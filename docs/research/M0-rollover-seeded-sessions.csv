@@ -1,0 +1,6 @@
+label,handoff_bytes,handoff_tokens_delta,cli,model,wall_s,duration_ms,input_tokens,cache_creation_input_tokens,cache_read_input_tokens,output_tokens,context_tokens,recall_ok
+empty-1,0,0,claude,claude-haiku-5-5,2.5,1950,2,44498,0,4,44500,n/a
+empty-2,0,0,claude,claude-haiku-5-5,2.9,2114,2,0,44498,39,44500,n/a
+handoff-8KB,8017,4537,claude,claude-haiku-5-5,3.1,2324,2,21833,27202,103,49037,True
+handoff-32KB,32012,18099,claude,claude-haiku-5-5,3.6,2891,2,35395,27202,109,62599,True
+handoff-128KB,128030,72367,claude,claude-haiku-5-5,4.3,3660,2,116865,0,143,116867,True
