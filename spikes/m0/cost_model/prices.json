@@ -625,6 +625,20 @@
    "cold_start_requests": 3,
    "source": "lane 1 via manager-2, 2026-10-15",
    "tag": "measured (one seat, pending lane 1 review)"
-  }
+  },
+  "sweep_route_miss": [
+   [
+    "0 (model default)",
+    0.0
+   ],
+   [
+    "23% (3 of 13, throwaways)",
+    0.23076923076923078
+   ],
+   [
+    "100% (3 of 3, lab seat)",
+    1.0
+   ]
+  ]
  }
 }

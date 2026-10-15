@@ -201,47 +201,10 @@ def test_recall_adds_one_round_trip():
     assert with_recall.events["recall"] == 1
 
 
-def test_cvm_bound_is_never_exceeded_even_mid_turn():
-    pol = cm.CvmPolicy(window_tokens=5000, epoch_turns=100, opportunistic=False, respect_price_tier=False,
-                       pinned_base=500, pinned_per_turn=0, pinned_max=500, bound_tokens=6000,
-                       tool_output_excerpt_tokens=200)
-    # Each turn: a user message, then two 2000-token tool results; the last turn has a 9000-token result.
-    turns = [[(100, 10, 10), (2000, 10, 10), (2000, 10, 10)]] * 4 + [[(100, 10, 10), (9000, 10, 10)]]
-    r = cm.run_cvm(trace(turns), OPUS, T5, pol)
-    assert r.max_prompt <= 6000
-    assert r.events["rebase_bound"] >= 1
-    assert r.events["tool_output_paged"] == 1  # the 9000-token result alone cannot fit
-    assert r.events["bound_exceeded"] == 0
 
 
-def test_cvm_bound_stubs_active_turn_results_and_strips_its_thinking():
-    pol = cm.CvmPolicy(window_tokens=5000, epoch_turns=100, opportunistic=False, respect_price_tier=False,
-                       pinned_base=0, pinned_per_turn=0, pinned_max=0, bound_tokens=5000,
-                       tool_output_excerpt_tokens=100)
-    # One turn: four 1500-token tool results, each assistant step keeps 50 thinking of 60 tokens.
-    reqs = (cm.Req(100, 60, 60, thinking=50),) + tuple(cm.Req(1500, 60, 60, thinking=50) for _ in range(4))
-    tr = cm.Trace("t", 1000, 1.0, (cm.Turn(0.0, reqs),))
-    r = cm.run_cvm(tr, OPUS, T5, pol)
-    assert r.max_prompt <= 5000 and r.events["bound_exceeded"] == 0
-    assert r.events["active_turn_result_stubbed"] >= 1
-    assert r.events["thinking_stripped"] >= 50
-    assert r.events["tool_output_paged"] == 0  # stubbing earlier results was enough
 
 
-def test_mid_turn_page_strips_active_turn_thinking_even_without_stubbing():
-    pol = cm.CvmPolicy(window_tokens=5000, epoch_turns=100, opportunistic=False, respect_price_tier=False,
-                       pinned_base=0, pinned_per_turn=0, pinned_max=0, bound_tokens=3000)
-    think = 50
-    turn1 = (cm.Req(100, 60, 60, thinking=think), cm.Req(1200, 60, 60, thinking=think))
-    turn2 = (cm.Req(100, 60, 60, thinking=think), cm.Req(1000, 60, 60, thinking=think))
-    tr = cm.Trace("t", 1000, 1.0, (cm.Turn(0.0, turn1), cm.Turn(0.0, turn2)))
-    r = cm.run_cvm(tr, OPUS, T5, pol)
-    # Turn 2's tool result would reach 3580: paging turn 1 is enough, so nothing is stubbed,
-    # but the page changes the prefix in front of turn 2's first step, so its thinking goes.
-    assert r.events["mid_turn_page"] == 1
-    assert r.events["active_turn_result_stubbed"] == 0
-    assert r.events["active_turn_thinking_stripped"] == think
-    assert r.max_prompt <= 3000
 
 
 def test_strip_overhead_charged_only_when_thinking_is_in_context():
@@ -260,12 +223,71 @@ def test_trace_for_keeps_thinking_per_vendor():
     assert not any(r.thinking for t in oai.turns for r in t.reqs)
 
 
+def bounded(**kw):
+    base = dict(window_tokens=10_000, epoch_turns=100, opportunistic=False, respect_price_tier=False,
+                pinned_base=0, pinned_per_turn=0, pinned_max=0, stub_tokens_per_turn=0, bound_tokens=3000)
+    base.update(kw)
+    return cm.CvmPolicy(**base)
+
+
+def test_turn_boundary_rebase_leaves_headroom_for_the_next_turn():
+    # Each turn grows 520; after turn 1 the prompt is 1520, and 1520 + 1500 headroom > 3000.
+    r = cm.run_cvm(trace([[(100, 10, 10), (400, 10, 10)]] * 4), OPUS, T5, bounded(headroom_tokens=1500))
+    assert r.events["rebase_headroom"] >= 1
+    assert r.events["bound_exceeded"] == 0 and r.max_prompt <= 3000
+
+
+def test_turn_larger_than_headroom_is_reported_and_never_edited():
+    reqs = (cm.Req(100, 10, 10, thinking=5), cm.Req(1500, 10, 10, thinking=5), cm.Req(1500, 10, 10, thinking=5))
+    tr = cm.Trace("t", 1000, 1.0, (cm.Turn(0.0, reqs),))
+    r = cm.run_cvm(tr, OPUS, T5, bounded(headroom_tokens=500))
+    # The second tool result would reach 4120; nothing inside the active turn is touched.
+    assert r.events["bound_exceeded"] == 1
+    assert r.events["thinking_stripped"] == 0 and r.events["clear_fallback"] == 0
+    assert r.max_prompt == 4120
+
+
+def test_clear_fallback_is_server_side_lossy_and_breaks_the_cache():
+    reqs = (cm.Req(100, 10, 10, thinking=5), cm.Req(1500, 10, 10, thinking=5), cm.Req(1500, 10, 10, thinking=5))
+    tr = cm.Trace("t", 1000, 1.0, (cm.Turn(0.0, reqs),))
+    r = cm.run_cvm(tr, OPUS, T5, bounded(headroom_tokens=500, bound_fallback="clear", clear_keep=1))
+    # The earlier 1500-token result becomes a 15-token placeholder: 2620 - 1485 + 1500 = 2635.
+    assert r.events["clear_fallback"] == 1 and r.events["bound_exceeded"] == 0
+    assert r.max_prompt == 2635
+    assert r.breaks.count["clear"] == 1
+    assert r.events["thinking_stripped"] == 0  # server-side clearing is exempt from the prefix check
+
+
+def test_immediate_pin_rebuild_strips_kept_thinking():
+    pol = bounded(bound_tokens=None, pin_updates="immediate", pinned_base=100, pinned_max=100)
+    reqs = (cm.Req(100, 60, 60, thinking=50),)
+    tr = cm.Trace("t", 1000, 1.0, (cm.Turn(0.0, reqs, pin_change=True), cm.Turn(0.0, reqs), cm.Turn(0.0, reqs)))
+    r = cm.run_cvm(tr, OPUS, T5, pol)
+    assert r.events["pin_update"] == 1
+    assert r.events["thinking_stripped"] == 50
+
+
+def test_route_miss_rate_forces_full_misses():
+    tr = trace([[(100, 10, 10), (100, 10, 10)]] * 3)
+    always = cm.run_plain(tr, OPUS, T5, route_miss_rate=1.0)
+    never = cm.run_plain(tr, OPUS, T5)
+    assert always.total.read == 0 and never.total.read > 0
+    assert always.breaks.count["route_miss"] == always.total.requests - 1
+
+
+def test_turn_growth_p99_counts_ingest_paged_results_as_excerpts():
+    tr = trace([[(100, 10, 10)], [(100, 10, 10), (20_000, 10, 10)]])
+    assert cm.turn_growth_p99(tr) == 100 + 10 + 20_000 + 10
+    assert cm.turn_growth_p99(tr, page_over=8000, excerpt=400) == 100 + 10 + 400 + 10
+
+
 def test_policy_for_bound_rejects_a_bound_the_head_fills():
     pol = cm.CvmPolicy()
     assert cm.policy_for_bound(pol, 30_000, 42_000) is None
-    fitted = cm.policy_for_bound(pol, 100_000, 42_000)
-    assert fitted.bound_tokens == 100_000
-    assert fitted.window_tokens + fitted.pinned_max + fitted.stubs_max_tokens < 100_000 - 42_000
+    assert cm.policy_for_bound(pol, 100_000, 42_000, headroom=60_000) is None
+    fitted = cm.policy_for_bound(pol, 100_000, 42_000, headroom=20_000)
+    assert fitted.bound_tokens == 100_000 and fitted.headroom_tokens == 20_000
+    assert fitted.window_tokens + fitted.pinned_max + fitted.stubs_max_tokens < 100_000 - 42_000 - 20_000
 
 
 def test_idle_compaction_fires_before_a_1h_expiry_only():

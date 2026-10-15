@@ -349,6 +349,8 @@ class Engine:
         self.pending_cause: str | None = None  # why the next send's prefix changed
         self.cold_start = 0  # this many first requests miss the cache entirely (observed on a rig seat)
         self.sends = 0
+        self.route_miss_rate = 0.0  # chance a warm, byte-identical prefix still misses (route-side)
+        self._miss_rng = random.Random(7)
 
     def warm(self) -> bool:
         return self.last_send is not None and self.now - self.last_send <= self.tier.ttl_s
@@ -362,12 +364,15 @@ class Engine:
         if cold_start:
             cause = "cold_start"
         warm = self.warm() and reuse_cache and not cold_start
+        if warm and self.route_miss_rate and self._miss_rng.random() < self.route_miss_rate:
+            warm = False
+            cause = "route_miss"
         hit = p.reusable() if warm else 0
         b = price(self.model, self.tier, p.total, hit, output)
         # Tokens re-sent at miss price although they are not new since the last send.
         rewritten = max(0, p.total - hit - p.new_since_send) if self.last_send is not None else 0
         if rewritten:
-            if not self.warm() and cause not in RESET_CAUSES + ("cold_start",):
+            if not self.warm() and cause not in RESET_CAUSES + ("cold_start", "route_miss"):
                 why = "ttl"
             else:
                 why = cause or "other"
@@ -463,8 +468,12 @@ class CvmPolicy:
     recall_call_tokens: int = 120
     page_tool_output_over: int | None = None  # page large tool results at once
     tool_output_excerpt_tokens: int = 400
-    bound_tokens: int | None = None  # hard working-context bound: page before any request would exceed it
+    bound_tokens: int | None = None  # hard working-context bound, enforced at turn boundaries
+    headroom_tokens: int = 0  # free space kept under the bound at each turn start, for the coming turn
+    bound_fallback: str = "none"  # "none": report requests over the bound; "clear": server-side tool-result clearing
     strip_output_overhead: float = 0.0  # extra output from stripping kept thinking (vendor: 4.6% to 67.1%)
+    clear_keep: int = 3  # tool uses the server-side clearing fallback keeps (vendor default)
+    clear_placeholder_tokens: int = 15
     stubs_max_tokens: int | None = None  # beyond this, older stubs merge into coarser index entries
 
 
@@ -500,7 +509,7 @@ def _finish_turn(res: Result, t: int, b: Buckets, peak: int) -> None:
 
 def run_plain(trace: Trace, model: Model, tier: CacheTier | None = None, reset: Reset | None = None,
               clear: ClearPolicy | None = None, keepalive: Keepalive | None = None,
-              idle: IdleCompaction | None = None, cold_start: int = 0) -> Result:
+              idle: IdleCompaction | None = None, cold_start: int = 0, route_miss_rate: float = 0.0) -> Result:
     """Strategy (i), or (ii) and H4 with ``reset``, or H5 with ``clear``.
 
     ``idle`` adds Claude Code's idle compaction to (ii): only on a TTL of an hour or more,
@@ -510,6 +519,7 @@ def run_plain(trace: Trace, model: Model, tier: CacheTier | None = None, reset: 
     eng = Engine(model, tier)
     name = reset.kind if reset else ("clear" if clear else "plain")
     eng.cold_start = cold_start
+    eng.route_miss_rate = route_miss_rate
     res = Result(name, model, tier, Buckets(), [], eng.breaks)
     p = eng.prompt
     p.append(trace.head_tokens)
@@ -566,7 +576,8 @@ def run_plain(trace: Trace, model: Model, tier: CacheTier | None = None, reset: 
 
 def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: CvmPolicy = CvmPolicy(),
             keepalive: Keepalive | None = None, cli_compaction: Reset | None = None,
-            cli_idle: IdleCompaction | None = None, cold_start: int = 0) -> Result:
+            cli_idle: IdleCompaction | None = None, cold_start: int = 0,
+            route_miss_rate: float = 0.0) -> Result:
     """Strategy (iii): [head][pinned][stubs][window turns ...], rebuilt only at epoch rebases.
 
     By default the CLI never compacts: its local history grows without bound while the
@@ -579,6 +590,7 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
     eng = Engine(model, tier)
     res = Result("cvm", model, tier, Buckets(), [], eng.breaks)
     eng.cold_start = cold_start
+    eng.route_miss_rate = route_miss_rate
     p = eng.prompt
     tail = policy.pin_position == "tail"
     cap = policy.hard_cap_tokens
@@ -669,12 +681,24 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
                 cause = "rebase_on_expiry"  # the prefix is lost anyway, so the rebase is nearly free
             elif cap is not None and projected > cap:
                 cause = "rebase_cap"
+            elif policy.bound_tokens is not None and p.total + policy.headroom_tokens > policy.bound_tokens:
+                cause = "rebase_headroom"
             if cause:
-                page_out(policy.window_tokens)
+                budget = policy.window_tokens
+                if policy.bound_tokens is not None:
+                    fixed = p.total - sum(window)
+                    budget = min(budget, max(0, policy.bound_tokens - policy.headroom_tokens - fixed))
+                page_out(budget)
                 layout(t)
                 eng.pending_cause = "rebase"
                 res.events[cause] += 1
             elif not tail and policy.pin_updates == "immediate" and trace.turns[t - 2].pin_change:
+                # Rebuilding pinned state edits the prefix, so kept thinking after it is stripped.
+                for i, th in enumerate(window_think):
+                    if th:
+                        window[i] -= th
+                        res.events["thinking_stripped"] += th
+                window_think = [0] * len(window)
                 layout(t)
                 eng.pending_cause = "pin"
                 res.events["pin_update"] += 1
@@ -695,38 +719,21 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
                 res.events["tool_output_paged"] += 1
             bound = policy.bound_tokens
             if bound is not None and p.total + added > bound:
-                # Mid-turn guard, before sending: (1) page whole older turns.
-                fixed = p.total - sum(window) - sum(cur)
-                stubs_before = stubs
-                page_out(max(0, bound - fixed - sum(cur) - added))
-                fixed += stubs - stubs_before  # stubs for the turns just paged
-                res.events["rebase_bound"] += 1
-                if j:
-                    res.events["mid_turn_page"] += 1
-                    # Any page after the turn has started changes the prefix in front of the active
-                    # turn's kept thinking, which invalidates it, so strip all of it.
-                    for i, th in enumerate(cur_think):
-                        if th:
-                            cur[i] -= th
-                            res.events["thinking_stripped"] += th
-                            res.events["active_turn_thinking_stripped"] += th
-                    cur_think = [0] * len(cur)
-                if fixed + sum(window) + sum(cur) + added > bound:
-                    # (2) Edit the active turn: stub earlier tool results, oldest first. Each
-                    # tool_use keeps its tool_result block; only the result's content shrinks.
-                    excerpt = policy.tool_output_excerpt_tokens
-                    for i in range(2, len(cur), 2):
-                        if fixed + sum(window) + sum(cur) + added <= bound:
-                            break
-                        if cur[i] > excerpt:
-                            cur[i] = excerpt
-                            res.events["active_turn_result_stubbed"] += 1
-                # (3) Last resort: stub the new tool result itself.
-                if j and fixed + sum(window) + sum(cur) + added > bound and added > policy.tool_output_excerpt_tokens:
-                    added = policy.tool_output_excerpt_tokens
-                    res.events["tool_output_paged"] += 1
-                layout(t)
-                eng.pending_cause = "rebase"
+                # No client-side edit inside an active tool-use turn: its thinking must be passed back
+                # unchanged behind an unchanged prefix. Only the server-side fallback may act here.
+                if j and policy.bound_fallback == "clear":
+                    base = len(p.tok) - len(cur) - (1 if tail else 0)
+                    results = list(range(2, len(cur), 2))  # earlier tool results of this turn
+                    victims = results[: max(0, len(results) - max(0, policy.clear_keep - 1))]
+                    freed = 0
+                    for i in victims:
+                        if cur[i] > policy.clear_placeholder_tokens:
+                            freed += cur[i] - policy.clear_placeholder_tokens
+                            cur[i] = policy.clear_placeholder_tokens
+                            p.resize(base + i, cur[i])
+                    if freed:
+                        eng.pending_cause = "clear"
+                        res.events["clear_fallback"] += 1
                 if p.total + added > bound:
                     res.events["bound_exceeded"] += 1
             if tail:
@@ -908,20 +915,53 @@ def rollover_for(prices: dict, profile: dict, model: Model, **overrides) -> Rese
     return Reset(**kw)
 
 
-def policy_for_bound(policy: CvmPolicy, bound: int, head: int) -> CvmPolicy | None:
-    """A (iii) policy sized to a hard working-context bound, or None when the head alone leaves no room.
+def turn_growth_p99(trace: Trace, page_over: int | None = None, excerpt: int = 400) -> int:
+    """99th percentile of per-turn growth (every request's addition and kept output in a turn).
 
-    The split of free space (pinned state at most 20%, stub index at most 15% or 8k, a
-    third of the rest for the kept window) is inferred; L2b owns the real policy.
+    With ``page_over``, tool results above it count as their ingest-time excerpt.
     """
-    free = bound - head
+    def size(j: int, r: Req) -> int:
+        added = excerpt if j and page_over and r.added > page_over else r.added
+        return added + r.kept
+
+    g = sorted(sum(size(j, r) for j, r in enumerate(t.reqs)) for t in trace.turns[1:] or trace.turns)
+    return g[min(len(g) - 1, int(0.99 * len(g)))]
+
+
+INGEST_PAGE_OVER = 8000  # tool results above this are paged at ingest, before their first send (inferred)
+
+
+def bounded_variants(policy: CvmPolicy, bound: int, trace: Trace) -> list[tuple[str, CvmPolicy | None, int]]:
+    """(label, policy, headroom) for (iii) under a bound: plain headroom, ingest paging, clearing fallback."""
+    out = []
+    h = turn_growth_p99(trace)
+    out.append(("headroom = p99 turn", policy_for_bound(policy, bound, trace.head_tokens, h), h))
+    hp = turn_growth_p99(trace, INGEST_PAGE_OVER, policy.tool_output_excerpt_tokens)
+    bp = policy_for_bound(policy, bound, trace.head_tokens, hp)
+    out.append((f"plus ingest paging over {_k(INGEST_PAGE_OVER)}",
+                replace(bp, page_tool_output_over=INGEST_PAGE_OVER) if bp else None, hp))
+    out.append((f"plus ingest paging and clear_tool_uses fallback (lossy)",
+                replace(bp, page_tool_output_over=INGEST_PAGE_OVER, bound_fallback="clear") if bp else None, hp))
+    return out
+
+
+def policy_for_bound(policy: CvmPolicy, bound: int, head: int, headroom: int = 0,
+                     fallback: str = "none") -> CvmPolicy | None:
+    """A (iii) policy sized to a hard working-context bound, or None when head plus headroom leave no room.
+
+    Turn-boundary rebases keep ``headroom`` free for the coming turn. The split of the rest
+    (pinned state at most 20%, stub index at most 15% or 8k, a third of the remainder for
+    the kept window) is inferred; L2b owns the real policy.
+    """
+    free = bound - head - headroom
     if free < 6000:
         return None
     pinned_max = min(policy.pinned_max, int(0.2 * free))
     stubs_max = int(min(8000, 0.15 * free))
     window = int((free - pinned_max - stubs_max) / 3)
-    return replace(policy, bound_tokens=bound, hard_cap_tokens=int(bound * 0.9), window_tokens=window,
-                   stubs_max_tokens=stubs_max, pinned_max=pinned_max, pinned_base=min(policy.pinned_base, pinned_max))
+    return replace(policy, bound_tokens=bound, headroom_tokens=headroom, bound_fallback=fallback,
+                   window_tokens=window, stubs_max_tokens=stubs_max, pinned_max=pinned_max,
+                   pinned_base=min(policy.pinned_base, pinned_max))
 
 
 STRATEGIES = ("plain", "compaction", "rollover", "cvm")
@@ -1102,8 +1142,10 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
     variants = [
         (f"default: pinned head, rebase every {policy.epoch_turns} turns or on expiry", policy, None, None),
         ("no rebase on expiry", replace(policy, opportunistic=False), None, None),
-        ("pinned state rebuilt at once on every change", replace(policy, pin_updates="immediate"), None, None),
-        ("pinned state at the tail, re-sent every request", replace(policy, pin_position="tail"), None, None),
+        ("pinned state rebuilt at once on every change (strips kept thinking at each rebuild)",
+         replace(policy, pin_updates="immediate"), None, None),
+        ("pinned state at the tail, re-sent every request (invalid with kept thinking: edits a block in front "
+         "of the active turn's thinking)", replace(policy, pin_position="tail"), None, None),
         ("tool results over 8k paged at once", replace(policy, page_tool_output_over=8000), None, None),
         ("1 h cache TTL", policy, "1h", None),
         ("keepalive pings through idle gaps up to 1 h", policy, None, Keepalive()),
@@ -1267,19 +1309,22 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
                           run_plain(trace, focus, None, replace(comp, threshold=at))))
             cands.append((f"H4 rollover at {_k(at)}", run_plain(trace, focus, None, replace(roll, threshold=at))))
         cands.append(("H5 tool-result clearing, vendor defaults", run_plain(trace, focus, None, clear=ClearPolicy())))
-        bp = policy_for_bound(policy, bound, trace.head_tokens)
-        if bp:
-            r = run_cvm(trace, focus, None, bp)
-            bounded_results[bound] = (bp, r)
-            cands.append((f"(iii) cvm sized to {_k(bound)} (window {_k(bp.window_tokens)})", r))
+        for vlabel, vp, h in bounded_variants(policy, bound, trace)[:2]:
+            if vp:
+                r = run_cvm(trace, focus, None, vp)
+                bounded_results.setdefault(bound, (vp, r))
+                cands.append((f"(iii) cvm, {vlabel} ({_k(h)}), window {_k(vp.window_tokens)}", r))
+        bp = bool(bounded_results.get(bound))
         rows = []
         for label, r in cands:
             over = r.max_prompt > bound
-            lossy = r.resets
+            lossy = r.resets + r.events["clear_fallback"]
             kind = {"compaction": "compactions", "rollover": "lossy handoffs", "clear": "lossy clears"}.get(
-                r.strategy, "lossy resets")
+                r.strategy, "lossy clears")
             exceeded = r.events["bound_exceeded"]
-            if over:
+            if over and exceeded:
+                verdict = f"fails: {exceeded} requests over the bound"
+            elif over:
                 verdict = "fails: over the bound"
             elif lossy:
                 verdict = f"fails: {lossy} {kind}"
@@ -1325,21 +1370,24 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         prof["tool_output_tokens"]["median"] = profile["tool_output_tokens"]["median"] * scale
         tr = trace_for(prof, focus)
         for bound in (100_000, 250_000):
-            bp = policy_for_bound(policy, bound, tr.head_tokens)
-            r = run_cvm(tr, focus, None, bp)
-            rows.append([label, _k(bound), _k(r.max_prompt), r.events["bound_exceeded"], r.events["mid_turn_page"],
-                         r.events["active_turn_result_stubbed"], r.events["tool_output_paged"], _usd(r.total.usd)])
-    blocks["bound_stress"] = _table(["Workload", "Bound", "Max working context", "Requests over bound",
-                                     "Mid-turn pages (active-turn thinking stripped)", "Active-turn results stubbed",
-                                     "New results cut to an excerpt", "(iii) cost"],
-                                    rows) + (
-        f"\n\n{focus.display}. When a request inside a turn would cross the bound, (iii) pages whole older turns and "
-        "strips all of the active turn's thinking (any mid-turn page changes the prefix in front of it), then stubs "
-        "the active turn's earlier tool results oldest first (each tool_use keeps its tool_result block; only the "
-        "content shrinks), and as a last resort cuts the new result to an excerpt. A request still over the bound "
-        "after that is counted. The re-thinking overhead is charged on every (iii) request, as for epoch strips. "
-        + basis)
-
+            small = policy_for_bound(policy, bound, tr.head_tokens, 3000)
+            variants = [("headroom 3k fixed (too small for these turns)", small, 3000)] + bounded_variants(policy, bound, tr)
+            for vlabel, vp, h in variants:
+                if vp is None:
+                    rows.append([label, _k(bound), vlabel, _k(h), "no room", "", "", ""])
+                    continue
+                r = run_cvm(tr, focus, None, vp)
+                rows.append([label, _k(bound), vlabel, _k(h), _k(r.max_prompt), r.events["bound_exceeded"],
+                             r.events["clear_fallback"], _usd(r.total.usd)])
+    blocks["bound_stress"] = _table(["Workload", "Bound", "(iii) variant", "Headroom H", "Max working context",
+                                     "Requests over bound", "Lossy clears", "(iii) cost"], rows) + (
+        f"\n\n{focus.display}. Rebases happen only at turn boundaries and leave H free, where H is the workload's "
+        "p99 turn growth (after ingest paging, where used), read from the whole trace in advance; a real policy must "
+        "set H from measured turn sizes. A fixed 3k H shows what an undersized headroom does. \"no room\" means head "
+        "plus H leave no space under the bound, so no valid (iii) policy meets it for that workload. Nothing inside an active tool-use turn is edited client-side. "
+        "Ingest paging replaces a tool result above the threshold with an excerpt and a recall id before its first send, "
+        "which appends new content and edits no earlier message. The clear_tool_uses fallback is server-side, lossy, "
+        "and fails the owner's bar. A request still over the bound is counted. " + basis) + "\n\n"
     rows = []
     for h in rep["sweep_heads"]:
         tr = replace(trace, head_tokens=h)
@@ -1368,6 +1416,18 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         "OpenRig seat by lane 1 (pending lane 1 review; cause of the misses unknown) and replace only the head and "
         "the first requests' cache state; the rest of the workload is the inferred profile. Lane 1 reports about 46k "
         "for a default throwaway session, close to the 42k inferred head. " + basis)
+
+    rows = []
+    for label, rate in rep["sweep_route_miss"]:
+        c = run_plain(trace, focus, None, comp, route_miss_rate=rate)
+        v = run_cvm(trace, focus, None, policy, route_miss_rate=rate)
+        rows.append([label, _usd(c.total.usd), _usd(v.total.usd), f"{v.total.usd / c.total.usd:.2f}",
+                     v.breaks.count.get("route_miss", 0)])
+    blocks["route_miss"] = _table(["Route-side full-miss rate", "(ii) compaction", "(iii) cvm", "(iii) / (ii)",
+                                   "(iii) route misses"], rows) + (
+        f"\n\n{focus.display}. A warm, byte-identical prefix still misses with this probability per request. "
+        "Lane 1 measured full misses on the rig proxy route with identical per-block hashes: 3 of 13 cache-eligible "
+        "calls on throwaway sessions and 3 of 3 on one lab seat (small sample, pending lane 1 review). " + basis)
 
     cc = run_cvm(trace, focus, None, policy, cli_compaction=comp)
     cci = run_cvm(trace, focus, focus.cache_tier("1h"), policy, cli_compaction=comp, cli_idle=IdleCompaction())
@@ -1434,13 +1494,17 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
     ka = run_cvm(trace, focus, None, policy, keepalive=Keepalive())
     lo_k, hi_k = min(ratios, key=ratios.get), max(ratios, key=ratios.get)
     b100 = bounded_results.get(100_000)
+    miss_c = run_plain(trace, focus, None, comp, route_miss_rate=rep["sweep_route_miss"][1][1])
+    miss_v = run_cvm(trace, focus, None, policy, route_miss_rate=rep["sweep_route_miss"][1][1])
     blocks["findings"] = "\n".join([
         "- Under the owner's bar (no compaction, a hard working-context bound), only (iii) meets a 100k or 250k bound "
         "without a lossy reset: (i) and (ii) at the CLI default exceed it, (ii) configured to reset inside the bound compacts, H4 "
         "hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a "
         f"{_k(trace.head_tokens)} head."
-        + (f" Sized to 100k, (iii) costs {_usd(b100[1].total.usd)} over {st['turns']} turns with a "
-           f"{_k(b100[1].max_prompt)} maximum working context." if b100 else ""),
+        + (f" Sized to 100k with headroom equal to the profile's p99 turn growth ({_k(b100[0].headroom_tokens)}), (iii) "
+           f"costs {_usd(b100[1].total.usd)} over {st['turns']} turns with a {_k(b100[1].max_prompt)} maximum working "
+           f"context and {b100[1].events['bound_exceeded']} requests over the bound; heavier tool use needs more "
+           "headroom than a 100k bound leaves (bound stress table)." if b100 else ""),
         f"- Cost, second: over {st['turns']} turns on {focus.display} with API-key billing (5 min TTL), (iii) costs {_usd(rs['cvm'].total.usd)} against "
         f"{_usd(rs['compaction'].total.usd)} for (ii) built-in compaction, {_usd(rs['rollover'].total.usd)} for H4 "
         f"rollover, and {_usd(plain.total.usd)} for (i) plain, which would pass the "
@@ -1455,6 +1519,10 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         f"- Bounding the prompt is most of the cost saving: compaction configured at 100k costs "
         f"{_usd(c100.total.usd)}, within {c100.total.usd / rs['cvm'].total.usd - 1:.0%} of (iii), but only by "
         f"compacting {c100.resets} times, which the owner's bar rules out.",
+        f"- Route-side cache misses can outweigh every design choice: at the {rep['sweep_route_miss'][1][0]} full-miss "
+        f"rate lane 1 saw on the rig proxy route (small sample, pending review), (ii) costs {_usd(miss_c.total.usd)} "
+        f"and (iii) {_usd(miss_v.total.usd)}, about {miss_c.total.usd / rs['compaction'].total.usd:.1f}x their "
+        "no-miss cost.",
         f"- (iii) costs more than (ii) for very short sessions: it first beats (ii) at turn {cross}. Its fixed "
         "overhead is the pinned block, stubs, and recall round trips.",
         f"- Under the profile's think time, rebases mostly ride on cache expiry, so epoch length barely matters "
