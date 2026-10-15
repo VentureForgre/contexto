@@ -272,10 +272,20 @@ By probe point: RP0 cost 94,624 in both arms, and RP1 cost 206,125.
 - The projection used `RP1_preserved`'s measured cost. It cost 103,117, against 103,008 for the
   preserved request.
 
-**What it shows**
-- On these probes, stripping all earlier thinking cost nothing at 41k or 92k: 96/96 in both arms,
-  with no stale answers.
-- The P3 condition (a gap of at least 2 probes) is **not met**.
+**What it shows: inconclusive** (corrected the same day)
+- Both arms scored 96/96 at 41k and 92k, with no stale answers.
+- That is **not** evidence that stripping thinking is free. A later conformance case found that
+  this route (the rig proxy) drops every replayed thinking block with reason
+  `end_user_binding_mismatch`, even on pure appends. That includes requests with the binding header
+  and the field unset, where failing prefix blocks would otherwise pass through.
+- These requests sent no header, so drops were not reported. The "preserved" arm most likely sent
+  its earlier thinking to be dropped, which would make the two arms the same request in effect
+  [inferred].
+- Preserved versus stripped stays inconclusive until a route with stable identity exists, and any
+  rerun must check `input_transformations` on every response. Lane 1 is testing the identity
+  hypothesis.
+- The P3 condition (a gap of at least 2 probes) is formally not met, but with both arms
+  indistinguishable it carries no information.
 
 **What it does not show**
 - The build turns did little reasoning: about 59 output tokens each, thinking included. So
@@ -284,6 +294,29 @@ By probe point: RP0 cost 94,624 in both arms, and RP1 cost 206,125.
   accuracy on reasoning-heavy, tool-heavy work, where earlier thinking carries information the text
   does not, is untested [inferred].
 - Each arm ran once.
+
+## Ceiling effect and harder probes (phase 2)
+
+**Every condition measured so far hit the ceiling:**
+- E1 and E2 at about 30k: 13/13 and 37/37;
+- the replay at 41k and 92k: 96/96 in both arms.
+
+A probe that every condition passes cannot locate a slip point. Below 92k on these probe types,
+this design cannot say where quality starts to drop, or whether it does. The lab run's P2 at about
+243k may still separate, but a ceiling there would say the same.
+
+**Harder probe types**, targeting an 80% to 90% baseline so that drops are visible (packet L2f):
+- **Multi-hop recall.** The answer needs two or more planted facts combined: "the region of the
+  service whose owner alias is X".
+- **Deep supersession chains.** A value revised 4 to 6 times, with the probe asking for the current
+  one and the stale-answer count tracked.
+- **Obligations at depth.** Items opened, closed and reopened far apart, probed for current status.
+- **Near-duplicate distractors.** Many subjects that differ by one token, and values with the same
+  word stem.
+- **A reasoning-heavy tool task.** The answer comes from computing over values in earlier tool
+  outputs, so earlier thinking could matter. This is the case the strip arm most needs.
+- **Stub-only answers.** For the ingest-paging option, answers that sit only in a tool result the
+  model saw as a stub, so it must recall to answer.
 
 ## Codex variant (`labcodex.subject`)
 
