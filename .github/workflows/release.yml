@@ -1,0 +1,128 @@
+name: Release
+
+# A release creates a v{version} tag on the merged commit and a GitHub Release with the
+# sdist and wheel attached. It never pushes a commit: main is protected by a ruleset with
+# no bypass actors, and semantic-release runs with --no-commit. See RELEASING.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag whose sdist and wheel should be rebuilt and re-attached (for example v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  PSR: uvx --from python-semantic-release==10.7.0 semantic-release -c .github/semantic-release.toml
+
+jobs:
+  ci:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: ci
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Compute the next version from Conventional Commits
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          last=$($PSR version --print-last-released-tag || true)
+          next=$($PSR version --print-tag)
+          echo "Last released: ${last:-none}. Next: ${next:-none}."
+          # With no tags and no feat, fix, or perf commit, semantic-release proposes v0.0.0
+          # ("Initial Release"); that is not a release.
+          if [ -n "$next" ] && [ "$next" != "$last" ] && [ "$next" != "v0.0.0" ] \
+             && ! git rev-parse -q --verify "refs/tags/$next" >/dev/null; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$next" >> "$GITHUB_OUTPUT"
+          else
+            echo "No releasable commits since ${last:-the start of history}; nothing to release."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build, tag the merged commit, and create the release (no commit)
+        if: steps.plan.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          $PSR version --no-commit --tag --push --vcs-release --no-changelog
+
+      - name: Check that only a tag was created
+        if: steps.plan.outputs.released == 'true'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "$TAG^{commit}")" = "$GITHUB_SHA"
+          remote=$(git ls-remote origin "refs/tags/$TAG^{}" "refs/tags/$TAG" | awk 'NR==1 {print $1}')
+          test -n "$remote"
+          echo "$TAG points at $GITHUB_SHA; HEAD unchanged; no commit was made."
+
+      - name: Attach the sdist and wheel
+        if: steps.plan.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          shopt -s nullglob
+          files=(dist/*.tar.gz dist/*.whl)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No distributions were built (no pyproject.toml on this commit)."
+            exit 0
+          fi
+          gh release upload "$TAG" "${files[@]}" --clobber
+
+  reattach:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Validate the tag name
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Not a release tag: $TAG" >&2; exit 1; }
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.12"
+      - name: Rebuild at the tagged version and re-attach
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$TAG" >/dev/null
+          NEW_VERSION="${TAG#v}" bash .github/scripts/release-build.sh
+          shopt -s nullglob
+          files=(dist/*.tar.gz dist/*.whl)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "Nothing to attach: $TAG has no pyproject.toml."
+            exit 0
+          fi
+          gh release upload "$TAG" "${files[@]}" --clobber

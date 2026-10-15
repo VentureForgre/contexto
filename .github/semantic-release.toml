@@ -1,0 +1,38 @@
+# python-semantic-release configuration, read with `semantic-release -c .github/semantic-release.toml`.
+# It lives here, not in pyproject.toml, so releases work before any package exists on main.
+#
+# Releases never commit. The workflow runs `version --no-commit`, so semantic-release
+# computes the next version from Conventional Commits since the last v* tag, runs the
+# build command (which stamps that version into the runner's copy of pyproject.toml only),
+# tags the merged commit, pushes only that tag, and creates the GitHub Release.
+
+[semantic_release]
+tag_format = "v{version}"
+commit_parser = "conventional"
+allow_zero_version = true
+major_on_zero = false
+build_command = "bash .github/scripts/release-build.sh"
+# No version_variables or version_toml: no file in the repository carries the version.
+
+[semantic_release.branches.main]
+match = "^main$"
+prerelease = false
+
+[semantic_release.commit_parser_options]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]
+allowed_tags = ["feat", "fix", "perf", "docs", "chore", "refactor", "test", "ci", "style", "build", "revert"]
+parse_squash_commits = true
+ignore_merge_commits = true
+
+[semantic_release.remote]
+type = "github"
+token = { env = "GH_TOKEN" }
+
+[semantic_release.publish]
+dist_glob_patterns = ["dist/*"]
+upload_to_vcs_release = true
+
+[semantic_release.changelog.default_templates]
+# List the commits in the first release's notes instead of the "Initial Release" placeholder.
+mask_initial_release = false
