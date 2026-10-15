@@ -12,6 +12,9 @@ Every claim carries one tag:
   (section 7). All measurements in this document cost zero model tokens (section 8).
 - **[documented: ...]** vendor documentation (retrieved 2026-10-15, pages carry no version stamp)
   or vendor source at the pinned tag (`codex-rs/<path>:<line>`).
+- **[measured by <seat or packet>: ...]** measured by another seat or packet (for example L1-a or
+  lane 2's builder-4), cited with its record or its pending document; not re-run for this doc.
+  **[observed by <seat>]** is the same for an observation that has no reproducing command.
 - **[inferred]** reasoning from the above, not verified.
 
 Phase 1 rules apply: spike code only observes, nothing here rewrites live traffic, and no content,
@@ -373,7 +376,9 @@ All [documented, 2026-10-15] unless marked.
   `.contexto/spikes/l2b/conformance/probe-20261015T232600Z.json`, doc lands with PR #7's revision]:
   append-only 200; strip all thinking 200; drop the oldest turns while keeping thinking 200 (with
   `prefix_mismatch_behavior=error` also 200, with the thinking dropped and reason
-  `end_user_binding_mismatch`, not 400); change `system` while keeping thinking 400 (invalid
+  `end_user_binding_mismatch`, not 400; the vendor page names the reason `prefix_binding_mismatch`
+  [documented: https://platform.claude.com/docs/en/build-with-claude/preserved-thinking], so the
+  measured reason string differs from the documented one); change `system` while keeping thinking 400 (invalid
   signature); add text to an earlier user turn 400; full epoch rewrite with thinking stripped 200;
   `drop_block` 200; `clear_thinking_20251015` 200. Reading [inferred by lane 2]: the probe's account
   does not enforce the binding by default for dropped turns, but edits before signed thinking still
@@ -424,8 +429,9 @@ All [documented, 2026-10-15] unless marked.
   passed back untouched, https://developers.openai.com/api/docs/guides/reasoning). Inferred, not
   documented: whether the server binds `encrypted_content` to the context before it, so that
   altering or reordering it, or editing earlier items, invalidates it the way Anthropic's prefix
-  check does. Measured by lane 2 (builder-4's conformance probe above, `gpt-6-astra`, Responses,
-  `store:false`, encrypted reasoning): append-only (O1), editing an earlier user turn (O2), and
+  check does. Measured by lane 2 (builder-4's conformance probe above: Responses, `store:false`,
+  encrypted reasoning; the model, `gpt-6-astra`, is as stated in builder-4's report, since the
+  probe record has no model field): append-only (O1), editing an earlier user turn (O2), and
   dropping it (O3) all returned 200. No rejection was observed; whether the model actually used the
   encrypted reasoning after the edit is not observable from the response. Altering or reordering
   `encrypted_content` itself was not tested.
@@ -605,14 +611,39 @@ env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION \
 
 ### OpenRig operational notes for lane experiments
 
-- **Launch before projection, and an unexplained routing miss** [observed by manager-1,
-  2026-10-15]: on a rig shrink and expand of the lab pod, the seat's `claude` process started at
-  18:22:35 local time, and OpenRig's projection rewrote that seat's `.claude/settings.local.json` at
-  18:22:37 and again later. After the first recreate (23:09Z), the seat's model calls went to the
-  owner-operated rig proxy (a live socket was observed) instead of the spike proxy, so they were not
-  measured. The ordering is not shown to be the cause: a second recreate, with the file already
-  correct, also ignored the spike proxy. Cause unknown; escalated to intake. Rule: after
-  recreating a seat, verify its live routing with one tiny turn before measuring.
+- **Routing miss on the lab seat: the measured cause** [measured by L1-a, builder-1; doc
+  `docs/research/M0-proxy-measurements.md` pending]. After the lab seat was recreated (23:09Z), its
+  model calls went to the owner-operated rig proxy instead of the spike proxy. Three throwaway runs
+  (Claude Code 2.1.301, environment stripped, `--settings '{"disableAllHooks": true}'` only,
+  `--strict-mcp-config`, `--no-session-persistence`, `claude -p hi < /dev/null`, a 401 stub on
+  `127.0.0.1:18451`) isolate why:
+  - T1: cwd in the lab seat's worktree, whose own `.claude/settings.local.json` names port 18451.
+    The stub got 0 requests and a real model answered elsewhere.
+  - T2: cwd in a non-git `mktemp` directory whose `.claude/settings.local.json` holds only
+    `env.ANTHROPIC_BASE_URL` pointing at port 18451. The stub got 3 `POST /v1/messages`; 0 model
+    tokens.
+  - T3: T1 plus `--debug`. The settings watch list included `~/.claude/settings.json`, the
+    worktree's `.claude/settings.json` (missing) and `.claude/settings.local.json`, and also the
+    main checkout's `.claude/settings.local.json`. Requests were logged as "dispatching to
+    firstParty", and the stub got 0 requests.
+
+  Conclusion: in a git worktree, Claude Code also loads the main checkout's
+  `.claude/settings.local.json` [measured by L1-a], and that file's `env.ANTHROPIC_BASE_URL` wins
+  over the worktree's own file [inferred from the outcome; the precedence order itself was not
+  printed]. The live-call recipe above was not affected because its base URL comes from the
+  flag-level `--settings`, which outranks both files.
+- **Launch before projection** [observed by manager-1, 2026-10-15]: on a rig shrink and expand of
+  the lab pod, the seat's `claude` process started at 18:22:35 local time, and OpenRig's projection
+  rewrote that seat's `.claude/settings.local.json` at 18:22:37 and again later. This is an
+  observation only; it is not the cause of the routing miss above (a second recreate with the file
+  already correct also missed the spike proxy). Rule: after recreating a seat, verify its live
+  routing with one tiny turn before measuring.
+- **Design consequence for Contexto** [inferred from the measured cause]: Contexto must attach at a
+  layer that wins over every settings file, for example an explicit `--settings` flag or a launcher
+  wrapper that sets it, and must not rely on a worktree's own `.claude/settings.local.json`.
+- **Cost lesson** [observed in this packet and L1-a]: a throwaway run without `--model` uses the
+  user's default model (the early non-isolated runs in section 8 used `claude-fable-5-1` that way).
+  Pin `--model` on every throwaway run.
 - **Slash commands through `rig send`** [measured by manager-1]: a slash command sent with
   `rig send` arrives at the seat as a task, not as a CLI command.
 
@@ -655,8 +686,8 @@ harness: 206,547 + 232,154 + 228,620 = 667,321 tokens. No experiment called a mo
   separately in `docs/research/M0-proxy-measurements.md`: per-turn request sizes, reported usage,
   cache behavior, the mid-turn `--autocompact` run (section 3), and the Codex WebSocket probe
   (section 4). Not duplicated here.
-- **Codex session growth:** `docs/research/M0-codex-measurements.md` (PR #10) measures six turns on
-  the `labcodex.subject` seat from its rollout `token_count` events.
+- **Codex session growth:** `docs/research/M0-codex-measurements.md` (PR #10)
+  measures six turns on the `labcodex.subject` seat from its rollout `token_count` events.
 
 ## 10. Owner decisions
 
@@ -679,6 +710,11 @@ harness: 206,547 + 232,154 + 228,620 = 667,321 tokens. No experiment called a mo
    rather than a choice: accounts created on or after 2026-08-31 get the prefix check by default.
    Lane 2's probe account dropped turns without error but rejected edits before signed thinking;
    the owner should confirm the account phase 2 would use behaves the same.
+8. **Attachment layer** (section 7). Not a free choice but a constraint the owner should know:
+   Claude Code in a git worktree also loads the main checkout's `.claude/settings.local.json`, so
+   Contexto has to attach through a flag-level `--settings` or a launcher wrapper rather than a
+   worktree settings file. Whether a launcher wrapper is acceptable for the owner's sessions is the
+   decision.
 
 ## 11. Open questions
 
