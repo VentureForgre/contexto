@@ -43,6 +43,17 @@ SHA-256 at capture time so staleness can be detected later.
 
 Canonical JSON: `json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
 
+Serialization rules (pinned 2026-10-15 from lane A, so ids are reproducible across implementations):
+
+- `Record.to_dict()` omits optional fields whose value is `None` (`session`, `topic`, `target`,
+  `owner`) and omits `supersedes` when it is empty. `provenance` is always present, even when empty.
+- Every source object is serialized with all four keys; absent `sha256` or `span` is `null`.
+- `id` is computed over that `to_dict()` output minus `id` and `prev`. The ledger line is the
+  canonical JSON of the full `to_dict()` output, including `id` and `prev`.
+- `prev` is the SHA-256 hex of the previous ledger line's UTF-8 bytes, excluding its trailing newline.
+- `created_at` is written as `YYYY-MM-DDTHH:MM:SS.ffffffZ`. Readers accept any ISO 8601 UTC
+  timestamp with a `Z` suffix, and the stored string is hashed as written.
+
 Derived state rules:
 
 - A record is **inactive** if any later record lists it in `supersedes`.
@@ -66,6 +77,9 @@ Append-only JSONL at `<root>/.contexto/ledger.jsonl`, one canonical record per l
 - CLI: `contexto init`, `contexto add <kind> ...`, `contexto list [--kind] [--open] [--active]`,
   `contexto show <id>`, `contexto verify`, `contexto repair`. `add` with `--file PATH` captures
   that file's SHA-256 into provenance.
+- CLI layout: `contexto.cli` builds the parser and discovers subcommand modules in the
+  `contexto.commands` package via `pkgutil`; each module exposes `register(subparsers)`. Lane B adds
+  its own modules there and does not edit `cli.py`.
 
 Public Python API that lane B depends on, in `contexto.model` and `contexto.ledger`:
 
