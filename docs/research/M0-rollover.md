@@ -23,7 +23,8 @@ only (D3); no threshold overrides were used.
    starts higher: 81,808 tokens on `lab.subject`, about 36K of OpenRig onboarding over a 45,925
    throwaway [measured by L1-a, builder-1; doc pending]. On Codex, the `labcodex.subject` seat had
    32,331 tokens in use after OpenRig onboarding (58,985 tokens over 2 requests) [measured, PR #10].
-2. **Recall of the handoff held at every size tested** (one synthetic key per run, 4 of 4 correct)
+2. **Recall of the handoff held at every size tested** (one synthetic key per handoff run, 3 of 3
+   correct; the two empty runs asked only for "OK")
    [measured]. This is a single probe per size, not the fidelity baseline.
 3. **A rollover is fast and can reuse the prompt cache.** Each seeded one-shot run took 2.5 to 4.3 s
    wall-clock [measured]. Back-to-back fresh sessions read the shared prefix from cache in 3 of 4
@@ -132,10 +133,10 @@ default compaction settings. Each piped a synthetic handoff (lines `fact-NNNN: k
 into `claude -p` and asked for one key's value. Usage from the session JSONL [measured:
 `spikes/m0/rollover/run_seed.sh`, numbers in `docs/research/M0-rollover-seeded-sessions.csv`]:
 
-| Run | Handoff | Handoff tokens | Context | Cache write | Cache read | Output | Wall-clock | Recall |
+| Run | Handoff | Handoff tokens (delta) | Context | Cache write | Cache read | Output | Wall-clock | Recall |
 |---|---|---|---|---|---|---|---|---|
-| empty-1 | none | 0 | 44,500 | 44,498 | 0 | 4 | 2.5 s | ok |
-| empty-2 (10 s later) | none | 0 | 44,500 | 0 | 44,498 | 39 | 2.9 s | ok |
+| empty-1 | none | 0 | 44,500 | 44,498 | 0 | 4 | 2.5 s | n/a |
+| empty-2 (10 s later) | none | 0 | 44,500 | 0 | 44,498 | 39 | 2.9 s | n/a |
 | handoff-8KB | 8,017 bytes | 4,537 | 49,037 | 21,833 | 27,202 | 103 | 3.1 s | ok |
 | handoff-32KB | 32,012 bytes | 18,099 | 62,599 | 35,395 | 27,202 | 109 | 3.6 s | ok |
 | handoff-128KB | 128,030 bytes | 72,367 | 116,867 | 116,865 | 0 | 143 | 4.3 s | ok |
@@ -143,7 +144,8 @@ into `claude -p` and asked for one key's value. Usage from the session JSONL [me
 - **Floor:** 44,500 tokens before any handoff in this worktree, which includes the inherited
   `CLAUDE.md` and rig onboarding text; that is realistic for the owner's OpenRig sessions. A real
   seat adds OpenRig's startup files and onboarding turn: 81,808 tokens at the head of `lab.subject`
-  [measured by L1-a]. Handoff tokens are context minus 44,500; this synthetic format runs about
+  [measured by L1-a]. Handoff tokens (`handoff_tokens_delta` in the CSV) are the measured context
+  minus the 44,500 floor; this synthetic format runs about
   1.8 bytes per token, so prose handoffs will be cheaper per byte [inferred].
 - **Wall-clock** covers CLI start to result for a one-shot `-p` run. It does not include detecting
   the need to roll over or writing the handoff. OpenRig's own steps add a 30 s readiness wait, about
@@ -204,7 +206,7 @@ measurements].
   reading inferred].
 - **Quality stability:** quality between rollovers stays in the low-context regime if the trigger is
   early. Each rollover is a step change: whatever the handoff omits is gone, and thinking continuity
-  resets. The 4 of 4 recall result shows a handoff can be read back reliably at these sizes; it does
+  resets. The 3 of 3 recall result shows a handoff can be read back reliably at these sizes; it does
   not show that a handoff captures what later turns need [measured result; reading inferred].
 - **Token cost (second):** each rollover costs the floor (mostly a cache read within the TTL, a full
   write otherwise) plus the handoff as a write [measured, section 3].
@@ -222,7 +224,10 @@ Throwaway sessions follow the lane 1 live-call recipe proven in `M0-interception
 under this worktree's `.contexto/spikes/L1-c/` (inherits the seat credential as configured, nothing
 copied), seat variables stripped (`CLAUDECODE`, `CLAUDE_CODE_*` session variables, `CLAUDE_PID`,
 all `OPENRIG_*` and `RIGGED_*`), `--settings '{"disableAllHooks": true}'`, `--strict-mcp-config`,
-and `--model claude-haiku-5-5`. No spike proxy was used; usage comes from the session JSONL.
+and `--model claude-haiku-5-5`. No spike proxy was used; usage comes from the session JSONL. With no
+flag-level base URL, the runs reached the model through the route set by the main checkout's
+`.claude/settings.local.json`, which a git worktree also loads [measured by L1-a; recorded in
+`M0-interception.md` section 7].
 
 ```sh
 python3 spikes/m0/rollover/make_handoff.py <approx_tokens> <out.md>  # synthetic handoff
