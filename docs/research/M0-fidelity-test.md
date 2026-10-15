@@ -182,7 +182,9 @@ text by about 2.2x, so read them as relative sizes.
 
 Settings: window high 24,000 and low 12,000, a 3,000-token headroom, epochs at turn boundaries
 only. "Over bound" counts requests whose window exceeded `window_high`; the full condition is not
-bounded.
+bounded. The 0 holds for this synthetic profile and seed: its largest turn (3,100) exceeds the
+headroom, and the slack after each epoch absorbs it. Real tool turns are far larger (policy doc,
+section 3).
 
 The category columns are for the final point.
 

@@ -2,7 +2,7 @@
 
 Status: phase 1 design for M0 question 4 and H5 (lane 2, packet L2b). Nothing here rewrites
 requests yet; phase 2 builds it after the owner decides question 5. Author: build.builder-4.
-Date: 2026-10-15, revised the same day for review findings B1 to B4. Brief:
+Date: 2026-10-15, revised the same day for review findings B1 to B5. Brief:
 `docs/milestones/M0-infinite-session-study.md`. Executable form of this policy, used by the
 fidelity simulation: `spikes/m0/fidelity/policy.py`. Test design and results:
 `docs/research/M0-fidelity-test.md`. Quality-versus-size probe: `docs/research/M0-quality-vs-context.md`.
@@ -129,13 +129,36 @@ OMITTED: decision=0 fact=2        <- only when something was left out
   - If that sum would exceed `window_high`, the proxy pages whole completed turns from the start
     until they are at most `min(window_low, window_high - H)`. Any coming turn up to `H` tokens
     therefore fits under the bound.
-  - Defaults: high 24,000, low 12,000, and `H` 3,000 tokens. In the synthetic session that `H`
-    covers every turn: p50 701, p90 1,859, p99 2,720, max 3,100 estimated tokens [measured,
-    simulated].
-  - For real sessions, `H` should cover the workload's p99 turn growth. PR #8 states that figure
-    from builder-3's profile and tool-heavy stress cases.
+- **Sizing rules.**
+  - `H` must be at least the workload's p99 turn growth, after ingest paging if it is used (section
+    4).
+  - `window_high` must be at least pinned block + page index + the retained window + `H`.
   - The bound itself should come from L2d's measured quality-versus-size curve, well below any size
-    where quality slips.
+    where quality slips. PR #8 states the real `H` from builder-3's workload profile and tool-heavy
+    stress cases.
+- **What the synthetic defaults do and do not show.**
+  - Defaults are high 24,000, low 12,000, and `H` 3,000. The synthetic session's turns are p50 701,
+    p90 1,859, p99 2,720, and max 3,100 estimated tokens [measured, simulated]. So `H` covers the
+    p99 turn, but **not** the largest.
+  - The simulation's 0 over-bound requests come mostly from the slack after each epoch: the window
+    restarts near 12k against a 24k bound. That holds for this synthetic profile and seed only. An
+    earlier version of this section said `H` covers every turn, which was wrong.
+- **Real turns are much larger.**
+  - Codex adds about 3k tokens per small tool turn [measured, lane 1, PR #9].
+  - The L2d probe's file reads are 16k to 18k tokens each [inferred estimate].
+  - Reviewer-1 found 11 requests over the bound at 12 tool calls per turn in PR #8's model [reported
+    by reviewer-1].
+- **The trade-off.**
+  - A single 17k Read needs `H` of 17k or more. With a 24k bound, that leaves about 7k of retained
+    window, so an epoch falls on almost every tool turn.
+  - Every epoch rebuilds the cache and strips all thinking: +4.6% to +67.1% output when thinking is
+    dropped every turn [vendor-documented].
+  - Raising `window_high` buys fewer epochs at the price of a larger working context. L2d's curve
+    says how high it can go before quality slips.
+- **Turns larger than the bound are over bound by construction.**
+  - A turn bigger than `window_high` minus pinned and index cannot fit under any `H`. For example,
+    two 17k Reads in one turn exceed a 24k bound.
+  - Without ingest paging, such a turn is reported over bound. With it, see section 4.
 - **The epoch.** Each move of `first` is an epoch, and it is the only time earlier content changes.
   At an epoch the proxy:
   - drops the turns before `first`;
@@ -220,6 +243,57 @@ tool output: [paged pg_<16 hex> | tool_result of <tool>(<canonical input JSON>) 
   tokens), the oldest stubs fold into epoch stubs `[paged-epoch pe_<16 hex> | turns <a>-<b> | <k> pages]`.
   Recalling one returns its stub list.
 
+### Ingest-time paging of oversized tool results (option evaluated for B5)
+
+**Mechanism** [inferred, designed, not simulated]:
+- When a new `tool_result` in the newest user message exceeds `T` tokens, the proxy replaces its
+  content with a stub before the model ever sees it. The model has never seen this result.
+- The stub holds a keyed page id, the size, and an excerpt: the output's first `E` tokens.
+- The proxy keeps a mapping by `tool_use_id`. The CLI keeps resending the full output from its own
+  history, and the proxy substitutes the identical stub bytes on every later request.
+- Defaults are aligned with PR #8: `T` = 8,000 tokens and `E` = 400 tokens. Both are placeholders,
+  to be tuned with L2d data.
+
+**Why it is valid under preserved thinking.**
+- The stub is the first and only version of that block the model sees, so no earlier block ever
+  changes. The request stays append-only [vendor rule, vendor-documented; its application here,
+  inferred; reviewer-2 concurs].
+- **Conditions:**
+  1. The stub is byte-identical on every later request: keyed id, deterministic excerpt, and the
+     proxy-held mapping.
+  2. Reading the full output needs `recall` inside the active tool-use turn, which is a hidden
+     exchange. It is reinserted byte for byte (strategy C, section 7), with the stream hold-back
+     and mixed-call handling of section 6.
+  3. Fidelity now depends on the model recalling when it needs to. Phase 2 probes must include
+     answers that sit only in a stubbed result.
+
+**Conformance tool-loop case** [measured, 2026-10-15, `probe.py --only toolloop`, 7,002 tokens]:
+- Setup: `claude-haiku-5-5`, adaptive thinking at effort `max`, `prefix_mismatch_behavior: "error"`.
+  The task forces reasoning before each tool call.
+- Steps:
+  - The model called `read_file` with the computed path (thinking present).
+  - The result went back as a two-page stub (first send): 200.
+  - The model reasoned to the right page and called `recall`.
+  - The page was appended with all thinking kept: 200, correct answer.
+- So stub-first-send plus an appended recall exchange passes the prefix check: no 400.
+- **Caveat.** Through this route, every replayed thinking block was dropped with
+  `end_user_binding_mismatch`, on pure appends as well (section 7). The case therefore cannot show
+  that a byte-changed stub would fail: the variant returned 200 because the affected block was
+  already dropped. Byte identity stays a requirement from the vendor rule, untested here.
+
+**Does it remove the two-Read problem?** Partly [inferred].
+- Per-turn growth from tool output becomes about the stub size (around 500 tokens per oversized
+  result) rather than the output size. Two 17k Reads add about 1k and fit.
+- But anything the model recalls inside the turn joins the active turn, and cannot be paged until
+  the next turn boundary. A recall returns up to 32,000 characters, about 17k tokens of numeric
+  text.
+- So the bound holds only if a turn's recalls stay within `H`. The problem moves from "how large
+  are the outputs" to "how much does the model choose to read in one turn".
+- A smaller per-call recall slice (for example 8,000 characters, read with `offset`) keeps each
+  step small but does not cap a turn's total.
+- **Costs.** Each recall is a hidden upstream round trip that re-reads the context from cache. It
+  adds latency, and it risks the model not recalling what it needs.
+
 ## 5. Recall tool contract
 
 **Definition** (declared by the proxy from the first request, never by the CLI):
@@ -283,6 +357,13 @@ The CLI never declared `recall`, so it must never see a `recall` call. These req
 6. **Thinking.** Earlier thinking blocks are preserved and billed by default on Fable 5.1, Opus 5.5,
    Sonnet 5.5, and Haiku 5.5 [vendor-documented]. An earlier version of this section said the API
    drops them, which was wrong. Section 7 states the constraint and the strategy.
+7. **Proxy hygiene** [vendor-documented, preserved-thinking page, "Libraries, proxies, and
+   gateways"]. The vendor's guidance for any proxy:
+   - forward the caller's `anthropic-beta` values and `thinking.block_binding` unchanged;
+   - return `input_transformations` to the caller;
+   - leave any `role: "system"` message where the caller put it;
+   - to turn tool use off, send `tool_choice: {"type": "none"}` rather than removing `tools`;
+   - never hide a 400 by silently stripping thinking and retrying.
 
 ## 7. Preserved thinking: the constraint and the chosen strategy
 
@@ -326,7 +407,20 @@ accessed 2026-10-15]:
 What the probe shows:
 - This account does not enforce by default: every edit passed with no header. A newer account
   would get 400s.
-- The reason `end_user_binding_mismatch` was not on the part of the vendor page we read.
+- **The `end_user_binding_mismatch` drops are not prefix evidence.** Later cases (2026-10-15,
+  `probe.py --only binding`, 4,797 tokens) showed this route drops every replayed thinking block
+  with that reason, including on pure appends:
+  - with the binding header in error mode;
+  - with the header but the field unset, where the vendor says failing prefix blocks pass through
+    as `thinking_mismatch_allowed`;
+  - with a fixed `metadata.user_id`.
+  The reason is not on the vendor page, and the cause is unknown. Lane 1 is checking what the rig
+  proxy does to identity [inferred].
+- So the "drop oldest" rows above show the route's binding drop, not the prefix rule. The two 400s
+  (changed `system`, text added to an earlier user turn) remain direct evidence of the prefix check.
+- **Earlier thinking never reached the model on this route.** Thinking replayed through the rig
+  proxy was likely not seen in any of our requests. That makes the L2e preserved-versus-stripped
+  comparison inconclusive (quality-vs-context doc).
 
 **The four strategies compared:**
 
@@ -335,7 +429,7 @@ What the probe shows:
 | A. Strip all thinking at each epoch; append-only between epochs | yes [vendor-documented; measured: epoch rewrite with strip returns 200] | the model loses earlier reasoning at each epoch. Vendor estimate: output tokens +2.5% (low effort) to +20.1% (max) when dropped once per session, +4.6% to +67.1% when dropped every turn; "wide error bars" [vendor-documented]. With an epoch about every 14 turns in the simulation, the cost sits between those [inferred]. Facts and decisions in visible text are unaffected. | none beyond the epoch's own cache restart, which happens anyway [vendor-documented] | yes: bounded context, no compaction |
 | B. Server-side `context_management` (clear tool uses, clear thinking) | yes [vendor-documented; measured: `clear_thinking` 200] | none for what is kept, but the client must send the full, growing history. It cannot drop old turns, insert pinned state, or index pages | "clearing invalidates cached prompt prefixes" [vendor-documented] | no: working context is not bounded, so the CLI still reaches compaction |
 | C. Byte-for-byte reinsertion of all prior content | yes [vendor-documented] | none | none | no on its own: reinserting everything means never paging. It is the right rule for hidden recall exchanges within an epoch (section 6, item 4) |
-| D. Keep thinking-bearing turns in an untouched recent suffix, edit only before it | **no** [vendor-documented "client-side trimming" fails; measured: the kept block is dropped, or 400 under `error` for other prefix edits] | thinking is lost anyway, and new accounts get 400s | as A | no |
+| D. Keep thinking-bearing turns in an untouched recent suffix, edit only before it | **no** [vendor-documented "client-side trimming" fails; measured: other prefix edits return 400 under `error`. The observed drop of the kept block was the route's binding drop, so it is not prefix evidence] | thinking is lost anyway, and new accounts get 400s | as A | no |
 
 **Choice: A**, at turn boundaries only, combined with C for hidden recall exchanges.
 - A is the only strategy that keeps working context bounded and every request valid at turn

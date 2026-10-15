@@ -188,6 +188,120 @@ def anthropic_cases(c: Client) -> None:
            {"anthropic-beta": CONTEXT_BETA}, "anthropic")
 
 
+TOOLS = [
+    {"name": "read_file", "description": "Read a text file from the workspace and return its contents.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
+                      "additionalProperties": False}},
+    {"name": "recall", "description": "Fetch a paged-out tool output by its exact id (pg_...), as shown in a "
+     "[paged ...] stub. Returns the original text verbatim.",
+     "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"],
+                      "additionalProperties": False}},
+]
+PAGE_IDS = {"pg_5e1f0c3a9b7d2468": range(0, 40), "pg_a04c91e27f3b65d8": range(40, 80)}
+TARGET_SHARD = (37 * 43) % 80  # 71, so the value sits in the second page
+
+
+def page_text(page_id: str) -> str:
+    lines = []
+    for n in PAGE_IDS[page_id]:
+        lines.append(f"shard={n:02d} latency_ms={(n * 37) % 900} ok")
+        if n == TARGET_SHARD:
+            lines.append(f"shard={n:02d} map_version=cobalt-5817")
+    return "\n".join(lines)
+
+
+STUB = (
+    '[paged pg_5e1f0c3a9b7d2468 | tool_result of read_file({"path":"logs/1602.log"}) part 1 | shards 00-39 | ~900 tokens]\n'
+    '[paged pg_a04c91e27f3b65d8 | tool_result of read_file({"path":"logs/1602.log"}) part 2 | shards 40-79 | ~900 tokens]'
+)
+
+
+def binding_diagnostic(c: Client, user_id: str | None = None) -> None:
+    """Append-only tool loop with the binding header sent but prefix_mismatch_behavior unset.
+
+    Per the vendor page, failing blocks then still reach the model and are listed as
+    thinking_mismatch_allowed. This shows whether replayed thinking is usable through this route
+    at all, independent of any edit.
+    """
+    body = lambda messages: {  # noqa: E731
+        "model": ANTHROPIC_MODEL, "max_tokens": 8000, "system": "You are a careful assistant.", "tools": TOOLS,
+        "messages": messages, "thinking": {"type": "adaptive"}, "output_config": {"effort": "max"},
+        **({"metadata": {"user_id": user_id}} if user_id else {})}
+    hdr = {"anthropic-beta": BINDING_BETA}
+    tag = "_fixed_user" if user_id else ""
+    history = [user(
+        "Work this out step by step. The log to read is logs/N.log where N = 37 * 43 + 11. Read it with read_file. "
+        "Then find the map_version of shard S, where S = (37 * 43) mod 80. If a tool result is made of [paged ...] "
+        "stubs, call recall with the id of the one page that covers shard S. Reply with the map_version value only."
+    )]
+    first = c.post(f"D0_read_call_header_only{tag}", "/v1/messages", body(history), hdr, "anthropic")
+    if first is None or first.get("stop_reason") != "tool_use":
+        c.records.append({"case": "note", "text": "D0 did not call read_file"})
+        return
+    c.records[-1]["thinking_blocks"] = sum(1 for b in first["content"] if b.get("type") == "thinking")
+    use = next(b for b in first["content"] if b.get("type") == "tool_use")
+    history += [{"role": "assistant", "content": first["content"]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": use["id"], "content": STUB}]}]
+    c.post(f"D1_append_only_header_only{tag}", "/v1/messages", body(history), hdr, "anthropic")
+
+
+def toolloop_cases(c: Client) -> None:
+    """Ingest-time paging inside one tool-use turn, with thinking kept throughout.
+
+    The user's task needs reasoning before each tool call: the file name and the shard are both
+    computed. The read_file result is sent as a two-page stub the first time it is sent (the model
+    never sees the full output); the model recalls one page; the page comes back as the next
+    tool_result. T2 keeps every thinking block, in error mode: expect 200 and nothing dropped. T2x is
+    the same history with one byte of the earlier stub changed, which an ingest proxy must never do:
+    expect a 400 if any thinking block follows the stub.
+    """
+    def body(messages: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"model": ANTHROPIC_MODEL, "max_tokens": 8000, "system": "You are a careful assistant.",
+                "tools": TOOLS, "messages": messages,
+                "thinking": {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}},
+                "output_config": {"effort": "max"}}
+
+    def thinking_count(payload: dict[str, Any] | None) -> int:
+        return sum(1 for b in (payload or {}).get("content", []) if b.get("type") == "thinking")
+
+    hdr = {"anthropic-beta": BINDING_BETA}
+    history = [user(
+        "Work this out step by step. The log to read is logs/N.log where N = 37 * 43 + 11. Read it with read_file. "
+        "Then find the map_version of shard S, where S = (37 * 43) mod 80. If a tool result is made of [paged ...] "
+        "stubs, call recall with the id of the one page that covers shard S. Reply with the map_version value only."
+    )]
+    first = c.post("T0_read_call", "/v1/messages", body(history), hdr, "anthropic")
+    if first is None or first.get("stop_reason") != "tool_use":
+        c.records.append({"case": "note", "text": "T0 did not call read_file; tool-loop case not exercised"})
+        return
+    c.records[-1]["thinking_blocks"] = thinking_count(first)
+    use = next(b for b in first["content"] if b.get("type") == "tool_use")
+    c.records[-1]["path_correct"] = use.get("input", {}).get("path") == "logs/1602.log"
+    history += [{"role": "assistant", "content": first["content"]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": use["id"], "content": STUB}]}]
+    second = c.post("T1_stub_first_send", "/v1/messages", body(history), hdr, "anthropic")
+    if second is None or second.get("stop_reason") != "tool_use":
+        c.records.append({"case": "note", "text": "T1 did not call recall; recall exchange not exercised"})
+        return
+    c.records[-1]["thinking_blocks"] = thinking_count(second)
+    recall = next(b for b in second["content"] if b.get("type") == "tool_use")
+    page = recall.get("input", {}).get("id")
+    c.records.append({"case": "T1_tool_called", "tool": recall.get("name"),
+                      "chose_right_page": page == "pg_a04c91e27f3b65d8"})
+    content = page_text(page) if page in PAGE_IDS else "error: unknown_id"
+    history += [{"role": "assistant", "content": second["content"]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": recall["id"], "content": content}]}]
+    kept = sum(1 for m in history if m["role"] == "assistant" for b in m["content"] if b.get("type") == "thinking")
+    c.records.append({"case": "T2_setup", "thinking_blocks_in_history": kept})
+    final = c.post("T2_recall_appended_thinking_kept", "/v1/messages", body(history), hdr, "anthropic")
+    if final is not None:
+        answer = "\n".join(b.get("text", "") for b in final.get("content", []) if b.get("type") == "text")
+        c.records[-1]["answer_correct"] = "cobalt-5817" in answer
+    changed = copy.deepcopy(history)
+    changed[2]["content"][0]["content"] = STUB.replace("~900", "~901", 1)
+    c.post("T2x_stub_bytes_changed_thinking_kept", "/v1/messages", body(changed), hdr, "anthropic")
+
+
 def openai_cases(c: Client) -> None:
     def body(items: list[dict[str, Any]]) -> dict[str, Any]:
         return {"model": OPENAI_MODEL, "input": items, "reasoning": {"effort": "medium"}, "store": False,
@@ -214,12 +328,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--cap", type=int, default=45_000, help="stop before a call once spend reaches this")
     parser.add_argument("--skip-openai", action="store_true")
+    parser.add_argument("--only", choices=("toolloop", "binding"), help="run only the named case group")
+    parser.add_argument("--user-id", help="send this synthetic metadata.user_id on binding cases")
     args = parser.parse_args(argv)
     client = Client(args.settings, args.cap)
     status = 0
     try:
-        anthropic_cases(client)
-        if not args.skip_openai:
+        if args.only == "toolloop":
+            toolloop_cases(client)
+        elif args.only == "binding":
+            binding_diagnostic(client, args.user_id)
+        else:
+            anthropic_cases(client)
+        if not args.skip_openai and not args.only:
             openai_cases(client)
     except (Budget, SetupFailed) as exc:
         client.records.append({"case": "stopped", "reason": str(exc)})
