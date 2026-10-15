@@ -36,8 +36,9 @@ from fidelity.scoring import normalize, parse_answers
 from fidelity.session import _filler_text
 
 DEFAULT_SEED = 20261017
-DEFAULT_HEAD = 25_000  # inferred until lane 1 reports the measured fixed head
-CHECKPOINTS = (30_000, 100_000, 250_000)
+DEFAULT_HEAD = 81_808  # measured by lane 1 on lab.subject's first call, 2026-10-15
+CHECKPOINTS = (30_000, 250_000)  # P1 lands right after the opening; P2 as large as the gate allows
+REPLAY_CHECKPOINT = 40_000  # the replay arm's own extra checkpoint
 TOKEN_CAP = 2_000_000
 
 CATEGORIES = ("flagged", "unflagged", "superseded", "obligation")
@@ -105,6 +106,8 @@ class Plan:
     turns: tuple[Turn, ...]
     plants: tuple[Plant, ...]
     markers: tuple[str, ...]  # per-checkpoint line marker required by the standing rules
+    replay_turns: tuple[Turn, ...] = ()  # direct-API replay (strip-thinking arm); never sent to the seat
+    replay_marker: str = ""
 
 
 def answers_file(checkpoint: int) -> str:
@@ -146,25 +149,36 @@ def turn_tokens(turn: Turn) -> tuple[int, int]:
     return text, files
 
 
-def build(seed: int = DEFAULT_SEED, head: int = DEFAULT_HEAD, checkpoints: Sequence[int] = CHECKPOINTS) -> Plan:
+def build(
+    seed: int = DEFAULT_SEED,
+    head: int = DEFAULT_HEAD,
+    checkpoints: Sequence[int] = CHECKPOINTS,
+    replay_checkpoint: int | None = REPLAY_CHECKPOINT,
+) -> Plan:
+    """Build the seat plan and, unless ``replay_checkpoint`` is None, the replay arm's turns.
+
+    Group k (1-based) belongs to seat checkpoint k. Group 0 belongs only to the replay's own
+    checkpoint (about ``replay_checkpoint`` tokens) and never appears in a seat turn.
+    """
     rng = random.Random(seed)
     values = _Values(rng)
     subjects = [f"{s} {a}" for s in _SYSTEMS for a in _ATTRIBUTES]
     rng.shuffle(subjects)
     cfg_keys = [f"{s}.shard_{n:02d}.map_version" for s in _SYSTEMS for n in range(12)]
     rng.shuffle(cfg_keys)
-    ob_ids = rng.sample(range(100, 1000), 3 * PER_CATEGORY)
-    markers = tuple(f";{rng.choice('kmqvxz')}{rng.randrange(1, 10)}" for _ in checkpoints)
-    if len(set(markers)) != len(markers):
-        markers = tuple(f";{c}{i + 1}" for i, c in enumerate("kmq"[: len(checkpoints)]))
+    groups = list(range(1, len(checkpoints) + 1)) + ([0] if replay_checkpoint else [])
+    ob_ids = rng.sample(range(100, 1000), len(groups) * PER_CATEGORY)
+    all_markers = [f";{c}{i + 1}" for i, c in enumerate(rng.sample("kmqvxzr", len(groups)))]
+    markers = tuple(all_markers[: len(checkpoints)])
+    replay_marker = all_markers[-1] if replay_checkpoint else ""
 
     plants: list[Plant] = []
     deep_first: list[tuple[int, str, str]] = []  # (checkpoint, category, statement), for the opening
     deep_second: list[tuple[int, str, str]] = []  # later statements (supersessions, closures)
-    growth_text: dict[int, list[str]] = {k: [] for k in range(1, len(checkpoints) + 1)}
-    growth_cfg: dict[int, list[str]] = {k: [] for k in range(1, len(checkpoints) + 1)}
+    growth_text: dict[int, list[str]] = {k: [] for k in groups}
+    growth_cfg: dict[int, list[str]] = {k: [] for k in groups}
 
-    for k in range(1, len(checkpoints) + 1):
+    for k in groups:
         for category in CATEGORIES:
             for n in range(PER_CATEGORY):
                 deep = n < DEEP_SHARE
@@ -232,6 +246,10 @@ def build(seed: int = DEFAULT_SEED, head: int = DEFAULT_HEAD, checkpoints: Seque
     turns.append(Turn("S0", "rules", "\n".join(rules)))
 
     # Interleave checkpoints and categories so every group's deep plants sit at matched positions.
+    # Group 0 (replay only) gets its own opening in the replay.
+    replay_opening = _interleave([d for d in deep_first if d[0] == 0]) + _interleave([d for d in deep_second if d[0] == 0])
+    deep_first = [d for d in deep_first if d[0] != 0]
+    deep_second = [d for d in deep_second if d[0] != 0]
     opening = _interleave(deep_first) + _interleave(deep_second)
     for t, start in enumerate(range(0, len(opening), OPENING_STATEMENTS_PER_TURN), start=1):
         chunk = opening[start : start + OPENING_STATEMENTS_PER_TURN]
@@ -249,6 +267,8 @@ def build(seed: int = DEFAULT_SEED, head: int = DEFAULT_HEAD, checkpoints: Seque
     context = head + sum(sum(turn_tokens(t)) + REPLY_TOKENS for t in turns)
     for k, target in enumerate(checkpoints, start=1):
         group = [p for p in plants if p.checkpoint == k]
+        if not group:
+            continue
         probe = _probe_turn(k, group)
         text_lines = growth_text[k] + [""]
         probe_tokens = sum(turn_tokens(probe))
@@ -275,7 +295,107 @@ def build(seed: int = DEFAULT_SEED, head: int = DEFAULT_HEAD, checkpoints: Seque
         growth = Turn(f"G{k}", "growth", text, files, k)
         turns += [growth, probe]
         context += sum(turn_tokens(growth)) + REPLY_TOKENS + sum(turn_tokens(probe)) + len(group) * ANSWER_LINE_TOKENS
-    return Plan(seed, head, tuple(turns), tuple(plants), markers)
+    plan = Plan(seed, head, tuple(turns), tuple(plants), markers)
+    if not replay_checkpoint:
+        return plan
+    replay = _replay_turns(rng, plan, replay_opening, growth_text[0], growth_cfg[0], replay_marker, replay_checkpoint)
+    return Plan(seed, head, tuple(turns), tuple(plants), markers, replay, replay_marker)
+
+
+def _inline_files(files: Sequence[Mapping[str, Any]]) -> list[str]:
+    out = []
+    for f in files:
+        out += [f"=== file {f['path']} ===", f["content"].rstrip("\n"), "=== end of file ==="]
+    return out
+
+
+def _filler_files(rng: random.Random, tokens: int, label: str, cfg_lines: Sequence[str] = ()) -> list[dict[str, Any]]:
+    n_files = max(1, math.ceil(tokens / FILE_TOKENS))
+    lines_per_file = max(20, int(tokens / n_files / LOG_TOKENS_PER_CHAR / (FILE_LINE_CHARS - 4)))
+    files = []
+    for f in range(n_files):
+        body = _filler_text(rng, lines_per_file, f"{label}f{f}").split("\n")
+        for line in list(cfg_lines)[f::n_files]:
+            body.insert(rng.randrange(1, len(body)), line)
+        content = "\n".join(body) + "\n"
+        files.append({"path": f"replay/{label}_{f:02d}.log", "content": content, "chars": len(content), "lines": 0})
+    return files
+
+
+def _strip_reply_lines(text: str) -> list[str]:
+    drop = ("Reply with exactly:", "Use the Read tool", "Do not summarize them.")
+    return [line for line in text.split("\n") if not line.startswith(drop)]
+
+
+def _replay_turns(
+    rng: random.Random,
+    plan: Plan,
+    opening: Sequence[str],
+    growth_text: Sequence[str],
+    growth_cfg: Sequence[str],
+    marker: str,
+    target: int,
+) -> tuple[Turn, ...]:
+    """The strip-thinking arm's replay, one request per turn, files inline.
+
+    RS and RG plant group 0 and grow to about ``target``; RP0 probes group 0 there. RF then adds
+    plant-free filler so that the seat's own rules, opening, and G1 (merged into RF, verbatim
+    except for the reply and Read instructions) end where they end on the seat: the seat's head is
+    about ``plan.head`` tokens of system prompt and tools, which the replay stands in for with
+    filler. RP1 asks the seat's P1 questions at about the seat's P1 context.
+    """
+    group0 = [p for p in plan.plants if p.checkpoint == 0]
+    prose = [s for s in opening if not s.startswith("cfg ")]
+    cfg = [s for s in opening if s.startswith("cfg ")]
+    log = _filler_text(rng, len(cfg) + 6, "ro").split("\n")
+    for line in cfg:
+        log.insert(rng.randrange(1, len(log)), line)
+    rs = Turn("RS", "replay", "\n".join([
+        f"Standing rule for this whole session: whenever you answer checkpoint R, end every line of the answer with {marker}",
+        *prose, "Here is a short log for reference:", *log, "Reply with exactly: OK",
+    ]))
+    probe0 = _replay_probe("RP0", "R", group0, "answer with one line per question")
+    context = REPLAY_HEAD + sum(turn_tokens(rs)) + REPLY_TOKENS
+    head_text = "\n".join([*growth_text, "Here are the files for reference:"])
+    need = max(target - context - sum(turn_tokens(Turn("head", "replay", head_text))) - sum(turn_tokens(probe0)) - 200, 2_000)
+    files = _filler_files(rng, need, "rg", growth_cfg)
+    rg = Turn("RG", "replay", "\n".join([head_text, *_inline_files(files), "Reply with exactly: DONE"]))
+    context += sum(turn_tokens(rg)) + REPLY_TOKENS
+
+    seat = {t.id: t for t in plan.turns}
+    p1 = seat["P1"]
+    merged = []
+    for t in plan.turns:
+        if t.id == "P1":
+            break
+        merged += _strip_reply_lines(t.text)
+        merged += _inline_files(t.files)
+    seat_text = "\n".join(merged)
+    group1 = [p for p in plan.plants if p.checkpoint == 1]
+    probe1 = _replay_probe("RP1", "1", group1, f"reply with exactly the lines you would write to {answers_file(1)}")
+    seat_p1 = next(r.context for r in requests(plan) if r.turn == "P1")
+    seat_tokens = sum(turn_tokens(Turn("seat", "replay", seat_text)))
+    filler_need = max(seat_p1 - context - seat_tokens - sum(turn_tokens(probe1)) - 300, 2_000)
+    filler = _filler_files(rng, filler_need, "rf")
+    rf = Turn("RF", "replay", "\n".join([
+        "Here are some unrelated files for reference:", *_inline_files(filler), seat_text, "Reply with exactly: OK",
+    ]))
+    del p1
+    return (rs, rg, probe0, rf, probe1)
+
+
+def _replay_probe(turn_id: str, label: str, group: Sequence[Plant], how: str) -> Turn:
+    lines = [f"{probe_id(p, i)}: {p.question}" for i, p in enumerate(group)]
+    text = "\n".join([
+        f"Checkpoint {label}. Answer the questions below from what was said earlier in this conversation only.",
+        f"Do not use any tools: {how}, in the form",
+        "q_id: answer",
+        "with the value only. Follow any standing rule for these answers given earlier in this session.",
+        "If you do not know an answer, write unknown as the answer.",
+        "",
+        *lines,
+    ])
+    return Turn(turn_id, "replay_probe", text, [], 0 if label == "R" else 1)
 
 
 def _interleave(items: list[tuple[int, str, str]]) -> list[str]:
@@ -327,10 +447,19 @@ def contamination(plan: Plan) -> list[str]:
     An empty list means no plant is restated anywhere before (or after) its probe.
     """
     texts: list[tuple[str, str]] = []
-    for turn in plan.turns:
+    for turn in (*plan.turns, *plan.replay_turns):
         texts.append((turn.id, turn.text))
         texts += [(f"{turn.id}:{f['path']}", f["content"]) for f in turn.files]
     violations = []
+    # Group 0 belongs to the replay only; the replay's own opening and growth carry no seat plant.
+    seat_text = "\n".join(t.text + "".join(f["content"] for f in t.files) for t in plan.turns)
+    replay_own = "\n".join(t.text for t in plan.replay_turns if t.id in ("RS", "RG"))
+    for plant in plan.plants:
+        for stmt in plant.statements:
+            if plant.checkpoint == 0 and stmt in seat_text:
+                violations.append(f"{plant.key}: replay-only plant appears in a seat turn")
+            if plant.checkpoint != 0 and stmt in replay_own:
+                violations.append(f"{plant.key}: seat plant appears in the replay's own opening or growth")
     all_subjects = [p.subject for p in plan.plants]
     for i, a in enumerate(all_subjects):
         for b in all_subjects[i + 1 :]:
@@ -351,11 +480,17 @@ def contamination(plan: Plan) -> list[str]:
     return violations
 
 
-def plant_offsets(plan: Plan) -> dict[str, int]:
-    """Estimated token offset (from the start of the conversation) of each plant's current value."""
+def plant_offsets(plan: Plan, replay: bool = False) -> dict[str, int]:
+    """Estimated token offset (from the start of the conversation) of each plant's current value.
+
+    With ``replay``, offsets are on the replay's turns; replay probe turns are forks and take no room.
+    """
     offsets: dict[str, int] = {}
     position = 0
-    for turn in plan.turns:
+    for turn in plan.replay_turns if replay else plan.turns:
+        if turn.kind == "replay_probe":
+            offsets[f"__probe__{turn.id}"] = position
+            continue
         text_tokens, _ = turn_tokens(turn)
         for plant in plan.plants:
             last = plant.statements[-1]
@@ -435,7 +570,7 @@ def budget_sheet(plan: Plan) -> str:
         "(inferred); prose at chars/4. The meter counts every category, cache reads included, so each "
         "request costs its full context. Side calls by the CLI are not modeled; the margin covers them.",
         "",
-        "Compaction sanity bound: the largest context is about 250k, far below the measured block point of "
+        "Compaction sanity bound: the largest context is at most about 250k, far below the measured block point of "
         "about 977k for a 1M window (lane 1), so no compaction is expected.",
         "",
         "| # | turn | context | output | cumulative | note |",
@@ -453,12 +588,30 @@ def budget_sheet(plan: Plan) -> str:
         f"Planned total, parallel reads: {total_par:,} tokens ({total_par / TOKEN_CAP:.0%} of {TOKEN_CAP:,}).",
         f"If the subject reads files one at a time: {total_seq:,} tokens ({total_seq / TOKEN_CAP:.0%}).",
         "",
-        "Strip-thinking arm (direct-API replay, design only, separate from the lab run):",
     ]
-    for label, wanted in (("all checkpoints", None), ("checkpoints 1 and 2 only", (1, 2))):
-        rep = replay_requests(plan, wanted)
-        lines.append(f"- {label}: {len(rep)} requests, {sum(r.context + r.output for r in rep):,} tokens")
-    lines.append("")
+    worst, where = gate(plan)
+    lines += [
+        f"Worst pre-turn gate value (cumulative before the turn + 1.5 x the turn's cost): {worst:,} before {where} "
+        f"(limit 1,900,000).",
+        "",
+    ]
+    if plan.replay_turns:
+        rep = replay_requests(plan)
+        lines += [
+            "## Strip-thinking arm (direct-API replay; separate approval, not part of the lab run)",
+            "",
+            "| # | turn | context | output | note |",
+            "|---|---|---|---|---|",
+        ]
+        for i, r in enumerate(rep, start=1):
+            lines.append(f"| {i} | {r.turn} | {r.context:,} | {r.output:,} | {r.note} |")
+        full = sum(r.context + r.output for r in rep)
+        no_strip_p1 = sum(r.context + r.output for r in replay_requests(plan, stripped_p1=False))
+        lines += [
+            "",
+            f"Replay total with the stripped arm at P1: {full:,} tokens; without it: {no_strip_p1:,}.",
+            "",
+        ]
     return "\n".join(lines)
 
 
@@ -469,31 +622,48 @@ REPLY_WITH_THINKING = 200  # inferred: "OK" plus a short preserved thinking bloc
 PROBE_THINKING = 1_500  # inferred
 
 
-def replay_requests(plan: Plan, checkpoints: Sequence[int] | None = None) -> list[Request]:
-    """Model the direct-API replay: one request per turn, files inline as user content.
+def replay_requests(plan: Plan, stripped_p1: bool = True) -> list[Request]:
+    """Model the direct-API replay: one request per turn, files inline, probes as forks.
 
-    The build is shared. At each checkpoint the history forks into two probe requests with the
-    same content: thinking preserved, and every earlier thinking block stripped. Only checkpoints
-    listed in ``checkpoints`` are probed (default: all); turns after the last one are not sent.
+    RS, RG, and RF enter the shared history. RP0 forks into a preserved and a stripped request.
+    RP1 forks into a preserved request and, if ``stripped_p1``, a stripped one. Probe forks never
+    enter the shared history, so no answer can reach a later probe.
     """
-    wanted = set(checkpoints or {p.checkpoint for p in plan.plants})
-    last = max(wanted)
     out: list[Request] = []
     context = REPLAY_HEAD
-    for turn in plan.turns:
-        if turn.checkpoint is not None and turn.checkpoint > last:
-            break
+    for turn in plan.replay_turns:
         text, files = turn_tokens(turn)
-        if turn.kind == "probe":
-            if turn.checkpoint in wanted:
-                answers = sum(1 for p in plan.plants if p.checkpoint == turn.checkpoint) * ANSWER_LINE_TOKENS
-                for arm in ("preserved", "stripped"):
-                    out.append(Request(turn.id, context + text, answers + PROBE_THINKING, f"{arm} arm"))
-            continue  # probe turns are forks: they never enter the shared history
+        if turn.kind == "replay_probe":
+            answers = sum(1 for p in plan.plants if p.checkpoint == turn.checkpoint) * ANSWER_LINE_TOKENS
+            arms = ("preserved", "stripped") if (turn.id == "RP0" or stripped_p1) else ("preserved",)
+            for arm in arms:
+                out.append(Request(turn.id, context + text, answers + PROBE_THINKING, f"{arm} arm"))
+            continue
         context += text + files
         out.append(Request(turn.id, context, REPLY_WITH_THINKING))
         context += REPLY_WITH_THINKING
     return out
+
+
+def gate(plan: Plan, factor: float = 1.5) -> tuple[int, str]:
+    """builder-1's pre-turn gate: cumulative before a turn plus factor x that turn's cost.
+
+    Returns the worst value over the run and the turn where it occurs.
+    """
+    by_turn: dict[str, int] = {}
+    order: list[str] = []
+    for r in requests(plan):
+        if r.turn not in by_turn:
+            order.append(r.turn)
+            by_turn[r.turn] = 0
+        by_turn[r.turn] += r.context + r.output
+    worst, where, cumulative = 0, "", 0
+    for turn in order:
+        value = cumulative + int(factor * by_turn[turn])
+        if value > worst:
+            worst, where = value, turn
+        cumulative += by_turn[turn]
+    return worst, where
 
 
 # Scoring
@@ -561,10 +731,31 @@ def score_checkpoint(truth: Sequence[Mapping[str, Any]], answers_text: str, mark
     }
 
 
+REPLAY_ANSWER_FILES = ("replay_RP0_preserved.txt", "replay_RP0_stripped.txt",
+                       "replay_RP1_preserved.txt", "replay_RP1_stripped.txt")
+
+
 def score_dir(answers_dir: Path, truth_rows: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -> dict[str, Any]:
+    """Score seat answers files (answers_k.txt) and, when present, the replay arm's answer files.
+
+    Replay files hold the model's reply text for each fork: RP0 is scored against group 0 with the
+    replay marker, RP1 against group 1 with the seat's first marker.
+    """
     results: dict[str, Any] = {}
+    for name in REPLAY_ANSWER_FILES:
+        path = answers_dir / name
+        if not path.is_file():
+            continue
+        key = name.removeprefix("replay_").removesuffix(".txt")
+        group = 0 if key.startswith("RP0") else 1
+        marker = meta["replay_marker"] if group == 0 else meta["markers"][0]
+        rows = [dict(r, distance=r.get("replay_distance", r["distance"])) for r in truth_rows if r["checkpoint"] == group]
+        results[key] = score_checkpoint(rows, path.read_text(encoding="utf-8"), marker)
+        results[key]["context"] = meta["replay_contexts"][key.split("_")[0]]
     for k, marker in enumerate(meta["markers"], start=1):
         path = answers_dir / Path(answers_file(k)).name
+        if not path.is_file() and results:
+            continue  # a replay-only scoring directory
         rows = [r for r in truth_rows if r["checkpoint"] == k]
         if path.is_file():
             results[str(k)] = score_checkpoint(rows, path.read_text(encoding="utf-8"), marker)
@@ -606,16 +797,19 @@ def report(results: Mapping[str, Any]) -> str:
 
 def write_outputs(plan: Plan, out: Path) -> dict[str, Path]:
     out.mkdir(parents=True, exist_ok=True)
-    paths = {name: out / name for name in ("turns.jsonl", "probes.jsonl", "truth.jsonl", "budget.md", "contamination.json", "meta.json")}
-    with paths["turns.jsonl"].open("w", encoding="utf-8") as handle:
-        for turn in plan.turns:
-            handle.write(json.dumps(asdict(turn), ensure_ascii=False) + "\n")
+    names = ("turns.jsonl", "replay_turns.jsonl", "probes.jsonl", "truth.jsonl", "budget.md", "contamination.json", "meta.json")
+    paths = {name: out / name for name in names}
+    for name, turns in (("turns.jsonl", plan.turns), ("replay_turns.jsonl", plan.replay_turns)):
+        with paths[name].open("w", encoding="utf-8") as handle:
+            for turn in turns:
+                handle.write(json.dumps(asdict(turn), ensure_ascii=False) + "\n")
     for turn in plan.turns:
         for f in turn.files:
             target = out / "files" / Path(f["path"]).name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(f["content"], encoding="utf-8")
     offsets = plant_offsets(plan)
+    replay_offsets = plant_offsets(plan, replay=True) if plan.replay_turns else {}
     reqs = requests(plan)
     probe_contexts = [r.context for r in reqs if r.note.startswith("checkpoint")]
     probe_offsets = {}
@@ -629,14 +823,28 @@ def write_outputs(plan: Plan, out: Path) -> dict[str, Path]:
         for pid, p in probe_index(plan):
             probes.write(json.dumps({"id": pid, "checkpoint": p.checkpoint, "category": p.category,
                                      "segment": p.segment, "question": p.question}) + "\n")
-            truth.write(json.dumps({"id": pid, "checkpoint": p.checkpoint, "category": p.category,
-                                    "segment": p.segment, "answer": p.value, "older": list(p.older),
-                                    "offset": offsets[p.key], "distance": probe_offsets[p.checkpoint] - offsets[p.key]}) + "\n")
+            row = {"id": pid, "checkpoint": p.checkpoint, "category": p.category, "segment": p.segment,
+                   "answer": p.value, "older": list(p.older)}
+            if p.checkpoint == 0:
+                row["offset"] = replay_offsets[p.key]
+                row["distance"] = replay_offsets["__probe__RP0"] - replay_offsets[p.key]
+            else:
+                row["offset"] = offsets[p.key]
+                row["distance"] = probe_offsets[p.checkpoint] - offsets[p.key]
+                if p.checkpoint == 1 and p.key in replay_offsets:
+                    row["replay_distance"] = replay_offsets["__probe__RP1"] - replay_offsets[p.key]
+            truth.write(json.dumps(row) + "\n")
     paths["budget.md"].write_text(budget_sheet(plan) + "\n", encoding="utf-8")
     violations = contamination(plan)
     paths["contamination.json"].write_text(json.dumps({"violations": violations}, indent=2) + "\n", encoding="utf-8")
-    paths["meta.json"].write_text(json.dumps({"seed": plan.seed, "head": plan.head, "markers": list(plan.markers),
-                                              "checkpoint_contexts": probe_contexts}, indent=2) + "\n", encoding="utf-8")
+    replay_contexts = {}
+    for r in replay_requests(plan):
+        if r.note.endswith("arm"):
+            replay_contexts[r.turn] = r.context
+    paths["meta.json"].write_text(json.dumps({
+        "seed": plan.seed, "head": plan.head, "markers": list(plan.markers), "checkpoint_contexts": probe_contexts,
+        "replay_marker": plan.replay_marker, "replay_contexts": replay_contexts,
+    }, indent=2) + "\n", encoding="utf-8")
     return paths
 
 
