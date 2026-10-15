@@ -1,0 +1,311 @@
+import csv
+import json
+import math
+
+import pytest
+
+import cost_model as cm
+
+PRICES = cm.load_prices()
+OPUS = PRICES["parsed"]["claude-opus-5-5"]
+HAIKU = PRICES["parsed"]["claude-haiku-5-5"]
+ASTRA = PRICES["parsed"]["gpt-6-astra"]
+T5 = OPUS.cache_tier("5m")
+
+
+def trace(turns, head=1000, gap=0.0, intra=1.0, **flags):
+    """turns: list of request lists, each request (added, output, kept)."""
+    return cm.Trace("t", head, intra, tuple(
+        cm.Turn(gap if i else 0.0, tuple(cm.Req(*r) for r in reqs), **flags) for i, reqs in enumerate(turns)))
+
+
+# Pricing
+
+
+def test_price_explicit_mode_bills_misses_as_writes():
+    b = cm.price(OPUS, T5, prompt=1_000_000, hit=600_000, output=1000)
+    assert (b.uncached, b.write, b.read, b.output) == (0, 400_000, 600_000, 1000)
+    assert b.usd == pytest.approx((400_000 * 5 + 600_000 * 0.20 + 1000 * 20) / 1e6)
+
+
+def test_price_automatic_mode_bills_misses_as_input():
+    m = cm.Model("x", "openai", "x", "small", 1_000_000, input=1.0, output=4.0, cache_read=0.1,
+                 cache_mode="automatic", cache_tiers=(cm.CacheTier("t", 600, 1.0),), default_tier="t")
+    b = cm.price(m, m.cache_tier(), prompt=10_000, hit=8000, output=100)
+    assert (b.uncached, b.write, b.read) == (2000, 0, 8000)
+    assert b.usd == pytest.approx((2000 * 1.0 + 8000 * 0.1 + 100 * 4.0) / 1e6)
+
+
+def test_long_context_tier_multiplies_whole_request():
+    t = HAIKU.cache_tier()
+    under = cm.price(HAIKU, t, 100_000, 90_000, 100)
+    over = cm.price(HAIKU, t, 100_001, 90_001, 100)
+    assert under.usd == pytest.approx((10_000 * 0.125 + 90_000 * 0.01 + 100 * 0.5) / 1e6)
+    assert over.usd == pytest.approx(5 * (10_000 * 0.125 + 90_001 * 0.01 + 100 * 0.5) / 1e6)
+
+
+def test_price_file_values_carry_source_date_and_tag():
+    raw = json.loads(cm.PRICES.read_text())
+
+    def leaves(x):
+        if isinstance(x, dict):
+            if "value" in x:
+                yield x
+            else:
+                for v in x.values():
+                    yield from leaves(v)
+        elif isinstance(x, list):
+            for v in x:
+                yield from leaves(v)
+
+    found = list(leaves(raw["models"])) + list(leaves(raw["compaction"])) + list(leaves(raw["cli_ttl"]))
+    assert len(found) > 40
+    for leaf in found:
+        assert leaf["source"].startswith("https://")
+        assert leaf["retrieved"] == raw["retrieved"]
+        assert leaf["tag"] in ("vendor-documented", "measured", "inferred")
+
+
+# Cache engine and plain strategy
+
+
+def test_plain_reads_previous_prompt_and_writes_only_the_tail():
+    r = cm.run_plain(trace([[(100, 10, 10), (500, 20, 20)]]), OPUS, T5)
+    # Request 1: head 1000 + 100 written. Request 2: reads 1100, writes kept 10 + tool 500.
+    assert r.total.write == 1100 + 510
+    assert r.total.read == 1100
+    assert r.total.output == 30
+    assert r.breaks.count == {}
+
+
+def test_ttl_expiry_rewrites_whole_prefix_and_is_attributed():
+    warm = cm.run_plain(trace([[(100, 10, 10)], [(100, 10, 10)]], gap=299), OPUS, T5)
+    cold = cm.run_plain(trace([[(100, 10, 10)], [(100, 10, 10)]], gap=301), OPUS, T5)
+    assert warm.total.read == 1100 and warm.total.write == 1100 + 110
+    assert cold.total.read == 0 and cold.total.write == 1100 + 1210
+    # Rewritten = head + first user message; the 10 output tokens were never cached.
+    assert cold.breaks.count["ttl"] == 1 and cold.breaks.tokens["ttl"] == 1100
+
+
+def test_compaction_resets_to_head_plus_seed():
+    reset = cm.Reset("compaction", threshold=2600, instruction_tokens=50, output_tokens=300, seed_tokens=100)
+    r = cm.run_plain(trace([[(500, 10, 10)]] * 5), OPUS, T5, reset)
+    # Prompt with the next user message: 1500, 2010, 2520, then 3030 >= 2600 fires before turn 4.
+    assert r.resets == 1
+    fourth = r.turns[3]
+    assert fourth.b.requests == 2 and fourth.b.output == 300 + 10
+    assert fourth.prompt_tokens == 2530 + 50  # the summary request
+    # The summary request reads the warm prefix; the next request reads only the head.
+    assert fourth.b.read == 2520 + 1000  # last sent prompt, then the head
+    assert r.breaks.count["compaction"] == 1 and r.breaks.tokens["compaction"] == 100
+    # After the reset: head + seed + 510 for turn 4, then turn 5 appends 500.
+    assert r.turns[4].prompt_tokens == 1000 + 100 + 510 + 500
+
+
+def test_rollover_is_the_same_mechanism_with_its_own_cause():
+    reset = cm.Reset("rollover", threshold=2600, output_tokens=100, seed_tokens=50)
+    r = cm.run_plain(trace([[(500, 10, 10)]] * 4), OPUS, T5, reset)
+    assert r.strategy == "rollover" and r.resets == 1 and r.breaks.count["rollover"] == 1
+
+
+def test_plain_flags_turn_where_window_is_exceeded():
+    small = cm.Model(**{**OPUS.__dict__, "context_window": 2500})
+    r = cm.run_plain(trace([[(500, 10, 10)]] * 5), small, T5)
+    assert r.over_window_turn == 3  # prompts 1500, 2010, 2520
+
+
+def test_clearing_replaces_old_tool_results_and_breaks_cache():
+    clear = cm.ClearPolicy(trigger=3000, keep=1, clear_at_least=0, placeholder_tokens=5)
+    turns = [[(10, 1, 1), (1000, 1, 1)]] * 3
+    r = cm.run_plain(trace(turns), OPUS, T5, clear=clear)
+    # Turns 2 and 3 each push the prompt past 3000 with a new tool result, and keep=1 clears
+    # the previous one: 3023 -> 2028 in turn 2, 3040 -> 2045 in turn 3.
+    assert r.resets == 2
+    assert r.breaks.count["clear"] == 2
+    assert r.turns[1].prompt_tokens == 2028 and r.turns[2].prompt_tokens == 2045
+
+
+def test_keepalive_keeps_cache_warm_through_idle_gap():
+    tr = trace([[(100, 10, 10)], [(100, 10, 10)]], gap=1000)
+    plain = cm.run_plain(tr, OPUS, T5)
+    kept = cm.run_plain(tr, OPUS, T5, keepalive=cm.Keepalive(margin_s=30))
+    assert kept.breaks.count["keepalive_ping"] == 3  # 1000 // 270
+    assert "ttl" not in kept.breaks.count
+    assert kept.total.read == 1100 + 3 * 1110
+    assert kept.total.usd < plain.total.usd
+
+
+# Context virtual memory
+
+
+def test_cvm_rebase_rewrites_everything_after_the_system_head():
+    pol = cm.CvmPolicy(window_tokens=250, epoch_turns=3, opportunistic=False, respect_price_tier=False,
+                       pinned_base=100, pinned_per_turn=0, pinned_max=100, stub_tokens_per_turn=7)
+    r = cm.run_cvm(trace([[(100, 10, 10)]] * 5), OPUS, T5, pol)
+    assert r.rebases == 1 and r.events["rebase"] == 1
+    fourth = r.turns[3].b
+    # Window keeps the last two 110-token turns (220 <= 250), one turn paged to a 7-token stub.
+    assert fourth.read == 1000
+    assert fourth.write == 100 + 7 + 220 + 100
+    # Rewritten excludes turn 3's 10 output tokens, which were never cached.
+    assert r.breaks.count["rebase"] == 1 and r.breaks.tokens["rebase"] == 100 + 7 + 220 - 10
+
+
+def test_cvm_rebases_on_expiry_when_opportunistic():
+    pol = cm.CvmPolicy(window_tokens=0, epoch_turns=100, opportunistic=True, respect_price_tier=False)
+    tr = trace([[(100, 10, 10)]] * 3, gap=400)
+    r = cm.run_cvm(tr, OPUS, T5, pol)
+    assert r.events["rebase_on_expiry"] == 2
+    assert r.breaks.count["ttl"] == 2
+
+
+def test_cvm_prompt_stays_bounded_over_a_long_session():
+    prof = cm.load_profile()
+    tr = cm.generate_trace(prof, turns=600)
+    pol = cm.CvmPolicy(**prof["cvm"]["policy"])
+    r = cm.run_cvm(tr, OPUS, None, pol)
+    plain = cm.run_plain(tr, OPUS)
+    assert r.max_prompt < 250_000 < plain.max_prompt
+
+
+def test_cvm_respects_long_context_price_threshold():
+    prof = cm.load_profile()
+    tr = cm.generate_trace(prof, turns=120)
+    pol = cm.CvmPolicy(**{**prof["cvm"]["policy"], "window_tokens": 16_000})
+    r = cm.run_cvm(tr, HAIKU, None, pol)
+    over = [t for t in r.turns if t.prompt_tokens > HAIKU.long_context.threshold]
+    assert len(over) < len(r.turns) * 0.1
+
+
+def test_cvm_tail_pinning_rewrites_pinned_block_every_request():
+    pol = cm.CvmPolicy(pin_position="tail", pinned_base=50, pinned_per_turn=0, pinned_max=50, epoch_turns=100,
+                       opportunistic=False, respect_price_tier=False)
+    r = cm.run_cvm(trace([[(100, 10, 10), (100, 10, 10)]] * 2), OPUS, T5, pol)
+    assert r.breaks.count["pin"] == r.total.requests - 1
+    assert r.breaks.tokens["pin"] == 50 * (r.total.requests - 1)
+
+
+def test_recall_adds_one_round_trip():
+    pol = cm.CvmPolicy(respect_price_tier=False)
+    with_recall = cm.run_cvm(trace([[(100, 10, 10)]], recall=True), OPUS, T5, pol)
+    assert with_recall.total.requests == 2
+    assert with_recall.events["recall"] == 1
+
+
+# Epoch rule
+
+
+def test_optimal_epoch_minimizes_its_cost_function():
+    rebuilt, g, n, w, r = 50_000, 5000, 4, 5.0, 0.2
+    e_star = cm.optimal_epoch(rebuilt, g, n, w, r)
+
+    def cost(e):
+        return (w - r) * rebuilt / e + r * n * g * e / 2
+
+    assert cost(e_star) <= min(cost(e_star * 0.9), cost(e_star * 1.1))
+    assert e_star == pytest.approx(math.sqrt(2 * 4.8 * 50_000 / (0.2 * 4 * 5000)))
+
+
+# Trace generation
+
+
+def test_trace_is_deterministic_and_seed_sensitive():
+    prof = cm.load_profile()
+    assert cm.generate_trace(prof, turns=50) == cm.generate_trace(prof, turns=50)
+    assert cm.generate_trace(prof, turns=50) != cm.generate_trace(prof, turns=50, seed=1)
+
+
+def test_cvm_side_events_do_not_shift_shared_workload():
+    prof = cm.load_profile()
+    other = json.loads(json.dumps(prof))
+    other["cvm"]["recall_rate"] = 0.9
+    a, b = cm.generate_trace(prof, turns=40), cm.generate_trace(other, turns=40)
+    assert [t.reqs for t in a.turns] == [t.reqs for t in b.turns]
+
+
+# Lane 1 loader
+
+
+def write_jsonl(path, rows):
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return path
+
+
+ROW = dict(turn=1, input_tokens=3, cache_creation_input_tokens=1000, cache_read_input_tokens=0, output_tokens=50,
+           request_bytes=4000, message_count=1, cli="claude-code", model="m", endpoint="/v1/messages",
+           ts="2026-10-15T23:00:00.000000Z")
+
+
+def test_load_measured_jsonl_and_csv_with_empty_cache_creation(tmp_path):
+    rows = cm.load_measured(cm.HERE / "testdata" / "lane1_sample.jsonl")
+    assert len(rows) == 6 and rows[0]["cache_creation_input_tokens"] == 42_384
+    codex = cm.load_measured(cm.HERE / "testdata" / "lane1_codex_sample.csv")
+    assert [r["cache_creation_input_tokens"] for r in codex] == [None, None, None]
+    missing = {k: v for k, v in ROW.items() if k != "cache_creation_input_tokens"}
+    assert cm.load_measured(write_jsonl(tmp_path / "m.jsonl", [missing]))[0]["cache_creation_input_tokens"] is None
+
+
+@pytest.mark.parametrize("bad", [
+    {k: v for k, v in ROW.items() if k != "output_tokens"},
+    {**ROW, "input_tokens": ""},
+    {**ROW, "message_count": "many"},
+    {**ROW, "ts": "yesterday"},
+])
+def test_load_measured_rejects_bad_rows(tmp_path, bad):
+    with pytest.raises(ValueError):
+        cm.load_measured(write_jsonl(tmp_path / "bad.jsonl", [bad]))
+
+
+def test_load_measured_rejects_bad_json_and_missing_file(tmp_path):
+    p = tmp_path / "x.jsonl"
+    p.write_text("{not json\n")
+    with pytest.raises(ValueError):
+        cm.load_measured(p)
+    with pytest.raises(ValueError):
+        cm.load_measured(tmp_path / "absent.jsonl")
+
+
+def test_price_measured_uses_reported_buckets():
+    rows = [dict(ROW, input_tokens=10, cache_creation_input_tokens=1000, cache_read_input_tokens=5000,
+                 output_tokens=100)]
+    b = cm.price_measured(rows, OPUS)
+    assert b.usd == pytest.approx((10 * 4 + 1000 * 5 + 5000 * 0.2 + 100 * 20) / 1e6)
+
+
+def test_price_measured_bounds_for_missing_cache_writes():
+    rows = [dict(ROW, input_tokens=1000, cache_creation_input_tokens=None, cache_read_input_tokens=9000,
+                 output_tokens=0)]
+    hi = cm.price_measured(rows, ASTRA, missing_creation="write")
+    lo = cm.price_measured(rows, ASTRA, missing_creation="input")
+    assert hi.usd == pytest.approx((1000 * 12.5 + 9000 * 1.0) / 1e6)
+    assert lo.usd == pytest.approx((1000 * 10 + 9000 * 1.0) / 1e6)
+
+
+def test_trace_from_measured_growth_gaps_and_shrinks():
+    rows = cm.load_measured(cm.HERE / "testdata" / "lane1_sample.jsonl")
+    tr, shrinks = cm.trace_from_measured(rows, "s")
+    assert tr.head_tokens == 42_387
+    assert [len(t.reqs) for t in tr.turns] == [2, 2, 1, 1]
+    assert tr.turns[0].reqs[1].added == 1450
+    assert tr.turns[1].gap_s == pytest.approx(78.0)
+    assert shrinks == 1 and tr.turns[3].reqs[0].added == 0
+
+
+# Script and doc
+
+
+def test_doc_reproduces_from_script():
+    assert cm.main(["--check-doc"]) == 0
+
+
+def test_per_turn_csv(tmp_path):
+    out = tmp_path / "pt.csv"
+    assert cm.main(["--per-turn-csv", str(out)]) == 0
+    rows = list(csv.DictReader(out.read_text().splitlines()))
+    models, turns = len(PRICES["report"]["models"]), cm.load_profile()["turns"]
+    assert len(rows) == models * len(cm.STRATEGIES) * turns
+
+
+def test_measured_cli(capsys):
+    assert cm.main(["--measured", str(cm.HERE / "testdata" / "lane1_codex_sample.csv")]) == 0
+    assert "gpt-6-astra: observed" in capsys.readouterr().out

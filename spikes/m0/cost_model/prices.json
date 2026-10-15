@@ -1,0 +1,579 @@
+{
+ "retrieved": "2026-10-15",
+ "note": "USD per million tokens. tag is vendor-documented, measured, or inferred. Multipliers marked derived are ratios of two vendor-documented prices.",
+ "models": {
+  "claude-fable-5-1": {
+   "vendor": "anthropic",
+   "display": "Claude Fable 5.1",
+   "tier": "frontier",
+   "context_window": {
+    "value": 1000000,
+    "source": "https://platform.claude.com/docs/en/about-claude/models/overview",
+    "retrieved": "2026-10-15",
+    "tag": "vendor-documented"
+   },
+   "cache_mode": "explicit",
+   "default_tier": "5m",
+   "usd_per_mtok": {
+    "input": {
+     "value": 10,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    },
+    "output": {
+     "value": 50,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    },
+    "cache_read": {
+     "value": 0.25,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    }
+   },
+   "cache_tiers": [
+    {
+     "name": "5m",
+     "ttl_s": {
+      "value": 300,
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     },
+     "write": {
+      "value": 12.5,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     }
+    },
+    {
+     "name": "1h",
+     "ttl_s": {
+      "value": 3600,
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     },
+     "write": {
+      "value": 20,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     }
+    }
+   ]
+  },
+  "claude-opus-5-5": {
+   "vendor": "anthropic",
+   "display": "Claude Opus 5.5",
+   "tier": "frontier",
+   "context_window": {
+    "value": 1000000,
+    "source": "https://platform.claude.com/docs/en/about-claude/models/overview",
+    "retrieved": "2026-10-15",
+    "tag": "vendor-documented"
+   },
+   "cache_mode": "explicit",
+   "default_tier": "5m",
+   "usd_per_mtok": {
+    "input": {
+     "value": 4,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    },
+    "output": {
+     "value": 20,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    },
+    "cache_read": {
+     "value": 0.2,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    }
+   },
+   "cache_tiers": [
+    {
+     "name": "5m",
+     "ttl_s": {
+      "value": 300,
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     },
+     "write": {
+      "value": 5,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     }
+    },
+    {
+     "name": "1h",
+     "ttl_s": {
+      "value": 3600,
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     },
+     "write": {
+      "value": 8,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     }
+    }
+   ]
+  },
+  "claude-haiku-5-5": {
+   "vendor": "anthropic",
+   "display": "Claude Haiku 5.5",
+   "tier": "small",
+   "context_window": {
+    "value": 1000000,
+    "source": "https://platform.claude.com/docs/en/about-claude/models/overview",
+    "retrieved": "2026-10-15",
+    "tag": "vendor-documented"
+   },
+   "cache_mode": "explicit",
+   "default_tier": "5m",
+   "usd_per_mtok": {
+    "input": {
+     "value": 0.1,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    },
+    "output": {
+     "value": 0.5,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    },
+    "cache_read": {
+     "value": 0.01,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    }
+   },
+   "cache_tiers": [
+    {
+     "name": "5m",
+     "ttl_s": {
+      "value": 300,
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     },
+     "write": {
+      "value": 0.125,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     }
+    },
+    {
+     "name": "1h",
+     "ttl_s": {
+      "value": 3600,
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     },
+     "write": {
+      "value": 0.2,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     }
+    }
+   ],
+   "long_context": {
+    "threshold": {
+     "value": 100000,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented",
+     "note": "prompts over 100,000 tokens, cache reads and writes included"
+    },
+    "input_mult": {
+     "value": 5,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented",
+     "note": "derived: 0.50/0.10, same for writes and reads"
+    },
+    "output_mult": {
+     "value": 5,
+     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented",
+     "note": "derived: 2.50/0.50"
+    }
+   }
+  },
+  "gpt-6-astra": {
+   "vendor": "openai",
+   "display": "gpt-6-astra",
+   "tier": "frontier",
+   "context_window": {
+    "value": 1050000,
+    "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "retrieved": "2026-10-15",
+    "tag": "vendor-documented"
+   },
+   "cache_mode": "explicit",
+   "default_tier": "30m",
+   "cache_mode_note": "Automatic caching; GPT-5.6 and later bill cache writes at 1.25x input, so misses are priced as writes.",
+   "usd_per_mtok": {
+    "input": {
+     "value": 10,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    },
+    "output": {
+     "value": 50,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    },
+    "cache_read": {
+     "value": 1.0,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    }
+   },
+   "cache_tiers": [
+    {
+     "name": "30m",
+     "ttl_s": {
+      "value": 1800,
+      "source": "https://developers.openai.com/api/docs/guides/prompt-caching",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented",
+      "note": "only TTL for GPT-5.6 and later; reuse refreshes it"
+     },
+     "write": {
+      "value": 12.5,
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     }
+    }
+   ],
+   "long_context": {
+    "threshold": {
+     "value": 272000,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented",
+     "note": "short context is <=272K input tokens"
+    },
+    "input_mult": {
+     "value": 2,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented",
+     "note": "derived: long-context price / short-context price"
+    },
+    "output_mult": {
+     "value": 1.5,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented",
+     "note": "derived: long-context price / short-context price"
+    }
+   }
+  },
+  "gpt-6-luna": {
+   "vendor": "openai",
+   "display": "gpt-6-luna",
+   "tier": "small",
+   "context_window": {
+    "value": 1050000,
+    "source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+    "retrieved": "2026-10-15",
+    "tag": "vendor-documented"
+   },
+   "cache_mode": "explicit",
+   "default_tier": "30m",
+   "cache_mode_note": "Automatic caching; GPT-5.6 and later bill cache writes at 1.25x input, so misses are priced as writes.",
+   "usd_per_mtok": {
+    "input": {
+     "value": 0.1,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    },
+    "output": {
+     "value": 0.5,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    },
+    "cache_read": {
+     "value": 0.01,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented"
+    }
+   },
+   "cache_tiers": [
+    {
+     "name": "30m",
+     "ttl_s": {
+      "value": 1800,
+      "source": "https://developers.openai.com/api/docs/guides/prompt-caching",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented",
+      "note": "only TTL for GPT-5.6 and later; reuse refreshes it"
+     },
+     "write": {
+      "value": 0.125,
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "retrieved": "2026-10-15",
+      "tag": "vendor-documented"
+     }
+    }
+   ],
+   "long_context": {
+    "threshold": {
+     "value": 272000,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented",
+     "note": "short context is <=272K input tokens"
+    },
+    "input_mult": {
+     "value": 2,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented",
+     "note": "derived: long-context price / short-context price"
+    },
+    "output_mult": {
+     "value": 1.5,
+     "source": "https://developers.openai.com/api/docs/pricing",
+     "retrieved": "2026-10-15",
+     "tag": "vendor-documented",
+     "note": "derived: long-context price / short-context price"
+    }
+   }
+  }
+ },
+ "compaction": {
+  "anthropic": {
+   "cli": "Claude Code",
+   "threshold_tokens": {
+    "value": 967000,
+    "source": "https://code.claude.com/docs/en/model-config",
+    "retrieved": "2026-10-15",
+    "tag": "vendor-documented",
+    "note": "native 1M models compact at about 967K tokens by default; configurable 100K to 1M with CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+   },
+   "summary_tokens": {
+    "value": 8000,
+    "source": "https://code.claude.com/docs/en/prompt-caching",
+    "retrieved": "2026-10-15",
+    "tag": "inferred",
+    "note": "summary length not documented"
+   },
+   "reattach_tokens": {
+    "value": 15000,
+    "source": "https://code.claude.com/docs/en/context-window",
+    "retrieved": "2026-10-15",
+    "tag": "inferred",
+    "note": "documented: up to 5 recent files (5K each) and skills (25K total) are restored; 15K is an assumed typical total"
+   },
+   "instruction_tokens": {
+    "value": 500,
+    "source": "https://code.claude.com/docs/en/prompt-caching",
+    "retrieved": "2026-10-15",
+    "tag": "inferred",
+    "note": "documented: summarization instruction appended as the final user message; size not documented"
+   },
+   "reuse_cache": {
+    "value": true,
+    "source": "https://code.claude.com/docs/en/prompt-caching",
+    "retrieved": "2026-10-15",
+    "tag": "vendor-documented",
+    "note": "the summary request has the same system prompt, tools, and history, and reads the warm prefix"
+   }
+  },
+  "openai": {
+   "cli": "Codex CLI",
+   "threshold_fraction": {
+    "value": 0.9,
+    "source": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/openai_models.rs",
+    "retrieved": "2026-10-15",
+    "tag": "inferred",
+    "note": "source code, not docs: auto_compact_token_limit defaults to 90% of the context window"
+   },
+   "summary_tokens": {
+    "value": 8000,
+    "source": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/openai_models.rs",
+    "retrieved": "2026-10-15",
+    "tag": "inferred"
+   },
+   "reattach_tokens": {
+    "value": 15000,
+    "source": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/openai_models.rs",
+    "retrieved": "2026-10-15",
+    "tag": "inferred"
+   },
+   "instruction_tokens": {
+    "value": 500,
+    "source": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/openai_models.rs",
+    "retrieved": "2026-10-15",
+    "tag": "inferred"
+   },
+   "reuse_cache": {
+    "value": true,
+    "source": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/openai_models.rs",
+    "retrieved": "2026-10-15",
+    "tag": "inferred"
+   }
+  }
+ },
+ "cli_ttl": {
+  "anthropic": {
+   "api_key": {
+    "value": "5m",
+    "source": "https://code.claude.com/docs/en/prompt-caching",
+    "retrieved": "2026-10-15",
+    "tag": "vendor-documented"
+   },
+   "subscription": {
+    "value": "1h",
+    "source": "https://code.claude.com/docs/en/prompt-caching",
+    "retrieved": "2026-10-15",
+    "tag": "vendor-documented",
+    "note": "main conversation within plan usage; other requests 5m"
+   }
+  }
+ },
+ "report": {
+  "models": [
+   "claude-fable-5-1",
+   "claude-opus-5-5",
+   "claude-haiku-5-5",
+   "gpt-6-astra",
+   "gpt-6-luna"
+  ],
+  "focus_model": "claude-opus-5-5",
+  "sweep_windows": [
+   8000,
+   16000,
+   32000,
+   64000,
+   128000
+  ],
+  "sweep_epochs": [
+   3,
+   5,
+   8,
+   12,
+   20,
+   40
+  ],
+  "sweep_turns": [
+   1,
+   5,
+   10,
+   25,
+   50,
+   100,
+   200,
+   300,
+   600,
+   1000
+  ],
+  "sweep_tool_scale": [
+   [
+    "0.25x",
+    0.25
+   ],
+   [
+    "0.5x",
+    0.5
+   ],
+   [
+    "1x (profile)",
+    1
+   ],
+   [
+    "2x",
+    2
+   ],
+   [
+    "4x",
+    4
+   ]
+  ],
+  "sweep_think": [
+   [
+    "always under 1 min",
+    {
+     "dist": "lognormal",
+     "median": 20,
+     "sigma": 0.5,
+     "max": 60
+    }
+   ],
+   [
+    "profile mix",
+    null
+   ],
+   [
+    "mostly 10 to 40 min",
+    {
+     "dist": "lognormal",
+     "median": 1200,
+     "sigma": 0.5
+    }
+   ]
+  ],
+  "sweep_reset_thresholds": [
+   100000,
+   200000,
+   400000,
+   967000
+  ],
+  "sweep_recall": [
+   [
+    0,
+    1500
+   ],
+   [
+    0.1,
+    1500
+   ],
+   [
+    0.5,
+    1500
+   ],
+   [
+    1.0,
+    1500
+   ],
+   [
+    0.5,
+    8000
+   ],
+   [
+    2.0,
+    8000
+   ]
+  ]
+ }
+}
