@@ -25,8 +25,9 @@ because model quality degrades as context grows. This run never steered Codex to
 - A tool-free recall question about turn 2 and turn 5 outputs was answered correctly at 44.5K
   context [measured]. This is one probe, not the fidelity baseline (section 6).
 - Spend for this packet: 351,842 tokens over 9 requests (turns 2 to 6), 351,463 input of which
-  337,664 were cache reads, 379 output [measured]. Including the pre-existing turn 1, the run's
-  total is 410,827, still under the 500,000 cap. Billed to the owner's ChatGPT plan by owner
+  337,664 were cache reads, 379 output [measured]. Turn 1 was the seat's OpenRig onboarding
+  (58,985 tokens, section 1), recorded separately; including it, the session's total is 410,827.
+  Both are on the owner's ChatGPT plan. Billed to the owner's ChatGPT plan by owner
   decision (decision record on queue row `qitem-20261015224601-10ad09bd`).
 
 ## 1. Setup
@@ -39,10 +40,13 @@ because model quality degrades as context grows. This run never steered Codex to
   (`lsof -p <pid>`), under `~/.codex/sessions/2026/10/15/` [measured]. `session_meta` reports
   `model_provider: openai`, `cli_version: 0.154.0`, `history_mode: paginated` [measured].
 - **Turns sent** (with `rig send`, one at a time):
-  - Turn 1 existed before this packet: one shell task, 2 requests, 58,985 tokens, at 23:08:59Z,
-    shortly after the seat was recreated. builder-2 did not send it, and its sender and budget are
-    not recorded in this packet (open question for manager-1). It is reported for context but
-    excluded from this packet's spend.
+  - Turn 1 was the seat's OpenRig startup at 23:08:59Z, not part of this packet: at launch OpenRig
+    delivered the seat's `role.md` and `startup/context.md`, and the seat ran `rig whoami` and
+    oriented (attribution by intake, relayed by manager-1). It cost 58,985 tokens over 2 requests
+    on the owner's ChatGPT plan [measured: rollout `token_count`]. It is recorded as seat
+    onboarding overhead, separate from the lane 1 budget, and doubles as a measurement of what
+    OpenRig onboarding costs on Codex: after onboarding, 32,331 tokens of context were already in
+    use before the first lab task (turn 2) arrived.
   - Turns 2 to 5: "Run exactly this one shell command ... `seq -f 'row %g alpha beta gamma delta
     epsilon' <a> <b> | tee scratch/l1d/t<n>.txt`. Then reply with only the word DONE." Each writes
     and prints 300 synthetic lines in the seat's own scratch directory.
@@ -69,7 +73,7 @@ A parallel `token_usage_record` per request carries `usage`, `turn_token_usage`,
 |---|---|
 | `turn` | count of `event_msg` `task_started` |
 | `input_tokens` | `input_tokens - cached_input_tokens - cache_write_input_tokens` (uncached input, Anthropic semantics; the subtraction matches Codex's own parser test) |
-| `cache_creation_input_tokens` | `cache_write_input_tokens`, 0 on every request here. Caveat: Codex fills the field with 0 when the server omits `input_tokens_details.cache_write_tokens` (`#[serde(default)]`, `codex-rs/protocol/src/protocol.rs:2216`, `codex-api/src/sse/responses.rs:156-160`), so in the rollout an absent field looks like a reported 0. Lane 2's conformance probe saw the Responses API report `cache_write_tokens` explicitly as 0 on `gpt-6-astra` [measured by builder-4: `.contexto/spikes/l2b/conformance/probe-20261015T232600Z.json` in builder-4's worktree; doc lands with PR #7], so these zeros are most likely reported |
+| `cache_creation_input_tokens` | `cache_write_input_tokens`, 0 on every request here. Caveat: Codex fills the field with 0 when the server omits `input_tokens_details.cache_write_tokens` (`#[serde(default)]`, `codex-rs/protocol/src/protocol.rs:2216`, `codex-api/src/sse/responses.rs:156-160`), so in the rollout an absent field looks like a reported 0. Lane 2's conformance probe saw the Responses API report `cache_write_tokens` explicitly as 0 [measured by builder-4: `.contexto/spikes/l2b/conformance/probe-20261015T232600Z.json` in builder-4's worktree; doc lands with PR #7; the model, `gpt-6-astra`, is as stated in builder-4's report, since the probe record has no model field], so these zeros are most likely reported |
 | `cache_read_input_tokens` | `cached_input_tokens` |
 | `output_tokens` | `output_tokens` (includes `reasoning_output_tokens`) |
 | `request_bytes` | empty: not observable without a proxy |
@@ -92,7 +96,7 @@ Per turn [measured: `codex_usage.py <rollout> --per-turn`, committed as
 
 | Turn | Requests | Input (raw) | Cache read | Output | Context after turn | Growth | `message_count`, last request |
 |---|---|---|---|---|---|---|---|
-| 1 (pre-existing) | 2 | 58,743 | 33,024 | 242 | 32,331 | n/a | 9 |
+| 1 (OpenRig onboarding) | 2 | 58,743 | 33,024 | 242 | 32,331 | n/a | 9 |
 | 2 | 2 | 67,762 | 64,384 | 88 | 35,306 | +2,975 | 14 |
 | 3 | 2 | 73,704 | 70,272 | 94 | 38,281 | +2,975 | 19 |
 | 4 | 2 | 79,652 | 76,416 | 94 | 41,254 | +2,973 | 24 |
@@ -184,7 +188,7 @@ where Codex writes them.
 | Scope | Requests | Input (raw) | Cache read | Output | Total |
 |---|---|---|---|---|---|
 | Turns 2 to 6 (this packet) | 9 | 351,463 | 337,664 | 379 | 351,842 |
-| Turn 1 (pre-existing, excluded) | 2 | 58,743 | 33,024 | 242 | 58,985 |
+| Turn 1: seat onboarding overhead (OpenRig startup; not lane 1 budget) | 2 | 58,743 | 33,024 | 242 | 58,985 |
 
 Model: `gpt-6-astra`. Budget: 500,000 per experiment and 3,000,000 per packet (shared with L1-b,
 whose experiments used 0 model tokens).
@@ -195,7 +199,6 @@ whose experiments used 0 model tokens).
   own mode was not observed).
 - The rollout cannot distinguish a reported 0 cache write from an omitted field; lane 2's probe
   indicates the API reports it explicitly.
-- Who sent turn 1 and under which budget.
 - The fidelity probe set and the full-context baseline (builder-4) are pending.
 - Turn shapes with large tool outputs, file reads, or reasoning-heavy work would grow faster; this
   run measured one small, uniform shape.
