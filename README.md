@@ -23,9 +23,9 @@ Work flows from intake to managers, from managers to builders, and from builders
 
 ```sh
 rig ps --nodes --rig contexto --json
-rig send '@contexto/intake/lead' 'Describe the next milestone and delegate it through the managers.'
-# Attach to the existing OpenRig-owned intake session once its exact name is shown by rig ps:
-# tmux attach -t '<intake-session-name>'
+rig send 'intake-lead@contexto' 'Describe the next milestone and delegate it through the managers.'
+# Attach to the existing OpenRig-owned intake session:
+# tmux attach -t 'intake-lead@contexto'
 ```
 
 Do not commit proxy keys, tokens, local Claude settings, raw private transcripts, or generated runtime state. Contributions should go through pull requests targeting `main`. GitHub branch-rule enforcement depends on the account plan and is verified separately from this repository policy.

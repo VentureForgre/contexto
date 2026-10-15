@@ -1,5 +1,7 @@
 # Local agent and proxy state
-.claude/settings.local.json
+.claude/
+.mcp.json
+CLAUDE.md
 .env
 .env.*
 !.env.example
