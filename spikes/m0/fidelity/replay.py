@@ -52,7 +52,7 @@ class RequestFailed(Exception):
     pass
 
 
-Post = Callable[[dict[str, Any]], tuple[int, dict[str, Any]]]
+Post = Callable[..., tuple[int, dict[str, Any]]]  # (body, extra headers=None) -> (status, payload)
 
 
 def http_post(settings: Path) -> Post:
@@ -69,8 +69,10 @@ def http_post(settings: Path) -> Post:
         raise SystemExit(f"apiKeyHelper failed (exit {proc.returncode}); output not shown")
     key = proc.stdout.strip()
 
-    def post(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    def post(body: dict[str, Any], headers: dict[str, str] | None = None) -> tuple[int, dict[str, Any]]:
         req = urllib.request.Request(base + "/v1/messages", data=json.dumps(body).encode("utf-8"), method="POST")
+        for name, value in (headers or {}).items():
+            req.add_header(name, value)
         req.add_header("content-type", "application/json")
         req.add_header("user-agent", "contexto-replay/0.1")
         req.add_header("anthropic-version", "2023-06-01")
