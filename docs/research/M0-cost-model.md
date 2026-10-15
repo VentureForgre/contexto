@@ -18,7 +18,7 @@ Claim tags used below:
 ## Summary
 
 <!-- BEGIN GENERATED: findings -->
-- Under the owner's bar (no compaction, a hard working-context bound), only (iii) meets a 100k or 250k bound without a lossy reset: (i) and (ii) at the CLI default exceed it, (ii) configured to reset inside the bound compacts, H4 hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a 42.0k head. Sized to 100k, (iii) costs $73.83 over 300 turns with a 99.6k maximum working context.
+- Under the owner's bar (no compaction, a hard working-context bound), only (iii) meets a 100k or 250k bound without a lossy reset: (i) and (ii) at the CLI default exceed it, (ii) configured to reset inside the bound compacts, H4 hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a 42.0k head. Sized to 100k, (iii) costs $73.81 over 300 turns with a 99.6k maximum working context.
 - Cost, second: over 300 turns on Claude Opus 5.5 with API-key billing (5 min TTL), (iii) costs $87.95 against $382.10 for (ii) built-in compaction, $337.07 for H4 rollover, and $716.23 for (i) plain, which would pass the 1.00M window at turn 157. Across the five models (iii) costs 0.07 to 0.76 of (ii) (Claude Haiku 5.5 to gpt-6-astra).
 - On the inferred think-time mix (35% of gaps over 5 min), cache expiry is the largest single cost in (i): 65% of its cost is the premium (write price minus read price) for re-writing prefixes after idle gaps over the 5 minute TTL. The 1 h TTL cuts (i) to $337.42 and (ii) to $173.31; (iii) gains less ($72.84) because its prefix is small. Keepalive pings bring (iii) to $65.72.
 - Bounding the prompt is most of the cost saving: compaction configured at 100k costs $100.79, within 15% of (iii), but only by compacting 61 times, which the owner's bar rules out.
@@ -62,7 +62,7 @@ Bound 100.0k.
 
 | Rank | Strategy | Max working context | Within bound | Requests over bound | Lossy resets | Cost | Verdict |
 |---|---|---|---|---|---|---|---|
-| 1 | (iii) cvm sized to 100.0k (window 12.8k) | 99.6k | yes | 0 | 0 | $73.83 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
+| 1 | (iii) cvm sized to 100.0k (window 12.8k) | 99.6k | yes | 0 | 0 | $73.81 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
 | 2 | H4 rollover at 75.0k | 88.2k | yes | 0 | 163 | $103.85 | fails: 163 lossy handoffs |
 | 3 | (ii) compaction configured at 75.0k | 91.4k | yes | 0 | 205 | $132.44 | fails: 205 compactions |
 | 4 | (i) plain | 2.06M | no | 0 | 0 | $716.23 | fails: over the bound |
@@ -86,11 +86,12 @@ Ranked by: within the bound, no lossy reset of any kind, smaller working context
 The bounded (iii) policy checks every request before it is sent. If the request would cross the
 bound, the policy acts in this order:
 
-1. It pages whole older turns.
-2. If the active turn alone is still too big, it strips all thinking from that turn and stubs the
-   turn's earlier tool results, oldest first. Each tool_use keeps its tool_result block; only the
-   result content shrinks, so pairing stays valid. Editing an earlier message invalidates kept
-   thinking, which is why that thinking is stripped too.
+1. It pages whole older turns. If the turn has already started, the page changes the prefix in front
+   of the active turn's kept thinking, which invalidates it, so the policy strips all of that thinking
+   on any mid-turn page, even when paging older turns is enough.
+2. If the active turn alone is still too big, it stubs the turn's earlier tool results, oldest first.
+   Each tool_use keeps its tool_result block; only the result content shrinks, so pairing stays
+   valid.
 3. As a last resort, it cuts the new tool result to an excerpt.
 
 Any request still over the bound is counted in the "Requests over bound" column. The policy also caps
@@ -99,16 +100,16 @@ entries. Those sizes are inferred; L2b owns the policy. The profile's three tool
 trigger steps 2 and 3. Tool-heavy turns do, and those steps cost more:
 
 <!-- BEGIN GENERATED: bound_stress -->
-| Workload | Bound | Max working context | Requests over bound | Active-turn results stubbed | New results cut to an excerpt | (iii) cost |
-|---|---|---|---|---|---|---|
-| profile (3 calls per turn) | 100.0k | 99.6k | 0 | 0 | 0 | $73.83 |
-| profile (3 calls per turn) | 250.0k | 193.4k | 0 | 0 | 0 | $107.17 |
-| 12 calls per turn | 100.0k | 100.0k | 0 | 23 | 0 | $168.51 |
-| 12 calls per turn | 250.0k | 232.4k | 0 | 0 | 0 | $233.85 |
-| 12 calls per turn, 4x tool output | 100.0k | 100.0k | 0 | 1259 | 0 | $365.23 |
-| 12 calls per turn, 4x tool output | 250.0k | 249.5k | 0 | 0 | 0 | $287.62 |
+| Workload | Bound | Max working context | Requests over bound | Mid-turn pages (active-turn thinking stripped) | Active-turn results stubbed | New results cut to an excerpt | (iii) cost |
+|---|---|---|---|---|---|---|---|
+| profile (3 calls per turn) | 100.0k | 99.6k | 0 | 2 | 0 | 0 | $73.81 |
+| profile (3 calls per turn) | 250.0k | 193.4k | 0 | 0 | 0 | 0 | $107.17 |
+| 12 calls per turn | 100.0k | 100.0k | 0 | 36 | 23 | 0 | $167.88 |
+| 12 calls per turn | 250.0k | 232.4k | 0 | 0 | 0 | 0 | $233.85 |
+| 12 calls per turn, 4x tool output | 100.0k | 100.0k | 0 | 687 | 1259 | 0 | $365.22 |
+| 12 calls per turn, 4x tool output | 250.0k | 249.5k | 0 | 5 | 0 | 0 | $287.52 |
 
-Claude Opus 5.5. When a tool-heavy turn would cross the bound, (iii) first pages whole older turns, then strips all thinking from the active turn and stubs its earlier tool results oldest first (each tool_use keeps its tool_result block; only the content shrinks), and as a last resort cuts the new result to an excerpt. A request still over the bound after that is counted. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+Claude Opus 5.5. When a request inside a turn would cross the bound, (iii) pages whole older turns and strips all of the active turn's thinking (any mid-turn page changes the prefix in front of it), then stubs the active turn's earlier tool results oldest first (each tool_use keeps its tool_result block; only the content shrinks), and as a last resort cuts the new result to an excerpt. A request still over the bound after that is counted. The re-thinking overhead is charged on every (iii) request, as for epoch strips. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: bound_stress -->
 
 What the bound guarantees, inferred from the mechanism: every request stays under it as long as head,
@@ -163,9 +164,11 @@ OpenAI rows keep reasoning out of the resent input, tagged inferred.
 Kept thinking stays valid only while the system prompt, tools, and every earlier message are
 unchanged. Removing all thinking, or thinking at the start or end, is a valid edit, and so is
 server-side context editing (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking,
-vendor-documented). Builder-4 measured the same rules on claude-haiku-5-5 through the rig proxy for
-PR #7: an append is accepted, and so is a rewrite that strips all thinking; changing the system
-prompt or an earlier message while keeping thinking returns 400 in error mode. The account date
+vendor-documented). Builder-4's conformance record for PR #7 (`spikes/m0/conformance/probe.py` at
+PR #7 head 66fe74a, claude-haiku-5-5 through the rig proxy) agrees. An append and a rewrite that
+strips all thinking both returned 200. Changing the system prompt, or adding text to an earlier user
+turn, while keeping thinking returned 400 with `prefix_mismatch_behavior=error`. Without that header,
+dropping the oldest turns while keeping thinking returned 200 with no transformation reported. The account date
 (2026-08-31) decides only whether a failing block gets a 400 or passes through; it does not decide
 whether thinking is kept.
 
@@ -630,17 +633,19 @@ Interface (confirmed by manager-1 through manager-2): one row per upstream reque
 CSV.
 
 - `input_tokens` is the uncached part. Lane 1 already subtracts cached tokens from Codex totals.
-- `cache_creation_input_tokens` may be empty or missing (Codex: the Responses API does not report
-  cache writes). The loader reads it as unknown. Pricing then shows a range: as an upper bound every
-  uncached token is priced as a cache write (right for GPT-5.6 and later, which bill writes); as a
-  lower bound it is priced as plain input.
+- `cache_creation_input_tokens` may be empty or missing, and the loader then reads it as unknown. For
+  unknown writes, pricing shows a range: as an upper bound every uncached token is priced as a cache
+  write (right for GPT-5.6 and later, which bill writes); as a lower bound it is priced as plain
+  input. Lane 1's Codex rows (PR #10 at ae6e91a) report 0 cache writes, because the Responses API
+  reports writes explicitly. They are priced as reported, with the write-priced figure kept as an
+  upper bound, because lane 1 notes that an absent field would also read 0.
 - `ts` sets the idle gap before each turn, so measured think time drives cache expiry on replay.
 - A prompt that shrinks between rows marks a compaction or reset in the measured session; it is
   counted and adds no growth on replay.
 - Replay builds a trace from measured rows: the first prompt becomes the head and each later prompt's
   growth becomes that request's addition. That replays (i), (ii), H4, and (iii) on measured growth.
 
-Status: lane 1's first Codex run is in review (PR #10 at 8155abd), and a pinned copy of its
+Status: lane 1's first Codex run is in re-review (PR #10 at ae6e91a, pending review), and a pinned copy of its
 per-request file is used below. The Claude Code numbers have not landed. Until they do, the Claude
 headline stays modeled on the inferred profile. `cost_model.py --measured <file>` prices observed
 buckets (measured) and replays the four strategies (modeled).
@@ -650,17 +655,18 @@ Measured Codex run:
 <!-- BEGIN GENERATED: lane1_codex -->
 | Codex, measured | Value |
 |---|---|
-| Source | lane 1 PR #10 at 8155abd (in review), `data/lane1_pr10_8155abd_codex_requests.csv` |
+| Source | lane 1 PR #10 at ae6e91a (in re-review), `data/lane1_pr10_ae6e91a_codex_requests.csv` |
 | Basis | measured (pending lane 1 review) |
 | Requests / user turns / shrinking prompts | 11 / 6 / 0 |
 | Head: first request prompt | 26.5k |
 | Growth per later turn, mean | 2.5k |
 | Cache reads as a share of input | 90% |
-| Observed buckets priced on gpt-6-astra, cache writes unknown: as writes / as input | $0.90 / $0.80 |
+| Observed buckets priced on gpt-6-astra, cache writes as reported (0) | $0.80 |
+| Upper bound if every uncached token were a cache write | $0.90 |
 | Modeled: measured turns tiled to 300 turns on gpt-6-astra: (i) plain / (ii) compaction / H4 rollover / (iii) cvm | $421.04 / $88.20 / $82.31 / $71.77 |
 | Modeled: max working context, (ii) / (iii) | 244.7k / 101.4k |
 
-`input_tokens` is uncached input (Codex input minus cached). `cache_creation_input_tokens` is written as 0 in the file but Codex does not report it, so it is loaded as unknown and priced as a range. `request_bytes` is empty. Lane 1 reports a 32.3k head, the context after the first turn; the 26.5k above is the first request's prompt. Tiling repeats the measured turns after the first; it keeps the measured head, growth shape, and gaps but is a model, not a measurement.
+`input_tokens` is uncached input (Codex input minus cached minus cache writes). `cache_creation_input_tokens` is 0 as reported by the Responses API, which reports cache writes explicitly (lane 1, pending review); lane 1 notes that an absent field would also read 0, so the write-priced figure is kept as an upper bound. `request_bytes` is empty. Lane 1 reports a 32.3k head, the context after the first turn; the 26.5k above is the first request's prompt. Tiling repeats the measured turns after the first; it keeps the measured head, growth shape, and gaps but is a model, not a measurement.
 <!-- END GENERATED: lane1_codex -->
 
 Loader check on synthetic files:

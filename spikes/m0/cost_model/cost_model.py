@@ -697,17 +697,23 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
             if bound is not None and p.total + added > bound:
                 # Mid-turn guard, before sending: (1) page whole older turns.
                 fixed = p.total - sum(window) - sum(cur)
+                stubs_before = stubs
                 page_out(max(0, bound - fixed - sum(cur) - added))
+                fixed += stubs - stubs_before  # stubs for the turns just paged
                 res.events["rebase_bound"] += 1
-                if fixed + sum(window) + sum(cur) + added > bound:
-                    # (2) Edit the active turn: strip all its thinking (editing an earlier message
-                    # invalidates kept thinking) and stub earlier tool results, oldest first.
-                    # Each tool_use keeps its tool_result block; only the result's content shrinks.
+                if j:
+                    res.events["mid_turn_page"] += 1
+                    # Any page after the turn has started changes the prefix in front of the active
+                    # turn's kept thinking, which invalidates it, so strip all of it.
                     for i, th in enumerate(cur_think):
                         if th:
                             cur[i] -= th
                             res.events["thinking_stripped"] += th
+                            res.events["active_turn_thinking_stripped"] += th
                     cur_think = [0] * len(cur)
+                if fixed + sum(window) + sum(cur) + added > bound:
+                    # (2) Edit the active turn: stub earlier tool results, oldest first. Each
+                    # tool_use keeps its tool_result block; only the result's content shrinks.
                     excerpt = policy.tool_output_excerpt_tokens
                     for i in range(2, len(cur), 2):
                         if fixed + sum(window) + sum(cur) + added <= bound:
@@ -1321,15 +1327,18 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         for bound in (100_000, 250_000):
             bp = policy_for_bound(policy, bound, tr.head_tokens)
             r = run_cvm(tr, focus, None, bp)
-            rows.append([label, _k(bound), _k(r.max_prompt), r.events["bound_exceeded"],
+            rows.append([label, _k(bound), _k(r.max_prompt), r.events["bound_exceeded"], r.events["mid_turn_page"],
                          r.events["active_turn_result_stubbed"], r.events["tool_output_paged"], _usd(r.total.usd)])
     blocks["bound_stress"] = _table(["Workload", "Bound", "Max working context", "Requests over bound",
-                                     "Active-turn results stubbed", "New results cut to an excerpt", "(iii) cost"],
+                                     "Mid-turn pages (active-turn thinking stripped)", "Active-turn results stubbed",
+                                     "New results cut to an excerpt", "(iii) cost"],
                                     rows) + (
-        f"\n\n{focus.display}. When a tool-heavy turn would cross the bound, (iii) first pages whole older turns, then "
-        "strips all thinking from the active turn and stubs its earlier tool results oldest first (each tool_use keeps "
-        "its tool_result block; only the content shrinks), and as a last resort cuts the new result to an excerpt. "
-        "A request still over the bound after that is counted. " + basis)
+        f"\n\n{focus.display}. When a request inside a turn would cross the bound, (iii) pages whole older turns and "
+        "strips all of the active turn's thinking (any mid-turn page changes the prefix in front of it), then stubs "
+        "the active turn's earlier tool results oldest first (each tool_use keeps its tool_result block; only the "
+        "content shrinks), and as a last resort cuts the new result to an excerpt. A request still over the bound "
+        "after that is counted. The re-thinking overhead is charged on every (iii) request, as for epoch strips. "
+        + basis)
 
     rows = []
     for h in rep["sweep_heads"]:
@@ -1473,26 +1482,26 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
                      f"{_usd(hi)} / {_usd(lo)}"])
     blocks["lane1"] = _table(["Quantity", "Value"], rows)
 
-    cx_path = HERE / "data" / "lane1_pr10_8155abd_codex_requests.csv"
-    cx = load_measured(cx_path, creation_unknown=True)
+    cx_path = HERE / "data" / "lane1_pr10_ae6e91a_codex_requests.csv"
+    cx = load_measured(cx_path)  # cache writes reported by the API as 0
     cxt, cx_shrinks = trace_from_measured(cx, "lane1 PR #10 Codex")
     if oai:
-        hi = price_measured(cx, oai, missing_creation="write")
-        lo = price_measured(cx, oai, missing_creation="input")
+        lo = price_measured(cx, oai)
+        hi = price_measured(load_measured(cx_path, creation_unknown=True), oai, missing_creation="write")
         reads = sum(r["cache_read_input_tokens"] for r in cx)
         total_in = sum(r["input_tokens"] + r["cache_read_input_tokens"] for r in cx)
         growth = (sum(r.added for t in cxt.turns[1:] for r in t.reqs) / max(1, len(cxt.turns) - 1))
         tiled = tile_trace(cxt, st["turns"])
         tr_rr = run_all(tiled, prices, profile, oai, policy)
         rows = [
-            ["Source", "lane 1 PR #10 at 8155abd (in review), `data/lane1_pr10_8155abd_codex_requests.csv`"],
+            ["Source", "lane 1 PR #10 at ae6e91a (in re-review), `data/lane1_pr10_ae6e91a_codex_requests.csv`"],
             ["Basis", "measured (pending lane 1 review)"],
             ["Requests / user turns / shrinking prompts", f"{len(cx)} / {len(cxt.turns)} / {cx_shrinks}"],
             ["Head: first request prompt", _k(cxt.head_tokens)],
             ["Growth per later turn, mean", _k(growth)],
             ["Cache reads as a share of input", f"{reads / total_in:.0%}"],
-            [f"Observed buckets priced on {oai.display}, cache writes unknown: as writes / as input",
-             f"{_usd(hi.usd)} / {_usd(lo.usd)}"],
+            [f"Observed buckets priced on {oai.display}, cache writes as reported (0)", _usd(lo.usd)],
+            ["Upper bound if every uncached token were a cache write", _usd(hi.usd)],
             [f"Modeled: measured turns tiled to {st['turns']} turns on {oai.display}: "
              + " / ".join(LABEL[s] for s in STRATEGIES),
              " / ".join(_usd(tr_rr[s].total.usd) for s in STRATEGIES)],
@@ -1500,9 +1509,10 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
              f"{_k(tr_rr['compaction'].max_prompt)} / {_k(tr_rr['cvm'].max_prompt)}"],
         ]
         blocks["lane1_codex"] = _table(["Codex, measured", "Value"], rows) + (
-            "\n\n`input_tokens` is uncached input (Codex input minus cached). `cache_creation_input_tokens` is written "
-            "as 0 in the file but Codex does not report it, so it is loaded as unknown and priced as a range. "
-            "`request_bytes` is empty. Lane 1 reports a 32.3k head, the context after the first turn; the 26.5k above is "
+            "\n\n`input_tokens` is uncached input (Codex input minus cached minus cache writes). "
+            "`cache_creation_input_tokens` is 0 as reported by the Responses API, which reports cache writes "
+            "explicitly (lane 1, pending review); lane 1 notes that an absent field would also read 0, so the "
+            "write-priced figure is kept as an upper bound. `request_bytes` is empty. Lane 1 reports a 32.3k head, the context after the first turn; the 26.5k above is "
             "the first request's prompt. Tiling repeats the measured turns after the first; it keeps the measured "
             "head, growth shape, and gaps but is a model, not a measurement.")
     return blocks

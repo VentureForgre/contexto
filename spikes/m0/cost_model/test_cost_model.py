@@ -228,6 +228,22 @@ def test_cvm_bound_stubs_active_turn_results_and_strips_its_thinking():
     assert r.events["tool_output_paged"] == 0  # stubbing earlier results was enough
 
 
+def test_mid_turn_page_strips_active_turn_thinking_even_without_stubbing():
+    pol = cm.CvmPolicy(window_tokens=5000, epoch_turns=100, opportunistic=False, respect_price_tier=False,
+                       pinned_base=0, pinned_per_turn=0, pinned_max=0, bound_tokens=3000)
+    think = 50
+    turn1 = (cm.Req(100, 60, 60, thinking=think), cm.Req(1200, 60, 60, thinking=think))
+    turn2 = (cm.Req(100, 60, 60, thinking=think), cm.Req(1000, 60, 60, thinking=think))
+    tr = cm.Trace("t", 1000, 1.0, (cm.Turn(0.0, turn1), cm.Turn(0.0, turn2)))
+    r = cm.run_cvm(tr, OPUS, T5, pol)
+    # Turn 2's tool result would reach 3580: paging turn 1 is enough, so nothing is stubbed,
+    # but the page changes the prefix in front of turn 2's first step, so its thinking goes.
+    assert r.events["mid_turn_page"] == 1
+    assert r.events["active_turn_result_stubbed"] == 0
+    assert r.events["active_turn_thinking_stripped"] == think
+    assert r.max_prompt <= 3000
+
+
 def test_strip_overhead_charged_only_when_thinking_is_in_context():
     pol = cm.CvmPolicy(respect_price_tier=False, strip_output_overhead=0.5)
     plain_reqs = trace([[(100, 100, 100)]])
@@ -369,12 +385,14 @@ def test_load_measured_rejects_bad_json_and_missing_file(tmp_path):
         cm.load_measured(tmp_path / "absent.jsonl")
 
 
-def test_measured_codex_file_creation_unknown_and_empty_bytes():
-    path = cm.HERE / "data" / "lane1_pr10_8155abd_codex_requests.csv"
-    rows = cm.load_measured(path, creation_unknown=True)
+def test_measured_codex_file_reported_writes_and_empty_bytes():
+    path = cm.HERE / "data" / "lane1_pr10_ae6e91a_codex_requests.csv"
+    rows = cm.load_measured(path)
     assert len(rows) == 11
-    assert all(r["cache_creation_input_tokens"] is None and r["request_bytes"] is None for r in rows)
-    assert cm.load_measured(path)[0]["cache_creation_input_tokens"] == 0  # the file's placeholder
+    assert all(r["cache_creation_input_tokens"] == 0 and r["request_bytes"] is None for r in rows)
+    unknown = cm.load_measured(path, creation_unknown=True)
+    assert all(r["cache_creation_input_tokens"] is None for r in unknown)
+    assert cm.price_measured(rows, ASTRA).usd < cm.price_measured(unknown, ASTRA, missing_creation="write").usd
     tr, _ = cm.trace_from_measured(rows, "codex")
     assert len(tr.turns) == 6 and tr.head_tokens == 19693 + 6784
 
