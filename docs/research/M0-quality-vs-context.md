@@ -30,7 +30,12 @@ full-context baseline that phase 2 designs must match at that size.
 **Checkpoints.** The defaults target about 30k, 100k and 250k tokens of context at the probe
 request.
 - If the measured fixed head plus the opening already exceeds 30k, checkpoint 1 sits right after the
-  opening, relative to the head. With the assumed 25k head it lands at about 40k.
+  opening, relative to the head.
+  - The opening plus the first probe turn add about 11k tokens: every deep plant for all three
+    checkpoints, plus 96 questions.
+  - With the provisional 46k head from lane 1, P1 therefore lands at 57,434, and that is the earliest
+    possible. A P1 near 50k would need about 5 probes per category, too few for a precise baseline,
+    so the design keeps 24.
 - One session keeps the prefix cacheable. Every request costs its full context against the meter
   anyway.
 
@@ -104,7 +109,7 @@ covers it with a reply-size check.
 - With parallel reads a growth turn costs two requests: the user message, and the request after all
   results. If the subject reads one file per request, each read is its own request and the cost
   roughly doubles.
-- With a 25k head, `G2` reads 4 files and `G3` reads 9.
+- With a 46k head, `G1` reads 1 file, `G2` 3, and `G3` 9.
 
 ## Budget [inferred estimates; measured inputs where stated]
 
@@ -121,13 +126,14 @@ covers it with a reply-size check.
 
 | Fixed head | P1 | P2 | P3 | Requests | Total, parallel reads | Total, sequential reads |
 |---|---|---|---|---|---|---|
-| 25,000 (assumed) | 40,424 | 97,425 | 243,105 | 16 | 1,449,183 (72% of 2M) | 3,016,557 (151%) |
-| 40,000 | 55,424 | 98,217 | 243,289 | 16 | 1,587,838 (79%) | 3,106,201 (155%) |
+| 25,000 | 36,434 | 97,321 | 243,300 | 16 | 1,418,923 (71% of 2M) | 2,980,510 (149%) |
+| 40,000 | 51,434 | 98,049 | 243,114 | 16 | 1,556,212 (78%) | 3,069,014 (153%) |
+| 46,000 (provisional, lane 1; current generated plan) | 57,434 | 98,305 | 243,070 | 16 | 1,611,104 (81%) | 3,130,995 (157%) |
 
 - The full per-request sheet is `budget.md` in the output directory.
 - **Compaction bound:** the largest context is about 245k, far below the block point of about 977k
   that lane 1 measured for a 1M window. No compaction is expected.
-- Parallel reads fit with a 21% to 28% margin. Sequential reads do not fit, which is why the
+- Parallel reads fit with a 19% to 29% margin. Sequential reads do not fit, which is why the
   go/no-go list has a stop rule for them.
 
 ## Scoring
@@ -228,16 +234,18 @@ nor keep thinking on demand.
 
 **Budget**, computed by `replay_requests()` from the same plan [inferred]:
 
-| Scope | Requests | Tokens |
-|---|---|---|
-| all three checkpoints | 13 | 954,439 |
-| checkpoints 1 and 2 only | 10 | 309,507 |
+| Scope | Requests | Tokens, plan for a 46k head | Tokens, plan for a 25k head |
+|---|---|---|---|
+| all three checkpoints | 13 | 808,527 | 932,265 |
+| checkpoints 1 and 2 only | 10 | 226,700 | 286,748 |
 
-- Neither fits in the 2,000,000 lab budget alongside the 1.45M to 1.59M lab run, so the arm needs
-  its own approval.
-- Recommended: run checkpoints 1 and 2 first, about 0.31M.
-- Run it only after the B3 conformance probe shows that a stripped history returns 200. If the API
-  rejects it, stripping is not a valid strategy, and the arm is answered without running.
+The replay has its own short head, so its cost depends only on the plan's content and file sizes,
+which shift slightly with the lab head the plan was generated for.
+
+- Neither fits in the 2,000,000 lab budget alongside the 1.42M to 1.61M lab run, so the arm needs
+  its own approval. Intake approved checkpoints 1 and 2 at up to 309,507 tokens.
+- The B3 conformance probe's gate is met: a history with all thinking stripped returned 200
+  [measured, 2026-10-15].
 
 ## Codex variant (`labcodex.subject`)
 

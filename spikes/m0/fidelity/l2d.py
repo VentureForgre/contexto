@@ -239,7 +239,7 @@ def build(seed: int = DEFAULT_SEED, head: int = DEFAULT_HEAD, checkpoints: Seque
         cfg = [s for s in chunk if s.startswith("cfg ")]
         parts = [*prose]
         if cfg:
-            log = _filler_text(rng, 4 * len(cfg) + 6, f"o{t}").split("\n")
+            log = _filler_text(rng, len(cfg) + 6, f"o{t}").split("\n")  # minimal filler: the opening must stay small
             for line in cfg:
                 log.insert(rng.randrange(1, len(log)), line)
             parts += ["Here is a short log for reference:", *log]
@@ -647,9 +647,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     gen.add_argument("--out", type=Path, required=True)
     gen.add_argument("--seed", type=int, default=DEFAULT_SEED)
     gen.add_argument("--head", type=int, default=DEFAULT_HEAD)
+    gen.add_argument("--checkpoints", type=lambda v: tuple(int(x) for x in v.split(",")), default=CHECKPOINTS,
+                     help="comma-separated target contexts, e.g. 50000,100000,250000")
     bud = sub.add_parser("budget")
     bud.add_argument("--seed", type=int, default=DEFAULT_SEED)
     bud.add_argument("--head", type=int, default=DEFAULT_HEAD)
+    bud.add_argument("--checkpoints", type=lambda v: tuple(int(x) for x in v.split(",")), default=CHECKPOINTS,
+                     help="comma-separated target contexts, e.g. 50000,100000,250000")
     sc = sub.add_parser("score")
     sc.add_argument("--answers-dir", type=Path, required=True)
     sc.add_argument("--truth", type=Path, required=True)
@@ -657,7 +661,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "generate":
-        plan = build(args.seed, args.head)
+        plan = build(args.seed, args.head, args.checkpoints)
         paths = write_outputs(plan, args.out)
         violations = json.loads(paths["contamination.json"].read_text())["violations"]
         for name, path in paths.items():
@@ -665,7 +669,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"contamination violations: {len(violations)}")
         return 1 if violations else 0
     if args.command == "budget":
-        print(budget_sheet(build(args.seed, args.head)))
+        print(budget_sheet(build(args.seed, args.head, args.checkpoints)))
         return 0
     truth = [json.loads(line) for line in args.truth.read_text(encoding="utf-8").splitlines() if line.strip()]
     meta = json.loads((args.truth.parent / "meta.json").read_text(encoding="utf-8"))
