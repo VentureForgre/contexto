@@ -1,0 +1,7 @@
+turn,requests,codex_input_tokens,cache_read_input_tokens,output_tokens,reasoning_output_tokens,total_tokens,context_after_turn,message_count_last_request
+1,2,58743,33024,242,21,58985,32331,9
+2,2,67762,64384,88,0,67850,35306,14
+3,2,73704,70272,94,0,73798,38281,19
+4,2,79652,76416,94,0,79746,41254,24
+5,2,85801,82304,95,0,85896,44429,29
+6,1,44544,44288,8,0,44552,44552,31
