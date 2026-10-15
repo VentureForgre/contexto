@@ -241,6 +241,50 @@ with conversation filler. Group 2's opening plants ride along unprobed, as on th
   2026-10-15].
 - Run only after manager-2 says go.
 
+### Strip-thinking arm results [measured, 2026-10-15]
+
+Run with `spikes/m0/fidelity/replay.py`: `claude-haiku-5-5`, adaptive thinking, effort `medium`,
+through the rig proxy. Output is in `.contexto/spikes/l2e/replay-20261015T234450Z/` (gitignored).
+
+| Probe point | Context (est.) | Arm | Score | Wilson 95% | Compliance | flagged | unflagged | superseded | obligation | stale |
+|---|---|---|---|---|---|---|---|---|---|---|
+| RP0 | 40,749 | preserved | 96/96 | 0.962-1.00 | 96/96 | 24/24 | 24/24 | 24/24 | 24/24 | 0 |
+| RP0 | 40,749 | stripped | 96/96 | 0.962-1.00 | 96/96 | 24/24 | 24/24 | 24/24 | 24/24 | 0 |
+| RP1 | 91,861 | preserved | 96/96 | 0.962-1.00 | 96/96 | 24/24 | 24/24 | 24/24 | 24/24 | 0 |
+| RP1 | 91,861 | stripped | 96/96 | 0.962-1.00 | 96/96 | 24/24 | 24/24 | 24/24 | 24/24 | 0 |
+
+**Spend:** 441,401 tokens in total, under the 450,000 ceiling.
+
+| Part | Requests | Tokens |
+|---|---|---|
+| Shared history (RS, RG, RF) | 3 | 140,652 |
+| Preserved arm (RP0, RP1) | 2 | 150,187 |
+| Stripped arm (RP0, RP1) | 2 | 150,562 |
+
+By probe point: RP0 cost 94,624 in both arms, and RP1 cost 206,125.
+
+**How the run went**
+- The first run stopped one request short. Its guard projected 1.2 times the estimated context for
+  `RP1_stripped`, which would have passed the cap.
+- That request was then sent from a reconstructed history. With every thinking block stripped, the
+  history is just the user turns and each reply's text. The recorded replies matched the instructed
+  `OK`, `DONE` and `OK` exactly, in size and block layout.
+- The projection used `RP1_preserved`'s measured cost. It cost 103,117, against 103,008 for the
+  preserved request.
+
+**What it shows**
+- On these probes, stripping all earlier thinking cost nothing at 41k or 92k: 96/96 in both arms,
+  with no stale answers.
+- The P3 condition (a gap of at least 2 probes) is **not met**.
+
+**What it does not show**
+- The build turns did little reasoning: about 59 output tokens each, thinking included. So
+  stripping removed little.
+- The probes test recall of stated facts, which live in visible text. Whether stripping costs
+  accuracy on reasoning-heavy, tool-heavy work, where earlier thinking carries information the text
+  does not, is untested [inferred].
+- Each arm ran once.
+
 ## Codex variant (`labcodex.subject`)
 
 Same files and plants. The turn texts and two limits differ [inferred unless tagged]:
