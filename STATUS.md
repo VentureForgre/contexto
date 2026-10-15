@@ -21,6 +21,6 @@ Only the charter. No product code exists yet.
 
 ## Known issues
 
-- Live manager seats run with cwd set to the main checkout, while the rig spec declares per-seat
+- All nine live seats run with cwd set to the main checkout, while the rig spec declares per-seat
   worktrees. Seats must not switch branches in the main checkout; git work happens in each seat's
   worktree under `contexto-worktrees/`.
