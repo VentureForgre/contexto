@@ -53,8 +53,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   context size where recall starts to slip, which bounds the working window.
 - **D10. Direct-API replay arm: up to 450k tokens.** Intake, 2026-10-15. First approved at 309,507
   tokens for two checkpoints with thinking stripped; then widened to a 40k checkpoint in both arms
-  (thinking preserved and stripped) plus thinking preserved at about 93k, so the replay can be
-  compared with the seat run at the same size. The third large checkpoint runs only if the smaller
+  and at about 92k, each with thinking preserved and stripped (408,851 tokens planned), so the
+  replay is symmetric and comparable with the seat run at the same size. The third large checkpoint runs only if the smaller
   ones show a gap of at least 2 probes.
 - **D11. The rig proxy is the owner's infrastructure.** Owner, 2026-10-15. Auth headers reaching
   `cliproxy.sullylab.de` are not an exposure.
@@ -67,12 +67,23 @@ the owner's delegation. Open decisions are listed at the end with the options an
   should use is a product documentation question, listed under open decisions.
 
 - **D16. Phase 2 attaches through a launcher wrapper.** Intake under D0, 2026-10-15. Measured by
-  lane 1 (PR #13): inside a git worktree Claude Code also loads the main checkout's
-  `.claude/settings.local.json`, and its `ANTHROPIC_BASE_URL` wins, so a session cannot be
-  reliably rerouted through its own settings file. A launcher such as `contexto run claude ...`
+  lane 1 (PR #13, approved at 5daaab4): inside a git worktree Claude Code also loads the main
+  checkout's `.claude/settings.local.json`, and model requests go to that file's
+  `ANTHROPIC_BASE_URL`, not the worktree's. Vendor-documented: "In a worktree, it uses the file at
+  the main checkout's root." So a session cannot be reliably rerouted through its own settings
+  file. A launcher such as `contexto run claude ...`
   passes an explicit `--settings` with the Contexto base URL, and `contexto run codex ...` uses a
   temporary `CODEX_HOME` whose provider fetches its key with `auth.command`. This beats every
-  settings layer and never edits the user's configuration.
+  settings file (organization-managed settings still outrank `--settings`) and never edits the
+  user's configuration.
+
+- **D17. No paging inside a turn; rotate only at turn boundaries.** Manager-2, accepted by intake,
+  2026-10-15. Vendor-documented and verified by both reviewers: within a tool-use turn, thinking
+  must be passed back unchanged, and changing the prefix mid-turn while keeping thinking is
+  invalid. Window rotation therefore happens only between user turns, with headroom left for a
+  long turn. Server-side `clear_tool_uses` (context editing, not compaction) is a labeled fallback
+  for a turn that still exceeds the bound; it is lossy, so its accuracy cost must be measured
+  before it ships.
 
 ## Repository and process
 
@@ -111,10 +122,10 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   encrypted reasoning item returns 200, and whether the reasoning was used is not observable.
   Lean: strip all thinking at rotation, pending the strip-thinking arm's accuracy numbers.
 - **O3. Working-window bound.** Pending the quality-versus-context-size probe: on `lab.subject` at
-  about 93k, 150k, and 250k (two checkpoints if three exceed the budget gate), plus a direct-API
-  replay at 40k with thinking preserved and stripped, and at about 93k with thinking preserved. Known so far, measured by lane
+  about 91k and 243k (three checkpoints exceeded the budget gate), plus a direct-API
+  replay at 40k and about 92k, each with thinking preserved and stripped. Known so far, measured by lane
   1 and not yet reviewed: `lab.subject`'s fixed head is 81,808 tokens, of which plain Claude Code is
-  45,925 and OpenRig seat context about 36k; Codex's head was 32.3k (PR #10 in review). Lane 2's
+  45,925 and OpenRig seat context about 36k; Codex's head was 32.3k (PR #10, merged). Lane 2's
   earlier 42k figure was inferred.
 - **O4. End-user authentication guidance.** API key only, or also subscription logins, for people
   who run Contexto themselves. Needs the terms question answered in the product docs. Owner
