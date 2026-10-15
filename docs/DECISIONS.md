@@ -39,7 +39,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   and fidelity were unknown; a wrong guess would build the wrong proxy correctly.
 - **D6. Phase 1 is pass-through only, with numeric token caps.** Intake after reviewer-1, 2026-10-15.
   500k per experiment, 3M per builder packet, 6M per lane; spike proxies on 127.0.0.1; shared
-  routing never edited. Raised once: a 2M lab budget for the quality-versus-context-size probe.
+  routing never edited. Raised for specific runs since: a 2M lab budget for the quality-versus-context-size probe, and
+  separate lines for the direct-API replay (D10) and the cache-miss test (400k).
 - **D7. Dedicated test seats instead of throwaway processes.** Owner, 2026-10-15. `lab.subject`
   (Claude Code, claude-haiku-5-5) and `labcodex.subject` (Codex, gpt-6-astra) are real long-running
   OpenRig seats, the owner's actual use case, and avoid builder-seat hook and resume-token
@@ -50,8 +51,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
 - **D9. The 2M compaction-loss run was replaced by a quality-versus-context-size probe.** Intake under
   D2, 2026-10-15. Forcing a session into compaction measures the wrong thing; the probe finds the
   context size where recall starts to slip, which bounds the working window.
-- **D10. Strip-thinking arm limited to two checkpoints (309,507 tokens).** Intake, 2026-10-15. The
-  third checkpoint (954,439 total) runs only if the first two show a gap of at least 2 probes.
+- **D10. Direct-API replay arm: up to 450k tokens.** Intake, 2026-10-15. First approved at 309,507
+  tokens for two checkpoints with thinking stripped; then widened to a 40k checkpoint in both arms
+  (thinking preserved and stripped) plus thinking preserved at about 93k, so the replay can be
+  compared with the seat run at the same size. The third large checkpoint runs only if the smaller
+  ones show a gap of at least 2 probes.
 - **D11. The rig proxy is the owner's infrastructure.** Owner, 2026-10-15. Auth headers reaching
   `cliproxy.sullylab.de` are not an exposure.
 - **D12. Phase 2 rewriting is authorized under D0, on owner infrastructure only.** Intake,
@@ -61,6 +65,14 @@ the owner's delegation. Open decisions are listed at the end with the options an
   provider uses `auth.command` (Codex). Rewritten traffic never uses the owner's ChatGPT or
   claude.ai subscription login, and the owner's own config files are never edited. What end users
   should use is a product documentation question, listed under open decisions.
+
+- **D16. Phase 2 attaches through a launcher wrapper.** Intake under D0, 2026-10-15. Measured by
+  lane 1 (PR #13): inside a git worktree Claude Code also loads the main checkout's
+  `.claude/settings.local.json`, and its `ANTHROPIC_BASE_URL` wins, so a session cannot be
+  reliably rerouted through its own settings file. A launcher such as `contexto run claude ...`
+  passes an explicit `--settings` with the Contexto base URL, and `contexto run codex ...` uses a
+  temporary `CODEX_HOME` whose provider fetches its key with `auth.command`. This beats every
+  settings layer and never edits the user's configuration.
 
 ## Repository and process
 
@@ -100,7 +112,7 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   Lean: strip all thinking at rotation, pending the strip-thinking arm's accuracy numbers.
 - **O3. Working-window bound.** Pending the quality-versus-context-size probe: on `lab.subject` at
   about 93k, 150k, and 250k (two checkpoints if three exceed the budget gate), plus a direct-API
-  replay at 40k and about 93k with thinking preserved and stripped. Known so far, measured by lane
+  replay at 40k with thinking preserved and stripped, and at about 93k with thinking preserved. Known so far, measured by lane
   1 and not yet reviewed: `lab.subject`'s fixed head is 81,808 tokens, of which plain Claude Code is
   45,925 and OpenRig seat context about 36k; Codex's head was 32.3k (PR #10 in review). Lane 2's
   earlier 42k figure was inferred.
