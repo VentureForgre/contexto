@@ -19,7 +19,7 @@ from fidelity.policy import RECALL_MAX_CALLS_PER_TURN, RECALL_TOOL_NAME, RecallE
 from fidelity.session import Planted
 
 _STUB = re.compile(r"\[paged (pg_[0-9a-f]{16}) \|")
-_PINNED_OPEN_HEADER = "OPEN OBLIGATIONS (complete list"
+_PINNED_OPEN_HEADER = "OPEN OBLIGATIONS as of turn "
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,8 @@ def _newest(planted: Planted, segments: list[tuple[int, str]], request: Request)
     claims = _claims(planted, segments)
     pinned = segments[: request.pinned_count]
     if planted.category == "obligation" and any(text.startswith(_PINNED_OPEN_HEADER) for _, text in pinned):
-        # A complete open list, current as of the window start, implies "closed" for anything it omits.
+        # The list is complete as of the turn its header names (the window start minus one), so an
+        # item it omits was closed by then; later turns in the window may still reopen it.
         if not any(text.startswith(f"- {planted.subject}: ") for _, text in pinned):
             claims.append((request.window_first_turn - 1, 0, 0, "closed"))
     return max(claims) if claims else None

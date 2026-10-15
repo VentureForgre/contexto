@@ -18,9 +18,11 @@ from fidelity.policy import (
     Store,
     WindowState,
     advance_window,
+    append_only,
     build_request,
     check_protocol,
     page_id,
+    pinned_claim_errors,
     render_pinned,
     turn_tokens,
 )
@@ -150,7 +152,8 @@ def test_check_protocol_detects_a_split_pair(session):
 def test_large_tool_outputs_are_stubbed_in_place(session):
     settings = Settings(window_high=10**9, window_low=10**9, tool_output_page_over=200)
     store = Store()
-    request = build_request(session, "pinned_recall", session.turns, settings, WindowState(), store)
+    state = WindowState(stub_before=session.turns - 1)  # as if an epoch had just happened
+    request = build_request(session, "pinned_recall", session.turns, settings, state, store)
     results = [b for m in request.messages for b in m["content"] if b["type"] == "tool_result"]
     stubbed = [b for b in results if b["content"].startswith("[paged pg_")]
     assert stubbed
@@ -287,3 +290,78 @@ def test_runner_charges_compact_by_model_usage_growth_and_enforces_cap(monkeypat
     tight = live.Runner(tmp_path, tmp_path / "settings.json", "model-x", cap=1_000)
     with pytest.raises(live.CapExceeded):
         tight.call("build_00", "x" * 9_000, "s9", new=True)
+
+
+# Preserved thinking: every rewrite happens at an epoch; requests in between only append
+
+
+@pytest.mark.parametrize("condition", ["window", "pinned", "pinned_recall"])
+def test_edits_happen_only_at_epochs(session, condition):
+    result = run_condition(session, condition, Settings(window_high=6_000, window_low=3_000))
+    assert result.window_moves > 0
+    assert result.edit_points == result.window_moves
+    assert run_condition(session, "full", Settings()).edit_points == 0
+
+
+def test_current_turn_tool_outputs_are_never_stubbed(session):
+    settings = Settings(window_high=6_000, window_low=3_000, tool_output_page_over=200)
+    state, store = WindowState(), Store()
+    for upto in range(1, session.turns + 1):
+        request = build_request(session, "pinned_recall", upto, settings, state, store)
+        current = session.turn_messages(upto - 1)
+        sent = request.messages[-len(current):]
+        for orig, got in zip(current, sent, strict=True):
+            for a, b in zip(orig["content"], got["content"][-len(orig["content"]):], strict=True):
+                if a["type"] == "tool_result":
+                    assert b["content"] == a["content"], upto
+
+
+def test_append_only_detects_an_edit(session):
+    settings = Settings(window_high=10**9, window_low=10**9)
+    state = WindowState()
+    first = build_request(session, "pinned", 10, settings, state)
+    second = build_request(session, "pinned", 11, settings, state)
+    assert append_only(first, second)
+    edited = build_request(session, "pinned", 11, settings, state)
+    edited.messages[0]["content"][0]["text"] += " (edited)"
+    assert not append_only(first, edited)
+
+
+def test_pinned_header_names_its_as_of_turn_and_is_checked(session):
+    settings = Settings(window_high=6_000, window_low=3_000)
+    state = WindowState()
+    for upto in range(1, session.turns + 1):
+        request = build_request(session, "pinned", upto, settings, state)
+        assert pinned_claim_errors(session, request) == []
+    header = next(t for _, t in request.segments if t.startswith("OPEN OBLIGATIONS"))
+    assert header.startswith(f"OPEN OBLIGATIONS as of turn {request.window_first_turn - 1} ")
+    open_line = next(i for i, (_, t) in enumerate(request.segments) if t.startswith("- ob"))
+    request.segments[open_line] = (request.segments[open_line][0], "- ob99: invented [since turn 1]")
+    assert pinned_claim_errors(session, request)
+
+
+def test_base_url_source_reports_without_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"apiKeyHelper": "true", "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:2"}}))
+    got = live.base_url_source(path)
+    assert got == {"source": "settings_env", "equals_inherited": False, "settings_env_keys": ["ANTHROPIC_BASE_URL"]}
+    assert "127.0.0.1" not in json.dumps(got)
+    path.write_text(json.dumps({"apiKeyHelper": "true"}))
+    assert live.base_url_source(path)["source"] == "inherited_env"
+
+
+def test_cap_is_checked_after_each_call_and_continuations_keep_prior_spend(monkeypatch, tmp_path):
+    def fake_run(cmd, **kwargs):
+        out = _fake_result("s1", {"input_tokens": 5_000, "output_tokens": 0}, {"m": {"inputTokens": 5_000}})
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(live.subprocess, "run", fake_run)
+    runner = live.Runner(tmp_path, tmp_path / "settings.json", "model-x", cap=6_000, spent=1_500)
+    with pytest.raises(live.CapExceeded):
+        runner.call("build_00", "hi", "s1", new=True)  # projected 5,500 passes the guard; recorded 6,500 is over
+    calls = [
+        {"phase": "build_00", "usage": {"input_tokens": 100}, "model_usage": {"m": {"inputTokens": 100}}},
+        {"phase": "compact", "usage": {"input_tokens": 0}, "model_usage": {"m": {"inputTokens": 400, "outputTokens": 50}}},
+    ]
+    assert live.corrected_spend(calls) == 100 + 350

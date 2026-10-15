@@ -2,60 +2,98 @@
 
 Status: phase 1 design for M0 question 4 and H5 (lane 2, packet L2b). Nothing here rewrites
 requests yet; phase 2 builds it after the owner decides question 5. Author: build.builder-4.
-Date: 2026-10-15. Brief: `docs/milestones/M0-infinite-session-study.md`. Executable form of this
-policy, used by the fidelity simulation: `spikes/m0/fidelity/policy.py`. Test design and results:
-`docs/research/M0-fidelity-test.md`.
+Date: 2026-10-15, revised the same day for review findings B1 to B3. Brief:
+`docs/milestones/M0-infinite-session-study.md`. Executable form of this policy, used by the
+fidelity simulation: `spikes/m0/fidelity/policy.py`. Test design and results:
+`docs/research/M0-fidelity-test.md`. Quality-versus-size probe: `docs/research/M0-quality-vs-context.md`.
 
-Every claim is tagged **[measured]**, **[vendor-documented]**, or **[inferred]**. Simulation
-results are **[measured, simulated]**: exact outputs of deterministic code, with no model involved.
+**Claim tags.**
+- **[measured]**: we ran it.
+- **[measured, simulated]**: exact output of deterministic code, with no model involved.
+- **[vendor-documented]**: stated by the vendor. For a paper, the authors' own description.
+- **[inferred]**: our reasoning.
+
+## Owner principle and how approaches are ranked
+
+**The principle** (intake, 2026-10-15 23:12Z, binding):
+- The compaction threshold exists because model quality already degrades as context grows.
+- Contexto's goal is very long sessions in which compaction never happens, with working context kept
+  well below the threshold at all times. Compaction is a failure mode to avoid, not a mechanism to
+  optimize.
+
+**Success bar** for any design:
+- no compaction ever, **and**
+- recall and task accuracy equal to the full-context baseline on the fidelity probes.
+
+The baseline at each working-context size is measured by the L2d probe. The window bound below
+should be set from where that probe shows quality starting to slip.
+
+**Ranking.** Approaches are ranked first by how small they keep working context, second by how
+stable quality stays, and only then by token cost [inferred, pending L2d and phase 2 measurements].
+
+| Rank | Approach | Working context | Quality stability | Cost |
+|---|---|---|---|---|
+| 1 | Hypothesis: bounded window, pinned state, recall (this doc) | bounded by design, constant over the session | depends on capture and recall selection; reasoning lost at each epoch (section 7) | lowest per turn; one cache rebuild per epoch |
+| 2 | H4 supervisor rollover | bounded, but grows to the rollover point each cycle | each rollover hands off a summary, which is lossy | full context near each rollover |
+| 3 | H3 session-file rebirth | resets to the curated state, then grows | same as H4 | as H4 |
+| 4 | H2 hooks that inject state | grows until the CLI compacts | injected state helps, but compaction still happens | full context every turn |
+| 5 | H5 provider features (caching, context editing, built-in compaction) | caching does not bound context; editing trims tool output only; compaction is the failure mode | compaction loses detail | cheapest per token with caching, unbounded overall |
 
 ## Summary
 
-- **Request layout.** Each upstream request is rebuilt as a stable head, a page index of stubs, and a
-  verbatim window of recent turns.
+- **Request layout.** Each upstream request is a stable head, a page index of stubs, and a verbatim
+  window of recent turns.
   - The stable head holds the system prompt, the tools, and a pinned state block.
   - The stubs carry keyed, content-addressed ids.
-- **What is paged.** Paging is turn-granular, so a `tool_use` and its `tool_result` can never be
-  split. Large tool outputs inside the window are paged by replacing only their content.
-- **The recall tool.** A model fetches a page back verbatim, by id, with a `recall` tool that the
-  proxy answers itself in extra upstream round trips the CLI never sees. There are no embeddings and
-  no similarity search: pages are chosen by id from extractive headlines.
-- **Window moves.** The window moves in steps (high and low watermarks), not every turn, so the
-  prompt prefix changes at paging events only. In the simulation that was 13 times in 242 turns
-  [measured, simulated].
-- **Fidelity.** In the offline simulation the pinned block keeps facts, decisions, and obligations
-  available, and recall brings back unpinned details, all at about 1/10 of the full-history request
-  size [measured, simulated]. Whether a model uses them as well as the simulated reader does is a
-  phase 2 measurement.
+- **Epochs.** Every rewrite of earlier content happens at an **epoch**, when the window start moves.
+  Between epochs each request only appends to the previous one.
+  - At an epoch, the proxy strips all earlier thinking blocks. That is the edit the vendor allows
+    when history changes (section 7).
+  - In the simulation, edit points equal window moves: 13 in 242 turns [measured, simulated].
+- **Paging.** Paging is turn-granular, so a `tool_use` and its `tool_result` are never split.
+- **Recall.** A model fetches a page back verbatim, by id, with a `recall` tool that the proxy
+  answers itself. There are no embeddings and no similarity search.
+- **Fidelity.** In the offline simulation:
+  - the pinned block keeps facts, decisions, and obligations available at every probe point;
+  - recall brings back unpinned details;
+  - both at about a tenth of the full-history request size [measured, simulated].
+  These scores follow largely from how the simulation is built (section 2 of the fidelity doc). The
+  measurement that matters is phase 2's model run against the L2d baseline.
 
 ## 1. Request layout
 
 ```
 system:   CLI system prompt (unchanged)
-          + PINNED STATE block            <- changes only at epochs
-tools:    CLI tools (unchanged) + recall  <- recall added only when pages exist
-messages: [page index text block] + window turns, verbatim except stubbed large tool outputs
+          + PINNED STATE block            <- re-rendered only at epochs
+tools:    CLI tools (unchanged) + recall  <- recall declared from the first request, never changed after
+messages: [page index text block] + window turns; earlier content changes only at epochs
 ```
 
-- **Order.** The order follows how prompt caching works. Anthropic caches "`tools`, `system`, and
-  `messages` (in that order)", and "changes at each level invalidate that level and all subsequent
-  levels" [vendor-documented, Anthropic prompt caching, accessed 2026-10-15]. Anything that changes
-  often must therefore sit late. The pinned block lives in `system` and changes only at an **epoch**
-  (see section 3).
-- **Recall in `tools`.** Adding `recall` to `tools` changes the tool list, which invalidates the
-  whole cache [vendor-documented]. The tool should therefore be added once, at the first paging
-  event, and kept for the rest of the session [inferred].
+- **Order.** Anthropic caches "`tools`, `system`, and `messages` (in that order)", and "changes at
+  each level invalidate that level and all subsequent levels" [vendor-documented, Anthropic prompt
+  caching, accessed 2026-10-15]. So the frequently changing part sits late.
+- **Preserved thinking.** The same three parts form the prefix that preserved thinking checks
+  (section 7): `system` and `tools` must stay fixed between epochs.
+- **Recall is declared from the first request.** At that point no thinking block exists yet, so
+  adding the tool costs nothing. Adding a tool later would invalidate both the cache and every
+  thinking block [vendor-documented].
 
 ## 2. Pinned state
 
-**What is pinned**, from the ledger as of the epoch start:
+**What is pinned**, from the ledger as of the turn before the window starts:
 
-1. **Open obligations, complete list.** Each line gives the id, the text, and the turn it opened.
-   The header says the list is complete, so a model can conclude that an unlisted item is closed.
-2. **Active decisions.** Current value only, with record id and turn. Superseded values are not
-   shown; recall reaches them if needed.
-3. **Verified facts with provenance.** Each line carries its source locator; facts are listed
-   newest first.
+1. **Open obligations.** The header names the turn it is complete as of:
+   `OPEN OBLIGATIONS as of turn N (complete as of that turn; the turns after it may open or close items):`.
+   An item the list omits was closed by turn N, but a turn inside the window may reopen it. A
+   window turn may also open a new item that the list cannot show.
+   - The simulation checks this header against ground truth on every request.
+   - An earlier wording ("complete list; an item not listed here is closed") was false in 72 of the
+     242 default-session requests, while an obligation opened inside the window. Review found it,
+     and the check now prevents it [measured, simulated].
+2. **Active decisions.** Current value only, with the turn it was stated in. Superseded values are
+   not shown; recall reaches them if needed.
+3. **Verified facts.** Each line carries the turn it was stated in. A ledger-backed block also
+   carries the record id and its provenance locator (section 9). Facts are listed newest first.
 
 **Size bound**
 - Default 2,000 tokens. The simulation uses characters / 4 as its estimate; the prototype should
@@ -64,15 +102,14 @@ messages: [page index text block] + window turns, verbatim except stubbed large 
 - Obligations are never dropped. If they alone exceed the bound, the proxy surfaces an error to the
   operator instead of truncating.
 - Decisions and facts that do not fit are dropped oldest first. The block ends with
-  `OMITTED: decision=<n> fact=<n>`, and those records stay reachable through recall.
-- The tests check that the rendered block never exceeds the bound and never drops an open
-  obligation [measured, simulated].
+  `OMITTED: decision=<n> fact=<n>`, and those records stay reachable by recall.
+- The tests check the bound and that no open obligation is dropped [measured, simulated].
 
-**Rendering**, with record ids added when the block is ledger-backed (section 7):
+**Rendering:**
 
 ```
 PINNED STATE (from the session ledger; authoritative over older turns)
-OPEN OBLIGATIONS (complete list; an item not listed here is closed):
+OPEN OBLIGATIONS as of turn 215 (complete as of that turn; the turns after it may open or close items):
 - ob01: write the rollback runbook [since turn 51]
 ACTIVE DECISIONS:
 - the chosen queue backend is harbor-2291 [turn 140]
@@ -86,39 +123,55 @@ OMITTED: decision=0 fact=2        <- only when something was left out
 - **Turn units.** A turn starts at a user message that contains no `tool_result` block, and runs
   until the next such message. Only whole turns are paged.
 - **Hysteresis.** The window holds turns `[first, now)`. When its size exceeds `window_high`, the
-  proxy pages whole turns from its start until the size is at most `window_low`. The newest turn is
-  always kept, even if it alone exceeds the bound. Defaults: high 24,000 and low 12,000 tokens;
-  phase 2 should tune them with lane 2's cost model.
-- **Epochs.** Each move of `first` is an epoch boundary. The pinned block and page index are
-  re-rendered only then, so between epochs the request prefix is byte-stable and stays cacheable.
-  The CLI's own appends land after the cached prefix. In the simulation, `first` moved 13 times
-  over 242 turns [measured, simulated].
-- **Cache economics.** Anthropic charges 1.25x base input for 5-minute cache writes, 2x for 1-hour
-  writes, and 0.1x for reads (0.05x on Opus 5.5 and Sonnet 5.5) [vendor-documented].
-  - An epoch therefore costs about one cache write of the head plus window. A turn inside an epoch
-    costs a cache read plus the new tokens [inferred].
-  - A wider gap between high and low means fewer epochs but larger requests. That is the knob lane
-    2's cost model should price.
+  proxy pages whole turns from its start until the size is at most `window_low`. Defaults: high
+  24,000 and low 12,000 tokens. These are placeholders: the bound should come from L2d's measured
+  quality-versus-size curve, well below any size where quality slips.
+- **The epoch.** Each move of `first` is an epoch, and it is the only time earlier content changes.
+  At an epoch the proxy:
+  - drops the turns before `first`;
+  - re-renders the pinned block and the page index;
+  - stubs large tool outputs in turns before the current one;
+  - strips every thinking block from the request (section 7).
+- **Between epochs.** Each request is the previous request plus appended messages. The simulation
+  checks this property on every request: edit points equal window moves in every condition
+  [measured, simulated].
+- **Cache economics.**
+  - An epoch costs one cache write of head plus window. A turn inside an epoch costs a cache read
+    plus its new tokens [inferred].
+  - Anthropic charges 1.25x base input for 5-minute cache writes, 2x for 1-hour writes, and 0.1x for
+    reads, with reads at 0.05x on Opus 5.5 and Sonnet 5.5 and 0.025x on Fable 5.1 and Mythos 5.1
+    [vendor-documented].
+  - The epoch's thinking strip coincides with that cache restart, so it adds no extra cache break
+    [vendor-documented: "the edits that invalidate thinking are the edits that restart the cache"].
+- **The active turn.** A tool-heavy turn can grow past the bound by itself. When the current turn
+  would push the request over `window_high`, the proxy takes an **in-turn epoch**:
+  - it stubs the turn's earlier `tool_result` contents, keeping every `tool_use`/`tool_result` pair
+    and its id, and pages them;
+  - it strips all thinking, as at any epoch.
+  The turn's newest tool results stay verbatim. This matches PR #8's handling, agreed with
+  build.builder-3. It is designed but not simulated, because the simulation builds requests at turn
+  boundaries only [inferred].
 
 ## 4. What gets paged, and the stub format
 
 **Paged**
-- **Whole turns before the window start**, in fixed groups of 8 turns (turns 0 to 7, 8 to 15, and
-  so on). Fixed boundaries mean a completed group always has the same id, and the trailing partial
-  group is its own page.
-- **Tool outputs inside the window larger than 1,500 tokens.** Only the `content` of the
-  `tool_result` block is replaced; the block and its `tool_use_id` stay.
+- **Whole turns before the window start**, in fixed groups of 8 turns (0 to 7, 8 to 15, and so on).
+  A completed group always has the same id; the trailing partial group is its own page.
+- **Tool outputs larger than 1,500 tokens**, in window turns before the current one, at an epoch
+  only. Only the `content` of the `tool_result` block is replaced; the block and its `tool_use_id`
+  stay. Between epochs the set of stubbed outputs does not change.
 
 **Never paged**
-- The current turn, which holds any active tool loop and its signed thinking blocks.
+- The current turn's newest tool results.
 - The system prompt, the tool definitions, and the pinned block.
+
+The tests check that the current turn's tool outputs are never stubbed.
 
 **Page id**
 - `pg_` + the first 16 hex characters of HMAC-SHA256(store key, canonical JSON of the page payload).
 - The store key is random, generated once per store, and kept beside the pages, outside Git.
-- Keyed, as the brief requires, so an id cannot be checked against guessed content.
-- Same content under the same store, same id, across requests and restarts. The tests check this
-  [measured, simulated].
+- Keyed, so an id cannot be checked against guessed content. Same content under the same store,
+  same id [measured, simulated].
 
 **Stub grammar**
 
@@ -129,20 +182,17 @@ tool output: [paged pg_<16 hex> | tool_result of <tool>(<canonical input JSON>) 
 
 - **Headlines.** Each `<h>` is that turn's opening user text and `<headline>` is the tool output's
   first text. Both are whitespace-collapsed and cut to 40 characters at a word boundary, with
-  ` ...` appended. Cutting at a word boundary means a partial value never appears.
-- **Purpose of headlines.** They are extractive, not model-written, and they let a reader choose a
-  page by its words.
-- **Page index.** The index is one text block prepended to the window's first user message:
+  ` ...` appended, so a partial value never appears.
+- **Page index.** One text block at the start of the window's first user message:
   `PAGED HISTORY (use the recall tool with an id to read a page verbatim):` followed by one stub per
   line. It is rebuilt only at epochs.
-- **Index bound** [inferred, designed, not simulated]. The index grows with history, about 100
-  tokens per 8-turn page. Above an index budget (proposed 4,000 tokens), the oldest stubs fold into
-  epoch stubs, `[paged-epoch pe_<16 hex> | turns <a>-<b> | <k> pages]`. Recalling an epoch id
-  returns its stub list, so any turn stays reachable in at most two recalls.
+- **Index bound** [inferred, designed, not simulated]. Above an index budget (proposed 4,000
+  tokens), the oldest stubs fold into epoch stubs `[paged-epoch pe_<16 hex> | turns <a>-<b> | <k> pages]`.
+  Recalling one returns its stub list.
 
 ## 5. Recall tool contract
 
-**Definition** (added to `tools` by the proxy, never by the CLI):
+**Definition** (declared by the proxy from the first request, never by the CLI):
 
 ```json
 {
@@ -162,261 +212,285 @@ tool output: [paged pg_<16 hex> | tool_result of <tool>(<canonical input JSON>) 
 
 **Output**
 - A JSON `tool_result`: `{"id", "turns": [a, b], "offset", "text", "next_offset"}`.
-- `text` is the verbatim page, as `[turn N] role: content` lines for turn pages or the raw output
-  for tool pages, sliced to at most 32,000 characters (about 8k tokens).
-- `next_offset` is null at the end.
+- `text` is the verbatim page, sliced to at most 32,000 characters. `next_offset` is null at the end.
 
-**Errors**
-- Returned as a `tool_result` with `is_error: true` and a code, so the model can recover:
-  - `bad_id`: the input is not shaped like a `pg_` id.
-  - `unknown_id`: no such page.
-  - `bad_offset`: offset outside 0 to the page length.
-  - `recall_limit`: more than 8 recall calls in one user turn.
-- The limits bound the hidden round trips per turn (section 6).
-- Ids are exact; there is no fuzzy matching. Choosing a page is the model's job, using the headlines.
+**Errors**, returned as a `tool_result` with `is_error: true`:
+- `bad_id`: the input is not shaped like a `pg_` id.
+- `unknown_id`: no such page.
+- `bad_offset`: offset outside the page.
+- `recall_limit`: more than 8 recall calls in one user turn.
 
-**Extension, ledger-backed** [inferred]: accept M1 record ids (`rec_...`) too, returning the full
-record with its provenance. Pinned lines omitted for space then stay reachable by id.
+**Extension, ledger-backed** [inferred]: accept M1 record ids (`rec_...`), returning the full record
+with its provenance.
 
 ## 6. What a proxy-added tool requires
 
-The CLI never declared `recall`, so it must never see a `recall` call. All of this is [inferred]
-until lane 1's interception evidence for question 1 confirms the CLI's streaming and request
-behavior.
+The CLI never declared `recall`, so it must never see a `recall` call. These requirements are
+[inferred] until lane 1's question 1 evidence (PR #9) confirms streaming and request behavior per CLI.
 
-1. **Buffer before forwarding.** Responses arrive as a stream. When the model emits a `recall`
-   `tool_use`, the proxy must not forward that part of the response to the CLI. It must hold the
-   streamed message until it knows whether the message contains a `recall` call. The simplest safe
-   rule is to hold the content blocks of a streamed message and release them once the message ends
-   without a `recall` call. This costs streaming latency on tool-calling turns, and lane 1 should
-   measure it.
-2. **Hidden round trips.** For each `recall`, the proxy executes it against its store, appends the
-   assistant message and a user message with the matching `tool_result`, and calls upstream again
-   with the same head and window. The prefix is unchanged, so these calls read from cache. It
-   repeats until the model stops calling `recall`, or the 8-call limit, after which `recall_limit`
-   errors push the model to answer. Only the final response is streamed to the CLI.
-3. **Mixed calls.** If one assistant message calls both `recall` and a CLI tool, every `tool_use`
-   in it must be answered in the next user message (pairing rule). The proxy answers `recall`
-   normally and answers each CLI tool call in that hidden exchange with `is_error: true` and "call
-   this again after recall finishes". The model then re-issues the CLI call in a later message
-   without `recall`, which the proxy forwards. The CLI never sees the aborted call.
-   - The alternative, `disable_parallel_tool_use`, would change the CLI's behavior on every turn.
-4. **History stays clean.** The CLI's next request will not contain the hidden exchange. The proxy
-   does not reinsert it: the recalled text is still addressable, and reinsertion would undo the bound.
-5. **Usage reporting.** The hidden calls are billed but not visible to the CLI. The proxy should
-   report the final call's usage to the CLI unchanged and log the hidden calls' usage itself.
-   Question 2 decides whether the reported counts may differ from the bounded prompt's.
-6. **Thinking blocks.** Signed thinking blocks in the current turn's tool loop pass through
-   untouched, because the current turn is never paged. Whole turns paged with their thinking leave
-   the prompt entirely rather than being edited. That is consistent with the API dropping earlier
-   thinking on 5.x models (see compaction notes below), but lane 1 should confirm for both CLIs.
+1. **Buffer before forwarding.** The proxy holds a streamed assistant message until it knows
+   whether the message calls `recall`. That costs streaming latency on tool-calling turns, and lane
+   1 should measure it.
+2. **Hidden round trips.** For each `recall` the proxy executes it, appends the assistant message
+   and a user message with the matching `tool_result`, and calls upstream again. The prefix only
+   grows, so these calls read from cache and keep thinking valid. The proxy repeats until the
+   model stops calling `recall` or the limit forces `recall_limit` errors. Only the final response
+   is streamed to the CLI.
+3. **Mixed calls.** If one assistant message calls both `recall` and a CLI tool, every `tool_use` in
+   it must be answered in the next message. Inside the hidden exchange, the proxy answers each CLI
+   call with `is_error: true` and "call this again after recall finishes". The model re-issues it
+   in a later message, which the proxy forwards.
+4. **Reinsert the hidden exchange byte for byte until the next epoch.** The CLI's next request will
+   not contain the hidden exchange, but the model's later thinking was produced with it in place.
+   Leaving it out would edit earlier history and invalidate that thinking [vendor-documented rule,
+   section 7]. So the proxy:
+   - stores each exchange;
+   - splices it back, unchanged, at the same position in every later request of the epoch;
+   - counts it toward the window size.
+   At the next epoch it is paged out with the rest of its turn, and thinking is stripped as usual.
+5. **Usage reporting.** The hidden calls are billed but not visible to the CLI. The proxy logs them
+   itself; question 2 decides what usage the CLI is shown.
+6. **Thinking.** Earlier thinking blocks are preserved and billed by default on Fable 5.1, Opus 5.5,
+   Sonnet 5.5, and Haiku 5.5 [vendor-documented]. An earlier version of this section said the API
+   drops them, which was wrong. Section 7 states the constraint and the strategy.
 
-## 7. Tool-use and tool-result pairing survives paging
+## 7. Preserved thinking: the constraint and the chosen strategy
 
-- **Turn-granular cuts.** A turn begins at a user message with no `tool_result`. Every
-  `tool_result` therefore sits in the same turn as the assistant `tool_use` that precedes it, and
-  cutting between turns cannot separate a pair.
-- **In-window stubs keep the block.** Paging a tool output replaces the block's `content` only; its
-  `type` and `tool_use_id` remain.
-- **Hidden recall pairs stay hidden.** Recall pairs exist only in hidden round trips and are always
-  complete there (section 6).
-- **The page index keeps roles alternating.** The index rides as an extra text block inside the
-  window's first user message, so no new message is inserted.
-- **Tested.** `check_protocol` validates role alternation and that every `tool_use` is answered by
-  the next message and every `tool_result` follows its `tool_use`. It passed for all four conditions
-  on every turn of the 242-turn default session and the 120-turn test session [measured, simulated].
+**The rule** [vendor-documented, https://platform.claude.com/docs/en/build-with-claude/preserved-thinking,
+accessed 2026-10-15]:
+- On Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5, "a thinking block stays valid only while
+  everything you sent before it is unchanged". The checked prefix is the top-level `system`, the
+  set of `tools`, and every earlier message.
+- Invalid edits include:
+  - editing, reordering, or deleting any earlier message;
+  - clearing or shortening an earlier `tool_result`;
+  - adding a text block to an earlier user turn;
+  - changing `system`;
+  - adding, removing, or editing a tool.
+- Valid: appending messages; removing thinking blocks "from the start of the history, from the
+  end, or all of them"; server-side compaction or context editing.
+- The page names this policy's pattern directly. "Client-side trimming" (dropping the oldest turns
+  and keeping recent ones verbatim) fails, because the kept turns' thinking was produced with the
+  removed history in place.
+- On failure, accounts created on or after 2026-08-31 get a 400 by default. Older accounts pass the
+  block through unless `thinking.block_binding.prefix_mismatch_behavior` is set, which needs beta
+  `thinking-binding-controls-2026-08-01`. `drop_block` drops failing blocks and every later one.
 
-## 8. Backing the pinned state with the M1 ledger
+**Conformance probe** [measured, 2026-10-15, `spikes/m0/conformance/probe.py`, 4,973 tokens total]:
+- Setup: `claude-haiku-5-5` with adaptive thinking, through the rig proxy. History holds two
+  assistant turns with signed thinking.
+- `prefix_mismatch_behavior: "error"` was set where noted.
 
-M1 (`docs/milestones/M1-ledger-and-recovery.md` on `main`; its implementation PRs #2, #3, #4 are
-paused) already has most of the pinned-state machinery.
+| Case | Status |
+|---|---|
+| append only | 200 |
+| strip all thinking | 200 |
+| drop oldest turns, keep later thinking, no beta header | 200, nothing reported |
+| same, with `error` | 200, but the kept block was dropped (`thinking_dropped`, reason `end_user_binding_mismatch`) |
+| change `system`, keep thinking, `error` | **400** "Invalid `signature` in `thinking` block. The block is bound to a different conversation." |
+| add a text block to an earlier user turn, keep thinking, `error` | **400** (same message) |
+| full epoch rewrite (drop oldest, new `system`, page index text) with all thinking stripped, `error` | 200 |
+| drop oldest with `drop_block` | 200, block dropped (`end_user_binding_mismatch`) |
+| server-side `clear_thinking_20251015` | 200 |
+
+What the probe shows:
+- This account does not enforce by default: every edit passed with no header. A newer account
+  would get 400s.
+- The reason `end_user_binding_mismatch` was not on the part of the vendor page we read.
+
+**The four strategies compared:**
+
+| Strategy | Valid? | Accuracy cost | Cache cost | Fits the owner principle? |
+|---|---|---|---|---|
+| A. Strip all thinking at each epoch; append-only between epochs | yes [vendor-documented; measured: epoch rewrite with strip returns 200] | the model loses earlier reasoning at each epoch. Vendor estimate: output tokens +2.5% (low effort) to +20.1% (max) when dropped once per session, +4.6% to +67.1% when dropped every turn; "wide error bars" [vendor-documented]. With epochs every ~19 turns the cost sits between those [inferred]. Facts and decisions in visible text are unaffected. | none beyond the epoch's own cache restart, which happens anyway [vendor-documented] | yes: bounded context, no compaction |
+| B. Server-side `context_management` (clear tool uses, clear thinking) | yes [vendor-documented; measured: `clear_thinking` 200] | none for what is kept, but the client must send the full, growing history. It cannot drop old turns, insert pinned state, or index pages | "clearing invalidates cached prompt prefixes" [vendor-documented] | no: working context is not bounded, so the CLI still reaches compaction |
+| C. Byte-for-byte reinsertion of all prior content | yes [vendor-documented] | none | none | no on its own: reinserting everything means never paging. It is the right rule for hidden recall exchanges within an epoch (section 6, item 4) |
+| D. Keep thinking-bearing turns in an untouched recent suffix, edit only before it | **no** [vendor-documented "client-side trimming" fails; measured: the kept block is dropped, or 400 under `error` for other prefix edits] | thinking is lost anyway, and new accounts get 400s | as A | no |
+
+**Choice: A**, combined with C for hidden recall exchanges, and with the in-turn epoch (section 3)
+for tool-heavy turns. A is the only strategy that keeps working context bounded and every request
+valid. Its cost:
+- earlier reasoning is lost at each epoch, never facts, decisions, or obligations;
+- some extra output tokens.
+
+The window bound and epoch spacing set how often that cost is paid. The L2d strip-thinking arm
+(approved for checkpoints 1 and 2) measures the accuracy cost of A directly against preserved
+thinking on the same probes.
+
+**What the simulation does not cover.** The fidelity simulation has no thinking blocks. It checks
+only the structural property that strategy A needs: earlier content changes only at epochs
+[measured, simulated].
+
+## 8. Tool-use and tool-result pairing survives paging
+
+- **Turn-granular cuts.** Every `tool_result` sits in the same turn as the `tool_use` before it, so
+  cutting between turns cannot split a pair.
+- **Stubs keep the block.** Paging a tool output, between turns or within an in-turn epoch, replaces
+  `content` only; the `type` and `tool_use_id` remain.
+- **Hidden recall pairs stay complete.** They exist only in hidden round trips, and are reinserted
+  whole (section 6).
+- **Roles keep alternating.** The page index rides inside the window's first user message, so no
+  new message is inserted.
+- **Tested.** `check_protocol` validates role alternation and pairing for all four conditions on
+  every turn of the 242-turn default session and the 120-turn test session [measured, simulated].
+
+## 9. Backing the pinned state with the M1 ledger
+
+M1 (`docs/milestones/M1-ledger-and-recovery.md` on `main`; implementation PRs #2, #3, #4 paused)
+already has most of the machinery.
 
 | Pinned element | M1 source |
 |---|---|
 | Open obligations | `contexto.state.derive(...).open_obligations` |
-| Active decisions | active `decision` records; same-topic conflicts become explicit `CONFLICT` items |
-| Verified facts | active records with `epistemic: verified`, which M1 requires to carry provenance |
-| Stale warning | `state.stale` (cited file changed or missing), rendered under a stale heading |
-| Bounded rendering | `contexto.checkpoint.build` already uses this priority order and never drops an obligation |
-| Epoch identity | the ledger `head()` hash: re-render the block at an epoch only if the head changed |
+| Active decisions | active `decision` records; same-topic conflicts become `CONFLICT` items |
+| Verified facts | active `verified` records, which M1 requires to carry provenance |
+| Stale warning | `state.stale`, rendered under a stale heading |
+| Bounded rendering | `contexto.checkpoint.build` uses this priority order and never drops an obligation |
+| Epoch identity | the ledger `head()` hash: re-render at an epoch only if the head changed |
 
 **What M1 lacks for this use** [inferred]:
-- **Capture.** Nothing writes ledger records from a live conversation, and transcript ingestion is
-  out of M1's scope. Someone must append: the model through a proxy-added tool such as `record`,
-  the operator, or a hook. Pinned state is only as good as capture, and the fidelity simulation
-  assumes perfect capture.
-- **Page store.** M1 has no store for verbatim turn pages, no keyed page ids, and no recall. Pages
-  need their own append-only store, which could share M1's hash-chain and quarantine conventions.
-- **Record-to-page links.** A record's provenance should cite the page that holds the original
-  words. M1's `transcript` source type has a free-form `locator`, which could carry `pg_` ids
-  without a schema change; this needs pinning in a contract.
-- **Token budgets.** The M1 checkpoint budget is in characters; the pinned block needs a token
-  budget. This is a small change.
-- **No "fact" kind.** Verified facts map to `event`, `artifact`, or `reference` records with
-  `verified`. That is workable, but the renderer needs a rule for which kinds count as facts.
+- **Capture.** Nothing writes ledger records from a live conversation. Pinned state is only as good
+  as capture, and the fidelity simulation assumes perfect capture.
+- **Page store.** M1 has no store for verbatim pages, no keyed ids, and no recall.
+- **Record-to-page links.** M1's `transcript` source type has a free-form `locator` that could carry
+  `pg_` ids. That needs pinning in a contract.
+- **Token budgets.** The checkpoint budget is in characters; the pinned block needs a token budget.
+- **No "fact" kind.** Verified facts map to `event`, `artifact`, or `reference` records.
 
-## 9. Prior art and H5 (provider-native features)
+## 10. Prior art and H5 (provider-native features)
 
-Sources were read on 2026-10-15 unless a date is given. Tags apply per sentence.
+Sources were read on 2026-10-15 unless a date is given.
 
 ### MemGPT (paper) and Letta
 
 - **What it does.**
-  - MemGPT splits the prompt into "system instructions, working context, and FIFO Queue"
-    [vendor-documented, Packer et al., arXiv 2310.08560 v2, 2024-02-12].
-  - The head of the queue is "a recursive summary of messages that have been evicted"
-    [vendor-documented].
-  - Evicted messages are "stored indefinitely in recall storage and readable via MemGPT function
-    calls", with paginated retrieval [vendor-documented].
-  - On deep memory retrieval, GPT-4 went from 32.1% to 92.5% accuracy with MemGPT [measured, by the
-    authors, Table 2].
-  - Letta, the successor framework, persists all messages in a database and compacts with
-    `compaction_settings.mode` (default `sliding_window`, `sliding_window_percentage` 0.3)
-    [vendor-documented, docs.letta.com, accessed].
-  - Letta's archival memory is "a semantically searchable database" [vendor-documented].
-- **Trigger.**
-  - MemGPT warns at a "warning token count (e.g. 70% of the context window)" and evicts at the
-    flush count [vendor-documented].
-  - Letta compacts when history "grows too long to fit" [vendor-documented].
-- **Why it falls short.**
-  - It is the closest prior art: pinned working context, out-of-context storage, retrieval tools
-    [inferred].
-  - Retrieval is by search, and archival search uses embeddings, which the owner ruled out.
-    Evicted turns surface as a lossy recursive summary rather than as addressable stubs [inferred].
-  - It is a whole agent framework that owns the loop, not a transparent layer under an existing CLI
-    [inferred].
+  - MemGPT splits the prompt into "system instructions, working context, and FIFO Queue". The
+    queue's head is "a recursive summary of messages that have been evicted". Evicted messages are
+    "stored indefinitely in recall storage and readable via MemGPT function calls"
+    [vendor-documented, i.e. the authors' paper: Packer et al., arXiv 2310.08560 v2, 2024-02-12].
+  - On deep memory retrieval, GPT-4 went from 32.1% to 92.5% accuracy [measured, by the authors,
+    Table 2].
+  - Letta persists all messages and compacts with `compaction_settings.mode` (default
+    `sliding_window`, `sliding_window_percentage` 0.3). Its archival memory is "a semantically
+    searchable database" [vendor-documented, docs.letta.com, accessed 2026-10-15].
+- **Trigger.** A "warning token count (e.g. 70% of the context window)", then eviction at the flush
+  count [vendor-documented].
+- **Why it falls short** [inferred]:
+  - Retrieval is by search, with embeddings for archival memory.
+  - Evicted turns surface as a recursive summary.
+  - It owns the agent loop rather than sitting under an existing CLI.
 
-### Anthropic API: context editing, memory tool, compaction, prompt caching
+### Anthropic API: context editing, memory tool, compaction, prompt caching, preserved thinking
 
 - **Context editing.**
-  - Beta `context-management-2025-06-27`, strategy `clear_tool_uses_20250919`: `trigger` defaults
-    to 100,000 input tokens and `keep` to 3 tool uses. Cleared results are replaced "with
-    placeholder text" [vendor-documented, platform.claude.com context-editing, accessed;
-    announced 2025-09-29].
-  - Editing happens server-side while "your client application maintains the full, unmodified
-    conversation history", and clearing "invalidates cached prompt prefixes" [vendor-documented].
-  - Anthropic reports a 29% gain from context editing alone, and an 84% token reduction in a
-    100-turn eval [measured, by Anthropic, blog 2025-09-29].
-- **Memory tool.** `memory_20250818` is client-side: "your application executes" `view`,
-  `create`, `str_replace`, `insert`, `delete`, and `rename` under `/memories` [vendor-documented].
+  - Beta `context-management-2025-06-27`, strategy `clear_tool_uses_20250919`. `trigger` defaults
+    to 100,000 input tokens and `keep` to 3 tool uses. Cleared results become "placeholder text"
+    [vendor-documented, platform.claude.com context-editing, accessed 2026-10-15; announced
+    2025-09-29].
+  - Clearing "invalidates cached prompt prefixes" [vendor-documented].
+  - Anthropic reports an 84% token reduction in a 100-turn eval [measured, by Anthropic, blog
+    2025-09-29].
+- **Memory tool.** `memory_20250818` is client-side, with `view`, `create`, `str_replace`,
+  `insert`, `delete`, and `rename` under `/memories` [vendor-documented, accessed 2026-10-15].
 - **Server-side compaction.**
-  - Threshold mode: `compact-2026-01-12`, `trigger` default 150,000.
-  - On-demand mode: `compact-2026-09-04`. It returns a signed `compaction` block; editing it fails
-    with `compaction_signature_invalid`.
-  - "The API automatically drops all content blocks prior to the `compaction` block"
-    [vendor-documented, compaction docs, accessed].
+  - Threshold mode: `compact-2026-01-12`, `trigger` default 150,000. In this mode "the API
+    automatically drops all content blocks prior to the `compaction` block".
+  - On-demand mode: `compact-2026-09-04`, which returns a signed `compaction` block. Editing the
+    block fails with `compaction_signature_invalid`, and sending messages before it returns 400
+    `compaction_block_misplaced`.
+  - [vendor-documented, compaction-threshold and compaction-on-demand pages, accessed 2026-10-15]
 - **Prompt caching (H5).**
-  - Explicit or automatic `cache_control`, at most 4 breakpoints, a "5-minute lifetime" refreshed
-    on use, or `"ttl": "1h"`.
-  - Writes cost 1.25x (5 min) or 2x (1 h), reads 0.1x (0.05x on Opus 5.5 and Sonnet 5.5).
-  - Minimum 512 tokens on 5.x models. "Cache hits require 100% identical prompt segments"
-    [vendor-documented, platform.claude.com prompt-caching, accessed].
+  - At most 4 breakpoints and a "5-minute lifetime" refreshed on use, or `"ttl": "1h"`.
+  - Writes cost 1.25x or 2x; reads cost 0.1x (0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1
+    and Mythos 5.1).
+  - The minimum cacheable prefix is 512 tokens on most 5.x models and 1,024 on Sonnet 5.
+  - "Cache hits require 100% identical prompt segments" [vendor-documented, prompt-caching, accessed
+    2026-10-15].
+- **Preserved thinking.** Earlier thinking stays in context and is billed by default, and edits
+  before it invalidate it (section 7) [vendor-documented].
 - **Why it falls short.**
-  - Cleared tool results become placeholders with no id and no way to fetch them back.
-    Compaction is a lossy summary that is signed, so it can be neither audited nor edited.
-    [vendor-documented for the mechanics; inferred for the conclusion]
-  - The memory tool is addressable, but the model chooses what to save, so verbatim history is not
-    guaranteed [inferred].
-  - Caching makes the full history cheaper per token but never bounds it. Every turn still resends
-    everything, and the context limit still forces compaction [inferred].
-  - All of these are provider-specific.
+  - Cleared results have no id and no way back, and compaction is a signed, lossy summary
+    [vendor-documented mechanics; inferred conclusion].
+  - Caching makes the growing history cheaper but never bounds it [inferred].
 
 ### OpenAI: conversation state, truncation, compaction, prompt caching
 
-- **Conversation state.**
-  - With `previous_response_id`, "all previous input tokens for responses in the chain are billed
-    as input tokens" [vendor-documented, conversation-state guide, accessed].
-  - The Conversations API stores items durably [vendor-documented].
-- **Truncation.** `truncation: auto` drops "items from the beginning of the conversation"; the
-  default `disabled` fails with a 400 [vendor-documented].
-- **Compaction.**
-  - `/responses/compact` (changelog 2025-12-11), and server-side compaction via
-    `context_management: [{type: "compaction", compact_threshold: N}]` (changelog 2026-02-10).
-  - The compaction item is "encrypted" and "opaque and not intended to be human-interpretable"
-    [vendor-documented].
-  - The Agents SDK has session backends, including `OpenAIResponsesCompactionSession`
-    [vendor-documented].
+- **Conversation state.** With `previous_response_id`, "all previous input tokens for responses in
+  the chain are billed as input tokens" [vendor-documented, conversation-state guide, accessed
+  2026-10-15].
+- **Truncation.** `truncation: auto` drops "items from the beginning of the conversation"
+  [vendor-documented].
+- **Compaction.** `/responses/compact` (changelog 2025-12-11) and server-side `context_management`
+  compaction (changelog 2026-02-10). Its output is "encrypted" and "opaque" [vendor-documented].
 - **Prompt caching (H5).**
-  - Automatic, "enabled by default for supported OpenAI models", at 1,024 tokens minimum for
-    GPT-5.6 and later; "Cache reuse requires the entire rendered prefix to match".
-  - Retention is a 30-minute TTL on GPT-5.6 and later, or `in_memory`/`24h` on earlier models.
-  - Reads cost 0.1x uncached on GPT-5.6 and later, and `prompt_cache_key` helps routing
-    [vendor-documented, prompt-caching guide, accessed].
-- **Why it falls short.**
-  - Truncation is permanent loss, and the compacted state is opaque [vendor-documented].
-  - Full history is retained server-side, but a proxied session has no `recall(id)` into it
-    [inferred].
-  - Caching has the same limit as Anthropic's: cheaper, not bounded [inferred].
+  - Automatic, at 1,024 tokens minimum for GPT-5.6 and later, and "Cache reuse requires the entire
+    rendered prefix to match".
+  - Reads cost 0.1x on GPT-5.6 and later and 0.05x on GPT-6.1 Sol; writes cost 1.25x
+    [vendor-documented, prompt-caching guide, accessed 2026-10-15].
+- **Encrypted reasoning and history edits.** Our probe sent `gpt-6-astra` histories, with
+  `store: false`, that edited or removed a user turn before an encrypted reasoning item. The API
+  returned 200 [measured, 2026-10-15]. Whether the reasoning item was then used or ignored is not
+  observable from the response.
+- **Why it falls short.** Truncation is permanent loss, compaction is opaque, and caching does not
+  bound context [vendor-documented, inferred].
 
 ### Claude Code compaction
 
 - **What it does.**
   - Automatic compaction "clears older tool outputs first, then summarizes the conversation if
-    needed" [vendor-documented, code.claude.com context-window, accessed].
+    needed" [vendor-documented, code.claude.com how-claude-code-works, accessed 2026-10-15].
   - The summary keeps "requests and intent, key technical concepts, files examined or modified...,
-    errors..., pending tasks, and current work". Full tool outputs and intermediate reasoning "are
-    gone" [vendor-documented].
-  - CLAUDE.md, auto memory, and up to five recently modified files are re-injected
-    [vendor-documented].
+    errors..., pending tasks, and current work", and full tool outputs "are gone"
+    [vendor-documented, code.claude.com context-window, accessed 2026-10-15].
 - **Trigger.**
-  - Near the model's limit: about 967K tokens for native 1M-window models, 200K otherwise
-    [vendor-documented].
-  - Tunable with `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (100000 to 1000000) or
-    `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (lowers only), and can be disabled with
-    `DISABLE_AUTO_COMPACT` [vendor-documented].
-  - Manual: `/compact [instructions]`. Hooks: `PreCompact` can block, `PostCompact` receives the
-    summary, and `SessionStart` with matcher `compact` can re-inject context [vendor-documented].
-- **Our observations** (CLI 2.1.301, `claude-haiku-5-5`, headless).
-  - `/compact` shrank a 29.7k-token context to 4.3k and kept all 37 planted values [measured,
-    fidelity E2].
-  - Its own model call reported zero `usage` in JSON output. The session's cumulative `modelUsage`
-    grew by 34,358 tokens [measured].
-- **Why it falls short.**
-  - The live context keeps only a lossy summary. The full transcript survives on disk at
-    `~/.claude/projects/<project>/<session>.jsonl`, but the model has no addressable way back to it
-    [vendor-documented, inferred].
-  - Each compaction re-reads the whole context once, at a cost that per-turn usage does not show
-    [measured, as above].
-  - Whether Claude Code sizes its trigger from API-reported usage decides what a proxy that shrinks
-    the prompt does to it. That is question 2, lane 1 [inferred].
+  - At the model's context limit: about 967K tokens for 1M-window models. 200K applies only to
+    Sonnet 4.6 and Opus 4.6 without extended context, or with `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`
+    [vendor-documented, code.claude.com model-config, accessed 2026-10-15].
+  - Lane 1 measured the blocking point at about the window minus 23k (about 977K on a 1M window)
+    [measured, lane 1, PR #9].
+  - Tunable with `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (100000 to 1000000), and can be disabled with
+    `DISABLE_AUTO_COMPACT` [vendor-documented, env-vars, accessed 2026-10-15].
+  - Lane 1 found that `--autocompact` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` did not force pre-send
+    compaction in `-p` resume [measured, lane 1, PR #9].
+- **Our observations** (CLI 2.1.301, `claude-haiku-5-5`, headless, manual `/compact`).
+  - `/compact` shrank a 29.7k-token context to 4.3k and kept all 37 planted values.
+  - Its own model call reported zero `usage`. The session's cumulative `modelUsage` grew by 34,358
+    tokens [measured; the figure is derived from recorded cumulative `modelUsage`].
+- **Why it falls short.** It is a lossy summary at the point where quality is already degrading
+  (owner principle), and its cost does not show in per-turn usage [vendor-documented, measured].
 
 ### Codex CLI compaction
 
-- **Trigger.**
-  - `model_auto_compact_token_limit` ("unset uses model defaults"), capped in source at 90% of the
-    context window [vendor-documented, Codex config reference, accessed; `openai_models.rs` at
-    openai/codex main 16e578dd1d, 2026-10-15].
-  - Also `/compact`.
-- **What it does.**
-  - Local mode builds new history from the initial context, recent user messages up to
-    `COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000`, and a summary written from a "CONTEXT CHECKPOINT
-    COMPACTION" prompt. Assistant turns and tool outputs are dropped, except client-marked retained
-    tool outputs [vendor-documented, `compact.rs`].
-  - A provider capability `remote_compaction = "v2"` sends compaction through the Responses API
-    [vendor-documented, config reference; `compact_remote_v2.rs`, last commit 2026-10-13].
-  - `tool_output_token_limit` caps each stored tool output [vendor-documented].
-- **Why it falls short.**
-  - Local mode keeps only user messages and a summary; remote mode keeps opaque encrypted items
-    [vendor-documented].
-  - Truncated tool output is gone, and there is no recall path [inferred].
-  - Which compaction mode is the default for the OpenAI provider is not verified.
+- **Requests.** Codex sends the full input on every request (`store: false`, no
+  `previous_response_id`) and auto-compacts at about 90% of a 272k window [measured, lane 1,
+  PR #9].
+- **Configuration.** `model_auto_compact_token_limit`, capped in source at 90% of the window
+  [vendor-documented, Codex config reference, accessed 2026-10-15; `openai_models.rs` at
+  openai/codex main 16e578dd1d, 2026-10-15].
+- **Local mode** keeps the initial context, recent user messages up to
+  `COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000`, and a summary. Assistant turns and tool outputs are
+  dropped, except retained tool outputs [vendor-documented, `compact.rs`].
+- **Remote mode.** `remote_compaction = "v2"` compacts through the Responses API
+  [vendor-documented, `compact_remote_v2.rs`, last commit 2026-10-13].
+- **Why it falls short.** It keeps only a summary or opaque items, truncated tool output is gone,
+  and there is no recall path [vendor-documented, inferred].
 
 ### What none of them provide
 
-**Gap in prior art** [inferred]: none keeps the full history outside the model, under the user's
-control, behind stable ids the model can dereference, while bounding every upstream request below
-the point where compaction would trigger. MemGPT/Letta comes closest, but uses search and
-summaries rather than ids. The provider features (context editing, compaction, caching) either
-discard, summarize opaquely, or make the full prompt cheaper without bounding it.
+No system we found keeps the full history outside the model, under the user's control, behind
+stable ids the model can dereference, while bounding every request well below the compaction point
+[inferred].
 
-**Not verified in this pass**:
-- The placeholder text Anthropic uses for cleared tool results.
-- Whether Claude Code calls Anthropic's server-side compaction.
-- The parameters of Claude Code's tool-output clearing.
-- Codex's default `remote_compaction` for the OpenAI provider.
-- The implementation of Letta's `conversation_search`.
+**Not verified**:
+- The placeholder text for cleared tool results.
+- Whether Claude Code uses Anthropic's server-side compaction.
+- Codex's default `remote_compaction`.
+- Letta's `conversation_search` implementation.
+- The `end_user_binding_mismatch` reason in our probe.
 
 ### Sources
+
+All pages without a visible date were accessed 2026-10-15.
 
 - MemGPT, arXiv 2310.08560 (v1 2023-10-12, v2 2024-02-12): https://arxiv.org/abs/2310.08560
 - Letta docs:
@@ -426,38 +500,31 @@ discard, summarize opaquely, or make the full prompt cheaper without bounding it
 - Anthropic, "Managing context on the Claude Developer Platform", 2025-09-29: https://claude.com/blog/context-management
 - Anthropic docs:
   - context editing: https://platform.claude.com/docs/en/build-with-claude/context-editing
-  - compaction: https://platform.claude.com/docs/en/build-with-claude/compaction
   - threshold compaction: https://platform.claude.com/docs/en/build-with-claude/compaction-threshold
   - on-demand compaction: https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand
   - memory tool: https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool
   - prompt caching: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+  - preserved thinking: https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
 - OpenAI docs:
   - conversation state: https://developers.openai.com/api/docs/guides/conversation-state
   - compaction: https://developers.openai.com/api/docs/guides/compaction
   - prompt caching: https://developers.openai.com/api/docs/guides/prompt-caching
-  - Responses reference: https://developers.openai.com/api/reference/resources/responses/methods/create
-  - changelog (2025-12-11, 2026-02-10): https://developers.openai.com/api/docs/changelog
-  - Agents SDK sessions: https://openai.github.io/openai-agents-python/sessions/
+  - changelog: https://developers.openai.com/api/docs/changelog
 - Claude Code docs:
+  - https://code.claude.com/docs/en/how-claude-code-works
   - https://code.claude.com/docs/en/context-window
+  - https://code.claude.com/docs/en/model-config
   - https://code.claude.com/docs/en/env-vars
-  - https://code.claude.com/docs/en/hooks
-  - https://code.claude.com/docs/en/settings-reference
 - Codex:
   - config reference: https://learn.chatgpt.com/docs/config-file/config-reference
-  - source at openai/codex main 16e578dd1d (2026-10-15): `codex-rs/core/src/compact.rs`,
-    `compact_remote_v2.rs`, `codex-rs/protocol/src/openai_models.rs`
-
-All pages without a visible date were accessed 2026-10-15.
+  - source at openai/codex main 16e578dd1d (2026-10-15)
+- Lane 1 measurements: `docs/research/M0-interception.md`, PR #9 (VentureForgre/contexto).
 
 ## Open questions
 
-1. **Capture.** Who writes ledger records during a live session: a proxy-added `record` tool, the
-   operator, or hooks? This decides whether pinned state is trustworthy, and it is outside
-   question 4.
-2. **Window and pinned settings.** The defaults (window 24k/12k, pinned 2k, tool pages over 1.5k)
-   are unpriced. Lane 2's cost model (L2a) should set them, and phase 2 should check fidelity at
-   the chosen values.
-3. **Proxy interception details.** Streaming hold-back latency, mixed-call handling, and
-   usage-count reporting depend on lane 1's question 1 and 2 evidence for each CLI.
-4. **Index folding.** The index bound and epoch-stub folding are designed but not simulated.
+1. **Capture.** Who writes ledger records live: a proxy-added `record` tool, the operator, or hooks?
+2. **Window bound.** Set from L2d's quality curve. The cost model (L2a) prices epoch spacing.
+3. **Accuracy cost of strategy A.** The L2d strip-thinking arm measures it on the same probes.
+4. **Proxy details.** Streaming hold-back latency, mixed-call handling, and usage reporting per CLI
+   (lane 1).
+5. **Index folding and in-turn epochs.** Designed but not simulated.

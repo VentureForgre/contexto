@@ -5,10 +5,12 @@ Usage, from spikes/m0 (dry run is the default and makes no model call):
     python3 -m fidelity.live --out ../../.contexto/spikes/l2b --live --settings PATH [--model ID]
 
 Live mode runs ``claude -p --bare`` in an empty run directory, resumed across turns by session id.
-Auth is whatever the process inherits: ``--settings`` names an existing settings file whose
-apiKeyHelper the CLI runs itself, and the base URL comes from the inherited environment. Nothing
-here reads, copies, or logs a credential. The child environment drops OpenRig and parent Claude
-Code session variables so the throwaway process cannot act as a rig seat.
+``--settings`` names an existing settings file whose apiKeyHelper the CLI runs itself. Routing
+caveat: if that file has an ``env`` block, the CLI applies it over the inherited environment, so
+the file's ``ANTHROPIC_BASE_URL`` (and any other variable it sets) wins. The runner records which
+source decides the base URL and whether it equals the inherited value, without recording either
+value. ``--bare`` keeps the settings file's hooks from running. Nothing here reads, copies, or logs
+a credential. The child environment drops OpenRig and parent Claude Code session variables.
 
 After the build turns, the session is forked twice: one fork answers the probes directly
 (plain CLI, full history), the other runs ``/compact`` first and then answers the same probes.
@@ -172,6 +174,34 @@ def _model_usage_total(model_usage: dict[str, Any]) -> int:
     return sum(int(v.get(k) or 0) for v in model_usage.values() if isinstance(v, dict) for k in keys)
 
 
+def base_url_source(settings: Path) -> dict[str, Any]:
+    """Which source sets the child's base URL, and whether it matches the inherited value. No values."""
+    try:
+        env = json.loads(settings.read_text(encoding="utf-8")).get("env") or {}
+    except (OSError, json.JSONDecodeError):
+        return {"source": "unknown"}
+    if "ANTHROPIC_BASE_URL" in env:
+        return {"source": "settings_env", "equals_inherited": env["ANTHROPIC_BASE_URL"] == os.environ.get("ANTHROPIC_BASE_URL"),
+                "settings_env_keys": sorted(env)}
+    return {"source": "inherited_env", "settings_env_keys": sorted(env)}
+
+
+def corrected_spend(calls: list[dict[str, Any]]) -> int:
+    """Re-total a recorded run, replacing any zero-usage call by its modelUsage growth over the last build call."""
+    total = 0
+    parent: dict[str, Any] | None = None
+    for c in calls:
+        if c["phase"].startswith("build_"):
+            parent = c.get("model_usage")
+        usage = c.get("usage") or {}
+        if any(usage.get(k) for k in usage):
+            total += usage_total(usage)
+        elif c.get("model_usage") is not None:
+            base = _model_usage_total(parent) if parent and c["phase"] == "compact" else 0
+            total += max(0, _model_usage_total(c["model_usage"]) - base)
+    return total
+
+
 def child_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith(_DROP_PREFIXES)}
 
@@ -187,12 +217,12 @@ class CapExceeded(Exception):
 
 
 class Runner:
-    def __init__(self, run_dir: Path, settings: Path, model: str, cap: int) -> None:
+    def __init__(self, run_dir: Path, settings: Path, model: str, cap: int, spent: int = 0) -> None:
         self.run_dir = run_dir
         self.settings = settings
         self.model = model
         self.cap = cap
-        self.spent = 0
+        self.spent = spent  # tokens already spent by this experiment, for continuation runs
         self.last_context = 0
         self.calls: list[dict[str, Any]] = []
         # Session id -> cumulative modelUsage as last reported. The CLI reports modelUsage per
@@ -254,6 +284,9 @@ class Runner:
         })
         if out.get("is_error"):
             raise RuntimeError(f"{phase}: claude reported an error (subtype {out.get('subtype')!r})")
+        if self.spent > self.cap:
+            # The pre-call projection can undershoot; stop as soon as the recorded spend is over.
+            raise CapExceeded(f"{phase}: spend {self.spent} is over the cap {self.cap}")
         return new_session, str(out.get("result") or "")
 
 
@@ -309,7 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = args.out.resolve() / f"baseline-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
     run_dir.mkdir(parents=True, exist_ok=False)
     runner = Runner(run_dir, args.settings.resolve(), args.model, args.cap)
-    summary.update({"model": args.model, "cap": args.cap, "run_dir_name": run_dir.name})
+    summary.update({"model": args.model, "cap": args.cap, "run_dir_name": run_dir.name,
+                    "base_url": base_url_source(args.settings)})
     status = 0
     try:
         session = str(uuid.uuid4())
@@ -350,7 +384,8 @@ def compact_only(args: argparse.Namespace, ls: LiveScript) -> int:
     if not session:
         raise SystemExit("no build session id recorded; pass --session")
     build_calls = [c for c in summary["calls"] if c["phase"].startswith("build_")]
-    runner = Runner(args.compact_only.resolve(), args.settings.resolve(), args.model, args.cap)
+    prior = corrected_spend(summary["calls"] + summary.get("continuation", {}).get("calls", []))
+    runner = Runner(args.compact_only.resolve(), args.settings.resolve(), args.model, args.cap, spent=prior)
     runner.session_usage[session] = build_calls[-1]["model_usage"]
     continuation: dict[str, Any] = {"build_session_id": session}
     status = 0
@@ -359,7 +394,8 @@ def compact_only(args: argparse.Namespace, ls: LiveScript) -> int:
     except (CapExceeded, RuntimeError, subprocess.TimeoutExpired) as exc:
         continuation["stopped"] = str(exc)
         status = 1
-    continuation["tokens"] = runner.spent
+    continuation["prior_tokens"] = prior
+    continuation["tokens"] = runner.spent - prior
     continuation["calls"] = runner.calls
     summary["continuation"] = continuation
     path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")

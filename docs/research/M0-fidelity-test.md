@@ -1,12 +1,16 @@
 # M0 fidelity test: design, plain-CLI baseline, and offline simulation
 
 Status: phase 1 deliverable for M0 question 4 (lane 2, packet L2b). Author: build.builder-4.
-Date: 2026-10-15. Brief: `docs/milestones/M0-infinite-session-study.md`. Policy under test:
+Date: 2026-10-15, revised the same day for review findings. Brief: `docs/milestones/M0-infinite-session-study.md`. Policy under test:
 `docs/research/M0-paging-policy.md`. Code: `spikes/m0/fidelity/`.
 
 Every claim is tagged **[measured]** (we ran it and give the numbers), **[vendor-documented]**, or
 **[inferred]**. Simulated numbers are tagged **[measured, simulated]**: they are exact outputs of
 deterministic code, but no model was involved.
+
+**Owner principle** (binding): compaction is a failure mode to avoid. A design succeeds only if it
+never compacts and its recall and task accuracy equal the full-context baseline on these probes. The
+size-by-size baseline itself is measured by the L2d probe (`docs/research/M0-quality-vs-context.md`).
 
 ## What question 4 asks, and what phase 1 can answer
 
@@ -67,8 +71,20 @@ implemented in `fidelity/policy.py`. A protocol checker validates role alternati
 Setup:
 - A throwaway headless Claude Code process (`claude -p --bare --tools "" --output-format json`, CLI
   2.1.301) on model `claude-haiku-5-5`, resumed across turns by session id.
-- Auth and base URL are inherited: `--settings` names the worktree's existing settings file, whose
-  `apiKeyHelper` the CLI runs itself, and `ANTHROPIC_BASE_URL` comes from the environment.
+- Auth comes from `--settings`, which names the worktree's existing settings file; the CLI runs its
+  `apiKeyHelper` itself.
+- **Base URL.** It came from that same file, not from the inherited environment as an earlier
+  version of this doc said. The file's `env` block sets `ANTHROPIC_BASE_URL`, and the CLI applies it
+  over the inherited environment.
+  - Reviewer-2 showed this with loopback listeners: the settings port got the connections, the
+    inherited one got none.
+  - In these runs both values were equal, so traffic went through the rig proxy as intended
+    [measured by reviewer-2, values compared without printing them].
+  - The same block also sets `CLAUDE_CODE_EFFORT_LEVEL` in the child.
+  - The runner now records which source decides the base URL and whether it equals the inherited
+    value.
+- **Hooks.** `--bare` is what keeps the settings file's OpenRig hooks from running in the
+  throwaway. Reviewer-2 verified this for `SessionStart`; the other hook events are inferred.
 - No credential was read, copied, or logged. OpenRig and parent-session environment variables were
   dropped from the child.
 - Lane 1's measuring proxy was not used.
@@ -91,6 +107,8 @@ What this shows:
 - At about 30k tokens of history, the plain CLI recovers every planted item, including the current
   value after two supersessions [measured]. The probe set and scorer work end to end against a real
   model; nothing was unparseable or unanswered [measured].
+- Both runs stayed far below the auto-compaction threshold: about 29k tokens against about 967K.
+  `/compact` was invoked manually.
 - `/compact` cut the context about 7x to 11x and still kept all 37 values, unflagged ones included,
   in this run [measured]. So at this scale the probe set does **not** reach the point where
   compaction loses detail. Claude Code compacts automatically only near the model's context limit
@@ -98,7 +116,7 @@ What this shows:
   more material. Loss is plausible there, but not shown here [inferred].
 - Finding for lanes 1 and 2: in `--output-format json`, the `/compact` call reports zero `usage`,
   but the session's cumulative `modelUsage` grows by 34,358 tokens for a 29.7k context [measured,
-  E2]. The cost of compaction is invisible in per-turn usage, so a cost model built on per-turn usage
+  E2; the figure is derived from recorded cumulative `modelUsage`]. The cost of compaction is invisible in per-turn usage, so a cost model built on per-turn usage
   undercounts compaction [inferred].
 
 Smallest informative N: 12 build turns at about 30k tokens was enough to validate the harness and
@@ -115,12 +133,16 @@ the conservative figure the brief's caps are checked against.
 |---|---|---|---|---|---|
 | smoke (one call) | | | | | 121 |
 | E1 flagged | 192,590 | 29,345 | about 31,500 [inferred: not captured; context 28,928 plus summary] | 2,890 | 224,825 measured, about 256,300 with compact |
-| E2 dense | 198,358 | 32,315 | 34,358 + 34,643 | 5,595 | 305,269 |
+| E2 dense | 198,358 | 32,315 | 34,358 (derived) + 34,643 | 5,595 | 305,269 |
 
 - E2 ran `/compact` twice. The first attempt was stopped by a bug in the runner's cap guard, since
   fixed: it read cumulative `modelUsage` as a per-call figure and halted before the compacted probe.
   The second attempt is a `--compact-only` continuation of the same build session. Both compactions
   are counted.
+  - The raw summary file still shows the bugged 463,389 running total; 305,269 is the corrected
+    figure.
+  - Continuations now start from the experiment's corrected prior spend, and spend is also checked
+    after every call.
 - Packet total: about 561,700 tokens, of which 530,215 were measured. That is under the 3M packet
   cap, and each experiment stayed under the 500k cap.
 - Cost reported by the CLI for E2's build session and its forks was under $0.02 per fork.
@@ -138,24 +160,42 @@ every turn under each condition with default settings:
 - tool outputs paged over 1,500
 - 8-turn page groups
 
-The reader then answers the 24 probes from the final request. Token figures are estimates
-(characters / 4). The live runs showed this undercounts numeric log text by about 2.2x, so read
-them as relative sizes.
+**Checks on every request**
+- protocol validity;
+- the truth of the pinned obligations header, against ground truth as of the turn it names;
+- whether the request only appends to the previous one.
 
-| Condition | Final request (est. tokens) | Cumulative over session (est.) | Window moves | Recalls | Score | early | detail | decision | obligation | recent |
-|---|---|---|---|---|---|---|---|---|---|---|
-| full | 195,601 | 22,720,319 | 0 | 0 | 24/24 | 5/5 | 6/6 | 4/4 | 8/8 | 1/1 |
-| window | 20,451 | 3,898,078 | 13 | 0 | 2/24 | 0/5 | 0/6 | 1/4 | 0/8 | 1/1 |
-| pinned | 20,661 | 3,943,739 | 13 | 0 | 18/24 | 5/5 | 0/6 | 4/4 | 8/8 | 1/1 |
-| pinned_recall | 20,507 | 3,822,584 | 13 | 14 | 24/24 | 5/5 | 6/6 | 4/4 | 8/8 | 1/1 |
+**Probes.** The reader answers the probes at four points: a quarter, half, three quarters, and the
+end of the session. Each point is scored against the values current then, which gives 84
+probe-answers in total, 24 of them at the end. An earlier version scored only the final request,
+which hid a false pinned header (review finding B2).
+
+Token figures are estimates (characters / 4). The live runs showed this undercounts numeric log
+text by about 2.2x, so read them as relative sizes.
+
+| Condition | Final request (est. tokens) | Cumulative over session (est.) | Window moves | Edit points | Recalls (final) | Score, final | Score, 4 points | early | detail | decision | obligation | recent |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| full | 195,601 | 22,720,319 | 0 | 0 | 0 | 24/24 | 84/84 | 5/5 | 6/6 | 4/4 | 8/8 | 1/1 |
+| window | 20,451 | 3,898,078 | 13 | 13 | 0 | 2/24 | 7/84 | 0/5 | 0/6 | 1/4 | 0/8 | 1/1 |
+| pinned | 20,670 | 3,945,818 | 13 | 13 | 0 | 18/24 | 66/84 | 5/5 | 0/6 | 4/4 | 8/8 | 1/1 |
+| pinned_recall | 22,010 | 4,117,517 | 13 | 13 | 14 | 24/24 | 84/84 | 5/5 | 6/6 | 4/4 | 8/8 | 1/1 |
+
+The category columns are for the final point.
 
 What this shows, and what it does not:
-- The pinned block alone makes every pinned category available, but not unpinned details. Recall
-  through stub headlines brings the details back, in 14 recall calls for 6 details [measured,
-  simulated].
+- **Edit points equal window moves.** Every rewrite of earlier content happens at an epoch, and
+  every other request only appends. That is the structural property the policy's preserved-thinking
+  strategy depends on (policy doc, section 7) [measured, simulated].
+- **The scores are largely by construction.**
+  - Pinned scores 18/24, missing exactly the details, because the generator's ledger records
+    exactly the pinned categories (perfect capture).
+  - Pinned plus recall scores 24/24 partly because every probe's hint word appears in the turn
+    headline the generator writes.
+  - These two scores follow from the generator's design. They are not evidence that the policy
+    works on real sessions, only that the policy code does what it specifies.
 - A bounded window without either loses almost everything older than the window [measured,
   simulated].
-- The bounded conditions cut cumulative input by about 5.8x over 242 turns. The window start moved
+- The bounded conditions cut cumulative input by about 5.5x to 5.8x over 242 turns. The window start moved
   13 times, so with prompt caching the prefix would be rebuilt about 13 times rather than on every
   turn [measured, simulated]. Lane 2's cost model (packet L2a) owns the priced comparison.
 - The reader is a deterministic upper bound. It finds values by exact phrasing, resolves conflicts
@@ -195,6 +235,9 @@ Prompts, responses, and answers are not written. The CLI's own session files lan
 - **Pasted logs, not tool calls.** The live baseline pastes logs as user text instead of producing
   real tool calls. The tool-use path is only exercised offline [measured].
 - **One run each.** Each live experiment ran once on one model, so no variance is measured.
+- **No thinking blocks.** The synthetic session has none and the reader is not a model. The
+  simulation checks only that history changes at epochs, not the accuracy cost of stripping
+  thinking there. The L2d strip-thinking arm measures that cost.
 
 ## Open questions
 

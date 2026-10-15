@@ -173,7 +173,10 @@ def render_pinned(session: Session, upto_turn: int, budget: int) -> tuple[str, d
     facts = sorted((r for r in current.values() if r["kind"] == "fact"), key=lambda r: -r["turn"])
 
     head = ["PINNED STATE (from the session ledger; authoritative over older turns)"]
-    ob_lines = ["OPEN OBLIGATIONS (complete list; an item not listed here is closed):"]
+    as_of = upto_turn - 1
+    ob_lines = [
+        f"OPEN OBLIGATIONS as of turn {as_of} (complete as of that turn; the turns after it may open or close items):"
+    ]
     ob_lines += [f"- {r['subject']}: {r['text']} [since turn {r['turn']}]" for r in obligations] or ["- none"]
     lines = head + ob_lines
     if estimate_tokens("\n".join(lines)) > budget:
@@ -214,9 +217,15 @@ class Request:
 
 @dataclass
 class WindowState:
-    """Hysteresis: the window start only moves at paging events, so the prefix stays stable between them."""
+    """Hysteresis: the window start only moves at paging events (epochs).
+
+    Every rewrite of earlier content happens at an epoch: the window start, the pinned block, the
+    page index, and which tool outputs are stubbed. Between epochs a request only appends to the
+    previous one, which is what keeps preserved thinking valid (see the policy doc, section 6).
+    """
 
     first_turn: int = 0
+    stub_before: int = 0  # tool outputs in turns before this are stubbed; fixed at the last epoch
 
 
 def turn_tokens(session: Session, turn: int) -> int:
@@ -236,7 +245,9 @@ def advance_window(session: Session, upto_turn: int, state: WindowState, setting
         while total > settings.window_low and first < upto_turn - 1:
             total -= sizes[first - state.first_turn]
             first += 1
-        state.first_turn = first
+        if first != state.first_turn:
+            state.first_turn = first
+            state.stub_before = upto_turn - 1  # never the current turn
     return state.first_turn
 
 
@@ -290,15 +301,20 @@ def page_out(session: Session, upto_turn: int, settings: Settings, store: Store,
 
 
 def _page_tool_outputs(
-    session: Session, messages: list[dict[str, Any]], indices: list[int], settings: Settings, store: Store
+    session: Session, messages: list[dict[str, Any]], indices: list[int], settings: Settings, store: Store,
+    stub_before: int,
 ) -> list[dict[str, Any]]:
     out = []
     for index, message in zip(indices, messages, strict=True):
-        if message["role"] != "user" or not any(b["type"] == "tool_result" for b in message["content"]):
+        turn = _turn_of(session, index)
+        if (
+            turn >= stub_before
+            or message["role"] != "user"
+            or not any(b["type"] == "tool_result" for b in message["content"])
+        ):
             out.append(message)
             continue
         message = copy.deepcopy(message)
-        turn = _turn_of(session, index)
         for block in message["content"]:
             if block["type"] != "tool_result" or not isinstance(block["content"], str):
                 continue
@@ -364,7 +380,7 @@ def build_request(
         pinned_count = len(segments)
     if condition == "pinned_recall":
         tools = [recall_tool_definition()]
-        messages = _page_tool_outputs(session, messages, indices, settings, store)
+        messages = _page_tool_outputs(session, messages, indices, settings, store, state.stub_before)
         if first > 0:
             pages = page_out(session, first, settings, store)
             prefix_lines.append("PAGED HISTORY (use the recall tool with an id to read a page verbatim):")
@@ -403,3 +419,32 @@ def check_protocol(messages: Sequence[dict[str, Any]]) -> list[str]:
             if not set(results_here) <= set(prev_uses):
                 problems.append(f"message {i}: tool_result {results_here} has no tool_use before it")
     return problems
+
+
+def append_only(previous: Request, current: Request) -> bool:
+    """True when ``current`` only appends to ``previous``: same system and tools, old messages unchanged."""
+    if previous.system != current.system or previous.tools != current.tools:
+        return False
+    n = len(previous.messages)
+    return len(current.messages) >= n and current.messages[:n] == previous.messages
+
+
+def pinned_claim_errors(session: Session, request: Request) -> list[str]:
+    """Check the pinned obligations header against ground truth as of the turn it names."""
+    lines = [text for _, text in request.segments[: request.pinned_count]]
+    header = next((line for line in lines if line.startswith("OPEN OBLIGATIONS as of turn ")), None)
+    if header is None:
+        return []
+    as_of = int(header.split("as of turn ", 1)[1].split(" ", 1)[0])
+    listed = {line[2:].split(":", 1)[0] for line in lines if line.startswith("- ob")}
+    truth = set()
+    for planted in session.planted.values():
+        if planted.category != "obligation":
+            continue
+        states = [value for turn, value in planted.history if turn <= as_of]
+        if states and states[-1] == "open":
+            truth.add(planted.subject)
+    errors = []
+    if listed != truth:
+        errors.append(f"as of turn {as_of}: listed {sorted(listed)} but open {sorted(truth)}")
+    return errors
