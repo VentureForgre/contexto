@@ -53,6 +53,8 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
+          # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
+          ignore-nothing-to-cache: true
 
       - name: Compute the next version from Conventional Commits
         id: plan
@@ -123,6 +125,8 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
+          # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
+          ignore-nothing-to-cache: true
       - name: Refuse anything but an existing release tag on main
         run: bash .github/scripts/reattach-verify.sh "$TAG"
       - name: Create the release if the tag exists without one
@@ -143,6 +147,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git checkout --quiet --detach "refs/tags/$TAG"
+          # Drop files main's checkout left behind (semantic-release writes CHANGELOG.md), so the
+          # sdist holds exactly the tagged tree.
+          git clean -ffdx
           NEW_VERSION="${TAG#v}" bash .github/scripts/release-build.sh
           shopt -s nullglob
           files=(dist/*.tar.gz dist/*.whl)
