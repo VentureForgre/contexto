@@ -17,27 +17,32 @@ because model quality degrades as context grows. This run never steered Codex to
 - Each tool turn of this shape (one shell command printing 300 lines) cost two model requests and
   added about 3,000 tokens of context. A tool-free turn cost one request and added 123 tokens
   [measured].
-- Every request's reported input equals the whole conversation so far: input tokens rise by exactly
-  the newly added items each request. Cache reads covered 96% of input in turns 2 to 6 [measured].
-  Whether the wire carried the full history (HTTP) or a delta with `previous_response_id`
-  (WebSocket) is not visible in the rollout [inferred, section 4].
+- Every request's reported input is consistent with the whole conversation so far: input tokens
+  rise with the newly added items each request. Cache reads covered 96% of input in turns 2 to 6
+  [measured]. On the wire, Codex's WebSocket transport sends a delta with `previous_response_id`
+  (measured by L1-a), and its HTTP fallback sends the full input (measured in M0-interception.md);
+  billing is the full conversation either way (section 4).
 - A tool-free recall question about turn 2 and turn 5 outputs was answered correctly at 44.5K
   context [measured]. This is one probe, not the fidelity baseline (section 6).
 - Spend for this packet: 351,842 tokens over 9 requests (turns 2 to 6), 351,463 input of which
-  337,664 were cache reads, 379 output [measured]. Billed to the owner's ChatGPT plan by owner
-  decision.
+  337,664 were cache reads, 379 output [measured]. Including the pre-existing turn 1, the run's
+  total is 410,827, still under the 500,000 cap. Billed to the owner's ChatGPT plan by owner
+  decision (decision record on queue row `qitem-20261015224601-10ad09bd`).
 
 ## 1. Setup
 
 - **Seat:** `labcodex.subject` (session `labcodex-subject@contexto`), worktree
-  `contexto-worktrees/lab-codex`, `gpt-6-astra`, owner's ChatGPT login (owner decision). No proxy.
+  `contexto-worktrees/lab-codex`, `gpt-6-astra`, owner's ChatGPT login (owner decision recorded on
+  queue row `qitem-20261015224601-10ad09bd`). No proxy.
   No configuration, model, or auth was changed.
 - **Rollout location:** found through the file the seat's Codex process holds open
   (`lsof -p <pid>`), under `~/.codex/sessions/2026/10/15/` [measured]. `session_meta` reports
   `model_provider: openai`, `cli_version: 0.154.0`, `history_mode: paginated` [measured].
 - **Turns sent** (with `rig send`, one at a time):
-  - Turn 1 existed before this packet (one shell task, 2 requests). It is reported for context but
-    excluded from spend.
+  - Turn 1 existed before this packet: one shell task, 2 requests, 58,985 tokens, at 23:08:59Z,
+    shortly after the seat was recreated. builder-2 did not send it, and its sender and budget are
+    not recorded in this packet (open question for manager-1). It is reported for context but
+    excluded from this packet's spend.
   - Turns 2 to 5: "Run exactly this one shell command ... `seq -f 'row %g alpha beta gamma delta
     epsilon' <a> <b> | tee scratch/l1d/t<n>.txt`. Then reply with only the word DONE." Each writes
     and prints 300 synthetic lines in the seat's own scratch directory.
@@ -63,16 +68,17 @@ A parallel `token_usage_record` per request carries `usage`, `turn_token_usage`,
 | Lane schema field | Source in the rollout |
 |---|---|
 | `turn` | count of `event_msg` `task_started` |
-| `input_tokens` | `input_tokens - cached_input_tokens - cache_write_input_tokens` (uncached input, Anthropic semantics) |
-| `cache_creation_input_tokens` | `cache_write_input_tokens` (reported, 0 on every request here) |
+| `input_tokens` | `input_tokens - cached_input_tokens`: input not read from cache; it may include tokens that were written to the cache |
+| `cache_creation_input_tokens` | empty. Codex fills `cache_write_input_tokens` with 0 when the server omits `input_tokens_details.cache_write_tokens` (`#[serde(default)]`, `codex-rs/protocol/src/protocol.rs:2216`, `codex-api/src/sse/responses.rs:156-160`), so a rollout 0 cannot be told apart from "not reported" |
 | `cache_read_input_tokens` | `cached_input_tokens` |
 | `output_tokens` | `output_tokens` (includes `reasoning_output_tokens`) |
 | `request_bytes` | empty: not observable without a proxy |
-| `message_count` | `response_item` records written before the request (messages, tool calls, tool outputs, reasoning) |
+| `message_count` | `response_item` records in history when the request was sent: every recorded item minus the response's own output items (reasoning, tool calls, assistant messages), reset to the `replacement_history` length at a compaction. It excludes base instructions and tool definitions, which are not `response_item`s, so it is a count of conversation items, not of every input item on the wire |
 | `cli`, `model`, `ts` | `codex`, `turn_context.model`, timestamp of the `token_count` record |
 
 Extra raw columns: `codex_input_tokens` (Codex `input_tokens`, which includes cached tokens),
-`reasoning_output_tokens`, `total_tokens` (input plus output: the context in use after the
+`codex_cache_write_raw` (the raw, serde-defaulted value; 0 on every request here, meaning either no
+writes or not reported), `reasoning_output_tokens`, `total_tokens` (input plus output: the context in use after the
 response), `model_context_window`, `compactions_so_far`.
 
 The OpenAI `cached_tokens` count is a subset of `input_tokens`, unlike Anthropic where cache fields
@@ -85,18 +91,20 @@ that reading.
 Per turn [measured: `codex_usage.py <rollout> --per-turn`, committed as
 `M0-codex-measurements-turns.csv`]:
 
-| Turn | Requests | Input (raw) | Cache read | Output | Context after turn | Growth | Items before last request |
+| Turn | Requests | Input (raw) | Cache read | Output | Context after turn | Growth | `message_count`, last request |
 |---|---|---|---|---|---|---|---|
-| 1 (pre-existing) | 2 | 58,743 | 33,024 | 242 | 32,331 | n/a | 8 |
+| 1 (pre-existing) | 2 | 58,743 | 33,024 | 242 | 32,331 | n/a | 9 |
 | 2 | 2 | 67,762 | 64,384 | 88 | 35,306 | +2,975 | 14 |
 | 3 | 2 | 73,704 | 70,272 | 94 | 38,281 | +2,975 | 19 |
 | 4 | 2 | 79,652 | 76,416 | 94 | 41,254 | +2,973 | 24 |
 | 5 | 2 | 85,801 | 82,304 | 95 | 44,429 | +3,175 | 29 |
-| 6 (no tools) | 1 | 44,544 | 44,288 | 8 | 44,552 | +123 | 30 |
+| 6 (no tools) | 1 | 44,544 | 44,288 | 8 | 44,552 | +123 | 31 |
 
 Per request: `M0-codex-measurements-requests.csv` (11 rows). Within a tool turn the first request
 reads almost everything from cache (for example turn 2: 32,128 of 32,461) and the second request
-pays for the new tool output uncached (turn 2: 3,045 uncached of 35,301) [measured].
+pays for the new tool output uncached (turn 2: 3,045 uncached of 35,301) [measured]. Whether those
+uncached tokens were also written to the cache, and billed as writes, is not recorded (see
+`cache_creation_input_tokens` above); a cost model should treat cache writes as unknown here.
 
 Reasoning tokens: 21 on one request in turn 1, 0 elsewhere [measured]. `model_context_window` is
 258,400 on every request, which is 95% of the model's 272,000 window, matching Codex's default
@@ -104,17 +112,23 @@ Reasoning tokens: 21 on one request in turn 1, 0 elsewhere [measured]. `model_co
 
 ## 4. Question 1: does each turn resend the full history?
 
-- **Billing view [measured]:** yes. Each request's reported `input_tokens` equals the previous
-  request's context plus the items added since (for example 35,301 then 35,428 then 38,276), so
-  the server processes the whole conversation every request. Prompt caching makes most of it cache
+- **Billing view [measured]:** yes. Each request's reported `input_tokens` is consistent with the
+  previous request's context plus the items added since (for example 35,301 then 35,428 then
+  38,276); the rollout gives no independent token count for the added items, so "equal" would be
+  inferred. The server processes the whole conversation every request. Prompt caching makes most of it cache
   reads (96% across turns 2 to 6).
-- **Wire view [inferred]:** the built-in `openai` provider prefers the WebSocket transport, which
-  sends `previous_response_id` and only the new items when the input strictly extends the previous
-  request [documented: `codex-rs/core/src/client.rs:300-370, 1331-1410`]. Over HTTP it sends the full
-  input with `store:false` (measured against a local stub in M0-interception.md section 4). The seat
-  process held three TLS connections to a Cloudflare address on port 443 during the run [measured:
-  `lsof -i`], which does not distinguish the two. Either way, the server-side context and the billed
-  input grow with history.
+- **Wire view, WebSocket [measured by L1-a, builder-1: one throwaway Codex probe through the
+  pass-through proxy's WebSocket tunnel; to be published in `docs/research/M0-proxy-measurements.md`,
+  doc pending]:** Codex uses a WebSocket with permessage-deflate, and its second request carried
+  `previous_response_id` with only 5 items (33 KB) instead of the full history. So on WebSocket the
+  wire carries deltas against server-side state, while `token_count` still bills the full
+  conversation per request (above). This matches the source [documented:
+  `codex-rs/core/src/client.rs:300-370, 1331-1410`].
+- **Wire view, HTTP [measured in M0-interception.md section 4]:** when WebSocket is refused, Codex
+  sends the full input over HTTP with `store:false` and no `previous_response_id`.
+- **This seat:** it held three TLS connections to a Cloudflare address on port 443 during the run
+  [measured: `lsof -i`], which does not show which mode it used. Either way, the server-side context
+  and the billed input grow with history.
 - **For the design [inferred]:** usage grows with history and is billed per request, so a session
   with many tool calls pays roughly two full-context reads per turn. Keeping working context small
   lowers both quality risk and cost; cache reads soften the cost, not the context size.
@@ -132,7 +146,7 @@ Reasoning tokens: 21 on one request in turn 1, 0 elsewhere [measured]. `model_co
 - **What the rollout records when it compacts [documented: `codex-rs/history/src/rollout_payload.rs:155-180`]:**
   a `compacted` record with `message`, `replacement_history`, `window_number`, `first_window_id`,
   `previous_window_id`, `window_id`, `compaction_response_id`, `latest_token_usage_record`,
-  `retained_context`, `guardian_history`. With the built-in provider the summary is remote and
+  `retained_context`, `guardian_history`, `replacement_history_metadata`. With the built-in provider the summary is remote and
   opaque (`encrypted_content`). Not observed on this seat, by design.
 - **Per-process override:** `-c model_auto_compact_token_limit=<n>` at launch can only lower the
   trigger [documented]. The seat was already running, its config was not edited, and the owner
@@ -178,8 +192,10 @@ whose experiments used 0 model tokens).
 
 ## 9. Open questions
 
-- Transport on the seat (WebSocket deltas or HTTP full input) needs a proxy or transport logging to
-  settle.
+- Which transport this seat used (L1-a measured WebSocket deltas on a throwaway probe; the seat's
+  own mode was not observed).
+- Whether Codex requests incur cache writes: the rollout cannot distinguish 0 from "not reported".
+- Who sent turn 1 and under which budget.
 - The fidelity probe set and the full-context baseline (builder-4) are pending.
 - Turn shapes with large tool outputs, file reads, or reasoning-heavy work would grow faster; this
   run measured one small, uniform shape.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-request usage summary from a Codex rollout file (codex-cli 0.154.0).
 
-Usage: codex_usage.py <rollout.jsonl> [--summary]
+Usage: codex_usage.py <rollout.jsonl> [--summary | --per-turn]
 
 Reads only usage numbers, record types, and counts; never prints prompts, outputs,
 or tool output. Emits CSV with the fields builder-1's proxy uses for the lane 2 cost
@@ -11,13 +11,18 @@ model, plus raw Codex columns:
   request                      1-based index of event_msg token_count (one per model response)
   ts                           timestamp of the token_count record
   cli, model                   "codex", model from the latest turn_context
-  input_tokens                 uncached input = codex input - cached - cache_write
-  cache_creation_input_tokens  codex cache_write_input_tokens
+  input_tokens                 codex input - cached; may include tokens written to the cache
+  cache_creation_input_tokens  empty: Codex serde-defaults cache_write_input_tokens to 0 when the
+                               server omits it, so a rollout 0 is not a measured zero
   cache_read_input_tokens      codex cached_input_tokens
   output_tokens                codex output_tokens (includes reasoning)
   request_bytes                empty: not observable from the rollout
-  message_count                response_item records written before this response's items
-  codex_input_tokens           raw input_tokens (includes cached and cache_write)
+  message_count                response_item records in history when the request was sent: all
+                               recorded items minus this response's own output items (reset to
+                               the replacement_history length at a compaction). Excludes base
+                               instructions and tool definitions, which are not response_items.
+  codex_input_tokens           raw input_tokens (includes cached)
+  codex_cache_write_raw        raw cache_write_input_tokens (0 may mean "not reported")
   reasoning_output_tokens      raw reasoning_output_tokens
   total_tokens                 raw total_tokens (input + output) = context in use after the response
   model_context_window         as reported in the token_count event
@@ -34,15 +39,25 @@ import sys
 
 FIELDS = ["turn", "request", "ts", "cli", "model", "input_tokens", "cache_creation_input_tokens",
           "cache_read_input_tokens", "output_tokens", "request_bytes", "message_count",
-          "codex_input_tokens", "reasoning_output_tokens", "total_tokens", "model_context_window",
-          "compactions_so_far"]
+          "codex_input_tokens", "codex_cache_write_raw", "reasoning_output_tokens", "total_tokens",
+          "model_context_window", "compactions_so_far"]
+
+# Item types the model produces in a response; everything else in history is request input.
+OUTPUT_ITEM_TYPES = {"reasoning", "function_call", "custom_tool_call", "local_shell_call",
+                     "web_search_call", "image_generation_call", "tool_search_call"}
+
+
+def is_output_item(item):
+    if item.get("type") == "message":
+        return item.get("role") == "assistant"
+    return item.get("type") in OUTPUT_ITEM_TYPES
 
 
 def rows(path):
     turn = request = compactions = 0
     model = None
-    items_before = 0  # response_item records before the current response started
-    items_seen = 0
+    items_total = 0  # response_item records currently in history
+    outputs_since = 0  # output items recorded since the previous token_count
     with open(path) as f:
         for line in f:
             try:
@@ -56,12 +71,13 @@ def rows(path):
                 model = p.get("model") or model
             elif t == "compacted":
                 compactions += 1
-                items_seen = items_before = len(p.get("replacement_history") or [])
+                items_total = len(p.get("replacement_history") or [])
+                outputs_since = 0
             elif t == "response_item":
-                items_seen += 1
+                items_total += 1
+                outputs_since += is_output_item(p)
             elif t == "event_msg" and sub == "task_started":
                 turn += 1
-                items_before = items_seen
             elif t == "event_msg" and sub == "token_count":
                 info = p.get("info") or {}
                 last = info.get("last_token_usage")
@@ -70,20 +86,19 @@ def rows(path):
                 request += 1
                 raw_in = last.get("input_tokens", 0)
                 cached = last.get("cached_input_tokens", 0)
-                write = last.get("cache_write_input_tokens", 0)
                 yield {
                     "turn": turn, "request": request, "ts": o.get("timestamp"), "cli": "codex",
-                    "model": model, "input_tokens": raw_in - cached - write,
-                    "cache_creation_input_tokens": write, "cache_read_input_tokens": cached,
+                    "model": model, "input_tokens": raw_in - cached,
+                    "cache_creation_input_tokens": "", "cache_read_input_tokens": cached,
                     "output_tokens": last.get("output_tokens", 0), "request_bytes": "",
-                    "message_count": items_before, "codex_input_tokens": raw_in,
+                    "message_count": items_total - outputs_since, "codex_input_tokens": raw_in,
+                    "codex_cache_write_raw": last.get("cache_write_input_tokens", 0),
                     "reasoning_output_tokens": last.get("reasoning_output_tokens", 0),
                     "total_tokens": last.get("total_tokens", 0),
                     "model_context_window": info.get("model_context_window"),
                     "compactions_so_far": compactions,
                 }
-                # Items written after this response belong to the next request's input.
-                items_before = items_seen
+                outputs_since = 0
 
 
 def summary(path):
