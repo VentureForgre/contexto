@@ -6,6 +6,7 @@ import pytest
 
 from contexto.model import (
     GENESIS_PREV,
+    KINDS,
     Record,
     Source,
     ValidationError,
@@ -74,6 +75,7 @@ def test_id_ignores_absent_optional_spelling():
     explicit_nulls = copy.deepcopy(GOLDEN_DRAFT)
     explicit_nulls["provenance"][1].update({"sha256": None, "span": None})
     explicit_nulls["owner"] = None
+    explicit_nulls["target"] = None
     assert compute_id(explicit_nulls) == GOLDEN_ID
 
 
@@ -93,13 +95,18 @@ def test_id_ignores_id_and_prev():
         ("topic", "other"),
         ("body", "Ledger is append-only JSONL. Cafe ✓"),
         ("supersedes", ["rec_000000000000000000000002"]),
-        ("target", "rec_000000000000000000000003"),
-        ("owner", "someone"),
         ("provenance", [{"type": "url", "locator": "https://example.com/spec"}]),
     ],
 )
 def test_changing_hashed_field_changes_id(field, value):
     assert compute_id(dict(GOLDEN_DRAFT, **{field: value})) != GOLDEN_ID
+
+
+def test_changing_target_or_owner_changes_id():
+    closure = dict(MINIMAL_DRAFT, kind="closure", target="rec_" + "c" * 24)
+    assert compute_id(closure) != compute_id(dict(closure, target="rec_" + "d" * 24))
+    obligation = dict(MINIMAL_DRAFT, kind="obligation", owner="build.builder-1")
+    assert compute_id(obligation) != compute_id(dict(obligation, owner="build.builder-2"))
 
 
 @pytest.mark.parametrize("key, value", [("type", "url"), ("locator", "x"), ("sha256", "b" * 64), ("span", "L1")])
@@ -225,6 +232,22 @@ INVALID = [
 def test_validation_errors(bad):
     with pytest.raises(ValidationError):
         Record.from_dict(bad)
+
+
+# Each draft carries the fields its kind requires, so the only defect is the forbidden field.
+REQUIRED_BY_KIND = {"closure": {"target": "rec_" + "c" * 24}, "obligation": {"owner": "o"}}
+
+
+@pytest.mark.parametrize(
+    "field, value, kind",
+    [("target", "rec_" + "d" * 24, kind) for kind in KINDS if kind != "closure"]
+    + [("owner", "someone", kind) for kind in KINDS if kind != "obligation"],
+)
+def test_target_and_owner_rejected_on_other_kinds(field, value, kind):
+    draft = dict(MINIMAL_DRAFT, kind=kind, **REQUIRED_BY_KIND.get(kind, {}))
+    draft[field] = value
+    with pytest.raises(ValidationError, match=f"{field} is only allowed on"):
+        Record.from_dict(full_dict(draft))
 
 
 def test_valid_file_and_verified_records_accepted():

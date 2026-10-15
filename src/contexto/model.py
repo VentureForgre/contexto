@@ -207,8 +207,12 @@ def _validate(r: Record) -> None:
             raise ValidationError(f"{name} must be a string")
     if r.kind == "closure" and not r.target:
         raise ValidationError("closure record requires a target")
+    if r.kind != "closure" and r.target is not None:
+        raise ValidationError(f"target is only allowed on closure records, not {r.kind!r}")
     if r.kind == "obligation" and not r.owner:
         raise ValidationError("obligation record requires an owner")
+    if r.kind != "obligation" and r.owner is not None:
+        raise ValidationError(f"owner is only allowed on obligation records, not {r.kind!r}")
 
 
 def _validate_created_at(value: Any) -> None:
