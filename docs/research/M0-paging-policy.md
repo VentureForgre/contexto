@@ -267,7 +267,8 @@ tool output: [paged pg_<16 hex> | tool_result of <tool>(<canonical input JSON>) 
   3. Fidelity now depends on the model recalling when it needs to. Phase 2 probes must include
      answers that sit only in a stubbed result.
 
-**Conformance tool-loop case** [measured, 2026-10-15, `probe.py --only toolloop`, 7,002 tokens]:
+**Conformance tool-loop case: inconclusive on this route** [measured, 2026-10-15, `probe.py --only
+toolloop`, 7,002 tokens]:
 - Setup: `claude-haiku-5-5`, adaptive thinking at effort `max`, `prefix_mismatch_behavior: "error"`.
   The task forces reasoning before each tool call.
 - Steps:
@@ -275,11 +276,12 @@ tool output: [paged pg_<16 hex> | tool_result of <tool>(<canonical input JSON>) 
   - The result went back as a two-page stub (first send): 200.
   - The model reasoned to the right page and called `recall`.
   - The page was appended with all thinking kept: 200, correct answer.
-- So stub-first-send plus an appended recall exchange passes the prefix check: no 400.
-- **Caveat.** Through this route, every replayed thinking block was dropped with
-  `end_user_binding_mismatch`, on pure appends as well (section 7). The case therefore cannot show
-  that a byte-changed stub would fail: the variant returned 200 because the affected block was
-  already dropped. Byte identity stays a requirement from the vendor rule, untested here.
+- **Why it is inconclusive.** Through this route, every replayed thinking block was dropped with
+  `end_user_binding_mismatch`, on pure appends as well (section 7). So the prefix check may never
+  have seen the kept thinking, and the 200s do not show that it passed.
+  - The byte-changed variant also returned 200, for the same reason.
+  - Validity rests on the vendor rule and reviewer-2's reading. It needs a rerun on a route whose
+    identity is stable.
 
 **Does it remove the two-Read problem?** Partly [inferred].
 - Per-turn growth from tool output becomes about the stub size (around 500 tokens per oversized
@@ -397,11 +399,11 @@ accessed 2026-10-15]:
 | append only | 200 |
 | strip all thinking | 200 |
 | drop oldest turns, keep later thinking, no beta header | 200, nothing reported |
-| same, with `error` | 200, but the kept block was dropped (`thinking_dropped`, reason `end_user_binding_mismatch`) |
+| same, with `error` | 200, but the kept block was dropped (`thinking_dropped`, reason `end_user_binding_mismatch`); route-specific, see below |
 | change `system`, keep thinking, `error` | **400** "Invalid `signature` in `thinking` block. The block is bound to a different conversation." |
 | add a text block to an earlier user turn, keep thinking, `error` | **400** (same message) |
 | full epoch rewrite (drop oldest, new `system`, page index text) with all thinking stripped, `error` | 200 |
-| drop oldest with `drop_block` | 200, block dropped (`end_user_binding_mismatch`) |
+| drop oldest with `drop_block` | 200, block dropped (`end_user_binding_mismatch`); route-specific |
 | server-side `clear_thinking_20251015` | 200 |
 
 What the probe shows:
@@ -416,11 +418,16 @@ What the probe shows:
   - with a fixed `metadata.user_id`.
   The reason is not on the vendor page, and the cause is unknown. Lane 1 is checking what the rig
   proxy does to identity [inferred].
-- So the "drop oldest" rows above show the route's binding drop, not the prefix rule. The two 400s
-  (changed `system`, text added to an earlier user turn) remain direct evidence of the prefix check.
+- So the "drop oldest" rows above, and any reading that dropping the oldest turns is "tolerated",
+  apply to this route only. They show the route's binding drop, not the prefix rule.
+- **Only the two 400s are route-independent evidence** of the prefix check: changed `system`, and
+  text added to an earlier user turn. The 200s for append-only, strip-all and the epoch rewrite
+  show those requests are accepted, nothing more.
 - **Earlier thinking never reached the model on this route.** Thinking replayed through the rig
-  proxy was likely not seen in any of our requests. That makes the L2e preserved-versus-stripped
-  comparison inconclusive (quality-vs-context doc).
+  proxy was likely not seen in any of our requests.
+- **Preserved versus stripped thinking stays inconclusive until a route with stable identity
+  exists.** That covers the L2e comparison (quality-vs-context doc) and strategy A's measured
+  accuracy cost. Lane 1 is testing the identity hypothesis black-box.
 
 **The four strategies compared:**
 
