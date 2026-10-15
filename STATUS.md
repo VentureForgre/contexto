@@ -32,10 +32,10 @@ are until decision O1.
 
 - Lane 1 (manager-1): `docs/research/` interception findings and measuring-proxy data.
 - Lane 2 (manager-2): `docs/research/` policy, cost model, fidelity test design and baseline.
-- Release automation REL-1 (manager-2): CI and release workflows, no real release until the owner
-  agrees.
+- Release automation REL-1 (manager-2): CI and release workflows; no real release until
+  decision O5.
 - Intake: M0 recommendation (docs/research), then phase 2 plan. Q5 settled for development by D12.
-- Parked on gate qitem-20261015222349-14b703cb until the owner decides M1: M1 lane rows, PRs #2,
+- Parked on gate qitem-20261015222349-14b703cb until intake decides O1: M1 lane rows, PRs #2,
   #3, #4, and their review rows.
 
 ## Test seats
@@ -46,8 +46,8 @@ are until decision O1.
 
 ## Known issues
 
-- Only intake runs in the main checkout; the other eight seats run in their own worktrees under
-  `contexto-worktrees/` (pane paths checked 2026-10-15 22:22Z). Never switch branches in the main
+- Only intake runs in the main checkout; the other ten seats (eight team seats and two lab
+  subjects) run in their own worktrees under `contexto-worktrees/`. Never switch branches in the main
   checkout.
 - PR approvals are not required by GitHub because every seat uses one GitHub account. Exact-head
   review by a reviewer seat is a team rule.
