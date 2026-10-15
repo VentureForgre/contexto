@@ -48,6 +48,7 @@ class Settings:
     window_low: int = 12_000  # tokens; after paging, the window is at most this
     pinned_budget: int = 2_000  # tokens for the pinned block
     tool_output_page_over: int = 1_500  # tokens; larger tool_result content is paged
+    headroom: int = 3_000  # tokens reserved at each turn boundary for the coming turn (synthetic p99 is ~2.7k)
     headline_chars: int = 40
 
 
@@ -235,14 +236,21 @@ def turn_tokens(session: Session, turn: int) -> int:
 def advance_window(session: Session, upto_turn: int, state: WindowState, settings: Settings) -> int:
     """Return the first window turn for a request covering turns [0, upto_turn).
 
-    When the window exceeds window_high, drop whole turns from its start until it is at most
-    window_low. The newest turn is always kept, even if it alone exceeds the bound.
+    The epoch decision is taken at the turn boundary, before the current turn (upto_turn - 1)
+    starts: if the completed turns in the window plus ``headroom`` would exceed window_high, drop
+    whole completed turns from the start until they are at most min(window_low, window_high -
+    headroom), so a coming turn up to the headroom still fits. Nothing is ever paged
+    inside the current turn; a turn larger than the headroom can push one request over the bound,
+    which ``over_bound`` reports.
     """
-    sizes = [turn_tokens(session, t) for t in range(state.first_turn, upto_turn)]
-    if sum(sizes) > settings.window_high:
+    current = upto_turn - 1
+    sizes = [turn_tokens(session, t) for t in range(state.first_turn, current)]
+    if sum(sizes) + settings.headroom > settings.window_high:
         total = sum(sizes)
         first = state.first_turn
-        while total > settings.window_low and first < upto_turn - 1:
+        # Page down far enough that the coming turn, up to the headroom, still fits under the bound.
+        target = min(settings.window_low, settings.window_high - settings.headroom)
+        while total > target and first < current:
             total -= sizes[first - state.first_turn]
             first += 1
         if first != state.first_turn:
@@ -448,3 +456,9 @@ def pinned_claim_errors(session: Session, request: Request) -> list[str]:
     if listed != truth:
         errors.append(f"as of turn {as_of}: listed {sorted(listed)} but open {sorted(truth)}")
     return errors
+
+
+def over_bound(session: Session, request: Request, upto_turn: int, settings: Settings) -> bool:
+    """True when the request's raw window (completed turns plus the current turn) exceeds window_high."""
+    size = sum(turn_tokens(session, t) for t in range(request.window_first_turn, upto_turn))
+    return size > settings.window_high

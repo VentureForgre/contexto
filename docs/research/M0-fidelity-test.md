@@ -173,12 +173,16 @@ which hid a false pinned header (review finding B2).
 Token figures are estimates (characters / 4). The live runs showed this undercounts numeric log
 text by about 2.2x, so read them as relative sizes.
 
-| Condition | Final request (est. tokens) | Cumulative over session (est.) | Window moves | Edit points | Recalls (final) | Score, final | Score, 4 points | early | detail | decision | obligation | recent |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| full | 195,601 | 22,720,319 | 0 | 0 | 0 | 24/24 | 84/84 | 5/5 | 6/6 | 4/4 | 8/8 | 1/1 |
-| window | 20,451 | 3,898,078 | 13 | 13 | 0 | 2/24 | 7/84 | 0/5 | 0/6 | 1/4 | 0/8 | 1/1 |
-| pinned | 20,670 | 3,945,818 | 13 | 13 | 0 | 18/24 | 66/84 | 5/5 | 0/6 | 4/4 | 8/8 | 1/1 |
-| pinned_recall | 22,010 | 4,117,517 | 13 | 13 | 14 | 24/24 | 84/84 | 5/5 | 6/6 | 4/4 | 8/8 | 1/1 |
+| Condition | Final request (est. tokens) | Cumulative over session (est.) | Window moves | Edit points | Over bound | Recalls (final) | Score, final | Score, 4 points | early | detail | decision | obligation | recent |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| full | 195,601 | 22,720,319 | 0 | 0 | 0 | 0 | 24/24 | 84/84 | 5/5 | 6/6 | 4/4 | 8/8 | 1/1 |
+| window | 20,451 | 3,801,404 | 17 | 17 | 0 | 0 | 2/24 | 9/84 | 0/5 | 0/6 | 1/4 | 0/8 | 1/1 |
+| pinned | 20,670 | 3,848,639 | 17 | 17 | 0 | 0 | 18/24 | 66/84 | 5/5 | 0/6 | 4/4 | 8/8 | 1/1 |
+| pinned_recall | 22,010 | 3,925,976 | 17 | 17 | 0 | 14 | 24/24 | 84/84 | 5/5 | 6/6 | 4/4 | 8/8 | 1/1 |
+
+Settings: window high 24,000 and low 12,000, a 3,000-token headroom, epochs at turn boundaries
+only. "Over bound" counts requests whose window exceeded `window_high`; the full condition is not
+bounded.
 
 The category columns are for the final point.
 
@@ -195,8 +199,8 @@ What this shows, and what it does not:
     works on real sessions, only that the policy code does what it specifies.
 - A bounded window without either loses almost everything older than the window [measured,
   simulated].
-- The bounded conditions cut cumulative input by about 5.5x to 5.8x over 242 turns. The window start moved
-  13 times, so with prompt caching the prefix would be rebuilt about 13 times rather than on every
+- The bounded conditions cut cumulative input by about 5.8x to 6.0x over 242 turns. The window start moved
+  17 times, so with prompt caching the prefix would be rebuilt about 17 times rather than on every
   turn [measured, simulated]. Lane 2's cost model (packet L2a) owns the priced comparison.
 - The reader is a deterministic upper bound. It finds values by exact phrasing, resolves conflicts
   by turn order, and recalls a page when the probe's hint word appears in its stub. A model may

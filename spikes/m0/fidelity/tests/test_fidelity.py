@@ -118,19 +118,30 @@ def test_unanswered_probe_is_wrong():
 # Policy
 
 
-def test_window_respects_bound_and_moves_only_when_exceeded(session):
-    settings = Settings(window_high=6_000, window_low=3_000)
+def test_epochs_happen_at_turn_boundaries_with_headroom(session):
+    biggest = max(turn_tokens(session, t) for t in range(session.turns))
+    settings = Settings(window_high=6_000, window_low=3_000, headroom=biggest)
     state = WindowState()
     previous = 0
     for upto in range(1, session.turns + 1):
-        before = sum(turn_tokens(session, t) for t in range(state.first_turn, upto))
+        completed = sum(turn_tokens(session, t) for t in range(state.first_turn, upto - 1))
         first = advance_window(session, upto, state, settings)
-        assert first >= previous
+        assert first >= previous and first <= upto - 1  # the current turn is never paged
         if first != previous:
-            assert before > settings.window_high
-        size = sum(turn_tokens(session, t) for t in range(first, upto))
-        assert size <= settings.window_high or upto - first == 1
+            assert completed + settings.headroom > settings.window_high
+            target = min(settings.window_low, settings.window_high - settings.headroom)
+            assert sum(turn_tokens(session, t) for t in range(first, upto - 1)) <= target
+        # With headroom covering the largest turn, no request's window goes over the bound.
+        assert sum(turn_tokens(session, t) for t in range(first, upto)) <= settings.window_high
         previous = first
+
+
+def test_a_turn_larger_than_the_headroom_is_reported_over_bound(session):
+    settings = Settings(window_high=6_000, window_low=3_000, headroom=0)
+    result = run_condition(session, "window", settings)
+    assert result.over_bound > 0
+    covered = Settings(window_high=6_000, window_low=3_000, headroom=max(turn_tokens(session, t) for t in range(session.turns)))
+    assert run_condition(session, "window", covered).over_bound == 0
 
 
 @pytest.mark.parametrize("condition", CONDITIONS)

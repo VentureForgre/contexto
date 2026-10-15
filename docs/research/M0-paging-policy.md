@@ -2,7 +2,7 @@
 
 Status: phase 1 design for M0 question 4 and H5 (lane 2, packet L2b). Nothing here rewrites
 requests yet; phase 2 builds it after the owner decides question 5. Author: build.builder-4.
-Date: 2026-10-15, revised the same day for review findings B1 to B3. Brief:
+Date: 2026-10-15, revised the same day for review findings B1 to B4. Brief:
 `docs/milestones/M0-infinite-session-study.md`. Executable form of this policy, used by the
 fidelity simulation: `spikes/m0/fidelity/policy.py`. Test design and results:
 `docs/research/M0-fidelity-test.md`. Quality-versus-size probe: `docs/research/M0-quality-vs-context.md`.
@@ -46,10 +46,12 @@ stable quality stays, and only then by token cost [inferred, pending L2d and pha
   - The stable head holds the system prompt, the tools, and a pinned state block.
   - The stubs carry keyed, content-addressed ids.
 - **Epochs.** Every rewrite of earlier content happens at an **epoch**, when the window start moves.
-  Between epochs each request only appends to the previous one.
+  Epochs happen only at turn boundaries, never inside a turn. Between epochs each request only
+  appends to the previous one.
   - At an epoch, the proxy strips all earlier thinking blocks. That is the edit the vendor allows
     when history changes (section 7).
-  - In the simulation, edit points equal window moves: 13 in 242 turns [measured, simulated].
+  - In the simulation, edit points equal window moves: 17 in 242 turns, with no request over the
+    bound [measured, simulated].
 - **Paging.** Paging is turn-granular, so a `tool_use` and its `tool_result` are never split.
 - **Recall.** A model fetches a page back verbatim, by id, with a `recall` tool that the proxy
   answers itself. There are no embeddings and no similarity search.
@@ -122,10 +124,18 @@ OMITTED: decision=0 fact=2        <- only when something was left out
 
 - **Turn units.** A turn starts at a user message that contains no `tool_result` block, and runs
   until the next such message. Only whole turns are paged.
-- **Hysteresis.** The window holds turns `[first, now)`. When its size exceeds `window_high`, the
-  proxy pages whole turns from its start until the size is at most `window_low`. Defaults: high
-  24,000 and low 12,000 tokens. These are placeholders: the bound should come from L2d's measured
-  quality-versus-size curve, well below any size where quality slips.
+- **Epochs only at turn boundaries, with headroom.** The window holds turns `[first, now)`. Before
+  a new turn starts, the proxy checks the completed turns in the window plus a headroom `H`.
+  - If that sum would exceed `window_high`, the proxy pages whole completed turns from the start
+    until they are at most `min(window_low, window_high - H)`. Any coming turn up to `H` tokens
+    therefore fits under the bound.
+  - Defaults: high 24,000, low 12,000, and `H` 3,000 tokens. In the synthetic session that `H`
+    covers every turn: p50 701, p90 1,859, p99 2,720, max 3,100 estimated tokens [measured,
+    simulated].
+  - For real sessions, `H` should cover the workload's p99 turn growth. PR #8 states that figure
+    from builder-3's profile and tool-heavy stress cases.
+  - The bound itself should come from L2d's measured quality-versus-size curve, well below any size
+    where quality slips.
 - **The epoch.** Each move of `first` is an epoch, and it is the only time earlier content changes.
   At an epoch the proxy:
   - drops the turns before `first`;
@@ -143,14 +153,33 @@ OMITTED: decision=0 fact=2        <- only when something was left out
     [vendor-documented].
   - The epoch's thinking strip coincides with that cache restart, so it adds no extra cache break
     [vendor-documented: "the edits that invalidate thinking are the edits that restart the cache"].
-- **The active turn.** A tool-heavy turn can grow past the bound by itself. When the current turn
-  would push the request over `window_high`, the proxy takes an **in-turn epoch**:
-  - it stubs the turn's earlier `tool_result` contents, keeping every `tool_use`/`tool_result` pair
-    and its id, and pages them;
-  - it strips all thinking, as at any epoch.
-  The turn's newest tool results stay verbatim. This matches PR #8's handling, agreed with
-  build.builder-3. It is designed but not simulated, because the simulation builds requests at turn
-  boundaries only [inferred].
+- **No client-side paging inside an active tool-use turn.**
+  - The rule [vendor-documented, https://platform.claude.com/docs/en/build-with-claude/thinking,
+    accessed 2026-10-15]: "within a tool-use turn, pass thinking blocks back", "complete and
+    unmodified". The preserved-thinking check also invalidates any thinking kept after an earlier
+    edit (section 7).
+  - So there is no valid client-side form of paging mid-turn. Stripping the turn's own thinking
+    breaks the first rule. Editing earlier content while keeping it breaks the second. Any variant
+    that keeps thinking across a prefix edit is **invalid**.
+  - The likely consequence of trying anyway is that "the API doesn't error" but may "disable
+    thinking", silently, for the rest of the turn [rule vendor-documented; consequence inferred].
+    The tool-loop case is **untested**: our conformance probe had no tool loop.
+  - An earlier version of this section proposed an "in-turn epoch" that did exactly this. It is
+    withdrawn.
+- **A turn that still crosses the bound.**
+  - First, the headroom rule makes this rare: a crossing needs a turn larger than `H`.
+  - **Fallback, labeled lossy:** server-side `clear_tool_uses_20250919` context editing. It is
+    vendor-documented, not compaction, and exempt from the prefix check because it edits the
+    server's copy [vendor-documented]. Its costs:
+    - it restarts the cache from the first cleared block;
+    - it is **lossy**: cleared results become placeholders with no id, and the proxy can bring them
+      back only by paging those outputs itself at the next epoch.
+    - It therefore fails the owner bar of accuracy equal to the full-context baseline, and is a
+      last resort, not part of the design.
+  - Otherwise the proxy lets the turn run over the bound and **reports it as over bound** in its
+    log. The simulation counts such requests; there were 0 with the defaults [measured,
+    simulated].
+  - This wording is shared with PR #8 (build.builder-3).
 
 ## 4. What gets paged, and the stub format
 
@@ -162,10 +191,11 @@ OMITTED: decision=0 fact=2        <- only when something was left out
   stay. Between epochs the set of stubbed outputs does not change.
 
 **Never paged**
-- The current turn's newest tool results.
+- Anything in the current turn.
 - The system prompt, the tool definitions, and the pinned block.
 
-The tests check that the current turn's tool outputs are never stubbed.
+The tests check that the current turn's tool outputs are never stubbed, and that epochs happen only
+at turn boundaries.
 
 **Page id**
 - `pg_` + the first 16 hex characters of HMAC-SHA256(store key, canonical JSON of the page payload).
@@ -302,14 +332,18 @@ What the probe shows:
 
 | Strategy | Valid? | Accuracy cost | Cache cost | Fits the owner principle? |
 |---|---|---|---|---|
-| A. Strip all thinking at each epoch; append-only between epochs | yes [vendor-documented; measured: epoch rewrite with strip returns 200] | the model loses earlier reasoning at each epoch. Vendor estimate: output tokens +2.5% (low effort) to +20.1% (max) when dropped once per session, +4.6% to +67.1% when dropped every turn; "wide error bars" [vendor-documented]. With epochs every ~19 turns the cost sits between those [inferred]. Facts and decisions in visible text are unaffected. | none beyond the epoch's own cache restart, which happens anyway [vendor-documented] | yes: bounded context, no compaction |
+| A. Strip all thinking at each epoch; append-only between epochs | yes [vendor-documented; measured: epoch rewrite with strip returns 200] | the model loses earlier reasoning at each epoch. Vendor estimate: output tokens +2.5% (low effort) to +20.1% (max) when dropped once per session, +4.6% to +67.1% when dropped every turn; "wide error bars" [vendor-documented]. With an epoch about every 14 turns in the simulation, the cost sits between those [inferred]. Facts and decisions in visible text are unaffected. | none beyond the epoch's own cache restart, which happens anyway [vendor-documented] | yes: bounded context, no compaction |
 | B. Server-side `context_management` (clear tool uses, clear thinking) | yes [vendor-documented; measured: `clear_thinking` 200] | none for what is kept, but the client must send the full, growing history. It cannot drop old turns, insert pinned state, or index pages | "clearing invalidates cached prompt prefixes" [vendor-documented] | no: working context is not bounded, so the CLI still reaches compaction |
 | C. Byte-for-byte reinsertion of all prior content | yes [vendor-documented] | none | none | no on its own: reinserting everything means never paging. It is the right rule for hidden recall exchanges within an epoch (section 6, item 4) |
 | D. Keep thinking-bearing turns in an untouched recent suffix, edit only before it | **no** [vendor-documented "client-side trimming" fails; measured: the kept block is dropped, or 400 under `error` for other prefix edits] | thinking is lost anyway, and new accounts get 400s | as A | no |
 
-**Choice: A**, combined with C for hidden recall exchanges, and with the in-turn epoch (section 3)
-for tool-heavy turns. A is the only strategy that keeps working context bounded and every request
-valid. Its cost:
+**Choice: A**, at turn boundaries only, combined with C for hidden recall exchanges.
+- A is the only strategy that keeps working context bounded and every request valid at turn
+  boundaries.
+- Inside an active tool-use turn no client-side strategy is valid (section 3). Tool-heavy turns are
+  handled by headroom, with a lossy server-side fallback that fails the owner bar.
+
+The cost of A:
 - earlier reasoning is lost at each epoch, never facts, decisions, or obligations;
 - some extra output tokens.
 
@@ -325,8 +359,8 @@ only the structural property that strategy A needs: earlier content changes only
 
 - **Turn-granular cuts.** Every `tool_result` sits in the same turn as the `tool_use` before it, so
   cutting between turns cannot split a pair.
-- **Stubs keep the block.** Paging a tool output, between turns or within an in-turn epoch, replaces
-  `content` only; the `type` and `tool_use_id` remain.
+- **Stubs keep the block.** Paging a tool output at an epoch replaces `content` only; the `type` and
+  `tool_use_id` remain. Nothing in the active turn is paged.
 - **Hidden recall pairs stay complete.** They exist only in hidden round trips, and are reinserted
   whole (section 6).
 - **Roles keep alternating.** The page index rides inside the window's first user message, so no
@@ -527,4 +561,6 @@ All pages without a visible date were accessed 2026-10-15.
 3. **Accuracy cost of strategy A.** The L2d strip-thinking arm measures it on the same probes.
 4. **Proxy details.** Streaming hold-back latency, mixed-call handling, and usage reporting per CLI
    (lane 1).
-5. **Index folding and in-turn epochs.** Designed but not simulated.
+5. **Index folding.** Designed but not simulated.
+6. **The tool-loop case.** A conformance case that strips or keeps thinking inside a real tool loop
+   would turn the inferred silent-disable consequence into a measurement. It is untested so far.

@@ -30,6 +30,7 @@ from fidelity.policy import (
     append_only,
     build_request,
     check_protocol,
+    over_bound,
     pinned_claim_errors,
 )
 from fidelity.scoring import Score, score
@@ -43,6 +44,7 @@ class ConditionResult:
     cumulative_tokens: int
     window_moves: int
     edit_points: int
+    over_bound: int
     recalls: int
     correct: int
     total: int
@@ -75,6 +77,7 @@ def run_condition(session: Session, condition: str, settings: Settings) -> Condi
     cumulative = 0
     moves = 0
     edits = 0
+    over = 0
     last_first = 0
     previous = None
     request = None
@@ -92,6 +95,8 @@ def run_condition(session: Session, condition: str, settings: Settings) -> Condi
             last_first = request.window_first_turn
         if previous is not None and not append_only(previous, request):
             edits += 1
+        if condition != "full" and over_bound(session, request, upto, settings):
+            over += 1
         previous = request
         if upto in points:
             probes, older = probes_at(session, upto)
@@ -111,6 +116,7 @@ def run_condition(session: Session, condition: str, settings: Settings) -> Condi
         cumulative_tokens=cumulative,
         window_moves=moves,
         edit_points=edits,
+        over_bound=over,
         recalls=final_recalls,
         correct=result.correct,
         total=result.total,
@@ -123,12 +129,12 @@ def run_condition(session: Session, condition: str, settings: Settings) -> Condi
 
 def table(results: list[ConditionResult]) -> str:
     categories = sorted({c for r in results for c in r.by_category})
-    head = ["condition", "final req tokens (est)", "cumulative tokens (est)", "window moves", "edit points",
+    head = ["condition", "final req tokens (est)", "cumulative tokens (est)", "window moves", "edit points", "over bound",
             "recalls", "score (final)", "score (4 points)"]
     head += categories
     rows = [head, ["---"] * len(head)]
     for r in results:
-        row = [r.condition, str(r.final_tokens), str(r.cumulative_tokens), str(r.window_moves), str(r.edit_points),
+        row = [r.condition, str(r.final_tokens), str(r.cumulative_tokens), str(r.window_moves), str(r.edit_points), str(r.over_bound),
                str(r.recalls), f"{r.correct}/{r.total}", f"{r.all_points_correct}/{r.all_points_total}"]
         row += [f"{r.by_category[c][0]}/{r.by_category[c][1]}" if c in r.by_category else "-" for c in categories]
         rows.append(row)
