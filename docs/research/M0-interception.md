@@ -710,11 +710,11 @@ harness: 206,547 + 232,154 + 228,620 = 667,321 tokens. No experiment called a mo
    rather than a choice: accounts created on or after 2026-08-31 get the prefix check by default.
    Lane 2's probe account dropped turns without error but rejected edits before signed thinking;
    the owner should confirm the account phase 2 would use behaves the same.
-8. **Attachment layer** (section 7). Not a free choice but a constraint the owner should know:
-   Claude Code in a git worktree also loads the main checkout's `.claude/settings.local.json`, so
-   Contexto has to attach through a flag-level `--settings` or a launcher wrapper rather than a
-   worktree settings file. Whether a launcher wrapper is acceptable for the owner's sessions is the
-   decision.
+8. **Attachment layer** (section 7). [intake decision, not a finding] Resolved by intake under D0,
+   see `docs/DECISIONS.md` D16 (pending on main): a launcher wrapper is acceptable and the preferred
+   phase 2 attachment layer (for example `contexto run claude ...` passing an explicit `--settings`
+   with the proxy base URL; `contexto run codex ...` using a temporary `CODEX_HOME` whose provider
+   uses `auth.command`), because it beats every settings file and never edits the user config.
 
 ## 11. Open questions
 
