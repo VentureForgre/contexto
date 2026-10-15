@@ -11,8 +11,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   The owner's one limit: nothing is published outside this repository (no PyPI, npm, Homebrew,
   public repos, or public posts). Intake added two limits of its own: the owner's personal Claude
   and Codex configuration is not changed, and heavy spend on the owner's ChatGPT plan waits for
-  the owner. D0 supersedes the owner gates written into earlier briefs, including the M0 brief's
-  Q5 gate (see D12).
+  the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
+  including the M0 brief's Q5 gate (see D12).
 
 ## Product direction
 
@@ -89,17 +89,21 @@ All open decisions are intake's to make under D0 unless marked otherwise.
 - **O2. History-edit strategy under preserved thinking.** Vendor-documented: on Fable 5.1, Opus 5.5,
   Sonnet 5.5, and Haiku 5.5, editing history before a thinking block invalidates it, and the API
   returns 400 by default only for accounts created on or after 2026-08-31. Measured by builder-4's
-  conformance probe (4,973 tokens, claude-haiku-5-5 and gpt-6-astra through the rig proxy):
+  conformance probe (4,973 tokens; claude-haiku-5-5 and gpt-6-astra, both through the owner's
+  proxy `cliproxy.sullylab.de`, D11; not yet reviewed; whether the probe set
+  `prefix_mismatch_behavior` is not stated in the handback):
   stripping all thinking at a rotation returns 200; changing system or editing an earlier user turn
   while keeping thinking returns 400; dropping the oldest turns while keeping thinking returns 200
   but the API drops the thinking, so an untouched recent suffix does not preserve it; this account
   does not enforce by default; on the OpenAI Responses API, editing or dropping a turn before an
   encrypted reasoning item returns 200, and whether the reasoning was used is not observable.
   Lean: strip all thinking at rotation, pending the strip-thinking arm's accuracy numbers.
-- **O3. Working-window bound.** Pending the quality-versus-context-size probe at about 57k, 98k, and
-  243k. Known so far: Claude Code's fixed head on `lab.subject` is about 46k (measured by lane 1,
-  not yet reviewed); Codex's was 32.3k (measured, PR #10 in review); lane 2's earlier 42k figure
-  was inferred.
+- **O3. Working-window bound.** Pending the quality-versus-context-size probe: on `lab.subject` at
+  about 93k, 150k, and 250k (two checkpoints if three exceed the budget gate), plus a direct-API
+  replay at 40k and about 93k with thinking preserved and stripped. Known so far, measured by lane
+  1 and not yet reviewed: `lab.subject`'s fixed head is 81,808 tokens, of which plain Claude Code is
+  45,925 and OpenRig seat context about 36k; Codex's head was 32.3k (PR #10 in review). Lane 2's
+  earlier 42k figure was inferred.
 - **O4. End-user authentication guidance.** API key only, or also subscription logins, for people
   who run Contexto themselves. Needs the terms question answered in the product docs. Owner
   decision, because it bears on what may be shared beyond this repository.
