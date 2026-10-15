@@ -639,6 +639,12 @@
     "100% (3 of 3, lab seat)",
     1.0
    ]
+  ],
+  "bound_seeds": 20,
+  "headroom_margins": [
+   0.0,
+   0.25,
+   0.5
   ]
  }
 }

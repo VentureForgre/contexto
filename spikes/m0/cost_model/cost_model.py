@@ -470,6 +470,9 @@ class CvmPolicy:
     tool_output_excerpt_tokens: int = 400
     bound_tokens: int | None = None  # hard working-context bound, enforced at turn boundaries
     headroom_tokens: int = 0  # free space kept under the bound at each turn start, for the coming turn
+    headroom_online: bool = False  # size headroom from turns seen so far instead of a fixed value
+    headroom_margin: float = 0.25  # online: headroom = running max of completed turn growth x (1 + margin)
+    headroom_floor_tokens: int = 25_000  # online: headroom before enough turns are seen, and its minimum
     bound_fallback: str = "none"  # "none": report requests over the bound; "clear": server-side tool-result clearing
     strip_output_overhead: float = 0.0  # extra output from stripping kept thinking (vendor: 4.6% to 67.1%)
     clear_keep: int = 3  # tool uses the server-side clearing fallback keeps (vendor default)
@@ -641,9 +644,15 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
     p.append(trace.head_tokens)
     layout(0)
     local = trace.head_tokens  # the CLI's own history, which the proxy never shrinks
+    seen_max = 0  # largest completed turn growth so far, for online headroom
     # With thinking kept in context, every strip makes the model re-derive what it dropped.
     has_thinking = any(r.thinking for tt in trace.turns for r in tt.reqs)
     out_mult = 1.0 + (policy.strip_output_overhead if has_thinking else 0.0)
+
+    def headroom() -> int:
+        if not policy.headroom_online:
+            return policy.headroom_tokens
+        return max(policy.headroom_floor_tokens, int(seen_max * (1 + policy.headroom_margin)))
 
     def cli_compact(t: int, b: Buckets, event: str) -> None:
         nonlocal stubs, window, window_think, since_rebase, local
@@ -681,13 +690,13 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
                 cause = "rebase_on_expiry"  # the prefix is lost anyway, so the rebase is nearly free
             elif cap is not None and projected > cap:
                 cause = "rebase_cap"
-            elif policy.bound_tokens is not None and p.total + policy.headroom_tokens > policy.bound_tokens:
+            elif policy.bound_tokens is not None and p.total + headroom() > policy.bound_tokens:
                 cause = "rebase_headroom"
             if cause:
                 budget = policy.window_tokens
                 if policy.bound_tokens is not None:
                     fixed = p.total - sum(window)
-                    budget = min(budget, max(0, policy.bound_tokens - policy.headroom_tokens - fixed))
+                    budget = min(budget, max(0, policy.bound_tokens - headroom() - fixed))
                 page_out(budget)
                 layout(t)
                 eng.pending_cause = "rebase"
@@ -752,6 +761,7 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
             cur += [added, req.kept]
             cur_think += [0, req.thinking]
         local += sum(r.added + r.kept for r in turn.reqs)
+        seen_max = max(seen_max, sum(cur))
         window.append(sum(cur))
         window_think.append(sum(cur_think))
         cur, cur_think = [], []
@@ -931,17 +941,25 @@ def turn_growth_p99(trace: Trace, page_over: int | None = None, excerpt: int = 4
 INGEST_PAGE_OVER = 8000  # tool results above this are paged at ingest, before their first send (inferred)
 
 
-def bounded_variants(policy: CvmPolicy, bound: int, trace: Trace) -> list[tuple[str, CvmPolicy | None, int]]:
-    """(label, policy, headroom) for (iii) under a bound: plain headroom, ingest paging, clearing fallback."""
+def bounded_variants(policy: CvmPolicy, bound: int, trace: Trace,
+                     margin: float = 0.25) -> list[tuple[str, CvmPolicy | None, int]]:
+    """(label, policy, headroom) for (iii) under a bound.
+
+    The oracle row sizes headroom from the whole trace's p99 turn growth, which a live proxy
+    cannot know, so it is an upper bound on what one can do. The online rows size headroom
+    from the largest completed turn so far plus ``margin``, starting from the floor.
+    """
     out = []
     h = turn_growth_p99(trace)
-    out.append(("headroom = p99 turn", policy_for_bound(policy, bound, trace.head_tokens, h), h))
-    hp = turn_growth_p99(trace, INGEST_PAGE_OVER, policy.tool_output_excerpt_tokens)
-    bp = policy_for_bound(policy, bound, trace.head_tokens, hp)
-    out.append((f"plus ingest paging over {_k(INGEST_PAGE_OVER)}",
-                replace(bp, page_tool_output_over=INGEST_PAGE_OVER) if bp else None, hp))
-    out.append((f"plus ingest paging and clear_tool_uses fallback (lossy)",
-                replace(bp, page_tool_output_over=INGEST_PAGE_OVER, bound_fallback="clear") if bp else None, hp))
+    out.append(("oracle p99 headroom (upper bound for a live proxy)", policy_for_bound(policy, bound, trace.head_tokens, h), h))
+    floor = policy.headroom_floor_tokens
+    op = policy_for_bound(policy, bound, trace.head_tokens, floor)
+    online = replace(op, headroom_online=True, headroom_margin=margin) if op else None
+    out.append((f"online headroom: running max + {margin:.0%}", online, floor))
+    paged = replace(online, page_tool_output_over=INGEST_PAGE_OVER) if online else None
+    out.append((f"online headroom plus ingest paging over {_k(INGEST_PAGE_OVER)}", paged, floor))
+    out.append(("online, ingest paging, and clear_tool_uses fallback (lossy)",
+                replace(paged, bound_fallback="clear") if paged else None, floor))
     return out
 
 
@@ -1309,11 +1327,12 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
                           run_plain(trace, focus, None, replace(comp, threshold=at))))
             cands.append((f"H4 rollover at {_k(at)}", run_plain(trace, focus, None, replace(roll, threshold=at))))
         cands.append(("H5 tool-result clearing, vendor defaults", run_plain(trace, focus, None, clear=ClearPolicy())))
-        for vlabel, vp, h in bounded_variants(policy, bound, trace)[:2]:
+        for vlabel, vp, h in bounded_variants(policy, bound, trace)[:3]:
             if vp:
                 r = run_cvm(trace, focus, None, vp)
-                bounded_results.setdefault(bound, (vp, r))
-                cands.append((f"(iii) cvm, {vlabel} ({_k(h)}), window {_k(vp.window_tokens)}", r))
+                if vp.headroom_online and not vp.page_tool_output_over:
+                    bounded_results[bound] = (vp, r)
+                cands.append((f"(iii) cvm, {vlabel}, window {_k(vp.window_tokens)}", r))
         bp = bool(bounded_results.get(bound))
         rows = []
         for label, r in cands:
@@ -1342,7 +1361,8 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
                               "bound. Rows are listed for reference, not ranked.")
         rank_blocks.append(f"Bound {_k(bound)}.{note}\n\n{table}")
     blocks["ranking"] = "\n\n".join(rank_blocks) + (
-        f"\n\nRanked by: within the bound, no lossy reset of any kind, smaller working context, then cost. Any "
+        f"\n\nSingle seed ({profile['seed']}); the seed sweep below gives over-bound counts across seeds. "
+        f"Ranked by: within the bound, no lossy reset of any kind, smaller working context, then cost. Any "
         "lossy reset fails the owner's bar, which also requires accuracy equal to the full-context baseline. "
         f"{focus.display}, 5 min TTL. Lossy resets count compactions, rollover handoffs, and tool-result clears. "
         "Quality is not scored here; the bound values are placeholders until the quality-vs-size probe (L2d) "
@@ -1350,18 +1370,29 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
 
     drop_tr = generate_trace(profile, keep_thinking=False)
     drop_rr = run_all(drop_tr, prices, profile, focus, policy)
-    rows = [[LABEL[s], _usd(rs[s].total.usd), _k(rs[s].max_prompt), _usd(drop_rr[s].total.usd)]
-            for s in STRATEGIES]
-    for label, oh in rep["sweep_strip_overhead"]:
-        r = run_cvm(trace, focus, None, replace(policy, strip_output_overhead=oh))
-        rows.append([f"(iii), strip overhead {label}", _usd(r.total.usd), _k(r.max_prompt), ""])
-    blocks["thinking"] = _table(["Strategy", "Thinking preserved and billed (default)", "Max prompt",
-                                 "Thinking dropped by the CLI (inferred alternative)"], rows) + (
+    oh = policy.strip_output_overhead
+
+    def rig_route(r: Result) -> float:
+        # Thinking dropped on every request: every strategy re-thinks, so every one pays the overhead.
+        return r.total.usd + r.total.output * oh * r.model.output / MTOK
+
+    rows = [[LABEL[s], _usd(rs[s].total.usd), _k(rs[s].max_prompt), _usd(drop_rr[s].total.usd),
+             _usd(rig_route(drop_rr[s]))] for s in STRATEGIES]
+    for label, o in rep["sweep_strip_overhead"]:
+        r = run_cvm(trace, focus, None, replace(policy, strip_output_overhead=o))
+        rows.append([f"(iii), strip overhead {label}", _usd(r.total.usd), _k(r.max_prompt), "", ""])
+    blocks["thinking"] = _table(["Strategy", "Thinking preserved and billed (default, direct connection)",
+                                 "Max prompt", "Thinking dropped by the CLI (inferred alternative)",
+                                 f"Rig proxy route: dropped every request, +{oh:.1%} re-thinking on all"], rows) + (
         f"\n\n{focus.display}. (i), (ii), and H4 carry every prior thinking block. (iii) keeps thinking until the next "
         f"rebase, which strips all of it ({_k(rs['cvm'].events['thinking_stripped'])} tokens stripped over "
         f"{st['turns']} turns), and charges {policy.strip_output_overhead:.1%} extra output for re-thinking. "
         "The vendor measured +4.6% (low effort) to +67.1% (max) output when thinking is dropped every turn after the "
-        "first; the effort level is inferred. " + basis)
+        "first; the effort level is inferred. On the rig proxy route builder-4 observed replayed thinking dropped on "
+        "every request, even on pure appends (`thinking_dropped`, `end_user_binding_mismatch`, cause unknown; "
+        "measured, pending review). There the last column is the closer one: billed input falls because no thinking "
+        "is carried, stripping at rebases saves nothing extra, and the re-thinking overhead applies to every "
+        "strategy, not only (iii). " + basis)
 
     rows = []
     for label, calls, scale in rep["sweep_bound_stress"]:
@@ -1388,6 +1419,40 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         "Ingest paging replaces a tool result above the threshold with an excerpt and a recall id before its first send, "
         "which appends new content and edits no earlier message. The clear_tool_uses fallback is server-side, lossy, "
         "and fails the owner's bar. A request still over the bound is counted. " + basis) + "\n\n"
+    seeds = range(1, rep["bound_seeds"] + 1)
+    seed_stats = {}
+    rows = []
+    for bound in (100_000, 250_000):
+        configs = [(lbl, None, vp_fn) for lbl, vp_fn in [
+            ("oracle p99 headroom (upper bound for a live proxy)",
+             lambda tr, b=bound: policy_for_bound(policy, b, tr.head_tokens, turn_growth_p99(tr))),
+        ] + [(f"online headroom: running max + {m:.0%}",
+              lambda tr, b=bound, m=m: (lambda bp: replace(bp, headroom_online=True, headroom_margin=m) if bp else None)(
+                  policy_for_bound(policy, b, tr.head_tokens, policy.headroom_floor_tokens)))
+             for m in rep["headroom_margins"]] + [
+            (f"online + 25%, ingest paging over {_k(INGEST_PAGE_OVER)}",
+             lambda tr, b=bound: (lambda bp: replace(bp, headroom_online=True, headroom_margin=0.25,
+                                                     page_tool_output_over=INGEST_PAGE_OVER) if bp else None)(
+                 policy_for_bound(policy, b, tr.head_tokens, policy.headroom_floor_tokens)))]]
+        for lbl, _, fn in configs:
+            overs, costs = [], []
+            for sd in seeds:
+                tr = trace_for(profile, focus, seed=sd)
+                vp = fn(tr)
+                r = run_cvm(tr, focus, None, vp)
+                overs.append(r.events["bound_exceeded"])
+                costs.append(r.total.usd)
+            hit = sum(1 for o in overs if o)
+            seed_stats[(bound, lbl)] = (hit, sum(overs), max(overs))
+            rows.append([_k(bound), lbl, f"{hit} of {len(overs)}", sum(overs), f"{sum(overs) / len(overs):.2f}",
+                         max(overs), _usd(sum(costs) / len(costs))])
+    blocks["seed_sweep"] = _table(["Bound", "(iii) headroom rule", "Seeds with any request over",
+                                   "Requests over, total", "Mean per seed", "Worst seed", "Mean cost"], rows) + (
+        f"\n\n{focus.display}, the inferred profile, seeds 1 to {len(seeds)}, {st['turns']} turns each. Online headroom "
+        f"starts at {_k(policy.headroom_floor_tokens)} (inferred floor) and becomes the largest completed turn so far "
+        "times (1 + margin). The oracle row reads each seed's p99 in advance, which a live proxy cannot do. "
+        "Sweep basis: modeled, inferred profile.")
+
     rows = []
     for h in rep["sweep_heads"]:
         tr = replace(trace, head_tokens=h)
@@ -1426,8 +1491,10 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
     blocks["route_miss"] = _table(["Route-side full-miss rate", "(ii) compaction", "(iii) cvm", "(iii) / (ii)",
                                    "(iii) route misses"], rows) + (
         f"\n\n{focus.display}. A warm, byte-identical prefix still misses with this probability per request. "
-        "Lane 1 measured full misses on the rig proxy route with identical per-block hashes: 3 of 13 cache-eligible "
-        "calls on throwaway sessions and 3 of 3 on one lab seat (small sample, pending lane 1 review). " + basis)
+        "Lane 1 measured intermittent full misses on the rig proxy route with identical per-block hashes: 3 of 13 "
+        "cache-eligible calls on throwaway sessions and 3 of 3 on one lab seat, while cache reads worked on a fresh "
+        "lab seat (small sample, pending lane 1 review). The 100% row is a worst case, not a measured steady state. "
+        + basis)
 
     cc = run_cvm(trace, focus, None, policy, cli_compaction=comp)
     cci = run_cvm(trace, focus, focus.cache_tier("1h"), policy, cli_compaction=comp, cli_idle=IdleCompaction())
@@ -1469,10 +1536,12 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         "get the 5 minute TTL (vendor-documented), which changes nothing here because the next request rewrites the "
         "short history anyway.",
         f"- **Thinking.** Every Anthropic row keeps prior thinking in context and bills it as input, the "
-        f"vendor-documented default for Opus 5.5, Haiku 5.5, and Fable 5.1; (iii) strips it at rebases and pays "
-        f"{policy.strip_output_overhead:.1%} extra output. If Claude Code drops thinking before sending (not shown; "
-        f"inferred alternative), (i) costs {_usd(drop_rr['plain'].total.usd)} and (ii) "
-        f"{_usd(drop_rr['compaction'].total.usd)} instead (thinking table).",
+        f"vendor-documented default for Opus 5.5, Haiku 5.5, and Fable 5.1, and the headline for a direct "
+        f"connection; (iii) strips it at rebases and pays {policy.strip_output_overhead:.1%} extra output. Through the "
+        f"rig proxy route, builder-4 observed replayed thinking dropped on every request (cause unknown; measured, "
+        f"pending review). There every strategy re-thinks: (i) costs about {_usd(rig_route(drop_rr['plain']))}, (ii) "
+        f"{_usd(rig_route(drop_rr['compaction']))}, and (iii) {_usd(rig_route(drop_rr['cvm']))} (thinking table, last "
+        "column).",
         f"- **Think time.** The TTL findings depend on the inferred think-time mix, in which "
         f"{st['gap_over'][300]:.0%} of gaps exceed 5 minutes. With every gap under a minute, (iii) / (ii) is "
         f"{calm_rr['cvm'].total.usd / calm_rr['compaction'].total.usd:.2f} instead of "
@@ -1494,6 +1563,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
     ka = run_cvm(trace, focus, None, policy, keepalive=Keepalive())
     lo_k, hi_k = min(ratios, key=ratios.get), max(ratios, key=ratios.get)
     b100 = bounded_results.get(100_000)
+    o100 = seed_stats.get((100_000, "online headroom: running max + 25%"), (0, 0, 0))
     miss_c = run_plain(trace, focus, None, comp, route_miss_rate=rep["sweep_route_miss"][1][1])
     miss_v = run_cvm(trace, focus, None, policy, route_miss_rate=rep["sweep_route_miss"][1][1])
     blocks["findings"] = "\n".join([
@@ -1501,10 +1571,11 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         "without a lossy reset: (i) and (ii) at the CLI default exceed it, (ii) configured to reset inside the bound compacts, H4 "
         "hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a "
         f"{_k(trace.head_tokens)} head."
-        + (f" Sized to 100k with headroom equal to the profile's p99 turn growth ({_k(b100[0].headroom_tokens)}), (iii) "
-           f"costs {_usd(b100[1].total.usd)} over {st['turns']} turns with a {_k(b100[1].max_prompt)} maximum working "
-           f"context and {b100[1].events['bound_exceeded']} requests over the bound; heavier tool use needs more "
-           "headroom than a 100k bound leaves (bound stress table)." if b100 else ""),
+        + (f" At 100k with online headroom (running max of completed turns + 25%), (iii) costs "
+           f"{_usd(b100[1].total.usd)} on seed {profile['seed']}; across seeds 1 to {rep['bound_seeds']} it sends a "
+           f"request over the bound on {o100[0]} of {rep['bound_seeds']} seeds ({o100[1]} requests in all, worst seed "
+           f"{o100[2]}), so the bound holds for most turns but not every one. Heavier tool use needs more headroom "
+           "than a 100k bound leaves (bound stress table)." if b100 else ""),
         f"- Cost, second: over {st['turns']} turns on {focus.display} with API-key billing (5 min TTL), (iii) costs {_usd(rs['cvm'].total.usd)} against "
         f"{_usd(rs['compaction'].total.usd)} for (ii) built-in compaction, {_usd(rs['rollover'].total.usd)} for H4 "
         f"rollover, and {_usd(plain.total.usd)} for (i) plain, which would pass the "
@@ -1519,7 +1590,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         f"- Bounding the prompt is most of the cost saving: compaction configured at 100k costs "
         f"{_usd(c100.total.usd)}, within {c100.total.usd / rs['cvm'].total.usd - 1:.0%} of (iii), but only by "
         f"compacting {c100.resets} times, which the owner's bar rules out.",
-        f"- Route-side cache misses can outweigh every design choice: at the {rep['sweep_route_miss'][1][0]} full-miss "
+        f"- Intermittent route-side cache misses can outweigh every design choice: at the {rep['sweep_route_miss'][1][0]} full-miss "
         f"rate lane 1 saw on the rig proxy route (small sample, pending review), (ii) costs {_usd(miss_c.total.usd)} "
         f"and (iii) {_usd(miss_v.total.usd)}, about {miss_c.total.usd / rs['compaction'].total.usd:.1f}x their "
         "no-miss cost.",

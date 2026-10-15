@@ -237,6 +237,17 @@ def test_turn_boundary_rebase_leaves_headroom_for_the_next_turn():
     assert r.events["bound_exceeded"] == 0 and r.max_prompt <= 3000
 
 
+def test_online_headroom_grows_with_the_largest_turn_seen():
+    # Turns of 520, then 2020. Online H starts at the 600 floor and becomes 2020 x 1.5 = 3030
+    # after turn 2. Turn 3 starts at 3540, and 3540 + 3030 > 4000, so it rebases; the window
+    # budget is 4000 - 3030 - 1000 head < 0, so every completed turn is paged.
+    turns = [[(100, 10, 10), (400, 10, 10)], [(100, 10, 10), (1900, 10, 10)], [(100, 10, 10)]]
+    pol = bounded(bound_tokens=4000, headroom_online=True, headroom_margin=0.5, headroom_floor_tokens=600)
+    r = cm.run_cvm(trace(turns), OPUS, T5, pol)
+    assert r.events["rebase_headroom"] == 1
+    assert r.turns[2].prompt_tokens == 1000 + 100
+
+
 def test_turn_larger_than_headroom_is_reported_and_never_edited():
     reqs = (cm.Req(100, 10, 10, thinking=5), cm.Req(1500, 10, 10, thinking=5), cm.Req(1500, 10, 10, thinking=5))
     tr = cm.Trace("t", 1000, 1.0, (cm.Turn(0.0, reqs),))

@@ -18,11 +18,11 @@ Claim tags used below:
 ## Summary
 
 <!-- BEGIN GENERATED: findings -->
-- Under the owner's bar (no compaction, a hard working-context bound), only (iii) meets a 100k or 250k bound without a lossy reset: (i) and (ii) at the CLI default exceed it, (ii) configured to reset inside the bound compacts, H4 hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a 42.0k head. Sized to 100k with headroom equal to the profile's p99 turn growth (28.7k), (iii) costs $65.98 over 300 turns with a 95.3k maximum working context and 0 requests over the bound; heavier tool use needs more headroom than a 100k bound leaves (bound stress table).
+- Under the owner's bar (no compaction, a hard working-context bound), only (iii) meets a 100k or 250k bound without a lossy reset: (i) and (ii) at the CLI default exceed it, (ii) configured to reset inside the bound compacts, H4 hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a 42.0k head. At 100k with online headroom (running max of completed turns + 25%), (iii) costs $69.10 on seed 20261015; across seeds 1 to 20 it sends a request over the bound on 4 of 20 seeds (5 requests in all, worst seed 2), so the bound holds for most turns but not every one. Heavier tool use needs more headroom than a 100k bound leaves (bound stress table).
 - Cost, second: over 300 turns on Claude Opus 5.5 with API-key billing (5 min TTL), (iii) costs $87.95 against $382.10 for (ii) built-in compaction, $337.07 for H4 rollover, and $716.23 for (i) plain, which would pass the 1.00M window at turn 157. Across the five models (iii) costs 0.07 to 0.76 of (ii) (Claude Haiku 5.5 to gpt-6-astra).
 - On the inferred think-time mix (35% of gaps over 5 min), cache expiry is the largest single cost in (i): 65% of its cost is the premium (write price minus read price) for re-writing prefixes after idle gaps over the 5 minute TTL. The 1 h TTL cuts (i) to $337.42 and (ii) to $173.31; (iii) gains less ($72.84) because its prefix is small. Keepalive pings bring (iii) to $65.72.
 - Bounding the prompt is most of the cost saving: compaction configured at 100k costs $100.79, within 15% of (iii), but only by compacting 61 times, which the owner's bar rules out.
-- Route-side cache misses can outweigh every design choice: at the 23% (3 of 13, throwaways) full-miss rate lane 1 saw on the rig proxy route (small sample, pending review), (ii) costs $971.37 and (iii) $212.47, about 2.5x their no-miss cost.
+- Intermittent route-side cache misses can outweigh every design choice: at the 23% (3 of 13, throwaways) full-miss rate lane 1 saw on the rig proxy route (small sample, pending review), (ii) costs $971.37 and (iii) $212.47, about 2.5x their no-miss cost.
 - (iii) costs more than (ii) for very short sessions: it first beats (ii) at turn 14. Its fixed overhead is the pinned block, stubs, and recall round trips.
 - Under the profile's think time, rebases mostly ride on cache expiry, so epoch length barely matters and window size sets the cost. With no idle gaps the analytic rule E* = sqrt(2 (w - r) R / (r n g)) lands within 44% of the simulated optimum on the tested grid.
 <!-- END GENERATED: findings -->
@@ -63,27 +63,29 @@ Bound 100.0k.
 
 | Rank | Strategy | Max working context | Within bound | Requests over bound | Lossy resets | Cost | Verdict |
 |---|---|---|---|---|---|---|---|
-| 1 | (iii) cvm, plus ingest paging over 8.0k (18.1k), window 8.6k | 94.8k | yes | 0 | 0 | $66.83 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
-| 2 | (iii) cvm, headroom = p99 turn (28.7k), window 6.3k | 95.3k | yes | 0 | 0 | $65.98 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
-| 3 | H4 rollover at 75.0k | 88.2k | yes | 0 | 163 | $103.85 | fails: 163 lossy handoffs |
-| 4 | (ii) compaction configured at 75.0k | 91.4k | yes | 0 | 205 | $132.44 | fails: 205 compactions |
-| 5 | (i) plain | 2.06M | no | 0 | 0 | $716.23 | fails: over the bound |
-| 6 | H5 tool-result clearing, vendor defaults | 757.1k | no | 0 | 781 | $308.68 | fails: over the bound |
-| 7 | (ii) compaction at the CLI default (967.0k) | 967.3k | no | 0 | 2 | $382.10 | fails: over the bound |
+| 1 | (iii) cvm, online headroom plus ingest paging over 8.0k, window 7.2k | 83.2k | yes | 0 | 0 | $65.07 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
+| 2 | (iii) cvm, oracle p99 headroom (upper bound for a live proxy), window 6.3k | 95.3k | yes | 0 | 0 | $65.98 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
+| 3 | (iii) cvm, online headroom: running max + 25%, window 7.2k | 98.6k | yes | 0 | 0 | $69.10 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
+| 4 | H4 rollover at 75.0k | 88.2k | yes | 0 | 163 | $103.85 | fails: 163 lossy handoffs |
+| 5 | (ii) compaction configured at 75.0k | 91.4k | yes | 0 | 205 | $132.44 | fails: 205 compactions |
+| 6 | (i) plain | 2.06M | no | 0 | 0 | $716.23 | fails: over the bound |
+| 7 | H5 tool-result clearing, vendor defaults | 757.1k | no | 0 | 781 | $308.68 | fails: over the bound |
+| 8 | (ii) compaction at the CLI default (967.0k) | 967.3k | no | 0 | 2 | $382.10 | fails: over the bound |
 
 Bound 250.0k.
 
 | Rank | Strategy | Max working context | Within bound | Requests over bound | Lossy resets | Cost | Verdict |
 |---|---|---|---|---|---|---|---|
-| 1 | (iii) cvm, plus ingest paging over 8.0k (18.1k), window 56.6k | 166.9k | yes | 0 | 0 | $102.15 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
-| 2 | (iii) cvm, headroom = p99 turn (28.7k), window 53.1k | 184.2k | yes | 0 | 0 | $100.45 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
-| 3 | H4 rollover at 225.0k | 225.5k | yes | 0 | 12 | $129.73 | fails: 12 lossy handoffs |
-| 4 | (ii) compaction configured at 225.0k | 225.9k | yes | 0 | 12 | $128.80 | fails: 12 compactions |
-| 5 | (i) plain | 2.06M | no | 0 | 0 | $716.23 | fails: over the bound |
-| 6 | H5 tool-result clearing, vendor defaults | 757.1k | no | 0 | 781 | $308.68 | fails: over the bound |
-| 7 | (ii) compaction at the CLI default (967.0k) | 967.3k | no | 0 | 2 | $382.10 | fails: over the bound |
+| 1 | (iii) cvm, online headroom plus ingest paging over 8.0k, window 54.3k | 166.9k | yes | 0 | 0 | $100.55 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
+| 2 | (iii) cvm, oracle p99 headroom (upper bound for a live proxy), window 53.1k | 184.2k | yes | 0 | 0 | $100.45 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
+| 3 | (iii) cvm, online headroom: running max + 25%, window 54.3k | 188.6k | yes | 0 | 0 | $101.67 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
+| 4 | H4 rollover at 225.0k | 225.5k | yes | 0 | 12 | $129.73 | fails: 12 lossy handoffs |
+| 5 | (ii) compaction configured at 225.0k | 225.9k | yes | 0 | 12 | $128.80 | fails: 12 compactions |
+| 6 | (i) plain | 2.06M | no | 0 | 0 | $716.23 | fails: over the bound |
+| 7 | H5 tool-result clearing, vendor defaults | 757.1k | no | 0 | 781 | $308.68 | fails: over the bound |
+| 8 | (ii) compaction at the CLI default (967.0k) | 967.3k | no | 0 | 2 | $382.10 | fails: over the bound |
 
-Ranked by: within the bound, no lossy reset of any kind, smaller working context, then cost. Any lossy reset fails the owner's bar, which also requires accuracy equal to the full-context baseline. Claude Opus 5.5, 5 min TTL. Lossy resets count compactions, rollover handoffs, and tool-result clears. Quality is not scored here; the bound values are placeholders until the quality-vs-size probe (L2d) measures the real one. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+Single seed (20261015); the seed sweep below gives over-bound counts across seeds. Ranked by: within the bound, no lossy reset of any kind, smaller working context, then cost. Any lossy reset fails the owner's bar, which also requires accuracy equal to the full-context baseline. Claude Opus 5.5, 5 min TTL. Lossy resets count compactions, rollover handoffs, and tool-result clears. Quality is not scored here; the bound values are placeholders until the quality-vs-size probe (L2d) measures the real one. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: ranking -->
 
 How the bounded (iii) policy keeps a turn inside the bound (shared with PR #7, decided by manager-2 on
@@ -96,14 +98,23 @@ How the bounded (iii) policy keeps a turn inside the bound (shared with PR #7, d
    (inferred). The tool-loop case itself is untested unless probed.
 2. **Rebases only at turn boundaries, with headroom.** Before each turn, if the prompt plus headroom H
    would exceed the bound, the policy pages completed turns until H fits, stripping their thinking as
-   at any rebase. Any turn whose growth is at most H then fits. H must cover the workload's turn sizes.
-   The tables use the workload's p99 turn growth, read from the whole trace in advance. A real policy
-   has to set H from measured turn sizes, and lane 1 reports single Reads of 16k to 18k tokens, so a
-   3k H is not enough (reviewer-2, PR #7).
-3. **Ingest paging, optional.** A tool result above a threshold (8k here) is replaced by an excerpt
-   and a recall id before its first send. That appends new content and edits no earlier message, so
-   it is valid, and it shrinks the headroom a workload needs. The threshold is inferred; builder-4 is
-   evaluating it for PR #7.
+   at any rebase. Any turn whose growth is at most H then fits. H must cover the workload's turn sizes,
+   including the recall a turn triggers (builder-4: in-turn recall re-adds whatever the model reads, up
+   to 32,000 characters per call). The model sizes H online, the way a live proxy has to: the largest
+   completed turn so far times (1 + margin), starting from an inferred 25k floor. An oracle row that
+   reads the whole trace's p99 in advance is shown as an upper bound on what a live proxy can do.
+   Lane 1 reports single Reads of 16k to 18k tokens, so a 3k H is not enough (reviewer-2, PR #7).
+3. **Ingest paging, optional.** A tool result above a threshold T (8k) is replaced by an excerpt of E
+   (400) tokens and a recall id before its first send. It appends new content and edits no earlier
+   message. It stays valid only under three conditions (reviewer-2, PR #7):
+   - The stub is byte-identical on every later request. The proxy holds the mapping keyed by
+     `tool_use_id`.
+   - A recall inside the turn reinserts the page byte for byte.
+   - Probes check answers the model gives from the stub alone.
+
+   It shrinks the headroom a workload needs, but stubbed content must be recalled when needed, which
+   costs fidelity this model does not score. T and E are placeholders shared with PR #7, to be tuned
+   with L2d.
 4. **Fallback for a turn that still would not fit:** server-side `clear_tool_uses` context editing
    (vendor-documented). It is not compaction and is exempt from the prefix check, but it restarts
    caching from the first cleared block and loses the cleared results. It is lossy and fails the
@@ -117,37 +128,63 @@ need far more headroom than the profile's turns:
 | Workload | Bound | (iii) variant | Headroom H | Max working context | Requests over bound | Lossy clears | (iii) cost |
 |---|---|---|---|---|---|---|---|
 | profile (3 calls per turn) | 100.0k | headroom 3k fixed (too small for these turns) | 3.0k | 131.3k | 17 | 0 | $71.48 |
-| profile (3 calls per turn) | 100.0k | headroom = p99 turn | 28.7k | 95.3k | 0 | 0 | $65.98 |
-| profile (3 calls per turn) | 100.0k | plus ingest paging over 8.0k | 18.1k | 94.8k | 0 | 0 | $66.83 |
-| profile (3 calls per turn) | 100.0k | plus ingest paging and clear_tool_uses fallback (lossy) | 18.1k | 94.8k | 0 | 0 | $66.83 |
+| profile (3 calls per turn) | 100.0k | oracle p99 headroom (upper bound for a live proxy) | 28.7k | 95.3k | 0 | 0 | $65.98 |
+| profile (3 calls per turn) | 100.0k | online headroom: running max + 25% | 25.0k | 98.6k | 0 | 0 | $69.10 |
+| profile (3 calls per turn) | 100.0k | online headroom plus ingest paging over 8.0k | 25.0k | 83.2k | 0 | 0 | $65.07 |
+| profile (3 calls per turn) | 100.0k | online, ingest paging, and clear_tool_uses fallback (lossy) | 25.0k | 83.2k | 0 | 0 | $65.07 |
 | profile (3 calls per turn) | 250.0k | headroom 3k fixed (too small for these turns) | 3.0k | 193.4k | 0 | 0 | $106.36 |
-| profile (3 calls per turn) | 250.0k | headroom = p99 turn | 28.7k | 184.2k | 0 | 0 | $100.45 |
-| profile (3 calls per turn) | 250.0k | plus ingest paging over 8.0k | 18.1k | 166.9k | 0 | 0 | $102.15 |
-| profile (3 calls per turn) | 250.0k | plus ingest paging and clear_tool_uses fallback (lossy) | 18.1k | 166.9k | 0 | 0 | $102.15 |
+| profile (3 calls per turn) | 250.0k | oracle p99 headroom (upper bound for a live proxy) | 28.7k | 184.2k | 0 | 0 | $100.45 |
+| profile (3 calls per turn) | 250.0k | online headroom: running max + 25% | 25.0k | 188.6k | 0 | 0 | $101.67 |
+| profile (3 calls per turn) | 250.0k | online headroom plus ingest paging over 8.0k | 25.0k | 166.9k | 0 | 0 | $100.55 |
+| profile (3 calls per turn) | 250.0k | online, ingest paging, and clear_tool_uses fallback (lossy) | 25.0k | 166.9k | 0 | 0 | $100.55 |
 | 12 calls per turn | 100.0k | headroom 3k fixed (too small for these turns) | 3.0k | 148.1k | 446 | 0 | $159.94 |
-| 12 calls per turn | 100.0k | headroom = p99 turn | 60.0k | no room |  |  |  |
-| 12 calls per turn | 100.0k | plus ingest paging over 8.0k | 39.0k | 95.4k | 0 | 0 | $136.81 |
-| 12 calls per turn | 100.0k | plus ingest paging and clear_tool_uses fallback (lossy) | 39.0k | 95.4k | 0 | 0 | $136.81 |
+| 12 calls per turn | 100.0k | oracle p99 headroom (upper bound for a live proxy) | 60.0k | no room |  |  |  |
+| 12 calls per turn | 100.0k | online headroom: running max + 25% | 25.0k | 115.1k | 34 | 0 | $151.94 |
+| 12 calls per turn | 100.0k | online headroom plus ingest paging over 8.0k | 25.0k | 95.3k | 0 | 0 | $143.88 |
+| 12 calls per turn | 100.0k | online, ingest paging, and clear_tool_uses fallback (lossy) | 25.0k | 95.3k | 0 | 0 | $143.88 |
 | 12 calls per turn | 250.0k | headroom 3k fixed (too small for these turns) | 3.0k | 294.4k | 85 | 0 | $238.05 |
-| 12 calls per turn | 250.0k | headroom = p99 turn | 60.0k | 215.5k | 0 | 0 | $206.88 |
-| 12 calls per turn | 250.0k | plus ingest paging over 8.0k | 39.0k | 242.0k | 0 | 0 | $212.04 |
-| 12 calls per turn | 250.0k | plus ingest paging and clear_tool_uses fallback (lossy) | 39.0k | 242.0k | 0 | 0 | $212.04 |
+| 12 calls per turn | 250.0k | oracle p99 headroom (upper bound for a live proxy) | 60.0k | 215.5k | 0 | 0 | $206.88 |
+| 12 calls per turn | 250.0k | online headroom: running max + 25% | 25.0k | 229.8k | 0 | 0 | $218.06 |
+| 12 calls per turn | 250.0k | online headroom plus ingest paging over 8.0k | 25.0k | 228.8k | 0 | 0 | $216.65 |
+| 12 calls per turn | 250.0k | online, ingest paging, and clear_tool_uses fallback (lossy) | 25.0k | 228.8k | 0 | 0 | $216.65 |
 | 12 calls per turn, 4x tool output | 100.0k | headroom 3k fixed (too small for these turns) | 3.0k | 234.6k | 1463 | 0 | $240.41 |
-| 12 calls per turn, 4x tool output | 100.0k | headroom = p99 turn | 140.5k | no room |  |  |  |
-| 12 calls per turn, 4x tool output | 100.0k | plus ingest paging over 8.0k | 62.2k | no room |  |  |  |
-| 12 calls per turn, 4x tool output | 100.0k | plus ingest paging and clear_tool_uses fallback (lossy) | 62.2k | no room |  |  |  |
+| 12 calls per turn, 4x tool output | 100.0k | oracle p99 headroom (upper bound for a live proxy) | 140.5k | no room |  |  |  |
+| 12 calls per turn, 4x tool output | 100.0k | online headroom: running max + 25% | 25.0k | 231.5k | 1191 | 0 | $234.59 |
+| 12 calls per turn, 4x tool output | 100.0k | online headroom plus ingest paging over 8.0k | 25.0k | 117.3k | 64 | 0 | $166.67 |
+| 12 calls per turn, 4x tool output | 100.0k | online, ingest paging, and clear_tool_uses fallback (lossy) | 25.0k | 99.7k | 0 | 23 | $167.43 |
 | 12 calls per turn, 4x tool output | 250.0k | headroom 3k fixed (too small for these turns) | 3.0k | 379.5k | 378 | 0 | $298.41 |
-| 12 calls per turn, 4x tool output | 250.0k | headroom = p99 turn | 140.5k | 248.7k | 0 | 0 | $242.79 |
-| 12 calls per turn, 4x tool output | 250.0k | plus ingest paging over 8.0k | 62.2k | 238.9k | 0 | 0 | $223.45 |
-| 12 calls per turn, 4x tool output | 250.0k | plus ingest paging and clear_tool_uses fallback (lossy) | 62.2k | 238.9k | 0 | 0 | $223.45 |
+| 12 calls per turn, 4x tool output | 250.0k | oracle p99 headroom (upper bound for a live proxy) | 140.5k | 248.7k | 0 | 0 | $242.79 |
+| 12 calls per turn, 4x tool output | 250.0k | online headroom: running max + 25% | 25.0k | 260.7k | 3 | 0 | $240.99 |
+| 12 calls per turn, 4x tool output | 250.0k | online headroom plus ingest paging over 8.0k | 25.0k | 221.7k | 0 | 0 | $237.12 |
+| 12 calls per turn, 4x tool output | 250.0k | online, ingest paging, and clear_tool_uses fallback (lossy) | 25.0k | 221.7k | 0 | 0 | $237.12 |
 
 Claude Opus 5.5. Rebases happen only at turn boundaries and leave H free, where H is the workload's p99 turn growth (after ingest paging, where used), read from the whole trace in advance; a real policy must set H from measured turn sizes. A fixed 3k H shows what an undersized headroom does. "no room" means head plus H leave no space under the bound, so no valid (iii) policy meets it for that workload. Nothing inside an active tool-use turn is edited client-side. Ingest paging replaces a tool result above the threshold with an excerpt and a recall id before its first send, which appends new content and edits no earlier message. The clear_tool_uses fallback is server-side, lossy, and fails the owner's bar. A request still over the bound is counted. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 
 
 <!-- END GENERATED: bound_stress -->
 
+Over-bound counts depend on the seed, so they are reported across 20 seeds, not one:
+
+<!-- BEGIN GENERATED: seed_sweep -->
+| Bound | (iii) headroom rule | Seeds with any request over | Requests over, total | Mean per seed | Worst seed | Mean cost |
+|---|---|---|---|---|---|---|
+| 100.0k | oracle p99 headroom (upper bound for a live proxy) | 7 of 20 | 11 | 0.55 | 4 | $63.56 |
+| 100.0k | online headroom: running max + 0% | 6 of 20 | 9 | 0.45 | 3 | $66.90 |
+| 100.0k | online headroom: running max + 25% | 4 of 20 | 5 | 0.25 | 2 | $68.00 |
+| 100.0k | online headroom: running max + 50% | 3 of 20 | 4 | 0.20 | 2 | $68.46 |
+| 100.0k | online + 25%, ingest paging over 8.0k | 0 of 20 | 0 | 0.00 | 0 | $63.27 |
+| 250.0k | oracle p99 headroom (upper bound for a live proxy) | 0 of 20 | 0 | 0.00 | 0 | $97.57 |
+| 250.0k | online headroom: running max + 0% | 0 of 20 | 0 | 0.00 | 0 | $98.84 |
+| 250.0k | online headroom: running max + 25% | 0 of 20 | 0 | 0.00 | 0 | $98.84 |
+| 250.0k | online headroom: running max + 50% | 0 of 20 | 0 | 0.00 | 0 | $98.85 |
+| 250.0k | online + 25%, ingest paging over 8.0k | 0 of 20 | 0 | 0.00 | 0 | $97.57 |
+
+Claude Opus 5.5, the inferred profile, seeds 1 to 20, 300 turns each. Online headroom starts at 25.0k (inferred floor) and becomes the largest completed turn so far times (1 + margin). The oracle row reads each seed's p99 in advance, which a live proxy cannot do. Sweep basis: modeled, inferred profile.
+<!-- END GENERATED: seed_sweep -->
+
 What the bound guarantees, inferred from the mechanism: a turn whose growth is at most H stays under
-the bound with no edit inside the turn. A larger turn either crosses the bound (counted) or triggers
+the bound with no edit inside the turn. Online H, sized from turns already seen, misses a turn larger
+than any before it, which is why some seeds send a request over the bound. A larger turn either crosses the bound (counted) or triggers
 the lossy clearing fallback. When head plus H leaves no room, as with heavy tool use at a 100k bound,
 no valid (iii) policy meets that bound. The bound does not guarantee fidelity: paged turns and
 ingest-paged results must be recalled if needed again, which is L2b's test.
@@ -159,7 +196,7 @@ ingest-paged results must be recalled if needed again, which is L2b's test.
 - **The CLI never compacts on its own under (iii).** The proxy bounds the upstream prompt, but the CLI's local history still grows past 967.0k. Whether the CLI then compacts depends on how it counts context, which is brief question 2 (lane 1). Lane 1 PR #9 reports that compaction-forcing settings did not force a pre-send compaction in a `-p` resume (lane 1's measurement, not repeated here). If the CLI does compact at 967.0k of local history, (iii) costs $88.94 instead of $87.95 (2 CLI compactions in 300 turns), and each one is a lossy reset the proxy cannot undo. On the 1 hour TTL the CLI's idle compaction (`idleCompaction`, default on, 200k minimum via `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`) also applies, and the CLI's local history passes 200k early: a subscription session under (iii) takes 7 idle CLI compactions in 300 turns ($72.71), which the proxy cannot prevent. Setting `idleCompaction: false` avoids them.
 - **Same head and caching as a direct connection.** (iii) runs behind a custom `ANTHROPIC_BASE_URL`. There Claude Code may load tool definitions upfront instead of through tool search, caching works only if the proxy forwards `cache_control` markers unchanged, and the 1 hour TTL needs the `anthropic-beta` header forwarded (vendor-documented, https://code.claude.com/docs/en/prompt-caching). The model gives (iii) the same 42.0k head and working cache as (ii); the head-size table shows the effect of a larger head. Lane 1's rows are captured behind a custom base URL, so measured heads include this effect.
 - **Idle compaction on the 1 hour TTL.** Claude Code can compact an idle conversation shortly before a 1 hour cache expires (`idleCompaction`, vendor-documented). Modeled for (ii) with the documented 200k minimum: $95.37 instead of $173.31 (7 idle compactions, each a lossy reset). Compaction requests themselves get the 5 minute TTL (vendor-documented), which changes nothing here because the next request rewrites the short history anyway.
-- **Thinking.** Every Anthropic row keeps prior thinking in context and bills it as input, the vendor-documented default for Opus 5.5, Haiku 5.5, and Fable 5.1; (iii) strips it at rebases and pays 9.7% extra output. If Claude Code drops thinking before sending (not shown; inferred alternative), (i) costs $614.27 and (ii) $358.76 instead (thinking table).
+- **Thinking.** Every Anthropic row keeps prior thinking in context and bills it as input, the vendor-documented default for Opus 5.5, Haiku 5.5, and Fable 5.1, and the headline for a direct connection; (iii) strips it at rebases and pays 9.7% extra output. Through the rig proxy route, builder-4 observed replayed thinking dropped on every request (cause unknown; measured, pending review). There every strategy re-thinks: (i) costs about $615.42, (ii) $359.92, and (iii) $86.17 (thinking table, last column).
 - **Think time.** The TTL findings depend on the inferred think-time mix, in which 35% of gaps exceed 5 minutes. With every gap under a minute, (iii) / (ii) is 0.41 instead of 0.23.
 <!-- END GENERATED: assumptions -->
 
@@ -200,7 +237,7 @@ byte-identical prefix: 3 of 13 cache-eligible throwaway calls and 3 of 3 calls o
 | 23% (3 of 13, throwaways) | $971.37 | $212.47 | 0.22 | 269 |
 | 100% (3 of 3, lab seat) | $2,752.11 | $589.45 | 0.21 | 1074 |
 
-Claude Opus 5.5. A warm, byte-identical prefix still misses with this probability per request. Lane 1 measured full misses on the rig proxy route with identical per-block hashes: 3 of 13 cache-eligible calls on throwaway sessions and 3 of 3 on one lab seat (small sample, pending lane 1 review). Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+Claude Opus 5.5. A warm, byte-identical prefix still misses with this probability per request. Lane 1 measured intermittent full misses on the rig proxy route with identical per-block hashes: 3 of 13 cache-eligible calls on throwaway sessions and 3 of 3 on one lab seat, while cache reads worked on a fresh lab seat (small sample, pending lane 1 review). The 100% row is a worst case, not a measured steady state. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: route_miss -->
 
 Thinking blocks. Claude Opus 4.5 and later Opus models, Haiku 5.5, and Fable 5.1 keep every prior
@@ -230,16 +267,16 @@ inferred. Server-side `context_management` and byte-for-byte reinsertion are the
 compares.
 
 <!-- BEGIN GENERATED: thinking -->
-| Strategy | Thinking preserved and billed (default) | Max prompt | Thinking dropped by the CLI (inferred alternative) |
-|---|---|---|---|
-| (i) plain | $716.23 | 2.06M | $614.27 |
-| (ii) compaction | $382.10 | 967.3k | $358.76 |
-| H4 rollover | $337.07 | 870.9k | $342.94 |
-| (iii) cvm | $87.95 | 173.2k | $85.02 |
-| (iii), strip overhead 4.6% (low effort) | $87.34 | 173.2k |  |
-| (iii), strip overhead 67.1% (max effort) | $94.76 | 173.2k |  |
+| Strategy | Thinking preserved and billed (default, direct connection) | Max prompt | Thinking dropped by the CLI (inferred alternative) | Rig proxy route: dropped every request, +9.7% re-thinking on all |
+|---|---|---|---|---|
+| (i) plain | $716.23 | 2.06M | $614.27 | $615.42 |
+| (ii) compaction | $382.10 | 967.3k | $358.76 | $359.92 |
+| H4 rollover | $337.07 | 870.9k | $342.94 | $344.10 |
+| (iii) cvm | $87.95 | 173.2k | $85.02 | $86.17 |
+| (iii), strip overhead 4.6% (low effort) | $87.34 | 173.2k |  |  |
+| (iii), strip overhead 67.1% (max effort) | $94.76 | 173.2k |  |  |
 
-Claude Opus 5.5. (i), (ii), and H4 carry every prior thinking block. (iii) keeps thinking until the next rebase, which strips all of it (257.4k tokens stripped over 300 turns), and charges 9.7% extra output for re-thinking. The vendor measured +4.6% (low effort) to +67.1% (max) output when thinking is dropped every turn after the first; the effort level is inferred. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+Claude Opus 5.5. (i), (ii), and H4 carry every prior thinking block. (iii) keeps thinking until the next rebase, which strips all of it (257.4k tokens stripped over 300 turns), and charges 9.7% extra output for re-thinking. The vendor measured +4.6% (low effort) to +67.1% (max) output when thinking is dropped every turn after the first; the effort level is inferred. On the rig proxy route builder-4 observed replayed thinking dropped on every request, even on pure appends (`thinking_dropped`, `end_user_binding_mismatch`, cause unknown; measured, pending review). There the last column is the closer one: billed input falls because no thinking is carried, stripping at rebases saves nothing extra, and the re-thinking overhead applies to every strategy, not only (iii). Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: thinking -->
 
 ## Prices and cache rules
@@ -733,9 +770,10 @@ Loader check on synthetic files:
 
 ## Limits
 
-- The bounded (iii) policy is enforced at turn boundaries only. Its headroom comes from the workload's
-  own p99 turn growth, known in advance here but not in practice. Ingest-paged results and paged turns
-  must be recalled if needed again, which costs fidelity this model does not score.
+- The bounded (iii) policy is enforced at turn boundaries only, with headroom sized online from turns
+  already seen; over-bound counts are given across 20 seeds of one inferred workload. Ingest-paged
+  results and paged turns must be recalled if needed again, which costs fidelity this model does not
+  score.
 - The re-thinking charge is one vendor figure applied uniformly; the real overhead depends on effort
   level and on how often thinking is stripped.
 - Every workload number is inferred, except the Codex rows from lane 1. The largest unknowns are think time (it drives TTL expiry), tool
