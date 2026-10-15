@@ -4,23 +4,41 @@ Updated 2026-10-15 by intake.lead.
 
 ## Current milestone
 
-M1: durable ledger, checkpoints, and recovery. Contract: `docs/milestones/M1-ledger-and-recovery.md`.
+M0: infinite-session design study (2026-10-15). The owner described the problem and asked the team
+to look; intake framed it as M0. Brief:
+`docs/milestones/M0-infinite-session-study.md`.
 
-- Lane A (ledger, model, CLI): management.manager-1 with build.builder-1 and build.builder-2.
-- Lane B (state, checkpoint, resume, recovery harness): management.manager-2 with build.builder-3 and build.builder-4.
-- Reviewers per rig spec edges: builder-1 and builder-3 to review.reviewer-1, builder-2 and builder-4 to review.reviewer-2.
+- Lane 1 (interception surfaces): management.manager-1.
+- Lane 2 (policy and economics): management.manager-2.
+
+M1 (ledger, checkpoints, recovery; contract on main) is paused. Open PRs #2, #3, #4 stay as they
+are until the owner decides on them after M0.
 
 ## Verified on main
 
-Only the charter. No product code exists yet.
+- Charter and the M1 contract (PR #1, reviewed at 040318c). No product code exists yet.
+
+## Verified repository settings (2026-10-15)
+
+- Repository lives at VentureForgre/contexto (private). Ruleset `main: require pull request`
+  (id 25202810) is active: PR required, no force-push, no deletion, no bypass. Intake verified
+  enforcement with a direct push rejected (GH013, "Changes must be made through a pull request")
+  against an identical temporary ruleset on a scratch branch; both were deleted afterward.
 
 ## Open obligations
 
-- Lane A first PR: `contexto.model` plus scaffolding, which unblocks lane B integration.
-- Intake: integrate reviewed PRs, run the end-to-end CLI scenario on main, record results here.
+- Lane 1 (manager-1): `docs/research/` interception findings and measuring-proxy data.
+- Lane 2 (manager-2): `docs/research/` policy, cost model, fidelity test design and baseline.
+- Release automation REL-1 (manager-2): CI and release workflows, no real release until the owner
+  agrees.
+- Intake: one M0 recommendation to the owner, including the Q5 auth decision.
+- Parked on gate qitem-20261015222349-14b703cb until the owner decides M1: M1 lane rows, PRs #2,
+  #3, #4, and their review rows.
 
 ## Known issues
 
-- All nine live seats run with cwd set to the main checkout, while the rig spec declares per-seat
-  worktrees. Seats must not switch branches in the main checkout; git work happens in each seat's
-  worktree under `contexto-worktrees/`.
+- Only intake runs in the main checkout; the other eight seats run in their own worktrees under
+  `contexto-worktrees/` (pane paths checked 2026-10-15 22:22Z). Never switch branches in the main
+  checkout.
+- PR approvals are not required by GitHub because every seat uses one GitHub account. Exact-head
+  review by a reviewer seat is a team rule.
