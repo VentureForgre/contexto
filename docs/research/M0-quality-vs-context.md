@@ -241,6 +241,50 @@ with conversation filler. Group 2's opening plants ride along unprobed, as on th
   2026-10-15].
 - Run only after manager-2 says go.
 
+### Lab run results on `lab.subject` [measured, 2026-10-15]
+
+**Run** (facts from manager-1 and builder-1):
+- session 93eadb5d, `claude-haiku-5-5`, default settings, the rig proxy route;
+- each `Gk`'s files were moved out before its probe; exactly one Write per probe; no compaction.
+
+**Spend.** The meter total is 1,796,949 tokens over 14 calls in 8 turns: input 44, cache write
+601,942, cache read 1,178,130, output 16,833. That includes OpenRig's startup turn of 170,162.
+
+**Scored** with `python3 -m fidelity.l2d score`. Before scoring, the truth and plan files were
+checked byte-identical to a fresh regeneration.
+
+| Checkpoint | Context, planned | Context, measured | Score | Wilson 95% | Format rule | flagged | unflagged | superseded | obligation | stale |
+|---|---|---|---|---|---|---|---|---|---|---|
+| P1 | 91,133 | 98,910 | 96/96 | 0.962-1.00 | 96/96 (0.962-1.00) | 24/24 | 24/24 | 24/24 | 24/24 | 0 |
+| P2 | 242,822 | 256,783 | 96/96 | 0.962-1.00 | 96/96 (0.962-1.00) | 24/24 | 24/24 | 24/24 | 24/24 | 0 |
+
+**By segment and depth** (estimated distance from plant to probe):
+
+| Checkpoint | deep | growth | <10k | 10k-50k | 50k-150k | >=150k |
+|---|---|---|---|---|---|---|
+| P1 | 64/64 | 32/32 | 96/96 | - | - | - |
+| P2 | 64/64 | 32/32 | - | 2/2 | 30/30 | 64/64 |
+
+**Comparisons**
+- **P1 against the replay's RP1**: the same 96 questions at about the same size, 98.9k on the seat
+  against about 92k in the replay. Both scored 96/96, with no difference.
+- **P1 against P2**: 96/96 at both. At P2 the deep plants were 150k or more tokens back, with about
+  257k of context, and all were recalled.
+- No slip is visible anywhere from about 99k to 257k on these probes.
+
+**Limits**
+- **Ceiling.** Every category is at 24/24 at both sizes, so the probe cannot locate a slip point
+  inside this range, or below it. "No slip observed" holds for easy, explicitly stated facts only.
+  The harder probe set (L2f) is meant to fix that.
+- **Size estimates ran low.** Measured contexts were 8.5% (P1) and 5.7% (P2) above plan, so the
+  0.55 tokens-per-character estimate undercounts this content slightly.
+- **Restatement inside thinking is uncheckable.** No visible reply restated a plant: O1 and O2
+  replied `OK`, and the long output counts were thinking. The session JSONL does not keep thinking,
+  so restatement inside thinking cannot be checked.
+- **Thinking state unknown.** The seat's JSONL cannot show silent drops, and the rig route dropped
+  replayed thinking in direct-API tests. This run is **not** labeled "thinking preserved".
+- **One run on one model**; no variance is measured.
+
 ### Strip-thinking arm results [measured, 2026-10-15]
 
 Run with `spikes/m0/fidelity/replay.py`: `claude-haiku-5-5`, adaptive thinking, effort `medium`,
