@@ -1,0 +1,4 @@
+turn,input_tokens,cache_creation_input_tokens,cache_read_input_tokens,output_tokens,request_bytes,message_count,cli,model,ts,endpoint
+1,30000,,0,200,90000,2,codex,gpt-6-astra,2026-10-15T23:00:00.000000Z,/v1/responses
+1,1200,,30000,300,94000,4,codex,gpt-6-astra,2026-10-15T23:00:10.000000Z,/v1/responses
+2,800,,31200,250,97000,6,codex,gpt-6-astra,2026-10-15T23:02:00.000000Z,/v1/responses

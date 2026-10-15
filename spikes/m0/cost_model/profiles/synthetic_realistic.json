@@ -1,0 +1,112 @@
+{
+ "name": "synthetic-realistic",
+ "tag": "inferred",
+ "note": "Assumed shape of a long Claude Code or Codex working session. Every number here is inferred, not measured; lane 1's measuring proxy replaces it with per-request rows.",
+ "seed": 20261015,
+ "turns": 300,
+ "system_and_tools_tokens": 42000,
+ "intra_turn_gap_s": 15,
+ "user_message_tokens": {
+  "dist": "lognormal",
+  "median": 150,
+  "sigma": 1.0,
+  "min": 5,
+  "max": 6000
+ },
+ "tool_calls_per_turn": {
+  "dist": "poisson",
+  "mean": 3.0,
+  "max": 40
+ },
+ "tool_output_tokens": {
+  "dist": "lognormal",
+  "median": 700,
+  "sigma": 1.3,
+  "min": 10,
+  "max": 25000
+ },
+ "tool_call_output_tokens": {
+  "dist": "lognormal",
+  "median": 120,
+  "sigma": 0.5,
+  "min": 20,
+  "max": 2000
+ },
+ "final_output_tokens": {
+  "dist": "lognormal",
+  "median": 400,
+  "sigma": 0.8,
+  "min": 20,
+  "max": 6000
+ },
+ "thinking_tokens_per_request": {
+  "dist": "lognormal",
+  "median": 150,
+  "sigma": 1.0,
+  "min": 0,
+  "max": 8000
+ },
+ "think_time_s": {
+  "dist": "mixture",
+  "components": [
+   {
+    "weight": 0.6,
+    "dist": "lognormal",
+    "median": 45,
+    "sigma": 0.8
+   },
+   {
+    "weight": 0.3,
+    "dist": "lognormal",
+    "median": 420,
+    "sigma": 0.7
+   },
+   {
+    "weight": 0.1,
+    "dist": "lognormal",
+    "median": 2400,
+    "sigma": 0.8
+   }
+  ]
+ },
+ "rollover": {
+  "note": "H4 supervisor rollover: when context reaches the threshold, the outgoing session writes a handoff and a fresh session starts from the head plus that handoff. All values inferred.",
+  "threshold_fraction_of_compaction": 0.9,
+  "handoff_output_tokens": 4000,
+  "seed_tokens": 20000,
+  "instruction_tokens": 300
+ },
+ "cvm": {
+  "recall_rate": 0.1,
+  "pin_change_rate": 0.15,
+  "policy": {
+   "window_tokens": 32000,
+   "epoch_turns": 8,
+   "opportunistic": true,
+   "respect_price_tier": true,
+   "pinned_base": 3000,
+   "pinned_per_turn": 15,
+   "pinned_max": 12000,
+   "stub_tokens_per_turn": 60,
+   "recall_tokens": 1500,
+   "recall_call_tokens": 120,
+   "strip_output_overhead": 0.097
+  },
+  "policy_note": "strip_output_overhead 0.097 is the vendor's medium-effort figure for dropping thinking every turn (platform.claude.com preserved-thinking page); the effort level is inferred"
+ },
+ "head_note": "Inferred. Head means everything fixed before the first user turn: system prompt, tool definitions, injected first-turn context. 42k matches lane 1's preliminary, unreviewed Claude Code default-mode request (not cited as measured).",
+ "thinking_in_context": {
+  "anthropic": {
+   "value": true,
+   "source": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+   "retrieved": "2026-10-15",
+   "tag": "vendor-documented",
+   "note": "Opus 4.5 and later Opus, Haiku 5.5, and Fable 5.1 keep all prior turns' thinking in context and bill it as input"
+  },
+  "openai": {
+   "value": false,
+   "tag": "inferred",
+   "note": "reasoning items are not assumed to stay in Codex's resent input"
+  }
+ }
+}
