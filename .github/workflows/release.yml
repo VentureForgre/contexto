@@ -115,16 +115,16 @@ jobs:
     env:
       TAG: ${{ inputs.tag }}
     steps:
-      - name: Validate the tag name
-        run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Not a release tag: $TAG" >&2; exit 1; }
+      # Check out main, not the tag: semantic-release cannot match release groups on a detached HEAD.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: main
           fetch-depth: 0
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
+      - name: Refuse anything but an existing release tag on main
+        run: bash .github/scripts/reattach-verify.sh "$TAG"
       - name: Create the release if the tag exists without one
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -133,6 +133,8 @@ jobs:
             echo "Release $TAG exists."
             exit 0
           fi
+          # Prove the notes can be generated before creating anything.
+          $PSR --noop changelog --post-to-release-tag "$TAG"
           gh release create "$TAG" --verify-tag --title "$TAG" --notes "Release notes are being generated."
           # Replace the placeholder with the Conventional Commit notes for this tag.
           $PSR changelog --post-to-release-tag "$TAG"
@@ -140,6 +142,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          git checkout --quiet --detach "refs/tags/$TAG"
           NEW_VERSION="${TAG#v}" bash .github/scripts/release-build.sh
           shopt -s nullglob
           files=(dist/*.tar.gz dist/*.whl)

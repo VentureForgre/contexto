@@ -100,6 +100,7 @@ No VCS-derived version plugin (hatch-vcs, setuptools-scm) is needed.
 |---|---|
 | `.github/semantic-release.toml` | PSR settings: `v{version}` tags, conventional parser, release types, `main` only, no version files |
 | `.github/scripts/release-build.sh` | PSR `build_command`: stamp, build, and verify artifact versions; skip cleanly without `pyproject.toml` |
+| `.github/scripts/reattach-verify.sh` | Recovery guard: the tag must be an existing `vX.Y.Z` tag on `main` |
 | `.github/workflows/ci.yml` | Pull request checks; also the required gate for releases (`workflow_call`) |
 | `.github/workflows/release.yml` | Release on push to `main`; manual recovery for an existing tag; both gated on `RELEASES_ENABLED` |
 
@@ -132,10 +133,14 @@ clone to act as `origin`, push the commits under test to its `main`, and run
 
 - **The tag exists but the release is missing or has no assets** (for example, release creation or
   the upload failed after the tag was pushed): run the Release workflow manually from the Actions tab
-  with the existing tag, such as `v0.2.0`. The `reattach` job checks out the tag. If the release is
-  missing, it creates one and posts that tag's Conventional Commit notes
-  (`semantic-release changelog --post-to-release-tag`). It then rebuilds at the tag's version and
-  uploads the sdist and wheel. It never creates a tag or a new version. A plain re-run of the
+  with the existing tag, such as `v0.2.0`. The `reattach` job checks out `main` with full history.
+  It refuses anything except an existing `vX.Y.Z` tag whose commit is on `main`
+  (`.github/scripts/reattach-verify.sh`, `git merge-base --is-ancestor`), failing before it creates
+  anything. If the release is missing, it first checks that the notes can be generated, then creates
+  the release and posts that tag's Conventional Commit notes
+  (`semantic-release changelog --post-to-release-tag`, which needs a branch checkout, not a detached
+  tag). Finally it checks out the tag, rebuilds at the tag's version, and uploads the sdist and wheel.
+  It never creates a tag or a new version. A plain re-run of the
   release workflow does nothing here, because it sees the tag and treats that version as released.
 - **A release is broken:** fix it with a `fix:` pull request; the merge produces the next patch
   release. Deleting a published tag or release is a maintainer decision made in the GitHub UI.
