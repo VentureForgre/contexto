@@ -68,17 +68,16 @@ A parallel `token_usage_record` per request carries `usage`, `turn_token_usage`,
 | Lane schema field | Source in the rollout |
 |---|---|
 | `turn` | count of `event_msg` `task_started` |
-| `input_tokens` | `input_tokens - cached_input_tokens`: input not read from cache; it may include tokens that were written to the cache |
-| `cache_creation_input_tokens` | empty. Codex fills `cache_write_input_tokens` with 0 when the server omits `input_tokens_details.cache_write_tokens` (`#[serde(default)]`, `codex-rs/protocol/src/protocol.rs:2216`, `codex-api/src/sse/responses.rs:156-160`), so a rollout 0 cannot be told apart from "not reported" |
+| `input_tokens` | `input_tokens - cached_input_tokens - cache_write_input_tokens` (uncached input, Anthropic semantics; the subtraction matches Codex's own parser test) |
+| `cache_creation_input_tokens` | `cache_write_input_tokens`, 0 on every request here. Caveat: Codex fills the field with 0 when the server omits `input_tokens_details.cache_write_tokens` (`#[serde(default)]`, `codex-rs/protocol/src/protocol.rs:2216`, `codex-api/src/sse/responses.rs:156-160`), so in the rollout an absent field looks like a reported 0. Lane 2's conformance probe saw the Responses API report `cache_write_tokens` explicitly as 0 on `gpt-6-astra` [measured by builder-4: `.contexto/spikes/l2b/conformance/probe-20261015T232600Z.json` in builder-4's worktree; doc lands with PR #7], so these zeros are most likely reported |
 | `cache_read_input_tokens` | `cached_input_tokens` |
 | `output_tokens` | `output_tokens` (includes `reasoning_output_tokens`) |
 | `request_bytes` | empty: not observable without a proxy |
 | `message_count` | `response_item` records in history when the request was sent: every recorded item minus the response's own output items (reasoning, tool calls, assistant messages), reset to the `replacement_history` length at a compaction. It excludes base instructions and tool definitions, which are not `response_item`s, so it is a count of conversation items, not of every input item on the wire |
 | `cli`, `model`, `ts` | `codex`, `turn_context.model`, timestamp of the `token_count` record |
 
-Extra raw columns: `codex_input_tokens` (Codex `input_tokens`, which includes cached tokens),
-`codex_cache_write_raw` (the raw, serde-defaulted value; 0 on every request here, meaning either no
-writes or not reported), `reasoning_output_tokens`, `total_tokens` (input plus output: the context in use after the
+Extra raw columns: `codex_input_tokens` (Codex `input_tokens`, which includes cached and
+cache-write tokens), `reasoning_output_tokens`, `total_tokens` (input plus output: the context in use after the
 response), `model_context_window`, `compactions_so_far`.
 
 The OpenAI `cached_tokens` count is a subset of `input_tokens`, unlike Anthropic where cache fields
@@ -102,9 +101,9 @@ Per turn [measured: `codex_usage.py <rollout> --per-turn`, committed as
 
 Per request: `M0-codex-measurements-requests.csv` (11 rows). Within a tool turn the first request
 reads almost everything from cache (for example turn 2: 32,128 of 32,461) and the second request
-pays for the new tool output uncached (turn 2: 3,045 uncached of 35,301) [measured]. Whether those
-uncached tokens were also written to the cache, and billed as writes, is not recorded (see
-`cache_creation_input_tokens` above); a cost model should treat cache writes as unknown here.
+pays for the new tool output uncached (turn 2: 3,045 uncached of 35,301) [measured]. Cache writes
+were 0 on every request, most likely as reported by the server (see the
+`cache_creation_input_tokens` caveat above).
 
 Reasoning tokens: 21 on one request in turn 1, 0 elsewhere [measured]. `model_context_window` is
 258,400 on every request, which is 95% of the model's 272,000 window, matching Codex's default
@@ -194,7 +193,8 @@ whose experiments used 0 model tokens).
 
 - Which transport this seat used (L1-a measured WebSocket deltas on a throwaway probe; the seat's
   own mode was not observed).
-- Whether Codex requests incur cache writes: the rollout cannot distinguish 0 from "not reported".
+- The rollout cannot distinguish a reported 0 cache write from an omitted field; lane 2's probe
+  indicates the API reports it explicitly.
 - Who sent turn 1 and under which budget.
 - The fidelity probe set and the full-context baseline (builder-4) are pending.
 - Turn shapes with large tool outputs, file reads, or reasoning-heavy work would grow faster; this

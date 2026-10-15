@@ -11,9 +11,10 @@ model, plus raw Codex columns:
   request                      1-based index of event_msg token_count (one per model response)
   ts                           timestamp of the token_count record
   cli, model                   "codex", model from the latest turn_context
-  input_tokens                 codex input - cached; may include tokens written to the cache
-  cache_creation_input_tokens  empty: Codex serde-defaults cache_write_input_tokens to 0 when the
-                               server omits it, so a rollout 0 is not a measured zero
+  input_tokens                 uncached input = codex input - cached - cache_write
+  cache_creation_input_tokens  codex cache_write_input_tokens. Codex serde-defaults it to 0 when
+                               the server omits the field, so an absent field and a reported 0
+                               look the same in the rollout
   cache_read_input_tokens      codex cached_input_tokens
   output_tokens                codex output_tokens (includes reasoning)
   request_bytes                empty: not observable from the rollout
@@ -21,8 +22,7 @@ model, plus raw Codex columns:
                                recorded items minus this response's own output items (reset to
                                the replacement_history length at a compaction). Excludes base
                                instructions and tool definitions, which are not response_items.
-  codex_input_tokens           raw input_tokens (includes cached)
-  codex_cache_write_raw        raw cache_write_input_tokens (0 may mean "not reported")
+  codex_input_tokens           raw input_tokens (includes cached and cache_write)
   reasoning_output_tokens      raw reasoning_output_tokens
   total_tokens                 raw total_tokens (input + output) = context in use after the response
   model_context_window         as reported in the token_count event
@@ -39,8 +39,8 @@ import sys
 
 FIELDS = ["turn", "request", "ts", "cli", "model", "input_tokens", "cache_creation_input_tokens",
           "cache_read_input_tokens", "output_tokens", "request_bytes", "message_count",
-          "codex_input_tokens", "codex_cache_write_raw", "reasoning_output_tokens", "total_tokens",
-          "model_context_window", "compactions_so_far"]
+          "codex_input_tokens", "reasoning_output_tokens", "total_tokens", "model_context_window",
+          "compactions_so_far"]
 
 # Item types the model produces in a response; everything else in history is request input.
 OUTPUT_ITEM_TYPES = {"reasoning", "function_call", "custom_tool_call", "local_shell_call",
@@ -86,13 +86,13 @@ def rows(path):
                 request += 1
                 raw_in = last.get("input_tokens", 0)
                 cached = last.get("cached_input_tokens", 0)
+                write = last.get("cache_write_input_tokens", 0)
                 yield {
                     "turn": turn, "request": request, "ts": o.get("timestamp"), "cli": "codex",
-                    "model": model, "input_tokens": raw_in - cached,
-                    "cache_creation_input_tokens": "", "cache_read_input_tokens": cached,
+                    "model": model, "input_tokens": raw_in - cached - write,
+                    "cache_creation_input_tokens": write, "cache_read_input_tokens": cached,
                     "output_tokens": last.get("output_tokens", 0), "request_bytes": "",
                     "message_count": items_total - outputs_since, "codex_input_tokens": raw_in,
-                    "codex_cache_write_raw": last.get("cache_write_input_tokens", 0),
                     "reasoning_output_tokens": last.get("reasoning_output_tokens", 0),
                     "total_tokens": last.get("total_tokens", 0),
                     "model_context_window": info.get("model_context_window"),
