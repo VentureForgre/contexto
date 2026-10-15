@@ -144,7 +144,7 @@ OMITTED: decision=0 fact=2        <- only when something was left out
     restarts near 12k against a 24k bound. That holds for this synthetic profile and seed only. An
     earlier version of this section said `H` covers every turn, which was wrong.
 - **Real turns are much larger.**
-  - Codex adds about 3k tokens per small tool turn [measured, lane 1, PR #9].
+  - Codex adds about 3k tokens per small tool turn [measured, lane 1, PR #10].
   - The L2d probe's file reads are 16k to 18k tokens each [inferred estimate].
   - Reviewer-1 found 11 requests over the bound at 12 tool calls per turn in PR #8's model [reported
     by reviewer-1].
@@ -423,7 +423,7 @@ What the probe shows:
 - **Only the two 400s are route-independent evidence** of the prefix check: changed `system`, and
   text added to an earlier user turn. The 200s for append-only, strip-all and the epoch rewrite
   show those requests are accepted, nothing more.
-- **Earlier thinking never reached the model on this route.** Thinking replayed through the rig
+- **Earlier thinking likely did not reach the model on this route.** Thinking replayed through the rig
   proxy was likely not seen in any of our requests.
 - **Preserved versus stripped thinking stays inconclusive until a route with stable identity
   exists.** That covers the L2e comparison (quality-vs-context doc) and strategy A's measured
