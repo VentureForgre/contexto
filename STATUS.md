@@ -12,11 +12,14 @@ M1: durable ledger, checkpoints, and recovery. Contract: `docs/milestones/M1-led
 
 ## Verified on main
 
-Only the charter. No product code exists yet.
+- Charter and the M1 contract (PR #1, reviewed by review.reviewer-1 at head 040318c, merged as
+  49613a2). No product code exists yet.
 
 ## Open obligations
 
-- Lane A first PR: `contexto.model` plus scaffolding, which unblocks lane B integration.
+- Lane A first PR: `contexto.model` plus scaffolding (PR #2, in revision), which unblocks lane B
+  integration.
+- Contract follow-up: pin `Ledger.repair()` signature and CLI root resolution (this change).
 - Intake: integrate reviewed PRs, run the end-to-end CLI scenario on main, record results here.
 
 ## Known issues

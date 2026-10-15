@@ -94,6 +94,8 @@ Append-only JSONL at `<root>/.contexto/ledger.jsonl`, one canonical record per l
 - CLI layout: `contexto.cli` builds the parser and discovers subcommand modules in the
   `contexto.commands` package via `pkgutil`; each module exposes `register(subparsers)`. Lane B adds
   its own modules there and does not edit `cli.py`.
+- CLI root: `--root PATH`, else the `CONTEXTO_ROOT` environment variable, else the current
+  directory. There is no upward search. `cli.main` resolves it into `args.root` before dispatch.
 
 Public Python API that lane B depends on, in `contexto.model` and `contexto.ledger`:
 
@@ -114,7 +116,11 @@ class Ledger:
     def records(self) -> list[Record]: ...  # intact prefix only
     def head(self) -> str: ...  # line hash of last intact line, 64 zeros when empty
     def verify(self) -> list[str]: ...  # empty list means intact
+    def repair(self) -> Path | None: ...  # quarantine file path, None if no truncated tail
 ```
+
+`repair()` raises `contexto.ledger.LedgerError` when `verify()` finds damage other than a truncated
+final line; it never rewrites the chain.
 
 Lane A lands `contexto.model` plus project scaffolding (`pyproject.toml`, test config) as its first,
 small PR so lane B can build on it.
