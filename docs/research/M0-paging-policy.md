@@ -132,6 +132,10 @@ OMITTED: decision=0 fact=2        <- only when something was left out
 - **Sizing rules.**
   - `H` must be at least the workload's p99 turn growth, after ingest paging if it is used (section
     4).
+  - A live proxy cannot know that figure in advance; it is an oracle. So `H` is set from an online
+    estimate: the running maximum of observed turn growth, plus 25%, as PR #8 does. In PR #8's
+    model, that rule left requests over the bound in 4 of 20 seeds at 100k without ingest paging,
+    and in 0 of 20 with it [measured in PR #8's model, reported by reviewer-1].
   - `window_high` must be at least pinned block + page index + the retained window + `H`.
   - The bound itself should come from L2d's measured quality-versus-size curve, well below any size
     where quality slips. PR #8 states the real `H` from builder-3's workload profile and tool-heavy
