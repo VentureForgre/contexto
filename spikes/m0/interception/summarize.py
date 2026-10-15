@@ -3,7 +3,9 @@
 
 Usage: summarize.py <stub requests.log> [hooks.log]
 Prints hook events (name, source, trigger) and, for each POST, body size, message or
-input-item structure, and synthetic MARKER-* tokens. The logs hold no other content.
+input-item structure, `store` and whether `previous_response_id` was set (Responses API
+requests), and synthetic MARKER-* tokens. The logs hold no other content. Codex retries a
+refused POST several times, so identical POST lines are expected.
 """
 import json
 import sys
@@ -27,7 +29,10 @@ def main() -> None:
                 continue
             s = o.get("shape") or {}
             structure = s.get("input_items") if "input_items" in s else s.get("roles")
-            print(f"  POST {o['path']} bytes={o['body_bytes']} model={s.get('model')} "
+            codex = ""
+            if "input_items" in s:  # Responses API request
+                codex = f" store={s.get('store')} previous_response_id_set={s.get('previous_response_id_set')}"
+            print(f"  POST {o['path']} bytes={o['body_bytes']} model={s.get('model')}{codex} "
                   f"structure={structure} markers={o['markers']}")
     print(f"  non-POST requests: {gets}")
 

@@ -15,7 +15,9 @@ Every claim carries one tag:
 - **[inferred]** reasoning from the above, not verified.
 
 Phase 1 rules apply: spike code only observes, nothing here rewrites live traffic, and no content,
-credential, or header value was logged.
+credential, or header value was logged. One deviation is disclosed in section 8: two early
+non-isolated runs sent the owner's Claude subscription credential to the owner-operated rig proxy,
+which rejected them.
 
 ## Summary
 
@@ -32,14 +34,40 @@ credential, or header value was logged.
    is phase 2).
 4. **The hard constraint for the main hypothesis (H1) is preserved thinking.** On Claude 5.x models
    the API binds each thinking block to everything before it; shortening an earlier `tool_result`
-   invalidates every later thinking block. A rewriting proxy must be deterministic and append-only
-   after each rewrite point, or use the server-side `context_management` edits Claude Code already
-   sends a version of (documented, observed in the request params).
+   invalidates every later thinking block (documented). Lane 2's probe measured that editing content
+   before a kept signed thinking block returns 400, while dropping old turns or stripping thinking
+   returns 200 on its account. A rewriting proxy must be deterministic and append-only after each
+   rewrite point, or use the server-side `context_management` edits Claude Code already sends a
+   version of (documented, observed in the request params).
 5. **A recall tool is far simpler as a tool the CLI declares (an MCP server) than as a tool only the
    proxy knows about** (section 5, inferred).
 6. **Auth:** both CLIs send their subscription credential to a custom base URL. Anthropic and OpenAI
    terms both restrict intermediating subscription credentials. Owner decisions are listed in
    section 10.
+
+## Owner principle and how H2, H3, H4 measure against it
+
+Binding owner principle (2026-10-15): the compaction threshold exists because model quality
+degrades as context grows, and results near it are poor. Compaction is a failure mode to avoid,
+not a mechanism to optimize. The success bar is that compaction is never called, with recall and
+task accuracy equal to the full-context baseline on the fidelity probes. The alternatives are
+therefore judged first by how small they keep working context and how stable quality stays, and
+only then by token cost. All [inferred] from sections 1 to 3; intake does the cross-lane ranking.
+
+- **H2 (hooks):** cannot shrink working context. Every injection is appended and resent, so context
+  grows until the CLI compacts. On its own it fails the principle; it only helps as an add-on that
+  re-seeds a pinned state block after a rollover.
+- **H3 (session-file rebirth):** can reset working context to a small curated seed at each rollover,
+  and the rollover can be triggered far below the threshold (both CLIs trust recorded usage, so the
+  writer controls what they believe). Between rollovers context grows normally. Quality stays in the
+  low-context regime if the seed holds what later turns need; thinking and reasoning continuity is
+  lost at each rollover because opaque items cannot be synthesized. Depends on internal formats.
+- **H4 (supervisor rollover):** the same sawtooth as H3, using a fresh session seeded by a handoff
+  message instead of a written file. No format dependency; the floor is the handoff size and quality
+  depends on handoff fidelity.
+- **Reference, H1 (bounded-prompt proxy):** the only option that can hold working context at a fixed
+  budget every turn without rollovers; quality then depends on stubbing and recall fidelity, and
+  preserved thinking constrains how it may rewrite (section 4).
 
 ## Capability matrix
 
@@ -53,7 +81,7 @@ numbers point to details.
 |---|---|---|---|---|---|
 | API requests (`ANTHROPIC_BASE_URL` proxy) | Full request: system, tools, messages, params, headers | Anything, in principle | Can refuse | Earlier bytes change under preserved thinking (400 or dropped thinking); prefix change re-writes the cache; `anthropic-beta` stripped (401 on OAuth) | documented (4.1, 6); measured that requests reach a local listener (7) |
 | API responses and `usage` | Full SSE stream | Anything, including `usage` | n/a | Truncated SSE treated as dropped connection; rewritten `usage` changes the CLI's compaction decision | documented (3, 4) |
-| SessionStart hook | `source` (startup, resume, clear, compact, fork), `transcript_path` | Append only (`additionalContext`) | No | 10,000-character cap per string; added text is itself summarized at the next compaction | measured `cc-hooks`, `cc-precompact`; documented (1) |
+| SessionStart hook | `source` (startup, resume, clear, compact, fork), `transcript_path` | Append only (`additionalContext`) | No | 10,000-character cap on every hook output string; added text is itself summarized at the next compaction | measured `cc-hooks`, `cc-precompact`; documented (1) |
 | UserPromptSubmit hook | `prompt` | Append only; cannot replace the prompt | Yes | 30 s default timeout drops its output | measured `cc-hooks`; documented (1) |
 | PreToolUse / PostToolUse hooks | Tool input / tool output | `updatedInput`; `updatedToolOutput` (current call only, before Claude sees it) | Yes | Built-in tool output that fails the schema is ignored | documented (1) |
 | PreCompact hook | `trigger`, `custom_instructions` | Plain stdout is appended to the summarizer instructions (undocumented) | Yes (exit 2) | Blocking a forced compaction surfaces "Prompt is too long" and the turn fails | measured `cc-precompact`; documented block (1) |
@@ -100,8 +128,9 @@ What the documentation adds [documented: https://code.claude.com/docs/en/hooks]:
 - 33 hook events. Only `additionalContext` (append), `updatedInput` (current tool call),
   `updatedToolOutput` (current tool result, must match the tool's output shape), and blocking can
   change what the model sees. UserPromptSubmit "can't replace the prompt".
-- Each injected string is capped at 10,000 characters with no override; overflow is replaced by a
-  file path and a 2,000-character preview.
+- Every hook output string (`additionalContext`, `systemMessage`, `initialUserMessage`, and plain
+  stdout) is capped at 10,000 characters with no override; overflow is replaced by a file path and
+  a 2,000-character preview.
 - Hooks get `transcript_path`, which "is written asynchronously and may lag". There is no API to
   read or rewrite the in-memory history.
 - After a compaction, SessionStart hooks matching `compact` run and their output is added to the
@@ -166,11 +195,14 @@ What the source adds [documented: `codex-rs/hooks/src/events/compact.rs:47-54, 2
   records: `api-request` (`params`, `cacheControl`, `querySource`, `shapeHash`), `api-request-shape`
   (`system`, `tools`), and `api-request-blob` (hashed message content). Compaction writes a
   `system` record with subtype `compact_boundary` plus a `user` record with `isCompactSummary`
-  [documented from binary strings, see research notes].
+  [inferred from inspection of the 2.1.301 binary, not vendor documentation; the names are present:
+  measured with `grep -a -o -F compact_boundary ~/.local/bin/claude | wc -l` (72 hits) and the same
+  for `isCompactSummary` (94); no compaction was observed in these experiments].
 - **Privacy note:** the session file stores what was sent on the wire, including the system prompt,
   tool definitions, and message blobs. Throwaway sessions from these experiments live in the
-  isolated config dir under `.contexto/spikes/L1-b/cc-config/`; the one early run without isolation
-  and the live-recipe proof wrote to `~/.claude/projects`. They stay local and are never committed.
+  isolated config dir under `.contexto/spikes/L1-b/cc-config/`; the two early non-isolated runs
+  (section 8, deviations) and the live-recipe proof wrote to `~/.claude/projects`. They stay local and
+  are never committed.
 - **A synthesized file is accepted on resume** [measured: `run.sh cc-resume`]: a two-record file (one
   `user`, one `assistant`) written by `spikes/m0/interception/synth_session.py` was resumed with `--resume <id>`,
   and the upstream request contained both synthesized turns before the new prompt.
@@ -221,13 +253,18 @@ What the source adds [documented: `codex-rs/hooks/src/events/compact.rs:47-54, 2
 
 ### Claude Code
 
-- **Mechanism** [documented from the 2.1.301 binary, research notes section 3.2]: the count is the
-  `usage` of the last assistant message (`input + cache_creation + cache_read + output`) plus a
-  local bytes-per-token estimate of later messages. Levels: `compact` at the auto-compact threshold,
-  `blocked` at `window - min(maxOutput, 20000) - 3000`.
+- **Mechanism** [inferred from inspection of the 2.1.301 binary; not vendor documentation and not
+  reproduced by a committed command]: the count is the `usage` of the last assistant message
+  (`input + cache_creation + cache_read + output`) plus a local bytes-per-token estimate of later
+  messages. Levels: `compact` at the auto-compact threshold (`window - min(maxOutput, 20000) -
+  13000`), `blocked` at `window - min(maxOutput, 20000) - 3000`. The measured part is narrower: the
+  CLI trusts the `usage` recorded in the session file (planted values drive the decision, below), and
+  the override names exist in the binary [measured: `grep -a -o -F <name> ~/.local/bin/claude | wc -l`
+  gives `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 8, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 16,
+  `DISABLE_AUTO_COMPACT` 6, `CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE` 3].
 - **Thresholds** [documented: https://code.claude.com/docs/en/model-config#set-the-auto-compact-window]:
-  native 1M models compact "at about 967K tokens" (`window - 20000 - 13000`); 200K models at about
-  167K. Unknown model ids behind a gateway are assumed to have 200K.
+  native 1M models compact "at about 967K tokens"; 200K models compact at the 200K boundary.
+  Unknown model ids behind a gateway are assumed to have 200K.
 - **Overrides** [documented: same page and https://code.claude.com/docs/en/env-vars]:
   `--autocompact <auto|tokens>` sets the auto-compact window for one launch (help text: "Auto-compact
   window size (auto, or 100k-1M tokens)" [measured: `claude --help`]); `/autocompact <n>` and the
@@ -246,11 +283,30 @@ What the source adds [documented: `codex-rs/hooks/src/events/compact.rs:47-54, 2
   | 120,012 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=10` | the new turn |
   | 999,012 | `DISABLE_AUTO_COMPACT=1` | none; CLI reports "Prompt is too long" |
 
-  The pre-send trigger therefore sits between 970,012 and 975,012 reported tokens plus the local
-  estimate of the new prompt, which matches the `blocked` level (977,000) rather than the 967K
-  auto-compact threshold. In `-p` resume, neither the window flag nor the percentage override
-  caused a compaction before the first send [measured]. Whether they act after a completed turn, as
-  documented, needs a real response and is covered by builder-1's live measurement (section 9).
+  The pre-send trigger sits between 970,012 and 975,012 reported tokens plus the local estimate of
+  the new prompt [measured]. Reading it as the `blocked` level (977,000) rather than the 967K
+  auto-compact threshold [inferred] assumes the local estimate for the new prompt and its
+  attachments is about 2,000 to 7,000 tokens, which was not measured. In `-p` resume, neither the
+  window flag nor the percentage override caused a compaction before the first send [measured].
+- **Measured mid-turn in `-p` stream-json mode** [measured by L1-a, builder-1: Claude Code 2.1.301,
+  `claude-haiku-5-5`, default mode, `-p --output-format stream-json`, `--autocompact 100000`, through
+  the pass-through proxy; to be published in `docs/research/M0-proxy-measurements.md`, doc pending].
+  This run violated owner decision D3 (default compaction settings only, `docs/DECISIONS.md`,
+  PR #12) because it set `--autocompact`; its findings are kept as evidence, not as a pattern to
+  repeat. `--autocompact` does fire in this mode, mid-turn, and can loop. Turn 1 read four logs of about
+  50 KB in parallel; request 7 had a context of 136,866 tokens (one `tool_result` of 153 KB).
+  Compaction 1 ran at 139,320 (cache write 139,318, cache read 0, a full cache miss; output 5,510).
+  The model then re-read files; compactions 2 and 3 ran at 78,469 (output 8,908) and 86,968
+  (output 9,342), both below 100K, which suggests the trigger counts usage plus pending tool
+  results [inferred by L1-a]. The final request had a context of 38,887. stream-json emitted three
+  `system` `compact_boundary` events, and `count_tokens` calls of about 50 KB appeared around the
+  compactions. Compaction requests were identified by shape (the same 5 messages, no
+  `claude-code-20250219` beta, `end_turn`).
+- **The two modes together:** a resumed `-p` session checked only the hard `blocked` level before its
+  first send (this doc), while a live `-p` stream-json turn applies the `--autocompact` window
+  mid-turn and can compact repeatedly within one turn (L1-a). Both are measured; the difference
+  between them is not yet explained [inferred: the auto-compact check may run only after a model
+  response in the query loop].
 - **Under a bounded-prompt proxy** [inferred]: Claude Code's count comes from the `usage` the
   proxy returns. If the proxy forwards a bounded prompt and returns the true upstream usage, the
   CLI sees small numbers and does not compact, while its local history keeps growing. Rewriting
@@ -312,6 +368,17 @@ All [documented, 2026-10-15] unless marked.
   or all of them (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking). Claude
   Code's gateway guidance says the same: "inspect without modifying"
   (https://code.claude.com/docs/en/llm-gateway-protocol).
+- **Measured on one account** [measured by lane 2, builder-4: conformance probe at 23:26Z,
+  4,973 tokens, direct API, `claude-haiku-5-5` with two signed thinking turns; record in builder-4's
+  `.contexto/spikes/l2b/conformance/probe-20261015T232600Z.json`, doc lands with PR #7's revision]:
+  append-only 200; strip all thinking 200; drop the oldest turns while keeping thinking 200 (with
+  `prefix_mismatch_behavior=error` also 200, with the thinking dropped and reason
+  `end_user_binding_mismatch`, not 400); change `system` while keeping thinking 400 (invalid
+  signature); add text to an earlier user turn 400; full epoch rewrite with thinking stripped 200;
+  `drop_block` 200; `clear_thinking_20251015` 200. Reading [inferred by lane 2]: the probe's account
+  does not enforce the binding by default for dropped turns, but edits before signed thinking still
+  fail with 400. A proxy can therefore drop old turns or rewrite whole epochs with thinking stripped,
+  but must not edit content that precedes a signed thinking block it keeps.
 - **Server-side edits are exempt:** context editing (`clear_tool_uses_20250919`,
   `clear_thinking_20251015`, beta `context-management-2025-06-27`) and server compaction "never
   trigger" the prefix check, because it compares what the client sent
@@ -328,13 +395,21 @@ All [documented, 2026-10-15] unless marked.
 
 ### OpenAI Responses API (Codex)
 
-- **Codex's wire behavior** [measured: `run.sh cx-hooks`]: seven WebSocket upgrade attempts on
-  `GET /v1/responses`, then HTTP `POST /v1/responses` with the full input, `store:false`, no
-  `previous_response_id`, and `include: ["reasoning.encrypted_content"]`. Over WebSocket, Codex
-  sends `previous_response_id` plus only the new items when possible [documented:
-  `codex-rs/core/src/client.rs:300-370, 1331-1410`], so a rewriting proxy must handle or refuse the
-  WebSocket path (refusing makes Codex fall back to HTTP for the session [documented:
-  `core/src/client.rs:556-562`]).
+- **Codex's wire behavior, HTTP mode** [measured: `run.sh cx-hooks`, which prints `store` and
+  `previous_response_id` per request]: when the stub refused the WebSocket upgrades (4 to 7
+  `GET /v1/responses` attempts with 401), Codex sent HTTP `POST /v1/responses` with the full input,
+  `store:false`, no `previous_response_id`, and `include: ["reasoning.encrypted_content"]`, and
+  retried the identical POST up to 6 times on 401. Proxy logs will show those retries.
+- **Codex's wire behavior, WebSocket mode** [measured by L1-a, builder-1: one throwaway Codex probe
+  through a WebSocket tunnel in the pass-through proxy; to be published in
+  `docs/research/M0-proxy-measurements.md`, doc pending]: Codex uses a WebSocket with
+  permessage-deflate, and its second request carried `previous_response_id` with only 5 items
+  (33 KB) instead of the full history. So on WebSocket the wire carries deltas against server-side
+  state, while the billed input is still the full conversation (M0-codex-measurements.md).
+  [documented: `codex-rs/core/src/client.rs:300-370, 1331-1410`] A rewriting proxy must handle or
+  refuse the WebSocket path. The session-wide fall back to HTTP is sourced in `client.rs` only for
+  HTTP 426 [documented: `core/src/client.rs:556-562`]; that a 401 refusal also led to HTTP POSTs is
+  measured above.
 - **Call pairing:** `function_call` and `function_call_output` pair by `call_id`. Codex itself
   inserts `"aborted"` outputs and drops orphans before each request [documented:
   `core/src/context_manager/normalize.rs:21-155`].
@@ -344,11 +419,22 @@ All [documented, 2026-10-15] unless marked.
   without its following item (`Item 'rs_...' of type 'reasoning' was provided without its required
   following item.`) [documented: Codex test fixture `core/src/guardian/tests.rs:2971-2980`].
   `encrypted_content` is opaque; editing it is expected to fail [inferred].
+- **Does Codex have a preserved-thinking equivalent?** Documented: the adjacency rule above (a
+  reasoning item must be followed by its paired item, and items since the last user message must be
+  passed back untouched, https://developers.openai.com/api/docs/guides/reasoning). Inferred, not
+  documented: whether the server binds `encrypted_content` to the context before it, so that
+  altering or reordering it, or editing earlier items, invalidates it the way Anthropic's prefix
+  check does. Measured by lane 2 (builder-4's conformance probe above, `gpt-6-astra`, Responses,
+  `store:false`, encrypted reasoning): append-only (O1), editing an earlier user turn (O2), and
+  dropping it (O3) all returned 200. No rejection was observed; whether the model actually used the
+  encrypted reasoning after the edit is not observable from the response. Altering or reordering
+  `encrypted_content` itself was not tested.
 - **Compaction:** server-side `context_management: [{type: "compaction"}]` or
   `POST /responses/compact`; the compaction item is opaque `encrypted_content`, so a proxy cannot
   audit what was kept (https://developers.openai.com/api/docs/guides/compaction).
 - **Caching and usage:** `cached_tokens` is a subset of `input_tokens` [inferred from the
-  cache-hit-rate formula]; minimum 1,024 tokens on GPT-5.6 and later; writes 1.25x, reads 0.1x
+  cache-hit-rate formula]; minimum 1,024 tokens on GPT-5.6 and later. Rates: on GPT-5.6 and later,
+  writes 1.25x and reads 0.1x (0.05x on GPT-6.1 Sol); GPT-5.5 and earlier have no write charge
   (https://developers.openai.com/api/docs/guides/prompt-caching).
 
 ### Rules for any rewriting proxy (inferred from the above)
@@ -401,14 +487,19 @@ servers [documented]). The CLI then executes it, records it, and resends it like
 the proxy needs no stream surgery or shadow history. Cost: the CLI's local history grows with
 recalled pages, which the proxy's stubbing then has to handle like any other tool result.
 
+**Cross-lane note:** item 5 above and the preserved-thinking rule in section 4 conflict with the
+policy proposed in lane 2's PR #7 (reviewer-2 finding B3 there). The two documents must agree before
+intake merges the recommendation; this document does not resolve it.
+
 ## 6. Auth and terms (question 5)
 
 ### Claude Code
 
 - **Which credential goes where** [documented: https://code.claude.com/docs/en/authentication]:
-  precedence is cloud provider, `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`),
-  `ANTHROPIC_API_KEY` (sent as `X-Api-Key`), `apiKeyHelper`, `CLAUDE_CODE_OAUTH_TOKEN`, then the
-  `/login` subscription.
+  a signed-in gateway session outranks everything; then cloud provider, `ANTHROPIC_AUTH_TOKEN`
+  (sent as `Authorization: Bearer`), `ANTHROPIC_API_KEY` (sent as `X-Api-Key`), `apiKeyHelper`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, Anthropic profile and federation credentials, then the `/login`
+  subscription.
 - **Subscription login honors a custom base URL** [documented:
   https://code.claude.com/docs/en/llm-gateway#subscriptions-and-gateways]: "Requests still route
   through the gateway, but a saved claude.ai login remains the active credential", and the gateway
@@ -425,7 +516,7 @@ recalled pages, which the proxy's stubbing then has to handle like any other too
   plan credentials on behalf of their users" or "collect, store, or intermediate Claude.ai
   credentials or session tokens"; an end user may sign in "to the unmodified Claude Code binary with
   their own Claude subscription". Consumer Terms (effective 2025-10-08) forbid automated access
-  except with an API key (https://www.anthropic.com/legal/consumer-terms).
+  except with an API key or where Anthropic otherwise explicitly permits it (https://www.anthropic.com/legal/consumer-terms).
 
 ### Codex
 
@@ -512,46 +603,93 @@ env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION \
 - For a live run, the env override points at the pass-through proxy, whose upstream is read at
   runtime from the value the process would otherwise inherit and is never written to files or logs.
 
+### OpenRig operational notes for lane experiments
+
+- **Launch before projection, and an unexplained routing miss** [observed by manager-1,
+  2026-10-15]: on a rig shrink and expand of the lab pod, the seat's `claude` process started at
+  18:22:35 local time, and OpenRig's projection rewrote that seat's `.claude/settings.local.json` at
+  18:22:37 and again later. After the first recreate (23:09Z), the seat's model calls went to the
+  owner-operated rig proxy (a live socket was observed) instead of the spike proxy, so they were not
+  measured. The ordering is not shown to be the cause: a second recreate, with the file already
+  correct, also ignored the spike proxy. Cause unknown; escalated to intake. Rule: after
+  recreating a seat, verify its live routing with one tiny turn before measuring.
+- **Slash commands through `rig send`** [measured by manager-1]: a slash command sent with
+  `rig send` arrives at the seat as a task, not as a CLI command.
+
 ## 8. Token spend
 
 | Experiment | Model tokens (input, cache read, cache write, output) |
 |---|---|
 | All `run.sh` experiments, the recipe proof, and two early hook runs | 0 (every request answered by the local stub or rejected by the rig proxy with 401) |
 
+### Deviation: two early non-isolated runs
+
+Before the isolation in `run.sh` and the agreed recipe existed, two throwaway Claude Code runs were
+started from `/private/tmp` with none of the required isolation: no isolated config dir, no dummy
+key, and an unscrubbed environment [measured: request and error records in their local session
+files, names and counts only].
+
+| Run (UTC) | Model | Requests recorded, including retries | Outcome |
+|---|---|---|---|
+| 22:49:15 to 22:52:21 | `claude-haiku-5-5` | 11 | 401 on every request; process stopped by hand |
+| 22:52:56 to 22:55:22 | `claude-fable-5-1` | 10 | 401 on every request; stopped by a 150 s alarm |
+
+- **Credential type:** both runs ran outside the seat worktree, so they did not load the seat's
+  `apiKeyHelper` and fell back to the owner's claude.ai subscription OAuth login (`anthropic-beta`
+  included `oauth-2025-04-20`). With the inherited `ANTHROPIC_BASE_URL`, that credential went to the
+  rig proxy, which answered 401 each time.
+- **Not checked:** whether the rig proxy logs authorization headers.
+- **Exposure:** the owner confirmed that the rig proxy endpoint is owner-operated infrastructure, so
+  the credential did not reach a third party and nothing needs rotating (decision relayed by intake
+  through manager-1).
+- **What changed afterward:** every later experiment used `run.sh` isolation (isolated config dir,
+  dummy key, `env -i`, local stub), and the one live-credential run used the recipe above.
+
 Research for this packet used three in-session research subagents (Anthropic docs and the Claude
 Code binary; Codex source and docs; API protocol docs). Their own consumption, as reported by the
 harness: 206,547 + 232,154 + 228,620 = 667,321 tokens. No experiment called a model.
 
-## 9. Proxy measurements (placeholder)
+## 9. Related measurements
 
-Reserved for builder-1's pass-through proxy measurements, delivered separately in
-`docs/research/M0-proxy-measurements.md`: per-turn request sizes, reported usage, cache behavior,
-and the `--autocompact` pass-through run that tests whether the window flag acts after a completed
-turn (section 3). Not duplicated here.
+- **Proxy measurements (placeholder):** builder-1's pass-through proxy measurements are delivered
+  separately in `docs/research/M0-proxy-measurements.md`: per-turn request sizes, reported usage,
+  cache behavior, the mid-turn `--autocompact` run (section 3), and the Codex WebSocket probe
+  (section 4). Not duplicated here.
+- **Codex session growth:** `docs/research/M0-codex-measurements.md` (PR #10) measures six turns on
+  the `labcodex.subject` seat from its rollout `token_count` events.
 
 ## 10. Owner decisions
 
 1. **Credential mode for any rewriting proxy (Q5).** Route API-key traffic only, or also the owner's
    Claude subscription and ChatGPT login. Both vendors' terms restrict intermediating subscription
    credentials (section 6). This gates phase 2.
-2. **Live calls on the owner's subscription for experiments.** Manager-1 escalated this; until it is
-   decided, lane 1 uses the seat's proxy credential through the proven recipe or zero-spend stubs.
+2. **Live calls on the owner's subscription for experiments.** Decided by the owner for Codex: the
+   `labcodex.subject` seat runs on the owner's ChatGPT login (decision record on queue row
+   `qitem-20261015224601-10ad09bd`). Claude live runs in lane 1 use the seat's proxy credential
+   through the proven recipe, or zero-spend stubs.
 3. **Dependence on undocumented behavior.** PreCompact stdout steering in Claude Code works today
    (measured) but is undocumented. Building on it means re-verifying on every CLI update.
 4. **Session-file writing.** H3 writes into internal, version-specific formats in `~/.claude` and
    `~/.codex`. Decide whether a product may do that or should stay with hooks and the proxy.
 5. **Recall through MCP or a hidden proxy tool** (section 5). MCP is far simpler; a hidden tool
    keeps the CLI's history smaller but needs a shadow history and stream stitching.
+6. **Rewriting the `usage` a proxy reports to the CLI** (section 3). It would steer the CLI's
+   compaction decision, but it changes what the owner's tool reports about real consumption.
+7. **Preserved-thinking status of the owner's Anthropic account** (section 4). A fact to check
+   rather than a choice: accounts created on or after 2026-08-31 get the prefix check by default.
+   Lane 2's probe account dropped turns without error but rejected edits before signed thinking;
+   the owner should confirm the account phase 2 would use behaves the same.
 
 ## 11. Open questions
 
 - Subscription-mode request headers for Claude Code (names only) were not captured.
-- Exact OpenAI errors for an orphaned `function_call` or altered `encrypted_content`; Anthropic
-  behavior for an orphaned `tool_result`.
-- Whether the owner's Anthropic account is subject to default preserved-thinking enforcement
-  (accounts created on or after 2026-08-31).
-- Whether `--autocompact` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` act after a completed turn in `-p`
-  and interactive mode (builder-1, section 9).
+- Exact OpenAI errors for an orphaned `function_call` or altered `encrypted_content`, and whether
+  edited history degrades use of encrypted reasoning; Anthropic behavior for an orphaned
+  `tool_result`.
+- Whether the account phase 2 would use matches lane 2's probe account on preserved-thinking
+  behavior (section 4).
+- Why a resumed `-p` session ignores `--autocompact` before its first send while a live `-p`
+  stream-json turn applies it mid-turn (section 3); interactive mode was not measured.
 - Codex `-c model_auto_compact_token_limit` per launch was read from source, not measured.
 - Whether a Codex custom provider named `openai` is treated as OpenAI for remote compaction (read
   from source, not tested).

@@ -6,8 +6,9 @@
 # size, message structure, and synthetic MARKER-* tokens. The CLI builds and records its
 # full request before the 401, so request contents can be checked without any model call.
 # The throwaway processes get an isolated config dir (CLAUDE_CONFIG_DIR / CODEX_HOME),
-# a dummy key that is not a credential, a scrubbed environment, and a cwd outside the repo.
-# All output goes under <repo>/.contexto/spikes/L1-b/ (gitignored).
+# a dummy key that is not a credential, a scrubbed environment, and a per-run cwd outside the
+# repo. All output goes under <repo>/.contexto/spikes/L1-b/ (gitignored). The script starts its
+# own stub, refuses a port that is already in use, and stops the stub on exit.
 #
 # Usage: spikes/m0/interception/run.sh <experiment>
 #   cc-hooks        Claude: SessionStart/UserPromptSubmit additionalContext reaches the request
@@ -21,14 +22,24 @@ set -u
 S="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$S/../../.." && pwd)"
 OUT="$REPO/.contexto/spikes/L1-b"
-PORT="${M0_STUB_PORT:-18431}"
+PORT="${M0_STUB_PORT:-18431}"  # set M0_STUB_PORT to run beside another caller
 STUB_LOG="$OUT/stub-requests.log"
 HOOK_LOG="$OUT/hooks.log"
-SCRATCH="/private/tmp/m0-l1b-scratch"
+SCRATCH=""  # per-run directory, created in setup
 CLAUDE_BIN="$HOME/.local/bin/claude"
 CODEX_BIN="$HOME/.local/bin/codex"
 
+STUB_PID=""
+
+cleanup() {
+  if [ -n "$STUB_PID" ]; then kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null; fi
+  [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
+}
+
 setup() {
+  # Resolve symlinks (macOS /tmp -> /private/tmp): Claude Code keys session dirs by the real cwd.
+  SCRATCH="$(cd "$(mktemp -d /tmp/m0-l1b.XXXXXX)" && pwd -P)"
+  trap cleanup EXIT
   mkdir -p "$OUT/cc-config" "$OUT/codex-home" "$SCRATCH/cc" "$SCRATCH/cx"
   python3 - "$S" "$HOOK_LOG" "$OUT" <<'EOF'
 import json, sys
@@ -39,10 +50,20 @@ json.dump({"hooks": {e: cc for e in events}}, open(f"{out}/cc-settings.json", "w
 cx = [{"hooks": [{"type": "command", "command": f"{s}/codex_hook.py {log}"}]}]
 json.dump({"hooks": {e: cx for e in events}}, open(f"{out}/codex-home/hooks.json", "w"), indent=1)
 EOF
-  if ! curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/health"; then
-    python3 "$S/stub401.py" "$PORT" "$STUB_LOG" > "$OUT/stub.err" 2>&1 &
-    sleep 1
+  # Never reuse a listener we did not start: its log would not be ours.
+  if ! python3 -c "import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', int(sys.argv[1]))); s.listen()" "$PORT" 2>/dev/null; then
+    echo "port $PORT is already in use; set M0_STUB_PORT to a free port" >&2
+    exit 1
   fi
+  python3 "$S/stub401.py" "$PORT" "$STUB_LOG" > "$OUT/stub.err" 2>&1 &
+  STUB_PID=$!
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/ready" && return 0
+    sleep 0.5
+  done
+  echo "stub did not start on port $PORT" >&2
+  exit 1
 }
 
 reset_logs() { : > "$STUB_LOG"; : > "$HOOK_LOG"; }
