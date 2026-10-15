@@ -186,6 +186,11 @@ class Trace:
     source: str = "synthetic"
 
 
+def trace_for(profile: dict, model: Model, **kw) -> Trace:
+    """The profile's trace for ``model``, keeping thinking in context where that vendor does."""
+    return generate_trace(profile, keep_thinking=bool(_value(profile["thinking_in_context"][model.vendor])), **kw)
+
+
 def load_profile(path: Path = PROFILE) -> dict:
     return json.loads(Path(path).read_text())
 
@@ -342,6 +347,8 @@ class Engine:
         self.breaks = Breaks()
         self.max_prompt = 0
         self.pending_cause: str | None = None  # why the next send's prefix changed
+        self.cold_start = 0  # this many first requests miss the cache entirely (observed on a rig seat)
+        self.sends = 0
 
     def warm(self) -> bool:
         return self.last_send is not None and self.now - self.last_send <= self.tier.ttl_s
@@ -350,13 +357,17 @@ class Engine:
         p = self.prompt
         cause = cause or self.pending_cause
         self.pending_cause = None
-        warm = self.warm() and reuse_cache
+        cold_start = self.sends < self.cold_start
+        self.sends += 1
+        if cold_start:
+            cause = "cold_start"
+        warm = self.warm() and reuse_cache and not cold_start
         hit = p.reusable() if warm else 0
         b = price(self.model, self.tier, p.total, hit, output)
         # Tokens re-sent at miss price although they are not new since the last send.
         rewritten = max(0, p.total - hit - p.new_since_send) if self.last_send is not None else 0
         if rewritten:
-            if not self.warm() and cause not in RESET_CAUSES:
+            if not self.warm() and cause not in RESET_CAUSES + ("cold_start",):
                 why = "ttl"
             else:
                 why = cause or "other"
@@ -453,6 +464,7 @@ class CvmPolicy:
     page_tool_output_over: int | None = None  # page large tool results at once
     tool_output_excerpt_tokens: int = 400
     bound_tokens: int | None = None  # hard working-context bound: page before any request would exceed it
+    strip_output_overhead: float = 0.0  # extra output from stripping kept thinking (vendor: 4.6% to 67.1%)
     stubs_max_tokens: int | None = None  # beyond this, older stubs merge into coarser index entries
 
 
@@ -488,7 +500,7 @@ def _finish_turn(res: Result, t: int, b: Buckets, peak: int) -> None:
 
 def run_plain(trace: Trace, model: Model, tier: CacheTier | None = None, reset: Reset | None = None,
               clear: ClearPolicy | None = None, keepalive: Keepalive | None = None,
-              idle: IdleCompaction | None = None) -> Result:
+              idle: IdleCompaction | None = None, cold_start: int = 0) -> Result:
     """Strategy (i), or (ii) and H4 with ``reset``, or H5 with ``clear``.
 
     ``idle`` adds Claude Code's idle compaction to (ii): only on a TTL of an hour or more,
@@ -497,6 +509,7 @@ def run_plain(trace: Trace, model: Model, tier: CacheTier | None = None, reset: 
     tier = tier or model.cache_tier()
     eng = Engine(model, tier)
     name = reset.kind if reset else ("clear" if clear else "plain")
+    eng.cold_start = cold_start
     res = Result(name, model, tier, Buckets(), [], eng.breaks)
     p = eng.prompt
     p.append(trace.head_tokens)
@@ -552,7 +565,8 @@ def run_plain(trace: Trace, model: Model, tier: CacheTier | None = None, reset: 
 
 
 def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: CvmPolicy = CvmPolicy(),
-            keepalive: Keepalive | None = None, cli_compaction: Reset | None = None) -> Result:
+            keepalive: Keepalive | None = None, cli_compaction: Reset | None = None,
+            cli_idle: IdleCompaction | None = None, cold_start: int = 0) -> Result:
     """Strategy (iii): [head][pinned][stubs][window turns ...], rebuilt only at epoch rebases.
 
     By default the CLI never compacts: its local history grows without bound while the
@@ -564,6 +578,7 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
     tier = tier or model.cache_tier()
     eng = Engine(model, tier)
     res = Result("cvm", model, tier, Buckets(), [], eng.breaks)
+    eng.cold_start = cold_start
     p = eng.prompt
     tail = policy.pin_position == "tail"
     cap = policy.hard_cap_tokens
@@ -614,21 +629,36 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
     p.append(trace.head_tokens)
     layout(0)
     local = trace.head_tokens  # the CLI's own history, which the proxy never shrinks
+    # With thinking kept in context, every strip makes the model re-derive what it dropped.
+    has_thinking = any(r.thinking for tt in trace.turns for r in tt.reqs)
+    out_mult = 1.0 + (policy.strip_output_overhead if has_thinking else 0.0)
+
+    def cli_compact(t: int, b: Buckets, event: str) -> None:
+        nonlocal stubs, window, window_think, since_rebase, local
+        p.append(cli_compaction.instruction_tokens)
+        b.add(eng.send(cli_compaction.output_tokens, "cli_compaction"))
+        stubs += policy.stub_tokens_per_turn * len(window)
+        if policy.stubs_max_tokens is not None:
+            stubs = min(stubs, policy.stubs_max_tokens)
+        window, window_think = [cli_compaction.seed_tokens], [0]
+        since_rebase = 0
+        layout(t)
+        eng.pending_cause = "cli_compaction"
+        res.events[event] += 1
+        local = trace.head_tokens + cli_compaction.seed_tokens
 
     for t, turn in enumerate(trace.turns, 1):
-        b = eng.idle(turn.gap_s, keepalive)
+        b = Buckets()
+        gap = turn.gap_s
+        if (cli_idle and cli_compaction and tier.ttl_s >= 3600 and eng.last_send is not None
+                and gap > tier.ttl_s - cli_idle.lead_s and local >= cli_idle.min_tokens):
+            early = tier.ttl_s - cli_idle.lead_s
+            b.add(eng.idle(early, None))
+            cli_compact(t, b, "cli_idle_compaction")
+            gap -= early
+        b.add(eng.idle(gap, keepalive))
         if cli_compaction and local + turn.reqs[0].added >= cli_compaction.threshold:
-            p.append(cli_compaction.instruction_tokens)
-            b.add(eng.send(cli_compaction.output_tokens, "cli_compaction"))
-            stubs += policy.stub_tokens_per_turn * len(window)
-            if policy.stubs_max_tokens is not None:
-                stubs = min(stubs, policy.stubs_max_tokens)
-            window, window_think = [cli_compaction.seed_tokens], [0]
-            since_rebase = 0
-            layout(t)
-            eng.pending_cause = "cli_compaction"
-            res.events["cli_compaction"] += 1
-            local = trace.head_tokens + cli_compaction.seed_tokens
+            cli_compact(t, b, "cli_compaction")
         elif t > 1:
             recent = window[-5:] or [0]
             projected = p.total + 2 * sum(recent) / len(recent)
@@ -653,9 +683,9 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
             reqs.insert(1, Req(added=policy.recall_tokens, output=policy.recall_call_tokens,
                                kept=policy.recall_call_tokens))
             res.events["recall"] += 1
-        turn_tokens = 0
         peak = 0
-        cur = []
+        cur = []  # [message or tool result, assistant output] per request so far this turn
+        cur_think = []  # thinking inside each cur block (assistant outputs only)
         for j, req in enumerate(reqs):
             if j:
                 eng.now += trace.intra_gap_s
@@ -665,15 +695,32 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
                 res.events["tool_output_paged"] += 1
             bound = policy.bound_tokens
             if bound is not None and p.total + added > bound:
-                # Mid-turn guard: page older turns first, then this tool result, before sending.
+                # Mid-turn guard, before sending: (1) page whole older turns.
                 fixed = p.total - sum(window) - sum(cur)
                 page_out(max(0, bound - fixed - sum(cur) - added))
+                res.events["rebase_bound"] += 1
+                if fixed + sum(window) + sum(cur) + added > bound:
+                    # (2) Edit the active turn: strip all its thinking (editing an earlier message
+                    # invalidates kept thinking) and stub earlier tool results, oldest first.
+                    # Each tool_use keeps its tool_result block; only the result's content shrinks.
+                    for i, th in enumerate(cur_think):
+                        if th:
+                            cur[i] -= th
+                            res.events["thinking_stripped"] += th
+                    cur_think = [0] * len(cur)
+                    excerpt = policy.tool_output_excerpt_tokens
+                    for i in range(2, len(cur), 2):
+                        if fixed + sum(window) + sum(cur) + added <= bound:
+                            break
+                        if cur[i] > excerpt:
+                            cur[i] = excerpt
+                            res.events["active_turn_result_stubbed"] += 1
+                # (3) Last resort: stub the new tool result itself.
+                if j and fixed + sum(window) + sum(cur) + added > bound and added > policy.tool_output_excerpt_tokens:
+                    added = policy.tool_output_excerpt_tokens
+                    res.events["tool_output_paged"] += 1
                 layout(t)
                 eng.pending_cause = "rebase"
-                res.events["rebase_bound"] += 1
-                if j and p.total + added > bound:
-                    added = min(added, policy.tool_output_excerpt_tokens)
-                    res.events["tool_output_paged"] += 1
                 if p.total + added > bound:
                     res.events["bound_exceeded"] += 1
             if tail:
@@ -683,18 +730,18 @@ def run_cvm(trace: Trace, model: Model, tier: CacheTier | None = None, policy: C
                 p.append(pinned(t), new=False)
                 eng.pending_cause = eng.pending_cause or "pin"
             peak = max(peak, p.total)
-            b.add(eng.send(req.output))
+            b.add(eng.send(round(req.output * out_mult)))
             if tail:
                 p.pop()
             p.append(req.kept)
             if tail:
                 p.append(pinned(t), new=False)
             cur += [added, req.kept]
-            turn_tokens += added + req.kept
+            cur_think += [0, req.thinking]
         local += sum(r.added + r.kept for r in turn.reqs)
-        cur = []
-        window.append(turn_tokens)
-        window_think.append(sum(r.thinking for r in turn.reqs))
+        window.append(sum(cur))
+        window_think.append(sum(cur_think))
+        cur, cur_think = [], []
         since_rebase += 1
         _finish_turn(res, t, b, peak)
     res.max_prompt = eng.max_prompt
@@ -958,7 +1005,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
     rep = prices["report"]
     keys = rep["models"]
     focus = models[rep["focus_model"]]
-    trace = generate_trace(profile)
+    trace = trace_for(profile, focus)
     st = trace_stats(trace)
     policy = CvmPolicy(**profile["cvm"]["policy"])
     sweep_basis = f"Basis: modeled on the `{trace.name}` profile (inferred), seed {profile['seed']}."
@@ -995,7 +1042,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
     rows, ratio_rows, all_rs = [], [], {}
     for k in keys:
         m = models[k]
-        rs = run_all(trace, prices, profile, m, policy)
+        rs = run_all(trace_for(profile, m), prices, profile, m, policy)
         all_rs[k] = rs
         for s in STRATEGIES:
             r = rs[s]
@@ -1134,9 +1181,9 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
                      f"{cvm_usd / r.total.usd:.2f}"])
     oai = models.get("gpt-6-astra")
     if oai:
-        o_plain = all_rs[oai.key]["plain"].total.usd if oai.key in all_rs else run_plain(trace, oai).total.usd
-        o_cvm = all_rs[oai.key]["cvm"].total.usd if oai.key in all_rs else run_cvm(trace, oai, None, policy).total.usd
-        r = run_plain(trace, oai, None, compaction_for(prices, oai, threshold=200_000))
+        o_plain = all_rs[oai.key]["plain"].total.usd if oai.key in all_rs else run_plain(trace_for(profile, oai), oai).total.usd
+        o_cvm = all_rs[oai.key]["cvm"].total.usd if oai.key in all_rs else run_cvm(trace_for(profile, oai), oai, None, policy).total.usd
+        r = run_plain(trace_for(profile, oai), oai, None, compaction_for(prices, oai, threshold=200_000))
         rows.append([f"{oai.display}: server-side compaction, compact_threshold 200k", _usd(r.total.usd), r.resets,
                      _k(r.max_prompt), f"{r.total.usd / o_plain:.2f}", f"{o_cvm / r.total.usd:.2f}"])
     blocks["h5"] = _table(["H5 provider-native setting", "Cost", "Clears or compactions", "Max prompt",
@@ -1147,7 +1194,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
 
     rows = []
     for n in rep["sweep_turns"]:
-        rr = run_all(generate_trace(profile, turns=n), prices, profile, focus, policy)
+        rr = run_all(trace_for(profile, focus, turns=n), prices, profile, focus, policy)
         c = rr["compaction"].total.usd
         rows.append([n] + [_usd(rr[s].total.usd) for s in STRATEGIES] + [f"{rr['cvm'].total.usd / c:.2f}",
                                                                        rr["compaction"].resets])
@@ -1158,7 +1205,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
     for label, scale in rep["sweep_tool_scale"]:
         prof = json.loads(json.dumps(profile))
         prof["tool_output_tokens"]["median"] = profile["tool_output_tokens"]["median"] * scale
-        tr = generate_trace(prof)
+        tr = trace_for(prof, focus)
         rr = run_all(tr, prices, profile, focus, policy)
         c = rr["compaction"].total.usd
         rows.append([label, _k(trace_stats(tr)["growth_per_turn"])] + [_usd(rr[s].total.usd) for s in STRATEGIES]
@@ -1171,7 +1218,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         prof = json.loads(json.dumps(profile))
         if think is not None:
             prof["think_time_s"] = think
-        tr = generate_trace(prof)
+        tr = trace_for(prof, focus)
         rr = run_all(tr, prices, profile, focus, policy)
         c = rr["compaction"].total.usd
         rows.append([label, f"{trace_stats(tr)['gap_over'][300]:.0%}"] + [_usd(rr[s].total.usd) for s in STRATEGIES]
@@ -1192,7 +1239,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
     for rate, size in rep["sweep_recall"]:
         prof = json.loads(json.dumps(profile))
         prof["cvm"]["recall_rate"] = rate
-        tr = generate_trace(prof)
+        tr = trace_for(prof, focus)
         r = run_cvm(tr, focus, None, replace(policy, recall_tokens=size))
         rows.append([f"{rate:g}", _k(size), r.events["recall"], _usd(r.total.usd), f"{r.total.usd / compact_usd:.2f}"])
     blocks["by_recall"] = _table(["Recalls per turn", "Recall size", "Recalls", "(iii) cost", "(iii) / (ii)"], rows) + (
@@ -1223,37 +1270,66 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         for label, r in cands:
             over = r.max_prompt > bound
             lossy = r.resets
+            kind = {"compaction": "compactions", "rollover": "lossy handoffs", "clear": "lossy clears"}.get(
+                r.strategy, "lossy resets")
+            exceeded = r.events["bound_exceeded"]
             if over:
                 verdict = "fails: over the bound"
-            elif r.strategy == "compaction" and lossy:
-                verdict = "fails: compacts"
             elif lossy:
-                verdict = f"within bound; {lossy} lossy {'handoffs' if r.strategy == 'rollover' else 'clears'}"
+                verdict = f"fails: {lossy} {kind}"
             else:
                 verdict = "meets the bound with no lossy reset; fidelity depends on recall (L2b)"
-            key = (over, r.strategy == "compaction" and lossy > 0, lossy > 0, r.max_prompt, r.total.usd)
-            rows.append((key, [label, _k(r.max_prompt), "no" if over else "yes", lossy, _usd(r.total.usd), verdict]))
+            key = (over, lossy > 0, r.max_prompt, r.total.usd)
+            rows.append((key, [label, _k(r.max_prompt), "no" if over else "yes", exceeded, lossy,
+                               _usd(r.total.usd), verdict]))
         rows.sort(key=lambda x: x[0])
-        table = _table(["Rank", "Strategy", "Max working context", "Within bound", "Lossy resets", "Cost", "Verdict"],
-                       [[i + 1] + row for i, (_, row) in enumerate(rows)])
-        note = "" if bp else f" No strategy fits: the {_k(trace.head_tokens)} head alone exceeds or nearly fills the bound."
+        passing = any(not k[0] and not k[1] for k, _ in rows)
+        table = _table(["Rank", "Strategy", "Max working context", "Within bound", "Requests over bound",
+                        "Lossy resets", "Cost", "Verdict"],
+                       [[i + 1 if passing else "none"] + row for i, (_, row) in enumerate(rows)])
+        note = "" if bp else (f" No strategy fits: the {_k(trace.head_tokens)} head alone exceeds or nearly fills the "
+                              "bound. Rows are listed for reference, not ranked.")
         rank_blocks.append(f"Bound {_k(bound)}.{note}\n\n{table}")
     blocks["ranking"] = "\n\n".join(rank_blocks) + (
-        f"\n\nRanked by: within the bound, no compaction, no lossy reset, smaller working context, then cost. "
+        f"\n\nRanked by: within the bound, no lossy reset of any kind, smaller working context, then cost. Any "
+        "lossy reset fails the owner's bar, which also requires accuracy equal to the full-context baseline. "
         f"{focus.display}, 5 min TTL. Lossy resets count compactions, rollover handoffs, and tool-result clears. "
         "Quality is not scored here; the bound values are placeholders until the quality-vs-size probe (L2d) "
         "measures the real one. " + basis)
 
-    think_tr = generate_trace(profile, keep_thinking=True)
-    think_rr = run_all(think_tr, prices, profile, focus, policy)
-    rows = [[LABEL[s], _usd(rs[s].total.usd), _usd(think_rr[s].total.usd), _k(think_rr[s].max_prompt)]
+    drop_tr = generate_trace(profile, keep_thinking=False)
+    drop_rr = run_all(drop_tr, prices, profile, focus, policy)
+    rows = [[LABEL[s], _usd(rs[s].total.usd), _k(rs[s].max_prompt), _usd(drop_rr[s].total.usd)]
             for s in STRATEGIES]
-    blocks["thinking"] = _table(["Strategy", "Thinking dropped from context (default)", "Thinking preserved",
-                                 "Max prompt, preserved"], rows) + (
-        f"\n\n{focus.display}. With thinking preserved, (i), (ii), and H4 carry every prior thinking block; (iii) "
-        f"keeps them only until the next rebase, which strips them from the kept window "
-        f"({_k(think_rr['cvm'].events['thinking_stripped'])} tokens stripped). The current turn's thinking is never "
-        "stripped. " + basis)
+    for label, oh in rep["sweep_strip_overhead"]:
+        r = run_cvm(trace, focus, None, replace(policy, strip_output_overhead=oh))
+        rows.append([f"(iii), strip overhead {label}", _usd(r.total.usd), _k(r.max_prompt), ""])
+    blocks["thinking"] = _table(["Strategy", "Thinking preserved and billed (default)", "Max prompt",
+                                 "Thinking dropped by the CLI (inferred alternative)"], rows) + (
+        f"\n\n{focus.display}. (i), (ii), and H4 carry every prior thinking block. (iii) keeps thinking until the next "
+        f"rebase, which strips all of it ({_k(rs['cvm'].events['thinking_stripped'])} tokens stripped over "
+        f"{st['turns']} turns), and charges {policy.strip_output_overhead:.1%} extra output for re-thinking. "
+        "The vendor measured +4.6% (low effort) to +67.1% (max) output when thinking is dropped every turn after the "
+        "first; the effort level is inferred. " + basis)
+
+    rows = []
+    for label, calls, scale in rep["sweep_bound_stress"]:
+        prof = json.loads(json.dumps(profile))
+        prof["tool_calls_per_turn"]["mean"] = calls
+        prof["tool_output_tokens"]["median"] = profile["tool_output_tokens"]["median"] * scale
+        tr = trace_for(prof, focus)
+        for bound in (100_000, 250_000):
+            bp = policy_for_bound(policy, bound, tr.head_tokens)
+            r = run_cvm(tr, focus, None, bp)
+            rows.append([label, _k(bound), _k(r.max_prompt), r.events["bound_exceeded"],
+                         r.events["active_turn_result_stubbed"], r.events["tool_output_paged"], _usd(r.total.usd)])
+    blocks["bound_stress"] = _table(["Workload", "Bound", "Max working context", "Requests over bound",
+                                     "Active-turn results stubbed", "New results cut to an excerpt", "(iii) cost"],
+                                    rows) + (
+        f"\n\n{focus.display}. When a tool-heavy turn would cross the bound, (iii) first pages whole older turns, then "
+        "strips all thinking from the active turn and stubs its earlier tool results oldest first (each tool_use keeps "
+        "its tool_result block; only the content shrinks), and as a last resort cuts the new result to an excerpt. "
+        "A request still over the bound after that is counted. " + basis)
 
     rows = []
     for h in rep["sweep_heads"]:
@@ -1266,13 +1342,32 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         f"\n\n{focus.display}. Behind a custom `ANTHROPIC_BASE_URL`, Claude Code can load tool definitions upfront, "
         "so (iii) may carry a larger head than a direct (ii) session. " + basis)
 
+    seat = rep["seat_measured"]
+    seat_tr = replace(trace, head_tokens=seat["head_tokens"])
+    rows = []
+    for label, tr, cold in [(f"default throwaway head {_k(trace.head_tokens)} (inferred profile)", trace, 0),
+                            (f"OpenRig seat head {_k(seat['head_tokens'])}", seat_tr, 0),
+                            (f"OpenRig seat head {_k(seat['head_tokens'])}, first {seat['cold_start_requests']} "
+                             "calls full cache writes", seat_tr, seat["cold_start_requests"])]:
+        c = run_plain(tr, focus, None, comp, cold_start=cold)
+        v = run_cvm(tr, focus, None, policy, cold_start=cold)
+        rows.append([label, _usd(c.total.usd), _usd(v.total.usd), f"{v.total.usd / c.total.usd:.2f}",
+                     _usd(v.breaks.usd.get("cold_start", 0.0))])
+    blocks["seat_head"] = _table(["Head", "(ii) compaction", "(iii) cvm", "(iii) / (ii)",
+                                  "(iii) cold-start premium"], rows) + (
+        f"\n\n{focus.display}, 300 turns. The 82k seat head and the three uncached first calls are measured on one "
+        "OpenRig seat by lane 1 (pending lane 1 review; cause of the misses unknown) and replace only the head and "
+        "the first requests' cache state; the rest of the workload is the inferred profile. Lane 1 reports about 46k "
+        "for a default throwaway session, close to the 42k inferred head. " + basis)
+
     cc = run_cvm(trace, focus, None, policy, cli_compaction=comp)
+    cci = run_cvm(trace, focus, focus.cache_tier("1h"), policy, cli_compaction=comp, cli_idle=IdleCompaction())
     hour_tier = focus.cache_tier("1h")
     idle_ii = run_plain(trace, focus, hour_tier, comp, idle=IdleCompaction())
     hour_ii = run_plain(trace, focus, hour_tier, comp)
     calm = json.loads(json.dumps(profile))
     calm["think_time_s"] = rep["sweep_think"][0][1]
-    calm_rr = run_all(generate_trace(calm), prices, profile, focus, policy)
+    calm_rr = run_all(trace_for(calm, focus), prices, profile, focus, policy)
     hour_all = run_all(trace, prices, profile, focus, policy, tier="1h")
     blocks["assumptions"] = "\n".join([
         f"- **Billing mode.** The headline uses the 5 minute TTL, Claude Code's default with an API key or usage "
@@ -1287,7 +1382,11 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         f"did not force a pre-send compaction in a `-p` resume (lane 1's measurement, not repeated here). If the CLI "
         f"does compact at {_k(comp.threshold)} of local history, (iii) costs {_usd(cc.total.usd)} instead of "
         f"{_usd(rs['cvm'].total.usd)} ({cc.events['cli_compaction']} CLI compactions in {st['turns']} turns), and "
-        "each one is a lossy reset the proxy cannot undo.",
+        "each one is a lossy reset the proxy cannot undo. On the 1 hour TTL the CLI's idle compaction "
+        f"(`idleCompaction`, default on, 200k minimum via `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`) also applies, and the "
+        f"CLI's local history passes 200k early: a subscription session under (iii) takes "
+        f"{cci.events['cli_idle_compaction']} idle CLI compactions in {st['turns']} turns ({_usd(cci.total.usd)}), "
+        "which the proxy cannot prevent. Setting `idleCompaction: false` avoids them.",
         f"- **Same head and caching as a direct connection.** (iii) runs behind a custom `ANTHROPIC_BASE_URL`. "
         f"There Claude Code may load tool definitions upfront instead of through tool search, caching works only if "
         f"the proxy forwards `cache_control` markers unchanged, and the 1 hour TTL needs the `anthropic-beta` header "
@@ -1300,6 +1399,11 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
         f"({idle_ii.events['idle_compaction']} idle compactions, each a lossy reset). Compaction requests themselves "
         "get the 5 minute TTL (vendor-documented), which changes nothing here because the next request rewrites the "
         "short history anyway.",
+        f"- **Thinking.** Every Anthropic row keeps prior thinking in context and bills it as input, the "
+        f"vendor-documented default for Opus 5.5, Haiku 5.5, and Fable 5.1; (iii) strips it at rebases and pays "
+        f"{policy.strip_output_overhead:.1%} extra output. If Claude Code drops thinking before sending (not shown; "
+        f"inferred alternative), (i) costs {_usd(drop_rr['plain'].total.usd)} and (ii) "
+        f"{_usd(drop_rr['compaction'].total.usd)} instead (thinking table).",
         f"- **Think time.** The TTL findings depend on the inferred think-time mix, in which "
         f"{st['gap_over'][300]:.0%} of gaps exceed 5 minutes. With every gap under a minute, (iii) / (ii) is "
         f"{calm_rr['cvm'].total.usd / calm_rr['compaction'].total.usd:.2f} instead of "
@@ -1314,7 +1418,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
     c100 = run_plain(trace, focus, None, compaction_for(prices, focus, threshold=100_000))
     cross = None
     for n in range(1, 61):
-        rr = run_all(generate_trace(profile, turns=n), prices, profile, focus, policy)
+        rr = run_all(trace_for(profile, focus, turns=n), prices, profile, focus, policy)
         if rr["cvm"].total.usd < rr["compaction"].total.usd:
             cross = n
             break
@@ -1454,7 +1558,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.per_turn_csv:
-        trace = generate_trace(profile)
         try:
             args.per_turn_csv.parent.mkdir(parents=True, exist_ok=True)
             with args.per_turn_csv.open("w", newline="") as f:
@@ -1462,7 +1565,8 @@ def main(argv: list[str] | None = None) -> int:
                 w.writerow(["model", "strategy", "turn", "prompt_tokens", "uncached", "cache_write", "cache_read",
                             "output", "usd", "cum_usd"])
                 for k in prices["report"]["models"]:
-                    for s, r in run_all(trace, prices, profile, prices["parsed"][k]).items():
+                    m = prices["parsed"][k]
+                    for s, r in run_all(trace_for(profile, m), prices, profile, m).items():
                         for tr in r.turns:
                             w.writerow([k, s, tr.turn, tr.prompt_tokens, tr.b.uncached, tr.b.write, tr.b.read,
                                         tr.b.output, f"{tr.b.usd:.6f}", f"{tr.cum_usd:.6f}"])

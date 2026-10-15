@@ -89,8 +89,24 @@
    "pinned_max": 12000,
    "stub_tokens_per_turn": 60,
    "recall_tokens": 1500,
-   "recall_call_tokens": 120
-  }
+   "recall_call_tokens": 120,
+   "strip_output_overhead": 0.097
+  },
+  "policy_note": "strip_output_overhead 0.097 is the vendor's medium-effort figure for dropping thinking every turn (platform.claude.com preserved-thinking page); the effort level is inferred"
  },
- "head_note": "Inferred. Head means everything fixed before the first user turn: system prompt, tool definitions, injected first-turn context. 42k matches lane 1's preliminary, unreviewed Claude Code default-mode request (not cited as measured)."
+ "head_note": "Inferred. Head means everything fixed before the first user turn: system prompt, tool definitions, injected first-turn context. 42k matches lane 1's preliminary, unreviewed Claude Code default-mode request (not cited as measured).",
+ "thinking_in_context": {
+  "anthropic": {
+   "value": true,
+   "source": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+   "retrieved": "2026-10-15",
+   "tag": "vendor-documented",
+   "note": "Opus 4.5 and later Opus, Haiku 5.5, and Fable 5.1 keep all prior turns' thinking in context and bill it as input"
+  },
+  "openai": {
+   "value": false,
+   "tag": "inferred",
+   "note": "reasoning items are not assumed to stay in Codex's resent input"
+  }
+ }
 }

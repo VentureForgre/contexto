@@ -440,14 +440,14 @@
     "value": 244800,
     "source": "https://github.com/VentureForgre/contexto/pull/9",
     "retrieved": "2026-10-15",
-    "tag": "measured",
-    "note": "lane 1 measured Codex auto-compacting at about 90% of a 272K window (PR #9, open at retrieval); 0.9 x 272,000 = 244,800 matches the Codex source tests in codex-rs/protocol/src/openai_models.rs"
+    "tag": "measured (pending lane 1 review)",
+    "note": "lane 1 measured Codex auto-compacting at about 90% of a 272K window (PR #9, pending lane 1 review); 0.9 x 272,000 = 244,800 matches the Codex source tests. Codex reports model_context_window 258,400 = 0.95 x 272,000, its effective_context_window_percent default"
    },
    "requests_note": {
     "value": "full input every request",
     "source": "https://github.com/VentureForgre/contexto/pull/9",
     "retrieved": "2026-10-15",
-    "tag": "measured",
+    "tag": "measured (pending lane 1 review)",
     "note": "lane 1: Codex sends store:false with no previous_response_id"
    }
   }
@@ -592,6 +592,39 @@
    60000,
    80000,
    120000
-  ]
+  ],
+  "sweep_strip_overhead": [
+   [
+    "4.6% (low effort)",
+    0.046
+   ],
+   [
+    "67.1% (max effort)",
+    0.671
+   ]
+  ],
+  "sweep_bound_stress": [
+   [
+    "profile (3 calls per turn)",
+    3,
+    1
+   ],
+   [
+    "12 calls per turn",
+    12,
+    1
+   ],
+   [
+    "12 calls per turn, 4x tool output",
+    12,
+    4
+   ]
+  ],
+  "seat_measured": {
+   "head_tokens": 82000,
+   "cold_start_requests": 3,
+   "source": "lane 1 via manager-2, 2026-10-15",
+   "tag": "measured (one seat, pending lane 1 review)"
+  }
  }
 }

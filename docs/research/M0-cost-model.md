@@ -18,12 +18,12 @@ Claim tags used below:
 ## Summary
 
 <!-- BEGIN GENERATED: findings -->
-- Under the owner's bar (no compaction, a hard working-context bound), only (iii) meets a 100k or 250k bound without a lossy reset: (i) and (ii) at the CLI default exceed it, (ii) configured to reset inside the bound compacts, H4 hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a 42.0k head. Sized to 100k, (iii) costs $70.13 over 300 turns with a 100.0k maximum working context.
-- Cost, second: over 300 turns on Claude Opus 5.5 with API-key billing (5 min TTL), (iii) costs $85.02 against $358.76 for (ii) built-in compaction, $342.94 for H4 rollover, and $614.27 for (i) plain, which would pass the 1.00M window at turn 184. Across the five models (iii) costs 0.07 to 0.76 of (ii) (Claude Haiku 5.5 to gpt-6-astra).
-- On the inferred think-time mix (35% of gaps over 5 min), cache expiry is the largest single cost in (i): 64% of its cost is the premium (write price minus read price) for re-writing prefixes after idle gaps over the 5 minute TTL. The 1 h TTL cuts (i) to $290.41 and (ii) to $182.71; (iii) gains less ($68.56) because its prefix is small. Keepalive pings bring (iii) to $62.07.
-- Bounding the prompt is most of the cost saving: compaction configured at 100k costs $95.88, within 13% of (iii), but only by compacting 52 times, which the owner's bar rules out.
+- Under the owner's bar (no compaction, a hard working-context bound), only (iii) meets a 100k or 250k bound without a lossy reset: (i) and (ii) at the CLI default exceed it, (ii) configured to reset inside the bound compacts, H4 hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a 42.0k head. Sized to 100k, (iii) costs $73.83 over 300 turns with a 99.6k maximum working context.
+- Cost, second: over 300 turns on Claude Opus 5.5 with API-key billing (5 min TTL), (iii) costs $87.95 against $382.10 for (ii) built-in compaction, $337.07 for H4 rollover, and $716.23 for (i) plain, which would pass the 1.00M window at turn 157. Across the five models (iii) costs 0.07 to 0.76 of (ii) (Claude Haiku 5.5 to gpt-6-astra).
+- On the inferred think-time mix (35% of gaps over 5 min), cache expiry is the largest single cost in (i): 65% of its cost is the premium (write price minus read price) for re-writing prefixes after idle gaps over the 5 minute TTL. The 1 h TTL cuts (i) to $337.42 and (ii) to $173.31; (iii) gains less ($72.84) because its prefix is small. Keepalive pings bring (iii) to $65.72.
+- Bounding the prompt is most of the cost saving: compaction configured at 100k costs $100.79, within 15% of (iii), but only by compacting 61 times, which the owner's bar rules out.
 - (iii) costs more than (ii) for very short sessions: it first beats (ii) at turn 14. Its fixed overhead is the pinned block, stubs, and recall round trips.
-- Under the profile's think time, rebases mostly ride on cache expiry, so epoch length barely matters and window size sets the cost. With no idle gaps the analytic rule E* = sqrt(2 (w - r) R / (r n g)) lands within 32% of the simulated optimum on the tested grid.
+- Under the profile's think time, rebases mostly ride on cache expiry, so epoch length barely matters and window size sets the cost. With no idle gaps the analytic rule E* = sqrt(2 (w - r) R / (r n g)) lands within 44% of the simulated optimum on the tested grid.
 <!-- END GENERATED: findings -->
 
 How strategies are judged (owner principle, relayed by manager-2 on 2026-10-15): compaction is a
@@ -36,9 +36,9 @@ real one.
 
 What this means for the study, inferred from the tables:
 
-1. Only (iii) meets a working-context bound without compacting or handing off. Every built-in
-   compaction is a failure under the owner's bar, so (ii)'s cost column is a reference, not an
-   option.
+1. Only (iii) meets a working-context bound without a lossy reset. Every compaction, rollover
+   handoff, or tool-result clear fails the owner's bar, so the (ii) and H4 cost columns are a
+   reference, not options.
 2. The hypothesis is also cheaper, because its prompt is bounded, not because of anything clever in
    the cache. The cache-friendly layout keeps (iii) from losing that advantage to rebases; it does
    not create it.
@@ -50,52 +50,81 @@ What this means for the study, inferred from the tables:
 ## Working-context bound
 
 <!-- BEGIN GENERATED: ranking -->
-Bound 30.0k. No strategy fits: the 42.0k head alone exceeds or nearly fills the bound.
+Bound 30.0k. No strategy fits: the 42.0k head alone exceeds or nearly fills the bound. Rows are listed for reference, not ranked.
 
-| Rank | Strategy | Max working context | Within bound | Lossy resets | Cost | Verdict |
-|---|---|---|---|---|---|---|
-| 1 | (i) plain | 1.76M | no | 0 | $614.27 | fails: over the bound |
-| 2 | H5 tool-result clearing, vendor defaults | 460.0k | no | 738 | $203.55 | fails: over the bound |
-| 3 | (ii) compaction at the CLI default (967.0k) | 967.5k | no | 1 | $358.76 | fails: over the bound |
+| Rank | Strategy | Max working context | Within bound | Requests over bound | Lossy resets | Cost | Verdict |
+|---|---|---|---|---|---|---|---|
+| none | (i) plain | 2.06M | no | 0 | 0 | $716.23 | fails: over the bound |
+| none | H5 tool-result clearing, vendor defaults | 757.1k | no | 0 | 781 | $308.68 | fails: over the bound |
+| none | (ii) compaction at the CLI default (967.0k) | 967.3k | no | 0 | 2 | $382.10 | fails: over the bound |
 
 Bound 100.0k.
 
-| Rank | Strategy | Max working context | Within bound | Lossy resets | Cost | Verdict |
-|---|---|---|---|---|---|---|
-| 1 | (iii) cvm sized to 100.0k (window 12.8k) | 100.0k | yes | 0 | $70.13 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
-| 2 | H4 rollover at 75.0k | 88.1k | yes | 142 | $98.20 | within bound; 142 lossy handoffs |
-| 3 | (ii) compaction configured at 75.0k | 91.3k | yes | 181 | $124.34 | fails: compacts |
-| 4 | (i) plain | 1.76M | no | 0 | $614.27 | fails: over the bound |
-| 5 | H5 tool-result clearing, vendor defaults | 460.0k | no | 738 | $203.55 | fails: over the bound |
-| 6 | (ii) compaction at the CLI default (967.0k) | 967.5k | no | 1 | $358.76 | fails: over the bound |
+| Rank | Strategy | Max working context | Within bound | Requests over bound | Lossy resets | Cost | Verdict |
+|---|---|---|---|---|---|---|---|
+| 1 | (iii) cvm sized to 100.0k (window 12.8k) | 99.6k | yes | 0 | 0 | $73.83 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
+| 2 | H4 rollover at 75.0k | 88.2k | yes | 0 | 163 | $103.85 | fails: 163 lossy handoffs |
+| 3 | (ii) compaction configured at 75.0k | 91.4k | yes | 0 | 205 | $132.44 | fails: 205 compactions |
+| 4 | (i) plain | 2.06M | no | 0 | 0 | $716.23 | fails: over the bound |
+| 5 | H5 tool-result clearing, vendor defaults | 757.1k | no | 0 | 781 | $308.68 | fails: over the bound |
+| 6 | (ii) compaction at the CLI default (967.0k) | 967.3k | no | 0 | 2 | $382.10 | fails: over the bound |
 
 Bound 250.0k.
 
-| Rank | Strategy | Max working context | Within bound | Lossy resets | Cost | Verdict |
-|---|---|---|---|---|---|---|
-| 1 | (iii) cvm sized to 250.0k (window 62.7k) | 188.2k | yes | 0 | $104.24 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
-| 2 | H4 rollover at 225.0k | 225.2k | yes | 10 | $125.22 | within bound; 10 lossy handoffs |
-| 3 | (ii) compaction configured at 225.0k | 225.5k | yes | 10 | $124.05 | fails: compacts |
-| 4 | (i) plain | 1.76M | no | 0 | $614.27 | fails: over the bound |
-| 5 | H5 tool-result clearing, vendor defaults | 460.0k | no | 738 | $203.55 | fails: over the bound |
-| 6 | (ii) compaction at the CLI default (967.0k) | 967.5k | no | 1 | $358.76 | fails: over the bound |
+| Rank | Strategy | Max working context | Within bound | Requests over bound | Lossy resets | Cost | Verdict |
+|---|---|---|---|---|---|---|---|
+| 1 | (iii) cvm sized to 250.0k (window 62.7k) | 193.4k | yes | 0 | 0 | $107.17 | meets the bound with no lossy reset; fidelity depends on recall (L2b) |
+| 2 | H4 rollover at 225.0k | 225.5k | yes | 0 | 12 | $129.73 | fails: 12 lossy handoffs |
+| 3 | (ii) compaction configured at 225.0k | 225.9k | yes | 0 | 12 | $128.80 | fails: 12 compactions |
+| 4 | (i) plain | 2.06M | no | 0 | 0 | $716.23 | fails: over the bound |
+| 5 | H5 tool-result clearing, vendor defaults | 757.1k | no | 0 | 781 | $308.68 | fails: over the bound |
+| 6 | (ii) compaction at the CLI default (967.0k) | 967.3k | no | 0 | 2 | $382.10 | fails: over the bound |
 
-Ranked by: within the bound, no compaction, no lossy reset, smaller working context, then cost. Claude Opus 5.5, 5 min TTL. Lossy resets count compactions, rollover handoffs, and tool-result clears. Quality is not scored here; the bound values are placeholders until the quality-vs-size probe (L2d) measures the real one. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+Ranked by: within the bound, no lossy reset of any kind, smaller working context, then cost. Any lossy reset fails the owner's bar, which also requires accuracy equal to the full-context baseline. Claude Opus 5.5, 5 min TTL. Lossy resets count compactions, rollover handoffs, and tool-result clears. Quality is not scored here; the bound values are placeholders until the quality-vs-size probe (L2d) measures the real one. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: ranking -->
 
-The bounded (iii) policy in this table pages older turns, and an oversized tool result in the
-current turn, before any request would cross the bound. It caps the stub index at the smaller of
-15% of the free space or 8k by merging older stubs into coarser index entries. Those sizes are
-inferred; L2b owns the policy.
+The bounded (iii) policy checks every request before it is sent. If the request would cross the
+bound, the policy acts in this order:
+
+1. It pages whole older turns.
+2. If the active turn alone is still too big, it strips all thinking from that turn and stubs the
+   turn's earlier tool results, oldest first. Each tool_use keeps its tool_result block; only the
+   result content shrinks, so pairing stays valid. Editing an earlier message invalidates kept
+   thinking, which is why that thinking is stripped too.
+3. As a last resort, it cuts the new tool result to an excerpt.
+
+Any request still over the bound is counted in the "Requests over bound" column. The policy also caps
+the stub index at the smaller of 15% of the free space or 8k by merging older stubs into coarser index
+entries. Those sizes are inferred; L2b owns the policy. The profile's three tool calls per turn rarely
+trigger steps 2 and 3. Tool-heavy turns do, and those steps cost more:
+
+<!-- BEGIN GENERATED: bound_stress -->
+| Workload | Bound | Max working context | Requests over bound | Active-turn results stubbed | New results cut to an excerpt | (iii) cost |
+|---|---|---|---|---|---|---|
+| profile (3 calls per turn) | 100.0k | 99.6k | 0 | 0 | 0 | $73.83 |
+| profile (3 calls per turn) | 250.0k | 193.4k | 0 | 0 | 0 | $107.17 |
+| 12 calls per turn | 100.0k | 100.0k | 0 | 23 | 0 | $168.51 |
+| 12 calls per turn | 250.0k | 232.4k | 0 | 0 | 0 | $233.85 |
+| 12 calls per turn, 4x tool output | 100.0k | 100.0k | 0 | 1259 | 0 | $365.23 |
+| 12 calls per turn, 4x tool output | 250.0k | 249.5k | 0 | 0 | 0 | $287.62 |
+
+Claude Opus 5.5. When a tool-heavy turn would cross the bound, (iii) first pages whole older turns, then strips all thinking from the active turn and stubs its earlier tool results oldest first (each tool_use keeps its tool_result block; only the content shrinks), and as a last resort cuts the new result to an excerpt. A request still over the bound after that is counted. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+<!-- END GENERATED: bound_stress -->
+
+What the bound guarantees, inferred from the mechanism: every request stays under it as long as head,
+pinned state, stub index, and the active turn's stubbed results fit, which holds on every workload
+tested. It does not guarantee fidelity. Stubbed results in the active turn must be recalled if the
+model needs them again, and that is L2b's test.
 
 ## Assumptions behind the (iii) headline
 
 <!-- BEGIN GENERATED: assumptions -->
-- **Billing mode.** The headline uses the 5 minute TTL, Claude Code's default with an API key or usage credits. On a subscription within plan usage the main conversation gets the 1 hour TTL (vendor-documented); there (iii) costs $68.56 against $182.71 for (ii), a ratio of 0.38 instead of 0.24. Which mode the owner's sessions use is not known.
-- **The CLI never compacts on its own under (iii).** The proxy bounds the upstream prompt, but the CLI's local history still grows past 967.0k. Whether the CLI then compacts depends on how it counts context, which is brief question 2 (lane 1). Lane 1 PR #9 reports that compaction-forcing settings did not force a pre-send compaction in a `-p` resume (lane 1's measurement, not repeated here). If the CLI does compact at 967.0k of local history, (iii) costs $85.35 instead of $85.02 (1 CLI compactions in 300 turns), and each one is a lossy reset the proxy cannot undo.
+- **Billing mode.** The headline uses the 5 minute TTL, Claude Code's default with an API key or usage credits. On a subscription within plan usage the main conversation gets the 1 hour TTL (vendor-documented); there (iii) costs $72.84 against $173.31 for (ii), a ratio of 0.42 instead of 0.23. Which mode the owner's sessions use is not known.
+- **The CLI never compacts on its own under (iii).** The proxy bounds the upstream prompt, but the CLI's local history still grows past 967.0k. Whether the CLI then compacts depends on how it counts context, which is brief question 2 (lane 1). Lane 1 PR #9 reports that compaction-forcing settings did not force a pre-send compaction in a `-p` resume (lane 1's measurement, not repeated here). If the CLI does compact at 967.0k of local history, (iii) costs $88.94 instead of $87.95 (2 CLI compactions in 300 turns), and each one is a lossy reset the proxy cannot undo. On the 1 hour TTL the CLI's idle compaction (`idleCompaction`, default on, 200k minimum via `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`) also applies, and the CLI's local history passes 200k early: a subscription session under (iii) takes 7 idle CLI compactions in 300 turns ($72.71), which the proxy cannot prevent. Setting `idleCompaction: false` avoids them.
 - **Same head and caching as a direct connection.** (iii) runs behind a custom `ANTHROPIC_BASE_URL`. There Claude Code may load tool definitions upfront instead of through tool search, caching works only if the proxy forwards `cache_control` markers unchanged, and the 1 hour TTL needs the `anthropic-beta` header forwarded (vendor-documented, https://code.claude.com/docs/en/prompt-caching). The model gives (iii) the same 42.0k head and working cache as (ii); the head-size table shows the effect of a larger head. Lane 1's rows are captured behind a custom base URL, so measured heads include this effect.
-- **Idle compaction on the 1 hour TTL.** Claude Code can compact an idle conversation shortly before a 1 hour cache expires (`idleCompaction`, vendor-documented). Modeled for (ii) with the documented 200k minimum: $87.68 instead of $182.71 (6 idle compactions, each a lossy reset). Compaction requests themselves get the 5 minute TTL (vendor-documented), which changes nothing here because the next request rewrites the short history anyway.
-- **Think time.** The TTL findings depend on the inferred think-time mix, in which 35% of gaps exceed 5 minutes. With every gap under a minute, (iii) / (ii) is 0.39 instead of 0.24.
+- **Idle compaction on the 1 hour TTL.** Claude Code can compact an idle conversation shortly before a 1 hour cache expires (`idleCompaction`, vendor-documented). Modeled for (ii) with the documented 200k minimum: $95.37 instead of $173.31 (7 idle compactions, each a lossy reset). Compaction requests themselves get the 5 minute TTL (vendor-documented), which changes nothing here because the next request rewrites the short history anyway.
+- **Thinking.** Every Anthropic row keeps prior thinking in context and bills it as input, the vendor-documented default for Opus 5.5, Haiku 5.5, and Fable 5.1; (iii) strips it at rebases and pays 9.7% extra output. If Claude Code drops thinking before sending (not shown; inferred alternative), (i) costs $614.27 and (ii) $358.76 instead (thinking table).
+- **Think time.** The TTL findings depend on the inferred think-time mix, in which 35% of gaps exceed 5 minutes. With every gap under a minute, (iii) / (ii) is 0.41 instead of 0.23.
 <!-- END GENERATED: assumptions -->
 
 Head size, for the custom base URL case:
@@ -103,31 +132,62 @@ Head size, for the custom base URL case:
 <!-- BEGIN GENERATED: head_sweep -->
 | Head | (ii) at this head | (iii) at this head | (iii) / (ii), same head | (iii) / (ii) at 42.0k |
 |---|---|---|---|---|
-| 42.0k | $358.76 | $85.02 | 0.24 | 0.24 |
-| 60.0k | $365.80 | $98.51 | 0.27 | 0.27 |
-| 80.0k | $383.38 | $113.51 | 0.30 | 0.32 |
-| 120.0k | $415.54 | $143.50 | 0.35 | 0.40 |
+| 42.0k | $382.10 | $87.95 | 0.23 | 0.23 |
+| 60.0k | $393.96 | $101.44 | 0.26 | 0.27 |
+| 80.0k | $387.33 | $116.44 | 0.30 | 0.30 |
+| 120.0k | $413.70 | $146.43 | 0.35 | 0.38 |
 
 Claude Opus 5.5. Behind a custom `ANTHROPIC_BASE_URL`, Claude Code can load tool definitions upfront, so (iii) may carry a larger head than a direct (ii) session. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: head_sweep -->
 
-Thinking blocks. The model bills thinking as output and by default keeps none of it in the
-conversation, for every strategy. Reviewer-2 found that on 5.x models, editing the prefix (dropping
-old turns, stubbing tool results, changing system or tools) invalidates preserved thinking blocks
-(https://github.com/VentureForgre/contexto/pull/7#issuecomment-6204245614). So (iii) must strip
-prior thinking at each rebase, use server-side `context_management`, or reinsert thinking byte for
-byte. This model strips it at rebases and never strips the current turn's thinking. If the CLI does
-preserve thinking, (i), (ii), and H4 grow faster than the headline shows:
+Measured on one OpenRig seat (lane 1, pending review): an 82k head, with its first three calls written
+to the cache in full and no cache reads.
+
+<!-- BEGIN GENERATED: seat_head -->
+| Head | (ii) compaction | (iii) cvm | (iii) / (ii) | (iii) cold-start premium |
+|---|---|---|---|---|
+| default throwaway head 42.0k (inferred profile) | $382.10 | $87.95 | 0.23 | $0.00 |
+| OpenRig seat head 82.0k | $392.60 | $117.94 | 0.30 | $0.00 |
+| OpenRig seat head 82.0k, first 3 calls full cache writes | $393.39 | $118.76 | 0.30 | $0.82 |
+
+Claude Opus 5.5, 300 turns. The 82k seat head and the three uncached first calls are measured on one OpenRig seat by lane 1 (pending lane 1 review; cause of the misses unknown) and replace only the head and the first requests' cache state; the rest of the workload is the inferred profile. Lane 1 reports about 46k for a default throwaway session, close to the 42k inferred head. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+<!-- END GENERATED: seat_head -->
+
+Thinking blocks. Claude Opus 4.5 and later Opus models, Haiku 5.5, and Fable 5.1 keep every prior
+turn's thinking in context and bill it as input (vendor-documented,
+https://platform.claude.com/docs/en/build-with-claude/thinking). Thinking on Opus 5.5 and Fable 5.1
+cannot be turned off. The model therefore keeps thinking in context for every Anthropic row. Whether
+Claude Code strips thinking before sending is not shown anywhere and is left for lane 1 to check.
+OpenAI rows keep reasoning out of the resent input, tagged inferred.
+
+Kept thinking stays valid only while the system prompt, tools, and every earlier message are
+unchanged. Removing all thinking, or thinking at the start or end, is a valid edit, and so is
+server-side context editing (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking,
+vendor-documented). Builder-4 measured the same rules on claude-haiku-5-5 through the rig proxy for
+PR #7: an append is accepted, and so is a rewrite that strips all thinking; changing the system
+prompt or an earlier message while keeping thinking returns 400 in error mode. The account date
+(2026-08-31) decides only whether a failing block gets a 400 or passes through; it does not decide
+whether thinking is kept.
+
+So (iii) is append-only between epochs, strips all thinking at each rebase, and strips the active
+turn's thinking when it must stub that turn's results. Re-thinking costs extra output. The vendor
+measured +4.6% (low effort), +9.7% (medium), +10.3% (high), and +67.1% (max) output tokens when thinking
+was dropped on every turn after the first. The model charges the medium figure on every (iii)
+request. That is an upper bound for a policy that strips only at rebases, and the effort level is
+inferred. Server-side `context_management` and byte-for-byte reinsertion are the alternatives PR #7
+compares.
 
 <!-- BEGIN GENERATED: thinking -->
-| Strategy | Thinking dropped from context (default) | Thinking preserved | Max prompt, preserved |
+| Strategy | Thinking preserved and billed (default) | Max prompt | Thinking dropped by the CLI (inferred alternative) |
 |---|---|---|---|
-| (i) plain | $614.27 | $716.23 | 2.06M |
-| (ii) compaction | $358.76 | $382.10 | 967.3k |
-| H4 rollover | $342.94 | $337.07 | 870.9k |
-| (iii) cvm | $85.02 | $86.79 | 173.2k |
+| (i) plain | $716.23 | 2.06M | $614.27 |
+| (ii) compaction | $382.10 | 967.3k | $358.76 |
+| H4 rollover | $337.07 | 870.9k | $342.94 |
+| (iii) cvm | $87.95 | 173.2k | $85.02 |
+| (iii), strip overhead 4.6% (low effort) | $87.34 | 173.2k |  |
+| (iii), strip overhead 67.1% (max effort) | $94.76 | 173.2k |  |
 
-Claude Opus 5.5. With thinking preserved, (i), (ii), and H4 carry every prior thinking block; (iii) keeps them only until the next rebase, which strips them from the kept window (257.4k tokens stripped). The current turn's thinking is never stripped. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+Claude Opus 5.5. (i), (ii), and H4 carry every prior thinking block. (iii) keeps thinking until the next rebase, which strips all of it (257.4k tokens stripped over 300 turns), and charges 9.7% extra output for re-thinking. The vendor measured +4.6% (low effort) to +67.1% (max) output when thinking is dropped every turn after the first; the effort level is inferred. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: thinking -->
 
 ## Prices and cache rules
@@ -182,8 +242,8 @@ unreviewed first request for Claude Code default mode, which is not cited here a
 | Turns | 300 |
 | API requests, one per tool round trip | 1149 (3.83 per turn) |
 | Head: system prompt and tools | 42.0k |
-| Context growth per turn, mean | 5.7k |
-| Full history after the last turn | 1.76M |
+| Context growth per turn, mean | 6.7k |
+| Full history after the last turn | 2.06M |
 | Tool results: p50 / p90 / max | 0.7k / 3.6k / 25.0k |
 | Output tokens, thinking included | 589.9k |
 | Think time over 5 min / 30 min / 1 h | 35% / 8% / 4% of turns |
@@ -208,8 +268,10 @@ compaction, rollover, pinned-state change, or clearing).
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW` takes a token count capped at the model's window
   (vendor-documented, https://code.claude.com/docs/en/model-config). Codex sends the full input on
   every request (`store: false`, no `previous_response_id`) and auto-compacts at about 90% of a 272K
-  window, 244.8k tokens (measured by lane 1, PR #9; it matches the Codex source tests). Because Codex
-  runs a 272K window, the OpenAI (i) rows past 272K are hypothetical. The summary request reads the warm prefix and keeps the system-prompt layer
+  window, 244.8k tokens (measured by lane 1, PR #9, pending lane 1 review; it matches the Codex source
+  tests). Codex reports `model_context_window` 258,400, which is 0.95 x 272,000, its default
+  `effective_context_window_percent`. Because Codex runs a 272K window, the OpenAI (i) rows past 272K
+  are hypothetical. The summary request reads the warm prefix and keeps the system-prompt layer
   (vendor-documented). Summary size (8k) and re-attached context (15k) are inferred; Claude Code
   documents what it restores (up to 5 recent files at 5K each, skills up to 25K) but not typical sizes.
 - **H4 supervisor rollover**: the same mechanism with a supervisor in place of the CLI. At 90% of the
@@ -231,18 +293,18 @@ compaction, rollover, pinned-state change, or clearing).
 <!-- BEGIN GENERATED: headline -->
 | Model | Strategy | Uncached in | Cache write | Cache read | Output | Cost | Max prompt | Note |
 |---|---|---|---|---|---|---|---|---|
-| Claude Fable 5.1 | (i) plain | 0.0k | 84.16M | 908.46M | 589.9k | $1,308.57 | 1.76M | over the 1.00M window from turn 184 |
-| Claude Fable 5.1 | (ii) compaction | 0.0k | 49.00M | 508.93M | 597.9k | $769.66 | 967.5k | 1 compactions |
-| Claude Fable 5.1 | H4 rollover | 0.0k | 47.81M | 459.76M | 597.9k | $742.42 | 871.0k | 2 rollovers |
-| Claude Fable 5.1 | (iii) cvm | 0.0k | 10.54M | 102.29M | 593.8k | $186.97 | 168.0k | 108 rebases |
-| Claude Opus 5.5 | (i) plain | 0.0k | 84.16M | 908.46M | 589.9k | $614.27 | 1.76M | over the 1.00M window from turn 184 |
-| Claude Opus 5.5 | (ii) compaction | 0.0k | 49.00M | 508.93M | 597.9k | $358.76 | 967.5k | 1 compactions |
-| Claude Opus 5.5 | H4 rollover | 0.0k | 47.81M | 459.76M | 597.9k | $342.94 | 871.0k | 2 rollovers |
-| Claude Opus 5.5 | (iii) cvm | 0.0k | 10.54M | 102.29M | 593.8k | $85.02 | 168.0k | 108 rebases |
-| Claude Haiku 5.5 | (i) plain | 0.0k | 84.16M | 908.46M | 589.9k | $99.16 | 1.76M | over the 1.00M window from turn 184 |
-| Claude Haiku 5.5 | (ii) compaction | 0.0k | 49.00M | 508.93M | 597.9k | $57.14 | 967.5k | 1 compactions |
-| Claude Haiku 5.5 | H4 rollover | 0.0k | 47.81M | 459.76M | 597.9k | $53.65 | 871.0k | 2 rollovers |
-| Claude Haiku 5.5 | (iii) cvm | 0.0k | 16.85M | 84.42M | 593.8k | $3.82 | 134.1k | 259 rebases |
+| Claude Fable 5.1 | (i) plain | 0.0k | 98.38M | 1,062.60M | 589.9k | $1,524.94 | 2.06M | over the 1.00M window from turn 157 |
+| Claude Fable 5.1 | (ii) compaction | 0.0k | 54.25M | 493.75M | 605.9k | $831.80 | 967.3k | 2 compactions |
+| Claude Fable 5.1 | H4 rollover | 0.0k | 47.48M | 438.46M | 597.9k | $733.05 | 870.9k | 2 rollovers |
+| Claude Fable 5.1 | (iii) cvm | 0.0k | 10.80M | 104.48M | 651.3k | $193.74 | 173.2k | 108 rebases |
+| Claude Opus 5.5 | (i) plain | 0.0k | 98.38M | 1,062.60M | 589.9k | $716.23 | 2.06M | over the 1.00M window from turn 157 |
+| Claude Opus 5.5 | (ii) compaction | 0.0k | 54.25M | 493.75M | 605.9k | $382.10 | 967.3k | 2 compactions |
+| Claude Opus 5.5 | H4 rollover | 0.0k | 47.48M | 438.46M | 597.9k | $337.07 | 870.9k | 2 rollovers |
+| Claude Opus 5.5 | (iii) cvm | 0.0k | 10.80M | 104.48M | 651.3k | $87.95 | 173.2k | 108 rebases |
+| Claude Haiku 5.5 | (i) plain | 0.0k | 98.38M | 1,062.60M | 589.9k | $115.75 | 2.06M | over the 1.00M window from turn 157 |
+| Claude Haiku 5.5 | (ii) compaction | 0.0k | 54.25M | 493.75M | 605.9k | $59.49 | 967.3k | 2 compactions |
+| Claude Haiku 5.5 | H4 rollover | 0.0k | 47.48M | 438.46M | 597.9k | $52.28 | 870.9k | 2 rollovers |
+| Claude Haiku 5.5 | (iii) cvm | 0.0k | 17.45M | 84.41M | 651.3k | $4.03 | 136.2k | 269 rebases |
 | gpt-6-astra | (i) plain | 0.0k | 20.51M | 972.11M | 589.9k | $2,463.05 | 1.76M | over the 1.05M window from turn 193 |
 | gpt-6-astra | (ii) compaction | 0.0k | 5.39M | 171.85M | 661.9k | $272.32 | 245.6k | 9 compactions |
 | gpt-6-astra | H4 rollover | 0.0k | 5.33M | 159.45M | 629.9k | $257.52 | 220.8k | 10 rollovers |
@@ -258,9 +320,9 @@ Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 
 <!-- BEGIN GENERATED: ratios -->
 | Model | (i) plain | (ii) compaction | H4 rollover | (iii) cvm | (iii) / (ii) | H4 / (ii) |
 |---|---|---|---|---|---|---|
-| Claude Fable 5.1 | $1,308.57 | $769.66 | $742.42 | $186.97 | 0.24 | 0.96 |
-| Claude Opus 5.5 | $614.27 | $358.76 | $342.94 | $85.02 | 0.24 | 0.96 |
-| Claude Haiku 5.5 | $99.16 | $57.14 | $53.65 | $3.82 | 0.07 | 0.94 |
+| Claude Fable 5.1 | $1,524.94 | $831.80 | $733.05 | $193.74 | 0.23 | 0.88 |
+| Claude Opus 5.5 | $716.23 | $382.10 | $337.07 | $87.95 | 0.23 | 0.88 |
+| Claude Haiku 5.5 | $115.75 | $59.49 | $52.28 | $4.03 | 0.07 | 0.88 |
 | gpt-6-astra | $2,463.05 | $272.32 | $257.52 | $205.75 | 0.76 | 0.95 |
 | gpt-6-luna | $24.63 | $2.72 | $2.58 | $2.06 | 0.76 | 0.95 |
 
@@ -272,19 +334,19 @@ Per turn and cumulative, for the focus model:
 <!-- BEGIN GENERATED: per_turn -->
 | Turn | (i) plain prompt | (i) plain cumulative | (ii) compaction prompt | (ii) compaction cumulative | H4 rollover prompt | H4 rollover cumulative | (iii) cvm prompt | (iii) cvm cumulative |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 45.5k | $0.30 | 45.5k | $0.30 | 45.5k | $0.30 | 48.5k | $0.32 |
-| 25 | 150.9k | $9.33 | 150.9k | $9.33 | 150.9k | $9.33 | 86.4k | $7.26 |
-| 50 | 319.0k | $26.65 | 319.0k | $26.65 | 319.0k | $26.65 | 78.1k | $14.84 |
-| 75 | 451.4k | $50.69 | 451.4k | $50.69 | 451.4k | $50.69 | 124.4k | $21.30 |
-| 100 | 606.0k | $84.21 | 606.0k | $84.21 | 606.0k | $84.21 | 114.1k | $28.23 |
-| 125 | 737.0k | $132.28 | 737.0k | $132.28 | 737.0k | $132.28 | 112.9k | $35.60 |
-| 150 | 823.6k | $176.00 | 823.6k | $176.00 | 823.6k | $176.00 | 106.6k | $41.60 |
-| 175 | 949.1k | $217.80 | 949.1k | $217.80 | 140.4k | $194.22 | 122.5k | $47.15 |
-| 200 | 1.09M | $292.21 | 186.3k | $240.90 | 279.6k | $211.04 | 93.8k | $55.12 |
-| 225 | 1.23M | $350.55 | 331.8k | $255.58 | 425.1k | $230.25 | 106.1k | $61.63 |
-| 250 | 1.41M | $435.80 | 504.3k | $283.47 | 597.6k | $264.07 | 99.0k | $69.64 |
-| 275 | 1.56M | $545.26 | 657.9k | $326.72 | 751.2k | $314.17 | 93.5k | $78.36 |
-| 300 | 1.76M | $614.27 | 861.5k | $358.76 | 146.5k | $342.94 | 144.8k | $85.02 |
+| 1 | 46.6k | $0.31 | 46.6k | $0.31 | 46.6k | $0.31 | 49.6k | $0.33 |
+| 25 | 176.6k | $10.45 | 176.6k | $10.45 | 176.6k | $10.45 | 89.2k | $7.49 |
+| 50 | 373.1k | $30.56 | 373.1k | $30.56 | 373.1k | $30.56 | 81.5k | $15.34 |
+| 75 | 525.3k | $58.43 | 525.3k | $58.43 | 525.3k | $58.43 | 130.7k | $22.01 |
+| 100 | 701.2k | $97.20 | 701.2k | $97.20 | 701.2k | $97.20 | 118.6k | $29.17 |
+| 125 | 850.0k | $152.68 | 850.0k | $152.68 | 850.0k | $152.68 | 116.2k | $36.72 |
+| 150 | 960.8k | $203.32 | 960.8k | $203.32 | 152.2k | $174.08 | 112.1k | $42.94 |
+| 175 | 1.11M | $252.09 | 209.7k | $211.98 | 302.9k | $185.81 | 131.5k | $48.77 |
+| 200 | 1.27M | $339.04 | 372.7k | $234.72 | 465.9k | $215.19 | 95.9k | $56.96 |
+| 225 | 1.45M | $407.28 | 547.4k | $259.31 | 640.6k | $244.29 | 107.4k | $63.75 |
+| 250 | 1.65M | $507.28 | 751.0k | $301.96 | 844.2k | $292.86 | 100.3k | $72.06 |
+| 275 | 1.83M | $635.65 | 926.4k | $364.14 | 211.1k | $322.78 | 94.1k | $81.00 |
+| 300 | 2.06M | $716.23 | 258.1k | $382.10 | 443.5k | $337.07 | 148.9k | $87.95 |
 
 Claude Opus 5.5. Prompt is the largest request in the turn. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: per_turn -->
@@ -292,34 +354,34 @@ Claude Opus 5.5. Prompt is the largest request in the turn. Basis: modeled on th
 <!-- BEGIN GENERATED: per_turn_buckets -->
 | Turn | Strategy | Requests | Uncached in | Cache write | Cache read | Output | Turn cost |
 |---|---|---|---|---|---|---|---|
-| 1 | (i) plain | 5 | 0.0k | 45.5k | 173.6k | 1.9k | $0.301 |
-| 1 | (ii) compaction | 5 | 0.0k | 45.5k | 173.6k | 1.9k | $0.301 |
-| 1 | H4 rollover | 5 | 0.0k | 45.5k | 173.6k | 1.9k | $0.301 |
-| 1 | (iii) cvm | 5 | 0.0k | 48.5k | 185.6k | 1.9k | $0.318 |
-| 50 | (i) plain | 5 | 0.0k | 319.0k | 1.27M | 5.0k | $1.950 |
-| 50 | (ii) compaction | 5 | 0.0k | 319.0k | 1.27M | 5.0k | $1.950 |
-| 50 | H4 rollover | 5 | 0.0k | 319.0k | 1.27M | 5.0k | $1.950 |
-| 50 | (iii) cvm | 5 | 0.0k | 78.1k | 309.6k | 5.0k | $0.553 |
-| 100 | (i) plain | 4 | 0.0k | 12.2k | 2.38M | 2.9k | $0.596 |
-| 100 | (ii) compaction | 4 | 0.0k | 12.2k | 2.38M | 2.9k | $0.596 |
-| 100 | H4 rollover | 4 | 0.0k | 12.2k | 2.38M | 2.9k | $0.596 |
-| 100 | (iii) cvm | 4 | 0.0k | 12.2k | 416.7k | 2.9k | $0.202 |
-| 150 | (i) plain | 3 | 0.0k | 1.3k | 2.47M | 1.1k | $0.522 |
-| 150 | (ii) compaction | 3 | 0.0k | 1.3k | 2.47M | 1.1k | $0.522 |
-| 150 | H4 rollover | 3 | 0.0k | 1.3k | 2.47M | 1.1k | $0.522 |
-| 150 | (iii) cvm | 3 | 0.0k | 1.3k | 317.0k | 1.1k | $0.092 |
-| 200 | (i) plain | 2 | 0.0k | 6.0k | 2.17M | 0.9k | $0.481 |
-| 200 | (ii) compaction | 2 | 0.0k | 6.0k | 363.3k | 0.9k | $0.120 |
-| 200 | H4 rollover | 2 | 0.0k | 6.0k | 550.0k | 0.9k | $0.158 |
-| 200 | (iii) cvm | 2 | 0.0k | 6.0k | 178.4k | 0.9k | $0.083 |
-| 250 | (i) plain | 4 | 0.0k | 1.41M | 4.20M | 2.6k | $7.924 |
-| 250 | (ii) compaction | 4 | 0.0k | 504.3k | 1.50M | 2.6k | $2.873 |
-| 250 | H4 rollover | 4 | 0.0k | 597.6k | 1.78M | 2.6k | $3.396 |
-| 250 | (iii) cvm | 4 | 0.0k | 99.0k | 282.5k | 2.6k | $0.603 |
-| 300 | (i) plain | 6 | 0.0k | 36.7k | 10.38M | 3.1k | $2.321 |
-| 300 | (ii) compaction | 6 | 0.0k | 36.7k | 4.97M | 3.1k | $1.239 |
-| 300 | H4 rollover | 6 | 0.0k | 36.7k | 677.3k | 3.1k | $0.381 |
-| 300 | (iii) cvm | 6 | 0.0k | 36.7k | 667.4k | 3.1k | $0.379 |
+| 1 | (i) plain | 5 | 0.0k | 46.6k | 174.8k | 1.9k | $0.307 |
+| 1 | (ii) compaction | 5 | 0.0k | 46.6k | 174.8k | 1.9k | $0.307 |
+| 1 | H4 rollover | 5 | 0.0k | 46.6k | 174.8k | 1.9k | $0.307 |
+| 1 | (iii) cvm | 5 | 0.0k | 49.6k | 186.8k | 2.1k | $0.328 |
+| 50 | (i) plain | 5 | 0.0k | 373.1k | 1.49M | 5.0k | $2.263 |
+| 50 | (ii) compaction | 5 | 0.0k | 373.1k | 1.49M | 5.0k | $2.263 |
+| 50 | H4 rollover | 5 | 0.0k | 373.1k | 1.49M | 5.0k | $2.263 |
+| 50 | (iii) cvm | 5 | 0.0k | 81.5k | 319.3k | 5.5k | $0.581 |
+| 100 | (i) plain | 4 | 0.0k | 13.3k | 2.76M | 2.9k | $0.677 |
+| 100 | (ii) compaction | 4 | 0.0k | 13.3k | 2.76M | 2.9k | $0.677 |
+| 100 | H4 rollover | 4 | 0.0k | 13.3k | 2.76M | 2.9k | $0.677 |
+| 100 | (iii) cvm | 4 | 0.0k | 13.3k | 431.9k | 3.2k | $0.216 |
+| 150 | (i) plain | 3 | 0.0k | 1.5k | 2.88M | 1.1k | $0.605 |
+| 150 | (ii) compaction | 3 | 0.0k | 1.5k | 2.88M | 1.1k | $0.605 |
+| 150 | H4 rollover | 3 | 0.0k | 1.5k | 453.4k | 1.1k | $0.120 |
+| 150 | (iii) cvm | 3 | 0.0k | 1.5k | 333.4k | 1.2k | $0.098 |
+| 200 | (i) plain | 2 | 0.0k | 6.1k | 2.54M | 0.9k | $0.556 |
+| 200 | (ii) compaction | 2 | 0.0k | 6.1k | 736.2k | 0.9k | $0.195 |
+| 200 | H4 rollover | 2 | 0.0k | 6.1k | 922.5k | 0.9k | $0.233 |
+| 200 | (iii) cvm | 2 | 0.0k | 6.1k | 182.5k | 1.0k | $0.086 |
+| 250 | (i) plain | 4 | 0.0k | 1.65M | 4.94M | 2.6k | $9.304 |
+| 250 | (ii) compaction | 4 | 0.0k | 751.0k | 2.23M | 2.6k | $4.254 |
+| 250 | H4 rollover | 4 | 0.0k | 844.2k | 2.51M | 2.6k | $4.776 |
+| 250 | (iii) cvm | 4 | 0.0k | 100.3k | 282.7k | 2.8k | $0.615 |
+| 300 | (i) plain | 6 | 0.0k | 39.5k | 12.15M | 3.1k | $2.691 |
+| 300 | (ii) compaction | 6 | 0.0k | 39.5k | 1.34M | 3.1k | $0.528 |
+| 300 | H4 rollover | 6 | 0.0k | 39.5k | 2.45M | 3.1k | $0.750 |
+| 300 | (iii) cvm | 6 | 0.0k | 39.5k | 684.1k | 3.4k | $0.403 |
 
 Claude Opus 5.5. Full per-turn rows for every model: `cost_model.py --per-turn-csv` (written under `.contexto/spikes/l2a/`). Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: per_turn_buckets -->
@@ -355,13 +417,13 @@ How often the prefix breaks, and what each cause costs:
 <!-- BEGIN GENERATED: breaks -->
 | Strategy | Cause | Breaks | Tokens rewritten | Cost above a cache read |
 |---|---|---|---|---|
-| (i) plain | ttl | 106 | 82.39M | $395.49 |
-| (ii) compaction | compaction | 1 | 23.0k | $0.11 |
-| (ii) compaction | ttl | 106 | 47.22M | $226.63 |
+| (i) plain | ttl | 106 | 96.32M | $462.35 |
+| (ii) compaction | compaction | 2 | 46.0k | $0.22 |
+| (ii) compaction | ttl | 106 | 52.14M | $250.26 |
 | H4 rollover | rollover | 2 | 40.0k | $0.19 |
-| H4 rollover | ttl | 106 | 46.00M | $220.81 |
-| (iii) cvm | rebase | 2 | 108.2k | $0.52 |
-| (iii) cvm | ttl | 106 | 8.61M | $41.33 |
+| H4 rollover | ttl | 106 | 45.38M | $217.83 |
+| (iii) cvm | rebase | 2 | 107.2k | $0.51 |
+| (iii) cvm | ttl | 106 | 8.58M | $41.19 |
 
 Claude Opus 5.5, 5 min TTL. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: breaks -->
@@ -371,14 +433,14 @@ Layout and policy variants:
 <!-- BEGIN GENERATED: variants -->
 | (iii) variant | Cost | Cache breaks | Break cost | Pings | Max prompt |
 |---|---|---|---|---|---|
-| default: pinned head, rebase every 8 turns or on expiry | $85.02 | 108 | $41.85 | 0 | 168.0k |
-| no rebase on expiry | $101.92 | 130 | $56.27 | 0 | 188.0k |
-| pinned state rebuilt at once on every change | $90.94 | 130 | $47.77 | 0 | 168.0k |
-| pinned state at the tail, re-sent every request | $112.36 | 1180 | $69.19 | 0 | 168.0k |
-| tool results over 8k paged at once | $83.62 | 108 | $42.62 | 0 | 142.4k |
-| 1 h cache TTL | $68.56 | 45 | $17.72 | 0 | 157.5k |
-| keepalive pings through idle gaps up to 1 h | $62.07 | 45 | $10.94 | 269 | 157.5k |
-| CLI still compacts its local history at the CLI threshold (brief Q2) | $85.35 | 109 | $42.01 | 0 | 168.1k |
+| default: pinned head, rebase every 8 turns or on expiry | $87.95 | 108 | $41.71 | 0 | 173.2k |
+| no rebase on expiry | $107.09 | 130 | $57.96 | 0 | 197.3k |
+| pinned state rebuilt at once on every change | $94.13 | 130 | $47.89 | 0 | 173.2k |
+| pinned state at the tail, re-sent every request | $115.29 | 1180 | $69.05 | 0 | 173.3k |
+| tool results over 8k paged at once | $86.55 | 108 | $42.48 | 0 | 149.5k |
+| 1 h cache TTL | $72.84 | 45 | $17.66 | 0 | 170.3k |
+| keepalive pings through idle gaps up to 1 h | $65.72 | 45 | $10.90 | 269 | 170.3k |
+| CLI still compacts its local history at the CLI threshold (brief Q2) | $88.94 | 110 | $42.26 | 0 | 173.3k |
 
 Claude Opus 5.5. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: variants -->
@@ -388,10 +450,10 @@ TTL and keepalive across all strategies:
 <!-- BEGIN GENERATED: ttl -->
 | Cache setting | (i) plain | (ii) compaction | H4 rollover | (iii) cvm |
 |---|---|---|---|---|
-| 5 min TTL (Claude Code default with an API key) | $614.27 | $358.76 | $342.94 | $85.02 |
-| 1 h TTL (Claude Code main conversation on a subscription) | $290.41 | $182.71 | $168.65 | $68.56 |
-| 1 h TTL with Claude Code idleCompaction ((ii) only) |  | $87.68 |  |  |
-| 5 min TTL plus keepalive pings up to 1 h idle | $305.41 | $186.09 | $172.52 | $62.07 |
+| 5 min TTL (Claude Code default with an API key) | $716.23 | $382.10 | $337.07 | $87.95 |
+| 1 h TTL (Claude Code main conversation on a subscription) | $337.42 | $173.31 | $165.04 | $72.84 |
+| 1 h TTL with Claude Code idleCompaction ((ii) only) |  | $95.37 |  |  |
+| 5 min TTL plus keepalive pings up to 1 h idle | $355.05 | $183.23 | $167.03 | $65.72 |
 
 Claude Opus 5.5. Subscription use is billed against plan limits, not dollars; the dollar column is the API-price equivalent of the same tokens. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: ttl -->
@@ -410,11 +472,11 @@ expiry come more often than E* and set the cadence.
 <!-- BEGIN GENERATED: epoch_rule -->
 | Window | Analytic E* | Simulated best E, no idle gaps | Simulated best E, profile think time |
 |---|---|---|---|
-| 8.0k | 6.6 | 5 | 12 |
-| 16.0k | 7.8 | 8 | 12 |
-| 32.0k | 9.8 | 8 | 12 |
-| 64.0k | 12.9 | 12 | 12 |
-| 128.0k | 17.5 | 20 | 12 |
+| 8.0k | 6.1 | 5 | 8 |
+| 16.0k | 7.2 | 5 | 12 |
+| 32.0k | 9.1 | 8 | 12 |
+| 64.0k | 11.9 | 12 | 12 |
+| 128.0k | 16.1 | 12 | 12 |
 
 Claude Opus 5.5: write $5, read $0.2 per MTok. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: epoch_rule -->
@@ -424,13 +486,13 @@ Sensitivity over window size and epoch length:
 <!-- BEGIN GENERATED: sweep -->
 | Window | E=3 | E=5 | E=8 | E=12 | E=20 | E=40 | best / (ii) |
 |---|---|---|---|---|---|---|---|
-| 8.0k | $70.01 | $68.59 | $68.21 | **$68.19** | **$68.19** | **$68.19** | 0.19 |
-| 16.0k | $76.20 | $74.15 | $73.30 | **$73.16** | **$73.16** | **$73.16** | 0.20 |
-| 32.0k | $90.04 | $86.38 | $85.02 | **$84.67** | **$84.67** | **$84.67** | 0.24 |
-| 64.0k | $117.69 | $109.87 | $106.93 | **$106.48** | **$106.48** | **$106.48** | 0.30 |
-| 128.0k | $172.16 | $157.44 | $151.85 | **$150.67** | **$150.67** | **$150.67** | 0.42 |
+| 8.0k | $72.69 | $71.42 | **$71.14** | $71.17 | $71.17 | $71.17 | 0.19 |
+| 16.0k | $78.89 | $76.98 | $76.23 | **$76.14** | **$76.14** | **$76.14** | 0.20 |
+| 32.0k | $92.73 | $89.21 | $87.95 | **$87.65** | **$87.65** | **$87.65** | 0.23 |
+| 64.0k | $120.38 | $112.70 | $109.86 | **$109.46** | **$109.46** | **$109.46** | 0.29 |
+| 128.0k | $174.85 | $160.27 | $154.78 | **$153.65** | **$153.65** | **$153.65** | 0.40 |
 
-(iii) cost for Claude Opus 5.5, rebase on expiry on. Bold is the cheapest epoch length for each window. (ii) costs $358.76. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+(iii) cost for Claude Opus 5.5, rebase on expiry on. Bold is the cheapest epoch length for each window. (ii) costs $382.10. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: sweep -->
 
 ## Where (iii) wins and where it does not
@@ -440,16 +502,16 @@ Session length:
 <!-- BEGIN GENERATED: by_length -->
 | Turns | (i) plain | (ii) compaction | H4 rollover | (iii) cvm | (iii) / (ii) | Compactions |
 |---|---|---|---|---|---|---|
-| 1 | $0.30 | $0.30 | $0.30 | $0.32 | 1.06 | 0 |
-| 5 | $1.52 | $1.52 | $1.52 | $1.60 | 1.05 | 0 |
-| 10 | $2.71 | $2.71 | $2.71 | $2.85 | 1.05 | 0 |
-| 25 | $9.33 | $9.33 | $9.33 | $7.26 | 0.78 | 0 |
-| 50 | $26.65 | $26.65 | $26.65 | $14.84 | 0.56 | 0 |
-| 100 | $84.21 | $84.21 | $84.21 | $28.23 | 0.34 | 0 |
-| 200 | $292.21 | $240.90 | $211.04 | $55.12 | 0.23 | 1 |
-| 300 | $614.27 | $358.76 | $342.94 | $85.02 | 0.24 | 1 |
-| 600 | $2,403.71 | $735.20 | $642.70 | $180.37 | 0.25 | 3 |
-| 1000 | $6,699.47 | $1,227.87 | $1,140.28 | $331.24 | 0.27 | 6 |
+| 1 | $0.31 | $0.31 | $0.31 | $0.33 | 1.07 | 0 |
+| 5 | $1.62 | $1.62 | $1.62 | $1.65 | 1.02 | 0 |
+| 10 | $2.93 | $2.93 | $2.93 | $2.94 | 1.00 | 0 |
+| 25 | $10.45 | $10.45 | $10.45 | $7.49 | 0.72 | 0 |
+| 50 | $30.56 | $30.56 | $30.56 | $15.34 | 0.50 | 0 |
+| 100 | $97.20 | $97.20 | $97.20 | $29.17 | 0.30 | 0 |
+| 200 | $339.04 | $234.72 | $215.19 | $56.96 | 0.24 | 1 |
+| 300 | $716.23 | $382.10 | $337.07 | $87.95 | 0.23 | 2 |
+| 600 | $2,804.15 | $726.33 | $691.49 | $186.43 | 0.26 | 4 |
+| 1000 | $7,831.55 | $1,247.79 | $1,165.69 | $340.91 | 0.27 | 7 |
 
 Claude Opus 5.5. Basis: modeled on the `synthetic-realistic` profile (inferred), seed 20261015.
 <!-- END GENERATED: by_length -->
@@ -459,11 +521,11 @@ Tool output size:
 <!-- BEGIN GENERATED: by_tool_size -->
 | Tool output median | Growth per turn | (i) plain | (ii) compaction | H4 rollover | (iii) cvm | (iii) / (ii) |
 |---|---|---|---|---|---|---|
-| 0.25x | 2.5k | $298.03 | $298.03 | $298.03 | $79.50 | 0.27 |
-| 0.5x | 3.6k | $407.79 | $347.10 | $304.52 | $81.52 | 0.23 |
-| 1x (profile) | 5.7k | $614.27 | $358.76 | $342.94 | $85.02 | 0.24 |
-| 2x | 9.6k | $1,003.13 | $375.47 | $345.95 | $90.55 | 0.24 |
-| 4x | 16.0k | $1,680.88 | $391.87 | $360.82 | $100.01 | 0.26 |
+| 0.25x | 3.4k | $399.99 | $362.77 | $302.15 | $82.43 | 0.23 |
+| 0.5x | 4.6k | $509.75 | $324.38 | $311.16 | $84.45 | 0.26 |
+| 1x (profile) | 6.7k | $716.23 | $382.10 | $337.07 | $87.95 | 0.23 |
+| 2x | 10.6k | $1,105.10 | $378.07 | $352.76 | $93.48 | 0.25 |
+| 4x | 17.0k | $1,782.84 | $387.25 | $366.18 | $102.94 | 0.27 |
 
 Claude Opus 5.5. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: by_tool_size -->
@@ -473,9 +535,9 @@ Think time:
 <!-- BEGIN GENERATED: by_think -->
 | Think time | Gaps over 5 min | (i) plain | (ii) compaction | H4 rollover | (iii) cvm | (iii) / (ii) |
 |---|---|---|---|---|---|---|
-| always under 1 min | 0% | $231.79 | $136.06 | $124.54 | $52.47 | 0.39 |
-| profile mix | 35% | $614.27 | $358.76 | $342.94 | $85.02 | 0.24 |
-| mostly 10 to 40 min | 100% | $1,525.66 | $846.29 | $770.71 | $157.27 | 0.19 |
+| always under 1 min | 0% | $266.40 | $135.59 | $119.90 | $55.81 | 0.41 |
+| profile mix | 35% | $716.23 | $382.10 | $337.07 | $87.95 | 0.23 |
+| mostly 10 to 40 min | 100% | $1,763.29 | $830.08 | $725.83 | $159.54 | 0.19 |
 
 Claude Opus 5.5, 5 min TTL. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: by_think -->
@@ -486,12 +548,12 @@ more lossy resets:
 <!-- BEGIN GENERATED: reset_sweep -->
 | Reset threshold | (ii) compaction | Compactions | H4 rollover | Rollovers | (iii) / (ii) |
 |---|---|---|---|---|---|
-| 100.0k | $95.88 | 52 | $89.37 | 47 | 0.89 |
-| 200.0k | $113.60 | 12 | $115.55 | 12 | 0.75 |
-| 400.0k | $180.53 | 5 | $180.70 | 5 | 0.47 |
-| 967.0k | $358.76 | 1 | $357.81 | 1 | 0.24 |
+| 100.0k | $100.79 | 61 | $91.99 | 56 | 0.87 |
+| 200.0k | $124.35 | 14 | $125.24 | 14 | 0.71 |
+| 400.0k | $183.90 | 5 | $180.20 | 5 | 0.48 |
+| 967.0k | $382.10 | 2 | $380.96 | 2 | 0.23 |
 
-Claude Opus 5.5. Claude Code's `/autocompact` and `--autocompact` accept 100K to 1M; `CLAUDE_CODE_AUTO_COMPACT_WINDOW` takes a token count capped at the model's window (vendor-documented). Every compaction is a failure under the owner's bar; the table shows cost only. (iii) costs $85.02. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+Claude Opus 5.5. Claude Code's `/autocompact` and `--autocompact` accept 100K to 1M; `CLAUDE_CODE_AUTO_COMPACT_WINDOW` takes a token count capped at the model's window (vendor-documented). Every compaction is a failure under the owner's bar; the table shows cost only. (iii) costs $87.95. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: reset_sweep -->
 
 Whether the compaction request reads the cache:
@@ -499,10 +561,10 @@ Whether the compaction request reads the cache:
 <!-- BEGIN GENERATED: compaction_cache -->
 | Threshold | (ii) summary request | Compactions | (ii) cost | (iii) / (ii) |
 |---|---|---|---|---|
-| 967.0k | reads the warm prefix (vendor-documented) | 1 | $358.76 | 0.24 |
-| 967.0k | full miss (as after an idle gap) | 1 | $363.39 | 0.23 |
-| 200.0k | reads the warm prefix (vendor-documented) | 12 | $113.60 | 0.75 |
-| 200.0k | full miss (as after an idle gap) | 12 | $124.96 | 0.68 |
+| 967.0k | reads the warm prefix (vendor-documented) | 2 | $382.10 | 0.23 |
+| 967.0k | full miss (as after an idle gap) | 2 | $391.37 | 0.22 |
+| 200.0k | reads the warm prefix (vendor-documented) | 14 | $124.35 | 0.71 |
+| 200.0k | full miss (as after an idle gap) | 14 | $137.65 | 0.64 |
 
 Claude Opus 5.5. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: compaction_cache -->
@@ -513,14 +575,14 @@ on this profile:
 <!-- BEGIN GENERATED: by_recall -->
 | Recalls per turn | Recall size | Recalls | (iii) cost | (iii) / (ii) |
 |---|---|---|---|---|
-| 0 | 1.5k | 0 | $83.97 | 0.23 |
-| 0.1 | 1.5k | 32 | $85.02 | 0.24 |
-| 0.5 | 1.5k | 143 | $88.64 | 0.25 |
-| 1 | 1.5k | 300 | $93.39 | 0.26 |
-| 0.5 | 8.0k | 143 | $93.77 | 0.26 |
-| 2 | 8.0k | 300 | $105.23 | 0.29 |
+| 0 | 1.5k | 0 | $86.88 | 0.23 |
+| 0.1 | 1.5k | 32 | $87.95 | 0.23 |
+| 0.5 | 1.5k | 143 | $91.65 | 0.24 |
+| 1 | 1.5k | 300 | $96.50 | 0.25 |
+| 0.5 | 8.0k | 143 | $96.79 | 0.25 |
+| 2 | 8.0k | 300 | $108.34 | 0.28 |
 
-Claude Opus 5.5. Each recall is one extra upstream round trip that the proxy answers itself. (ii) costs $358.76. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
+Claude Opus 5.5. Each recall is one extra upstream round trip that the proxy answers itself. (ii) costs $382.10. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
 <!-- END GENERATED: by_recall -->
 
 Summary of the boundaries, inferred from the tables: on cost, (iii) loses for sessions shorter than
@@ -548,10 +610,10 @@ Packet L2b owns the H5 write-up; this section only costs the cache effect.
 <!-- BEGIN GENERATED: h5 -->
 | H5 provider-native setting | Cost | Clears or compactions | Max prompt | vs (i) plain | (iii) / this |
 |---|---|---|---|---|---|
-| trigger 100k, keep 3, clear_at_least 0 (vendor defaults) | $203.55 | 738 | 460.0k | 0.33 | 0.42 |
-| trigger 100k, keep 3, clear_at_least 20k | $196.53 | 54 | 478.3k | 0.32 | 0.43 |
-| trigger 100k, keep 3, clear_at_least 50k | $205.31 | 24 | 500.6k | 0.33 | 0.41 |
-| trigger 200k, keep 3, clear_at_least 50k | $209.38 | 22 | 500.6k | 0.34 | 0.41 |
+| trigger 100k, keep 3, clear_at_least 0 (vendor defaults) | $308.68 | 781 | 757.1k | 0.43 | 0.28 |
+| trigger 100k, keep 3, clear_at_least 20k | $299.90 | 55 | 775.4k | 0.42 | 0.29 |
+| trigger 100k, keep 3, clear_at_least 50k | $308.67 | 24 | 797.8k | 0.43 | 0.28 |
+| trigger 200k, keep 3, clear_at_least 50k | $311.15 | 23 | 797.8k | 0.43 | 0.28 |
 | gpt-6-astra: server-side compaction, compact_threshold 200k | $241.01 | 12 | 201.4k | 0.10 | 0.85 |
 
 Claude Opus 5.5 unless named. Clearing replaces each cleared tool result with a 15-token placeholder (placeholder size inferred) and breaks the cache from the first cleared block. OpenAI's compacted item size is not documented; the row reuses the (ii) summary assumption. Basis: modeled on the `synthetic-realistic` profile (inferred), 300 turns, seed 20261015.
@@ -616,8 +678,10 @@ Loader check on synthetic files:
 
 ## Limits
 
-- The bounded (iii) policy is enforced per request, but only at whole-block granularity: a single
-  tool result larger than the free space is cut to a 400 token excerpt and must be recalled.
+- The bounded (iii) policy is enforced per request at block granularity. Stubbed active-turn results
+  and excerpts must be recalled if needed again, which costs fidelity this model does not score.
+- The re-thinking charge is one vendor figure applied uniformly; the real overhead depends on effort
+  level and on how often thinking is stripped.
 - Every workload number is inferred, except the Codex rows from lane 1. The largest unknowns are think time (it drives TTL expiry), tool
   output sizes, and requests per turn; the sweeps bound their effect but do not replace measurement.
 - (iii) is modeled with no fidelity cost. A bounded window and stubs lose detail that recall may or

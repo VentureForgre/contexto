@@ -63,7 +63,7 @@ def test_price_file_values_carry_source_date_and_tag():
     for leaf in found:
         assert leaf["source"].startswith("https://")
         assert leaf["retrieved"] == raw["retrieved"]
-        assert leaf["tag"] in ("vendor-documented", "measured", "inferred")
+        assert leaf["tag"] in ("vendor-documented", "inferred") or leaf["tag"].startswith("measured")
 
 
 # Cache engine and plain strategy
@@ -135,6 +135,15 @@ def test_keepalive_keeps_cache_warm_through_idle_gap():
     assert kept.total.usd < plain.total.usd
 
 
+def test_cold_start_forces_full_writes_on_first_requests():
+    tr = trace([[(100, 10, 10), (100, 10, 10), (100, 10, 10)]])
+    warm = cm.run_plain(tr, OPUS, T5)
+    cold = cm.run_plain(tr, OPUS, T5, cold_start=2)
+    assert warm.total.read == 1100 + 1210
+    assert cold.total.read == 1210  # only the third request reads
+    assert cold.breaks.count["cold_start"] == 1  # the second request re-writes a cacheable prefix
+
+
 # Context virtual memory
 
 
@@ -203,6 +212,36 @@ def test_cvm_bound_is_never_exceeded_even_mid_turn():
     assert r.events["rebase_bound"] >= 1
     assert r.events["tool_output_paged"] == 1  # the 9000-token result alone cannot fit
     assert r.events["bound_exceeded"] == 0
+
+
+def test_cvm_bound_stubs_active_turn_results_and_strips_its_thinking():
+    pol = cm.CvmPolicy(window_tokens=5000, epoch_turns=100, opportunistic=False, respect_price_tier=False,
+                       pinned_base=0, pinned_per_turn=0, pinned_max=0, bound_tokens=5000,
+                       tool_output_excerpt_tokens=100)
+    # One turn: four 1500-token tool results, each assistant step keeps 50 thinking of 60 tokens.
+    reqs = (cm.Req(100, 60, 60, thinking=50),) + tuple(cm.Req(1500, 60, 60, thinking=50) for _ in range(4))
+    tr = cm.Trace("t", 1000, 1.0, (cm.Turn(0.0, reqs),))
+    r = cm.run_cvm(tr, OPUS, T5, pol)
+    assert r.max_prompt <= 5000 and r.events["bound_exceeded"] == 0
+    assert r.events["active_turn_result_stubbed"] >= 1
+    assert r.events["thinking_stripped"] >= 50
+    assert r.events["tool_output_paged"] == 0  # stubbing earlier results was enough
+
+
+def test_strip_overhead_charged_only_when_thinking_is_in_context():
+    pol = cm.CvmPolicy(respect_price_tier=False, strip_output_overhead=0.5)
+    plain_reqs = trace([[(100, 100, 100)]])
+    think_reqs = cm.Trace("t", 1000, 1.0, (cm.Turn(0.0, (cm.Req(100, 100, 100, thinking=40),)),))
+    assert cm.run_cvm(plain_reqs, OPUS, T5, pol).total.output == 100
+    assert cm.run_cvm(think_reqs, OPUS, T5, pol).total.output == 150
+
+
+def test_trace_for_keeps_thinking_per_vendor():
+    prof = cm.load_profile()
+    anth = cm.trace_for(prof, OPUS, turns=10)
+    oai = cm.trace_for(prof, ASTRA, turns=10)
+    assert any(r.thinking for t in anth.turns for r in t.reqs)
+    assert not any(r.thinking for t in oai.turns for r in t.reqs)
 
 
 def test_policy_for_bound_rejects_a_bound_the_head_fills():
