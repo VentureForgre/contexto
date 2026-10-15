@@ -412,13 +412,6 @@
   },
   "openai": {
    "cli": "Codex CLI",
-   "threshold_fraction": {
-    "value": 0.9,
-    "source": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/openai_models.rs",
-    "retrieved": "2026-10-15",
-    "tag": "inferred",
-    "note": "source code, not docs: auto_compact_token_limit defaults to 90% of the context window"
-   },
    "summary_tokens": {
     "value": 8000,
     "source": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/openai_models.rs",
@@ -442,6 +435,20 @@
     "source": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/openai_models.rs",
     "retrieved": "2026-10-15",
     "tag": "inferred"
+   },
+   "threshold_tokens": {
+    "value": 244800,
+    "source": "https://github.com/VentureForgre/contexto/pull/9",
+    "retrieved": "2026-10-15",
+    "tag": "measured",
+    "note": "lane 1 measured Codex auto-compacting at about 90% of a 272K window (PR #9, open at retrieval); 0.9 x 272,000 = 244,800 matches the Codex source tests in codex-rs/protocol/src/openai_models.rs"
+   },
+   "requests_note": {
+    "value": "full input every request",
+    "source": "https://github.com/VentureForgre/contexto/pull/9",
+    "retrieved": "2026-10-15",
+    "tag": "measured",
+    "note": "lane 1: Codex sends store:false with no previous_response_id"
    }
   }
  },
@@ -574,6 +581,17 @@
     2.0,
     8000
    ]
+  ],
+  "bounds": [
+   30000,
+   100000,
+   250000
+  ],
+  "sweep_heads": [
+   42000,
+   60000,
+   80000,
+   120000
   ]
  }
 }

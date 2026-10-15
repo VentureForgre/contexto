@@ -192,6 +192,71 @@ def test_recall_adds_one_round_trip():
     assert with_recall.events["recall"] == 1
 
 
+def test_cvm_bound_is_never_exceeded_even_mid_turn():
+    pol = cm.CvmPolicy(window_tokens=5000, epoch_turns=100, opportunistic=False, respect_price_tier=False,
+                       pinned_base=500, pinned_per_turn=0, pinned_max=500, bound_tokens=6000,
+                       tool_output_excerpt_tokens=200)
+    # Each turn: a user message, then two 2000-token tool results; the last turn has a 9000-token result.
+    turns = [[(100, 10, 10), (2000, 10, 10), (2000, 10, 10)]] * 4 + [[(100, 10, 10), (9000, 10, 10)]]
+    r = cm.run_cvm(trace(turns), OPUS, T5, pol)
+    assert r.max_prompt <= 6000
+    assert r.events["rebase_bound"] >= 1
+    assert r.events["tool_output_paged"] == 1  # the 9000-token result alone cannot fit
+    assert r.events["bound_exceeded"] == 0
+
+
+def test_policy_for_bound_rejects_a_bound_the_head_fills():
+    pol = cm.CvmPolicy()
+    assert cm.policy_for_bound(pol, 30_000, 42_000) is None
+    fitted = cm.policy_for_bound(pol, 100_000, 42_000)
+    assert fitted.bound_tokens == 100_000
+    assert fitted.window_tokens + fitted.pinned_max + fitted.stubs_max_tokens < 100_000 - 42_000
+
+
+def test_idle_compaction_fires_before_a_1h_expiry_only():
+    reset = cm.Reset("compaction", threshold=10_000_000, output_tokens=100, seed_tokens=200)
+    idle = cm.IdleCompaction(min_tokens=1000, lead_s=60)
+    tr = trace([[(500, 10, 10)], [(500, 10, 10)]], gap=4000)
+    hour = cm.run_plain(tr, OPUS, OPUS.cache_tier("1h"), reset, idle=idle)
+    assert hour.events["idle_compaction"] == 1 and hour.resets == 1
+    # The summary request ran at 3540 s, while the 1 h cache was still warm.
+    assert hour.turns[1].b.read >= 1500
+    five = cm.run_plain(tr, OPUS, T5, reset, idle=idle)
+    assert five.events["idle_compaction"] == 0
+
+
+def test_cli_compaction_under_cvm_counts_local_history():
+    reset = cm.Reset("compaction", threshold=2600, instruction_tokens=50, output_tokens=100, seed_tokens=300)
+    pol = cm.CvmPolicy(window_tokens=10_000, epoch_turns=100, opportunistic=False, respect_price_tier=False,
+                       pinned_base=0, pinned_per_turn=0, pinned_max=0)
+    # Local history: 1000 head + 510 per turn; turn 4 starts at 2530 + 500 >= 2600. Afterwards
+    # local is 1300 + 510, and turn 5 starts at 1810 + 500 < 2600, so only one compaction.
+    r = cm.run_cvm(trace([[(500, 10, 10)]] * 5), OPUS, T5, pol, cli_compaction=reset)
+    assert r.events["cli_compaction"] == 1
+    assert r.turns[3].b.output == 100 + 10
+    assert r.breaks.count["cli_compaction"] == 1
+
+
+def test_cvm_strips_thinking_from_kept_window_at_rebase():
+    pol = cm.CvmPolicy(window_tokens=10_000, epoch_turns=2, opportunistic=False, respect_price_tier=False,
+                       pinned_base=0, pinned_per_turn=0, pinned_max=0)
+    turns = (tuple(cm.Req(100, 60, 60, thinking=50) for _ in range(1)),) * 3
+    tr = cm.Trace("t", 1000, 1.0, tuple(cm.Turn(0.0, reqs) for reqs in turns))
+    r = cm.run_cvm(tr, OPUS, T5, pol)
+    assert r.events["thinking_stripped"] == 100  # two kept turns, 50 each
+    # Turn 3 prompt: head + two stripped turns of 110 + its own 100.
+    assert r.turns[2].prompt_tokens == 1000 + 2 * 110 + 100
+
+
+def test_keep_thinking_trace_keeps_thinking_in_context():
+    prof = cm.load_profile()
+    a = cm.generate_trace(prof, turns=20)
+    b = cm.generate_trace(prof, turns=20, keep_thinking=True)
+    ra, rb = (r for t in a.turns for r in t.reqs), (r for t in b.turns for r in t.reqs)
+    for x, y in zip(ra, rb):
+        assert y.kept == x.kept + y.thinking and x.output == y.output
+
+
 # Epoch rule
 
 
@@ -263,6 +328,22 @@ def test_load_measured_rejects_bad_json_and_missing_file(tmp_path):
         cm.load_measured(p)
     with pytest.raises(ValueError):
         cm.load_measured(tmp_path / "absent.jsonl")
+
+
+def test_measured_codex_file_creation_unknown_and_empty_bytes():
+    path = cm.HERE / "data" / "lane1_pr10_8155abd_codex_requests.csv"
+    rows = cm.load_measured(path, creation_unknown=True)
+    assert len(rows) == 11
+    assert all(r["cache_creation_input_tokens"] is None and r["request_bytes"] is None for r in rows)
+    assert cm.load_measured(path)[0]["cache_creation_input_tokens"] == 0  # the file's placeholder
+    tr, _ = cm.trace_from_measured(rows, "codex")
+    assert len(tr.turns) == 6 and tr.head_tokens == 19693 + 6784
+
+
+def test_tile_trace_repeats_turns_after_the_first():
+    tr = trace([[(100, 1, 1)], [(200, 1, 1)], [(300, 1, 1)]])
+    tiled = cm.tile_trace(tr, 6)
+    assert [t.reqs[0].added for t in tiled.turns] == [100, 200, 300, 200, 300, 200]
 
 
 def test_price_measured_uses_reported_buckets():
