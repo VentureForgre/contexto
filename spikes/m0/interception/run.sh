@@ -9,7 +9,7 @@
 # a dummy key that is not a credential, a scrubbed environment, and a cwd outside the repo.
 # All output goes under <repo>/.contexto/spikes/L1-b/ (gitignored).
 #
-# Usage: spikes/L1-b/run.sh <experiment>
+# Usage: spikes/m0/interception/run.sh <experiment>
 #   cc-hooks        Claude: SessionStart/UserPromptSubmit additionalContext reaches the request
 #   cc-resume       Claude: a synthesized session file is accepted by --resume
 #   cc-threshold    Claude: which planted usage values make resume compact before sending
@@ -19,7 +19,7 @@
 #   all             all of the above
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$S/../.." && pwd)"
+REPO="$(cd "$S/../../.." && pwd)"
 OUT="$REPO/.contexto/spikes/L1-b"
 PORT="${M0_STUB_PORT:-18431}"
 STUB_LOG="$OUT/stub-requests.log"

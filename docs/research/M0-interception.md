@@ -8,7 +8,7 @@ Versions studied: Claude Code 2.1.301 (`~/.local/bin/claude`) and codex-cli 0.15
 
 Every claim carries one tag:
 
-- **[measured: ...]** produced by a command in this repo, normally `spikes/L1-b/run.sh <experiment>`
+- **[measured: ...]** produced by a command in this repo, normally `spikes/m0/interception/run.sh <experiment>`
   (section 7). All measurements in this document cost zero model tokens (section 8).
 - **[documented: ...]** vendor documentation (retrieved 2026-10-15, pages carry no version stamp)
   or vendor source at the pinned tag (`codex-rs/<path>:<line>`).
@@ -172,7 +172,7 @@ What the source adds [documented: `codex-rs/hooks/src/events/compact.rs:47-54, 2
   isolated config dir under `.contexto/spikes/L1-b/cc-config/`; the one early run without isolation
   and the live-recipe proof wrote to `~/.claude/projects`. They stay local and are never committed.
 - **A synthesized file is accepted on resume** [measured: `run.sh cc-resume`]: a two-record file (one
-  `user`, one `assistant`) written by `spikes/L1-b/synth_session.py` was resumed with `--resume <id>`,
+  `user`, one `assistant`) written by `spikes/m0/interception/synth_session.py` was resumed with `--resume <id>`,
   and the upstream request contained both synthesized turns before the new prompt.
 - **Planted usage drives compaction** [measured: `run.sh cc-threshold`]: the synthesized assistant
   record carries a `usage` object; with a large value the CLI compacts before sending (section 3).
@@ -190,7 +190,7 @@ What the source adds [documented: `codex-rs/hooks/src/events/compact.rs:47-54, 2
   Observed in a throwaway rollout: `session_meta`, `event_msg` (`task_started`, `item_completed`,
   `task_complete`), `response_item` messages, `world_state`, `turn_context` [measured: key names].
 - **Appended items are accepted on resume** [measured: `run.sh cx-resume`, variant A]: an assistant
-  `response_item` appended by `spikes/L1-b/codex_append.py` appeared in the upstream input of
+  `response_item` appended by `spikes/m0/interception/codex_append.py` appeared in the upstream input of
   `codex exec resume <thread id>`.
 - **A planted `token_count` forces compaction** [measured: variant B]: with
   `total_tokens = 260000` the first upstream request ended with a `compaction_trigger` item and the
@@ -454,8 +454,8 @@ path for both CLIs. The decision belongs to the owner (section 10).
 
 ### Zero-spend method
 
-Every measurement above comes from `spikes/L1-b/run.sh`. It runs a throwaway CLI against
-`spikes/L1-b/stub401.py`, a local listener on `127.0.0.1` that answers every request with 401 and
+Every measurement above comes from `spikes/m0/interception/run.sh`. It runs a throwaway CLI against
+`spikes/m0/interception/stub401.py`, a local listener on `127.0.0.1` that answers every request with 401 and
 logs method, path, header names, body size, message or input-item structure, and synthetic
 `MARKER-*` test tokens, nothing else. The CLI builds, records, and sends its full request before
 seeing the 401, so injection, resume, and compaction decisions are visible without a model call.
@@ -465,7 +465,7 @@ Isolation per run: `env -i` with only `HOME`, `PATH`, `TERM`; an isolated `CLAUD
 `/private/tmp/m0-l1b-scratch/`; `CLAUDE_CODE_MAX_RETRIES=0` for Claude; a 60 s alarm.
 
 ```sh
-spikes/L1-b/run.sh all            # or one of: cc-hooks cc-resume cc-threshold cc-precompact cx-hooks cx-resume
+spikes/m0/interception/run.sh all            # or one of: cc-hooks cc-resume cc-threshold cc-precompact cx-hooks cx-resume
 ```
 
 Output and logs go to `.contexto/spikes/L1-b/` (gitignored). A full `all` run took about four
