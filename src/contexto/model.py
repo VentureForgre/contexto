@@ -13,6 +13,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import Any
 
 KINDS = ("event", "decision", "obligation", "artifact", "reference", "closure")
@@ -62,6 +63,12 @@ class Source:
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):
                 raise ValidationError(f"source {name} must be a string or null")
+        if self.type == "file":
+            # File sources are relative to the ledger root and pin content for staleness checks.
+            if self.sha256 is None or not _HEX64.fullmatch(self.sha256):
+                raise ValidationError("file source requires sha256 as 64 lowercase hex chars")
+            if PurePosixPath(self.locator).is_absolute():
+                raise ValidationError(f"file source locator must be a relative path: {self.locator!r}")
 
     @classmethod
     def from_dict(cls, d: dict) -> Source:
@@ -189,6 +196,8 @@ def _validate(r: Record) -> None:
     for source in r.provenance:
         if not isinstance(source, Source):
             raise ValidationError("provenance entries must be sources")
+    if r.epistemic == "verified" and not r.provenance:
+        raise ValidationError("verified record requires at least one provenance source")
     for value in r.supersedes:
         if not isinstance(value, str):
             raise ValidationError("supersedes entries must be record ids")

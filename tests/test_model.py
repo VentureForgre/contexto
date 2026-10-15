@@ -95,7 +95,7 @@ def test_id_ignores_id_and_prev():
         ("supersedes", ["rec_000000000000000000000002"]),
         ("target", "rec_000000000000000000000003"),
         ("owner", "someone"),
-        ("provenance", []),
+        ("provenance", [{"type": "url", "locator": "https://example.com/spec"}]),
     ],
 )
 def test_changing_hashed_field_changes_id(field, value):
@@ -191,6 +191,19 @@ INVALID = [
     pytest.param(
         dict(full_dict(MINIMAL_DRAFT), provenance=[{"type": "file"}]), id="source-missing-locator"
     ),
+    pytest.param(
+        dict(full_dict(MINIMAL_DRAFT), provenance=[{"type": "file", "locator": "a.txt"}]),
+        id="file-source-without-sha256",
+    ),
+    pytest.param(
+        dict(full_dict(MINIMAL_DRAFT), provenance=[{"type": "file", "locator": "a.txt", "sha256": "xyz"}]),
+        id="file-source-bad-sha256",
+    ),
+    pytest.param(
+        dict(full_dict(MINIMAL_DRAFT), provenance=[{"type": "file", "locator": "/etc/hosts", "sha256": "a" * 64}]),
+        id="file-source-absolute-locator",
+    ),
+    pytest.param(dict(full_dict(MINIMAL_DRAFT), epistemic="verified"), id="verified-without-provenance"),
     pytest.param(dict(full_dict(MINIMAL_DRAFT), kind="closure"), id="closure-without-target"),
     pytest.param(dict(full_dict(MINIMAL_DRAFT), kind="obligation"), id="obligation-without-owner"),
     pytest.param(
@@ -212,6 +225,24 @@ INVALID = [
 def test_validation_errors(bad):
     with pytest.raises(ValidationError):
         Record.from_dict(bad)
+
+
+def test_valid_file_and_verified_records_accepted():
+    source = {"type": "file", "locator": "docs/notes.md", "sha256": "0" * 64}
+    for epistemic in ("verified", "reported"):
+        r = Record.from_dict(full_dict(dict(MINIMAL_DRAFT, epistemic=epistemic, provenance=[source])))
+        assert r.provenance[0].locator == "docs/notes.md"
+    assert Source(type="url", locator="https://example.com").sha256 is None
+
+
+def test_id_hashes_utf8_bytes_of_non_ascii_canonical_json():
+    body = GOLDEN_DRAFT["body"]
+    assert not body.isascii()
+    payload = Record.from_dict(full_dict(GOLDEN_DRAFT)).to_dict()
+    del payload["id"], payload["prev"]
+    text = canonical_json(payload)
+    assert body in text  # ensure_ascii=False keeps the raw characters
+    assert GOLDEN_ID == "rec_" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 
 
 def test_compute_id_validates_drafts():
