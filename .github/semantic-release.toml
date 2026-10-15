@@ -30,8 +30,8 @@ type = "github"
 token = { env = "GH_TOKEN" }
 
 [semantic_release.publish]
-dist_glob_patterns = ["dist/*"]
-upload_to_vcs_release = true
+# The workflow attaches the sdist and wheel itself (one upload, after its checks).
+upload_to_vcs_release = false
 
 [semantic_release.changelog.default_templates]
 # List the commits in the first release's notes instead of the "Initial Release" placeholder.

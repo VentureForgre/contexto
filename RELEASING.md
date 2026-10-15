@@ -9,9 +9,25 @@ the workflow:
 2. computes the next version from the Conventional Commits since the last `v*` tag;
 3. stamps that version into the runner's copy of `pyproject.toml` and builds the sdist and wheel;
 4. creates the tag `v{version}` on the merged commit and pushes only that tag;
-5. creates a GitHub Release whose notes list those commits by type, and attaches the sdist and wheel.
+5. creates a GitHub Release whose notes list those commits by type, and attaches the sdist and wheel
+   (one upload, made by the workflow after its checks).
 
 Otherwise it exits successfully without doing anything.
+
+## Releases are off until the owner turns them on
+
+The release and recovery jobs run only when the repository variable `RELEASES_ENABLED` is exactly
+`true` (Settings > Secrets and variables > Actions > Variables). While it is unset, which is the
+state this file ships in, a push to `main` runs only a job that prints "Releases are disabled": no
+CI gate, no tag, no release, and no upload. A manual dispatch does nothing either.
+
+- **Who turns it on:** the repository owner, or intake on the owner's recorded instruction.
+- **When:** after intake has merged the pull requests that should be in the first release and the
+  owner has agreed to start releasing (decision O5). Setting the variable is the recorded act that
+  settles O5.
+- **What happens next:** the next push to `main` releases every releasable commit since the start of
+  history (no tag exists yet). With PR #2 or PR #3 merged by then, that is v0.1.0.
+- **Turning it off again:** delete the variable or set it to anything other than `true`.
 
 ## What a release never does
 
@@ -85,11 +101,17 @@ No VCS-derived version plugin (hatch-vcs, setuptools-scm) is needed.
 | `.github/semantic-release.toml` | PSR settings: `v{version}` tags, conventional parser, release types, `main` only, no version files |
 | `.github/scripts/release-build.sh` | PSR `build_command`: stamp, build, and verify artifact versions; skip cleanly without `pyproject.toml` |
 | `.github/workflows/ci.yml` | Pull request checks; also the required gate for releases (`workflow_call`) |
-| `.github/workflows/release.yml` | Release on push to `main`; manual re-attach of assets for an existing tag |
+| `.github/workflows/release.yml` | Release on push to `main`; manual recovery for an existing tag; both gated on `RELEASES_ENABLED` |
 
 CI runs Ruff only when the repository configures it, runs `uv run --with pytest pytest` only when the
 tree has test files, and checks that the package builds when `pyproject.toml` exists. On a tree with
-none of those, every job passes without doing anything.
+none of those, every job passes without doing anything. The pytest run collects spike tests under
+`spikes/` as well. That is intended, because those tests back numbers that research documents cite.
+
+Third-party actions are pinned by commit SHA, with the release tag in a comment:
+`actions/checkout` v7.0.1 and `astral-sh/setup-uv` v10.2.0. To update one, resolve the new tag's
+commit (`gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`) and update the SHA and the comment
+together.
 
 ## Dry run
 
@@ -108,10 +130,13 @@ clone to act as `origin`, push the commits under test to its `main`, and run
 
 ## Recovery
 
-- **The release has no assets** (for example, the upload step failed): run the Release workflow
-  manually from the Actions tab with the existing tag, such as `v0.2.0`. The `reattach` job checks
-  out the tag, rebuilds at that version, and re-uploads the sdist and wheel. It never creates a tag or
-  a version.
+- **The tag exists but the release is missing or has no assets** (for example, release creation or
+  the upload failed after the tag was pushed): run the Release workflow manually from the Actions tab
+  with the existing tag, such as `v0.2.0`. The `reattach` job checks out the tag. If the release is
+  missing, it creates one and posts that tag's Conventional Commit notes
+  (`semantic-release changelog --post-to-release-tag`). It then rebuilds at the tag's version and
+  uploads the sdist and wheel. It never creates a tag or a new version. A plain re-run of the
+  release workflow does nothing here, because it sees the tag and treats that version as released.
 - **A release is broken:** fix it with a `fix:` pull request; the merge produces the next patch
   release. Deleting a published tag or release is a maintainer decision made in the GitHub UI.
 - **Do not create release tags by hand.** Versions come only from the workflow.

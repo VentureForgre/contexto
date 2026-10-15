@@ -3,6 +3,10 @@ name: Release
 # A release creates a v{version} tag on the merged commit and a GitHub Release with the
 # sdist and wheel attached. It never pushes a commit: main is protected by a ruleset with
 # no bypass actors, and semantic-release runs with --no-commit. See RELEASING.md.
+#
+# Releases are off until the repository variable RELEASES_ENABLED is set to "true"
+# (Settings > Secrets and variables > Actions > Variables). Unset or any other value:
+# no tag, no release, no asset upload, on push or on manual dispatch.
 
 on:
   push:
@@ -25,21 +29,28 @@ env:
   PSR: uvx --from python-semantic-release==10.7.0 semantic-release -c .github/semantic-release.toml
 
 jobs:
+  disabled:
+    if: vars.RELEASES_ENABLED != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report that releases are off
+        run: echo "::notice::Releases are disabled. Set the repository variable RELEASES_ENABLED to true to enable them (see RELEASING.md)."
+
   ci:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && vars.RELEASES_ENABLED == 'true'
     uses: ./.github/workflows/ci.yml
 
   release:
     needs: ci
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && vars.RELEASES_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
 
@@ -97,7 +108,7 @@ jobs:
           gh release upload "$TAG" "${files[@]}" --clobber
 
   reattach:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && vars.RELEASES_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -107,17 +118,28 @@ jobs:
       - name: Validate the tag name
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Not a release tag: $TAG" >&2; exit 1; }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: refs/tags/${{ inputs.tag }}
-      - uses: astral-sh/setup-uv@v10.2.0
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
+      - name: Create the release if the tag exists without one
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists."
+            exit 0
+          fi
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes "Release notes are being generated."
+          # Replace the placeholder with the Conventional Commit notes for this tag.
+          $PSR changelog --post-to-release-tag "$TAG"
       - name: Rebuild at the tagged version and re-attach
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view "$TAG" >/dev/null
           NEW_VERSION="${TAG#v}" bash .github/scripts/release-build.sh
           shopt -s nullglob
           files=(dist/*.tar.gz dist/*.whl)
