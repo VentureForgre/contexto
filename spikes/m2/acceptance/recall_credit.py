@@ -5,8 +5,9 @@ of the page holding it, or a ``contexto_search`` hit whose returned lines contai
 here reads a transcript or tool output. From the session log's ``mcp_call`` events it takes the
 character ranges each call returned (page id, start, end), and from the stored page it takes where
 the planted statement sits in that page's rendered text (``render_page``, the text both tools read).
-A paged-only probe is credited when it was answered correctly and its statement lies wholly inside a
-returned range on the same page, from a call logged before the answer.
+A paged-only probe is credited when it was answered correctly and its statement lies wholly inside the
+union of the ranges returned for that page (B16 pages a recall over several calls, so adjacent or
+overlapping ranges are merged), from calls logged before the answer.
 
 Ranges, per call:
 - ``contexto_recall``: ``[offset, offset + chars)`` from its existing fields.
@@ -77,10 +78,21 @@ def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
         span = spans.get(probe.id)
         via = None
         if span:
-            for r in ranges:
-                if (cutoff is None or r["at"] < cutoff) and r["page_id"] == span["page_id"] \
-                        and r["start"] <= span["start"] and span["end"] <= r["end"]:
-                    via = {"tool": r["tool"], "page_id": r["page_id"], "range": [r["start"], r["end"]]}
+            # B16 pages a recall over several calls, so a line may span adjacent returned ranges:
+            # merge the page's ranges (overlapping or touching) before checking containment.
+            merged: list[dict[str, Any]] = []
+            for r in sorted((r for r in ranges if (cutoff is None or r["at"] < cutoff)
+                             and r["page_id"] == span["page_id"]), key=lambda r: r["start"]):
+                if merged and r["start"] <= merged[-1]["end"]:
+                    merged[-1]["end"] = max(merged[-1]["end"], r["end"])
+                    merged[-1]["tools"].add(r["tool"])
+                    merged[-1]["calls"] += 1
+                else:
+                    merged.append({"start": r["start"], "end": r["end"], "tools": {r["tool"]}, "calls": 1})
+            for m in merged:
+                if m["start"] <= span["start"] and span["end"] <= m["end"]:
+                    via = {"tool": "+".join(sorted(m["tools"])), "page_id": span["page_id"],
+                           "range": [m["start"], m["end"]], "calls": m["calls"]}
                     break
         rows.append({"id": probe.id, "answered_correctly": correct, "plant": span, "returned": via is not None,
                      "credited": correct and via is not None, **({"via": via} if via else {})})
