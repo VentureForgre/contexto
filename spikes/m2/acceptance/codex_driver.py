@@ -112,17 +112,37 @@ class SpendWatch:
     inflight: int
     grace_polls: int = 2
     grace_seconds: float = 5.0
+    startup_seconds: float = 10.0
     _pending_since: float | None = None
     _pending_polls: int = 0
+    _turn_started: float | None = None
+    _fresh: bool = False
+    _seen_log: bool = False
+
+    def begin_turn(self, fresh: bool = False) -> None:
+        """A new turn starts (run_session calls this before each turn). Only on the session's very first
+        turn (``fresh``, turn index 0), and only until the log has been seen once, a missing log may be
+        the session still starting (reviewer-1 on PR #154): the launcher logs ``proxy_start`` before it
+        starts Codex, and every dry-run turn here started within a second, so 10 seconds is ample.
+        Otherwise, a resume's first turn included, a missing log is a failure at once (reviewer-2 on
+        PR #165)."""
+        self._turn_started = time.monotonic()
+        self._fresh = fresh
+        self._pending_since, self._pending_polls = None, 0
 
     def __call__(self) -> bool:
         try:
             data = self.session_log.read_bytes()
         except FileNotFoundError:
-            self._pending("the session log is missing")
-            return False
+            starting = (self._fresh and not self._seen_log and self._turn_started is not None
+                        and time.monotonic() - self._turn_started < self.startup_seconds)
+            if starting:
+                return False
+            raise WatchFailed("the session log is missing" + (" after it was seen" if self._seen_log else
+                                                              " past the first turn's startup window"))
         except OSError as exc:
             raise WatchFailed(f"the session log cannot be read: {type(exc).__name__}") from exc
+        self._seen_log = True
         try:
             events, partial = complete_lines(data)
         except ValueError as exc:
@@ -244,39 +264,57 @@ def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved
     if len(estimates) != len(s.turns):
         raise ValueError("one estimate per turn")
     answers: list[str] = []
-    stopped, completed = None, start
+    by_turn: dict[str, str] = {}
+    stopped, completed, failed_turn = None, start, None
     for i, text in enumerate(s.turns):
         if i < start:
             continue
+        # Only the session's very first turn may find no log (a fresh session). Before any other turn, a
+        # resume's first included, a missing or unreadable log stops the run: it is never read as nothing
+        # spent, which would ignore what a failed attempt was billed (reviewer-2 on PR #165).
+        if i > 0 and not session_log.exists():
+            stopped = f"turn {i + 1}: not started, the session log is missing"
+            break
         try:
             spent = spend(read_log(session_log))
-        except ValueError:
-            stopped = f"turn {i + 1}: not started, the session log has a malformed line"
+        except (ValueError, OSError) as exc:
+            stopped = f"turn {i + 1}: not started, the session log cannot be read ({type(exc).__name__})"
             break
         if spent + estimates[i] + reserve > approved:
             stopped = f"turn {i + 1} could pass the approved {approved:,} (spent {spent:,})"
             break
+        if isinstance(turns.watch, SpendWatch):
+            turns.watch.begin_turn(fresh=(i == 0))
         try:
             answer = turns.send(i, text)
         except Exception as exc:  # noqa: BLE001 - fail closed: the turn was stopped, the session stops
             stopped = f"turn {i + 1}: stopped, the spend watcher failed closed ({type(exc).__name__}: {exc})"
+            failed_turn = i
             break
         if turns.stopped_by_watcher and turns.stopped_by_watcher[-1] == i:
             stopped = f"turn {i + 1}: stopped by the spend watcher (approved {approved:,})"
+            failed_turn = i
             break
         if turns.exits[-1] != 0:  # not completed: a resume starts again at this turn
             stopped = f"turn {i + 1}: codex exited {turns.exits[-1]}"
+            failed_turn = i
+            break
+        if not session_log.exists():  # the turn ran, but its spend cannot be accounted for
+            stopped = f"turn {i + 1}: the session log is missing after the turn"
+            failed_turn = i
             break
         completed += 1
         if i >= s.n_content:
             answers.append(answer)
+            by_turn[str(i)] = answer
     try:
         spent_total = spend(read_log(session_log))
     except ValueError:
         spent_total = None
     return {"spent": spent_total, "approved": approved, "turns": len(s.turns), "started_at": start,
             "turns_completed": completed, "probe_turns_completed": len(answers), "stopped": stopped,
-            "thread_id": turns.thread, "codex_exits": turns.exits,
+            "thread_id": turns.thread, "codex_exits": turns.exits, "failed_turn": failed_turn,
+            "answers_by_turn": by_turn,
             "stopped_by_watcher": list(turns.stopped_by_watcher), "answers": "\n".join(answers)}
 
 
@@ -310,3 +348,20 @@ def analyze(events: list[dict[str, Any]], bound: int) -> dict[str, Any]:
             "mcp_calls": {t: sum(1 for e in mcp if e.get("tool") == t) for t in sorted({e.get("tool") for e in mcp})},
             "mcp_failed": sum(1 for e in mcp if not e.get("ok")), "spent": spend(events),
             "acceptance_1": model_4xx == 0 and over_real == 0 and not failures and max_input <= bound}
+
+
+def join_records(s: script.Script, records: list[dict[str, Any]]) -> dict[str, Any]:
+    """One scored record from an original attempt and its resumes (reviewer-1 on PR #154), in the order
+    they ran. Answers join by turn index, a later attempt's answer for a turn replacing an earlier one;
+    each attempt is listed with the turn it failed on, so the record shows which turn was attempted
+    twice. ``answers`` follows the probe turns' order; ``complete`` says every probe turn has one."""
+    by_turn: dict[str, str] = {}
+    for r in records:
+        by_turn.update(r.get("answers_by_turn") or {})
+    probe = [str(i) for i in range(s.n_content, len(s.turns))]
+    last = records[-1] if records else {}
+    return {"attempts": [{k: r.get(k) for k in ("started_at", "turns_completed", "failed_turn", "stopped")}
+                         for r in records],
+            "answers_by_turn": by_turn, "answers": "\n".join(by_turn[t] for t in probe if t in by_turn),
+            "complete": all(t in by_turn for t in probe), "turns_completed": last.get("turns_completed"),
+            "spent": last.get("spent"), "approved": last.get("approved"), "thread_id": last.get("thread_id")}
