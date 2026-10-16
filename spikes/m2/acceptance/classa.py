@@ -73,7 +73,7 @@ def _ser_len(obj: Any) -> int:
 def original_bodies(cc: list[dict[str, Any]], probe_text: str) -> list[dict[str, Any]]:
     """Each original Claude Code request up to and including the first one carrying ``probe_text``,
     as sent: shape system and tools, the record's params and cache markers, system-role messages with
-    string content (the wire form; the JSONL keeps a one-block list)."""
+    string content unless cache-marked (the wire form; the JSONL keeps a one-block list)."""
     decoded = replay.recorded_messages(cc, stop=lambda msgs: any(
         m.get("role") == "user" and replay._has_text(m, probe_text) for m in msgs))
     shapes = {r.get("shapeHash"): r["shape"] for r in cc if r.get("type") == "api-request-shape"}
@@ -83,22 +83,24 @@ def original_bodies(cc: list[dict[str, Any]], probe_text: str) -> list[dict[str,
         shape, p = shapes.get(r.get("shapeHash")), r["params"]
         if shape is None:
             raise ExperimentError("a request's shape is not in the session JSONL")
-        body: dict[str, Any] = {"model": p["model"], "messages": copy.deepcopy(decoded[r["id"]]),
+        # One copy per message: identical messages (the per-turn reminder) decode to one shared object,
+        # and a single deepcopy would keep them aliased, so marking one would mark them all.
+        body: dict[str, Any] = {"model": p["model"], "messages": [copy.deepcopy(m) for m in decoded[r["id"]]],
                                 "system": copy.deepcopy(shape["system"]), "tools": copy.deepcopy(shape["tools"]),
                                 "stream": True}
         for key in ("max_tokens", "thinking", "context_management", "output_config", "safeguards"):
             if key in p:
                 body[key] = copy.deepcopy(p[key])
-        for m in body["messages"]:
-            c = m.get("content")
-            if m.get("role") == "system" and isinstance(c, list) and len(c) == 1 and set(c[0]) == {"type", "text"}:
-                m["content"] = c[0]["text"]
-        for mark in r.get("cacheControl") or []:
+        for mark in r.get("cacheControl") or []:  # markers first: a marked system message keeps its block form
             target: Any = body
             for part in mark["path"]:
                 target = target[part]
             if isinstance(target, dict):
                 target["cache_control"] = mark["value"]
+        for m in body["messages"]:
+            c = m.get("content")
+            if m.get("role") == "system" and isinstance(c, list) and len(c) == 1 and set(c[0]) == {"type", "text"}:
+                m["content"] = c[0]["text"]
         body["_betas"] = list(p.get("betas") or [])
         out.append(body)
     if not out or not any(m.get("role") == "user" and replay._has_text(m, probe_text) for m in out[-1]["messages"]):

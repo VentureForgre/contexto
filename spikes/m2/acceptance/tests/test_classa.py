@@ -102,3 +102,25 @@ def test_main_refuses_over_the_ceiling_and_without_an_upstream(tmp_path):
             "--seat-settings", str(tmp_path / "seat.json")]
     assert classa.main([*base, "--stub", "--approved", "600001"]) == 2
     assert classa.main(base) == 2  # neither --stub nor --upstream
+
+
+def test_identical_reminders_are_marked_only_where_the_record_says():
+    # The per-turn reminder decodes to one shared message object; a marker on the newest copy must not
+    # mark the earlier ones (that bug added 62 bytes per request to the rebuilt bodies).
+    from acceptance import replay
+
+    reminder = {"role": "system", "content": [{"type": "text", "text": "reminder"}]}
+    u1, a1 = {"role": "user", "content": [{"type": "text", "text": "turn 1"}]}, {"role": "assistant", "content": [{"type": "text", "text": "OK"}]}
+    u2 = {"role": "user", "content": [{"type": "text", "text": "PROBE"}]}
+    blobs = [{"type": "api-request-blob", "hash": replay.message_hash(m), "message": m} for m in (reminder, u1, a1, u2)]
+    h = [replay.message_hash(m) for m in (u1, reminder, a1, u2, reminder)]
+    params = {"model": "m", "max_tokens": 10, "betas": []}
+    cc = [{"type": "api-request-shape", "shapeHash": "s", "shape": {"system": [], "tools": []}}, *blobs,
+          {"type": "api-request", "id": "r1", "shapeHash": "s", "params": params, "keep": 0, "tail": h[:2],
+           "cacheControl": [{"path": ["messages", 1, "content", 0], "value": {"type": "ephemeral"}}]},
+          {"type": "api-request", "id": "r2", "shapeHash": "s", "params": params, "base": "r1", "keep": 2, "tail": h[2:],
+           "cacheControl": [{"path": ["messages", 4, "content", 0], "value": {"type": "ephemeral"}}]}]
+    bodies = classa.original_bodies(cc, "PROBE")
+    msgs = bodies[1]["messages"]
+    assert msgs[1]["content"] == "reminder"  # unmarked system message: the wire's string form
+    assert msgs[4]["content"] == [{"type": "text", "text": "reminder", "cache_control": {"type": "ephemeral"}}]
