@@ -373,8 +373,9 @@ nothing from the transcript or tool output. It takes each call's returned ranges
 content-free `mcp_call` events: B15's `returned: [{page_id, start, end}]`, 0-based characters into
 `render_page(page)` with the end exclusive, or, for a recall, `[offset, offset + chars)`. It finds
 each paged-only plant's line in its stored page's rendered text. A probe is credited when it was
-answered correctly and its whole line lies inside one returned range on the same page, from a call
-logged before the last Messages request (the answer). `recall_credited` is the verdict.
+answered correctly and its whole line lies inside the union of the ranges returned for that page
+(merged when they overlap or touch, since B16 pages a recall over several calls), from calls logged
+before the last Messages request (the answer). `recall_credited` is the verdict.
 
 On the live H1 rerun (`acceptance-20261016T044723Z`): q_p_01 and q_p_02 are credited through the
 recall of the turn-0 page (range 0 to 30,651; plants at 27,057 and 9,706). q_p_03 and q_p_04 were
