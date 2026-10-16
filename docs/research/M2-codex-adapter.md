@@ -7,6 +7,32 @@ Tags: **[measured]** zero-token probes in `spikes/m2/codex/` (loopback stub, syn
 that are not real); **[source]** Codex source at that tag, `S:<path>:<lines>` under `codex-rs/`;
 **[inferred]** not verified. No model was called.
 
+## Decisions (intake, D22, relayed by manager-1 on 2026-10-16)
+
+- **Transport:** force HTTP through a custom provider defined with `-c`; never the built-in `openai`
+  provider. The proxy URL has no `/v1`; the upstream base carries the version path (agreed with
+  builder-1), and the proxy transforms any path ending in `/responses`.
+- **API-key mode (default, the only mode run live, D12):** a temporary `CODEX_HOME` (directory 0700,
+  files 0600, removed on exit) holding a custom provider that points at the proxy, with
+  `auth.command` running the existing key helper command; upstream is the owner's proxy. The
+  temporary config names the helper command only, never the key; nothing from it is committed or
+  logged. The helper command is configurable (flag or environment), and its default comes from the
+  same place Claude Code's `apiKeyHelper` is configured rather than a hard-coded path.
+- **ChatGPT mode (`--codex-auth chatgpt`, a product feature):** the user's own `CODEX_HOME` with `-c`
+  overrides only, a custom provider at the proxy with `requires_openai_auth = true`, credentials and
+  `/models` passed through unchanged. Tested only with synthetic credentials, never live on the
+  owner's login. Its end-user terms question stays open as O4, stated in `--help` and here.
+- **Bypass:** some Codex calls go to chatgpt.com directly (rate limits, usage, a remote MCP
+  connection) and bypass the proxy by design.
+- **MCP:** registration with `-c mcp_servers.contexto` stays open until `tools/list` behavior for
+  `gpt-6-astra`'s lite format is understood.
+- **Rewrite:** a `Dialect` interface plus `ResponsesDialect`, as a separate PR after PR #30 merges.
+- **Request compression:** builder-1's proxy cannot transform compressed bodies; the custom provider
+  sent plain JSON in every probe, and the launcher disables request compression per process anyway.
+
+The sections below are the phase 1 analysis that led to these decisions; section 2's recommended
+auth path is kept as ChatGPT mode, and API-key mode follows the decision above.
+
 ## Summary of recommendations
 
 1. **Transport: force HTTP with a custom provider.** A provider defined with `-c` is HTTP-only and
