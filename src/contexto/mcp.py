@@ -47,7 +47,7 @@ RECALL_NEARLY_SPENT = ("The recall budget for this turn is nearly used up (about
 SEARCH_TOO_LONG = "This search result is longer than one call can return; use a longer or more specific query."
 NO_HIT = "No paged-out turn contains that exact text."
 # Fixed control replies are protocol text, never charged, and returned even when the room is smaller than they
-# are (contract PR #103); each is at most about 150 characters. RECALL_NEARLY_SPENT is a template, checked apart.
+# are (contract PR #103); the longest is about 225 characters. RECALL_NEARLY_SPENT is a template, checked apart.
 CONTROL_REPLIES = frozenset({BUDGET_SPENT, SEARCH_TOO_LONG, NO_HIT})
 UNMEASURED_CHARS_PER_TOKEN = 1.0  # before the engine records bytes per token: charges more, never less
 # Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
@@ -460,8 +460,9 @@ class Server:
         When nothing useful fits, the tool replies ``BUDGET_SPENT`` (or, for recall with some room
         left, ``RECALL_NEARLY_SPENT``). These and the other fixed control replies are protocol text:
         never charged, and returned even when the room is smaller than they are (contract PR #103).
-        Each is at most about 150 tokens, about 2,300 for 15 parallel calls, well inside the engine's
-        headroom floor (25,000 by default).
+        The longest, the nearly-used-up reply, is about 225 characters: about 60 tokens of real usage
+        (150 at the conservative 1.5 characters per token used for charging), so 15 parallel calls
+        add about 900, well inside the engine's headroom floor (25,000 by default).
 
         With no room published only the per-call limit applies. If the engine is present (it has
         recorded the window) but published no room, a ``turn_room_missing`` event makes the missed
