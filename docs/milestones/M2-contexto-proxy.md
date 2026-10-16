@@ -323,10 +323,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     (acceptance-20261016T044723Z): the room was 23,042, one full-page recall took 20,550 of it (89.2
     percent; the half cap would have allowed about 10,683), the next recall took the last 816, and
     the four calls after that found the room spent. When the room is above zero but half of it
-    cannot hold recall text plus its offset hint, `contexto_recall` replies: "The recall budget for
+    cannot hold about 200 page characters (below that a recall returns almost nothing useful;
+    reviewer-1 measured 20 characters at a room of 200), `contexto_recall` replies: "The recall budget for
     this turn is nearly used up (about N tokens left), too little for a recall. Use contexto_search
     with an exact key to get the matching lines, answer from what is in view, or say the detail is
-    unknown." `contexto_search` keeps working while its hits fit. `contexto_recall`, `contexto_search`, and `contexto_state` never return more than
+    unknown." `contexto_search` keeps working while its hits fit. The fixed short control replies (no hit, budget
+    used up, budget nearly used up) are protocol text and are not charged; each is at most about 30
+    tokens, well inside `headroom_floor` even for many parallel calls. `contexto_recall`, `contexto_search`, and `contexto_state` never return more than
     remains; when it is
     used up they return: "Recall budget for this turn is used up; answer from what is in view, or
     say the detail is unknown."
