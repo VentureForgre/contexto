@@ -144,7 +144,7 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
 ## Open decisions (details in DECISIONS.md)
 
 - O3: settled by D31: the default bound stays 150,000, including for OpenRig seats, because a
-  larger bound lowers the largest single turn that stays under Claude Code's 200,000 compaction
+  larger bound lowers the largest single turn that stays under Claude Code's 200,000 idle-compaction
   minimum (about 87k at 150,000 against 67k at 170,000 on a 92k head, modeled).
 - O4 (owner): end-user auth guidance (API key only, or subscription logins too).
 - O5: settled by D29. v0.1.0 is cut from the merge of this status (tag and GitHub Release on this

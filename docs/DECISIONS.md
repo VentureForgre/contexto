@@ -229,7 +229,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
   measured gain); a per-head automatic bound (not pursued: it would still trade the safe turn size
   against window). Revisit only if a live seat check shows the 150,000 window costs recall. What
   no bound fixes: a single read near 149,000 tokens crosses 200,000 at every bound; the headroom it
-  leaves behind is A33's subject.
+  leaves behind is A33's subject. This rests on an inferred premise, not yet verified: that
+  Claude Code's idle compaction counts the bounded usage Contexto reports. If it counts the local
+  history instead, no bound helps, and only Claude Code's own `idleCompaction: false` setting, which
+  belongs to whoever runs the CLI, prevents it.
 
 ## Repository and process
 
