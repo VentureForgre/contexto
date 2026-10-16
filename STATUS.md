@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-16 16:45Z by intake.lead. Decisions taken and still open, with reasons:
+Updated 2026-10-16 17:25Z by intake.lead. Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -107,7 +107,8 @@ a restart (verified from the run's log). Each rotation changes the text right af
 9,088-token head, so 17 of those 19 requests read only the head from cache. A zero-spend replay (A28,
 `docs/research/M2-cache-aware-rotation.md`) models resuming the epoch after a restart at 9 rotations
 instead of 19 and 9.8 to 16.2 percent lower cost, depending on the bytes-per-token rate; that is
-rule 16, being built (A30, B31). Codex's own compaction would not have fired (plain peak 116,731,
+rule 16, released in v0.2.0 (A30, B31; replaying the run through the released engine gives
+the same number of rotations, 9). Codex's own compaction would not have fired (plain peak 116,731,
 modeled). Users who keep one proxy for the whole session do not hit these restarts.
 
 ## Token spend on live model calls (owner's proxy unless noted)
@@ -201,6 +202,7 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
 | v0.1.4 | 314d575 | B24: standalone `contexto mcp` resolves `CONTEXTO_HOME` and `--home` to an expanded absolute path |
 | v0.1.5 | 5ef9370 | A23: the proxy logs how each response ended (status, incomplete reason, stop reason), content-free |
 | v0.1.6 | db472a9 | A26: the proxy's end-status log fields accept only documented values; anything else logs as `other` |
+| v0.2.0 | 703d7c3 | Rule 16 (B31, A30): a restarted proxy resumes the main conversation's epoch instead of rotating again from epoch 0, so the prompt and its cache survive a restart |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
