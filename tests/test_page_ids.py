@@ -109,8 +109,11 @@ def test_conflict_only_when_turn_or_messages_differ_under_the_same_id(tmp_path, 
         tampered = copy.deepcopy(store.pages[pid])
         tampered["messages"][2]["content"][0]["content"] = "KO"
         store.pages[pid] = tampered
-    with pytest.raises(PageConflictError):
+    with pytest.raises(PageConflictError) as raised:
         store.page_out([TOOL_TURN], 3)
+    assert raised.value.page_id == pid  # for lane A's quarantine (A2e); the message is unchanged
+    where = store.pages_dir / f"{pid}.json" if isinstance(store, SessionStore) else f"page {pid}"
+    assert str(raised.value) == f"{where} exists with different turn or messages"
 
 
 def test_an_unreadable_stored_page_is_a_conflict(tmp_path):
@@ -119,5 +122,7 @@ def test_an_unreadable_stored_page_is_a_conflict(tmp_path):
     store = SessionStore(tmp_path, "s1")
     [pid] = store.page_out([TOOL_TURN], 3)
     (store.pages_dir / f"{pid}.json").write_bytes(b"{not json")
-    with pytest.raises(PageConflictError):
+    with pytest.raises(PageConflictError) as raised:
         store.page_out([TOOL_TURN], 3)
+    assert raised.value.page_id == pid
+    assert str(raised.value).startswith(f"{store.pages_dir / f'{pid}.json'} exists but cannot be read: ")

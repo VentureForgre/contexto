@@ -29,6 +29,7 @@ import os
 import re
 import secrets
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +58,14 @@ _SECRET_KEYS = {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-aut
 
 
 class PageConflictError(RuntimeError):
-    """A page file exists under an id with different content; pages are immutable."""
+    """A page file exists under an id with different content; pages are immutable.
+
+    ``page_id`` names the conflicting page, so a caller can quarantine it without parsing the message.
+    """
+
+    def __init__(self, message: str, *, page_id: str | None = None) -> None:
+        super().__init__(message)
+        self.page_id = page_id
 
 
 def check_window(window_tokens: Any, bytes_per_token: Any) -> None:
@@ -74,6 +82,55 @@ def read_window(meta: dict[str, Any]) -> tuple[int | None, float | None]:
     w = w if isinstance(w, int) and not isinstance(w, bool) and w > 0 else None
     r = float(r) if isinstance(r, (int, float)) and not isinstance(r, bool) and 0 < r < float("inf") else None
     return w, r
+
+
+def check_turn_room(turn_id: Any, room_tokens: Any) -> str:
+    """The turn id as a string; ValueError for an empty id or a room that is not an integer.
+
+    A room may be zero or negative (a turn already at or over the bound): nothing remains.
+    """
+    if isinstance(turn_id, int) and not isinstance(turn_id, bool):
+        turn_id = str(turn_id)
+    if not isinstance(turn_id, str) or not turn_id:
+        raise ValueError(f"turn_id must be a non-empty string, not {turn_id!r}")
+    if not isinstance(room_tokens, int) or isinstance(room_tokens, bool):
+        raise ValueError(f"room_tokens must be an integer, not {room_tokens!r}")
+    return turn_id
+
+
+def read_turn_room(meta: dict[str, Any]) -> tuple[str | None, int | None, int]:
+    """(turn id, room tokens, tokens spent this turn) from session metadata; malformed reads as unpublished."""
+    room = meta.get("turn_room")
+    if not isinstance(room, dict):
+        return None, None, 0
+    turn_id, tokens, spent = room.get("turn_id"), room.get("room_tokens"), room.get("spent_tokens", 0)
+    if (not isinstance(turn_id, str) or not turn_id or not isinstance(tokens, int) or isinstance(tokens, bool)):
+        return None, None, 0
+    spent = spent if isinstance(spent, int) and not isinstance(spent, bool) and spent >= 0 else 0
+    return turn_id, tokens, spent
+
+
+def apply_turn_room(current: tuple[str | None, int | None, int], turn_id: str, room_tokens: int) -> dict[str, Any]:
+    """The new turn-room record: the spent counter resets only when the turn id changes."""
+    spent = current[2] if current[0] == turn_id else 0
+    return {"turn_id": turn_id, "room_tokens": room_tokens, "spent_tokens": spent}
+
+
+def charge_room(current: tuple[str | None, int | None, int], charge: Callable[[int | None], int]) -> dict[str, Any] | None:
+    """Run ``charge(remaining)`` and return the updated record, or None when no room is published.
+
+    ``charge`` gets the tokens left this turn (None when no room is published, which leaves the
+    turn unbudgeted) and returns the tokens it used, between 0 and what remained.
+    """
+    turn_id, room_tokens, spent = current
+    if turn_id is None or room_tokens is None:
+        charge(None)
+        return None
+    remaining = max(0, room_tokens - spent)
+    used = charge(remaining)
+    if not isinstance(used, int) or isinstance(used, bool) or not 0 <= used <= remaining:
+        raise ValueError(f"a turn-room charge must be between 0 and {remaining} tokens, not {used!r}")
+    return {"turn_id": turn_id, "room_tokens": room_tokens, "spent_tokens": spent + used}
 
 
 class SessionNotFoundError(LookupError):
@@ -142,8 +199,40 @@ class SessionStore(LedgerOps):
         check_window(window_tokens, bytes_per_token)
         self._update_meta({"window_tokens": window_tokens, "bytes_per_token": float(bytes_per_token)})
 
+    def set_turn_room(self, turn_id: str, room_tokens: int) -> None:
+        """Publish the room left in the current turn (M2 contract PR #69, per-turn recall budget).
+
+        Lane A's engine calls this when a response's real usage arrives, and the proxy holds the
+        stream (its final event, and ``tool_use`` blocks if the client starts tool calls early)
+        until the publish, so a tool call sees the current room. The tokens spent this turn reset
+        only when ``turn_id`` changes; a repeated call with the same id updates the room and keeps
+        what was spent.
+        """
+        turn_id = check_turn_room(turn_id, room_tokens)
+        self._modify_meta(lambda meta: {"turn_room": apply_turn_room(read_turn_room(meta), turn_id, room_tokens)})
+
+    def turn_room(self) -> tuple[str | None, int | None, int]:
+        """(turn id, room tokens, tokens spent this turn); (None, None, 0) until the engine publishes."""
+        return read_turn_room(self._meta())
+
+    def charge_turn_room(self, charge: Callable[[int | None], int]) -> None:
+        """Charge this turn's room atomically: ``charge`` runs while meta.lock is held.
+
+        See ``charge_room``. Parallel tool calls serialize here, so together they never spend
+        more than the room.
+        """
+        def update(meta: dict[str, Any]) -> dict[str, Any] | None:
+            record = charge_room(read_turn_room(meta), charge)
+            return None if record is None else {"turn_room": record}
+
+        self._modify_meta(update)
+
     def _update_meta(self, updates: dict[str, Any]) -> None:
-        """Merge ``updates`` into meta.json: writers serialize on meta.lock; readers never block.
+        """Merge ``updates`` into meta.json: writers serialize on meta.lock; readers never block."""
+        self._modify_meta(lambda meta: updates)
+
+    def _modify_meta(self, change: Callable[[dict[str, Any]], dict[str, Any] | None]) -> None:
+        """Merge ``change(meta)`` into meta.json under meta.lock; None writes nothing.
 
         The new file is written privately, fsynced, and renamed into place, so a concurrent reader
         sees either the old or the new complete file, and no writer drops another writer's field.
@@ -152,6 +241,9 @@ class SessionStore(LedgerOps):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
             meta = self._meta()
+            updates = change(meta)
+            if updates is None:
+                return
             meta.update(updates)
             tmp = self.dir / f".meta.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
             fd = open_private(tmp, os.O_WRONLY | os.O_EXCL)
@@ -233,9 +325,9 @@ class SessionStore(LedgerOps):
                 try:
                     stored = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError) as e:
-                    raise PageConflictError(f"{path} exists but cannot be read: {e}") from e
+                    raise PageConflictError(f"{path} exists but cannot be read: {e}", page_id=page["id"]) from e
                 if not same_content(stored, page):
-                    raise PageConflictError(f"{path} exists with different turn or messages")
+                    raise PageConflictError(f"{path} exists with different turn or messages", page_id=page["id"])
             ids.append(page["id"])
         return ids
 
