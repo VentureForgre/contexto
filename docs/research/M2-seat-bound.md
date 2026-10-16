@@ -9,34 +9,54 @@ rows of the six base sessions are in [`data/M2-seat-bound.csv`](data/M2-seat-bou
 
 ## Recommendation (modeled)
 
-**Bound 170,000 for seats**, the launcher cap.
-- **Window.** At a 92,000-token head, it gives a window budget of 50,331 to 52,958, against 30,030 to
-  32,958 at 150,000.
-- **Rotations.** 10 against 15 over 56 turns.
-- **Cost.** 0.8% less to 13.8% more, depending on the head.
-- **Margin.** With measured turn sizes, the largest request is 138,597, which is 61,403 under Claude
-  Code's 200,000 idle-compaction minimum.
-- **What it does not fix.** A large read (one tool round of 149,140 tokens, as measured) passes
-  200,000 at every bound tested.
+**Keep 150,000 for seats**, the current default. The owner's bar comes first (D2: compaction never
+fires; accuracy equals full context; then cost), and on that bar the margin to idle compaction
+decides.
+
+- **The trade.** A turn adds its growth on top of its turn-start input, and rotation keeps that input
+  under the bound.
+  - The largest single turn that stays under Claude Code's 200,000 idle-compaction minimum is 200,000
+    less the largest turn-start input.
+  - At a 92,000 head that is 87,141 tokens at 150,000, 78,133 at 160,000 and 67,225 at 170,000.
+  - At an 82,000 head: 88,133, 77,225 and 71,350.
+  - So 170,000 lowers the read size that triggers idle compaction by about 20,000 tokens. A turn
+    growing 67,000 to 87,000 tokens crosses 200,000 only at 170,000.
+  - M0 measured a 149,140-token read on this very seat (`lab.subject`, G2), which crosses at every bound.
+- **What 170,000 would buy.** A larger window for up to 13.8% more cost at a 92,000 head:
+  - W of 50,331 to 52,958 against 30,030 to 32,958, and 10 rotations against 15 over 56 turns.
+  - At an 82,000 head it costs 0.8% less.
+  - No accuracy figure says the larger window is needed. Recall room never fell below 12,000 at any
+    bound. M0 found no slip point by context size (96/96 at 98,910 and at 256,783, O3).
+- **When to revisit.** 170,000 is justified only if a live seat check shows that 150,000's window
+  costs recall accuracy.
+- **What no bound fixes.** A large read passes 200,000 at every bound.
+  - If Claude Code's idle compaction counts the bounded usage it reports (O3's premise, unverified),
+    no bound guarantees D2 on a seat that reads large files.
+  - If it counts its local history instead, that passes 200,000 early at any bound.
+  - Either way, Claude Code's `idleCompaction: false` setting is what removes the risk. That is the
+    seat owner's setting, not Contexto's.
 
 ## Headline (base session: 56 turns, no restarts)
 
-| Head | Bound | Window budget W | Window target | Rotations | Turn-start room: min / median | Peak input | Margin to 200,000 | Cached share | USD |
-|---|---|---|---|---|---|---|---|---|---|
-| 82,000 | 150,000 | 40,091 to 42,958 | 20,045 to 21,479 | 14 | 13,133 / 23,791 | 116,889 | 83,111 | 94.7% | 7.07 |
-| 82,000 | 160,000 | 50,331 to 52,958 | 25,165 to 26,479 | 10 | 12,225 / 26,939 | 128,597 | 71,403 | 95.0% | 7.26 |
-| 82,000 | 170,000 | 60,570 to 62,958 | 30,285 to 31,479 | 7 | 16,350 / 37,000 | 132,390 | 67,610 | 95.6% | 7.01 |
-| 92,000 | 150,000 | 30,030 to 32,958 | 15,015 to 16,479 | 15 | 12,141 / 22,650 | 116,161 | 83,839 | 95.8% | 6.59 |
-| 92,000 | 160,000 | 40,091 to 42,958 | 20,045 to 21,479 | 14 | 13,133 / 23,791 | 126,889 | 73,111 | 95.1% | 7.31 |
-| 92,000 | 170,000 | 50,331 to 52,958 | 25,165 to 26,479 | 10 | 12,225 / 26,939 | 138,597 | 61,403 | 95.3% | 7.50 |
+| Head | Bound | Window budget W | Window target | Rotations | Turn-start room: min / median | Largest turn-start input | Largest one turn under 200,000 | Peak input | Margin to 200,000 | Cached share | USD |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 82,000 | 150,000 | 40,091 to 42,958 | 20,045 to 21,479 | 14 | 13,133 / 23,791 | 111,867 | 88,133 | 116,889 | 83,111 | 94.7% | 7.07 |
+| 82,000 | 160,000 | 50,331 to 52,958 | 25,165 to 26,479 | 10 | 12,225 / 26,939 | 122,775 | 77,225 | 128,597 | 71,403 | 95.0% | 7.26 |
+| 82,000 | 170,000 | 60,570 to 62,958 | 30,285 to 31,479 | 7 | 16,350 / 37,000 | 128,650 | 71,350 | 132,390 | 67,610 | 95.6% | 7.01 |
+| 92,000 | 150,000 | 30,030 to 32,958 | 15,015 to 16,479 | 15 | 12,141 / 22,650 | 112,859 | 87,141 | 116,161 | 83,839 | 95.8% | 6.59 |
+| 92,000 | 160,000 | 40,091 to 42,958 | 20,045 to 21,479 | 14 | 13,133 / 23,791 | 121,867 | 78,133 | 126,889 | 73,111 | 95.1% | 7.31 |
+| 92,000 | 170,000 | 50,331 to 52,958 | 25,165 to 26,479 | 10 | 12,225 / 26,939 | 132,775 | 67,225 | 138,597 | 61,403 | 95.3% | 7.50 |
 
 - Every rotation was for the room (`min_turn_room`, 12,000).
 - In all six sessions: 0 turn starts below 12,000, 0 `window_minimal`, 0 `turn_room_low`, 0
   `bound_too_small`, and 0 `over_bound`.
 - The largest growth inside one turn is 5,823 tokens (a write with a long reply).
+- "Margin to 200,000" is the peak of this session's measured turn sizes. "Largest one turn under
+  200,000" is the decisive figure: the biggest single-turn growth that still stays under idle
+  compaction (200,000 less the largest turn-start input).
 - Plain Claude Code on the same requests, with a best-case cache, costs 8.69 (82,000 head) and 8.93
-  (92,000 head) and peaks at 372,232 and 382,232. Contexto is 16.1% to 26.3% cheaper in every case
-  above.
+  (92,000 head). Contexto is 16.1% to 26.3% cheaper in every case above.
+- Plain's peaks, 372,232 and 382,232, pass 200,000. Its cost therefore assumes no idle compaction.
 
 ## The seat session (synthetic, labeled)
 
@@ -128,15 +148,18 @@ crash). The rate is unmeasured. Here it is once every 14 turns: 3 restarts in 56
   - So each of the 27 remaining turns rotates to the minimal window (only the new turn) and logs
     `bound_too_small`.
   - The retained context for the rest of the session is one turn.
-  - A cap or decay on the growth that sets headroom would avoid this. It is outside this packet.
+  - **A restart does not clear it.** Since v0.2.0, rule 16 records `max_turn_growth` in the epoch record
+    and restores it, so the degradation survives proxy restarts too.
+  - A cap or decay on the growth that sets headroom would avoid this. It is a follow-up packet (A33,
+    builder-1).
 
 ## Accuracy risk of each bound (modeled)
 
-| Bound | Window budget W (82,000 to 92,000 head) | Turn-start room: min / median (92,000 head) | Risk |
-|---|---|---|---|
-| 150,000 | 30,030 to 42,958 | 12,141 / 22,650 | The smallest window: at a 92,000 head about 15,000 to 16,500 tokens of recent turns are kept (the target), so more is paged and recall carries more. |
-| 160,000 | 40,091 to 52,958 | 13,133 / 23,791 | Between the two. |
-| 170,000 | 50,331 to 62,958 | 12,225 / 26,939 | The largest window, with the least margin to 200,000 (61,403 at a 92,000 head, with measured turns). |
+| Bound | Window budget W (82,000 to 92,000 head) | Turn-start room: min / median (92,000 head) | Largest one turn under 200,000 (92,000 / 82,000 head) | Risk |
+|---|---|---|---|---|
+| 150,000 | 30,030 to 42,958 | 12,141 / 22,650 | 87,141 / 88,133 | The smallest window: at a 92,000 head about 15,000 to 16,500 tokens of recent turns are kept (the target), so more is paged and recall carries more. The most margin to idle compaction. |
+| 160,000 | 40,091 to 52,958 | 13,133 / 23,791 | 78,133 / 77,225 | Between the two. |
+| 170,000 | 50,331 to 62,958 | 12,225 / 26,939 | 67,225 / 71,350 | The largest window. The least margin: a single turn growing past 67,225 tokens reaches idle compaction. |
 
 - Recall room never fell below `min_turn_room` at any bound.
 - No accuracy figure is modeled here. M0 found no slip point by context size: 96/96 at 98,910 and at
@@ -144,14 +167,16 @@ crash). The rate is unmeasured. Here it is once every 14 turns: 3 restarts in 56
 
 ## What a live check would need
 
-- **One seat session at 170,000 through the launcher,** Opus 5.5, with the real seat head.
+- **One seat session at 150,000 through the launcher,** Opus 5.5, with the real seat head. A
+  170,000 arm is worth adding only to test whether the larger window changes recall accuracy.
 - **It would measure:**
   - F, W and the rotations;
   - the cache read after each rotation, given the seat path's intermittent misses;
   - recall accuracy on planted probes;
   - and the idle-compaction premise: whether Claude Code counts the bounded usage it reports. That is
     inferred in O3 and still unverified.
-- **Size:** at this model's figures, 56 turns would be about 11 million input tokens and about 7.50 USD.
+- **Size:** at this model's figures, 56 turns would be about 10 million input tokens and about 6.59 USD
+  at 150,000, or about 11.6 million and 7.50 USD at 170,000.
   The approval would be priced at the bound, as for A22.
 - **A large-read turn** should be run only with the headroom finding above understood.
 
