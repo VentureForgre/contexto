@@ -9,19 +9,54 @@ at the ``result`` event on stdout.
 
 The guard reserves the full output allowance before every turn and stops the run instead of
 passing the approved budget.
+
+Credential (intake, D12): the run uses an isolated Claude Code config directory in the scratch
+directory, so the owner's claude.ai login is never found. Its settings.json names ``keyhelper.py``
+as the apiKeyHelper, with only the path of the seat's settings file as argument; the seat's own
+helper runs at call time, read-only. No key and no copy of the helper command is written anywhere.
+Credential variables are removed from the child environment. The first 401 or 403 in the session
+log stops the run.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
+import sys
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 MODEL = "claude-haiku-5-5"
+KEYHELPER = Path(__file__).resolve().parent / "keyhelper.py"
+_CREDENTIAL_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
+
+class AuthFailure(RuntimeError):
+    pass
+
+
+def inside_git(path: Path) -> bool:
+    """True when ``path`` is inside any git work tree, including as a nested directory."""
+    proc = subprocess.run(["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+                          capture_output=True, text=True)
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+
+def isolated_config(scratch: Path, seat_settings: Path) -> Path:
+    """Create the isolated CLAUDE_CONFIG_DIR whose only setting is the apiKeyHelper shim."""
+    if not seat_settings.is_file():
+        raise ValueError("the seat settings file does not exist")
+    config = scratch / "claude-config"
+    config.mkdir(parents=True, exist_ok=True)
+    helper = " ".join(shlex.quote(x) for x in (sys.executable, str(KEYHELPER), str(seat_settings.resolve())))
+    (config / "settings.json").write_text(json.dumps({"apiKeyHelper": helper}, indent=2) + "\n", encoding="utf-8")
+    return config
 
 
 class Transport(Protocol):
@@ -29,19 +64,58 @@ class Transport(Protocol):
     def close(self) -> int: ...
 
 
-def launcher_command(session: str, bound: int, contexto: str = "contexto") -> list[str]:
-    return [contexto, "run", "--bound", str(bound), "--session", session, "claude", "-p",
+def launcher_command(session: str, bound: int, upstream: str, contexto: str = "contexto") -> list[str]:
+    return [contexto, "run", "--bound", str(bound), "--session", session, "--upstream", upstream, "claude", "-p",
             "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", MODEL]
+
+
+class AuthWatcher:
+    """Tail the session log; on the first 401 or 403, terminate the process and remember it."""
+
+    def __init__(self, session_log: Path, proc: subprocess.Popen) -> None:
+        self.session_log = session_log
+        self.proc = proc
+        self.status: int | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        offset = 0
+        while not self._stop.is_set() and self.status is None:
+            try:
+                with self.session_log.open("r", encoding="utf-8") as fh:
+                    fh.seek(offset)
+                    chunk = fh.read()
+                    offset = fh.tell()
+            except FileNotFoundError:
+                chunk = ""
+            for line in chunk.splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                status = event.get("status")
+                if event.get("event") in ("upstream_4xx", "request") and status in (401, 403):
+                    self.status = int(status)
+                    self.proc.terminate()
+                    return
+            time.sleep(0.5)
+
+    def stop(self) -> None:
+        self._stop.set()
 
 
 class StreamJsonTransport:
     """One ``contexto run claude`` process; stream-json in, stream-json out."""
 
-    def __init__(self, command: list[str], cwd: Path, env: dict[str, str]) -> None:
-        if (cwd / ".git").exists():
-            raise ValueError("the scratch directory must not be a git repository")
+    def __init__(self, command: list[str], cwd: Path, env: dict[str, str], session_log: Path | None = None) -> None:
+        if (cwd / ".git").exists() or inside_git(cwd):
+            raise ValueError("the scratch directory must not be inside a git repository")
         self.proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, text=True, bufsize=1)
+        self.watcher = AuthWatcher(session_log, self.proc) if session_log else None
+        self.compactions = 0  # stream-json system events with subtype compact_boundary
 
     def send(self, text: str) -> dict[str, Any]:
         assert self.proc.stdin and self.proc.stdout
@@ -53,20 +127,30 @@ class StreamJsonTransport:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if event.get("type") == "system" and event.get("subtype") == "compact_boundary":
+                self.compactions += 1
             if event.get("type") == "result":
                 return event
+        if self.watcher and self.watcher.status:
+            raise AuthFailure(f"upstream returned {self.watcher.status}; run stopped at the first auth error")
         raise RuntimeError(f"claude exited before the turn finished (code {self.proc.poll()})")
 
     def close(self) -> int:
+        if self.watcher:
+            self.watcher.stop()
         if self.proc.stdin:
             self.proc.stdin.close()
         return self.proc.wait(timeout=120)
 
 
-def child_env(contexto_home: Path) -> dict[str, str]:
-    """Inherited environment minus rig and parent-session variables, plus the run's CONTEXTO_HOME."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("OPENRIG_", "CLAUDE_CODE_", "CLAUDECODE"))}
+def child_env(contexto_home: Path, config_dir: Path | None = None) -> dict[str, str]:
+    """Inherited environment minus rig, parent-session, and credential variables; plus the run's
+    CONTEXTO_HOME and, when given, the isolated CLAUDE_CONFIG_DIR."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("OPENRIG_", "CLAUDE_CODE_", "CLAUDECODE")) and k not in _CREDENTIAL_VARS}
     env["CONTEXTO_HOME"] = str(contexto_home)
+    if config_dir is not None:
+        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     return env
 
 

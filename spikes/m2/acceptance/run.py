@@ -4,15 +4,19 @@ From the repository root:
     python3 spikes/m2/acceptance/run.py dry-run [--turns N --turn-kbytes K --head H]   # budget, no calls
     python3 spikes/m2/acceptance/run.py score --h1 ANSWERS --baseline ANSWERS [--seed N --turns N --turn-kbytes K]
     python3 spikes/m2/acceptance/run.py check --session-log PATH --cc-jsonl PATH [--bound 100000]
-    python3 spikes/m2/acceptance/run.py live --approved TOKENS --scratch DIR --home DIR --session ID
-The live mode refuses to start without an approved token figure, and the guard stops before
-passing it. Nothing here has been run live.
+    python3 spikes/m2/acceptance/run.py check-credential --seat-settings PATH        # zero spend
+    python3 spikes/m2/acceptance/run.py live --approved TOKENS --scratch DIR --home DIR --session ID \
+        --seat-settings PATH [--upstream URL]
+The live mode refuses to start without an approved token figure that covers the plan, or with a
+plan below 2.5 times the bound; the guard stops before passing the approval, and the first 401 or
+403 stops the run. Nothing here has been run live.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -65,19 +69,39 @@ def main(argv: list[str] | None = None) -> int:
     live.add_argument("--scratch", type=Path, required=True)
     live.add_argument("--home", type=Path, required=True)
     live.add_argument("--session", required=True)
+    live.add_argument("--seat-settings", type=Path, required=True,
+                      help="the seat's settings file whose apiKeyHelper the run uses, read-only")
+    live.add_argument("--upstream", default=None, help="upstream base URL (default: $ANTHROPIC_BASE_URL)")
+    cred = sub.add_parser("check-credential")
+    cred.add_argument("--seat-settings", type=Path, required=True)
     chk = sub.add_parser("check")
     chk.add_argument("--session-log", type=Path, required=True)
     chk.add_argument("--cc-jsonl", type=Path, required=True)
-    chk.add_argument("--bound", type=int, default=100_000)
+    chk.add_argument("--bound", type=int, default=150_000)
+    chk.add_argument("--session-dir", type=Path, default=None,
+                     help="session directory, to confirm the paged-only plants were really paged")
     args = parser.parse_args(argv)
+
+    if args.command == "check-credential":
+        from acceptance import credcheck
+
+        result = credcheck.check(args.seat_settings)
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("pass") else 1
 
     if args.command == "check":
         report = detectors.analyze(detectors.read_jsonl(args.session_log), detectors.read_jsonl(args.cc_jsonl), args.bound)
         out = {k: v for k, v in report.__dict__.items()}
         out["cache_hit_rate"] = report.cache_hit_rate
         out["verdicts"] = report.verdicts()
+        if args.session_dir is not None:
+            s0 = script.build()
+            paged = detectors.paged_statements(args.session_dir, [p.statements[0] for p in s0.probes
+                                                                  if p.id in s0.paged_only])
+            out["paged_only_plants_paged"] = f"{sum(paged.values())}/{len(paged)}"
+            out["verdicts"]["paged_only_plants_paged"] = all(paged.values())
         print(json.dumps(out, indent=2, default=str))
-        return 0 if all(report.verdicts().values()) else 1
+        return 0 if all(out["verdicts"].values()) else 1
 
     params = budget.Params(bound=args.bound, head=args.head)
     s = build_script(args.seed, args.turns, args.turn_kbytes * 1_000, params)
@@ -101,24 +125,34 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     # live
     b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], params)
-    if args.approved < b.h1_expected:
-        print(f"refusing: approved {args.approved:,} is below the expected H1 cost {b.h1_expected:,}", file=sys.stderr)
+    if b.history_tokens < 2.5 * args.bound:
+        print(f"refusing: planned history {b.history_tokens:,} is below 2.5x the bound ({int(2.5 * args.bound):,})",
+              file=sys.stderr)
+        return 2
+    if args.approved < b.h1_worst:
+        print(f"refusing: approved {args.approved:,} is below the worst-case H1 cost {b.h1_worst:,}", file=sys.stderr)
+        return 2
+    upstream = args.upstream or os.environ.get("ANTHROPIC_BASE_URL")
+    if not upstream:
+        print("refusing: no upstream (pass --upstream or set ANTHROPIC_BASE_URL)", file=sys.stderr)
         return 2
     args.scratch.mkdir(parents=True, exist_ok=True)
+    config = driver.isolated_config(args.scratch, args.seat_settings)
     estimates = [r.input_tokens for r in b.rows if r.kind == "turn"] + [max(r.input_tokens for r in b.rows if r.kind != "turn")]
-    transport = driver.StreamJsonTransport(driver.launcher_command(args.session, args.bound), args.scratch,
-                                           driver.child_env(args.home))
+    session_log = args.home / "sessions" / args.session / "log.jsonl"
+    transport = driver.StreamJsonTransport(driver.launcher_command(args.session, args.bound, upstream), args.scratch,
+                                           driver.child_env(args.home, config), session_log)
     run = driver.Run(transport, args.approved, params.max_tokens_reserve, estimates)
     status = 0
     try:
         answer = driver.run_session(list(s.turns), run)
         (args.home / f"acceptance-{args.session}-answers.txt").write_text(answer + "\n", encoding="utf-8")
-    except (driver.BudgetExceeded, RuntimeError) as exc:
+    except (driver.BudgetExceeded, driver.AuthFailure, RuntimeError) as exc:
         print(f"stopped: {exc}", file=sys.stderr)
         status = 1
     finally:
         transport.close()
-    print(json.dumps({"spent": run.spent, "turns": run.turns}, indent=2))
+    print(json.dumps({"spent": run.spent, "turns": run.turns, "stream_compactions": transport.compactions}, indent=2))
     return status
 
 

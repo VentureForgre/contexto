@@ -4,8 +4,8 @@ Session log (``$CONTEXTO_HOME/sessions/<id>/`` JSONL, lane A schema per builder-
 ``{"event": "request", "path", "status", "usage": {...} | null, "over_bound", "epoch",
 "transform_events": [...]}`` per upstream response; ``{"event": "upstream_4xx", ...}`` per 4xx; and
 lane B's ``{"event": "mcp_call", "tool", "ok", ...}`` per MCP tool call. Rotation and resync details
-are engine events inside ``transform_events``; their names are builder-2's, so this module counts
-any transform event whose name mentions rotation (an assumption to confirm when the engine lands).
+are engine events inside ``transform_events``; a rotation is an event named exactly ``rotation``
+(a ``rotation_noop`` pages nothing and is not counted).
 
 Claude Code's JSONL marks a compaction with a ``system`` record whose subtype is
 ``compact_boundary`` and a ``user`` record with ``isCompactSummary`` [inferred from the 2.1.301
@@ -59,6 +59,8 @@ class Report:
     max_input: int = 0
     rotations: int = 0
     epochs: int = 0
+    requests_per_epoch: dict[str, int] = field(default_factory=dict)
+    stream_compactions: int = 0  # stream-json compact_boundary events seen by the driver
     cache_eligible: int = 0  # requests after the first in their epoch
     cache_hits: int = 0  # eligible requests that read cache
     cache_misses: list[int] = field(default_factory=list)  # request indexes of eligible full misses
@@ -73,15 +75,26 @@ class Report:
 
     def verdicts(self) -> dict[str, bool]:
         return {
-            "zero_compaction": self.compaction_events == 0,
+            "zero_compaction": self.compaction_events == 0 and self.stream_compactions == 0,
             "over_bound_only_when_logged": not self.unlogged_over_bound,
             "zero_4xx": self.upstream_4xx == 0 and not any(400 <= s < 500 for s in self.statuses),
             "recall_called": self.recall_ok > 0,
         }
 
 
-def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, Any]], bound: int) -> Report:
-    r = Report()
+def paged_statements(session_dir: Path, statements: Iterable[str]) -> dict[str, bool]:
+    """Which plant statements appear in a stored page: proof that their turn was paged out."""
+    texts = [p.read_text(encoding="utf-8") for p in sorted((session_dir / "pages").glob("*.json"))]
+    out = {}
+    for st in statements:
+        needle = json.dumps(st)[1:-1]  # as the statement appears inside the page's JSON
+        out[st] = any(needle in t for t in texts)
+    return out
+
+
+def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, Any]], bound: int,
+            stream_compactions: int = 0) -> Report:
+    r = Report(stream_compactions=stream_compactions)
     seen_epochs: set[Any] = set()
     first_in_epoch: set[Any] = set()
     index = 0
@@ -104,9 +117,10 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
         status = int(ev.get("status") or 0)
         r.statuses[status] = r.statuses.get(status, 0) + 1
         for te in ev.get("transform_events") or []:
-            if isinstance(te, dict) and "rotat" in _event_name(te).lower():
+            if isinstance(te, dict) and _event_name(te) == "rotation":
                 r.rotations += 1
         epoch = ev.get("epoch")
+        r.requests_per_epoch[str(epoch)] = r.requests_per_epoch.get(str(epoch), 0) + 1
         inp = _upstream_input(ev.get("usage"))
         if inp is not None:
             r.max_input = max(r.max_input, inp)

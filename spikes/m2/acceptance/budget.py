@@ -7,10 +7,10 @@ preamble), always keeping the newest complete turn and the new one; if ``W`` can
 complete turn, the request goes unrotated (``bound_too_small``). ``headroom`` is the running max of
 per-turn growth plus 25%, floor 25,000.
 
-Token estimates use the contract's conservative estimator, 2.0 bytes per token for tool output
-and 3.5 for other text, except that this script's pasted log text counts at 2.0 too: it is numeric
-log content, measured near 0.55 tokens per character in M0 (E1, E2, L2f), which 3.5 would
-undercount by about half.
+Token estimates: this script's pasted log text counts at 1.8 bytes per token, the rate M0 measured
+for numeric log content (about 0.55 tokens per character in E1, E2, and L2f). The contract's
+estimator uses 2.0 for tool output and 3.5 for other text; 2.0 would undercount this content by
+about 10 percent and 3.5 by about half. Token counting replaces the estimate where available.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-BYTES_PER_TOKEN_LOG = 2.0
+BYTES_PER_TOKEN_LOG = 1.8
 BYTES_PER_TOKEN_TEXT = 3.5
 HEADROOM_FLOOR = 25_000
 

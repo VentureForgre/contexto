@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -90,7 +92,7 @@ def test_bound_too_small_when_the_window_budget_cannot_hold_a_turn():
 
 
 def test_conservative_estimator_for_log_text():
-    assert budget.turn_tokens(20_000) == 10_001  # 2.0 bytes per token, not 3.5
+    assert budget.turn_tokens(18_000) == 10_001  # 1.8 bytes per token, measured for numeric logs
 
 
 # Detectors
@@ -109,14 +111,15 @@ def test_detectors_on_a_clean_synthetic_session():
         _req(1, 60_000),
         _req(1, 70_000, cache_read=60_000),
         {"event": "request", "path": "/v1/messages/count_tokens", "status": 200, "usage": None},
-        _req(2, 80_000, events=[{"event": "rotation", "epoch": 2, "k": 3}]),
+        _req(2, 80_000, events=[{"event": "rotation", "epoch": 2, "k": 3}, {"event": "rotation_noop", "epoch": 2}]),
         _req(2, 85_000, cache_read=78_000),
         _req(2, 120_000, cache_read=80_000, over=True),
         {"event": "mcp_call", "tool": "contexto_recall", "ok": True, "page_id": "pg_x"},
     ]
     cc = [{"type": "user"}, {"type": "assistant"}, {"type": "system", "subtype": "api_error"}]
     r = detectors.analyze(log, cc, bound=100_000)
-    assert r.requests == 5 and r.epochs == 2 and r.rotations == 1
+    assert r.requests == 5 and r.epochs == 2 and r.rotations == 1  # rotation_noop is not counted
+    assert r.requests_per_epoch == {"1": 2, "2": 3}
     assert r.cache_eligible == 3 and r.cache_hits == 3 and r.cache_hit_rate == 1.0
     assert r.over_bound_requests == 1 and r.unlogged_over_bound == []
     assert r.recall_ok == 1 and r.compaction_events == 0
@@ -179,12 +182,67 @@ def test_guard_reserves_full_output_and_stops_before_the_cap():
 
 
 def test_launcher_command_and_scratch_rules(tmp_path):
-    cmd = driver.launcher_command("sess1", 100_000)
-    assert cmd[:6] == ["contexto", "run", "--bound", "100000", "--session", "sess1"]
-    assert cmd[6] == "claude" and "--input-format" in cmd and cmd[-1] == "claude-haiku-5-5"
+    cmd = driver.launcher_command("sess1", 150_000, "http://127.0.0.1:9")
+    assert cmd[:8] == ["contexto", "run", "--bound", "150000", "--session", "sess1", "--upstream", "http://127.0.0.1:9"]
+    assert cmd[8] == "claude" and "--input-format" in cmd and cmd[-1] == "claude-haiku-5-5"
     (tmp_path / ".git").mkdir()
     with pytest.raises(ValueError):
         driver.StreamJsonTransport(["true"], tmp_path, {})
+
+
+def test_scratch_nested_inside_a_git_work_tree_is_refused():
+    nested = Path(__file__).resolve().parent  # this repository's checkout
+    assert driver.inside_git(nested)
+    with pytest.raises(ValueError):
+        driver.StreamJsonTransport(["true"], nested, {})
+
+
+def test_isolated_config_names_only_the_helper_shim(tmp_path):
+    seat = tmp_path / "seat.json"
+    seat.write_text(json.dumps({"apiKeyHelper": "echo SECRET-HELPER-COMMAND", "env": {"X": "1"}}))
+    config = driver.isolated_config(tmp_path / "scratch", seat)
+    written = (config / "settings.json").read_text()
+    assert "keyhelper.py" in written and str(seat) in written
+    assert "SECRET-HELPER-COMMAND" not in written and "env" not in json.loads(written)
+
+
+def test_child_env_drops_credentials_and_sets_the_config_dir(monkeypatch, tmp_path):
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.setenv(var, "x")
+    env = driver.child_env(tmp_path / "home", tmp_path / "config")
+    assert not {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"} & set(env)
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "config")
+
+
+def test_auth_watcher_stops_the_process_on_the_first_401(tmp_path):
+    log = tmp_path / "log.jsonl"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    watcher = driver.AuthWatcher(log, proc)
+    log.write_text(json.dumps({"event": "request", "path": "/v1/messages", "status": 200}) + "\n"
+                   + json.dumps({"event": "upstream_4xx", "status": 401, "path": "/v1/messages"}) + "\n")
+    assert proc.wait(timeout=10) != 0
+    assert watcher.status == 401
+
+
+def test_stream_compactions_fail_the_zero_compaction_verdict():
+    r = detectors.analyze([], [], bound=150_000, stream_compactions=1)
+    assert r.verdicts()["zero_compaction"] is False
+
+
+def test_paged_statements_reads_the_session_pages(tmp_path):
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "pg_1.json").write_text(json.dumps({"messages": [{"content": "cfg billing-core.retention_days=amber-1"}]}))
+    found = detectors.paged_statements(tmp_path, ["cfg billing-core.retention_days=amber-1", "cfg other=x"])
+    assert found == {"cfg billing-core.retention_days=amber-1": True, "cfg other=x": False}
+
+
+def test_live_refuses_a_plan_below_two_and_a_half_times_the_bound(tmp_path, capsys):
+    seat = tmp_path / "seat.json"
+    seat.write_text("{}")
+    code = run.main(["live", "--approved", "10000000", "--turns", "4", "--scratch", str(tmp_path / "s"),
+                     "--home", str(tmp_path / "h"), "--session", "x", "--seat-settings", str(seat)])
+    assert code == 2 and "below 2.5x the bound" in capsys.readouterr().err
 
 
 def test_child_env_drops_rig_variables(monkeypatch, tmp_path):
@@ -206,9 +264,11 @@ def test_pass_rule_within_two_overall_and_one_per_category():
 
 
 def test_live_refuses_without_enough_approved_budget(tmp_path, capsys):
+    seat = tmp_path / "seat.json"
+    seat.write_text("{}")
     code = run.main(["live", "--approved", "1000", "--scratch", str(tmp_path / "s"), "--home", str(tmp_path / "h"),
-                     "--session", "x"])
-    assert code == 2 and "refusing" in capsys.readouterr().err
+                     "--session", "x", "--seat-settings", str(seat)])
+    assert code == 2 and "worst-case" in capsys.readouterr().err
 
 
 def test_dry_run_prints_the_budget(capsys):
@@ -226,3 +286,15 @@ def test_auto_turn_count_reaches_the_acceptance_history_at_150k():
     shorter = script.build(script.DEFAULT_SEED, len(s.turns) - 2, 70_000)
     assert sum(budget.turn_tokens(x) + p.reply_tokens for x in shorter.turn_bytes[:-1]) < 375_000
     assert b.h1_worst + b.baseline_replay_worst < 4_000_000
+
+
+@pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
+def test_credential_check_with_a_fake_helper_uses_the_helper_not_oauth(tmp_path):
+    # Zero spend: a fake helper key and a stub upstream that answers 401; the real key is never used.
+    from acceptance import credcheck
+
+    seat = tmp_path / "seat.json"
+    seat.write_text(json.dumps({"apiKeyHelper": "echo sk-ant-api00-fake-for-credcheck"}))
+    result = credcheck.check(seat)
+    assert result["request_seen"] and result["key_matches_seat_helper"] and not result["oauth_beta_header"]
+    assert result["pass"]

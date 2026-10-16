@@ -62,9 +62,37 @@ contexto run --bound 100000 --session <id> claude -p --input-format stream-json 
 - This is the launcher shape builder-1 proposed for lane A packet A3. Contexto's options come
   before `claude`, and everything after it passes through unchanged. It is confirmed when A3 lands.
 - Each user turn is one stream-json line on stdin. A turn ends at the `result` event.
-- The scratch directory must not be a git repository; the driver refuses one.
+- The scratch directory must not be inside any git work tree, checked with `git rev-parse
+  --is-inside-work-tree`, so a nested directory is refused too.
 - The child environment drops OpenRig and parent-session variables and sets `CONTEXTO_HOME`.
 - No `--settings` or `--mcp-config` of the harness's own is passed; the launcher supplies both.
+- `--upstream` is passed explicitly: the owner's proxy (D12), from `$ANTHROPIC_BASE_URL` unless
+  given.
+
+**Credential** (intake-approved, D12). If the scratch run inherits `HOME`, Claude Code falls back
+to the owner's claude.ai subscription login, which the rig proxy rejects with a 401 (lane 1
+measured this case, PR #9). So:
+- **Isolated config.** The run uses an isolated `CLAUDE_CONFIG_DIR` in the scratch directory. Its
+  only setting is an `apiKeyHelper` pointing at `keyhelper.py`, whose sole argument is the path of
+  the seat's settings file.
+- **Read-only helper.** At call time the shim reads that file's `apiKeyHelper` command and runs
+  it. No key, and no copy of the helper command, is written to the scratch directory, a log, or a
+  commit.
+- **Why not `--settings`.** The helper sits in the isolated user settings rather than a second
+  `--settings`, because merging with the launcher's own `--settings` is undefined (builder-1).
+- **No other credential.** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+  `CLAUDE_CODE_OAUTH_TOKEN` are removed from the child environment. Nobody logs in or out, and no
+  auth mode changes.
+- **Stop on auth failure.** A watcher tails `sessions/<id>/log.jsonl` and stops the run at the
+  first 401 or 403.
+- **Zero-spend check** (`run.py check-credential --seat-settings PATH`).
+  - It runs `claude -p` in default (non-bare) mode with the isolated config and a stub upstream
+    that answers 401 and never forwards.
+  - It compares the request's key header with the helper's output in memory and records only
+    booleans.
+  - Result on this seat, 2026-10-16 [measured]: a request reached `/v1/messages`; `x-api-key` was
+    present and equal to the seat helper's output; there was no OAuth beta header. **pass**.
+  - Once lane A's launcher lands, the same check should run through `contexto run`.
 
 **Guard.**
 - Before every turn, the guard projects spend plus that turn's estimated input plus the full
@@ -88,15 +116,17 @@ contexto run --bound 100000 --session <id> claude -p --input-format stream-json 
     `cache_read_input_tokens > 0`.
   - The rate and the miss indexes are reported. Explaining misses by the route is left to the
     analyst; see the cache-miss note below.
-- **Rotations** are engine events inside `transform_events`, with builder-2's names. The harness
-  counts any whose name contains "rotat", an assumption to confirm when the engine lands. Over-bound
-  and resync events carry the epoch too.
+- **Rotations** are engine events inside `transform_events`, counted only when named exactly
+  `rotation`; a `rotation_noop` pages nothing. Requests per epoch are reported too.
+- **Paged-only proof.** `check --session-dir` confirms each paged-only plant line is inside a
+  stored page under `sessions/<id>/pages/` before the recall criterion is claimed.
 - **Recall (acceptance 3).** `event: "mcp_call"` with `tool: "contexto_recall"` and `ok: true`,
   written by the MCP server (PR #24).
 
-**Claude Code's session JSONL: compaction (acceptance 1).** A compaction writes a `system` record
-with subtype `compact_boundary` and a `user` record with `isCompactSummary`. Both are counted, and
-the count must be 0. [Inferred by lane 1 from the 2.1.301 binary; not vendor-documented.]
+**Compaction (acceptance 1).** Claude Code's session JSONL marks a compaction with a `system`
+record whose subtype is `compact_boundary`, plus a `user` record with `isCompactSummary`. The driver
+also counts stream-json `system` events with subtype `compact_boundary`. All three must be 0.
+[Inferred by lane 1 from the 2.1.301 binary; not vendor-documented.]
 
 **When Claude Code would compact.** Its trigger is the token usage the API reports plus a local
 estimate of what was added since, not either one alone (lane 1). The proxy returns the bounded
@@ -127,13 +157,24 @@ measured head. With the default head:
 
 | Line | Expected tokens | Worst case (full output reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy (11 turns of 70 KB + probe turn) | 2,411,004 | 2,981,584 |
-| Full-context baseline, one direct replay request | 439,260 | 467,260 |
-| **Total** | **2,850,264** | **3,448,844** |
+| H1 acceptance run through the proxy (10 turns of 70 KB + probe turn) | 2,406,326 | 2,944,926 |
+| Full-context baseline, one direct replay request | 442,457 | 470,457 |
+| **Total** | **2,848,783** | **3,415,383** |
 
-- The plan reaches 378,899 tokens of local history, 2.53 times the bound, with 9 rotations.
-- No requests are planned over the bound, and `W` is 70,500.
-- The harness picks the fewest content turns whose actual sizes reach 2.5 times the bound.
+- The plan reaches 382,096 tokens of local history, 2.55 times the bound, with 8 rotations.
+- No requests are planned over the bound.
+- The harness picks the fewest content turns whose actual sizes reach 2.5 times the bound. Live
+  mode refuses a plan below that, and an approval below the worst case.
+
+**Reconciling the 150k rows in the scan below** (3,944,995 at 30 KB, 3,234,226 at 44 KB):
+- Those rows came from the same model with smaller turns, at the older 2.0 bytes-per-token rate.
+- At a fixed history target, every content turn is one request carrying the head plus the retained
+  window. So total cost scales with the number of turns:
+  - 25 turns at 30 KB;
+  - 18 turns at 44 KB;
+  - 10 turns at 70 KB.
+- Larger turns are cheaper as long as the window budget `W` can hold one. With 70 KB turns `W` is
+  about 45,000 after the turn-size headroom, enough for one turn of about 39,000 tokens.
 
 The figures below are the earlier 100k-bound analysis that led to that decision.
 
@@ -141,9 +182,11 @@ The figures below are the earlier 100k-bound analysis that led to that decision.
 - The proxy is simulated with contract rules 3 to 5. The window budget is `W = bound - headroom -
   F`, with `F` = head plus preamble, and rotation targets half of `W`. The newest complete turn is
   always kept, and the tool loop never rotates.
-- Pasted log text is counted at 2.0 bytes per token. The contract's estimator gives 2.0 to tool
-  output and 3.5 to other text. This content is numeric log text, which M0 measured near 0.55
-  tokens per character [measured], so 3.5 would undercount it by about half.
+- Pasted log text is counted at 1.8 bytes per token, M0's measured rate for numeric log text
+  (about 0.55 tokens per character).
+  - The contract's estimator uses 2.0 for tool output and 3.5 for other text. 2.0 runs about 10%
+    low on this content, as reviewer-2 noted, and 3.5 about half.
+  - Token counting replaces the estimate where it is available.
 - The head is 54,500, the contract's M0 figure for a throwaway head with pins. Lane 1 relayed
   45,925 without pins, and both are scanned below.
 - The probe turn is modeled with 6 `contexto_recall` round trips of about 8,000 tokens each.
