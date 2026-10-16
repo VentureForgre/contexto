@@ -45,7 +45,8 @@ BILLED_PATHS = frozenset(p for p in MODEL_PATHS if not p.endswith(("count_tokens
 # Intake (2026-10-16 03:39Z, contract PR at 147b182): any of these, wherever it appears (a request's
 # transform events, its usage_events, or a separate session-log line), fails acceptance 1.
 FAILURE_EVENTS = ("degraded_enter", "store_error", "page_conflict", "fallback_failed", "transform_error",
-                  "turn_room_missing", "unclassified_system_message")
+                  "turn_room_missing", "unclassified_system_message",
+                  "turn_room_low")  # A12: decided a failure, contract PR #115 at 1eb8a4c
 # The recalls the budget prices (script.MAX_RECALLS). A cost guard only (intake, 2026-10-16): the
 # model is not told about it, and ``recalls_over_budget`` reports it without failing any verdict.
 MAX_RECALLS = 2

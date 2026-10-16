@@ -243,9 +243,19 @@ billed; the driver's figure misses a turn stopped midway), plus, after an abnorm
 in-flight allowance of the last logged input and the output reserve. Run the baseline with `run.py replay --approved <combined approval>
 --h1-record <that file> ...`: the replay then may spend the combined approval minus H1's recorded
 spend, and its count_tokens gate checks each request against what is left of that.
-Rooms at the six probe-turn starts in this model are 29,562, 10,758, 9,749, 8,728, 7,689, and
-6,685. They are a pessimistic bound: one full recall per turn keeps its evidence in the window. The
-combined worst case exceeds the earlier 4,000,000 budget, so D27 needs a new approval.
+A12 (contract PR #115 at 1ce122c) also rotates a turn whose published room, `bound - estimate -
+25,000`, would fall under `min_turn_room`, which the simulation reads from the engine's Config (the
+contract default 12,000, PR #116, until lane A's engine carries the field). Such a rotation targets
+`0.5 * (W - min_turn_room)`, falling back to the minimal window (the new turn alone), and fires only
+if it restores a room of at least `min_turn_room`; otherwise there is no room rotation and
+`turn_room_low` is logged once per epoch, which fails acceptance 1 (decided at 1eb8a4c). The
+simulation reports `room_rotations` and `turn_room_low_epochs`. With 40 KB turns at bound 150,000
+and 12,000 there are 11 rotations, 9 of them room rotations (every other content turn, each to the
+minimal window, and probe turn 2), and no `turn_room_low`. Each 40 KB turn is about 22,000 tokens,
+so every other turn start leaves a room of about 11,000, under 12,000 as well as under 20,000.
+Epochs hold one or two turns, which leaves acceptance 4's within-epoch cache reads little to
+measure. Rooms at the six probe-turn starts are 29,562, 55,116, 18,551, 55,058, 18,463, and 54,925.
+The combined worst case exceeds the earlier 4,000,000 budget, so D27 needs a new approval.
 
 ## Zero-spend dry run through the launcher (2026-10-16)
 
@@ -294,10 +304,10 @@ KB, head 47,600, bound 150,000, 2 recalls sized by B9 (below).
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy, 6 probe turns (D27) | 2,630,342 | 3,425,786 |
+| H1 acceptance run through the proxy, 6 probe turns (D27) | 2,951,215 | 4,001,059 |
 | Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,684,549 | 2,872,553 |
 | Full-context baseline through a plain CLI session (alternative) | 5,054,342 | - |
-| **Total, H1 + baseline (live refuses an approval below the worst case)** | **5,314,891** | **6,298,339** |
+| **Total, H1 + baseline (live refuses an approval below the worst case)** | **5,635,764** | **6,873,612** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
