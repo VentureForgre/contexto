@@ -353,14 +353,19 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 - `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
-- `contexto_search(query)`: exact substring search over page stubs and text. For each hit it returns
-  a short header (page id and turn number, no stub), the matching lines with one line of context, and
-  their character offsets in the rendered page; at most 3 pages per reply, followed by a note giving
-  how many more pages match so the model can narrow the query (measured offline: about 144 tokens per
-  hit instead of 359, total demand for the 54 probes 29,800 instead of 91,249), so the model can answer from the hit or recall exactly that offset instead of
-  reading a page from the top (measured in the second live H1 run: a full recall from offset 0
-  reached character 30,651 of a 39,405-character page within the turn's room, and the two facts
-  beyond it were lost). Results are charged against the per-turn room. No embeddings, no
+- `contexto_search(query)`: exact substring search over page stubs and text. For each of the first 3 matching pages it
+  returns a short header (page id and turn number, no stub) and up to 3 matching lines, each with
+  one line of context and its character offset in the rendered page; when a match is in the stub
+  itself, the stub line is shown as the matching line. Any further matching pages are listed
+  compactly as page id, turn, and the offset of their first match (about 10 tokens each), so every
+  match stays reachable by `contexto_recall` at that offset even when the query cannot be
+  narrowed. The model can answer from a hit or recall exactly that offset instead of reading a
+  page from the top (measured in the second live H1 run: a full recall from offset 0 reached
+  character 30,651 of a 39,405-character page within the turn's room, and the two facts beyond it
+  were lost). Measured offline by builder-3 (numbers-only output under `spikes/m2/estimate/`):
+  this format costs about 144 tokens per hit instead of 359, and the 54 probes' total demand falls
+  from 91,249 to 29,800 tokens. An answer more than one line away from its match is not shown in
+  the hit and needs a recall at the offset. Results are charged against the per-turn room. No embeddings, no
   similarity ranking (owner: not RAG).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
