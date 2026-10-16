@@ -35,20 +35,14 @@ Tags: **measured** (seen in a run here or in A5/A6), **source** (read in code or
 
 ## 2. Model, bound, and headroom
 
-- **Model** [proposed]: pin `gpt-6-astra` with `model_reasoning_effort=low`. It is the only Codex model measured through the proxy (A5, A6), and low effort keeps output small. A cheaper model is open (section 6).
-- **The shipped default bound, 150,000** (`launcher.DEFAULT_BOUND`), works for the H1 arm. Every H1 request stays at or below the bound, and Codex compacts from the usage the proxy returns, so its 244,800-token trigger is never reached [source: docs/research/M2-codex-adapter.md].
-  - D27 needs a history of 2.5 times the bound: 375,000 tokens, or 18 content turns of 40 KB.
-  - A full-context baseline of that history cannot exist for `gpt-6-astra` at all. The last probe request would need 441,733 input tokens against a 272,000-token window (`codex_budget.replay_baseline`, `fits` false). Codex compaction does not apply to a direct replay, but the model's window does.
-  - So at the default bound, acceptance 1 and 3 can be tested, and acceptance 2 cannot.
-- **Why 64,000** [proposed]: so that acceptance 2 is possible at all, not chiefly to cut cost.
-  - It is the largest bound whose 2.5-times history, plus the head, probes and answers, fits the window with the output allowance. Its last baseline request is 210,370 input + 32,000 output.
-  - The cost reduction follows from that choice.
-  - **Smallest change that keeps the default bound:** none exists with this model, since the history D27 requires (2.5 times the bound) exceeds the window.
-  - **Alternative:** test acceptance 1 and 3 at the default bound and acceptance 2 at 64,000. The prices are in section 5.
-- **Headroom and room.** The defaults: a headroom floor of 25,000 and `min_turn_room` 12,000.
-  - At 64,000 with the measured Codex head (about 15,300 real tokens, A6), W = 64,000 - 25,000 - 15,300 ≈ 23,700.
-  - That holds two 20 KB turns of about 11,100 tokens each, so rotations follow rule 4 normally.
-  - With 40 KB turns, every turn rotates to the minimal window.
+- **Model** [proposed]: pin `gpt-6-astra` with `model_reasoning_effort=low`. It is the only Codex model measured through the proxy (A5, A6). A cheaper model is open (section 6).
+- **Bound: 64,000** [proposed]. Two conditions fix the range:
+  - The full-context baseline must stay under Codex's compaction point, about 245,000 tokens (244,800 of `gpt-6-astra`'s 272,000 window).
+  - Acceptance 1 needs a history of at least 2.5 times the bound.
+  - So the bound must sit near or under about 98,000. 64,000 leaves room for the head, the probes, their answers, and the output allowance: the last baseline request is 210,370 in plus 32,000 out.
+  - The shipped default of 150,000 goes untested on Codex. Its 2.5-times history is 375,000 tokens, which no full-context baseline can hold (intake records this in STATUS). Claude's acceptance ran at 150,000.
+- **Turns of 20 KB.** With the measured Codex head (about 15,300 real tokens, A6), W = 64,000 - 25,000 (headroom floor) - 15,300 ≈ 23,700. That holds two turns of about 11,100 tokens each, so rotations follow rule 4 normally; with 40 KB turns every turn would rotate to the minimal window.
+  - `min_turn_room` stays at its 12,000 default.
   - **Measured in the stub run:** 18 rotations for size and 2 for the room condition, over 21 turns.
 
 ## 3. The four criteria for the Responses dialect
@@ -82,66 +76,64 @@ The shared detectors read only `/v1/messages` and Anthropic usage keys. `codex_d
 - It sends no Codex client marker; D23 applies.
 - It is not built yet (section 6).
 
-**The first draft** ran the whole session again with no rotation (`--bound 1000000 --allow-large-bound -c model_auto_compact_token_limit=1000000`). It is kept in the estimate for comparison (`baseline_worst`), at about twice the replay's cost.
+**The first draft** ran the whole session again with no rotation (`--bound 1000000 --allow-large-bound -c model_auto_compact_token_limit=1000000`). It is kept in the estimate for comparison (`baseline_worst`), at about 2.5 times the replay's cost (3,497,451 against 1,383,936 before the margin).
 
 ## 5. Worst-case estimates (for intake's budget line)
 
-`spikes/m2/acceptance/codex_budget.py`: `estimate`, `baseline_breakdown`, `replay_baseline` and `staged`. `uv run python spikes/m2/acceptance/codex_budget.py` prints the figures below. Each is a closed formula, and every term is an upper bound.
-
-**Shared terms:**
+`spikes/m2/acceptance/codex_budget.py`: `estimate`, `replay_baseline`, `baseline_breakdown` and `staged`. `uv run python spikes/m2/acceptance/codex_budget.py` prints the figures below. Each is a closed formula, and every term is an upper bound.
 
 | Term | Value | Source |
 |---|---|---|
+| H1 request input | at most the bound, 64,000 | the engine's bound (acceptance 1) |
+| Output per request | 32,000, reasoning included | `budget.Params.max_tokens_reserve`. Codex sends no `max_output_tokens` (measured: its request has no such field), and codex-cli 0.154.0 has no client-side cap. The Responses `output_tokens` include reasoning. The allowance is enforced by the spend watcher. |
+| Tool rounds per H1 probe turn | 5 | run #3 measured up to 5, and its record proposes 5 (reviewer-1); Codex makes one `exec` call per round |
+| Retries | 0 billed | `codex_driver.RETRY_PIN` sets the provider's `request_max_retries` and `stream_max_retries` to 0. Measured against a 500-ing stub: 30 POSTs for one turn by default, 1 when pinned. A failure ends the turn and the session. |
+| Content turns | 15 | D27: history at least 2.5 times the bound, at 20 KB per turn (1.8 bytes per token) |
+| Probe turns | 6, of 9 probes each | D27 |
 | Codex head per request | 21,312 | A6 pre-flight seed estimate of the first request: developer instructions, `additional_tools` (the `exec` code-mode tool, whose description carries the deferred MCP tools note, plus the clock and collaboration tools), and the environment context. The live head measured 15,309; the larger figure is used. |
-| Turn tokens | bytes / 1.8 | `budget.turn_tokens`, the dense log ratio |
-| Output per request | 32,000 | `budget.Params.max_tokens_reserve`. Codex sets no `max_output_tokens`; the Responses API's `output_tokens` include reasoning tokens, so reasoning is inside this allowance. |
-| Billed retries | 1 per turn | an allowance for a dropped stream that Codex retries |
-| Margin | 10% | on each step's total |
+| Baseline tool rounds | 0 | the replay sends no tool definitions, so no MCP server |
+| Margin | 10% | on each step |
 
-**H1 arm** (bound B): every request is at most B in, plus 32,000 out.
-- Requests = content turns + 6 × (1 + 2 tool rounds) + (content turns + 6) × 1 retry.
-- At 64,000 with 20 KB turns: (15 + 18 + 21) = 54 requests × 96,000 = 5,184,000, or 5,702,400 with the margin.
+**Staged design.** Each step is its own approval and its own stop cap, and step 2 runs only if step 1 passes.
 
-**Where the first draft's 6,994,902 baseline came from** (64,000, 20 KB turns, session design, before the margin):
-- 21 requests, one per turn: 15 content and 6 probe.
-- Head: 21,312 × 21 = 447,552.
-- History: the growing turns and replies, 2,377,899 in total. The request for turn k carries every earlier turn; the last one is 210,370 in.
-- Output: 32,000 × 21 = 672,000.
-- Once: 3,497,451. With one retry allowance per request: + 3,497,451 = 6,994,902, over the 42 requests.
-- **Against Claude's run #3 baseline (2,872,721 worst):** Claude's replays only the 6 probe requests (`docs/research/M2-acceptance-run3.md`). The session design also sent 15 content-turn requests and doubled everything for retries.
-- **The replay design** comes to 3,044,660 with retries and the margin, about 1.38M per pass. That is in line with Claude's.
+| Step | Requests | Worst case |
+|---|---|---|
+| 1. H1 arm alone (acceptance 1 and 3) | 15 + 6 × (1 + 5) = 51, each at most 96,000 | 51 × 96,000 × 1.10 = **5,385,600** |
+| 2. Baseline replay + scoring (acceptance 2) | 6 probe requests, history up to 210,370 + 32,000 out | 1,383,936 × 1.10 = **1,522,330** |
+| Total | | **6,907,930** |
 
-**Staged design** (each step is its own approval and its own stop cap; step 2 runs only if step 1 passes):
+**With reviewer-1's stricter retry term** (2 billed retries per turn, not pinned):
+- Step 1: 93 requests, 9,820,800.
+- Step 2: 4,566,989.
+- Total: 14,387,789.
 
-| Configuration | Step 1: H1 arm (acceptance 1, 3) | Step 2: baseline replay + scoring (acceptance 2) | Total |
-|---|---|---|---|
-| 64,000, 20 KB turns (recommended) | 5,702,400 | 3,044,660 | 8,747,060 |
-| 64,000, 40 KB turns | 4,224,000 | 3,175,683 | 7,399,683 |
-| Default 150,000, 40 KB turns | 12,012,001 | not possible: 441,733 > 272,000 | 12,012,001 |
-| Default for step 1, 64,000 (20 KB) for step 2 | 12,012,001 | 5,702,400 (H1 at 64,000) + 3,044,660 | 20,759,061 |
+**Against reviewer-1's figures** (15,297,593 with T = 5, and so on): those price the session baseline, which sends every content turn again (3,497,451 once, before the margin). This plan prices the 6-request replay. Claude's run #3 baseline is the same replay shape: 6 requests, 2,872,721 worst.
 
-- **Recommended:** both steps at 64,000 with 20 KB turns, 8,747,060 in total.
-- **If intake wants the shipped default exercised:** step 1 at 150,000, then step 2 as its own H1 and replay pair at 64,000, 20,759,061 in total.
-- **The cap in each step:** `codex_driver.run_session` never starts a turn that could pass that step's approval. For step 2 the H1 share is the approval minus the replay's worst case.
+**Breakdown of the session baseline**, kept for comparison (`baseline_breakdown`):
+- 21 requests: head 21,312 × 21 = 447,552, plus history 2,377,899, plus output 32,000 × 21 = 672,000, giving 3,497,451.
+- The first draft's 6,994,902 doubled that for a retry allowance. Retries are now pinned to 0.
+
+**The stops in each step** (`codex_driver.run_session`):
+- A turn is never started when spent + its estimate + reserve would pass the step's approval.
+- Inside a turn, the spend watcher terminates the turn's process group (contexto, codex, the MCP server) once spent + 2 × 96,000 would pass it. Twice one request's worst case covers a request that started before the last one was logged.
+- So spend stays at or under the approval as long as no single request passes its 96,000 worst case. A request that does is still logged and fails acceptance 1.
 
 ## 6. Risks and open questions
 
-**Must be fixed before any live step:**
-1. **In-turn spend watcher.**
-   - The Codex driver checks only between turns. The Claude driver's `SessionWatcher` stops a turn mid-way.
-   - Answer: a watcher on the session log that kills the turn's process group when spent plus the in-flight allowance would pass the step's cap.
-   - It also enforces the 32,000 output allowance, since Codex sets no output cap.
-2. **Recall credit for the Responses paths.**
+**Must be in place before any live step:**
+1. **In-turn spend watcher.** Implemented: `CodexTurns` runs each turn in its own process group and polls the session log. Tests: `test_spend_watcher_stops_a_running_turn_and_the_session` and `test_spend_watcher_leaves_a_turn_alone_under_the_line`.
+2. **Retries pinned.** Implemented (`RETRY_PIN`) and measured: 1 POST per failing turn, where the default sent 30.
+3. **Recall credit for the Responses paths.**
    - Step 1's acceptance 3 verdict needs it: `recall_credit.answer_index` reads `/v1/messages`.
-   - Answer: a new `codex_recall_credit.py` that reuses `recall_credit` with the Responses paths. `recall_credit.py` is lane B's file, so it is not edited.
+   - Answer: a new `codex_recall_credit.py` that reuses `recall_credit` with the Responses paths. `recall_credit.py` is lane B's file. Not built yet.
 
 **Before step 2 only:**
 
-3. **The probe-request replay baseline** (section 4): build it from the Codex rollout, with tools off and the D23 User-Agent.
+4. **The probe-request replay baseline** (section 4): build it from the Codex rollout, with no tools and the D23 User-Agent.
 
 **Can wait (a cost or a decision, not correctness):**
 
-4. **Cheaper model.** Ask the owner which Codex-capable models the proxy serves. The estimate scales with the request counts, not the model.
+5. **Cheaper model.** Ask the owner which Codex-capable models the proxy serves.
 
 **Met:**
 - **Codex paged search found nothing** [measured; lane B B23]. **Met in v0.1.3** (031ca59).
@@ -161,7 +153,7 @@ The stub (`spikes/m2/acceptance/codex_stub.py`) serves streamed Responses replie
 - on a probe turn's first request, an `exec` call whose JavaScript runs `contexto_search`, then `contexto_recall` on the first page id search names (else on the first page id the preamble's index lists, which a build before B23 needed);
 - then the probe answers, which it is given, so the run checks scoring rather than model quality.
 
-Measured run (bound 64,000, 20 KB turns, seed 20261016, main 031ca59 with B23 and A18, `CONTEXTO_HOME` set, about 16 seconds):
+Measured run (bound 64,000, 20 KB turns, seed 20261016, main 031ca59 with B23 and A18, `CONTEXTO_HOME` set, Codex retries pinned, spend watcher on, about 16 seconds):
 
 | | |
 |---|---|
@@ -174,6 +166,6 @@ Measured run (bound 64,000, 20 KB turns, seed 20261016, main 031ca59 with B23 an
 | Score | 54 of 54 (stub answers) |
 | Record | `codex-dry-run.json`: the run record, analysis, score, and the estimate |
 
-Tests: `spikes/m2/acceptance/tests/test_codex_acceptance.py` (10 tests).
-- They cover the turn command and resume by id, the isolated environment, Responses spend, the analysis, the session runner's cap and stops, the stub's reply sequence, and the estimate's formula and baseline fit.
+Tests: `spikes/m2/acceptance/tests/test_codex_acceptance.py` (14 tests).
+- They cover the turn command (resume by id, retries pinned), the in-turn spend watcher, the isolated environment, Responses spend, the analysis, the session runner's cap and stops, the stub's reply sequence, and the estimate's formula and baseline fit.
 - They also include the full dry run, which is skipped where no codex CLI is installed.

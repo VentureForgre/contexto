@@ -10,7 +10,9 @@ H1 (``contexto run codex``, bound B):
   request costs at most ``B + R`` with R the per-request output allowance;
 - requests: one per content turn, and ``1 + T`` per probe turn (one per tool round: Codex calls the
   Contexto tools inside one ``exec`` call per round, then answers);
-- one billed retry per turn (Codex retries a dropped stream; the retried request is billed again).
+- retries: none. codex_driver pins Codex's request and stream retries to 0 (Codex otherwise sent 30
+  POSTs for one failing turn; pinned, 1), so every billed request is counted once and a failure ends
+  the session; ``retries_per_turn`` prices a looser configuration.
 
 Baseline (the same script and turns with no rotation, ``--bound`` above the history and Codex's own
 compaction disabled, tools off as Claude's replay sets them): request k sends the full history so far,
@@ -46,6 +48,8 @@ CODEX_HEAD = 21_312  # A6 pre-flight: the seed estimate of Codex 0.154.0's first
 # so the larger figure is used as the bound.
 OUTPUT_ALLOWANCE = 32_000  # per request: Codex sets no max_output_tokens, so the guard reserves the
 # same output budget.py reserves per Claude request (budget.Params.max_tokens_reserve)
+TOOL_ROUNDS = 5  # per probe turn: run #3 measured up to 5 tool rounds per probe turn, and its record
+# proposes 5 (reviewer-1 on PR #154); Codex makes one exec call per round
 REPLY_TOKENS = 20  # "OK" per content turn (budget.Params.reply_tokens)
 PROBE_ANSWER_TOKENS = 4_000  # one probe turn's answer lines (budget.Params.probe_output)
 CODEX_COMPACT_AT = 244_800  # gpt-6-astra: Codex compacts at this many tokens of its 272,000 window
@@ -70,7 +74,7 @@ class CodexBudget:
     terms: dict[str, str] = field(default_factory=dict)
 
 
-def estimate(s: script.Script, bound: int, tool_rounds: int = script.MAX_RECALLS, retries_per_turn: int = 1,
+def estimate(s: script.Script, bound: int, tool_rounds: int = TOOL_ROUNDS, retries_per_turn: int = 0,
              margin: float = 0.10, head: int = CODEX_HEAD, output: int = OUTPUT_ALLOWANCE) -> CodexBudget:
     """The worst case for one H1 run plus one baseline run of script ``s`` (module docstring)."""
     b = CodexBudget(bound, s.n_content, len(s.probe_turn_ids), tool_rounds, retries_per_turn, margin)
@@ -99,8 +103,8 @@ def estimate(s: script.Script, bound: int, tool_rounds: int = script.MAX_RECALLS
         "output": f"{output:,} per request (budget.Params.max_tokens_reserve)",
         "content turns": f"{s.n_content} (script, D27: history at least 2.5x the bound)",
         "probe turns": f"{b.probe_turns} x {script.PROBES_PER_TURN} probes (D27)",
-        "tool rounds": f"{tool_rounds} per probe turn in H1 (script.MAX_RECALLS); the baseline has none",
-        "retries": f"{retries_per_turn} billed retry per turn",
+        "tool rounds": f"{tool_rounds} per probe turn in H1 (run #3); the baseline replay sends no tools",
+        "retries": f"{retries_per_turn} billed retries per turn (Codex's retries pinned to 0)",
         "margin": f"{margin:.0%}",
     }
     return b
@@ -118,7 +122,7 @@ CODEX_WINDOW = 272_000  # gpt-6-astra's context window (docs/research/M2-codex-a
 
 
 def baseline_breakdown(s: script.Script, head: int = CODEX_HEAD, output: int = OUTPUT_ALLOWANCE,
-                       retries_per_turn: int = 1) -> dict[str, int]:
+                       retries_per_turn: int = 0) -> dict[str, int]:
     """The session baseline's worst case (``estimate``) split into its terms: every request's input
     (head plus history), the output allowance, and the retry allowance that repeats each request."""
     history, inputs, requests = head, 0, 0
@@ -136,7 +140,7 @@ def baseline_breakdown(s: script.Script, head: int = CODEX_HEAD, output: int = O
 
 
 def replay_baseline(s: script.Script, head: int = CODEX_HEAD, output: int = OUTPUT_ALLOWANCE,
-                    retries_per_turn: int = 1) -> dict[str, int | bool]:
+                    retries_per_turn: int = 0) -> dict[str, int | bool]:
     """A cheaper baseline, built as Claude's (run.py replay): only the 6 probe requests, each sent once
     to the upstream with the whole history before it (from Codex's rollout), tools off. Every request
     must fit the model's window with its output allowance."""
@@ -161,27 +165,27 @@ def history_turns(bound: int, turn_bytes: int, seed: int = script.DEFAULT_SEED) 
         n += 1
 
 
-def staged(s: script.Script, bound: int, margin: float = 0.10) -> dict[str, int | bool]:
+def staged(s: script.Script, bound: int, margin: float = 0.10, tool_rounds: int = TOOL_ROUNDS,
+           retries_per_turn: int = 0) -> dict[str, int | bool]:
     """Intake's staged design: step 1 is the H1 arm alone (acceptance 1 and 3), step 2 the baseline replay
     and the fidelity score (acceptance 2), run only if step 1 passes. Each step's worst case carries the
     margin, and each is its own stop cap."""
-    b = estimate(s, bound, margin=margin)
-    replay = replay_baseline(s)
+    b = estimate(s, bound, tool_rounds=tool_rounds, retries_per_turn=retries_per_turn, margin=margin)
+    replay = replay_baseline(s, retries_per_turn=retries_per_turn)
     step1 = math.ceil(b.h1_worst * (1 + margin))
     step2 = math.ceil(replay["total"] * (1 + margin))
-    return {"bound": bound, "content_turns": s.n_content, "step1_h1": step1, "step2_baseline_replay": step2,
+    return {"bound": bound, "content_turns": s.n_content, "h1_requests": b.h1_requests, "step1_h1": step1, "step2_baseline_replay": step2,
             "total": step1 + step2, "replay_fits": replay["fits"], "replay_largest_input": replay["largest_input"],
             "session_baseline": b.baseline_worst, "session_baseline_fits": b.baseline_fits}
 
 
 def main() -> None:
-    """The figures the plan cites: the shipped default bound (150,000, launcher.DEFAULT_BOUND) at D27's 40 KB
-    turns, and 64,000 at 20 KB and 40 KB turns."""
-    for bound, kb in ((150_000, 40), (64_000, 20), (64_000, 40)):
-        s = history_turns(bound, kb * 1000)
-        print(json.dumps({"turn_kbytes": kb, **staged(s, bound)}))
+    """The figures the plan cites: 64,000 at 20 KB turns (the proposed configuration) with Codex's
+    retries pinned, and the same with reviewer-1's stricter retry term (2 billed retries per turn)."""
     s = history_turns(64_000, 20_000)
-    print(json.dumps({"baseline_breakdown_64000_20kb": baseline_breakdown(s)}))
+    for retries in (0, 2):
+        print(json.dumps({"turn_kbytes": 20, "retries_per_turn": retries, **staged(s, 64_000, retries_per_turn=retries)}))
+    print(json.dumps({"replay_baseline": replay_baseline(s), "session_baseline_breakdown": baseline_breakdown(s)}))
 
 
 if __name__ == "__main__":

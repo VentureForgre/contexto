@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import math
 import shutil
+import signal
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -71,22 +73,46 @@ def test_analyze_reads_the_responses_dialect_log():
     assert a["acceptance_1"] is False
 
 
+class FakeProc:
+    """A finished turn: writes the last message and, on the first turn, the thread.started event."""
+
+    def __init__(self, fake, cmd, stdin, stdout, **kwargs):
+        fake.calls.append(cmd)
+        self.text, self.cmd, self.stdout, self.fake = [], cmd, stdout, fake
+        self.stdin = SimpleNamespace(write=self.text.append, close=self._finish)
+        self.returncode = 7 if fake.exit_at == len(fake.calls) else 0
+        self.pid = -1  # never signalled: these turns finish on their own
+
+    def _finish(self):
+        prompt = "".join(self.text)
+        Path(self.cmd[self.cmd.index("-o") + 1]).write_text("q_a_001: x" if script.PROBE_HEADER[0] in prompt else "OK")
+        if len(self.fake.calls) == 1:
+            self.stdout.write(json.dumps({"type": "thread.started", "thread_id": "T1"}) + "\n")
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 class FakeCodex:
-    """Stands in for subprocess.run: records each turn and writes the last message."""
+    """Stands in for subprocess.Popen: each turn finishes at once (FakeProc)."""
 
     def __init__(self, exit_at=None):
         self.calls, self.exit_at = [], exit_at
 
-    def __call__(self, cmd, input, cwd, env, **kwargs):
-        self.calls.append(cmd)
-        Path(cmd[cmd.index("-o") + 1]).write_text("q_a_001: x" if script.PROBE_HEADER[0] in input else "OK")
-        code = 7 if self.exit_at == len(self.calls) else 0
-        out = json.dumps({"type": "thread.started", "thread_id": "T1"}) if len(self.calls) == 1 else ""
-        return SimpleNamespace(returncode=code, stdout=out)
+    def __call__(self, cmd, **kwargs):
+        return FakeProc(self, cmd, **kwargs)
 
 
-def _turns(tmp_path, runner):
-    return codex_driver.CodexTurns("contexto", "S", 64_000, "http://u", "/h", tmp_path, {}, runner=runner)
+def _turns(tmp_path, popen):
+    return codex_driver.CodexTurns("contexto", "S", 64_000, "http://u", "/h", tmp_path, {}, popen=popen, poll=0.05)
+
+
+def sleeper(cmd, **kwargs):
+    """A real turn that would run for 60 seconds, in its own process group (as CodexTurns starts it)."""
+    return subprocess.Popen([sys.executable, "-c", "import sys, time; sys.stdin.read(); time.sleep(60)"], **kwargs)
 
 
 def test_run_session_resumes_the_thread_and_keeps_only_probe_answers(tmp_path):
@@ -95,6 +121,7 @@ def test_run_session_resumes_the_thread_and_keeps_only_probe_answers(tmp_path):
     record = codex_driver.run_session(s, _turns(tmp_path, runner), tmp_path / "log.jsonl", 10**9, [1] * len(s.turns))
     assert record["turns_completed"] == len(s.turns) and record["stopped"] is None and record["thread"]
     assert "resume" not in runner.calls[0] and all(c[-3:] == ["resume", "T1", "-"] for c in runner.calls[1:])
+    assert all("model_providers.contexto.request_max_retries=0" in c for c in runner.calls)  # retries pinned
     assert record["answers"].count("q_a_001: x") == len(s.probe_turn_ids)
 
 
@@ -168,7 +195,8 @@ def test_baseline_breakdown_adds_up_to_the_session_baseline():
     assert parts["head_total"] == 21 * codex_budget.CODEX_HEAD
     assert parts["input_total"] == parts["head_total"] + parts["history_total"]
     assert parts["once"] == parts["input_total"] + parts["output_total"]
-    assert parts["total"] == 2 * parts["once"] == codex_budget.estimate(s, 64_000).baseline_worst
+    assert parts["retries"] == 0 and parts["total"] == parts["once"] == codex_budget.estimate(s, 64_000).baseline_worst
+    assert codex_budget.baseline_breakdown(s, retries_per_turn=2)["total"] == 3 * parts["once"]
 
 
 def test_staged_steps_and_the_default_bound_baseline_that_cannot_fit():
@@ -178,3 +206,26 @@ def test_staged_steps_and_the_default_bound_baseline_that_cannot_fit():
     default = codex_budget.staged(codex_budget.history_turns(150_000, 40_000), 150_000)
     assert default["content_turns"] == 18 and not default["replay_fits"]
     assert default["replay_largest_input"] + codex_budget.OUTPUT_ALLOWANCE > codex_budget.CODEX_WINDOW
+
+
+def test_spend_watcher_stops_a_running_turn_and_the_session(tmp_path):
+    """The in-turn stop (reviewer-1 on PR #154, a precondition for any live step): while a turn runs,
+    once spent plus twice one request's worst case would pass the approved line, the turn's whole
+    process group is terminated and the session stops."""
+    s = script.build(turns=4, turn_bytes=2_000)
+    log = tmp_path / "log.jsonl"
+    log.write_text(json.dumps(_entry(inp=500, out=0)) + "\n")
+    turns = _turns(tmp_path, sleeper)
+    started = time.monotonic()
+    # Before the turn: 500 + 100 <= 2,000 passes. During it: 500 + 2 x 800 > 2,000 stops it.
+    record = codex_driver.run_session(s, turns, log, 2_000, [100] * len(s.turns), inflight=800)
+    assert time.monotonic() - started < 10  # stopped, not left to sleep 60 seconds
+    assert record["stopped"] == "turn 1: stopped by the spend watcher (approved 2,000)"
+    assert record["turns_completed"] == 0 and record["stopped_by_watcher"] == [0]
+    assert turns.exits == [-signal.SIGTERM]
+
+
+def test_spend_watcher_leaves_a_turn_alone_under_the_line(tmp_path):
+    turns = _turns(tmp_path, FakeCodex())
+    turns.watch = lambda: False
+    assert turns.send(0, "log\nReply with exactly: OK") == "OK" and turns.stopped_by_watcher == []

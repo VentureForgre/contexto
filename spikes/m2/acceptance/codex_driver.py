@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -31,6 +33,12 @@ from acceptance import script
 from acceptance.detectors import FAILURE_EVENTS
 
 MODEL = "gpt-6-astra"
+# Codex retries a failed request up to 30 times by default against a failing upstream [measured, A16:
+# one turn, 30 POSTs]. Pinned to none, so every billed request is counted once: a failure ends the turn
+# (1 POST measured) and the session stops. Keys: the provider's request_max_retries and
+# stream_max_retries (codex-cli 0.154.0 config schema).
+RETRY_PIN = ("-c", "model_providers.contexto.request_max_retries=0",
+             "-c", "model_providers.contexto.stream_max_retries=0")
 RESPONSES_PATHS = ("/responses", "/v1/responses")
 _DROP_PREFIXES = ("OPENRIG_", "CLAUDE", "ANTHROPIC_", "OPENAI_", "CODEX_", "RIGGED_", "CONTEXTO_")
 
@@ -45,7 +53,7 @@ def turn_command(contexto: str, session: str, bound: int, upstream: str, key_hel
     if codex_upstream:
         cmd += ["--codex-upstream", codex_upstream]
     cmd += ["codex", "exec", "--skip-git-repo-check", "--json", "-c", f"model={model}",
-            "-c", "model_reasoning_effort=low", "-o", str(last_message), *extra]
+            "-c", "model_reasoning_effort=low", *RETRY_PIN, "-o", str(last_message), *extra]
     return cmd + (["resume", thread, "-"] if thread else ["-"])
 
 
@@ -89,7 +97,9 @@ def spend(events: list[dict[str, Any]]) -> int:
 
 @dataclass
 class CodexTurns:
-    """Runs one user turn per call (module docstring); ``runner`` is subprocess.run, swappable in tests."""
+    """Runs one user turn per call (module docstring). The turn runs in its own process group so the
+    in-turn spend watcher can stop it: ``watch`` is polled while the turn runs, and when it returns True
+    the whole group (contexto, codex, the MCP server) is terminated. ``popen`` is swappable in tests."""
 
     contexto: str
     session: str
@@ -101,29 +111,66 @@ class CodexTurns:
     codex_upstream: str | None = None
     timeout: float = 900.0
     extra: tuple[str, ...] = ()
-    runner: Callable[..., Any] = subprocess.run
+    popen: Callable[..., Any] = subprocess.Popen
+    watch: Callable[[], bool] | None = None
+    poll: float = 0.25
     thread: str | None = None
     exits: list[int] = field(default_factory=list)
+    stopped_by_watcher: list[int] = field(default_factory=list)
 
     def send(self, index: int, text: str) -> str:
         last = self.scratch / f"last-{index}.txt"
+        events = self.scratch / f"events-{index}.jsonl"
         cmd = turn_command(self.contexto, self.session, self.bound, self.upstream, self.key_helper, last,
                            self.thread, self.codex_upstream, extra=self.extra)
-        done = self.runner(cmd, input=text, cwd=self.scratch, env=self.env, capture_output=True, text=True,
-                           timeout=self.timeout)
-        self.exits.append(done.returncode)
+        with events.open("w") as out, (self.scratch / f"stderr-{index}.txt").open("w") as err:
+            proc = self.popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err, cwd=self.scratch, env=self.env,
+                              text=True, start_new_session=True)
+            proc.stdin.write(text)
+            proc.stdin.close()
+            deadline = time.monotonic() + self.timeout
+            while proc.poll() is None:
+                if self.watch is not None and self.watch():
+                    self.stopped_by_watcher.append(index)
+                    self._stop(proc)
+                    break
+                if time.monotonic() > deadline:
+                    self._stop(proc)
+                    break
+                time.sleep(self.poll)
+            code = proc.wait()
+        self.exits.append(code)
         if self.thread is None:
-            for line in done.stdout.splitlines():
+            for line in events.read_text().splitlines():
                 if line.startswith("{") and '"thread.started"' in line:
                     self.thread = json.loads(line).get("thread_id")
                     break
         return last.read_text() if last.exists() else ""
 
+    @staticmethod
+    def _stop(proc: Any) -> None:
+        """Terminate the turn's process group, then kill it if it has not exited after 5 seconds."""
+        for sig, wait in ((signal.SIGTERM, 5.0), (signal.SIGKILL, None)):
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                return
+            try:
+                proc.wait(timeout=wait)
+                return
+            except subprocess.TimeoutExpired:
+                continue
+
 
 def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved: int, estimates: list[int],
-                reserve: int = 0) -> dict[str, Any]:
-    """Every turn of ``s`` in order, refusing any turn that could pass ``approved``; returns the
-    record (spend, turns completed, why it stopped, and the probe-turn answers)."""
+                reserve: int = 0, inflight: int = 0) -> dict[str, Any]:
+    """Every turn of ``s`` in order; returns the record (spend, turns completed, why it stopped, and
+    the probe-turn answers). Two stops keep spend at or under ``approved``: a turn is never started
+    when ``spent + estimate + reserve`` could pass it, and inside a turn the spend watcher stops the
+    turn's processes once ``spent + 2 x inflight`` would (``inflight`` is one request's worst case,
+    bound plus output; twice it covers a request that started before the last one was logged)."""
+    if inflight:
+        turns.watch = lambda: spend(read_log(session_log)) + 2 * inflight > approved
     if len(estimates) != len(s.turns):
         raise ValueError("one estimate per turn")
     answers: list[str] = []
@@ -134,6 +181,9 @@ def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved
             stopped = f"turn {i + 1} could pass the approved {approved:,} (spent {spent:,})"
             break
         answer = turns.send(i, text)
+        if turns.stopped_by_watcher and turns.stopped_by_watcher[-1] == i:
+            stopped = f"turn {i + 1}: stopped by the spend watcher (approved {approved:,})"
+            break
         completed += 1
         if i >= s.n_content:
             answers.append(answer)
@@ -142,7 +192,8 @@ def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved
             break
     return {"spent": spend(read_log(session_log)), "approved": approved, "turns": len(s.turns),
             "turns_completed": completed, "probe_turns_completed": len(answers), "stopped": stopped,
-            "thread": bool(turns.thread), "codex_exits": turns.exits, "answers": "\n".join(answers)}
+            "thread": bool(turns.thread), "codex_exits": turns.exits,
+            "stopped_by_watcher": list(turns.stopped_by_watcher), "answers": "\n".join(answers)}
 
 
 def analyze(events: list[dict[str, Any]], bound: int) -> dict[str, Any]:
