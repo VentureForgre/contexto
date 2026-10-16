@@ -391,8 +391,8 @@ class Stub:
     """A local upstream that never forwards: count_tokens answers a size-based count; Messages answers
     a contexto_search call first, then text naming every target."""
 
-    def __init__(self, key: str, fail_count_at: int | None = None) -> None:
-        self.key, self.fail_count_at, self.records, self.lock = key, fail_count_at, [], threading.Lock()
+    def __init__(self, key: str, query: str = "stub query") -> None:
+        self.key, self.query, self.records, self.lock = key, query, [], threading.Lock()
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
         stub = self
@@ -439,7 +439,7 @@ class Stub:
                 else:
                     blocks = [{"type": "thinking", "thinking": "", "signature": "stub-signature"},
                               {"type": "tool_use", "id": "toolu_stub_1", "name": MCP_PREFIX + "contexto_search",
-                               "input": {"query": "stub query"}}]
+                               "input": {"query": stub.query}}]
                     stop = "tool_use"
                 events = [{"type": "message_start", "message": {"id": "msg_stub", "type": "message", "role": "assistant",
                                                                 "content": [], "usage": {"input_tokens": tokens, "output_tokens": 1}}}]
@@ -523,7 +523,9 @@ def main(argv: list[str] | None = None) -> int:
     httpd = None
     upstream = args.upstream
     if args.stub:
-        stub = Stub(key)
+        # The stub searches for a target's subject (a key name, not its answer), so the in-view and
+        # paged search paths both run.
+        stub = Stub(key, query={p.id: p for p in s.probes}[TARGETS[0]].subjects[0])
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), stub.handler())
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         upstream = f"http://127.0.0.1:{httpd.server_port}"
