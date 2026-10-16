@@ -12,16 +12,17 @@ method and error stated). Per-request numbers are in
 | | Input tokens | Cost at Haiku 5.5 prices (USD) | Requests |
 |---|---|---|---|
 | Contexto, run #3 (**measured**) | 3,725,391 | 0.29 | 44 |
-| Plain Claude Code, same request points (**modeled**) | 16,500,083 (16,433,805 to 16,567,050) | 1.11 | 44 |
-| Plain Claude Code, plain-run shape (**modeled**, best-case cache) | 6,972,335 | 0.58 | 24 |
+| Plain Claude Code, same request points (**modeled**) | 16,500,083 (16,433,805 to 16,567,050) | 1.11 (modeled) | 44 |
+| Plain Claude Code, plain-run shape (**modeled**: 18 content turns modeled, 6 probe turns measured; best-case cache) | 6,972,335 | 0.58 (modeled) | 24 |
 
-- **Against the plain-run shape** (the fair comparison): Contexto used **46.6% fewer input tokens**
-  and cost **49.7% less**, even with every plain request assumed to hit the prefix cache.
-- **Against the same 44 request points:** 77.4% fewer tokens and 73.8% less cost.
+- **Against the plain-run shape** (the fair comparison; plain **modeled**: 18 content turns modeled,
+  6 probe turns measured): Contexto used **46.6% fewer input tokens** and cost **49.7% less**, even
+  with every plain request assumed to hit the prefix cache.
+- **Against the same 44 request points** (plain **modeled**): 77.4% fewer tokens and 73.8% less cost.
 - **Content turns:** the saving is mostly here. Contexto used 1,347,282 tokens against 4,350,348
-  plain (−69.0%).
+  plain (**modeled**) (−69.0%).
 - **Probe turns:** nearly even. Contexto used 2,378,109 tokens over 26 requests (its tool loops)
-  against 2,621,987 over 6 plain requests (−9.3%).
+  against 2,621,987 over 6 plain requests (**measured**: the baseline arm's `count_tokens`) (−9.3%).
 
 ## Method
 
@@ -73,8 +74,9 @@ Only the paged-out difference is converted; the part both runs share comes from 
 **Cache assumption for plain**, stated: every plain request reads the previous request's whole prompt
 from cache, writes the rest, and leaves 2 tokens uncached. This is the best case for plain, so it
 understates the saving. Run #3 itself hit the cache on 36 of 37 eligible requests. The baseline arm
-measured 2 full misses in 6 requests. With those measured misses, the plain shape costs 1.08 USD
-instead of 0.58, and the saving rises to 73.0%.
+measured 2 full misses in 6 requests. With those measured misses, the plain shape (18 content turns
+modeled, 6 probe turns measured) costs 1.08 USD instead of 0.58 (both modeled), and the saving rises
+to 73.0%.
 
 **Cost.** Prices are the M0 cost model's Haiku 5.5 rates
 ([M0-cost-model.md](M0-cost-model.md), vendor-documented 2026-10-15), in USD per million tokens:
@@ -83,21 +85,22 @@ instead of 0.58, and the saving rises to 73.0%.
 |---|---|---|---|
 | 0.1 | 0.5 | 0.01 | 0.125 |
 
-Every rate is ×5 when a prompt exceeds 100,000 tokens. Pricing is **modeled**; the token counts are
-the measured or modeled figures above.
+Every rate is ×5 when a prompt exceeds 100,000 tokens ([M0-cost-model.md:289](M0-cost-model.md),
+the Haiku 5.5 price row, and [:305](M0-cost-model.md), the long-prompt rule). Pricing is **modeled**;
+the token counts are the measured or modeled figures above.
 
 ### (c) Native compaction, modeled
 
 Claude Code compacts at about 967K tokens by default on 1M-window models
 ([M0-cost-model.md](M0-cost-model.md), vendor-documented; [M0-recommendation.md](M0-recommendation.md)).
-The plain history peaks at 493,902 tokens at the same request points and at 438,406 in the plain-run
-shape. Both are far under that threshold.
+The plain history peaks at 493,902 tokens at the same request points (**modeled**) and at 438,406 in
+the plain-run shape (**measured**: the baseline arm's last `count_tokens`). Both are far under that threshold.
 
 **So native compaction would not have fired anywhere in this run.** The "plain with compaction" model
 equals the "plain without compaction" model here: no sawtooth. The plain run simply grows to about
 440k to 490k tokens per request.
 
-## By cache class (plain-run shape, best-case cache)
+## By cache class (plain-run shape: 18 content turns modeled, 6 probe turns measured; best-case cache)
 
 | Class | Contexto (measured) | Plain (modeled) |
 |---|---|---|
@@ -113,7 +116,7 @@ equals the "plain without compaction" model here: no sawtooth. The plain run sim
 
 ## Per-turn curve (input tokens; plain at the same request points)
 
-| Turn | Kind | Contexto requests | Contexto input (measured) | Plain input (modeled) | Contexto USD | Plain USD |
+| Turn | Kind | Contexto requests | Contexto input (measured) | Plain input (modeled) | Contexto USD (modeled) | Plain USD (modeled) |
 |---|---|---|---|---|---|---|
 | 1 | content | 1 | 50,906 | 50,906 | 0.0065 | 0.0065 |
 | 2 | content | 1 | 73,769 | 73,769 | 0.0034 | 0.0034 |
@@ -146,8 +149,8 @@ plain input grows by about 22,700 tokens per turn, while Contexto's content requ
 
 ## Two findings for the product
 
-- **Haiku 5.5's 100K price line.** 7 Contexto requests crossed 100,000 tokens, where every rate is
-  ×5: the tool-loop requests of probe turns 1 and 2 (101,390 to 109,868). In probe
+- **Haiku 5.5's 100K price line** ([M0-cost-model.md:289](M0-cost-model.md) and
+  [:305](M0-cost-model.md)). 7 Contexto requests crossed 100,000 tokens, where every rate is ×5: the tool-loop requests of probe turns 1 and 2 (101,390 to 109,868). In probe
   turn 2 that made Contexto's cost slightly higher than plain's at the same points. A bound or room
   that kept requests under 100,000 on Haiku 5.5 is a cost lever worth a look.
 - **Tool-loop rounds.** Contexto's probe turns cost about as much as the plain probe requests
