@@ -181,13 +181,15 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     safe for thinking because rotation strips it), keep the latest settings-only message per
     settings key. If carried content grows by more than 4,000 tokens over its size at the
     session's first request, log `carried_over_budget` in the session log.
-14. **Transform failure fails closed.** If the engine cannot transform a request (an internal
-    error, an unreadable store, or a page conflict, which can only mean corruption), the proxy
-    never forwards the untransformed request. It answers the CLI with an Anthropic-format HTTP
-    400, `type: invalid_request_error`, and a message beginning `contexto:` that names the
-    event and points to `contexto sessions show`, and it logs `transform_error` or
-    `page_conflict`. A 400 rather than a 5xx, because Claude Code retries 5xx responses and the
-    session would stall. `count_tokens` fails the same way.
+14. **Transform failures.** Every expected error path stays bounded inside the engine: a page
+    conflict (which can only mean corruption), an unreadable store, or a resync failure logs a
+    specific event (`page_conflict`, `store_error`, `resync_failed`) and falls back to a fresh
+    epoch with the minimal window (rule 4), never to the untransformed request. Lane A lists every
+    engine path that can raise and shows each is handled this way. Only a genuine bug, an
+    exception on no listed path, makes the proxy forward the CLI's original request, so the user
+    is never blocked by a Contexto defect; it logs `transform_error` at error level,
+    `contexto sessions show` reports it prominently, and acceptance counts any `transform_error`
+    as a failure.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
