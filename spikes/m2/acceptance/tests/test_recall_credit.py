@@ -94,3 +94,21 @@ def test_in_view_spans_never_credit_and_unmarked_spans_count_as_paged():
         assert r["credited"] == 1 and r["acceptance_3"] and r["in_view_spans"] == 0
     unknown = [_req(), _call("contexto_search", [{**span, "source": "other"}]), _req()]
     assert recall_credit.credit([PROBE], ANSWERED, unknown, [PAGE])["credited"] == 0  # fails closed
+
+
+def test_a_log_with_no_answer_request_credits_nothing_and_says_why():
+    """B28 (lane A's A20 finding): without a /v1/messages request there is no answer to cut off at,
+    so credit fails closed instead of crediting every call."""
+    for path in (None, "/v1/responses", "/other"):
+        log = [_call("contexto_search", [{"page_id": PAGE["id"], "start": POS - 5, "end": POS + len(PLANT) + 1}])]
+        if path:
+            log.append({"event": "request", "path": path, "status": 200})
+        r = recall_credit.credit([PROBE], ANSWERED, log, [PAGE])
+        assert r["credited"] == 0 and r["acceptance_3"] is False
+        assert r["reason"] == "answer request not found"
+        assert r["paged_only"][0]["answered_correctly"] and not r["paged_only"][0]["returned"]
+
+
+def test_a_normal_log_has_no_reason_key():
+    log = [_req(), _call("contexto_search", [{"page_id": PAGE["id"], "start": POS - 5, "end": POS + len(PLANT) + 1}]), _req()]
+    assert "reason" not in recall_credit.credit([PROBE], ANSWERED, log, [PAGE])
