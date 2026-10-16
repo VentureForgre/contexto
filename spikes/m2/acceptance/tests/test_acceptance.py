@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import math
 import shutil
 import subprocess
@@ -223,7 +224,7 @@ def test_child_env_drops_credentials_and_sets_the_config_dir(monkeypatch, tmp_pa
 def test_auth_watcher_stops_the_process_on_the_first_401(tmp_path):
     log = tmp_path / "log.jsonl"
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    watcher = driver.AuthWatcher(log, proc)
+    watcher = driver.SessionWatcher(log, proc)
     log.write_text(json.dumps({"event": "request", "path": "/v1/messages", "status": 200}) + "\n"
                    + json.dumps({"event": "upstream_4xx", "status": 401, "path": "/v1/messages"}) + "\n")
     assert proc.wait(timeout=10) != 0
@@ -234,7 +235,7 @@ def test_auth_watcher_ignores_the_unauthenticated_startup_probe(tmp_path):
     # First live H1 attempt: Claude Code's HEAD /api/hello probe got 401 from the owner's proxy.
     log = tmp_path / "log.jsonl"
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    watcher = driver.AuthWatcher(log, proc)
+    watcher = driver.SessionWatcher(log, proc)
     try:
         log.write_text(json.dumps({"event": "request", "method": "HEAD", "path": "/api/hello", "status": 401,
                                    "usage": None}) + "\n"
@@ -422,13 +423,15 @@ def test_stub_dry_run_models_log_text_and_the_rest_separately():
     assert body["messages"][0]["content"][0]["text"] == log  # the caller's body is not changed
 
 
-def test_probe_turn_caps_recalls_and_the_detector_checks_the_cap():
+def test_probe_turn_is_tool_neutral_and_the_recall_budget_is_report_only():
     s4 = script.build(turns=4, turn_bytes=8_000)
-    assert f"at most {script.MAX_RECALLS} contexto_recall calls" in s4.turns[-1]
+    probe = s4.turns[-1]
+    assert "contexto" not in probe and "recall" not in probe  # intake: product-realistic wording
+    assert "If the conversation does not contain it, say unknown." in probe
     assert detectors.MAX_RECALLS == script.MAX_RECALLS == budget.Params().recalls == 2
     calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * 3
-    assert detectors.analyze(calls[:2], [], bound=150_000).verdicts()["recalls_within_cap"]
-    assert not detectors.analyze(calls, [], bound=150_000).verdicts()["recalls_within_cap"]
+    r = detectors.analyze(calls, [], bound=150_000)
+    assert r.recalls_over_budget == 1 and "recalls_within_cap" not in r.verdicts()
 
 
 def test_the_doc_carries_the_budget_live_gates_on():
@@ -472,3 +475,69 @@ def test_non_model_4xx_are_counted_apart_from_acceptance_1():
     assert r.non_model_4xx == {"HEAD /api/hello": 1} and r.upstream_4xx == 0 and r.verdicts()["zero_4xx"]
     model_4xx = {"event": "upstream_4xx", "status": 400, "path": "/v1/messages/count_tokens"}
     assert not detectors.analyze([model_4xx], [], bound=150_000).verdicts()["zero_4xx"]
+
+
+def _wait(proc, seconds=10):
+    try:
+        return proc.wait(timeout=seconds)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_spend_watcher_stops_inside_a_turn_before_real_spend_can_pass_the_approval(tmp_path):
+    # PR #68 review: the probe turn's tool loop runs inside one Claude Code turn, so the pre-turn
+    # projection cannot stop extra recalls; the watcher stops on real usage as it is logged.
+    def req(inp, out=100):
+        return json.dumps({"event": "request", "method": "POST", "path": "/v1/messages", "status": 200,
+                           "usage": {"input_tokens": 2, "cache_read_input_tokens": inp - 2, "output_tokens": out}})
+    log = tmp_path / "log.jsonl"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    watcher = driver.SessionWatcher(log, proc, approved=900_000, reserve=32_000)
+    try:
+        log.write_text(req(100_000) + "\n" + req(120_000) + "\n")  # 220,200 + 2 x 152,000 = 524,200: fine
+        time.sleep(1.0)
+        assert proc.poll() is None and watcher.spent == 220_200 and watcher.spend_stop is None
+        with log.open("a") as fh:  # 360,300 + 2 x 172,000 = 704,300: fine; then 520,400 + 2 x 192,000 = 904,400
+            fh.write(req(140_000) + "\n" + req(160_000) + "\n")
+        assert _wait(proc) != 0 and "could pass the approved 900,000" in (watcher.spend_stop or "")
+        assert watcher.spent == 520_400 and watcher.status is None
+    finally:
+        watcher.stop()
+
+
+def test_spend_watcher_ignores_spend_without_an_approval_and_other_paths(tmp_path):
+    log = tmp_path / "log.jsonl"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    watcher = driver.SessionWatcher(log, proc)
+    try:
+        log.write_text(json.dumps({"event": "request", "path": "/v1/messages", "status": 200,
+                                   "usage": {"input_tokens": 10_000_000}}) + "\n")
+        time.sleep(0.6)
+        assert proc.poll() is None and watcher.spend_stop is None
+    finally:
+        watcher.stop()
+        proc.kill()
+    log = tmp_path / "log2.jsonl"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    watcher = driver.SessionWatcher(log, proc, approved=100)
+    try:
+        log.write_text(json.dumps({"event": "request", "path": "/v1/messages/count_tokens", "status": 200,
+                                   "usage": {"input_tokens": 10_000}}) + "\n")
+        time.sleep(0.6)
+        assert proc.poll() is None and watcher.spent == 0
+    finally:
+        watcher.stop()
+        proc.kill()
+
+
+def test_transport_reports_an_in_turn_spend_stop_as_budget_exceeded(tmp_path):
+    # A fake 'claude' that waits; the watcher kills it, and send() says why.
+    log = tmp_path / "log.jsonl"
+    log.write_text(json.dumps({"event": "request", "path": "/v1/messages", "status": 200,
+                               "usage": {"input_tokens": 90_000, "output_tokens": 100}}) + "\n")
+    t = driver.StreamJsonTransport([sys.executable, "-c", "import sys, time; sys.stdin.readline(); time.sleep(30)"],
+                                   tmp_path, dict(os.environ), log, approved=100_000, reserve=1_000)
+    with pytest.raises(driver.BudgetExceeded, match="stopped inside the turn"):
+        t.send("hello")
+    t.watcher.stop()

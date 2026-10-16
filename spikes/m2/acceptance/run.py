@@ -222,7 +222,8 @@ def main(argv: list[str] | None = None) -> int:
     estimates = [r.input_tokens for r in b.rows if r.kind == "turn"] + [max(r.input_tokens for r in b.rows if r.kind != "turn")]
     session_log = args.home / "sessions" / args.session / "log.jsonl"
     transport = driver.StreamJsonTransport(driver.launcher_command(args.session, args.bound, upstream), args.scratch,
-                                           driver.child_env(args.home, config), session_log)
+                                           driver.child_env(args.home, config), session_log,
+                                           approved=args.approved, reserve=params.max_tokens_reserve)
     run = driver.Run(transport, args.approved, params.max_tokens_reserve, estimates)
     status = 0
     try:
