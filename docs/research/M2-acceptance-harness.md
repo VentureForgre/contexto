@@ -384,6 +384,17 @@ per round (`budget.ROUND_GROWTH_RUN3`).
   so the next live run needs at least that approval.
 - `test_tool_rounds_are_calibrated_on_live_run_3` pins all of this. `script.MAX_RECALLS` (2) stays as a
   report-only recall cap.
+- **What the worst case bounds** (reviewer-2 on #146). It bounds a run like run #3 in TOTAL: 6,561,088
+  against 3,748,084 real, 1.75x. It does not bound each probe turn.
+  - The simulation rotates at probe turns 2, 4 and 6 (11 rotations against run #3's 6), so its even
+    probe turns are small. Its pt6 inputs total 429,876, while run #3's pt6 took 486,808 (489,369 with
+    output).
+  - A real turn can therefore exceed that turn's simulated inputs, covered only by the per-request
+    output reserve.
+  - The live `SessionWatcher` enforces the approval on real usage, request by request, so a run
+    cannot pass the approval whatever a single turn does.
+- `stubrun.summarize`'s budget block prices its expected figure at the expected rounds and growth,
+  and its worst at the worst rounds, as `budget.simulate` does.
 
 **Intake's parameters** (2026-10-16 00:40Z): bound 150,000 with at least 375,000 tokens of
 history; the replay baseline, labeled no-replayed-thinking; up to 4,000,000 tokens with the guard
