@@ -181,15 +181,27 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     safe for thinking because rotation strips it), keep the latest settings-only message per
     settings key. If carried content grows by more than 4,000 tokens over its size at the
     session's first request, log `carried_over_budget` in the session log.
-14. **Transform failures.** Every expected error path stays bounded inside the engine: a page
-    conflict (which can only mean corruption), an unreadable store, or a resync failure logs a
-    specific event (`page_conflict`, `store_error`, `resync_failed`) and falls back to a fresh
-    epoch with the minimal window (rule 4), never to the untransformed request. Lane A lists every
-    engine path that can raise and shows each is handled this way. Only a genuine bug, an
-    exception on no listed path, makes the proxy forward the CLI's original request, so the user
-    is never blocked by a Contexto defect; it logs `transform_error` at error level,
-    `contexto sessions show` reports it prominently, and acceptance counts any `transform_error`
-    as a failure.
+14. **Transform failures.** Expected failures never reuse the component that failed and never
+    forward the history unbounded:
+    - **Degraded mode** is entered on `page_conflict` (a stored page differs in
+      `{turn, messages}` under its id, which can only mean corruption) or `store_error` (the store
+      cannot be read or written). In degraded mode the engine pages nothing and never rotates: it
+      sends the last good transform (the current `E`, with its in-memory `pinned_text` and
+      `index_text`) extended append-only with the new messages. That is always protocol-valid,
+      keeps thinking and the cache intact, and loses nothing, because no turn is paged while the
+      store is broken. Requests may then exceed the bound; each is logged `over_bound` and fails
+      acceptance. At each new turn start the engine tries the store once; if it is healthy and the
+      conflicting page is not needed, it leaves degraded mode and rotates normally. Mid tool loop
+      nothing changes, because degraded mode only appends.
+    - **Terminal step.** A failure inside degraded mode, or a resync (rule 10) that cannot be
+      completed without paging while the store is broken, is final for that request: the proxy
+      forwards the CLI's original request and logs `fallback_failed`. Each request enters each
+      fallback at most once; there is no retry loop.
+    - **Genuine bugs.** An exception on a path not listed by lane A is handled the same way: the
+      original request is forwarded so the user is never blocked by a Contexto defect, logged as
+      `transform_error` at error level, and reported prominently by `contexto sessions show`.
+    Acceptance counts any `over_bound`, `fallback_failed`, or `transform_error` as a failure. Lane
+    A lists every engine path that can raise and covers each with a fault-injection test.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
