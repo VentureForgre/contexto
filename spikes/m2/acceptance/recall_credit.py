@@ -109,7 +109,7 @@ def plant_spans(probes: list[Any], pages: list[dict[str, Any]]) -> dict[str, dic
 
 def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
            pages: list[dict[str, Any]], probe_turn_ids: tuple[tuple[str, ...], ...] | None = None,
-           turn_ends: list[int] | None = None) -> dict[str, Any]:
+           turn_ends: list[int] | None = None, expected_turns: int | None = None) -> dict[str, Any]:
     """Credit each paged-only probe answered correctly from a range returned before its answer.
 
     With ``probe_turn_ids`` (D27's assignment), a probe's cutoff is the answer of the probe turn that
@@ -117,8 +117,10 @@ def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
     without it, the session's last answer request. ``turn_ends`` (log indices of the requests that
     answered each user turn, in order) lets a caller with its own dialect supply them: it replaces
     ``turn_answer_indices`` and its last entry replaces ``answer_index``; omitted, the Messages rules
-    apply. Either way it fails closed (B28): with no answer request to cut off at, nothing is
-    credited and the result says why.
+    apply. ``expected_turns`` (content turns plus probe turns) makes the turn mapping exact: unless
+    the turn ends, detected or supplied, number exactly that many, nothing is credited, since a
+    spurious or missing end would shift every probe's cutoff silently. Either way it fails closed
+    (B28): with no answer request to cut off at, nothing is credited and the result says why.
     """
     given = {}
     for line in answers.splitlines():
@@ -130,7 +132,10 @@ def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
     reason = None if cutoff is not None else "answer request not found"
     if probe_turn_ids is not None and cutoff is not None:
         ends = turn_answer_indices(session_log) if turn_ends is None else list(turn_ends)
-        if len(ends) < len(probe_turn_ids):
+        if expected_turns is not None and len(ends) != expected_turns:
+            cutoffs = {probe.id: None for probe in probes}
+            reason = f"turn answers do not match the script ({len(ends)} found, {expected_turns} expected)"
+        elif len(ends) < len(probe_turn_ids):
             cutoffs, reason = {probe.id: None for probe in probes}, "probe turn answers not found"
         else:
             turn_end = ends[len(ends) - len(probe_turn_ids):]
