@@ -26,8 +26,8 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
-from contexto.store.render import MAX_CHARS_PER_TOKEN, RECALL_LIMIT, recall_chunk, recall_limit
-from contexto.store.render import render_page as render_page  # re-exported: contexto.mcp.render_page
+from contexto.store.render import (MATCH_CONTEXT, MATCHES_PER_PAGE, MAX_CHARS_PER_TOKEN, RECALL_LIMIT, match_lines,
+                                   recall_chunk, recall_limit, render_page)
 
 SERVER_NAME = "contexto"
 SERVER_VERSION = "0.1.0"
@@ -152,7 +152,10 @@ TOOLS: list[dict[str, Any]] = [
         "name": "contexto_search",
         "description": (
             "Find paged-out turns containing an exact substring (case-sensitive) in their text or stub. "
-            f"Returns up to {SEARCH_LIMIT} page ids, newest first. No fuzzy or similarity matching."
+            f"Returns up to {SEARCH_LIMIT} pages, newest first, each with up to {MATCHES_PER_PAGE} matching "
+            f"lines (marked >) and {MATCH_CONTEXT} lines of context either side, every line prefixed with "
+            "its character offset in the page: answer from a matching line, or call contexto_recall with "
+            "that page id and offset to read on. No fuzzy or similarity matching."
         ),
         "inputSchema": {
             "type": "object",
@@ -317,7 +320,9 @@ class Server:
         texts = texts or [BUDGET_SPENT]
         chunk = texts[0] if budget["turn_budget"] != "spent" else ""
         return ([{"type": "text", "text": t} for t in texts], None,
-                {"page_id": page_id, "offset": offset, "chars": len(chunk), "total_chars": total, **budget})
+                {"page_id": page_id, "offset": offset, "chars": len(chunk), "total_chars": total,
+                 "returned": [{"page_id": page_id, "start": offset, "end": offset + len(chunk)}] if chunk else [],
+                 **budget})
 
     def _tool_pin(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         _reject_extra(args, {"kind", "text", "supersedes", "epistemic", "provenance"})
@@ -380,40 +385,42 @@ class Server:
     def _tool_search(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], None, dict[str, Any]]:
         _reject_extra(args, {"query"})
         query = _require_str(args, "query")
-        hits: list[dict[str, Any]] = []
         found = self.store.search(query)
-        for page_id in found[:SEARCH_LIMIT]:
-            page = self.store.get_page(page_id) or {}
-            hits.append({"page_id": page_id, "turn": page.get("turn"), "stub": _stub_line(page.get("stub"))})
-        lines = [f"{h['page_id']} (turn {h['turn']}): {h['stub']}" for h in hits]
+        hits = [_hit_block(page_id, self.store.get_page(page_id) or {}, query) for page_id in found[:SEARCH_LIMIT]]
+        blocks = [text for text, _ in hits]
+        limit, _ = recall_limit(*self._window())  # one search reply is held to the per-call recall limit
 
         def render(shown: int, why: str = "use a longer or more specific query") -> str:
-            if not hits:
+            if not blocks:
                 return "No paged-out turn contains that exact text."
-            text = "\n".join(lines[:shown])
+            text = "\n".join(blocks[:shown])
             if len(found) > shown:
                 text += f"\n[{len(found) - shown} more matching pages not shown; {why}]"
             return text
 
-        picked = {"shown": len(hits)}
+        picked = {"shown": len(blocks)}
 
         def build(room: int | None) -> list[str] | None:
-            full = render(len(hits))
-            if room is None or len(full) <= room:
-                picked["shown"] = len(hits)
+            full = render(len(blocks))
+            cap = limit if room is None else min(room, limit)
+            if len(full) <= cap:
+                picked["shown"] = len(blocks)
                 return [full]
-            for count in range(len(hits) - 1, 0, -1):
-                text = render(count, "the recall budget for this turn is used up")
-                if len(text) <= room:
+            why = ("the recall budget for this turn is used up" if room is not None and room < limit
+                   and len(full) <= limit else "use a longer or more specific query")
+            for count in range(len(blocks) - 1, 0, -1):
+                text = render(count, why)
+                if len(text) <= cap:
                     picked["shown"] = count
                     return [text]
             return None
 
         texts, budget = self._within_room(build, "contexto_search")
-        shown = hits[: picked["shown"]] if texts else []
+        shown = blocks[: picked["shown"]] if texts else []
         text = texts[0] if texts else BUDGET_SPENT
         return ([{"type": "text", "text": text}], None,
-                {"query_chars": len(query), "hits": len(shown), "total_matches": len(found), **budget})
+                {"query_chars": len(query), "hits": len(shown), "total_matches": len(found),
+                 "returned": [span for _, spans in hits[: len(shown)] for span in spans], **budget})
 
     # Per-turn recall budget (M2 contract PR #69)
 
@@ -471,6 +478,28 @@ class Server:
 
 def _state_trailer(rest: int) -> str:
     return f"[{rest} more characters of the pinned state not shown; the recall budget for this turn is used up]"
+
+
+def _hit_block(page_id: str, page: dict[str, Any], query: str) -> tuple[str, list[dict[str, Any]]]:
+    """One search hit: the page line, then its matching lines (>) and context, each with its offset.
+
+    Also returns the page spans the hit shows, ``{page_id, start, end}`` with ``end`` exclusive, for
+    the content-free log that acceptance 3 reads (contract PR #95); contiguous lines merge.
+    """
+    lines = [f"{page_id} (turn {page.get('turn')}): {_stub_line(page.get('stub'))}"]
+    spans: list[dict[str, Any]] = []
+    if page.get("messages") is not None:
+        shown, total = match_lines(render_page(page), query)
+        lines += [f"{'>' if is_match else ' '} {start}: {text}" for start, _, is_match, text in shown]
+        for start, end, _, _ in shown:
+            if spans and spans[-1]["end"] + 1 == start:  # the next line: the newline between is shown too
+                spans[-1]["end"] = end
+            else:
+                spans.append({"page_id": page_id, "start": start, "end": end})
+        if total > MATCHES_PER_PAGE:
+            lines.append(f"  [{total - MATCHES_PER_PAGE} more matching lines in this page; call contexto_recall "
+                         f"with page_id {page_id} and an offset to read further]")
+    return "\n".join(lines), spans
 
 
 def _stub_line(stub: Any) -> str:

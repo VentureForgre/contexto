@@ -45,8 +45,10 @@ RULE_LINES = (
 
 EXAMPLE_LINE = (
     'Example: to find the value of cache.ttl_seconds, call contexto_search with {"query": '
-    '"cache.ttl_seconds"}; it lists matching pages such as "pg_0123456789abcdef (turn 3): ...". Then '
-    'call contexto_recall with {"page_id": "pg_0123456789abcdef"} and read the value there.'
+    '"cache.ttl_seconds"}. Each hit names a page, such as "pg_0123456789abcdef (turn 3): ...", then '
+    'shows its matching lines with their character offsets, such as "> 18240: cache.ttl_seconds=...". '
+    'Answer from that line, or call contexto_recall with {"page_id": "pg_0123456789abcdef", "offset": '
+    '18240} to read on from it.'
 )
 
 DEFAULT_LINES = (*RULE_LINES, EXAMPLE_LINE)
