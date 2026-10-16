@@ -150,7 +150,55 @@ def test_detectors_flag_compaction_unlogged_over_bound_4xx_and_misses():
     assert r.compaction_events == 2 and not v["zero_compaction"]
     assert r.over_bound_indexes == [2] and r.pre_send_tool_loop == [] and not v["no_request_over_bound"]
     assert r.upstream_4xx == 1 and not v["zero_4xx"]
-    assert r.cache_misses == [2, 3] and not v["recall_called"]
+    assert r.cache_misses == [2, 3] and "recall_called" not in v
+    assert r.informational() == {"recall_called": False, "recall_calls": 0, "search_calls": 0}
+
+
+def test_a_search_only_run_passes_every_verdict_and_reports_recall_as_information():
+    # Live run #2 (c8f0b08): 82 contexto_search calls, no contexto_recall, acceptance 3 credited 4/4
+    # from search hits. The contract's acceptance 3 counts either tool (intake 07:57Z).
+    log = [_req(0, 50_000), {"event": "mcp_call", "tool": "contexto_search", "ok": True,
+                             "returned": [{"page_id": "pg_x", "start": 0, "end": 10}]}]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert all(r.verdicts().values()) and "recall_called" not in r.verdicts()
+    assert r.informational() == {"recall_called": False, "recall_calls": 0, "search_calls": 1}
+
+
+def _check(tmp_path, log, *extra):
+    sl, cc = tmp_path / "log.jsonl", tmp_path / "cc.jsonl"
+    sl.write_text("".join(json.dumps(e) + "\n" for e in log), encoding="utf-8")
+    cc.write_text("", encoding="utf-8")
+    return run.main(["check", "--session-log", str(sl), "--cc-jsonl", str(cc), "--bound", "150000", *extra])
+
+
+def test_check_fails_closed_when_acceptance_3_is_not_evaluated(tmp_path, capsys):
+    # Reviewer-2 on PR #124: with recall_called informational, a clean log without --session-dir and
+    # --answers must not pass; acceptance 3 is reported as not evaluated.
+    log = [_req(0, 50_000)]
+    assert _check(tmp_path, log) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdicts"]["recall_credited"] is False and out["recall_credit"]["reason"].startswith("not evaluated")
+    assert out["verdicts"]["paged_only_plants_paged"] is False and out["paged_only_plants_paged"].startswith("not evaluated")
+    session = tmp_path / "session"
+    (session / "pages").mkdir(parents=True)
+    assert _check(tmp_path, log, "--session-dir", str(session)) == 1  # pages but no answers: still not evaluated
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdicts"]["recall_credited"] is False and out["recall_credit"]["reason"].startswith("not evaluated")
+
+
+def test_check_fails_a_run_with_no_retrieval_at_all(tmp_path, capsys):
+    # The first H1 rerun's shape: 0 recalls and 0 searches. Every acceptance 1 verdict passes, and
+    # check still exits 1, on recall_credited.
+    log = [_req(0, 50_000), _req(0, 60_000)]
+    session = tmp_path / "session"
+    (session / "pages").mkdir(parents=True)
+    answers = tmp_path / "answers.txt"
+    answers.write_text("q_p_01: unknown\n", encoding="utf-8")
+    assert _check(tmp_path, log, "--session-dir", str(session), "--answers", str(answers)) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdicts"]["recall_credited"] is False and out["recall_credit"]["credited"] == 0
+    assert out["informational"] == {"recall_called": False, "recall_calls": 0, "search_calls": 0}
+    assert all(v for k, v in out["verdicts"].items() if k not in ("recall_credited", "paged_only_plants_paged"))
 
 
 def test_read_jsonl_skips_a_torn_last_line(tmp_path):
@@ -427,15 +475,38 @@ def test_stub_dry_run_models_log_text_and_the_rest_separately():
     assert body["messages"][0]["content"][0]["text"] == log  # the caller's body is not changed
 
 
+def test_stub_budget_prices_six_probe_turns_and_six_baseline_requests():
+    # D27: the stub budget block follows budget.simulate, one baseline request per probe turn and each
+    # probe turn's recalls priced, not one of each (dry run #3 found it 6x low on the baseline).
+    from acceptance import stubrun
+
+    p = budget.Params()
+    head = {"path": "/v1/messages", "system_bytes": 9_000, "tools_bytes": 60_000, "tools": 26, "tokens": 40_000,
+            "max_tokens": 128_000}
+    inputs = [40_000, 60_000, 80_000] + [50_000 + 500 * k for k in range(script.PROBE_TURNS)]
+    log = [{"event": "request", "path": "/v1/messages", "epoch": 0,
+            "usage": {"input_tokens": x, "output_tokens": 2}} for x in inputs]
+    probes = [900] * script.PROBE_TURNS
+    out = stubrun.summarize([head], log, 3, p, probes, [40_000] * 3)["budget"]
+    assert len(out["baseline_requests"]) == script.PROBE_TURNS
+    assert out["baseline_replay_worst"] == sum(out["baseline_requests"]) + script.PROBE_TURNS * p.max_tokens_reserve
+    per_recall = budget.recall_tokens(p)
+    priced = inputs[:3] + [x + k * per_recall for x in inputs[3:] for k in range(p.recalls + 1)]
+    assert out["h1_worst"] == sum(priced) + len(priced) * p.max_tokens_reserve
+    assert out["total_worst"] == out["h1_worst"] + out["baseline_replay_worst"]
+
+
 def test_probe_turn_is_tool_neutral_and_the_recall_budget_is_report_only():
     s4 = script.build(turns=4, turn_bytes=8_000)
     for probe in s4.probe_texts:
         assert "contexto" not in probe and "recall" not in probe  # intake: product-realistic wording
         assert "If the conversation does not contain it, say unknown." in probe
     assert detectors.MAX_RECALLS == script.MAX_RECALLS == budget.Params().recalls == 2
-    calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * 3
+    assert detectors.PROBE_TURNS == script.PROBE_TURNS  # D27: the budget prices 2 recalls per probe turn
+    calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * (2 * script.PROBE_TURNS + 1)
     r = detectors.analyze(calls, [], bound=150_000)
     assert r.recalls_over_budget == 1 and "recalls_within_cap" not in r.verdicts()
+    assert detectors.analyze(calls[:-1], [], bound=150_000).recalls_over_budget == 0
 
 
 def test_the_doc_carries_the_budget_live_gates_on():

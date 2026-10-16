@@ -181,23 +181,36 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
     gaps = [r for r in rows if r["gap"] is not None]
     worst_gap = max(gaps, key=lambda r: r["gap"], default=None)
 
-    # H1 from the run's own inputs, plus the probe turn's recall round trips the stub cannot cause.
+    # H1 from the run's own inputs. D27: the last len(probes) requests are the probe turns (the stub
+    # calls no tools, so one request per turn); each is priced with the recall round trips the stub
+    # cannot cause and the probe turn's output, as budget.simulate prices them.
+    probes = probe_bytes if isinstance(probe_bytes, list) else [probe_bytes]
+    output_per_probe_turn = max(200, p.probe_output // len(probes))
     inputs = [r["real"] for r in rows]
-    probe_input = inputs[-1] if inputs else 0
+    probe_inputs = inputs[-len(probes):] if inputs else []
+    probe_input = probe_inputs[-1] if probe_inputs else 0
     # Each recall priced as the budget prices it (the largest B9 chunk); B9's size at the engine's last
-    # logged window budget W is reported beside it. The stub calls no tools.
+    # logged window budget W is reported beside it.
     budgets = [int(te["window_budget"]) for ev in requests for te in ev.get("transform_events") or []
                if isinstance(te, dict) and isinstance(te.get("window_budget"), (int, float))]
     window = budgets[-1] if budgets else 0
     per_recall = budget.recall_tokens(p)
     recall_inputs = [probe_input + k * per_recall for k in range(1, p.recalls + 1)]
-    outputs = [p.reply_tokens] * (len(inputs) - 1) + [200] + [200] * (p.recalls - 1) + [p.probe_output]
-    all_inputs = inputs + recall_inputs
+    all_inputs = inputs[:len(inputs) - len(probe_inputs)]
+    outputs = [p.reply_tokens] * len(all_inputs)
+    for x in probe_inputs:
+        all_inputs += [x] + [x + k * per_recall for k in range(1, p.recalls + 1)]
+        outputs += [200] * p.recalls + [output_per_probe_turn]
     h1_expected = sum(all_inputs) + sum(outputs)
     h1_worst = sum(x + p.max_tokens_reserve for x in all_inputs)
+    # D27's symmetric baseline: one full-context request per probe turn, request k carrying probe
+    # turns 1..k-1 with their answers (budget.simulate's baseline_requests, with the measured head).
     history = sum(budget.turn_tokens(x) + p.reply_tokens for x in turn_bytes)
-    probe = sum(math.ceil(x / budget.BYTES_PER_TOKEN_TEXT) for x in (probe_bytes if isinstance(probe_bytes, list) else [probe_bytes]))
-    replay = head_tokens + history + probe
+    probe_tokens = [math.ceil(x / budget.BYTES_PER_TOKEN_TEXT) for x in probes]
+    baseline_requests = [head_tokens + history + sum(probe_tokens[:k]) + (k - 1) * output_per_probe_turn
+                         for k in range(1, len(probes) + 1)]
+    replay = sum(baseline_requests) + len(probes) * output_per_probe_turn
+    replay_worst = sum(x + p.max_tokens_reserve for x in baseline_requests)
     sim = budget.simulate(turn_bytes, probe_bytes, budget.Params(**{**p.__dict__, "head": head_tokens}))
     return {
         "head": {"system_bytes": head["system_bytes"], "tools": head["tools"], "tools_bytes": head["tools_bytes"],
@@ -213,10 +226,9 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
                        "with_recalls": recall_inputs[-1] if recall_inputs else probe_input,
                        "margin_to_bound": p.bound - (recall_inputs[-1] if recall_inputs else probe_input)},
         "max_input": max(inputs, default=0),
-        "budget": {"h1_expected": h1_expected, "h1_worst": h1_worst, "baseline_replay": replay + p.probe_output,
-                   "baseline_replay_worst": replay + p.max_tokens_reserve,
-                   "total_expected": h1_expected + replay + p.probe_output,
-                   "total_worst": h1_worst + replay + p.max_tokens_reserve,
+        "budget": {"note": "non-authoritative; the approval table is the gate", "h1_expected": h1_expected, "h1_worst": h1_worst, "baseline_requests": baseline_requests,
+                   "baseline_replay": replay, "baseline_replay_worst": replay_worst,
+                   "total_expected": h1_expected + replay, "total_worst": h1_worst + replay_worst,
                    "simulated_with_measured_head": {"h1_expected": sim.h1_expected, "h1_worst": sim.h1_worst,
                                                      "rotations": sim.rotations,
                                                      "planned_over_bound": sim.planned_over_bound}},
@@ -286,6 +298,7 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
                        "any_oauth_beta_header": any(r["oauth_beta_header"] for r in stub.records)},
         "stub_paths": sorted({r["path"] for r in stub.records}),
         "verdicts": report.verdicts(),
+        "informational": report.informational(),
         "detectors": {"requests": report.requests, "rotations": report.rotations, "epochs": report.epochs,
                       "requests_per_epoch": report.requests_per_epoch, "over_bound_requests": report.over_bound_requests,
                       "unverified_requests": report.unverified_requests, "upstream_4xx": report.upstream_4xx,
