@@ -73,6 +73,14 @@ def run_replay(args: argparse.Namespace) -> int:
     except (RuntimeError, OSError):
         print("refusing: the seat's apiKeyHelper did not produce a key; output not shown", file=sys.stderr)
         return 2
+    if args.h1_record is not None:
+        try:
+            h1_spent = int(json.loads(args.h1_record.read_text(encoding="utf-8"))["spent"])
+        except (OSError, ValueError, KeyError, TypeError):
+            print("refusing: --h1-record is not a live run's H1 record", file=sys.stderr)
+            return 2
+        out["approval"] = {"combined": args.approved, "h1_spent": h1_spent, "replay": args.approved - h1_spent}
+        args.approved -= h1_spent
     status, spent, answers = 0, 0, []
     window = args.context_window or replay.CONTEXT_WINDOW
     try:
@@ -151,7 +159,11 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--cc-jsonl", type=Path, required=True, help="the H1 run's Claude Code session JSONL")
     rep.add_argument("--out", type=Path, required=True, help="private directory for the answers and counts")
     rep.add_argument("--dry", action="store_true", help="build the request and print its sizes; no calls")
-    rep.add_argument("--approved", type=int, default=0, help="tokens intake approved for the replay")
+    rep.add_argument("--approved", type=int, default=0,
+                     help="tokens the replay may spend; with --h1-record, the combined approval instead")
+    rep.add_argument("--h1-record", type=Path, default=None,
+                     help="the live run's <home>/acceptance-<session>-h1.json: the replay may then spend "
+                          "--approved (the combined approval) minus the H1 spend recorded there")
     rep.add_argument("--seat-settings", type=Path, default=None)
     rep.add_argument("--upstream", default=None, help="upstream base URL (default: $ANTHROPIC_BASE_URL)")
     rep.add_argument("--context-window", type=int, default=None)
@@ -281,7 +293,11 @@ def main(argv: list[str] | None = None) -> int:
         status = 1
     finally:
         transport.close()
-    print(json.dumps({"spent": run.spent, "turns": run.turns, "stream_compactions": transport.compactions}, indent=2))
+    record = {"spent": run.spent, "turns": run.turns, "stream_compactions": transport.compactions,
+              "approved": args.approved, "h1_cap": h1_cap, "baseline_worst": b.baseline_replay_worst}
+    # The replay's approval is the combined approval minus this spend (run.py replay --h1-record).
+    (args.home / f"acceptance-{args.session}-h1.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    print(json.dumps(record, indent=2))
     return status
 
 

@@ -295,3 +295,20 @@ def test_the_baseline_uses_the_same_assignment_as_h1():
     jsonl_probe = s.probe_texts[0]
     assert all(any(f"{i}:" in text for i in ids) for ids, text in zip(s.probe_turn_ids, s.probe_texts))
     assert jsonl_probe == s.probe_texts[0]  # the replay keys its first request on H1's first probe turn
+
+
+def test_the_replay_approval_is_the_combined_approval_minus_the_recorded_h1_spend(tmp_path, stub):
+    # Reviewer-2 on PR #112: tie the replay's --approved to the live run's own record.
+    jsonl, seat = _setup(tmp_path)
+    record = tmp_path / "acceptance-x-h1.json"
+    record.write_text(json.dumps({"spent": 4_990_000}))
+    code = run.main(["replay", "--cc-jsonl", str(jsonl), "--out", str(tmp_path / "o"), "--approved", "5000000",
+                     "--h1-record", str(record), "--seat-settings", str(seat), "--upstream", stub])
+    result = json.loads((tmp_path / "o" / "replay-result.json").read_text())
+    assert result["approval"] == {"combined": 5_000_000, "h1_spent": 4_990_000, "replay": 10_000}
+    assert code == 1 and "approved 10,000" in result["stopped"]  # 1,000 + 32,000 output does not fit 10,000
+    assert [x["path"] for x in _Stub.seen] == ["/v1/messages/count_tokens"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    assert run.main(["replay", "--cc-jsonl", str(jsonl), "--out", str(tmp_path / "o2"), "--approved", "1",
+                     "--h1-record", str(bad), "--seat-settings", str(seat), "--upstream", stub]) == 2
