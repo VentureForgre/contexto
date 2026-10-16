@@ -282,6 +282,14 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     counter resets when the turn id changes. They never return more than remains; when it is
     used up they return: "Recall budget for this turn is used up; answer from what is in view, or
     say the detail is unknown."
+  - Charges convert at `min(bytes_per_token, 1.5)` characters per token, using 1.0 before
+    `set_window` has recorded a ratio. `contexto_recall`, `contexto_search`, and `contexto_state`
+    return text content blocks only (no `structuredContent`), and the charge counts exactly what
+    they return.
+  - With no engine (no window recorded, for example tests or a direct `contexto mcp`), the per-turn
+    budget does not apply and only the per-call limit holds. With an engine present but no room
+    published for the call's turn, the same applies and the store logs `turn_room_missing`, so a
+    missed publish shows up in acceptance logs.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
