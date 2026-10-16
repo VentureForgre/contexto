@@ -112,3 +112,42 @@ def test_a_log_with_no_answer_request_credits_nothing_and_says_why():
 def test_a_normal_log_has_no_reason_key():
     log = [_req(), _call("contexto_search", [{"page_id": PAGE["id"], "start": POS - 5, "end": POS + len(PLANT) + 1}]), _req()]
     assert "reason" not in recall_credit.credit([PROBE], ANSWERED, log, [PAGE])
+
+
+# B29 (reviewer-1 on #161): the cutoff is the answer of the probe turn that asked the probe
+
+
+TURNS = (("q_a_901",), ("q_p_01",), ("q_a_902",), ("q_a_903",))  # q_p_01 is asked in probe turn 2
+HIT = [{"page_id": PAGE["id"], "start": POS - 5, "end": POS + len(PLANT) + 1}]
+
+
+def _turn(*events):
+    """A probe turn: its requests and calls, ending with the answer request (no call after it)."""
+    return [*events, _req()]
+
+
+def test_a_range_returned_in_a_later_probe_turn_does_not_credit_an_earlier_answer():
+    log = [_req(),  # a content turn
+           *_turn(), *_turn(), *_turn(_req(), _call("contexto_search", HIT)), *_turn()]  # the hit in turn 3
+    r = recall_credit.credit([PROBE], ANSWERED, log, [PAGE], probe_turn_ids=TURNS)
+    assert r["credited"] == 0 and not r["paged_only"][0]["returned"]
+    assert recall_credit.credit([PROBE], ANSWERED, log, [PAGE])["credited"] == 1  # the old session-wide rule did
+
+
+def test_a_range_in_the_probes_own_turn_before_its_answer_credits_it():
+    log = [_req(), *_turn(), *_turn(_req(), _call("contexto_search", HIT)), *_turn(), *_turn()]
+    r = recall_credit.credit([PROBE], ANSWERED, log, [PAGE], probe_turn_ids=TURNS)
+    assert r["credited"] == 1 and r["paged_only"][0]["via"]["tool"] == "contexto_search" and "reason" not in r
+
+
+def test_turn_answers_are_the_messages_requests_with_no_call_after_them():
+    log = [_req(), _req(), _call("contexto_search", HIT), _req(), {"event": "request", "path": "/v1/messages/count_tokens"}]
+    assert recall_credit.turn_answer_indices(log) == [0, 3]
+
+
+def test_too_few_turn_answers_fail_closed_and_say_why():
+    log = [_req(), _call("contexto_search", HIT), _req()]  # one turn answer, four probe turns
+    r = recall_credit.credit([PROBE], ANSWERED, log, [PAGE], probe_turn_ids=TURNS)
+    assert r["credited"] == 0 and r["acceptance_3"] is False and r["reason"] == "probe turn answers not found"
+    no_request = recall_credit.credit([PROBE], ANSWERED, [_call("contexto_search", HIT)], [PAGE], probe_turn_ids=TURNS)
+    assert no_request["reason"] == "answer request not found" and no_request["credited"] == 0  # B28 still holds

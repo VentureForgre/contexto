@@ -263,7 +263,8 @@ def main(argv: list[str] | None = None) -> int:
 
                 probes = [p for p in s0.probes if p.id in s0.paged_only]
                 credit = recall_credit.credit(probes, args.answers.read_text(encoding="utf-8"),
-                                              detectors.read_jsonl(args.session_log), reach.load_pages(args.session_dir))
+                                              detectors.read_jsonl(args.session_log), reach.load_pages(args.session_dir),
+                                              probe_turn_ids=s0.probe_turn_ids)
                 out["recall_credit"] = credit
                 out["verdicts"]["recall_credited"] = credit["acceptance_3"]
         print(json.dumps(out, indent=2, default=str))
