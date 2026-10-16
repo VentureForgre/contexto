@@ -385,9 +385,12 @@ def test_real_usage_refines_the_estimate_and_can_trigger_rotation():
     assert "rotation" in names(ev2)  # real usage says the window is nearly full
 
 
-def test_headroom_tracks_running_max_turn_growth():
+@pytest.mark.parametrize("decay", [1.0, 0.5])
+def test_headroom_tracks_a_decaying_max_turn_growth(decay):
+    # Rule 17 (contract PR #186): the maximum decays at each turn start that measures growth; with
+    # headroom_decay 1.0 it is the running maximum the engine kept before rule 17.
     store = MemoryStore(key=b"k" * 32)
-    big = Config(bound=10_000_000, headroom_floor=25_000)
+    big = Config(bound=10_000_000, headroom_floor=25_000, headroom_decay=decay)
     est = TokenEstimator()
     msgs = [user("p0")]
     _, st, _ = rewrite(request(msgs), None, store, big, est)
@@ -396,7 +399,7 @@ def test_headroom_tracks_running_max_turn_growth():
     assert st.max_turn_growth > 0
     msgs = msgs + [assistant("x"), user("p2")]
     _, st2, _ = rewrite(request(msgs), st, store, big, est)
-    assert st2.max_turn_growth == st.max_turn_growth  # running maximum, not the last value
+    assert st2.max_turn_growth == int(st.max_turn_growth * decay)  # the small turn does not replace it
 
 
 # The adapter: count_tokens, endpoints, conversations ------------------------------------------------

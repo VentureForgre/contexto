@@ -144,6 +144,8 @@ class Config:
     headroom_floor: int = 25_000
     min_turn_room: int = 12_000  # A12 (contract PR #115; 12,000 per intake/m2-min-room-12k): a turn's minimum recall room
     headroom_factor: float = 1.25
+    headroom_cap: float = 0.25  # rule 17: headroom at most this share of the bound
+    headroom_decay: float = 0.5  # rule 17: max_turn_growth's weight per later turn start that measures growth
     pin_budget: int = 6_000
     index_budget: int = 4_000
     carried_budget: int = 4_000  # rule 13: carried growth above this is reported
@@ -566,7 +568,10 @@ def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
 
 
 def headroom(state: EpochState, config: Config) -> int:
-    return max(config.headroom_floor, math.ceil(state.max_turn_growth * config.headroom_factor))
+    """Rule 17 (contract PR #186): one outlier turn raises headroom by at most ``headroom_cap`` of the
+    bound, and ``max_turn_growth`` forgets it at ``headroom_decay`` per turn start that measures growth."""
+    grown = math.ceil(state.max_turn_growth * config.headroom_factor)
+    return max(config.headroom_floor, min(grown, math.floor(config.headroom_cap * config.bound)))
 
 
 def estimate_upstream(request: dict, messages: list[dict], previous_n: int, state: EpochState,
@@ -908,7 +913,11 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
             # ratio, averaged when several turns arrive at once (a resume or a missed request).
             added = estimate_items(estimator, messages[state.last_turn_start_n:])
             growth = added // (count - state.last_turn_count)
-            state = replace(state, max_turn_growth=max(state.max_turn_growth, growth))
+            # Rule 17: the previous maximum decays once per turn start that measures growth, before the
+            # rotation decision. A retry or a resumed engine's first request (the turn start that wrote
+            # the record) measures nothing here, so it never decays twice.
+            decayed = math.floor(state.max_turn_growth * config.headroom_decay)
+            state = replace(state, max_turn_growth=max(decayed, growth))
         state = replace(state, last_turn_start_n=n, last_turn_count=count)
         # Early warning (reviewers): carried text messages (contract step 4) growing at consecutive turn
         # starts means a new hook or mode is adding standing messages per turn.

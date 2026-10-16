@@ -19,7 +19,7 @@ def body(messages: list[dict]) -> dict:
     return {"model": "m", "system": "head", "tools": [], "max_tokens": 64, "stream": True, "messages": messages}
 
 
-def growths(sizes: list[int], rule: dict, config: Config = Config(bound=150_000)) -> list[int]:
+def growths(sizes: list[int], rule: dict, config: Config = Config(bound=150_000, **ho.BEFORE_RULE_17)) -> list[int]:
     """max_turn_growth after each turn start of a session whose turns carry ``sizes`` words."""
     engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=config)
     messages: list[dict] = []
@@ -56,7 +56,7 @@ def test_window_keeps_the_largest_of_the_last_n_turns():
 
 
 def test_cap_bounds_headroom_at_a_share_of_the_bound():
-    config = Config(bound=100_000)
+    config = Config(bound=100_000, **ho.BEFORE_RULE_17)
     outlier = EpochState(max_turn_growth=10**6)
     assert rewrite.headroom(outlier, config) == 1_250_000
     with ho.headroom_rule(cap=0.25):
@@ -87,7 +87,7 @@ def test_the_candidates_are_inert_without_an_outlier():
 
 
 def test_a_retried_turn_start_does_not_decay_twice():
-    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=150_000))
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=150_000, **ho.BEFORE_RULE_17))
     messages: list[dict] = []
     values = []
     with ho.headroom_rule(decay=0.5):
@@ -106,14 +106,25 @@ def test_a_resume_on_the_turn_start_that_wrote_the_record_does_not_decay_again()
     store = MemoryStore(key=b"k" * 32)
     messages: list[dict] = []
     with ho.headroom_rule(decay=0.5):
-        first = RewriteEngine(store, config=Config(bound=150_000))
+        first = RewriteEngine(store, config=Config(bound=150_000, **ho.BEFORE_RULE_17))
         for t, size in enumerate(SIZES[:4]):
             messages = messages + [{"role": "user", "content": f"turn {t} " + WORDS * size}]
             first(body(messages), {}, "/v1/messages")
             if t < 3:
                 messages = messages + [{"role": "assistant", "content": [{"type": "text", "text": f"reply {t}"}]}]
         written = next(iter(first.states.values())).max_turn_growth
-        second = RewriteEngine(store, config=Config(bound=150_000))  # a restart, the same request again
+        second = RewriteEngine(store, config=Config(bound=150_000, **ho.BEFORE_RULE_17))  # a restart
         _, _, events = second(body(messages), {}, "/v1/messages")
     assert any(e.get("event") == "epoch_resumed" for e in events)
     assert next(iter(second.states.values())).max_turn_growth == written
+
+
+def test_the_engines_rule_17_reproduces_the_recommended_row():
+    # Rule 17 (contract PR #186) in the engine itself, no patch: A33's decay 0.5 + cap 25% row on A32's
+    # seat session with the 149,140-token read (92,000 head, bound 150,000).
+    from acceptance import seat_bound as sb
+
+    config = Config(bound=150_000)
+    s = sb.summarize(sb.replay(sb.session(92_000, 56, big_read_at=28), config), config)
+    assert (s["rotations"], s["window_minimal"], s["bound_too_small"]) == (15, 1, 0)
+    assert s["window_budget"][0] == 18_907 and s["usd"] == 7.3125
