@@ -438,3 +438,30 @@ def test_session_dir_codex_home_keeps_rollouts_and_removes_config(tmp_path):
         assert "/h2" in (home_dir / "config.toml").read_text()
     finally:
         again.cleanup()
+
+
+def test_retained_snapshot_on_the_responses_dialect():
+    """A14 (contract PR #125) for Codex: message text, calls as tool_use, call outputs as tool_result,
+    rendered as pages render them; the lead, context sections, and reasoning are left out. The engine
+    publishes it through the /responses path, once per request, before the room."""
+    from contexto.rewrite import retained_entries
+
+    items = lead() + [prompt("prompt 0"), reasoning(0),
+                      {"type": "function_call", "call_id": "c0", "name": "exec", "arguments": '{"cmd": "ls", "a": 1}'},
+                      output(0, "chain link 3 at node 12"), answer("answer 0")]
+    entries = retained_entries(items, 0, RESPONSES)
+    assert [(e["turn"], e["message_index"], e["role"], e["text"]) for e in entries] == [
+        (1, 4, "user", "prompt 0"),
+        (1, 6, "assistant", 'tool_use exec {"a": 1, "cmd": "ls"}'),
+        (1, 7, "tool_result", "tool_result:\nchain link 3 at node 12"),
+        (1, 8, "assistant", "answer 0")]
+    assert "opaque-synthetic" not in json.dumps(entries) and "environment_context" not in json.dumps(entries)
+
+    class Recording(MemoryStore):
+        def set_retained(self, epoch, k, turns):
+            self.snapshots = [*getattr(self, "snapshots", []), (epoch, k, turns)]
+
+    store = Recording(key=b"k" * 32)
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    engine(request(items + [prompt("prompt 1")]), {}, "/v1/responses")
+    assert len(store.snapshots) == 1 and store.snapshots[0][2][-1]["text"] == "prompt 1"
