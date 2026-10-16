@@ -158,6 +158,12 @@ def read_retained(data: Any) -> tuple[int, int, int, list[dict[str, Any]]] | Non
 
 EPOCH_VERSION = 1
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+EPOCH_DIALECTS = ("anthropic", "responses")
+_CONVERSATION = re.compile(r"(?:anthropic|responses):[0-9a-f]{64}")  # rewrite.keyed(dialect, request)
+
+
+def _hex64(v: Any) -> bool:
+    return isinstance(v, str) and bool(_HEX64.fullmatch(v))
 
 
 def _nat(v: Any) -> bool:
@@ -174,15 +180,20 @@ EPOCH_FIELDS: dict[str, Callable[[Any], bool]] = {
     **{name: _nat for name in ("epoch", "k", "strip_upto", "turns_paged", "max_turn_growth", "last_turn_count",
                                "carried_text_streak", "window_minimal_count")},
     **{name: _nat_or_none for name in ("last_turn_start_n", "head_tokens", "initial_carried",
-                                       "last_carried_text_count", "turn_room_low_epoch", "window_budget")},
-    **{name: (lambda v: isinstance(v, str)) for name in ("pinned_text", "index_text", "head_fingerprint", "dialect",
-                                                         "conversation")},
-    "preamble_sha256": lambda v: isinstance(v, str) and bool(_HEX64.fullmatch(v)),
+                                       "last_carried_text_count", "turn_room_low_epoch")},
+    # W = bound - headroom - F can be negative (bound_too_small).
+    "window_budget": lambda v: v is None or (isinstance(v, int) and not isinstance(v, bool)),
+    **{name: (lambda v: isinstance(v, str)) for name in ("pinned_text", "index_text")},
+    "preamble_sha256": _hex64,
+    "head_fingerprint": _hex64,
+    "dialect": lambda v: v in EPOCH_DIALECTS,
+    "conversation": lambda v: isinstance(v, str) and bool(_CONVERSATION.fullmatch(v)),
     "model": lambda v: v is None or isinstance(v, str),
-    "paged_carried": lambda v: isinstance(v, list) and all(isinstance(h, str) for h in v),
+    "paged_carried": lambda v: isinstance(v, list) and all(_hex64(h) for h in v),
+    # dataclasses.asdict(Config), kept opaque: the engine compares it for equality, so a new setting
+    # needs no store change.
     "config": lambda v: isinstance(v, dict),
-    "anchor": lambda v: (isinstance(v, dict) and set(v) == {"n", "hash"} and _nat(v["n"])
-                         and isinstance(v["hash"], str)),
+    "anchor": lambda v: isinstance(v, dict) and set(v) == {"n", "hash"} and _nat(v["n"]) and _hex64(v["hash"]),
 }
 
 

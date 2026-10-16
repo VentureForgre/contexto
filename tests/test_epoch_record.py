@@ -13,9 +13,9 @@ RECORD = {
     "carried_text_streak": 0, "window_minimal_count": 0, "last_turn_start_n": 40, "head_tokens": 47_600,
     "initial_carried": 2_100, "last_carried_text_count": None, "turn_room_low_epoch": None, "window_budget": 81_737,
     "pinned_text": "Earlier turns ...", "index_text": "pg_0000000000000000 turn 0: ...",
-    "preamble_sha256": "a" * 64, "head_fingerprint": "f" * 64, "dialect": "anthropic", "conversation": "c" * 64,
-    "model": "claude-opus-5-5", "paged_carried": ["d" * 64], "config": {"bound": 150_000, "headroom_floor": 25_000},
-    "anchor": {"n": 41, "hash": "e" * 64},
+    "preamble_sha256": "a" * 64, "head_fingerprint": "f" * 64, "dialect": "anthropic",
+    "conversation": "anthropic:" + "c" * 64, "model": "claude-opus-5-5", "paged_carried": ["d" * 64],
+    "config": {"bound": 150_000, "headroom_floor": 25_000}, "anchor": {"n": 41, "hash": "e" * 64},
 }
 
 
@@ -52,6 +52,9 @@ def test_the_record_is_private_atomic_and_never_logged(tmp_path):
     lambda r: {**r, "extra": 1}, lambda r: {**r, "k": -1}, lambda r: {**r, "k": True},
     lambda r: {**r, "preamble_sha256": "short"}, lambda r: {**r, "paged_carried": "x"},
     lambda r: {**r, "anchor": {"n": 1}}, lambda r: {**r, "model": 5}, lambda r: {**r, "config": []},
+    lambda r: {**r, "conversation": "c" * 64}, lambda r: {**r, "dialect": "openai"},
+    lambda r: {**r, "head_fingerprint": "F" * 64}, lambda r: {**r, "paged_carried": ["short"]},
+    lambda r: {**r, "anchor": {"n": 1, "hash": "x"}}, lambda r: {**r, "head_tokens": -1},
 ])
 def test_a_wrong_shape_or_version_is_rejected_on_write(store, change):
     store.set_epoch(RECORD)
@@ -99,3 +102,25 @@ def test_memory_store_returns_a_copy():
 
 def test_the_validated_fields_are_exactly_the_contracts():
     assert set(EPOCH_FIELDS) == set(RECORD)
+
+
+
+def test_the_engines_record_as_lane_a_sends_it(tmp_path):
+    """Lane A's A30 writer (builder-1, 16:19Z): exactly these 24 keys and value shapes; no version."""
+    import dataclasses
+
+    from contexto.rewrite import Config
+
+    record = {
+        "epoch": 2, "k": 37, "strip_upto": 35, "turns_paged": 9, "max_turn_growth": 8_200, "last_turn_count": 12,
+        "carried_text_streak": 1, "window_minimal_count": 0, "last_turn_start_n": 36, "head_tokens": 47_600,
+        "initial_carried": 2_400, "last_carried_text_count": 3, "turn_room_low_epoch": None,
+        "window_budget": -1_250,  # W can be negative (bound_too_small)
+        "pinned_text": "pinned", "index_text": "", "preamble_sha256": "0" * 64, "head_fingerprint": "1" * 64,
+        "dialect": "responses", "conversation": "responses:" + "2" * 64, "model": None,
+        "paged_carried": [], "config": dataclasses.asdict(Config()), "anchor": {"n": 37, "hash": "3" * 64},
+    }
+    assert len(record) == 24
+    for store in (MemoryStore("s1"), SessionStore(tmp_path, "s1")):
+        store.set_epoch(record)
+        assert store.epoch_record() == {**record, "version": 1}
