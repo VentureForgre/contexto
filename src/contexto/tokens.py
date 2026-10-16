@@ -1,8 +1,10 @@
 """The token estimator both lanes use (M2 contract, rewrite engine rule 3).
 
-Before a session has real usage, tool_result content counts 2.0 bytes per token and all other
-text 3.5. Once the proxy reports real usage (``TokenEstimator.observe``), the session's measured
-bytes-per-token ratio replaces both defaults.
+Before a session has real usage, tool_result content counts 1.5 bytes per token and all other
+text 3.5 (intake decision 2026-10-16 01:27Z, contract PR #44; tool output such as numeric logs tokenizes densely, and
+M0 measured about 1.8 bytes per token for it, so the seed errs toward overcounting). Once the proxy
+reports real usage (``TokenEstimator.observe``), the session's cumulative measured bytes-per-token
+ratio replaces both seeds.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from typing import Any
 from contexto.canonical import canonical_bytes
 
 TEXT_BYTES_PER_TOKEN = 3.5
-TOOL_RESULT_BYTES_PER_TOKEN = 2.0
+TOOL_RESULT_BYTES_PER_TOKEN = 1.5
 
 
 def _size(data: str | bytes) -> int:
