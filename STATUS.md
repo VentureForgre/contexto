@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-16 10:15Z by intake.lead. Decisions taken and still open, with reasons:
+Updated 2026-10-16 11:15Z by intake.lead. Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -90,12 +90,8 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
 ## Known limitations (v0.1.0)
 
 - Acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's proxy.
-- Codex, open bugs in v0.1.0 and v0.1.1 (found during the Codex acceptance plan, zero spend):
-  search does not match text in Codex's message parts, tool calls, or tool outputs, so a Codex
-  session's paged-out turns are not found by search and their index entries are empty, because
-  the store extracts search text from Claude's message shape only (recall by page id works; fix
-  B23 in progress); and with a non-default `CONTEXTO_HOME`, Codex's MCP server opens
-  `~/.contexto` instead (fix A18, PR #148, in review). Claude Code is not affected by either.
+- Codex pages written by v0.1.0 to v0.1.2 are searchable from v0.1.3 on, but their index lines
+  keep empty user text, tools, and paths (index stubs are stored when a page is written).
 - Codex: runs end to end, but has no live acceptance run. HTTP is forced through a custom
   provider (no WebSocket). Contexto's tools sit behind Codex tool search and need
   `default_tools_approval_mode = approve`, which `contexto run codex` sets. Only API-key mode is
@@ -124,6 +120,17 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
   changed; mixed-model sessions blend the ratio under the last model's label.
 - In a question turn, the question itself can take one of the 3 in-view search slots (B22,
   queued: exclude the current turn's own text).
+
+## Releases
+
+| Version | Commit | What changed |
+|---|---|---|
+| v0.1.0 | f990703 | first release, after M2 acceptance (D29) |
+| v0.1.1 | 0769fdf | B22: in-view search skips the current turn's own question |
+| v0.1.2 | def6e8c | A18: `CONTEXTO_HOME` resolved to one absolute path for the proxy and every MCP server (Codex's MCP server ignored it before) |
+| v0.1.3 | 031ca59 | B23: search and index lines read Codex message parts, tool calls, and tool outputs (Codex search found nothing before; recall already worked, B20 in v0.1.0) |
+
+Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
 ## Process notes
 
