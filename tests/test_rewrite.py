@@ -5,6 +5,7 @@ loops, signed and redacted thinking, settings-only system messages, and the CLI'
 single text block to a plain string. All content is synthetic."""
 
 import copy
+import json
 
 import pytest
 
@@ -22,6 +23,8 @@ from contexto.rewrite import (
     rewrite,
     window_tokens,
 )
+from contexto.store import KeyFileError, PageNotFoundError, SessionNotFoundError, SessionStore
+from contexto.store.ledger import LedgerCorruptError, LedgerError
 from contexto.store.memory import MemoryStore
 from contexto.tokens import TokenEstimator
 
@@ -860,3 +863,364 @@ def test_window_minimal_count_grows_and_normal_rotation_does_not_use_it():
     assert [e["count"] for e in ev if e["event"] == "window_minimal"] == [2]
     _, _, normal, _ = run(history(6) + [user("new prompt")])  # both fit: ordinary rotation
     assert "rotation" in names(normal) and "window_minimal" not in names(normal)
+
+
+# Rule 14: degraded mode and the terminal step (A2d) ---------------------------------------------
+
+class FaultyStore:
+    """A ``MemoryStore`` with fault injection: ``fail[method]`` is raised by that method while present;
+    ``fail_at = (method, n, error)`` raises on the n-th call of ``method`` counted in ``calls``."""
+
+    def __init__(self):
+        self.inner = MemoryStore(key=b"k" * 32)
+        self.fail: dict[str, Exception] = {}
+        self.fail_at: tuple[str, int, Exception] | None = None
+        self.calls: list[str] = []
+        self.windows: list[tuple[int, float]] = []
+
+    def _call(self, name, *args):
+        self.calls.append(name)
+        if name in self.fail:
+            raise self.fail[name]
+        if self.fail_at and self.fail_at[:2] == (name, self.calls.count(name)):
+            raise self.fail_at[2]
+        return getattr(self.inner, name)(*args)
+
+    def page_out(self, turns, first_turn):
+        return self._call("page_out", turns, first_turn)
+
+    def pinned_text(self, budget):
+        return self._call("pinned_text", budget)
+
+    def index_text(self, budget):
+        return self._call("index_text", budget)
+
+    def log(self, event):
+        return self._call("log", event)
+
+    def quarantine_page(self, page_id):
+        return self._call("quarantine_page", page_id)
+
+    def set_window(self, window_tokens, bytes_per_token):
+        self._call("set_window", window_tokens, bytes_per_token)
+        self.windows.append((window_tokens, bytes_per_token))
+
+
+def turn_start_after(msgs, t):
+    return msgs + [assistant(f"answer {t} {FILL}"), user(f"prompt {t + 1} {FILL}")]
+
+
+def seeded_conflict(msgs, store):
+    """Store a corrupt copy of the first page a rotation of ``msgs`` writes, under its real id."""
+    _, _, _, reference = run(msgs)
+    page_id = next(iter(reference.pages))
+    store.inner.pages[page_id] = {**reference.pages[page_id], "messages": [user("corrupted synthetic page")]}
+    return page_id, reference.pages[page_id]
+
+
+def test_page_conflict_enters_degraded_mode_and_sends_the_last_good_transform():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    page_id, _ = seeded_conflict(msgs, store)
+    up, st, ev, _ = run(msgs, store=store)
+    assert names(ev) == ["page_conflict", "degraded_enter", "over_bound", "request"]
+    assert ev[0] == {"event": "page_conflict", "epoch": 0, "operation": "page_out", "error": "PageConflictError",
+                     "page_id": page_id}
+    assert ev[1]["reason"] == "page_conflict" and ev[-1]["degraded"] is True
+    assert st.degraded and st.conflict_page == page_id and st.k == 0 and st.epoch == 0
+    assert up["messages"] == msgs  # epoch 0's transform: nothing paged, nothing lost
+    # Mid tool loop the engine only appends, touches no store, and marks every request degraded.
+    store.calls.clear()
+    loop = msgs + [tool_use(1), tool_result(1)]
+    up2, _, ev2, _ = run(loop, state=st, store=store)
+    assert up2["messages"][:len(up["messages"])] == up["messages"] and len(up2["messages"]) == len(loop)
+    assert names(ev2) == ["over_bound", "request"] and ev2[-1]["degraded"] is True and store.calls == []
+    assert ev2[0]["degraded"] is True and ev2[0]["in_tool_loop"] is True
+
+
+@pytest.mark.parametrize("method,error", [
+    ("page_out", OSError("synthetic disk full")),
+    ("page_out", SessionNotFoundError("synthetic")),
+    ("pinned_text", LedgerError("synthetic")),
+    ("pinned_text", LedgerCorruptError("synthetic")),
+    ("index_text", OSError("synthetic")),
+    ("index_text", KeyFileError("synthetic")),
+])
+def test_store_error_at_a_rotation_keeps_the_last_good_epoch(method, error):
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    up, st, ev, _ = run(msgs, store=store)
+    assert "rotation" in names(ev) and not st.degraded
+    store.fail[method] = error
+    msgs2 = turn_start_after(msgs, 6)
+    msgs2 = turn_start_after(msgs2, 7)
+    up2, st2, ev2, _ = run(msgs2, state=st, store=store)
+    assert names(ev2)[:2] == ["store_error", "degraded_enter"] and "rotation" not in names(ev2)
+    assert ev2[0] == {"event": "store_error", "epoch": st.epoch, "operation": method, "error": type(error).__name__}
+    assert (st2.epoch, st2.k, st2.pinned_text, st2.index_text) == (st.epoch, st.k, st.pinned_text, st.index_text)
+    assert st2.degraded and ev2[-1]["degraded"] is True
+    assert up2["messages"][:len(up["messages"])] == up["messages"]  # append-only from the last good transform
+    assert len(up2["messages"]) == len(up["messages"]) + len(msgs2) - len(msgs)
+    assert str(error) not in repr(ev2)  # exception text (paths) is never logged
+
+
+def test_degraded_retry_succeeds_once_and_leaves_degraded_mode():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    store.fail["page_out"] = OSError("synthetic")
+    _, st, _, _ = run(msgs, store=store)
+    del store.fail["page_out"]
+    msgs2 = turn_start_after(msgs, 6)
+    _, st2, ev2, _ = run(msgs2, state=st, store=store)
+    assert names(ev2)[0] == "degraded_leave" and "rotation" in names(ev2)
+    assert not st2.degraded and "degraded" not in ev2[-1] and st2.k > 0
+
+
+def test_degraded_retry_failure_stays_degraded_and_tries_once():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    store.fail["page_out"] = OSError("synthetic")
+    _, st, _, _ = run(msgs, store=store)
+    store.calls.clear()
+    msgs2 = turn_start_after(msgs, 6)
+    up2, st2, ev2, _ = run(msgs2, state=st, store=store)
+    assert names(ev2) == ["store_error", "over_bound", "request"]
+    assert ev2[0]["degraded"] is True and "degraded_enter" not in names(ev2)
+    assert store.calls.count("page_out") == 1 and st2.degraded and up2["messages"] == msgs2
+
+
+def test_degraded_retry_reads_the_store_when_no_rotation_is_due():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    store.fail["page_out"] = OSError("synthetic")
+    _, st, _, _ = run(msgs, store=store)
+    roomy = Config(bound=10_000_000, headroom_floor=500, pin_budget=200, index_budget=200)
+    store.fail = {"pinned_text": OSError("synthetic")}
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store, config=roomy)
+    assert ev2[0]["operation"] == "pinned_text" and st2.degraded
+    store.fail = {}
+    _, st3, ev3, _ = run(turn_start_after(turn_start_after(msgs, 6), 7), state=st2, store=store, config=roomy)
+    assert names(ev3) == ["degraded_leave", "request"] and not st3.degraded
+
+
+def test_degraded_turn_start_over_the_bound_is_logged_over_bound():
+    store = FaultyStore()
+    msgs = history(12) + [user("new prompt")]
+    store.fail["page_out"] = OSError("synthetic")
+    _, _, ev, _ = run(msgs, store=store)
+    bound = [e for e in ev if e["event"] == "over_bound"]
+    assert bound == [{"event": "over_bound", "source": "estimate", "in_tool_loop": False, "epoch": 0,
+                      "estimate": bound[0]["estimate"], "bound": CONFIG.bound, "degraded": True}]
+
+
+def test_persistent_conflict_is_quarantined_and_repaged_leaving_degraded_mode():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    page_id, good = seeded_conflict(msgs, store)
+    _, st, ev, _ = run(msgs, store=store)
+    assert names(ev)[:2] == ["page_conflict", "degraded_enter"] and not store.inner.quarantined  # first time
+    msgs2 = turn_start_after(msgs, 6)
+    _, st2, ev2, _ = run(msgs2, state=st, store=store)
+    assert names(ev2)[:2] == ["page_conflict", "degraded_leave"] and "rotation" in names(ev2)
+    assert ev2[0]["degraded"] is True and ev2[1]["quarantined"] == page_id
+    assert "page_quarantined" not in names(ev2)  # the store logs it, never the engine
+    assert [e["page_id"] for e in store.inner.events if e["event"] == "page_quarantined"] == [page_id]
+    assert store.inner.quarantined[page_id][-1][1]["messages"] == [user("corrupted synthetic page")]  # kept
+    assert store.inner.pages[page_id] == good  # re-paged under the same id from the current messages
+    assert not st2.degraded and st2.conflict_page is None and st2.k > 0
+
+
+def test_failed_quarantine_stays_degraded():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    seeded_conflict(msgs, store)
+    _, st, _, _ = run(msgs, store=store)
+    store.fail["quarantine_page"] = OSError("synthetic")
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert names(ev2)[:2] == ["page_conflict", "store_error"] and ev2[1]["operation"] == "quarantine_page"
+    assert st2.degraded and not store.inner.quarantined and "degraded_leave" not in names(ev2)
+
+
+def test_paged_changed_resync_with_a_broken_store_forwards_the_original_request():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    _, st, _, _ = run(msgs, store=store)
+    assert st.k > 0
+    changed = [user("compacted synthetic summary", context=True), *msgs[1:]] + [assistant("a"), user("next")]
+    store.fail["page_out"] = OSError("synthetic")
+    req = request(changed)
+    up, st2, ev = rewrite(req, st, store, CONFIG, TokenEstimator())
+    assert up is req  # the CLI's request, unchanged
+    assert names(ev) == ["resync", "store_error", "degraded_enter", "fallback_failed", "request"]
+    assert ev[3]["reason"] == "resync_paged_changed" and ev[-1]["fallback_failed"] is True
+    assert ev[-1]["degraded"] is True and store.calls.count("page_out") == 2  # one attempt in this request
+    assert st2.hashes == st.hashes and st2.k == st.k and st2.degraded  # the next request tries once more
+    del store.fail["page_out"]
+    up3, st3, ev3 = rewrite(request(changed + [assistant("b"), user("again")]), st2, store, CONFIG, TokenEstimator())
+    assert names(ev3)[:2] == ["resync", "degraded_leave"] and not st3.degraded and up3["messages"] != changed
+
+
+def test_failure_building_the_degraded_transform_forwards_the_original_request(monkeypatch):
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    store.fail["page_out"] = OSError("synthetic")
+    _, st, _, _ = run(msgs, store=store)
+
+    def broken(messages, state):
+        raise RuntimeError("synthetic")
+
+    monkeypatch.setattr("contexto.rewrite.transform_messages", broken)
+    req = request(msgs + [tool_use(1), tool_result(1)])
+    up, st2, ev = rewrite(req, st, store, CONFIG, TokenEstimator())
+    assert up is req and "fallback_failed" in names(ev) and st2.degraded
+    assert next(e for e in ev if e["event"] == "fallback_failed")["reason"] == "degraded_transform:RuntimeError"
+    # Outside degraded mode the same exception is a genuine bug: it reaches the proxy (transform_error).
+    with pytest.raises(RuntimeError):
+        rewrite(request(history(2) + [user("new")]), None, MemoryStore(key=b"k" * 32), CONFIG, TokenEstimator())
+
+
+def test_unlisted_store_exception_is_a_genuine_bug_and_propagates():
+    store = FaultyStore()
+    store.fail["page_out"] = ValueError("synthetic bug")
+    with pytest.raises(ValueError):
+        run(history(6) + [user("new prompt")], store=store)
+
+
+def test_store_log_failure_in_observe_usage_enters_degraded_mode_without_raising():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=Config(bound=1_000))
+    req = request(history(2) + [user("new")])
+    engine(req, {}, MESSAGES)
+    store.fail["log"] = OSError("synthetic")
+    events = engine.observe_usage(MESSAGES, {"input_tokens": 5_000}, req)
+    assert names(events) == ["over_bound", "estimate_error", "store_error", "degraded_enter"]
+    assert events[2]["operation"] == "log"
+    assert engine.states[next(iter(engine.states))].degraded
+
+
+def test_set_window_publishes_w_and_the_measured_ratio_only_when_they_change():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    msgs = history(6) + [user("new prompt")]
+    req = request(msgs)
+    engine(req, {}, MESSAGES)
+    assert "set_window" not in store.calls  # no measured ratio yet
+    state = next(iter(engine.states.values()))
+    sent = state.last_sent_bytes
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, req)
+    assert store.windows == [(state.window_budget, engine.estimator.measured_bytes_per_token)]
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, req)  # ratio unchanged
+    assert len(store.windows) == 1
+    engine(req, {}, COUNT_TOKENS)  # never from count_tokens
+    assert len(store.windows) == 1
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 2}, req)  # ratio moves well over 1%
+    assert len(store.windows) == 2 and store.windows[-1][1] == engine.estimator.measured_bytes_per_token
+    assert store.inner.window() == store.windows[-1]  # the real MemoryStore accepted both
+
+
+def test_set_window_is_skipped_for_a_non_positive_w_and_failing_enters_degraded_mode():
+    store = FaultyStore()
+    tight = Config(bound=4_000, headroom_floor=6_000, pin_budget=200, index_budget=200)  # W < 0
+    engine = RewriteEngine(store, config=tight)
+    req = request(history(6) + [user("new prompt")])
+    _, _, events = engine(req, {}, MESSAGES)
+    assert "bound_too_small" in names(events)
+    engine.observe_usage(MESSAGES, {"input_tokens": 3_000}, req)
+    assert next(iter(engine.states.values())).published_window is None and "set_window" not in store.calls
+    req = request(history(6) + [user("new prompt")])
+    failing = FaultyStore()
+    failing.fail["set_window"] = OSError("synthetic")
+    engine = RewriteEngine(failing, config=CONFIG)
+    engine(req, {}, MESSAGES)
+    events = engine.observe_usage(MESSAGES, {"input_tokens": 3_000}, req)
+    assert [e["operation"] for e in events if e["event"] == "store_error"] == ["set_window"]
+    assert next(iter(engine.states.values())).degraded
+
+
+def test_quarantine_of_a_vanished_page_is_a_store_error_and_stays_degraded():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    page_id, _ = seeded_conflict(msgs, store)
+    _, st, _, _ = run(msgs, store=store)
+    store.fail["quarantine_page"] = PageNotFoundError(f"no stored or quarantined page {page_id}")
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert ev2[1] == {"event": "store_error", "epoch": st.epoch, "operation": "quarantine_page",
+                      "error": "PageNotFoundError", "degraded": True}
+    assert st2.degraded
+
+
+def test_persistent_conflict_on_a_session_store_quarantines_the_file_and_repages(tmp_path):
+    store = SessionStore(tmp_path, "a2d-test")
+    msgs = history(6) + [user("new prompt")]
+    run(msgs, store=store)  # a first conversation writes real page files
+    first = min(store.pages_dir.glob("pg_*.json"), key=lambda p: json.loads(p.read_text())["turn"])
+    good = first.read_text()
+    page = json.loads(good)
+    first.write_text(json.dumps({**page, "messages": [user("corrupted synthetic page")]}))
+    # The same conversation from a fresh state pages turn 0 again under the same id: a conflict.
+    _, st, ev, _ = run(msgs, store=store)
+    assert ev[0]["event"] == "page_conflict" and ev[0]["page_id"] == page["id"] and st.degraded
+    assert str(tmp_path) not in repr(ev)  # the exception's path is never logged
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert names(ev2)[:2] == ["page_conflict", "degraded_leave"] and not st2.degraded
+    assert json.loads(first.read_text()) == page  # re-paged under the same id from the current messages
+    assert list((store.dir / "quarantine").glob(f"{page['id']}.*.json"))  # moved aside, never deleted
+
+
+def test_failure_after_pages_were_written_rewrites_them_identically_on_the_retry():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    store.fail_at = ("pinned_text", 2, OSError("synthetic"))  # fixed_overhead reads it, then new_epoch
+    _, st, ev, _ = run(msgs, store=store)
+    assert ev[0]["operation"] == "pinned_text" and "page_out" in store.calls and store.inner.pages
+    assert st.degraded and st.k == 0 and st.turns_paged == 0  # the written pages are not counted
+    store.fail_at = None
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert names(ev2)[0] == "degraded_leave" and "page_conflict" not in names(ev2) and not st2.degraded
+
+
+def test_carried_text_paging_failure_enters_degraded_mode():
+    store = FaultyStore()
+    cfg = Config(bound=30_000, headroom_floor=500, carried_text_budget=1_000, carried_budget=1_000_000)
+    msgs = [user(f"prompt 0 {FILL}", context=True), system("sys A"), assistant(f"a0 {FILL}")]
+    for t in range(1, 10):
+        msgs += [user(f"prompt {t} {FILL}"), style_message(f"Style{t}"), assistant(f"a{t} {FILL}")]
+    for t in range(10, 30):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    store.fail_at = ("page_out", 2, OSError("synthetic"))  # the turns page, then the carried text fails
+    up, st, ev, _ = run(msgs, store=store, config=cfg)
+    assert ev[0] == {"event": "store_error", "epoch": 0, "operation": "page_out", "error": "OSError"}
+    assert "carried_paged" not in names(ev) and "rotation" not in names(ev) and up["messages"] == msgs
+    store.fail_at = None
+    _, st2, ev2, _ = run(msgs + [assistant("a"), user("next")], state=st, store=store, config=cfg)
+    assert names(ev2)[:2] == ["degraded_leave", "page_out"] and "rotation" in names(ev2) and not st2.degraded
+
+
+def test_set_window_failure_at_a_rotation_enters_degraded_mode():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    first = request(history(2) + [user("new")])
+    engine(first, {}, MESSAGES)
+    sent = next(iter(engine.states.values())).last_sent_bytes
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, first)  # the ratio is measured, W not yet known
+    assert "set_window" not in store.calls
+    store.fail["set_window"] = OSError("synthetic")
+    _, _, events = engine(request(history(6) + [user("new prompt")]), {}, MESSAGES)
+    assert [e["operation"] for e in events if e["event"] == "store_error"] == ["set_window"]
+    assert "rotation" not in names(events) and next(iter(engine.states.values())).degraded
+
+
+def test_repage_failure_after_quarantine_stays_degraded_with_the_page_moved_aside():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    page_id, good = seeded_conflict(msgs, store)
+    _, st, _, _ = run(msgs, store=store)
+    store.calls.clear()
+    store.fail_at = ("page_out", 2, OSError("synthetic"))  # the conflict, the quarantine, then the re-page
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert names(ev2)[:2] == ["page_conflict", "store_error"] and ev2[1]["operation"] == "page_out"
+    assert st2.degraded and page_id in store.inner.quarantined and "degraded_leave" not in names(ev2)
+    store.fail_at = None
+    _, st3, ev3, _ = run(turn_start_after(turn_start_after(msgs, 6), 7), state=st2, store=store)
+    assert names(ev3)[0] == "degraded_leave" and not st3.degraded and store.inner.pages[page_id] == good
