@@ -170,7 +170,7 @@ PROXY = "http://127.0.0.1:43210"
 
 def claude_home(tmp_path, helper="/synthetic/bin/key-helper --profile synthetic"):
     home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
     (home / ".claude" / "settings.json").write_text(json.dumps({"apiKeyHelper": helper}))
     return home
 
@@ -326,7 +326,10 @@ def test_run_codex_api_key_mode_runs_and_cleans_up(tmp_path, monkeypatch):
     assert run_codex(args, launcher=fake, stderr=err) == 7
     assert fake.calls["upstream"] == "https://owner-proxy.invalid/v1" and fake.calls["session"] == "S9"
     assert fake.calls["argv"] == ["codex", "exec", "hi"] and fake.calls["home_existed"]
-    assert not os.path.exists(fake.calls["home"]) and fake.proxy.stopped
+    home = fake.calls["home"]
+    assert home.endswith(os.path.join("sessions", "S9", "codex-home"))  # under the Contexto session dir
+    assert os.path.isdir(home) and not os.path.exists(os.path.join(home, "config.toml"))  # rollouts kept
+    assert fake.proxy.stopped
     assert "session S9" in err.getvalue()
 
 
@@ -342,3 +345,39 @@ def test_run_codex_chatgpt_mode_and_errors(tmp_path, monkeypatch):
     assert "O4" in err.getvalue()
     refused = FakeLauncher(bound_error="bound too large")
     assert run_codex(parse("codex"), launcher=refused, stderr=io.StringIO()) == 2
+
+
+
+def test_tag_leading_user_prompts_stay_turn_starts():
+    from contexto.codex import CONTEXT_SECTIONS_CODEX_VERSION
+    assert CONTEXT_SECTIONS_CODEX_VERSION == "0.154.0"
+    d = ResponsesDialect()
+    for text in ("<div>fix this layout</div>", "<template>synthetic</template>", "<T>generic question",
+                 "<environment_context_extra>not measured", "# AGENTS.md is a file name I mention"):
+        item = prompt(text)
+        assert d.is_turn_start(item) and not d.is_system_like(item), text
+    for text in ("<environment_context>synthetic</environment_context>",
+                 "<permissions instructions>synthetic</permissions instructions>",
+                 "<skills_instructions>x</skills_instructions>", "<collaboration_mode>x</collaboration_mode>",
+                 "<multi_agent_role>x</multi_agent_role>", "<multi_agent_mode>x</multi_agent_mode>",
+                 "# AGENTS.md instructions for /synthetic/dir"):
+        item = prompt(text)
+        assert d.is_system_like(item) and not d.is_turn_start(item), text
+
+
+def test_session_dir_codex_home_keeps_rollouts_and_removes_config(tmp_path):
+    home_dir = tmp_path / "ctx" / "sessions" / "S3" / "codex-home"
+    launch = plan_codex([], PROXY, "S3", env={}, cwd=tmp_path, home=claude_home(tmp_path),
+                        upstream="https://u.invalid/v1", codex_home_dir=home_dir)
+    assert launch.codex_home == home_dir and stat.S_IMODE(home_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((home_dir / "config.toml").stat().st_mode) == 0o600
+    (home_dir / "sessions").mkdir()
+    (home_dir / "sessions" / "rollout-synthetic.jsonl").write_text("{}")
+    launch.cleanup()
+    assert not (home_dir / "config.toml").exists() and (home_dir / "sessions" / "rollout-synthetic.jsonl").exists()
+    again = plan_codex([], PROXY, "S3", env={}, cwd=tmp_path, home=claude_home(tmp_path, helper="/h2"),
+                       upstream="https://u.invalid/v1", codex_home_dir=home_dir)  # a resumed session reuses it
+    try:
+        assert "/h2" in (home_dir / "config.toml").read_text()
+    finally:
+        again.cleanup()

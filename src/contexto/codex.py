@@ -15,8 +15,9 @@ Mapping onto the contract's rules (``contexto.rewrite``):
 - Lead: every item before the first turn start. It stays first in every upstream request and is
   never paged (the analogue of ``system`` and of the session-start message).
 - System-like items: developer or system messages, the ``additional_tools`` item, and user messages
-  made only of context sections. After the lead they are carried (other text, contract step 4),
-  since no Codex hook-output signature is documented yet; non-text ones are unclassified.
+  made only of measured context sections (``CONTEXT_SECTION``). After the lead they are carried
+  (other text, contract step 4): no per-turn Codex context shape is measured yet, and carrying is
+  the contract's safe failure; non-text ones are unclassified.
 - Thinking (rule 2): ``reasoning`` items of retained turns that existed when the epoch began are
   dropped. Dropping a reasoning item alone keeps call pairing valid; turns are paged whole, so a
   ``function_call`` and its output stay together.
@@ -46,8 +47,14 @@ from contexto.upstream import claude_settings_order
 MODEL_OUTPUT_TYPES = frozenset({"reasoning", "function_call", "custom_tool_call", "local_shell_call",
                                 "web_search_call", "image_generation_call", "tool_search_call"})
 TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
-# Context sections Codex injects as messages (measured tags, and AGENTS.md per the 0.154.0 source).
-CONTEXT_SECTION = re.compile(r"\s*(<[A-Za-z_][\w -]*>|# AGENTS\.md instructions)")
+# Context sections Codex injects as messages, anchored to the exact openings measured on codex-cli
+# 0.154.0 (spikes/m2/codex/probe.sh: skills_instructions, permissions instructions, collaboration_mode,
+# multi_agent_role, multi_agent_mode, environment_context) and the AGENTS.md header from the 0.154.0
+# source. A user prompt that merely starts with another tag (such as <div>) stays a turn start.
+CONTEXT_SECTIONS_CODEX_VERSION = "0.154.0"
+CONTEXT_SECTION = re.compile(
+    r"\s*(?:<(?:skills_instructions|permissions instructions|collaboration_mode|multi_agent_role|"
+    r"multi_agent_mode|environment_context)>|# AGENTS\.md instructions for )")
 
 
 def _parts(item: dict) -> list:
@@ -175,13 +182,18 @@ class CodexLaunch:
     argv: list[str]
     env: dict[str, str]
     upstream: str
-    codex_home: Path | None = None  # temporary CODEX_HOME to remove with cleanup()
+    codex_home: Path | None = None  # CODEX_HOME written for this launch (API-key mode)
     notes: list[str] = field(default_factory=list)
+    keep_home: bool = False  # True when CODEX_HOME lives in the Contexto session dir (rollouts kept)
 
     def cleanup(self) -> None:
-        if self.codex_home is not None:
+        if self.codex_home is None:
+            return
+        if self.keep_home:
+            (self.codex_home / "config.toml").unlink(missing_ok=True)
+        else:
             shutil.rmtree(self.codex_home, ignore_errors=True)
-            self.codex_home = None
+        self.codex_home = None
 
 
 def claude_api_key_helper(cwd: Path, home: Path) -> str | None:
@@ -268,7 +280,8 @@ def resolve_codex_upstream(auth_mode: str, explicit: str | None, env: dict[str, 
 def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_mode: str = API_KEY_MODE,
                key_helper: str | None = None, upstream: str | None = None, contexto_bin: str = "contexto",
                codex_bin: str = "codex", env: dict[str, str] | None = None, cwd: Path | None = None,
-               home: Path | None = None, claude_upstream: str | None = None) -> CodexLaunch:
+               home: Path | None = None, claude_upstream: str | None = None,
+               codex_home_dir: Path | None = None) -> CodexLaunch:
     """Plan a ``codex`` launch behind the proxy at ``proxy_url`` (no ``/v1``: the upstream carries the
     version path). The caller starts the proxy with ``launch.upstream``, runs ``launch.argv`` with
     ``launch.env``, and calls ``launch.cleanup()`` on exit. Nothing here reads or writes a credential."""
@@ -283,18 +296,31 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     if not helper:
         raise CodexLaunchError(f"no key helper: pass --codex-key-helper, set {KEY_HELPER_ENV}, "
                                "or configure apiKeyHelper in Claude Code settings")
-    codex_home = Path(tempfile.mkdtemp(prefix="contexto-codex-"))
+    if codex_home_dir is not None:
+        # Kept under the Contexto session directory so Codex's rollouts stay resumable; only the
+        # config (which names the helper command) is removed on exit.
+        codex_home = Path(codex_home_dir)
+        codex_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        keep = True
+    else:
+        codex_home = Path(tempfile.mkdtemp(prefix="contexto-codex-"))
+        keep = False
+    config = codex_home / "config.toml"
     try:
         codex_home.chmod(0o700)
-        config = codex_home / "config.toml"
+        if config.exists():
+            config.unlink()  # a stale config from an interrupted run
         fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(api_key_config(proxy_url, helper, session_id, contexto_bin))
     except BaseException:
-        shutil.rmtree(codex_home, ignore_errors=True)
+        if keep:
+            config.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(codex_home, ignore_errors=True)
         raise
     return CodexLaunch(argv=[codex_bin, *codex_args], env={**base_env, "CODEX_HOME": str(codex_home)},
-                       upstream=target, codex_home=codex_home)
+                       upstream=target, codex_home=codex_home, keep_home=keep)
 
 
 # The run command's codex branch (agreed with builder-1: commands/run.py calls add_arguments and
@@ -341,7 +367,8 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
     plan = None
     try:
         plan = plan_codex(list(args.cli_args), proxy.url, session_id, auth_mode=args.codex_auth,
-                          key_helper=args.codex_key_helper, upstream=target)
+                          key_helper=args.codex_key_helper, upstream=target,
+                          codex_home_dir=paths.session_dir(paths.contexto_home(), session_id) / "codex-home")
         for note in plan.notes:
             print(f"contexto: {note}", file=stderr)
         print(f"contexto: session {session_id}, engine {engine_name}, codex auth {args.codex_auth}", file=stderr)
