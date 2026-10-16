@@ -183,12 +183,25 @@ def test_out_guard_fails_closed(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("GIT_DIR", str(tmp_path / "nowhere"))
     monkeypatch.setenv("GIT_WORK_TREE", str(outside))
     assert classa.out_in_git_tree(repo / "o") and not classa.out_in_git_tree(outside / "o")
-    # A ceiling at the repo root (or discovery limits) would make a path inside the repo read as outside.
+    # A ceiling at the repo root (or discovery limits) would make a path inside the repo read as outside:
+    # git, started in repo/sub, stops before the ceiling and reports "not a git repository".
+    (repo / "sub").mkdir()
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(repo))
     monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
-    assert classa.out_in_git_tree(repo / "sub" / "o")
-    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")  # the outside verdict does not depend on the locale
+    assert classa.out_in_git_tree(repo / "sub") and classa.out_in_git_tree(repo / "sub" / "o")
+    # The check's own environment: no GIT_* variable at all, and LC_ALL=C (so the message match does
+    # not depend on the caller's locale), whatever the caller set.
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    seen = {}
+    real_run = subprocess.run
+
+    def spy(cmd, **kw):
+        seen.update(kw["env"])
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(classa.subprocess, "run", spy)
     assert not classa.out_in_git_tree(outside / "o")
+    assert seen["LC_ALL"] == "C" and not any(k.startswith("GIT_") for k in seen)
     assert classa.out_in_git_tree(repo / ".git")  # inside the git directory itself
     def dubious(cmd, **kw):
         return subprocess.CompletedProcess(cmd, 128, "", "fatal: detected dubious ownership in repository\n")
