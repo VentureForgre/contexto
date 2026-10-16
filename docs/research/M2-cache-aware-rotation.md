@@ -22,7 +22,7 @@ uncached behind the 9,088-token head.
 | | (c) resume epoch state across restarts | 9 | 1,009,027 | 83.5% | 166,888 | 3.038 | -16.2% |
 | | (c) + (b) | 9 | 958,122 | 83.3% | 159,641 | 2.904 | -19.9% |
 | | reference: bound 100,000 (modeled) | 11 | 1,700,866 | 78.5% | 365,005 | 6.009 | +65.7% |
-| | reference: bound 150,000, no rotation (modeled) | 0 | 3,655,890 | 96.9% | 113,834 | 5.075 | +40.0% |
+| | reference: no rotation at Contexto's request points, bound 150,000 (modeled) | 0 | 3,655,890 | 96.9% | 113,834 | 5.075 | +40.0% |
 | Claude run #3, claude-haiku-5-5, bound 150,000 | baseline (as run) | 6 | 3,725,391 | 85.3% | 548,954 | 0.1581 | |
 | | (a) append-only index | 6 | 3,725,391 | 85.3% | 548,954 | 0.1581 | 0% |
 | | (b) window target 0.25 | 6 | 3,420,435 | 84.5% | 532,012 | 0.1531 | -3.2% |
@@ -64,6 +64,8 @@ Read in place, never copied:
   baseline replay, at the run's bytes per token (4.2702 on Codex, 2.399 on Claude). This is builder-4's
   B27 method, so a candidate's decisions see what it would have sent. The model's behaviour (tool
   calls, results, replies) is held fixed.
+- **Turn room** in the tables is the bound minus the request's input tokens minus the headroom floor.
+  It ignores output: at most 136 tokens per request on Codex A22 and 2,583 on Claude run #3.
 - **Baseline check.** At each run's own config the replay reproduces every logged rotation:
   - Codex: 19 rotations, at the same requests (3 to 16, 22, 26, 29, 34, 39), with bytes within 597
     of the log.
@@ -90,12 +92,17 @@ How well it fits:
 | Codex A22 | 680,832 (74.0%) | 694,275 (75.5%) |
 | Claude run #3 | 2,677,349 (71.9%) | 3,176,437 (85.3%) |
 
-The Codex fit is close. Per request, most differences fall within OpenAI's 128-token cache
-granularity, and one full miss (request 39) is not modeled.
+The Codex fit is close. Per request, the model is never below the measured read:
 
-The Claude gap fits A13's finding that the owner's route spreads requests over at least 3 upstream
-cache identities. The model assumes one cache, so candidates are compared with each other within the
-model, not with the measured run.
+- 21 of 44 requests are within 128 tokens, OpenAI's cache granularity, and 43 of 44 within 256.
+- The exception is request 39, a full miss in the run (0 read), which the model counts as a head
+  read (9,088).
+
+On Claude the model is above the measured read by 499,088 tokens. By reviewer-1's breakdown, 17
+requests carry 497,405 of that gap, and in 9 of them the model reads an older request's whole prompt.
+This fits A13's finding that the owner's route spreads requests over at least 3 upstream cache
+identities, but the link is inferred, not measured. The model assumes one cache, so candidates are
+compared with each other within the model, not with the measured run.
 
 A plain longest-shared-prefix model overstates the reads after a rotation. On Codex it credited the
 pinned part of the preamble, about 2,400 tokens a rotation, which both runs' measured reads show was
@@ -158,11 +165,13 @@ Accuracy risk: the larger windows that are no longer rotated away lower the mini
 ### Reference: larger bounds (modeled)
 
 - **Codex at 100,000** costs 65.7% more: it still rotates 11 times on restarts, with larger windows.
-- **Codex at 150,000** never rotates, which is plain Codex at the same request points. It costs 40.0%
-  more than Contexto at 64,000 under this cache model.
-
-  A27 compared against a modeled plain-run shape (probe turns without tool loops), so its result
-  differs. The two comparisons use different request points.
+- **Codex at 150,000** never rotates. These are still Contexto's request points, including the 23 tool
+  rounds that Contexto's tools drive, so this is not plain Codex. It answers a different question
+  from A27. The two figures side by side:
+  - **A27:** Contexto costs about 24% more than plain Codex, modeled on the plain-run shape (probe turns
+    as one request with no tool loop), which has different request points.
+  - **A28:** at Contexto's own request points, no rotation costs 40.0% more than Contexto at 64,000,
+    so Contexto is 28.6% cheaper there, under this document's cache model.
 - **Claude at 100,000** is 25.8% cheaper than at 150,000. No request crosses Haiku's 100,000 long-context
   tier (7 do at 150,000), but it rotates 19 times, 11 of them `window_minimal`. Its minimum turn room
   is 6,745, below `min_turn_room`.
@@ -177,9 +186,14 @@ check should score paged-only probes.
 ## Recommendation
 
 1. **Build (c): a proxy restart resumes the session's epoch state.**
-   - Persist `epoch`, `k`, `strip_upto`, and the preamble (pinned and index text) with the session.
-     Lane B's `retained.json` (PR #128) already records the retained turns per epoch. On the first
-     request after a restart, reuse them instead of rotating from epoch 0.
+   - At least `epoch`, `k`, `strip_upto`, and the preamble (pinned and index text) must be persisted
+     with the session. Lane B's `retained.json` (PR #128) already records the retained turns per
+     epoch. On the first request after a restart, reuse them instead of rotating from epoch 0.
+   - The replay modeled more than that list: it kept the whole engine across restarts, so the whole
+     `EpochState` survived. That includes `hashes`, `last_sent_bytes`, `last_input_tokens`,
+     `max_turn_growth`, `last_turn_start_n`, `last_turn_count`, `head_tokens`, `initial_carried`, the
+     paged carried set, the window budget, and the turn-room state. Which of these a resume must
+     persist to match the modeled result is for the design.
    - This is the largest gain on Codex (16.2%), adds no model-visible change beyond what one
      long-lived proxy gives, and applies to every per-turn `codex exec` use.
    - It needs a contract change in the engine (lane A) and the store (lane B).
