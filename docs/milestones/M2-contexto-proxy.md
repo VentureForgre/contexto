@@ -221,7 +221,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 `contexto mcp --session S`, stdio JSON-RPC per the MCP spec, tools:
 
 - `contexto_recall(page_id)` returns the page's messages rendered as plain text (thinking omitted),
-  exactly, up to 32,000 characters per call with `offset` for more.
+  exactly, up to a per-call limit with `offset` for more. The limit is the smaller of 32,000
+  characters and about one quarter of the session's window budget `W` in tokens, converted with the
+  session's measured bytes-per-token ratio; the engine publishes `W` and the ratio through the
+  session store (`SessionStore.set_window(window_tokens, bytes_per_token)`, kept in the private
+  session metadata). Reason: a 32,000-character recall of numeric log text is about 17,800 tokens,
+  more than half of an OpenRig seat's `W` near 33,000, and recall results arrive inside a tool
+  loop where the engine cannot rotate (D17).
 - `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
