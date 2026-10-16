@@ -492,7 +492,10 @@ class Server:
         if snapshot is None:
             return None
         found = []
+        newest = max((e["turn"] for e in snapshot[3]), default=None)
         for entry in snapshot[3]:
+            if entry["turn"] == newest and entry["role"] == "user":
+                continue  # the current turn's own question is what is asked, not a statement (B22, PR #143)
             for form in _rendered_forms(query):
                 every = entry["text"].count("\n") + 1  # ALL matching lines: the newest are chosen below
                 shown, _ = match_lines(entry["text"], form, context=0, per_page=every)
