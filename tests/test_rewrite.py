@@ -1295,7 +1295,8 @@ def test_first_usage_w_counts_the_recall_knobs_like_fixed_overhead():
     rule = "Synthetic recall rule. " * 40
     widths = {}
     for knob in ("", rule):
-        cfg = Config(bound=20_000, headroom_floor=500, pin_budget=200, index_budget=200, recall_rule=knob)
+        cfg = Config(bound=20_000, headroom_floor=500, pin_budget=200, index_budget=200, recall_rule=knob,
+                     min_turn_room=0)  # this measures observe_usage's first W, before any rotation decision
         engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
         req = request(history(2) + [user("new")])
         engine(req, {}, MESSAGES)
@@ -1367,3 +1368,95 @@ def test_restore_compares_the_recorded_model_with_the_first_request(recorded, re
         assert engine.restored is None and engine.estimator.measured_bytes_per_token is None
     _, _, again = engine(request([user("p0")], model=requested), {}, MESSAGES)
     assert not any(e["event"].startswith("sizing_") for e in again)  # decided once, at the first request
+
+
+# A12: the min_turn_room rotation condition (contract PR #115) -------------------------------------
+
+SEAT_HEAD = "synthetic head instructions " * 2000  # about 56 KB: a head near 16k tokens at the seed ratio
+
+
+def room_session(bound, turns=60, big_every=5):
+    """A long synthetic session through the engine: each turn start is sent, its sent estimate is fed
+    back as the real usage, and every fifth turn adds a large answer. Returns one record per turn start."""
+    cfg = Config(bound=bound)  # the default min_turn_room, 12,000
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
+    msgs = [user(f"prompt 0 {FILL}", context=True), system()]
+    records = []
+    for t in range(turns):
+        req = request(msgs, system=[{"type": "text", "text": SEAT_HEAD}])
+        up, _, ev = engine(req, {}, MESSAGES)
+        sent = ev[-1].get("sent_estimate", ev[-1]["estimate"])
+        records.append({"turn": t, "epoch": ev[-1]["epoch"], "upstream": up["messages"],
+                        "rotation": next((e["reason"] for e in ev if e["event"] == "rotation"), None),
+                        "room": bound - sent - cfg.headroom_floor, "low": names(ev).count("turn_room_low"),
+                        "min": cfg.min_turn_room})
+        engine.observe_usage(MESSAGES, {"input_tokens": sent}, req)
+        out = FILL * (12 if t % big_every == 0 else 1)
+        msgs += [assistant(f"answer {t} {out}", think=f"t{t}"), user(f"prompt {t + 1} {FILL}")]
+    return records
+
+
+@pytest.mark.parametrize("bound", [42_000, 80_000, 100_000, 150_000])
+def test_turns_start_with_min_turn_room_unless_no_rotation_can_give_it(bound):
+    """Intake's A12 invariants over long sessions at the bounds reviewer-2 named (PR #115): a turn starts
+    with at least min_turn_room unless that epoch logged turn_room_low; turn_room_low at most once per
+    epoch; no back-to-back rotations for the room; prefixes byte-stable within an epoch (thinking
+    stripped consistently)."""
+    records = room_session(bound)
+    low_epochs = {r["epoch"] for r in records if r["low"]}
+    assert all(r["low"] <= 1 for r in records)
+    for r in records:
+        assert r["room"] >= r["min"] or r["epoch"] in low_epochs, r["turn"]
+    assert sum(r["low"] for r in records) == len(low_epochs)  # once per epoch, never per turn
+    room_turns = [r["turn"] for r in records if r["rotation"] == "min_turn_room"]
+    assert not any(b - a == 1 for a, b in zip(room_turns, room_turns[1:]))  # no back-to-back room rotations
+    for before, after in zip(records, records[1:]):
+        if after["epoch"] == before["epoch"]:
+            assert after["upstream"][:len(before["upstream"])] == before["upstream"]
+    if bound >= 80_000:
+        # The room condition rotates before the size trigger would, and the room never runs short.
+        assert room_turns and not any(r["rotation"] == "bound" for r in records)
+        assert not low_epochs and min(r["room"] for r in records) >= records[0]["min"]
+        assert len(room_turns) <= len(records) // 5  # at most one rotation per big turn: not more than needed
+    else:
+        # 42,000 with a 16k head leaves W near 1,000: no room rotation can restore 12,000 (none fires);
+        # the size trigger's window_minimal, unchanged by A12, rotates each turn into a new epoch.
+        assert not room_turns and low_epochs
+
+
+def test_room_rotation_fires_only_when_it_restores_min_turn_room():
+    """PR #115: with a room that no rotation could restore (and the size trigger quiet), there is no
+    rotation for the room; turn_room_low is logged once for the epoch, not at every turn start."""
+    cfg = Config(bound=42_000, min_turn_room=30_000)  # room_new <= 17,000 - estimate: never 30,000
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
+    msgs = [user("prompt 0", context=True), system()]
+    lows = []
+    for t in range(4):
+        _, _, ev = engine(request(msgs), {}, MESSAGES)
+        assert "rotation" not in names(ev)
+        lows += [e for e in ev if e["event"] == "turn_room_low"]
+        msgs += [assistant(f"answer {t}"), user(f"prompt {t + 1}")]
+    assert len(lows) == 1 and lows[0]["min_turn_room"] == 30_000 and lows[0]["room"] < 30_000
+    assert set(lows[0]) == {"event", "epoch", "room", "best_room", "min_turn_room"}  # content-free
+
+
+def test_both_conditions_use_the_room_target_so_the_next_turn_does_not_rotate_again():
+    msgs = history(12) + [user("new prompt")]
+    plain = Config(bound=12_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=0)
+    roomy = Config(bound=12_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=3_000)
+    _, st_plain, ev_plain, _ = run(msgs, config=plain)
+    _, st_room, ev_room, _ = run(msgs, config=roomy)
+    reasons = [e["reason"] for e in ev_plain + ev_room if e["event"] == "rotation"]
+    assert reasons == ["bound", "bound"]  # the size trigger fires in both; the room condition only in roomy
+    assert st_room.k > st_plain.k  # the room target keeps fewer turns than 0.5 * W
+    sent = ev_room[-1]["sent_estimate"]
+    assert roomy.bound - sent - roomy.headroom_floor >= roomy.min_turn_room
+
+
+def test_count_tokens_never_rotates_or_publishes_for_the_room():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=Config(bound=42_000, min_turn_room=30_000))
+    req = request(history(2) + [user("new")])
+    view, _, events = engine(req, {}, COUNT_TOKENS)
+    assert events == [{"event": "count_tokens", "epoch": 0}] and view is req
+    assert store.calls == [] and engine.states == {}
