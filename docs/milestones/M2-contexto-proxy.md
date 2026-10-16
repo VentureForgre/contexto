@@ -344,7 +344,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     this turn is nearly used up (about N tokens left), too little for a recall. Use contexto_search
     with an exact key to get the matching lines, answer from what is in view, or say the detail is
     unknown." `contexto_search` keeps working while its hits fit. The fixed short control replies (no hit, budget
-    used up, budget nearly used up) are protocol text and are not charged; each is at most about 60
+    used up, budget nearly used up) and the coverage line on every search reply are protocol text
+    and are not charged; each is at most about 60
     tokens (the nearly-used-up reply is about 225 characters), so even 15 parallel calls add about
     900 tokens, well inside `headroom_floor`. `contexto_recall`, `contexto_search`, and `contexto_state` never return more than
     remains, apart from these uncharged control replies; when it is
