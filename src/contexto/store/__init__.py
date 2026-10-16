@@ -65,6 +65,9 @@ class SessionStore(LedgerOps):
         self.session_id = session_id
         self.dir = session_dir(home, session_id)
         self.pages_dir = self.dir / "pages"
+        # Narrow an existing wide CONTEXTO_HOME and sessions/ too, not only directories we create.
+        private_dir(Path(home))
+        private_dir(Path(home) / "sessions")
         private_dir(self.dir)
         private_dir(self.pages_dir)
         self._key = self._load_key()
