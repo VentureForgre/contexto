@@ -19,9 +19,11 @@ proxy reads from events: ``over_bound`` (truthy marks the request over the bound
 engine events (contract rule 10) are logged as given, reduced to scalars.
 
 Usage feedback: an optional ``observe_usage(endpoint, usage, request)`` callable is called after each
-successful (2xx) ``/v1/messages`` response, under the same lock, with the upstream usage dict
+successful (2xx) ``/v1/messages`` or ``/responses`` response, before the client sees the response
+complete, under the same lock, with the upstream usage dict
 (``input_tokens``, ``cache_creation_input_tokens``, ``cache_read_input_tokens``,
-``output_tokens``) and the CLI's original request dict, so a per-conversation engine can attribute
+``output_tokens``; for ``/responses`` the Responses usage as given) and the CLI's original request
+dict, so a per-conversation engine can attribute
 it. It is not called for ``count_tokens``, errors, or responses without usage. The engine's
 estimator (rule 4) uses it. The launcher passes a ``contexto.rewrite.RewriteEngine`` instance as
 the transform (it is callable) and its ``observe_usage`` method (lane A packet A2). Calls to the
@@ -54,10 +56,25 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Protocol
 from urllib.parse import urlsplit
 
+try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
+    from compression import zstd as _zstd
+except ImportError:  # pragma: no cover - depends on the interpreter
+    _zstd = None
+
 LISTEN_HOST = "127.0.0.1"
+# Contract rule 15 (PR #58): decoded request bodies are capped. A request carries the CLI's whole
+# local history, which may legitimately be many times the bound, so the cap guards against a
+# decompression bomb rather than enforcing the bound.
+MAX_DECODED_BODY_BYTES = 64 * 1024 * 1024
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
-TRANSFORMED_PATHS = frozenset({MESSAGES_PATH, COUNT_TOKENS_PATH})
+# OpenAI Responses API for the Codex adapter (lane A packet A5). Codex's base_url is the proxy root
+# without /v1 and the upstream base carries the version path, so Codex sends POST /responses; the
+# /v1 spelling is accepted too. The engine dispatches on endpoint.endswith("/responses").
+RESPONSES_PATHS = frozenset({"/responses", "/v1/responses"})
+TRANSFORMED_PATHS = frozenset({MESSAGES_PATH, COUNT_TOKENS_PATH}) | RESPONSES_PATHS
+USAGE_FEEDBACK_PATHS = frozenset({MESSAGES_PATH}) | RESPONSES_PATHS
+RESPONSE_END_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
 THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 UPSTREAM_TIMEOUT_S = 900
 MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -111,6 +128,44 @@ def add_beta(headers: Headers, beta: str) -> Headers:
     return out
 
 
+class EncodedBodyError(Exception):
+    """A request body that cannot be decoded; ``reason`` explains it to the user."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def decode_request_body(body: bytes, encoding: str, limit: int = MAX_DECODED_BODY_BYTES) -> bytes:
+    """Decode a gzip, deflate, or (Python 3.14+) zstd request body, refusing anything over ``limit``.
+
+    Raises EncodedBodyError for an unsupported encoding, a corrupt or truncated body, or a body that
+    decodes to more than ``limit`` bytes."""
+    if encoding == "gzip":
+        candidates = [lambda: zlib.decompressobj(16 + zlib.MAX_WBITS)]
+    elif encoding == "deflate":  # HTTP deflate is zlib-wrapped; some clients send raw deflate
+        candidates = [lambda: zlib.decompressobj(zlib.MAX_WBITS), lambda: zlib.decompressobj(-zlib.MAX_WBITS)]
+    elif encoding == "zstd":
+        if _zstd is None:
+            raise EncodedBodyError("zstd decoding needs Python 3.14 or newer")
+        candidates = [_zstd.ZstdDecompressor]
+    else:
+        raise EncodedBodyError("this encoding is not supported (gzip, deflate, and zstd on Python 3.14+ are)")
+    for make in candidates:
+        decompressor = make()
+        try:
+            out = decompressor.decompress(body, limit + 1)
+        except MemoryError:
+            raise
+        except Exception:  # zlib.error, or zstd's own ZstdError: try the next form, else corrupt
+            continue
+        if len(out) > limit:
+            raise EncodedBodyError(f"the body decodes to more than {limit:,} bytes")
+        if decompressor.eof:
+            return out
+    raise EncodedBodyError("the body could not be decoded")
+
+
 def _scalar_summary(value: Any) -> Any:
     """Keep numbers, booleans, and short strings; reduce anything else to its size."""
     if isinstance(value, (bool, int, float)) or value is None:
@@ -146,10 +201,25 @@ class _SideDecoder:
             return b""
 
 
-class UsageReader:
-    """Reads usage and input_transformations from SSE events or a JSON body, nothing else."""
+def _numeric(value: Any) -> Any:
+    """Numbers and nested dicts of numbers only (Responses usage keeps input_tokens_details)."""
+    if isinstance(value, dict):
+        return {str(k): v for k, v in ((k, _numeric(v)) for k, v in value.items()) if v is not None}
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
-    def __init__(self, content_type: str | None) -> None:
+
+class UsageReader:
+    """Reads usage and input_transformations from SSE events or a JSON body, nothing else.
+
+    Messages API (``api="messages"``): usage from ``message_start`` and ``message_delta``, limited to
+    the four Anthropic keys. Responses API (``api="responses"``): ``response.usage`` from
+    ``response.completed``, ``response.incomplete``, or ``response.failed`` (or a JSON body), kept
+    as given: ``input_tokens`` includes cached tokens, with ``input_tokens_details.cached_tokens``,
+    ``cache_write_tokens``, ``output_tokens``, and ``output_tokens_details.reasoning_tokens``.
+    """
+
+    def __init__(self, content_type: str | None, api: str = "messages") -> None:
+        self.api = api
         self.sse = "text/event-stream" in (content_type or "").lower()
         self.usage: dict[str, Any] = {}
         self.input_transformations: list[Any] | None = None
@@ -180,8 +250,11 @@ class UsageReader:
             except ValueError:
                 body = None
             if isinstance(body, dict):
-                self._take_usage(body.get("usage"))
-                self._take_transformations(body)
+                if self.api == "responses":
+                    self._take_responses_usage(body)
+                else:
+                    self._take_usage(body.get("usage"))
+                    self._take_transformations(body)
         self._buffer.clear()
 
     def _event(self, raw: bytes) -> None:
@@ -192,13 +265,21 @@ class UsageReader:
             return
         if not isinstance(payload, dict):
             return
-        if payload.get("type") == "message_start":
+        if self.api == "responses":
+            if payload.get("type") in RESPONSE_END_EVENTS and isinstance(payload.get("response"), dict):
+                self._take_responses_usage(payload["response"])
+        elif payload.get("type") == "message_start":
             message = payload.get("message") or {}
             self._take_usage(message.get("usage"))
             self._take_transformations(message)
         elif payload.get("type") == "message_delta":
             self._take_usage(payload.get("usage"))
             self._take_transformations(payload)
+
+    def _take_responses_usage(self, response: dict[str, Any]) -> None:
+        usage = response.get("usage")
+        if isinstance(usage, dict):
+            self.usage = _numeric(usage)
 
     def _take_usage(self, usage: Any) -> None:
         if isinstance(usage, dict):
@@ -229,6 +310,7 @@ class ContextoProxy:
         self.observe_thinking = observe_thinking
         self.upstream_source = upstream_source
         self.transform_lock = threading.Lock()
+        self.last_epoch: Any = None  # the engine's epoch from its last successful transform
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -351,6 +433,14 @@ class _Handler(BaseHTTPRequestHandler):
     def _handle_request(self) -> None:
         started = time.monotonic()
         path_only = self.path.split("?", 1)[0]
+        if (self.headers.get("Upgrade") or "").lower() == "websocket":
+            # Not tunneled: a WebSocket session (Codex's default transport) would bypass the bound.
+            # The launcher keeps Codex on HTTP; anything else is refused visibly, not mangled.
+            self.owner.log({"event": "websocket_rejected", "path": path_only})
+            self._send_local_error(501, "contexto proxy: WebSocket is not supported; use HTTP",
+                                   "invalid_request_error")
+            self.close_connection = True
+            return
         try:
             body = self._read_body()
         except ValueError:
@@ -365,6 +455,20 @@ class _Handler(BaseHTTPRequestHandler):
                                  "original_request_bytes": len(body)}
         original = None
         if self.command == "POST" and path_only in TRANSFORMED_PATHS:
+            entry["api"] = "responses" if path_only in RESPONSES_PATHS else "messages"
+            encoding = (self.headers.get("Content-Encoding") or "").strip().lower()
+            if encoding not in ("", "identity"):
+                # Contract rule 15 (PR #58): decode, transform as usual, forward uncompressed.
+                try:
+                    decoded = decode_request_body(body, encoding, MAX_DECODED_BODY_BYTES)
+                except EncodedBodyError as exc:
+                    self._reject_encoded(encoding, exc.reason, path_only, entry["api"])
+                    return
+                entry.update(request_content_encoding=encoding, wire_request_bytes=len(body),
+                             original_request_bytes=len(decoded))
+                body = decoded
+                headers = {k: v for k, v in headers.items() if k.lower() != "content-encoding"}
+                self._raw = (body, dict(headers))
             body, headers, original = self._transform(body, headers, entry, path_only)
         entry["request_bytes"] = len(body)
         self._forward(body, headers, entry, started, original)
@@ -372,9 +476,6 @@ class _Handler(BaseHTTPRequestHandler):
     def _transform(self, body: bytes, headers: Headers, entry: dict[str, Any],
                    endpoint: str) -> tuple[bytes, Headers, dict[str, Any] | None]:
         owner = self.owner
-        if self.headers.get("Content-Encoding"):
-            entry["transform_skipped"] = "encoded request body"
-            return body, headers, None
         try:
             request = json.loads(body)
         except (ValueError, RecursionError):
@@ -398,9 +499,11 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(new_request, dict) or not isinstance(new_headers, dict):
                 raise TypeError("transform must return (dict, dict, list)")
         except Exception as exc:
-            # Never alter the request on a failed transform, even one that mutated its argument
-            # before raising: forward the CLI's own bytes and headers, and log the failure.
+            # Contract rule 14, genuine bugs: never alter the request on a failed transform, even
+            # one that mutated its argument before raising. Forward the CLI's own bytes and headers
+            # and log transform_error at error level (acceptance counts it as a failure).
             entry["transform_error"] = type(exc).__name__
+            self._log_transform_error(type(exc).__name__, "transform", endpoint)
             entry["message_count"] = entry["original_message_count"]
             if owner.observe_thinking:
                 headers = add_beta(headers, THINKING_BINDING_BETA)
@@ -409,7 +512,7 @@ class _Handler(BaseHTTPRequestHandler):
         entry["over_bound"] = any(bool(e.get("over_bound")) for e in events if isinstance(e, dict))
         epochs = [e["epoch"] for e in events if isinstance(e, dict) and "epoch" in e]
         if epochs:
-            entry["epoch"] = _scalar_summary(epochs[-1])
+            entry["epoch"] = owner.last_epoch = _scalar_summary(epochs[-1])
         if owner.observe_thinking:
             new_headers = add_beta(new_headers, THINKING_BINDING_BETA)
         entry["message_count"] = len(new_request.get("messages") or [])
@@ -418,6 +521,7 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
             # The engine produced something that cannot be sent: forward the CLI's own bytes.
             entry["transform_error"] = f"serialize: {type(exc).__name__}"
+            self._log_transform_error(type(exc).__name__, "serialize", endpoint)
             entry["message_count"] = entry["original_message_count"]
             return body, headers, original
         return (body if after == before else after), new_headers, original
@@ -444,7 +548,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         content_type = response.getheader("Content-Type")
-        reader = UsageReader(content_type)
+        reader = UsageReader(content_type, entry.get("api", "messages"))
         decoder = _SideDecoder(response.getheader("Content-Encoding"))
         length = response.getheader("Content-Length")
         chunked = length is None and self.command != "HEAD"
@@ -459,49 +563,92 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", length)
         self.end_headers()
         response_bytes = 0
+        # The client must not see the response complete before the engine has its usage and the
+        # session log has the entry: Claude Code sends its next request right away, and the engine
+        # sizes it from the last real usage (rule 4). So the chunk terminator, or the last chunk of
+        # a Content-Length response, is written only after usage feedback and logging.
+        held = b""
+        relay_ok = True
         try:
             while chunk := response.read1(65536):
                 response_bytes += len(chunk)
+                reader.feed(decoder.decode(chunk))
                 if chunked:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 else:
-                    self.wfile.write(chunk)
-                self.wfile.flush()
-                reader.feed(decoder.decode(chunk))
-            if chunked:
-                self.wfile.write(b"0\r\n\r\n")
+                    if held:
+                        self.wfile.write(held)
+                    held = chunk
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             entry["client_aborted"] = True
             self.close_connection = True
+            relay_ok = False
         except OSError as exc:
             entry["error"] = f"relay: {type(exc).__name__}"
             self.close_connection = True
+            relay_ok = False
         finally:
             conn.close()
         reader.finish()
-        entry.update(status=response.status, response_bytes=response_bytes, duration_ms=_ms(started),
-                     usage={k: reader.usage.get(k) for k in USAGE_KEYS} if reader.usage else None)
+        if entry.get("api") == "responses":
+            usage = reader.usage or None  # Responses usage kept as given (see UsageReader)
+        else:
+            usage = {k: reader.usage.get(k) for k in USAGE_KEYS} if reader.usage else None
+        entry.update(status=response.status, response_bytes=response_bytes, duration_ms=_ms(started), usage=usage)
         if reader.input_transformations is not None:
             entry["input_transformations"] = reader.input_transformations
         if not decoder.supported:
             entry["usage_unavailable"] = f"response content-encoding {decoder.encoding}"
-        if (original is not None and entry["path"] == MESSAGES_PATH and 200 <= response.status < 300
+        if (original is not None and entry["path"] in USAGE_FEEDBACK_PATHS and 200 <= response.status < 300
                 and reader.usage):
-            self._observe_usage(reader.usage, original)
+            self._observe_usage(entry["path"], reader.usage, original)
         owner.log(entry)
         if 400 <= response.status < 500:
             owner.log({"event": "upstream_4xx", "status": response.status, "path": entry["path"],
                        "model": entry.get("model"), "epoch": entry.get("epoch"),
                        "transform_events": entry.get("transform_events")})
+        if relay_ok:
+            try:
+                if chunked:
+                    self.wfile.write(b"0\r\n\r\n")
+                elif held:
+                    self.wfile.write(held)
+                self.wfile.flush()
+            except OSError:
+                self.close_connection = True
 
-    def _observe_usage(self, usage: dict[str, Any], original: dict[str, Any]) -> None:
+    def _reject_encoded(self, encoding: str, reason: str, endpoint: str, api: str) -> None:
+        """Contract rule 15 (PR #58): a body the proxy cannot decode is a client problem, not a
+        Contexto defect, so it is refused with HTTP 415 in the API's own error format and never
+        forwarded, because an unread request cannot be kept bounded."""
+        message = (f"contexto: cannot read a request body with Content-Encoding {encoding}: {reason}. Run the CLI "
+                   f"through 'contexto run', or disable request compression.")
+        if api == "responses":
+            payload = {"error": {"message": message, "type": "invalid_request_error", "param": None,
+                                 "code": "unsupported_content_encoding"}}
+        else:
+            payload = {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
+        self.owner.log({"event": "encoded_body_rejected", "encoding": encoding, "endpoint": endpoint,
+                        "reason": reason})
+        body = json.dumps(payload).encode()
+        self.send_response_only(415)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _log_transform_error(self, error: str, stage: str, endpoint: str) -> None:
+        self.owner.log({"event": "transform_error", "level": "error", "error": error, "stage": stage,
+                        "endpoint": endpoint, "epoch": self.owner.last_epoch})
+
+    def _observe_usage(self, endpoint: str, usage: dict[str, Any], original: dict[str, Any]) -> None:
         callback = self.owner.observe_usage
         if callback is None:
             return
         try:
             with self.owner.transform_lock:
-                callback(MESSAGES_PATH, dict(usage), original)
+                callback(endpoint, dict(usage), original)
         except Exception as exc:
             self.owner.log({"event": "observe_usage_error", "error": type(exc).__name__})
 

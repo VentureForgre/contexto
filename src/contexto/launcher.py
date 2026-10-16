@@ -222,37 +222,83 @@ def run_claude(options: LaunchOptions, *, stderr=None) -> int:
         return exc.code
 
 
-def _run(options: LaunchOptions, stderr) -> int:
-    check_user_args(options.claude_args)
+def options_from_args(args: Any) -> LaunchOptions:
+    """LaunchOptions from the ``contexto run`` argparse namespace (also used by contexto.codex)."""
+    return LaunchOptions(
+        claude_args=list(getattr(args, "cli_args", None) or []), bound=args.bound, session_id=args.session,
+        upstream=args.upstream, observe_thinking=args.observe_thinking, allow_large_bound=args.allow_large_bound,
+        window_fraction=args.window_fraction, headroom_floor=args.headroom_floor)
+
+
+def check_options(options: LaunchOptions) -> None:
     check_bound(options.bound, options.allow_large_bound)
     if options.window_fraction is not None and not 0 < options.window_fraction < 1:
         raise LaunchError(f"--window-fraction must be between 0 and 1, got {options.window_fraction}", EXIT_USAGE)
     if options.headroom_floor is not None and not 0 < options.headroom_floor < options.bound:
         raise LaunchError(f"--headroom-floor must be between 0 and the bound, got {options.headroom_floor}",
                           EXIT_USAGE)
+
+
+def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dict[str, int | float],
+                observe_thinking: bool, *, stderr=None) -> tuple[ContextoProxy, str]:
+    """Build the rewrite engine for ``store`` and start the proxy on 127.0.0.1 with a free port.
+    Returns ``(proxy, engine_name)``; the caller stops the proxy. Shared by claude and codex."""
+    transform, observe_usage, engine_name = build_engine(store, config)
+    try:
+        proxy = ContextoProxy(upstream_url, NoticeLog(store, stderr or sys.stderr), transform,
+                              observe_usage=observe_usage, observe_thinking=observe_thinking,
+                              upstream_source=upstream_source)
+    except ValueError as exc:
+        raise LaunchError(f"invalid upstream: {exc}", EXIT_USAGE) from exc
+    try:
+        proxy.start(0)
+    except OSError as exc:
+        raise LaunchError(f"cannot start the proxy: {exc}", EXIT_PROXY) from exc
+    if engine_name == "identity":
+        store.log({"event": "engine_unavailable", "detail": "contexto.rewrite not installed; identity transform"})
+    return proxy, engine_name
+
+
+def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None) -> int:
+    """Run a CLI with the terminal passed through and return its exit code (128 + N if it died from
+    signal N, 127 if it cannot be started). Ctrl+C reaches it through the terminal while the
+    launcher ignores SIGINT; SIGTERM and SIGHUP are forwarded. Shared by claude and codex."""
+    try:
+        child = subprocess.Popen(argv, env=env)
+    except (FileNotFoundError, PermissionError) as exc:
+        print(f"contexto: cannot start {argv[0]!r}: {exc.strerror}", file=stderr or sys.stderr)
+        return EXIT_NOT_FOUND
+    previous = _install_signal_handlers(child)
+    try:
+        return exit_code(child.wait())
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+
+
+def _run(options: LaunchOptions, stderr) -> int:
+    check_user_args(options.claude_args)
+    check_options(options)
     claude = shutil.which(options.claude_bin)
     if claude is None:
         raise LaunchError(f"'{options.claude_bin}' not found on PATH", EXIT_NOT_FOUND)
     upstream = resolve_upstream(options.upstream, cwd=Path.cwd())
     home = contexto_home()
     session_id = options.session_id or uuid.uuid4().hex
-    workdir = Path.cwd()
     try:
-        store = open_session(home, session_id, workdir)
+        store = open_session(home, session_id, Path.cwd())
     except (OSError, ValueError) as exc:
         raise LaunchError(f"cannot open session {session_id!r}: {exc}", EXIT_USAGE) from exc
     config = engine_config(options)
-    transform, observe_usage, engine_name = build_engine(store, config)
-    proxy = ContextoProxy(upstream.url, NoticeLog(store, stderr), transform, observe_usage=observe_usage,
-                          observe_thinking=options.observe_thinking, upstream_source=upstream.source)
-    try:
-        proxy.start(0)
-    except OSError as exc:
-        raise LaunchError(f"cannot start the proxy: {exc}", EXIT_PROXY) from exc
-
+    proxy, engine_name = start_proxy(store, upstream.url, upstream.source, config, options.observe_thinking,
+                                     stderr=stderr)
     tmp = Path(tempfile.mkdtemp(prefix="contexto-run-"))  # mode 0700, removed on exit
-    previous: dict[int, Any] = {}
-    child: subprocess.Popen | None = None
     code = EXIT_PROXY
     try:
         settings = write_private_json(tmp, "settings.json", settings_payload(proxy.url))
@@ -260,8 +306,6 @@ def _run(options: LaunchOptions, stderr) -> int:
         store.log({"event": "launch", "cli": "claude", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": upstream.source,
                    "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args)})
-        if engine_name == "identity":
-            store.log({"event": "engine_unavailable", "detail": "contexto.rewrite not installed; identity transform"})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
         warning = start_warning(options.bound, options.headroom_floor, assumed_overhead())
@@ -269,19 +313,10 @@ def _run(options: LaunchOptions, stderr) -> int:
             print(f"contexto: {warning}", file=stderr, flush=True)
             store.log({"event": "window_budget_warning", "bound": options.bound,
                        "assumed_overhead": assumed_overhead()})
-        child = subprocess.Popen([claude, "--settings", str(settings), "--mcp-config", str(mcp), *options.claude_args])
-        previous = _install_signal_handlers(child)
-        code = exit_code(child.wait())
+        code = run_child([claude, "--settings", str(settings), "--mcp-config", str(mcp), *options.claude_args],
+                         stderr=stderr)
         return code
     finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
-        if child is not None and child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                child.kill()
         proxy.stop()
         shutil.rmtree(tmp, ignore_errors=True)
         store.log({"event": "exit", "code": code})

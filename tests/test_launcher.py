@@ -55,8 +55,10 @@ if os.environ.get("FAKE_REQUEST"):
                                      headers={"Content-Type": "application/json", "x-api-key": "fake-key"})
     with urllib.request.urlopen(request, timeout=10) as response:
         record["response_status"] = response.status
-with open(os.environ["FAKE_RECORD"], "w") as f:
+# Write atomically: the tests wait for this file to appear and then read it at once.
+with open(os.environ["FAKE_RECORD"] + ".tmp", "w") as f:
     json.dump(record, f)
+os.replace(os.environ["FAKE_RECORD"] + ".tmp", os.environ["FAKE_RECORD"])
 if os.environ.get("FAKE_SLEEP"):
     try:
         time.sleep(float(os.environ["FAKE_SLEEP"]))
@@ -342,3 +344,74 @@ def test_check_user_args():
     for args in (["--settings", "f"], ["--settings=f"], ["-p", "x", "--settings", "f"]):
         with pytest.raises(LaunchError):
             check_user_args(args)
+
+
+# Shared helpers for the codex path (contexto.codex, lane A packet A5) and the run dispatch
+
+
+def test_options_from_args_reads_the_run_namespace():
+    import argparse
+
+    ns = argparse.Namespace(cli="codex", cli_args=["exec", "x"], bound=120_000, allow_large_bound=False,
+                            window_fraction=0.4, headroom_floor=None, session="s", upstream=None,
+                            observe_thinking=True)
+    options = launcher.options_from_args(ns)
+    assert (options.claude_args, options.bound, options.session_id, options.observe_thinking,
+            options.window_fraction) == (["exec", "x"], 120_000, "s", True, 0.4)
+
+
+def test_start_proxy_starts_on_loopback_and_rejects_a_bad_upstream(tmp_path):
+    from contexto.store.memory import MemoryStore
+
+    store = MemoryStore()
+    proxy, engine = launcher.start_proxy(store, "http://127.0.0.1:9", "codex", {"bound": 150_000}, False)
+    try:
+        assert proxy.url.startswith("http://127.0.0.1:") and engine == "rewrite"
+        assert store.events[0]["event"] == "proxy_start" and store.events[0]["upstream_source"] == "codex"
+    finally:
+        proxy.stop()
+    with pytest.raises(LaunchError) as exc:
+        launcher.start_proxy(MemoryStore(), "ftp://nope.invalid", "codex", {"bound": 150_000}, False)
+    assert exc.value.code == EXIT_USAGE
+
+
+def test_run_child_returns_exit_codes_and_127_when_missing(tmp_path):
+    import io
+
+    assert launcher.run_child([sys.executable, "-c", "raise SystemExit(5)"]) == 5
+    assert launcher.run_child([sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"]) == (
+        128 + signal.SIGTERM)
+    err = io.StringIO()
+    assert launcher.run_child([str(tmp_path / "missing-binary")], stderr=err) == 127 and "cannot start" in err.getvalue()
+    env = dict(os.environ, CONTEXTO_CHILD_PROBE="7")
+    assert launcher.run_child([sys.executable, "-c", "import os; raise SystemExit(int(os.environ['CONTEXTO_CHILD_PROBE']))"],
+                              env) == 7
+
+
+def test_run_codex_without_the_codex_module_exits_2(monkeypatch, capsys):
+    from contexto import cli
+
+    monkeypatch.setitem(sys.modules, "contexto.codex", None)  # behaves as not installed
+    assert cli.main(["run", "codex", "exec", "hi"]) == 2
+    assert "codex support is not installed" in capsys.readouterr().err
+
+
+def test_run_codex_dispatches_to_contexto_codex(monkeypatch):
+    import types
+
+    from contexto import cli
+
+    seen = {}
+    fake = types.ModuleType("contexto.codex")
+
+    def add_arguments(parser):
+        parser.add_argument("--codex-auth", default="apikey")
+
+    def run_codex(args):
+        seen.update(cli=args.cli, cli_args=args.cli_args, auth=args.codex_auth, bound=args.bound)
+        return 9
+
+    fake.add_arguments, fake.run_codex = add_arguments, run_codex
+    monkeypatch.setitem(sys.modules, "contexto.codex", fake)
+    assert cli.main(["run", "--bound", "120000", "--codex-auth", "chatgpt", "codex", "exec", "hi"]) == 9
+    assert seen == {"cli": "codex", "cli_args": ["exec", "hi"], "auth": "chatgpt", "bound": 120_000}
