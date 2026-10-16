@@ -90,7 +90,7 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
 ## Known limitations (v0.1.0)
 
 - Acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's proxy.
-- Codex pages written by v0.1.0 or v0.1.1 are searchable from v0.1.3 on, but their index lines
+- Codex pages written by v0.1.0 to v0.1.2 are searchable from v0.1.3 on, but their index lines
   keep empty user text, tools, and paths (index stubs are stored when a page is written).
 - Codex: runs end to end, but has no live acceptance run. HTTP is forced through a custom
   provider (no WebSocket). Contexto's tools sit behind Codex tool search and need
@@ -128,7 +128,7 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
 | v0.1.0 | f990703 | first release, after M2 acceptance (D29) |
 | v0.1.1 | 0769fdf | B22: in-view search skips the current turn's own question |
 | v0.1.2 | def6e8c | A18: `CONTEXTO_HOME` resolved to one absolute path for the proxy and every MCP server (Codex's MCP server ignored it before) |
-| v0.1.3 | 031ca59 | B23: search, index lines, and recall read Codex message parts, tool calls, and tool outputs (Codex search found nothing before) |
+| v0.1.3 | 031ca59 | B23: search and index lines read Codex message parts, tool calls, and tool outputs (Codex search found nothing before; recall already worked, B20 in v0.1.0) |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
