@@ -22,7 +22,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from contexto.proxy import TRANSFORMED_PATHS
+
 MESSAGES = "/v1/messages"
+# Model requests for acceptance 1's zero-4xx (contract PR #61): the paths the proxy transforms,
+# /v1/messages, its count_tokens, and /responses. 4xx on any other path are reported apart.
+MODEL_PATHS = TRANSFORMED_PATHS
 # The probe turn's cap on contexto_recall calls (script.MAX_RECALLS). The verdict counts every recall
 # in the session: a build-turn recall adds unplanned tokens too, so it counts against the cap.
 MAX_RECALLS = 2
@@ -57,7 +62,11 @@ def _event_name(ev: dict[str, Any]) -> str:
 class Report:
     requests: int = 0
     statuses: dict[int, int] = field(default_factory=dict)
-    upstream_4xx: int = 0
+    upstream_4xx: int = 0  # Messages API 4xx (``upstream_4xx`` events on /v1/messages or count_tokens)
+    # 4xx on other paths, by "METHOD path": Claude Code's unauthenticated HEAD /api/hello probe gets 401
+    # from the owner's proxy. Reported on their own; no verdict uses them (how acceptance 1 reads them
+    # is pending intake).
+    non_model_4xx: dict[str, int] = field(default_factory=dict)
     over_bound_requests: int = 0  # usage above the bound
     # Intake's strict rule for the acceptance run (2026-10-16): any request over the bound fails
     # acceptance 1. Indexes of every such request.
@@ -143,9 +152,11 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
     index = 0
     for ev in session_log:
         name = ev.get("event")
+        path = str(ev.get("path") or "").split("?")[0]
         if name == "upstream_4xx":
-            r.upstream_4xx += 1
-            continue
+            if path in MODEL_PATHS:
+                r.upstream_4xx += 1
+            continue  # other paths are counted once, from their request record, below
         if name == "mcp_call":
             tool = str(ev.get("tool"))
             r.mcp_calls[tool] = r.mcp_calls.get(tool, 0) + 1
@@ -153,6 +164,9 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
                 r.recall_calls += 1
                 r.recall_ok += int(bool(ev.get("ok")))
             continue
+        if name == "request" and path not in MODEL_PATHS and 400 <= int(ev.get("status") or 0) < 500:
+            label = f"{ev.get('method') or '?'} {path}"
+            r.non_model_4xx[label] = r.non_model_4xx.get(label, 0) + 1
         if name != "request" or ev.get("path") != MESSAGES:
             continue  # count_tokens and other paths have no turn effect
         index += 1

@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from contexto.proxy import TRANSFORMED_PATHS
+
 MODEL = "claude-haiku-5-5"
 KEYHELPER = Path(__file__).resolve().parent / "keyhelper.py"
 _CREDENTIAL_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
@@ -69,8 +71,25 @@ def launcher_command(session: str, bound: int, upstream: str, contexto: str = "c
             "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", MODEL]
 
 
+# Paths whose 401 or 403 means the credential failed: the model requests the proxy transforms
+# (contract PR #61). Claude Code also sends an unauthenticated ``HEAD /api/hello`` connectivity probe
+# at startup, which the owner's proxy answers with 401; that is not a credential failure (first live
+# H1 attempt, 2026-10-16), so other paths and methods are ignored.
+AUTH_PATHS = TRANSFORMED_PATHS
+
+
+def is_auth_failure(event: dict) -> bool:
+    """A 401 or 403 on a POST to the Messages API, as a request record or an upstream_4xx event."""
+    if event.get("event") not in ("upstream_4xx", "request") or event.get("status") not in (401, 403):
+        return False
+    if str(event.get("path") or "").split("?")[0] not in AUTH_PATHS:
+        return False
+    return event.get("method", "POST") == "POST"  # upstream_4xx events carry no method; only POSTs reach them
+
+
 class AuthWatcher:
-    """Tail the session log; on the first 401 or 403, terminate the process and remember it."""
+    """Tail the session log; on the first credential failure (``is_auth_failure``), terminate the
+    process and remember the status."""
 
     def __init__(self, session_log: Path, proc: subprocess.Popen) -> None:
         self.session_log = session_log
@@ -82,6 +101,7 @@ class AuthWatcher:
 
     def _run(self) -> None:
         offset = 0
+        pending = ""  # a line still being written
         while not self._stop.is_set() and self.status is None:
             try:
                 with self.session_log.open("r", encoding="utf-8") as fh:
@@ -90,14 +110,15 @@ class AuthWatcher:
                     offset = fh.tell()
             except FileNotFoundError:
                 chunk = ""
-            for line in chunk.splitlines():
+            lines = (pending + chunk).split("\n")
+            pending = lines.pop()
+            for line in lines:
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                status = event.get("status")
-                if event.get("event") in ("upstream_4xx", "request") and status in (401, 403):
-                    self.status = int(status)
+                if isinstance(event, dict) and is_auth_failure(event):
+                    self.status = int(event["status"])
                     self.proc.terminate()
                     return
             time.sleep(0.5)
