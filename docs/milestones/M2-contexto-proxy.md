@@ -134,7 +134,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    equals `E.k`, the rotation is a no-op: nothing is paged and no thinking is stripped. Write the
    newly paged turns to the page store, one page per turn, minus carried content; add any newly
    paged system messages to `carried`; rebuild `pinned_text` and `index_text`; strip thinking per
-   rule 2. If `W` is not positive or cannot hold the newest complete turn, log
+   rule 2. If `W` cannot hold the newest complete turn and the new turn together, retain
+   only the new turn (the newest complete turn is paged like any other and stays recallable) and
+   log `window_minimal`; this keeps the request under the bound at the cost of the previous turn's
+   verbatim text. Only if `W` is not positive or cannot hold even the new turn, log
    `bound_too_small` and send the request unrotated; the launcher warns at start when the measured
    head leaves less than 25,000 tokens of window budget and suggests a larger `--bound`. Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
