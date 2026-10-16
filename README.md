@@ -18,14 +18,14 @@ Contexto sends no extra model calls. It reads and rewrites the requests your CLI
 ## Install
 
 Contexto needs Python 3.12 or later and has no runtime dependencies. Install the wheel from the
-[v0.1.0 GitHub Release](https://github.com/VentureForgre/contexto/releases/tag/v0.1.0). The release
-has two assets: `contexto-0.1.0-py3-none-any.whl` and `contexto-0.1.0.tar.gz`. The repository is
-private, so download with a `gh` login that can read it:
+latest release, [v0.1.3](https://github.com/VentureForgre/contexto/releases/tag/v0.1.3). It has two
+assets: `contexto-0.1.3-py3-none-any.whl` and `contexto-0.1.3.tar.gz`. The repository is private, so
+download with a `gh` login that can read it:
 
 ```sh
-gh release download v0.1.0 --repo VentureForgre/contexto --pattern 'contexto-0.1.0-py3-none-any.whl'
-uv tool install ./contexto-0.1.0-py3-none-any.whl     # or: pipx install ./contexto-0.1.0-py3-none-any.whl
-contexto --version                                    # contexto 0.1.0
+gh release download v0.1.3 --repo VentureForgre/contexto --pattern 'contexto-0.1.3-py3-none-any.whl'
+uv tool install ./contexto-0.1.3-py3-none-any.whl     # or: pipx install ./contexto-0.1.3-py3-none-any.whl
+contexto --version                                    # contexto 0.1.3
 ```
 
 `pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`. To
@@ -50,8 +50,8 @@ The session id is printed on stderr at start. The launcher:
    `127.0.0.1:<free port>`;
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets only
    `env.ANTHROPIC_BASE_URL` to the proxy, and an `--mcp-config` file that starts Contexto's MCP
-   server (`python -m contexto mcp --session <id>` with the same Python, and the same
-   `CONTEXTO_HOME`);
+   server (`python -m contexto mcp --session <id>` with the same Python, and `CONTEXTO_HOME` in its
+   environment);
 4. runs `claude --settings <file> --mcp-config <file> [your args]` in your terminal and returns its
    exit code.
 
@@ -76,14 +76,15 @@ writes a `config.toml` there (mode 0600) that:
   `supports_websockets = false`, and the key helper as its auth command;
 - turns request compression off (`features.enable_request_compression = false`);
 - adds the MCP server `contexto` (`contexto mcp --session <id>`) with
-  `default_tools_approval_mode = "approve"`, so recall works in `codex exec` too.
+  `default_tools_approval_mode = "approve"`, so recall works in `codex exec` too, and `CONTEXTO_HOME`
+  in its `env` table, because Codex starts MCP servers with a restricted environment.
 
 On exit the `config.toml` is deleted and the directory is kept, so Codex can resume its rollouts.
 Because `CODEX_HOME` is new, your own `~/.codex` configuration is not loaded in this mode.
 
-In v0.1.0, `contexto run codex` needs the default `CONTEXTO_HOME` (`~/.contexto`). The Codex MCP
-server entry does not pass `CONTEXTO_HOME`, so with a non-default home the proxy writes the session to
-your home while the MCP tools look in `~/.contexto` and do not find it.
+Before v0.1.2, the Codex MCP server was not given `CONTEXTO_HOME`. With a non-default home, the proxy
+wrote the session to `$CONTEXTO_HOME/sessions/<id>/` while the MCP tools looked in
+`~/.contexto/sessions/<id>/` and did not find it. Upgrade if you use a non-default home with Codex.
 
 Codex requests go to `--codex-upstream`, else `$CONTEXTO_CODEX_UPSTREAM`, else (API-key mode) the
 upstream Claude Code would use plus `/v1`, or (ChatGPT mode) the ChatGPT Codex backend.
@@ -117,7 +118,7 @@ Environment variables:
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `CONTEXTO_HOME` | all commands | Data directory (default `~/.contexto`). `contexto mcp --home` overrides it. In v0.1.0, `run codex` needs the default (see Quickstart). |
+| `CONTEXTO_HOME` | all commands | Data directory (default `~/.contexto`), resolved to an absolute path. `contexto run` passes it to the MCP server for both Claude Code and Codex. `contexto mcp --home` overrides it. |
 | `CONTEXTO_SESSION` | `recall`, `state` | Session to read when `--session` is not given. |
 | `CONTEXTO_CODEX_KEY_HELPER` | `run codex` | Key helper command when `--codex-key-helper` is not given. |
 | `CONTEXTO_CODEX_UPSTREAM` | `run codex` | Codex upstream when `--codex-upstream` is not given. |
@@ -157,9 +158,9 @@ not start it by hand.
 
 | Tool | What it does |
 |---|---|
-| `contexto_search(query)` | Exact, case-sensitive substring search. Matching lines from the conversation still in view come first (at most 3, newest first). Then the 3 newest matching paged-out turns, each with its matching lines and their offsets, then up to 50 more matching turns as page id and offset. Each reply ends with a note on what was searched |
+| `contexto_search(query)` | Exact, case-sensitive substring search. Matching lines from the conversation still in view come first (at most 3, newest first), skipping the current turn's own user message. Then the 3 newest matching paged-out turns, each with its last 3 matching lines in page order and their offsets, then up to 50 more matching turns as page id and the offsets of their first and last matches (`@first..last`, one offset when they are the same). Each reply ends with a note on what was searched |
 | `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
-| `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`; a verified record shows as a fact in the pinned state |
+| `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`. A verified event, artifact, or reference shows as a fact in the pinned state; decisions and obligations keep their own groups |
 | `contexto_close(obligation_id, note)` | Close an open obligation |
 | `contexto_state()` | The full pinned state, with no pin-budget cap. It is charged against the turn's recall budget and cut at a whole line, with a trailer, when the budget runs out |
 
@@ -199,16 +200,13 @@ turns Codex's request compression off.
 **`count_tokens` returns 403.** Errors from the upstream pass through unchanged. Some proxies refuse
 `/v1/messages/count_tokens`; Claude Code calls it only around compaction.
 
-**Codex recall finds no session.** In v0.1.0, `contexto run codex` works only with the default
-`CONTEXTO_HOME`; unset it, or set it to `~/.contexto`, for Codex sessions.
-
 **Where are the logs?** `$CONTEXTO_HOME/sessions/<id>/log.jsonl`, one JSON object per event, with sizes,
 counts, and event names but no prompt or response text. Paged-out turns are in `pages/` and the
 pinned records in `ledger.jsonl` in the same directory.
 
 ## Known limitations
 
-v0.1.0 was accepted on one model, one bound, and one upstream, Codex has no live acceptance run, and
+v0.1.0 was accepted on one model, one bound, and one upstream. Codex has no live acceptance run, and
 cache efficiency depends on the upstream route. The full list is in
 [STATUS.md, "Known limitations (v0.1.0)"](STATUS.md#known-limitations-v010).
 
