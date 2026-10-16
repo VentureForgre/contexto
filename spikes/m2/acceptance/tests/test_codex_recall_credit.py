@@ -226,3 +226,19 @@ def test_a_turn_cut_off_after_a_held_tool_call_has_no_answer():
     assert codex_recall_credit.credit([PROBE], ANSWERED, answered + cut_off, [PAGE])["credited"] == 0
     credited_before = turn(call("contexto_search", [WHOLE]))
     assert codex_recall_credit.credit([PROBE], ANSWERED, credited_before + cut_off, [PAGE])["credited"] == 1
+
+
+def test_turn_ends_that_do_not_match_the_script_credit_nothing():
+    log = ([resp(0)]
+           + [resp(3), call("contexto_search", [WHOLE]), resp(0)]
+           + [resp(3), call("contexto_recall", [WHOLE_2]), resp(0)])  # 3 turn ends
+    exact = codex_recall_credit.credit([PROBE, PROBE_2], BOTH, log, [PAGE, PAGE_2], TURNS, expected_turns=3)
+    assert exact["credited"] == 2
+    for expected in (2, 4):
+        r = codex_recall_credit.credit([PROBE, PROBE_2], BOTH, log, [PAGE, PAGE_2], TURNS, expected_turns=expected)
+        assert r["credited"] == 0 and r["reason"] == f"turn answers do not match the script (3 found, {expected} expected)"
+
+
+def test_a_request_logged_without_a_status_counts_as_answered():
+    log = [resp(0), call("contexto_search", [WHOLE]), {k: v for k, v in resp(0).items() if k != "status"}]
+    assert codex_recall_credit.turn_ends(log) == [0, 2]
