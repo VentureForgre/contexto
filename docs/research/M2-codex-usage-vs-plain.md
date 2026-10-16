@@ -250,15 +250,19 @@ The main cause was a new Contexto proxy for every `codex exec` turn, not bound 6
     39. Their `k` runs 10, 12, ..., 34, 34, 36, 49, 58, 66, 77.
 - **Reproduced offline.** A28's baseline replay (`docs/research/M2-cache-aware-rotation.md`, PR #174)
   reproduces every logged rotation: 19, at the same requests, with bytes within 597 of the log.
-- **Bound 64,000 is a secondary factor.** In A28's model (**modeled**), bound 100,000 still rotates 11
-  times on restarts and costs 65.7% more. Bound 150,000 never rotates. At Contexto's own request points
-  (tool rounds included, so not plain Codex), A28 models it at 40.0% more than Contexto at 64,000, under
-  A28's cache model.
+- **A28's figures are ranges.** A28 converts byte differences at two bytes-per-token rates: the run's
+  head-inclusive average, 4.2702, and A27's content rates, 3.0193. It calls the content rate the better
+  estimate. Every A28 range below spans the two.
+- **Bound 64,000 is a secondary factor.** In A28's model (**modeled**):
+  - Bound 100,000 still rotates 11 to 14 times, on restarts, and costs 65.7% to 79.0% more.
+  - Bound 150,000 rotates 0 to 5 times. At Contexto's own request points (tool rounds included, so not
+    plain Codex), it costs 40.0% to 104.9% more than Contexto at 64,000: Contexto is 28.6% to 51.2%
+    cheaper there, under A28's cache model.
 - **Resuming epoch state across restarts** (A28, **modeled**: one engine kept across restarts):
   - rotations fall from 19 to 9;
-  - the cached share rises from 75.5% to 83.5% (A28's cache model, whose baseline gives 75.5% against
-    the measured 74.0%);
-  - cost falls 16.2%.
+  - the cached share rises from 75.5% to between 82.4% and 83.5% (A28's cache model, whose baseline
+    gives 75.5% against the measured 74.0%);
+  - cost falls 9.8% (content rate) to 16.2% (head-inclusive rate).
 
 ## Limits
 
@@ -279,9 +283,9 @@ The main cause was a new Contexto proxy for every `codex exec` turn, not bound 6
   - Main cause: a new proxy for every turn, whose engine had no epoch state. Every content request from
     turn 3 on rotated, and each cached only the 9,088-token head.
   - Secondary factor: bound 64,000 with 20 KB turns.
-  - With epoch state resumed across restarts, A28 models 9 rotations instead of 19 and 16.2% lower cost.
-    A larger bound alone does not remove the restart rotations: at 100,000, A28 models 11 of them and a
-    higher cost. See "Why every content request rotated" above.
+  - With epoch state resumed across restarts, A28 models 9 rotations instead of 19 and 9.8% to 16.2%
+    lower cost. A larger bound alone does not remove the restart rotations: at 100,000, A28 models 11 to
+    14 of them and a higher cost. See "Why every content request rotated" above.
 - **Price assumption.** Uncached input is priced at the cache-write rate. The input-rate variant is given
   above.
 - **Single run, probe protocol.** One run of 21 turns: 15 synthetic 20 KB content turns, then 6 probe
