@@ -97,12 +97,8 @@ def test_score_targets_tells_the_asked_link_from_an_older_one():
     assert not out["targets"]["q_a_024"]["answered"]
 
 
-def test_main_refuses_over_the_ceiling_without_an_upstream_and_live_without_a14(tmp_path, capsys):
+def test_main_refuses_over_the_ceiling_and_without_an_upstream(tmp_path):
     base = ["--run-dir", str(tmp_path), "--session", "s", "--run-code", str(tmp_path), "--out", str(tmp_path / "o"),
             "--seat-settings", str(tmp_path / "seat.json")]
     assert classa.main([*base, "--stub", "--approved", "600001"]) == 2
     assert classa.main(base) == 2  # neither --stub nor --upstream
-    from contexto.store import SessionStore
-    if not hasattr(SessionStore, "set_retained"):  # until B19 (b) and A14 are on main
-        assert classa.main([*base, "--upstream", "http://127.0.0.1:9"]) == 2
-        assert "set_retained" in capsys.readouterr().err

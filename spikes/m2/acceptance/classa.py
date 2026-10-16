@@ -307,7 +307,7 @@ def answer_tools(server: Any, content: list[dict[str, Any]]) -> tuple[list[dict[
 
 def run_sample(bodies: list[dict[str, Any]], log: list[dict[str, Any]], session_dir: Path, session: str,
                upstream: str, key: str, budget: dict[str, int], under: Path, count: Callable[..., int],
-               send: Callable[..., dict[str, Any]]) -> dict[str, Any]:
+               send: Callable[..., dict[str, Any]], require_snapshot: bool = True) -> dict[str, Any]:
     """One sample: main's engine over a fresh scratch store through the first probe turn, then the
     targets-only turn's tool loop, gated per request against ``budget`` (approved, spent)."""
     from contexto.mcp import Server
@@ -322,9 +322,20 @@ def run_sample(bodies: list[dict[str, Any]], log: list[dict[str, Any]], session_
     body = copy.deepcopy(bodies[-1])
     betas = body.pop("_betas")
     requests, calls, answer, stopped = [], [], "", None
+    snapshot: dict[str, Any] = {}
     for n in range(LOOP_CAP):
         original = json.loads(json.dumps(body))
         upstream_req, _, events = engine(copy.deepcopy(body), {"anthropic-beta": ",".join(betas)}, "/v1/messages")
+        if n == 0:
+            # A14: the engine itself writes the retained snapshot for this request; the live run
+            # refuses before any model call unless it did (intake's precondition).
+            current = store.retained_current() if hasattr(store, "retained_current") else None
+            epoch = next((e.get("epoch") for e in events if "epoch" in e), None)
+            snapshot = {"written": current is not None, "epoch": current[0] if current else None,
+                        "k": current[1] if current else None, "turns": len(current[3]) if current else 0,
+                        "request_epoch": epoch}
+            if require_snapshot and not current:
+                raise ExperimentError("the engine wrote no retained snapshot (A14 is not on this main)")
         upstream_req = {**upstream_req, "max_tokens": MAX_TOKENS}
         thinking = upstream_req.get("thinking")
         if isinstance(thinking, dict) and thinking.get("display") not in (None, "summarized", "omitted"):
@@ -353,6 +364,7 @@ def run_sample(bodies: list[dict[str, Any]], log: list[dict[str, Any]], session_
     mcp_log = detectors.read_jsonl(home / "sessions" / session / "log.jsonl") \
         if (home / "sessions" / session / "log.jsonl").exists() else []
     return {"requests": requests, "calls": calls, "answer": answer, "stopped": stopped, "home": str(home),
+            "snapshot": snapshot,
             "mcp_events": [e for e in mcp_log if e.get("event") == "mcp_call"]}
 
 
@@ -482,10 +494,9 @@ def main(argv: list[str] | None = None) -> int:
     from acceptance import credcheck
     from contexto.store import SessionStore
 
-    # Preconditions (intake 08:33Z): B19 (b) and A14 on main. The retained snapshot is the store's
-    # set_retained, written by the engine; without it a live run would test the wrong format.
-    a14 = hasattr(SessionStore, "set_retained")
-    if not args.stub and not a14:
+    # Preconditions (intake 08:33Z): B19 (b) and A14 on main. run_sample also checks, before any model
+    # call, that the engine itself wrote the retained snapshot for the probe request (live only).
+    if not args.stub and not hasattr(SessionStore, "set_retained"):
         print("refusing: main has no retained-window snapshot (set_retained); B19 (b) and A14 come first", file=sys.stderr)
         return 2
     args.out.mkdir(parents=True, exist_ok=True)
@@ -496,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
     probe_text = s.probe_texts[0]
     bodies = original_bodies(cc, probe_text)
     result: dict[str, Any] = {"targets": list(TARGETS), "approved": args.approved, "stub": args.stub,
-                              "a14_snapshot_on_main": a14}
+                              "store_has_set_retained": hasattr(SessionStore, "set_retained")}
     result["rebuild"] = rebuild_check(bodies, log, session_dir, args.session, args.run_code, args.out)
     if not result["rebuild"]["ok"]:
         (args.out / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -519,14 +530,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for _ in range(args.samples):
             sample = run_sample(exp, log, session_dir, args.session, upstream, key, budget, args.out,
-                                replay.count_tokens, send_message)
+                                replay.count_tokens, send_message, require_snapshot=not args.stub)
             answer = sample.pop("answer")
             (Path(sample["home"]) / "answer.txt").write_text(answer + "\n", encoding="utf-8")  # private
             sample["score"] = score_targets(s, answer)
             samples.append(sample)
             if sample["stopped"]:
                 break
-    except (driver.AuthFailure, replay.ReplayError, OSError) as exc:
+    except (driver.AuthFailure, replay.ReplayError, ExperimentError, OSError) as exc:
         result["stopped"] = f"{type(exc).__name__}: {exc}"
     finally:
         del key
