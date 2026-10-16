@@ -149,3 +149,83 @@ def test_close_precondition_also_applies_in_memory():
     mem.close(ob, "done")
     with pytest.raises(ValueError):
         mem.close(ob, "again")
+
+
+# PR #32 revision: no single source can break pinned text
+
+
+def write_old_record(store, locator, body="old fact"):
+    """Append a record the way an older ledger could hold it, bypassing append-time checks."""
+    from contexto.canonical import canonical_json
+    from contexto.store.model import Record, compute_id
+
+    fields = {"kind": "event", "epistemic": "verified", "author": "old", "body": body,
+              "created_at": "2026-01-01T00:00:00.000000Z", "session": "s1",
+              "provenance": [{"type": "file", "locator": locator, "sha256": sha(b"x"), "span": None}]}
+    record = Record.from_dict({**fields, "id": compute_id(fields), "prev": store.ledger.head()})
+    with open(store.ledger.path, "ab") as f:
+        f.write(canonical_json(record.to_dict()).encode("utf-8") + b"\n")
+    return record.id
+
+
+@pytest.mark.parametrize("locator", ["a\x00b.py", "a\nb.py", "tab\there.py", "del\x7f.py"])
+def test_control_characters_in_locators_are_rejected_at_append(store, locator):
+    for source in ({"type": "file", "locator": locator, "sha256": sha(b"x")},
+                   {"type": "url", "locator": "https://x/" + locator}):
+        with pytest.raises(ValueError):
+            store.pin("event", "x", provenance=[source])
+    assert store.ledger.records() == []
+
+
+@pytest.mark.parametrize("locator", ["a\x00b.py", "../outside.py"])
+def test_an_old_ledger_with_a_bad_locator_still_renders(tmp_path, locator):
+    store = SessionStore(tmp_path / "home", "s1")
+    store.pin("event", "a good fact")
+    rid = write_old_record(store, locator)
+    reopened = SessionStore(tmp_path / "home", "s1")
+    assert reopened.ledger.verify() == []
+    text = reopened.state_text()  # no workdir: unchecked, but it renders
+    assert UNCHECKED_LINE in text and rid in text
+    reopened.set_workdir(tmp_path)
+    assert f"{rid} event, verified STALE: old fact" in reopened.pinned_text(6000)
+    assert f"{rid} event, verified STALE" in reopened.state_text()
+
+
+def test_a_symlink_out_of_the_workdir_is_stale_and_not_followed(tmp_path):
+    work, outside = tmp_path / "work", tmp_path / "outside"
+    work.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"x")
+    (work / "link.txt").symlink_to(outside / "secret.txt")
+    store = SessionStore(tmp_path / "home", "s1")
+    store.set_workdir(work)
+    rid = store.pin("event", "linked", epistemic="verified",
+                    provenance=[{"type": "file", "locator": "link.txt", "sha256": sha(b"x")}])
+    assert f"{rid} event, verified STALE: linked" in store.pinned_text(6000)
+
+
+@pytest.mark.parametrize("meta", [b"\xff\xfe not utf-8", b"{not json", b'["a list"]', None])
+def test_unreadable_meta_degrades_to_not_checked(tmp_path, meta):
+    store = SessionStore(tmp_path / "home", "s1")
+    path = store.dir / "meta.json"
+    if meta is None:
+        path.mkdir()  # a directory where the file should be: OSError on read
+    else:
+        path.write_bytes(meta)
+    assert store.workdir() is None
+    store.pin("event", "x", epistemic="verified",
+              provenance=[{"type": "file", "locator": "f.py", "sha256": sha(b"x")}])
+    assert UNCHECKED_LINE in store.pinned_text(6000)
+
+
+def test_ledger_damaged_logs_only_the_error_class_and_line(tmp_path):
+    store = SessionStore(tmp_path, "s1")
+    store.pin("event", "PRIVATE-BODY-one")
+    store.pin("event", "two")
+    data = store.ledger.path.read_bytes().replace(b"PRIVATE-BODY-one", b"PRIVATE-BODY-0ne")
+    store.ledger.path.write_bytes(data)
+    reopened = SessionStore(tmp_path, "s1")
+    [event] = [json.loads(x) for x in (reopened.dir / "log.jsonl").read_text().splitlines()]
+    assert event["event"] == "ledger_damaged" and event["error"] == "LedgerCorruptError"
+    assert event["line"] == 1 and set(event) == {"event", "error", "line", "ts"}
+    assert "PRIVATE" not in (reopened.dir / "log.jsonl").read_text()

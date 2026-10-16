@@ -40,7 +40,14 @@ from pathlib import Path
 
 from contexto.canonical import canonical_json
 from contexto.private import open_private, private_dir
-from contexto.store.model import GENESIS_PREV, Record, ValidationError, compute_id, utc_timestamp
+from contexto.store.model import (
+    GENESIS_PREV,
+    Record,
+    ValidationError,
+    check_new_sources,
+    compute_id,
+    utc_timestamp,
+)
 
 LEDGER_FILE = "ledger.jsonl"
 LOCK_FILE = "ledger.lock"
@@ -172,6 +179,7 @@ def _chain(fields: dict, prev: str, existing: list[Record], precondition=None) -
     if precondition is not None:
         precondition(existing)  # runs on the records as they are under the lock
     record = Record.from_dict({**fields, "id": compute_id(fields), "prev": prev})
+    check_new_sources(record)
     Ledger._check_references(record, existing)
     return record
 
