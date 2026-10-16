@@ -83,7 +83,8 @@ new-turn request; they can carry `cache_control`.
    character); after that, use the session's measured bytes-per-token ratio.
 4. **Rotation.** Choose the smallest `k` (retain as many recent turns as fit) such that the
    retained turns fit in `window_target` (default 50% of the bound), always retaining the newest
-   complete turn and the new turn; write the newly paged turns
+   complete turn and the new turn, and never below the current `E.k` (a rotation never un-pages
+   a turn already in the store); write the newly paged turns
    to the page store, one page per turn, minus carried content; add any newly paged system
    messages to `carried`; rebuild `pinned_text` and `index_text`; strip thinking per rule 2.
 5. **Never rotate inside a tool loop** (D17). A turn that grows past the bound is sent as is and
@@ -187,7 +188,9 @@ a no-replayed-thinking baseline.
 1. **Long run:** a scripted session whose local history reaches at least 2.5 times the bound
    (bound set to 100,000 for this run to keep spend down and well under every compaction trigger) shows zero compaction events, every
    upstream request under the bound except logged over-bound turns, and zero 4xx responses.
-2. **Fidelity:** the L2f harder probes asked at the end of that run, scored against the
+2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
+   only probe type that failed at small contexts across three pilots: 5/8 at about 12k, 29/30
+   at 15,002 counted tokens), asked at the end of that run, scored against the
    full-context baseline at the same session content. Pass: within 2 probes of baseline overall
    and no category more than 1 probe below.
 3. **Recall:** at least one probe answerable only from a paged-out turn is answered correctly,
