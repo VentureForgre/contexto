@@ -137,7 +137,8 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   encrypted reasoning item returns 200, and whether the reasoning was used is not observable.
   Lean: strip all thinking at rotation, pending the strip-thinking arm's accuracy numbers.
 - **O3. Working-window bound.** Provisional default 150,000 (M2 contract), with the launcher
-  refusing more than 170,000 to stay under Claude Code's 200,000 idle-compaction minimum. Evidence:
+  refusing more than 170,000 to stay under Claude Code's 200,000 idle-compaction minimum (the premise
+  that idle compaction counts the bounded reported usage is inferred; acceptance run 1 verifies it). Evidence:
   every M0 probe hit its ceiling on stated facts (96/96 at 98,910 and 256,783 on `lab.subject`;
   96/96 in the replay at 40,749 and 91,861), while deep supersession chains failed even at small
   contexts (5/8 at about 12k; one depth-8 miss in 29/30 at 15,002; PR #22). So no slip point by

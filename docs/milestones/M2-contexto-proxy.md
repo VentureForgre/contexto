@@ -126,8 +126,17 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     fields (such as `output_config`) is carried like any other system message and forwarded as the
     CLI sends it. Lane A measured that Claude Code does not empty earlier system messages, so no
     client-side edit precedes kept thinking (zero-spend stubs; measured by builder-2, reported by
-    manager-1, pending review; evidence to land in the A2 PR under `spikes/m2/carried/`). If a later CLI
-    version starts emptying them, re-run that check before relying on kept thinking after one.
+    manager-1, pending review; evidence to land in the A2 PR under `spikes/m2/carried/`). If a
+    later CLI version starts emptying them, re-run that check before relying on kept thinking.
+13. **Carried growth.** Measured by builder-2 (zero spend, real CLI-written history, one fresh
+    start and five resumes; reported by manager-1, pending review): system messages accrue per
+    settings change, not per turn or per resume; each effort change adds one settings-only message
+    of about 66 bytes after the new prompt, and injected context blocks stay in `messages[0]`. So
+    carried content grows only with settings changes. At rotation only (deterministic, and safe for
+    thinking because rotation strips it), keep the latest settings-only system message per
+    settings key and drop superseded ones from the carried set. If carried content ever exceeds
+    4,000 tokens, log it as `carried_over_budget` in the session log; tool-addition system messages
+    from MCP tool-list changes are not yet measured and would show up there.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_target` 50% of the bound.
@@ -183,7 +192,7 @@ the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
 ## Lanes
 
 - **Lane A, management.manager-1 (builder-1, builder-2):** launcher, proxy server and SSE relay,
-  rewrite engine (rules 1 to 12), upstream resolution, session log; then the Codex adapter
+  rewrite engine (rules 1 to 13), upstream resolution, session log; then the Codex adapter
   (Responses API over HTTP through a temporary `CODEX_HOME` whose provider uses `auth.command`;
   force HTTP or handle WebSocket deltas, decided with evidence).
 - **Lane B, management.manager-2 (builder-3, builder-4):** package scaffolding first (harvest PR #2),
