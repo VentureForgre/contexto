@@ -102,6 +102,8 @@ def test_main_refuses_over_the_ceiling_and_without_an_upstream(tmp_path):
             "--seat-settings", str(tmp_path / "seat.json")]
     assert classa.main([*base, "--stub", "--approved", "600001"]) == 2  # the default ceiling
     assert classa.main([*base, "--stub", "--ceiling", "740000", "--approved", "740001"]) == 2
+    assert classa.main([*base, "--stub", "--ceiling", "7400000", "--approved", "1000"]) == 2  # over 1,000,000
+    assert classa.CEILING_MAX == 1_000_000
     assert classa.main(base) == 2  # neither --stub nor --upstream
 
 
@@ -151,3 +153,18 @@ def test_tool_results_logged_one_per_record_decode_as_the_one_message_sent():
         replay.recorded_messages(cc)  # one record per result: the merged hash is unknown
     decoded = classa.decode_requests(cc, stop=lambda msgs: False)
     assert decoded["q2"][2] == merged
+
+
+def test_out_inside_a_git_work_tree_is_refused(tmp_path):
+    # Reviewer-2 on #133: experiment output never lands in a repo, even a not-yet-created subdirectory.
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    outside = tmp_path / "outside"
+    assert classa.out_in_git_tree(repo / "new" / "out") and classa.out_in_git_tree(repo)
+    assert not classa.out_in_git_tree(outside / "new") and not classa.out_in_git_tree(tmp_path)
+    base = ["--run-dir", str(tmp_path), "--session", "s", "--run-code", str(tmp_path), "--seat-settings",
+            str(tmp_path / "seat.json"), "--stub"]
+    assert classa.main([*base, "--out", str(repo / "o")]) == 2

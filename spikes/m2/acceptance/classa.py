@@ -52,6 +52,9 @@ from fidelity.l2f import normalize, parse_answers  # noqa: E402  (script.py puts
 
 TARGETS = ("q_a_016", "q_a_012", "q_a_035", "q_a_024")  # builder-3's class-A H1-only misses, live run #2
 APPROVAL = 600_000  # the class-A line's first approval; --ceiling carries a raised one (intake 09:15Z: 740,000)
+# Targeted experiments only (intake 09:24Z): anything larger is a full rerun through the acceptance
+# harness under its own approval. Also catches a typo such as 7400000.
+CEILING_MAX = 1_000_000
 MAX_TOKENS = 16_000
 LOOP_CAP = 3
 MCP_PREFIX = "mcp__contexto__"
@@ -522,6 +525,15 @@ def body_fields(bodies: list[dict[str, Any]], exp: list[dict[str, Any]]) -> dict
             for k in sorted(set(a) | set(b))}
 
 
+def out_in_git_tree(out: Path) -> bool:
+    """Whether ``out`` (or, while it does not exist yet, its nearest existing parent) is inside a git
+    work tree (reviewer-2 on #133): requests, answers and tool output must never land in a repo."""
+    path = out.resolve()
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    return driver.inside_git(path)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="class-A experiment (zero spend with --stub)")
     ap.add_argument("--run-dir", type=Path, required=True)
@@ -541,11 +553,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--h1-answers", type=Path, default=None,
                     help="run #2's H1 answers file: faithful mode scores each probe against it")
     args = ap.parse_args(argv)
+    if args.ceiling > CEILING_MAX:
+        print(f"refusing: --ceiling {args.ceiling:,} is over {CEILING_MAX:,}; larger runs go through the acceptance "
+              "harness under their own approval", file=sys.stderr)
+        return 2
     if args.approved > args.ceiling:
         print(f"refusing: --approved {args.approved:,} is over the ceiling {args.ceiling:,}", file=sys.stderr)
         return 2
     if not args.stub and not args.upstream:
         print("refusing: pass --upstream for a live run, or --stub", file=sys.stderr)
+        return 2
+    if out_in_git_tree(args.out):
+        print("refusing: --out is inside a git work tree; experiment output stays outside any repo", file=sys.stderr)
         return 2
     from acceptance import credcheck
     from contexto.store import SessionStore
