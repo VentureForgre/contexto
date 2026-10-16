@@ -1,8 +1,8 @@
 """Cache-aware rotation, offline (packet A28): replay a recorded run's requests through the engine under
 candidate configurations and model what each would send, cache, and cost. Zero spend: nothing is sent.
 
-    uv run python spikes/m2/acceptance/cache_rotation.py codex <codex session dir> [--json out]
-    uv run python spikes/m2/acceptance/cache_rotation.py claude <run dir> <session id> [--json out]
+    uv run python spikes/m2/acceptance/cache_rotation.py codex <codex session dir> [--rate B] [--json out]
+    uv run python spikes/m2/acceptance/cache_rotation.py claude <run dir> <session id> [--rate B] [--json out]
 
 Requests. Codex (Responses): each request's ``input`` is rebuilt from Codex's own rollout
 (``codex-home/sessions/**/rollout-*.jsonl``): every response item before the request's first output
@@ -15,8 +15,11 @@ the body shape of ``classa.original_bodies``, as builder-4's B27 replay does, fo
 Engine. A fresh ``SessionStore`` under a temporary directory with a fresh key (run #3's ``page.key``
 is not copied, per manager-1's ruling): page ids differ from the original run but keep their length,
 so byte and token counts do not change. Usage fed back after each request: the run's measured input
-plus the byte difference from the baseline replay at the run's own config, at the run's bytes per
-token (builder-4's B27 method), so a candidate's decisions see what it would have sent.
+plus the byte difference from the baseline replay at the run's own config, converted at a bytes-per-token
+rate (builder-4's B27 method), so a candidate's decisions see what it would have sent. The default is
+the run's average, head included; ``--rate`` sets a content rate (A27's calibration gives 3.0193 on
+Codex A22; B27 used 1.8274 on Claude run #3). The differences are conversation content, so the
+content rate is the better estimate; the document reports both as a range.
 
 Cache model (an assumption, stated, and checked against both runs): checkpoints. A request reads from
 cache the whole prompt of the longest earlier request of the same replay that is a byte prefix of it
@@ -286,13 +289,14 @@ def _usage(api: str, total: int, cached: int, output: int) -> dict[str, Any]:
 
 
 def replay(run: dict[str, Any], config: Config, prototype: str = "", baseline_bytes: list[int] | None = None,
-           resume: bool = False) -> list[dict[str, Any]]:
+           resume: bool = False, rate: float | None = None) -> list[dict[str, Any]]:
     """Each request as the engine would send it under ``config``: bytes, modeled tokens and cache, and
     the engine's decisions. ``baseline_bytes`` is the baseline replay's bytes, the reference for the
     token model (None: this is the baseline). A new engine (same store) starts at each of the run's
     proxy restarts, as in the run; ``resume`` keeps one engine instead, modeling a proxy that resumes
-    its epoch state across restarts."""
-    rate = bytes_per_token(run)
+    its epoch state across restarts. ``rate`` converts byte differences to tokens (default: the run's
+    average bytes per token, head included; ``--rate`` sets a content rate, as A27 calibrates)."""
+    rate = rate or bytes_per_token(run)
     head = run.get("head_tokens") or head_tokens(run)
     home = Path(tempfile.mkdtemp(prefix="contexto-a28-"))
     rows: list[dict[str, Any]] = []
@@ -368,10 +372,10 @@ def candidates(bound: int) -> dict[str, tuple[Config, str, bool]]:
     }
 
 
-def evaluate(run: dict[str, Any], bound: int) -> dict[str, Any]:
+def evaluate(run: dict[str, Any], bound: int, rate: float | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     base_config, _, _ = candidates(bound)["baseline"]
-    base = replay(run, base_config)
+    base = replay(run, base_config, rate=rate)
     base_bytes = [r["bytes"] for r in base]
     measured_cached = sum(m["cached"] for m in run["measured"])
     measured_tokens = sum(m["input"] for m in run["measured"])
@@ -384,12 +388,13 @@ def evaluate(run: dict[str, Any], bound: int) -> dict[str, Any]:
                                 if any(t.get("event") == "rotation" for t in e.get("transform_events") or [])],
         "measured_input": measured_tokens, "measured_cached": measured_cached,
         "measured_cached_share": round(measured_cached / measured_tokens, 4),
-        "bytes_per_token": round(bytes_per_token(run), 4), "head_tokens": head_tokens(run),
+        "bytes_per_token": round(bytes_per_token(run), 4), "rate_used": round(rate or bytes_per_token(run), 4),
+        "head_tokens": head_tokens(run),
         "modeled_cached_baseline": sum(r["cached"] for r in base),
         "modeled_cached_share_baseline": round(sum(r["cached"] for r in base) / sum(r["tokens"] for r in base), 4),
     }
     for name, (config, prototype, resume) in candidates(bound).items():
-        rows = base if name == "baseline" else replay(run, config, prototype, base_bytes, resume)
+        rows = base if name == "baseline" else replay(run, config, prototype, base_bytes, resume, rate)
         out[name] = summary(rows, run["model"] if run["model"] in PRICES else
                             ("gpt-6-astra" if run["api"] == "responses" else "claude-haiku-5-5"))
     return out
@@ -407,9 +412,11 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--bound", type=int, default=150_000)
     for p in (c, m):
         p.add_argument("--json", type=Path, default=None)
+        p.add_argument("--rate", type=float, default=None,
+                       help="bytes per token for byte differences (default: the run's average, head included)")
     args = ap.parse_args(argv)
     run = codex_run(args.session_dir) if args.kind == "codex" else claude_run(args.run_dir, args.session)
-    result = evaluate(run, args.bound)
+    result = evaluate(run, args.bound, args.rate)
     text = json.dumps(result, indent=2)
     if args.json:
         args.json.write_text(text + "\n", encoding="utf-8")

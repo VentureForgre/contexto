@@ -122,3 +122,16 @@ def test_a_restart_starts_a_new_engine_at_epoch_zero_unless_resumed():
     assert [r["epoch"] for r in resumed[9:]] == [1, 2, 3]
     assert all(r["rotations"] for r in restarted[9:])
     assert restarted[0]["tokens"] == run["measured"][0]["input"]  # the baseline's tokens are the measured ones
+
+
+def test_rate_converts_byte_differences_from_the_baseline():
+    run = synthetic_run(12, restarts=set())
+    config = Config(bound=64_000, headroom_floor=10_000, min_turn_room=5_000)
+    base = cr.replay(run, config)
+    refs = [r["bytes"] for r in base]
+    wide = Config(bound=200_000)  # no rotation: more bytes than the baseline after its first rotation
+    default = cr.replay(run, wide, baseline_bytes=refs)
+    halved = cr.replay(run, wide, baseline_bytes=refs, rate=cr.bytes_per_token(run) / 2)
+    extra = [d["tokens"] - m["input"] for d, m in zip(default, run["measured"])]
+    extra_halved = [h["tokens"] - m["input"] for h, m in zip(halved, run["measured"])]
+    assert any(extra) and all(abs(b - 2 * a) <= 1 for a, b in zip(extra, extra_halved))
