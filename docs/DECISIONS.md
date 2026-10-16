@@ -157,7 +157,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
 
 All open decisions are intake's to make under D0 unless marked otherwise.
 
-- **O2. History-edit strategy under preserved thinking.** Vendor-documented: on Fable 5.1, Opus 5.5,
+- **O2. History-edit strategy under preserved thinking.** Resolved by D20 (strip all thinking at
+  rotation); kept here for its evidence. Vendor-documented: on Fable 5.1, Opus 5.5,
   Sonnet 5.5, and Haiku 5.5, editing history before a thinking block invalidates it, and the API
   returns 400 by default only for accounts created on or after 2026-08-31. Measured by builder-4's
   conformance probe (4,973 tokens; claude-haiku-5-5 and gpt-6-astra, both through the owner's

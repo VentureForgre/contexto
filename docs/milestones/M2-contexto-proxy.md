@@ -396,7 +396,9 @@ a no-replayed-thinking baseline.
    upstream request under the bound except logged over-bound turns, and zero 4xx responses to
    model requests (`/v1/messages`, `/responses`, and their `count_tokens`); 4xx answers to
    non-model requests, such as Claude Code's unauthenticated `HEAD /api/hello` startup probe (the
-   owner's proxy answers it 401), are reported separately and do not fail the run. The run also fails on any event that
+   owner's proxy answers it 401), are reported separately and do not fail the run. A 5xx that Contexto's own proxy generates on a model request (for
+   example `upstream unreachable`) fails the run; an upstream 5xx passed through unchanged is
+   reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
    `fallback_failed`, `transform_error`, `turn_room_missing`, or `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
