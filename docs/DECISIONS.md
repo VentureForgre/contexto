@@ -137,6 +137,28 @@ the owner's delegation. Open decisions are listed at the end with the options an
   (except logged in-turn over-bound turns per rule 5) and model-request 4xx, acceptance 1 fails on `degraded_enter`, `store_error`, `page_conflict`,
   `fallback_failed`, `transform_error`, `turn_room_missing`, or `unclassified_system_message`.
 
+- **D27. Acceptance asks the 54 probes over 6 user turns of 9, for H1 and the baseline alike.**
+  Intake, 2026-10-16, decided after a failed run and recorded as such. The second live H1 run
+  scored 18 of 54 against the full-context baseline's 44, both under the old single-turn protocol.
+  An offline estimate on that run's pages (builder-3, zero spend, a simulated ideal searcher, not a
+  model run; script and numbers-only output committed under `spikes/m2/estimate/`) found every
+  probe answerable on its own (54 of 54, the search hit carrying the answer), but answering all 54
+  in one turn needs about 91,000 tokens of returned evidence (31,002 with the leaner hits of B17)
+  against a measured recall room of 23,042 (bound 150,000), so even an ideal searcher tops out
+  near 38 to 43. Under D17 (no paging inside a turn) and the per-turn recall room, Contexto cannot
+  pull more evidence into a single turn than that room holds, and long real sessions do not ask 54
+  deep-history questions at once. The probes are therefore asked over 6 user turns of 9, a fixed
+  assignment (seed 20261016) whose algorithm builder-4 recorded at 05:39:09Z before computing
+  anything under it (queue row `qitem-m2-d27-protocol`; the assignment is in
+  `docs/research/M2-acceptance-harness.md`). A what-if script already running when the stop
+  arrived had computed 2-, 3-, and an unseeded 6-turn split in one pass; builder-3 deleted those
+  numbers unread, they were never reported, and they played no part in the choice. To keep the
+  comparison symmetric, the full-context baseline is also rerun under the same 6 by 9 assignment
+  (6 sequential full-context requests, each including the earlier probe turns), and acceptance 2
+  compares H1 with that baseline, not with the old 44. The single-turn scores (H1 18, baseline 44)
+  stay on record, and a single turn that needs more evidence than the room holds is a stated known
+  limitation.
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
