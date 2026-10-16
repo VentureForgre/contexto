@@ -121,13 +121,78 @@ def test_parallel_charges_and_engine_publishes_never_overspend(tmp_path):
                 s.set_turn_room("1", 1_000)  # the engine republishing the same turn keeps the counter
                 s.set_window(200_000, 2.0)
 
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(15)]  # V2 fired 15 searches at once
     for t in threads:
         t.start()
     for t in threads:
         t.join()
     assert sum(granted) == 1_000 and store.turn_room() == ("1", 1_000, 1_000)
     assert store.window() == (200_000, 2.0)
+
+
+class RecordingStore(SessionStore):
+    """A SessionStore that also keeps the events its own server logged, to pair replies with charges."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.mine = []
+
+    def log(self, event):
+        self.mine.append(event)
+        super().log(event)
+
+
+@pytest.mark.parametrize("room", [3_000, 20_000, 0])
+def test_fifteen_concurrent_tool_calls_charge_exactly_the_room(tmp_path, room):
+    """Intake (03:26Z): V2 issued 15 parallel searches in one response. 15 servers, each with its own
+    store on one session directory, call recall and search at once while the engine republishes."""
+    store = SessionStore(tmp_path, "s1")
+    store.set_window(200_000, 2.0)
+    pids = [store.page_out([[{"role": "user", "content": f"needle {i} " + "x" * 5_000}]], i + 1)[0]
+            for i in range(20)]
+    store.set_turn_room("7", room)
+    jobs = [("contexto_search", {"query": "needle"}) if i % 2 else ("contexto_recall", {"page_id": pids[i]})
+            for i in range(15)]
+    start, stop = threading.Barrier(len(jobs) + 1), threading.Event()
+    replies = [None] * len(jobs)
+
+    def worker(i):
+        own = RecordingStore(tmp_path, "s1")
+        start.wait()
+        replies[i] = (text_of(call(own, *jobs[i])), [e for e in own.mine if e["event"] == "mcp_call"])
+
+    def engine():
+        own = SessionStore(tmp_path, "s1")
+        start.wait()
+        while not stop.is_set():
+            own.set_turn_room("7", room)  # the same turn: the counter is kept
+            own.set_window(200_000, 2.0)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(len(jobs))]
+    publisher = threading.Thread(target=engine)
+    for t in threads + [publisher]:
+        t.start()
+    for t in threads:
+        t.join()
+    stop.set()
+    publisher.join()
+
+    charges = []
+    for text, events in replies:
+        [event] = events
+        charges.append(event["charged_tokens"])
+        if text == SPENT:  # nothing useful fit: the exact reply, charged at what was left, up to its size
+            assert event["turn_budget"] == "spent" and event["charged_tokens"] <= math.ceil(len(SPENT) / RATIO)
+        else:  # what came back is exactly what was charged
+            assert event["turn_budget"] == "charged" and event["charged_tokens"] == math.ceil(len(text) / RATIO)
+    assert sum(charges) == store.turn_room()[2] <= room
+    assert store.turn_room()[:2] == ("7", room)
+    spent_replies = sum(text == SPENT for text, _ in replies)
+    if room == 0:
+        assert spent_replies == 15
+    elif room == 3_000:  # one full recall alone is more than this room: someone gets the reply
+        assert 0 < spent_replies < 15
+    assert not any(e.get("event") == "turn_room_missing" for e in calls(store))
 
 
 # The tools

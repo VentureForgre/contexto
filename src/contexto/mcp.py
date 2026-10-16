@@ -429,6 +429,11 @@ class Server:
         all (None: no limit), or None when nothing useful fits. Tokens are the characters divided by
         the per-call limit's ratio, the smaller of the measured bytes per token and 1.5.
 
+        When nothing useful fits, the tool replies ``BUDGET_SPENT``, charged at the room that is
+        left, up to its own size. That text is required, so a call with no room left still returns
+        it, uncharged: at most about 67 tokens per such call (100 characters at 1.5), about 1,000
+        for 15 parallel calls, well inside the engine's headroom floor (25,000 by default).
+
         With no room published only the per-call limit applies. If the engine is present (it has
         recorded the window) but published no room, a ``turn_room_missing`` event makes the missed
         publish visible.
@@ -442,11 +447,9 @@ class Server:
             out["texts"] = texts
             if remaining is None:
                 return 0
-            if texts is None:
-                out["budget"] = {"turn_budget": "spent", "charged_tokens": 0, "room_left": remaining}
-                return 0
-            used = min(remaining, math.ceil(sum(map(len, texts)) / ratio))
-            out["budget"] = {"turn_budget": "charged", "charged_tokens": used, "room_left": remaining - used}
+            used = min(remaining, math.ceil(sum(map(len, texts or [BUDGET_SPENT])) / ratio))
+            out["budget"] = {"turn_budget": "spent" if texts is None else "charged", "charged_tokens": used,
+                             "room_left": remaining - used}
             return used
 
         charge_turn_room = getattr(self.store, "charge_turn_room", None)

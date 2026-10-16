@@ -202,9 +202,11 @@ class SessionStore(LedgerOps):
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None:
         """Publish the room left in the current turn (M2 contract PR #69, per-turn recall budget).
 
-        Lane A's engine calls this at request time and again when the response's real usage
-        arrives. The tokens spent this turn reset only when ``turn_id`` changes; a repeated call
-        with the same id updates the room and keeps what was spent.
+        Lane A's engine calls this when a response's real usage arrives, and the proxy holds the
+        stream (its final event, and ``tool_use`` blocks if the client starts tool calls early)
+        until the publish, so a tool call sees the current room. The tokens spent this turn reset
+        only when ``turn_id`` changes; a repeated call with the same id updates the room and keeps
+        what was spent.
         """
         turn_id = check_turn_room(turn_id, room_tokens)
         self._modify_meta(lambda meta: {"turn_room": apply_turn_room(read_turn_room(meta), turn_id, room_tokens)})
