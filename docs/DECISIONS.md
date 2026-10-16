@@ -146,7 +146,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
   tops out near 38 to 42. No design bounded at 150,000 with a working window can pull that much
   evidence into a single turn, and long real sessions do not ask 54 deep-history questions at
   once. The probes are therefore asked over 6 user turns of 9, a fixed assignment (seed 20261016)
-  chosen before any estimate under it; no other split was computed. Questions, scoring, and the
+  chosen before any estimate under it (builder-4 recorded the
+  assignment algorithm at 05:39:09Z before computing). A what-if script already running when the
+  stop arrived had computed 2-, 3-, and an unseeded 6-turn split in one pass; builder-3 deleted
+  those numbers unread, they were never reported to anyone, and they played no part in the
+  choice. The room in the estimate is the measured 23,042 at the second run's probe turn
+  (bound 150,000). Questions, scoring, and the
   44 of 54 baseline (one full-context request) are unchanged. A single turn that needs more
   evidence than the room holds is a stated known limitation.
 
