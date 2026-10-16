@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-16 11:50Z by intake.lead. Decisions taken and still open, with reasons:
+Updated 2026-10-16 15:05Z by intake.lead. Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -12,7 +12,8 @@ compaction never fires, and accuracy equals full context.
 - M0 study: complete. Recommendation `docs/research/M0-recommendation.md`.
 - M2 build: complete on main. Runs end to end through `contexto run claude ...` and
   `contexto run codex ...`. Contract: `docs/milestones/M2-contexto-proxy.md`.
-- Acceptance: **all four live criteria passed in one run** (live run #3, main fbb1303, below).
+- Acceptance: **all four live criteria passed in one run on Claude Code** (live run #3, main
+  fbb1303), and **Codex passed criteria 1 to 3** (D30), below.
   Contexto answered 51 of 54 probes against 48 for the full-context baseline, with zero
   compaction and every request under the bound.
 
@@ -45,6 +46,20 @@ How it got here, all on record:
 
 D28's targeted experiment (532,157 tokens) replayed one of live run #2's failing turns on the
 fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
+
+## Acceptance on Codex (main ca05b29, gpt-6-astra reasoning low, bound 64,000, owner's proxy)
+
+Record: `docs/research/M2-codex-step1-live.md`; decision D30.
+
+| Criterion | Result |
+|---|---|
+| 1. Long run | PASS: 21 of 21 turns, history 164,844 (at least 160,000 needed), 0 compaction, 44 requests all under the bound (max input 26,066), all 200 and completed, 0 failure events |
+| 2. Fidelity | PASS by arithmetic: Contexto answered 54 of 54 (rescored independently by reviewer-1), so no baseline can be above it; the baseline was not run (D30) |
+| 3. Recall | PASS: 4 of 4 paged-only probes reached the model through `contexto_search` (as scored after B30, #169). The run's harness scored 1 of 4 because it located 3 plants on later pages that quoted them; B30 fixed that, and the Claude runs were unaffected |
+
+Spend 922,201 of a 5,385,600 line (74.0 percent of input cached). The model searched 84 times,
+pinned 9 records, and never called recall. Network samples saw no connection outside the proxy
+with analytics and plugin sync off.
 
 ## Usage against plain Claude Code (run #3's session, zero-spend analysis)
 
@@ -114,14 +129,18 @@ run, one model.
 
 ## Known limitations (v0.1.0)
 
-- Acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's proxy.
+- Claude acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's
+  proxy; Codex acceptance on gpt-6-astra at bound 64,000. The default bound 150,000 is untested
+  on Codex (D30).
 - Codex pages written by v0.1.0 to v0.1.2 are searchable from v0.1.3 on, but their index lines
   keep empty user text, tools, and paths (index stubs are stored when a page is written).
-- Codex: runs end to end, but has no live acceptance run. HTTP is forced through a custom
+- Codex: HTTP is forced through a custom
   provider (no WebSocket). Contexto's tools sit behind Codex tool search and need
   `default_tools_approval_mode = approve`, which `contexto run codex` sets. Only API-key mode is
   live-tested; ChatGPT login mode is tested with synthetic credentials and its terms question is
-  open (O4). Some Codex calls go to chatgpt.com directly and bypass the proxy. `preamble_first` is
+  open (O4). By default Codex also connects to chatgpt.com (analytics) and github.com (plugin
+  sync) outside the proxy; `-c analytics.enabled=false` and `-c features.plugins=false` stop them
+  in network samples, and `contexto run codex` leaves both to the user. `preamble_first` is
   on but unmeasured there.
 - One turn that needs more evidence than its recall room holds cannot get it all (D27); the room
   per turn is the bound minus the request's usage (input plus output) minus a 25,000-token
@@ -155,6 +174,7 @@ run, one model.
 | v0.1.2 | def6e8c | A18: `CONTEXTO_HOME` resolved to one absolute path for the proxy and every MCP server (Codex's MCP server ignored it before) |
 | v0.1.3 | 031ca59 | B23: search and index lines read Codex message parts, tool calls, and tool outputs (Codex search found nothing before; recall already worked, B20 in v0.1.0) |
 | v0.1.4 | 314d575 | B24: standalone `contexto mcp` resolves `CONTEXTO_HOME` and `--home` to an expanded absolute path |
+| v0.1.5 | 5ef9370 | A23: the proxy logs how each response ended (status, incomplete reason, stop reason), content-free |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 

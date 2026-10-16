@@ -201,6 +201,21 @@ the owner's delegation. Open decisions are listed at the end with the options an
   is reversible by deleting the tag and release); release after B22 (rejected: B22 refines search
   but is not needed for what acceptance measured, and it ships in a later version).
 
+- **D30. Codex acceptance: run H1 only, and skip the baseline once H1 scores 54 of 54.** Intake,
+  2026-10-16. Codex acceptance (`docs/research/M2-codex-acceptance-plan.md`) uses gpt-6-astra at
+  reasoning effort low and bound 64,000, because the full-context baseline must stay under Codex's
+  own compaction point (about 245,000 of a 272,000 window) while acceptance 1 needs history of at
+  least 2.5 times the bound; so the shipped default of 150,000 is untested on Codex. It ran in two
+  stages with separate approvals: step 1, H1 alone for acceptance 1 and 3 (line 5,385,600, through
+  the owner's proxy with the rig key under D12, retries pinned and Codex's analytics and plugin sync
+  off in the harness only), and step 2, a no-tools replay of the 6 probe requests as the baseline
+  (worst 1,522,330). Step 1 on main ca05b29 spent 922,201, passed acceptance 1, and answered 54 of
+  54, which reviewer-1 rescored independently from the run's local files. Since no baseline can
+  score above 54 overall or in any category, acceptance 2 passes by arithmetic, and step 2 was not
+  run. Options considered: run step 2 anyway for a baseline figure (rejected: 1.5M tokens for a
+  number that cannot change the verdict); run both arms at once as for Claude (rejected: staging
+  let a failed H1 stop before the baseline spend).
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
