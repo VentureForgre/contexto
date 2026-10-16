@@ -34,15 +34,28 @@ def compare(h1: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
             "pass": overall_gap <= 2 and all(g <= 1 for g in gaps.values())}
 
 
+def build_script(seed: int, turns: int, turn_bytes: int, params: budget.Params) -> script.Script:
+    """With ``turns`` 0, the fewest content turns whose actual sizes reach 2.5x the bound."""
+    if turns:
+        return script.build(seed, turns, turn_bytes)
+    n = 4
+    while True:
+        s = script.build(seed, n, turn_bytes)
+        tokens = sum(budget.turn_tokens(x) + params.reply_tokens for x in s.turn_bytes[:-1])
+        if tokens >= 2.5 * params.bound:
+            return s
+        n += 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="M2 acceptance harness")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("dry-run", "score", "live"):
         sp = sub.add_parser(name)
         sp.add_argument("--seed", type=int, default=script.DEFAULT_SEED)
-        sp.add_argument("--turns", type=int, default=17)
-        sp.add_argument("--turn-kbytes", type=int, default=30)
-        sp.add_argument("--bound", type=int, default=100_000)
+        sp.add_argument("--turns", type=int, default=0, help="content turns; 0 = the fewest reaching 2.5x the bound")
+        sp.add_argument("--turn-kbytes", type=int, default=70)
+        sp.add_argument("--bound", type=int, default=150_000)
         sp.add_argument("--head", type=int, default=budget.Params.head)
     score_p = sub.choices["score"]
     score_p.add_argument("--h1", type=Path, required=True)
@@ -66,8 +79,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(out, indent=2, default=str))
         return 0 if all(report.verdicts().values()) else 1
 
-    s = script.build(args.seed, args.turns, args.turn_kbytes * 1_000)
     params = budget.Params(bound=args.bound, head=args.head)
+    s = build_script(args.seed, args.turns, args.turn_kbytes * 1_000, params)
     if args.command == "dry-run":
         b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], params)
         print(f"Script: seed {s.seed}, {len(s.turns) - 1} content turns of about {args.turn_kbytes} KB, "

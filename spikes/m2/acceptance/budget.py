@@ -25,7 +25,7 @@ HEADROOM_FLOOR = 25_000
 
 @dataclass(frozen=True)
 class Params:
-    bound: int = 100_000
+    bound: int = 150_000  # intake 00:40Z: the shipped default; history must reach 2.5x (375,000)
     head: int = 54_500  # the contract's M0 figure for a throwaway head with pins (rule 4); lane 1 relayed 45,925 without
     window_fraction: float = 0.5  # rule 4: retained window targets this share of W
     reply_tokens: int = 20  # "OK" plus a little thinking per build turn

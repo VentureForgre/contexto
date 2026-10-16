@@ -63,7 +63,7 @@ def test_turns_reach_the_requested_size(s):
 
 
 def test_rotation_always_retains_the_newest_complete_turn(s):
-    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], budget.Params())
+    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], budget.Params(bound=100_000))
     for row in b.rows[1:]:
         if row.kind == "turn":
             assert row.retained_turns >= 1
@@ -74,7 +74,7 @@ def test_rotation_always_retains_the_newest_complete_turn(s):
 
 
 def test_budget_lines_and_worst_case(s):
-    p = budget.Params()
+    p = budget.Params(bound=100_000)
     b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], p)
     assert b.h1_worst > b.h1_expected > 0
     assert b.baseline_cli > b.baseline_replay > b.history_tokens
@@ -84,7 +84,7 @@ def test_budget_lines_and_worst_case(s):
 def test_bound_too_small_when_the_window_budget_cannot_hold_a_turn():
     # 44 KB turns at a 54.5k head and a 100k bound: W = 20,500 cannot hold a 22k-token turn (rule 4).
     big = script.build(turns=12, turn_bytes=44_000)
-    b = budget.simulate(list(big.turn_bytes[:-1]), big.turn_bytes[-1], budget.Params())
+    b = budget.simulate(list(big.turn_bytes[:-1]), big.turn_bytes[-1], budget.Params(bound=100_000))
     assert b.bound_too_small > 0 and b.planned_over_bound > 0 and b.rotations == 0
     assert b.window_budget_first == 100_000 - 25_000 - 54_500
 
@@ -215,3 +215,14 @@ def test_dry_run_prints_the_budget(capsys):
     assert run.main(["dry-run"]) == 0
     out = capsys.readouterr().out
     assert "H1 acceptance run through the proxy" in out and "Full-context baseline" in out
+
+
+def test_auto_turn_count_reaches_the_acceptance_history_at_150k():
+    p = budget.Params()
+    assert p.bound == 150_000
+    s = run.build_script(script.DEFAULT_SEED, 0, 70_000, p)
+    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], p)
+    assert b.history_tokens >= 375_000 and b.planned_over_bound == 0 and b.bound_too_small == 0
+    shorter = script.build(script.DEFAULT_SEED, len(s.turns) - 2, 70_000)
+    assert sum(budget.turn_tokens(x) + p.reply_tokens for x in shorter.turn_bytes[:-1]) < 375_000
+    assert b.h1_worst + b.baseline_replay_worst < 4_000_000

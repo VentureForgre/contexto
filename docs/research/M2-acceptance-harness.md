@@ -114,8 +114,28 @@ the local part small.
 ## Dry-run budget [inferred estimates]
 
 ```
-python3 spikes/m2/acceptance/run.py dry-run   # 17 turns of 30 KB, bound 100,000, head 54,500
+python3 spikes/m2/acceptance/run.py dry-run   # bound 150,000, 70 KB turns, turn count chosen to reach 375,000
 ```
+
+**Intake's parameters** (2026-10-16 00:40Z):
+- bound 150,000, the shipped default, and local history of at least 375,000;
+- the replay baseline, labeled no-replayed-thinking;
+- up to 4,000,000 tokens with the guard at the worst case.
+
+That approval is conditional on a zero-spend dry run with lane A's real `contexto run` and the
+measured head. With the default head:
+
+| Line | Expected tokens | Worst case (full output reserve) |
+|---|---|---|
+| H1 acceptance run through the proxy (11 turns of 70 KB + probe turn) | 2,411,004 | 2,981,584 |
+| Full-context baseline, one direct replay request | 439,260 | 467,260 |
+| **Total** | **2,850,264** | **3,448,844** |
+
+- The plan reaches 378,899 tokens of local history, 2.53 times the bound, with 9 rotations.
+- No requests are planned over the bound, and `W` is 70,500.
+- The harness picks the fewest content turns whose actual sizes reach 2.5 times the bound.
+
+The figures below are the earlier 100k-bound analysis that led to that decision.
 
 **Method**
 - The proxy is simulated with contract rules 3 to 5. The window budget is `W = bound - headroom -
@@ -189,5 +209,5 @@ They cover:
 2. **Launcher flags.** The A3 flags (`--bound`, `--session`) are proposed, not landed.
 3. **Replay baseline.** It needs the CLI's request shape: either the JSONL's `api-request-shape`
    record, or an opt-in proxy dump of the last full request under the session directory.
-4. **Budget and bound.** Intake to approve the budget line and the bound (100k with small turns,
-   or 150k), after a dry-run with the measured head.
+4. **Budget and bound.** Decided by intake: bound 150k, budget up to 4,000,000. Pending: the
+   zero-spend dry run with lane A's real `contexto run` and the measured head.
