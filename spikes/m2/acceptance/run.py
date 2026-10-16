@@ -245,6 +245,13 @@ def main(argv: list[str] | None = None) -> int:
         out["cache_hit_rate"] = report.cache_hit_rate
         out["verdicts"] = report.verdicts()
         out["informational"] = report.informational()
+        # Acceptance 3 is recall_credited, which needs the session's pages and the answers. Without
+        # them it is not evaluated, and check fails closed (reviewer-2 on PR #124).
+        not_evaluated = "not evaluated: pass --session-dir and --answers"
+        out["paged_only_plants_paged"] = not_evaluated
+        out["verdicts"]["paged_only_plants_paged"] = False
+        out["verdicts"]["recall_credited"] = False
+        out["recall_credit"] = {"acceptance_3": False, "reason": not_evaluated}
         if args.session_dir is not None:
             s0 = script.build()
             paged = detectors.paged_statements(args.session_dir, [p.statements[0] for p in s0.probes

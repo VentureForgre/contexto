@@ -226,7 +226,7 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
                        "with_recalls": recall_inputs[-1] if recall_inputs else probe_input,
                        "margin_to_bound": p.bound - (recall_inputs[-1] if recall_inputs else probe_input)},
         "max_input": max(inputs, default=0),
-        "budget": {"h1_expected": h1_expected, "h1_worst": h1_worst, "baseline_requests": baseline_requests,
+        "budget": {"note": "non-authoritative; the approval table is the gate", "h1_expected": h1_expected, "h1_worst": h1_worst, "baseline_requests": baseline_requests,
                    "baseline_replay": replay, "baseline_replay_worst": replay_worst,
                    "total_expected": h1_expected + replay, "total_worst": h1_worst + replay_worst,
                    "simulated_with_measured_head": {"h1_expected": sim.h1_expected, "h1_worst": sim.h1_worst,

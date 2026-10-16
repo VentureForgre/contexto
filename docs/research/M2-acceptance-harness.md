@@ -16,7 +16,7 @@ Claims are tagged **[measured]**, **[vendor-documented]**, or **[inferred]**.
 |---|---|
 | 1. Long run: zero compaction, every request under the bound except logged over-bound turns, zero 4xx | `detectors.analyze` over the session log and Claude Code's session JSONL |
 | 2. Fidelity: within 2 probes of the full-context baseline overall, no category more than 1 below | `run.py score`, using the deterministic L2f scorer on both answer sets plus `compare` |
-| 3. Recall: a paged-out-only probe answered, and the answer reached the model through Contexto's tools: a `contexto_recall` of its page or a `contexto_search` hit whose returned lines contain it | 4 paged-only probes; `run.py check --answers` credits each from the `mcp_call` events' returned ranges (`recall_credited`). Whether `contexto_recall` was called is reported under `informational`, never a verdict |
+| 3. Recall: a paged-out-only probe answered, and the answer reached the model through Contexto's tools: a `contexto_recall` of its page or a `contexto_search` hit whose returned lines contain it | 4 paged-only probes; `run.py check --answers` credits each from the `mcp_call` events' returned ranges (`recall_credited`). Whether `contexto_recall` was called is reported under `informational`, never a verdict. Without `--session-dir` and `--answers`, acceptance 3 is not evaluated and `check` fails closed |
 | 4. Cache within an epoch, misses reported as a rate | `Report.cache_hit_rate` and the list of misses |
 
 ## The session
