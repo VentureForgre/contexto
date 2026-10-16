@@ -159,6 +159,30 @@ the owner's delegation. Open decisions are listed at the end with the options an
   stay on record, and a single turn that needs more evidence than the room holds is a stated known
   limitation.
 
+- **D28. Fix stale chain answers in search, then rerun both arms on new content.** Intake,
+  2026-10-16, decided after a failed run and recorded as such. Live run #2 (main c8f0b08, D27
+  6 by 9) passed acceptance 1, 3, and 4 and failed acceptance 2 narrowly: H1 44 and baseline 45
+  overall, but chain 22 against 24 (gap 2, limit 1). All 5 H1-only misses were deep chain probes
+  answered with a stale value. A zero-spend analysis (builder-3) found 4 of the 5 had the newer
+  link in the retained window while the model answered from a search reply whose newest paged hit
+  looked current. Changes, each reviewed at exact head: search lists matches from the retained
+  window first, newest first, at most 3 per reply (contract #125 and #134, code #131 and #132);
+  paged hits show their last 3 matching lines with first and last offsets (B21, #134 and #135);
+  the harness plants chain links in order (#127). Measured on main before the rerun (targeted
+  experiment, line 740,000, spent 532,157): two targets-only samples on run #2's first probe
+  turn scored 3 of 4 (no search calls) and 4 of 4 (one search per target, retained-window lines
+  first); a faithful replay of run #2's third probe turn (original wording and position, all 9
+  probes, 2 requests and 14 searches as in run #2) went from 5 of 9 to 8 of 9, with 3 wins
+  (including the target) and 0 regressions; the remaining miss is a probe whose content run #2
+  planted in the wrong order, so it tested nothing. One sample of one turn, so this is evidence
+  for the rerun, not an acceptance result. Options considered: (a) accept the failure and list
+  stale chain answers as a known limitation, rejected because the miss had a found, fixable cause;
+  (b) widen the per-category tolerance, rejected as moving the bar after seeing the result;
+  (c) rerun H1 only against the old baseline of 45, rejected because the plant-order fix changes
+  the content, so the arms would no longer be comparable. Chosen: rerun both arms on the new
+  content under D27 on main with B19, B21, the plant-order fix, and B20, after a zero-spend dry
+  run; H1 first, the baseline only if acceptance 1 and 3 pass; new approval line 6,873,612 worst.
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
