@@ -155,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
     chk.add_argument("--bound", type=int, default=150_000)
     chk.add_argument("--session-dir", type=Path, default=None,
                      help="session directory, to confirm the paged-only plants were really paged")
+    chk.add_argument("--answers", type=Path, default=None,
+                     help="the run's answers file: with --session-dir, credits acceptance 3 from the logged "
+                          "returned ranges (contract PR #95)")
     args = parser.parse_args(argv)
 
     if args.command == "check-credential":
@@ -186,6 +189,14 @@ def main(argv: list[str] | None = None) -> int:
                                                                   if p.id in s0.paged_only])
             out["paged_only_plants_paged"] = f"{sum(paged.values())}/{len(paged)}"
             out["verdicts"]["paged_only_plants_paged"] = all(paged.values())
+            if args.answers is not None:
+                from acceptance import reach, recall_credit
+
+                probes = [p for p in s0.probes if p.id in s0.paged_only]
+                credit = recall_credit.credit(probes, args.answers.read_text(encoding="utf-8"),
+                                              detectors.read_jsonl(args.session_log), reach.load_pages(args.session_dir))
+                out["recall_credit"] = credit
+                out["verdicts"]["recall_credited"] = credit["acceptance_3"]
         print(json.dumps(out, indent=2, default=str))
         return 0 if all(out["verdicts"].values()) else 1
 
