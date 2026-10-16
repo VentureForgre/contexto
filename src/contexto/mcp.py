@@ -55,6 +55,9 @@ CONTROL_REPLIES = frozenset({BUDGET_SPENT, SEARCH_TOO_LONG, NO_HIT})
 # statement sat in the conversation in view, which search cannot see.
 SEARCH_COVERAGE = ("[Paged hits come only from paged-out turns; the conversation in view is newer than any of "
                    "them.]")  # contract PR #125
+# B19 (b): when the retained-window snapshot is missing or not from the current room publish.
+SEARCH_COVERAGE_UNCHECKED = SEARCH_COVERAGE[:-1] + " In view not checked.]"
+IN_VIEW_LIMIT = 3  # matching lines from the conversation in view per search reply, newest first
 UNMEASURED_CHARS_PER_TOKEN = 1.0  # before the engine records bytes per token: charges more, never less
 # Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
 # rejects a tools/list result without them (reviewer-2, real client, 2026-10-16). The tool list is
@@ -347,7 +350,8 @@ class Server:
                      else BUDGET_SPENT]
         return ([{"type": "text", "text": t} for t in texts], None,
                 {"page_id": page_id, "offset": offset, "chars": len(chunk), "total_chars": total,
-                 "returned": [{"page_id": page_id, "start": offset, "end": offset + len(chunk)}] if chunk else [],
+                 "returned": [{"source": "paged", "page_id": page_id, "start": offset, "end": offset + len(chunk)}]
+                 if chunk else [],
                  **budget})
 
     def _tool_pin(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
@@ -415,11 +419,13 @@ class Server:
         pages = [(page_id, self.store.get_page(page_id) or {}) for page_id in found[:SEARCH_LIMIT + SEARCH_MORE_LIMIT]]
         hits = [_hit_rows(page_id, page, query) for page_id, page in pages[:SEARCH_LIMIT]]
         more = [_more_row(page_id, page, query) for page_id, page in pages[SEARCH_LIMIT:]]
+        in_view = self._in_view_rows(query)  # None: in view not checked
+        lead = in_view or []
         limit, _ = recall_limit(*self._window())  # one search reply is held to the per-call recall limit
         specific = "use a longer or more specific query"
 
         def render(rows: list[Row], detailed: int, listed: int, why: str) -> str:
-            lines = [t for t, _ in rows]
+            lines = [t for t, _ in lead + rows]
             if listed:
                 lines.append("[more matching pages, newest first; recall one at its offset:]")
                 lines += [t for t, _ in more[:listed]]
@@ -430,8 +436,15 @@ class Server:
         picked: dict[str, Any] = {"rows": [], "pages": 0}
 
         def build(room: int | None) -> list[str] | None:
-            if not hits:
+            if not hits and not lead:
                 return [NO_HIT]
+            if not hits:  # matches in view only
+                text = "\n".join(t for t, _ in lead)
+                cap_only = limit if room is None else min(room, limit)
+                if len(text) <= cap_only:
+                    picked.update(rows=[], pages=0)
+                    return [text]
+                return None
             cap = limit if room is None else min(room, limit)
             by_cap = room is None or limit <= room  # the per-call limit binds, not the turn's room
             why = specific if by_cap else "the recall budget for this turn is used up"
@@ -456,9 +469,42 @@ class Server:
 
         texts, budget = self._within_room(build, "contexto_search")
         text = texts[0] if texts else BUDGET_SPENT
-        return ([{"type": "text", "text": text}, {"type": "text", "text": SEARCH_COVERAGE}], None,
+        shown = texts is not None and text not in CONTROL_REPLIES
+        coverage = SEARCH_COVERAGE if in_view is not None else SEARCH_COVERAGE_UNCHECKED
+        return ([{"type": "text", "text": text}, {"type": "text", "text": coverage}], None,
                 {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": len(found),
-                 "returned": _spans(picked["rows"]) if texts else [], **budget})
+                 "in_view_hits": max(0, len(lead) - 1) if shown else 0, "in_view_checked": in_view is not None,
+                 "returned": _spans(lead + picked["rows"]) if shown else [], **budget})
+
+    def _in_view_rows(self, query: str) -> list[Row] | None:
+        """Matching lines of the conversation in view, newest first (B19 b, contract PR #125).
+
+        Uses the retained-window snapshot only when the store says it is the current request's
+        (``retained_current``); otherwise returns None and the reply says in view was not checked. Each
+        line is the matching line only, labelled in view, with no offset (recall reads pages, not the
+        window); its span is logged content-free with source in_view, which never credits recall.
+        """
+        current = getattr(self.store, "retained_current", None)  # stamp == room stamp == request sequence
+        snapshot = current() if callable(current) else None
+        if snapshot is None:
+            return None
+        found = []
+        for entry in snapshot[3]:
+            for form in _rendered_forms(query):
+                shown, _ = match_lines(entry["text"], form, context=0)
+                if shown:
+                    found += [(entry["turn"], entry["message_index"], start, end, text)
+                              for start, end, is_match, text in shown if is_match]
+                    break
+        found.sort(key=lambda m: (m[0], m[1], m[2]), reverse=True)
+        if not found:
+            return []
+        rows: list[Row] = [("[in view, newest first:]", None)]
+        rows += [(f"> in view (turn {turn}): {text}", ("in_view", turn, index, start, end))
+                 for turn, index, start, end, text in found[:IN_VIEW_LIMIT]]
+        if len(found) > IN_VIEW_LIMIT:
+            rows.append((f"  [{len(found) - IN_VIEW_LIMIT} more matching lines in view]", None))
+        return rows
 
     # Per-turn recall budget (M2 contract PR #69)
 
@@ -525,7 +571,9 @@ def _state_trailer(rest: int) -> str:
     return f"[{rest} more characters of the pinned state not shown; the recall budget for this turn is used up]"
 
 
-Row = tuple[str, "tuple[str, int, int] | None"]  # a line of a search reply, and the page span it shows
+# A line of a search reply and the span it shows: (page_id, start, end) in a page, or
+# ("in_view", turn, message_index, start, end) in the retained window, or None.
+Row = tuple[str, "tuple[Any, ...] | None"]
 
 
 def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
@@ -582,16 +630,25 @@ def _stub_line(stub: Any) -> str:
 
 
 def _spans(rows: list[Row]) -> list[dict[str, Any]]:
-    """The page spans a reply's rows show, ``{page_id, start, end}``; lines that follow each other merge."""
+    """The spans a reply's rows show, content-free, each with its source (contract PR #125, agreed with builder-4).
+
+    Paged spans are ``{source: paged, page_id, start, end}`` into ``render_page``; lines that follow
+    each other merge. In-view spans are ``{source: in_view, turn, message_index, start, end}`` into
+    that retained entry's text, with no page id, so they never credit recall (acceptance 3).
+    """
     spans: list[dict[str, Any]] = []
     for _, span in rows:
         if span is None:
             continue
+        if span[0] == "in_view":
+            _, turn, index, start, end = span
+            spans.append({"source": "in_view", "turn": turn, "message_index": index, "start": start, "end": end})
+            continue
         page_id, start, end = span
-        if spans and spans[-1]["page_id"] == page_id and spans[-1]["end"] + 1 == start:  # the newline is shown too
+        if spans and spans[-1].get("page_id") == page_id and spans[-1]["end"] + 1 == start:  # the newline is shown too
             spans[-1]["end"] = end
         else:
-            spans.append({"page_id": page_id, "start": start, "end": end})
+            spans.append({"source": "paged", "page_id": page_id, "start": start, "end": end})
     return spans
 
 
