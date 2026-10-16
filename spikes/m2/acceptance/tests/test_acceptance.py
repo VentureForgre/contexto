@@ -738,3 +738,18 @@ def test_live_gates_on_the_combined_h1_and_baseline_worst_case(tmp_path, capsys)
     assert "below the combined worst case" in capsys.readouterr().err
     assert run.main(["live", "--approved", str(combined), *common]) == 2  # passes the gate, stops at the seat file
     assert "seat settings file" in capsys.readouterr().err
+
+
+
+def test_h1_spend_takes_the_proxy_logged_usage_after_a_mid_turn_stop():
+    # Reviewer-2 on PR #112: the driver's spend grows only per finished turn; a stop inside the probe
+    # turn's tool loop drops that turn's requests. The proxy-logged usage is what was billed.
+    log = [_req(0, 100_000)] + [_req(1, 105_000) for _ in range(4)]  # 5 requests, 10 output tokens each
+    logged = 100_000 + 4 * 105_000 + 5 * 10
+    spend = run.h1_spend(100_010, log, abnormal=True, reserve=32_000)  # results saw only the first turn
+    assert spend["spent_logged"] == logged and spend["spent_results"] == 100_010
+    assert spend["in_flight_allowance"] == 105_000 + 32_000  # one more request of the last size may be unlogged
+    assert spend["spent"] == logged + 137_000
+    clean = run.h1_spend(logged, log, abnormal=False, reserve=32_000)
+    assert clean["spent"] == logged and clean["in_flight_allowance"] == 0
+    assert run.h1_spend(500, [], abnormal=False, reserve=32_000)["spent"] == 500  # no log: the driver's figure

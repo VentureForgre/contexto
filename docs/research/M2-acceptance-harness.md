@@ -234,8 +234,10 @@ answers with the baseline's 6x9 answers per probe id.
 stop at the room. Evidence and answers stay in the history. Every input token counts toward the
 approval, cached or not: caching lowers the price, not the token count. The live gate is the
 combined worst case (H1 plus baseline); H1's guards stop at the approval minus the baseline's worst.
-After H1, `live` writes `<home>/acceptance-<session>-h1.json` with the spend it measured (each
-turn's reported usage). Run the baseline with `run.py replay --approved <combined approval>
+After H1, `live` writes `<home>/acceptance-<session>-h1.json` with what H1 cost: the larger of the
+driver's per-turn figure and the usage the proxy logged for every Messages response (what was
+billed; the driver's figure misses a turn stopped midway), plus, after an abnormal stop, an
+in-flight allowance of the last logged input and the output reserve. Run the baseline with `run.py replay --approved <combined approval>
 --h1-record <that file> ...`: the replay then may spend the combined approval minus H1's recorded
 spend, and its count_tokens gate checks each request against what is left of that.
 Rooms at the six probe-turn starts in this model are 29,562, 10,758, 9,749, 8,728, 7,689, and

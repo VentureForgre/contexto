@@ -114,6 +114,25 @@ def run_replay(args: argparse.Namespace) -> int:
     return status
 
 
+def h1_spend(results_spent: int, session_log: list[dict[str, Any]], abnormal: bool, reserve: int) -> dict[str, int]:
+    """What H1 cost, for the replay's approval (reviewer-2, PR #112). The driver's figure grows only
+    when a turn's result arrives, so a stop inside a turn (the spend watcher in a tool loop, a 401 or
+    403, Claude Code exiting) drops that turn's requests. The proxy logs every Messages response's
+    usage, which is what was billed: take the larger of the two. On an abnormal stop a request may also
+    have been in flight, unlogged: allow one more of the last logged input plus the output reserve."""
+    logged, last_input = 0, 0
+    for ev in session_log:
+        if ev.get("event") == "request" and str(ev.get("path") or "").split("?")[0] == "/v1/messages" and ev.get("usage"):
+            usage = ev["usage"]
+            inp = sum(int(usage.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
+                                                       "cache_read_input_tokens"))
+            logged += inp + int(usage.get("output_tokens") or 0)
+            last_input = inp
+    in_flight = last_input + reserve if abnormal else 0
+    return {"spent": max(results_spent, logged) + in_flight, "spent_results": results_spent,
+            "spent_logged": logged, "in_flight_allowance": in_flight}
+
+
 def plan(seed: int = script.DEFAULT_SEED, turns: int = 0, turn_bytes: int = 40_000,
          params: budget.Params = budget.Params()) -> tuple[script.Script, budget.Budget]:
     """The script and its simulated budget: the one figure dry-run prints, the doc shows, and live gates on."""
@@ -293,7 +312,9 @@ def main(argv: list[str] | None = None) -> int:
         status = 1
     finally:
         transport.close()
-    record = {"spent": run.spent, "turns": run.turns, "stream_compactions": transport.compactions,
+    spend = h1_spend(run.spent, detectors.read_jsonl(session_log) if session_log.exists() else [],
+                     abnormal=status != 0, reserve=params.max_tokens_reserve)
+    record = {**spend, "turns": run.turns, "stream_compactions": transport.compactions,
               "approved": args.approved, "h1_cap": h1_cap, "baseline_worst": b.baseline_replay_worst}
     # The replay's approval is the combined approval minus this spend (run.py replay --h1-record).
     (args.home / f"acceptance-{args.session}-h1.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
