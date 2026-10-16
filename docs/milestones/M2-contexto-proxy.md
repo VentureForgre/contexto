@@ -405,7 +405,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   main conversation's room and snapshot, and for a subagent "in view" refers to the main
   conversation's window (part of the documented subagent limitation); the MCP
   server cannot tell which conversation issued a call. Matches in the
-  snapshot are listed first, labeled in view, newest first, as the matching line only, charged,
+  snapshot are listed first, labeled in view, newest first, as the matching line only, at most 3
+  per reply (the newest 3 across the window, the rest counted in one line), charged,
   with their returned spans logged content-free under a distinct source marker and no page id. In-view hits do not count toward acceptance 3,
   which measures retrieval of paged-out content. Measured basis (live run #2 chain
   analysis, builder-3, zero spend): 4 of H1's 5 extra chain misses had a newer link in the retained
