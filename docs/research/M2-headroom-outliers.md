@@ -110,21 +110,57 @@ there.
   outlier turn starts at the same size under all of them. Only a smaller bound, or more room kept at
   turn starts (a larger `headroom_floor` or `min_turn_room`, at the cost of window), raises it.
 
+## The cost of the recommendation (reviewer-1, answering intake)
+
+Forgetting returns the window to normal after an outlier. That also returns the in-turn ceiling for
+a later large turn to normal. Today's stuck headroom keeps only the newest turn in view, and that
+leaves extra margin as a side effect.
+
+- **`over_bound`** is 0 under every rule on Codex A22 and Claude run #3, and 1 on the seat session
+  (the read itself). Peaks are identical across rules (26,066, 109,868, 258,586 and 281,532).
+- **Synthetic double reads at 150,000** (reviewer-1's replay: the seat session with a second large
+  read 2, 3, 5 or 8 turns after the first):
+  - With fixed sizes (149,140, 60,000, 40,000, 25,000), `over_bound` is the same for today and the
+    recommended rule. The second read's turn starts 0 to 5,875 tokens larger under the recommended
+    rule (92,000 head).
+  - The largest second read each rule keeps under the bound differs, so there is a band. A second
+    read in that band is logged over the bound inside its loop under the recommended rule, but stays
+    under it today:
+
+    | Head | Second read at | Today | Recommended | No earlier outlier |
+    |---|---|---|---|---|
+    | 30,000 | +3 turns | ~116,600 | ~110,700 | ~58,400 |
+    | 30,000 | +8 turns | ~113,400 | ~77,200 | ~74,400 |
+    | 60,000 | +3 turns | ~86,600 | ~80,700 | |
+    | 60,000 | +8 turns | ~83,300 | ~47,200 | |
+    | 92,000 | +3 turns | ~54,600 | ~48,600 | ~45,800 |
+    | 92,000 | +8 turns | ~51,400 | ~48,600 | ~48,600 |
+
+  - The band is about 6,000 tokens wide 3 turns after the outlier. With a small head it is up to
+    about 36,000 tokens wide 8 turns after it.
+- **This is the cost of the recommendation.** Today's extra margin comes only from `window_minimal`.
+  The recommended rule's ceiling is never below a session with no outlier at the same turn (last
+  column). It returns to normal and does not make large turns riskier than normal. In exchange, the
+  model keeps more history in view, with fewer rotations.
+
 ## Proposed contract text (rule 4, headroom; for intake)
 
 > **Headroom.** At a turn start, headroom = max(`headroom_floor`, min(ceil(`headroom_factor` x
 > `max_turn_growth`), floor(`headroom_cap` x bound))), with `headroom_cap` = 0.25. At each turn
-> start of a conversation, `max_turn_growth` = max(floor(previous `max_turn_growth` x
-> `headroom_decay`), g), where g is that turn's growth (the tokens of the messages added since the
-> previous turn start, per turn start, as today) and `headroom_decay` = 0.5. So one outlier turn
-> raises headroom by at most a quarter of the bound, and its weight halves at every later turn
-> start. Both are configuration settings (`headroom_cap`, `headroom_decay`), included in the rule 16
-> configuration check. Rule 16 records `max_turn_growth` as today (one integer): a resumed engine
-> applies the cap at every use and the decay at its next turn start, so it forgets exactly as the
+> start where the engine measures the turn's growth g (as today: a previous turn start is recorded
+> and the turn count has grown), and before the rotation decision, `max_turn_growth` =
+> max(floor(previous `max_turn_growth` x `headroom_decay`), g), where g is the tokens of the
+> messages added since the previous turn start, per turn start, as today, and `headroom_decay` =
+> 0.5. A turn start sent again with no new turn (a retry) measures no growth and does not decay.
+> So one outlier turn raises headroom by at most a quarter of the bound, and its weight halves at
+> every later turn start. Both are configuration settings (`headroom_cap`, `headroom_decay`),
+> included in the rule 16 configuration check. Rule 16 records `max_turn_growth` as today (one
+> integer): a resumed engine applies the cap at every use and the decay at its next turn start
+> that measures growth (not at the turn start that wrote the record), so it forgets exactly as the
 > previous engine would have. A record written by an engine without these settings does not resume
 > (`settings_changed`). Headroom is used only in rotation decisions at a turn start, so rule 5 is
-> unchanged: nothing rotates inside a tool loop, and an in-turn request over the bound is logged as
-> today.
+> unchanged: nothing rotates inside a tool loop, and an in-turn request over the bound is logged
+> as today.
 
 ## What a live check would need
 
