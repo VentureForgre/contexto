@@ -17,7 +17,9 @@ same design after Claude Code works.
   standard library only. Tests with `pytest` via `uv run --with pytest pytest`. CI on `main` runs
   them (`.github/workflows/ci.yml`).
 - Data lives under `$CONTEXTO_HOME` (default `~/.contexto`), one directory per session:
-  `sessions/<session id>/`. Nothing in it is committed. Never edit the user's Claude or Codex
+  `sessions/<session id>/`. Nothing in it is committed. Everything under `$CONTEXTO_HOME` is
+  private to the user: directories `0700`, files `0600`, created atomically (secrets such as the
+  page key are written to a temporary file and renamed, never left empty by a race). Never edit the user's Claude or Codex
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
   stores or logs them.
@@ -135,8 +137,9 @@ compaction trigger, or the CLI may compact; the launcher refuses a `bound` above
 ## Store (normative)
 
 - **Pages:** `pages/<page id>.json`, one per paged-out turn, holding the exact message JSON of that
-  turn (thinking included as received), its turn number, byte and token estimates, and a stub:
-  first 200 characters of the user text, tool names used, and file paths mentioned.
+  turn (thinking included as received), its turn number, byte size (canonical JSON, summed per
+  content block) and token estimate, and a stub: first 200 characters of the user text, tool names
+  used, and at most 20 file paths mentioned.
   Page id: `pg_` + first 16 hex of HMAC-SHA256 over the canonical JSON, keyed with a random
   per-store key kept in the store and never sent upstream (ids appear in prompts, and short turns
   must not be guessable from their id). Pages are immutable.
