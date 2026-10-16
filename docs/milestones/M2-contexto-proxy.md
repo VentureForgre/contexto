@@ -181,6 +181,13 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     safe for thinking because rotation strips it), keep the latest settings-only message per
     settings key. If carried content grows by more than 4,000 tokens over its size at the
     session's first request, log `carried_over_budget` in the session log.
+14. **Transform failure fails closed.** If the engine cannot transform a request (an internal
+    error, an unreadable store, or a page conflict, which can only mean corruption), the proxy
+    never forwards the untransformed request. It answers the CLI with an Anthropic-format HTTP
+    400, `type: invalid_request_error`, and a message beginning `contexto:` that names the
+    event and points to `contexto sessions show`, and it logs `transform_error` or
+    `page_conflict`. A 400 rather than a 5xx, because Claude Code retries 5xx responses and the
+    session would stall. `count_tokens` fails the same way.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
@@ -240,7 +247,7 @@ the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
 ## Lanes
 
 - **Lane A, management.manager-1 (builder-1, builder-2):** launcher, proxy server and SSE relay,
-  rewrite engine (rules 1 to 13), upstream resolution, session log; then the Codex adapter
+  rewrite engine (rules 1 to 14), upstream resolution, session log; then the Codex adapter
   (Responses API over HTTP through a temporary `CODEX_HOME` whose provider uses `auth.command`;
   force HTTP or handle WebSocket deltas, decided with evidence).
 - **Lane B, management.manager-2 (builder-3, builder-4):** package scaffolding first (harvest PR #2),
