@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 import threading
 import time
@@ -9,8 +10,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from contexto.store import (PageConflictError, PageNotFoundError, charge_room, check_page_id, check_retained,
-                             check_model, check_turn_room, check_window, redact)
+from contexto.store import (PageConflictError, PageNotFoundError, charge_room, check_epoch, check_model,
+                             check_page_id, check_retained, check_turn_room, check_window, redact)
 from contexto.store.ledger import MemoryLedger
 from contexto.store.recall import lists_identifiers
 from contexto.store.pages import build_page, render_index, same_content, search_pages
@@ -65,6 +66,13 @@ class MemoryStore(LedgerOps):
 
     def retained(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
         return self._retained
+
+    def set_epoch(self, record: dict[str, Any]) -> None:
+        self._epoch = check_epoch(record)
+
+    def epoch_record(self) -> dict[str, Any] | None:
+        epoch = getattr(self, "_epoch", None)
+        return None if epoch is None else json.loads(json.dumps(epoch))  # a copy: callers cannot change it
 
     def retained_current(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
         r = self._retained
