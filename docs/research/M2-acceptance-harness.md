@@ -361,6 +361,25 @@ planned over-bound requests.
   zero-4xx counts model requests only, and other 4xx are reported apart (see Detectors).
 - **Artifacts** (private, never in Git): `.contexto/runs/acceptance-20261016T022918Z/`.
 
+## Acceptance 3 credit (contract PR #95)
+
+```
+uv run python spikes/m2/acceptance/run.py check --session-log ... --cc-jsonl ... --session-dir ... --answers ...
+```
+
+An answer counts as recall when it reached the model through Contexto's tools: a `contexto_recall` of
+its page, or a `contexto_search` hit whose returned lines hold it (B15). `recall_credit.py` reads
+nothing from the transcript or tool output. It takes each call's returned ranges from the
+content-free `mcp_call` events: B15's `returned: [{page_id, start, end}]`, 0-based characters into
+`render_page(page)` with the end exclusive, or, for a recall, `[offset, offset + chars)`. It finds
+each paged-only plant's line in its stored page's rendered text. A probe is credited when it was
+answered correctly and its whole line lies inside one returned range on the same page, from a call
+logged before the last Messages request (the answer). `recall_credited` is the verdict.
+
+On the live H1 rerun (`acceptance-20261016T044723Z`): q_p_01 and q_p_02 are credited through the
+recall of the turn-0 page (range 0 to 30,651; plants at 27,057 and 9,706). q_p_03 and q_p_04 were
+not returned (plants at 33,800 and 38,598) and were answered unknown.
+
 ## Search reachability (offline, zero spend)
 
 ```
