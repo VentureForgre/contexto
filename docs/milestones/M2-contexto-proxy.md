@@ -389,9 +389,9 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   the hit and needs a recall at the offset. Every reply states its coverage: paged hits come only from paged-out turns, and the conversation
   in view is newer than any of them. Search also matches the retained window: after each request's transform (never from
   `count_tokens`) the engine calls `SessionStore.set_retained(epoch, k, turns)` with entries
-  `{turn, message_index, role, kind, text}` (text blocks of the retained messages, including
-  `tool_result` text; `kind` is `text` or `tool_result`, and for Responses input `input_text` maps
-  to `text` and a function call's output to `tool_result`; no thinking or images), a full atomic overwrite at mode 0600, bounded by the
+  `{turn, message_index, role, text}` (text blocks of the retained messages, including
+  `tool_result` text; `role` is `user`, `assistant`, or `tool_result`, the last for every tool
+  result, including a Responses function call's output; no thinking or images), a full atomic overwrite at mode 0600, bounded by the
   window, never logged, stamped with that request's sequence number. Both room publishes of the
   same request (request time and real usage) carry the same request sequence, so a tool call
   inside the stream hold sees a snapshot that matches its room. Search refuses a snapshot whose
@@ -408,8 +408,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   server cannot tell which conversation issued a call. Matches in the
   snapshot are listed first, labeled in view, newest first, as the matching line only, at most 3
   per reply (the newest 3 across the window, the rest counted in one line), charged,
-  skipping the current turn's own question: entries of `kind` `text` and role `user` in the
-  snapshot's newest turn are never matched, since that text is what is being asked, not a
+  skipping the current turn's own question: entries with role `user` in the snapshot's newest
+  turn are never matched, since that text is what is being asked, not a
   statement about it (B22; in reviewer-2's zero-spend reach re-check on main 8571095, a probe turn's
   search returned the probe's own question as an in-view line, taking one of the 3 slots); the
   turn's `tool_result` text is still matched;
