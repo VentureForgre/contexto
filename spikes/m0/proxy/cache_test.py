@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
 import subprocess
 import sys
 import time
@@ -26,15 +28,26 @@ from extract import first_changed_block, total_tokens
 from proxy import SpikeProxy
 from run_session import REPO, SPIKE_ROOT, child_env, inherited_claude_base
 
-LAB_HOOK = "node '/Users/solomonwakhungu/Projects/contexto-worktrees/lab-subject/.openrig/hooks/scripts/activity-relay.cjs'"
+# The lab seat's own worktree, by default the sibling worktree named lab-subject; override with
+# M0_LAB_WORKTREE. Its registered activity hook is what condition "a" reproduces.
+LAB_HOOK_SCRIPT = Path(".openrig") / "hooks" / "scripts" / "activity-relay.cjs"
 SEAT_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "Notification")
 PROMPT = "Reply with the single word OK. Do not use any tools."
+
+
+def lab_hook_command() -> str:
+    worktree = Path(os.environ.get("M0_LAB_WORKTREE") or REPO.parent / "lab-subject")
+    script = worktree / LAB_HOOK_SCRIPT
+    if not script.is_file():
+        sys.exit(f"lab seat hook script not found under {worktree}; set M0_LAB_WORKTREE")
+    return f"node {shlex.quote(str(script))}"
 
 
 def settings_for(condition: str, proxy_url: str) -> dict[str, Any]:
     settings: dict[str, Any] = {"env": {"ANTHROPIC_BASE_URL": proxy_url}}
     if condition == "a":
-        settings["hooks"] = {event: [{"hooks": [{"type": "command", "command": LAB_HOOK}]}] for event in SEAT_HOOK_EVENTS}
+        hook = lab_hook_command()
+        settings["hooks"] = {event: [{"hooks": [{"type": "command", "command": hook}]}] for event in SEAT_HOOK_EVENTS}
     else:
         settings["disableAllHooks"] = True
     return settings

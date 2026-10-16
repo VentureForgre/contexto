@@ -240,11 +240,37 @@ class Run:
         print(json.dumps(line, sort_keys=True), flush=True)
 
 
-def inherited_claude_base() -> str | None:
-    """The base URL a throwaway Claude Code child would use without the spike, in Claude Code's
-    settings precedence (local, project, user, then process env). Held in memory only."""
-    for path in (REPO / ".claude" / "settings.local.json", REPO / ".claude" / "settings.json",
-                 Path.home() / ".claude" / "settings.json"):
+def main_checkout(repo: Path) -> Path | None:
+    """The main checkout when repo is a linked git worktree, else None."""
+    try:
+        out = subprocess.run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute",
+                              "--git-common-dir", "--show-toplevel"], capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    common_dir, toplevel = (Path(line) for line in out.stdout.splitlines()[:2])
+    main = common_dir.parent if common_dir.name == ".git" else None
+    return main if main is not None and main.resolve() != toplevel.resolve() else None
+
+
+def claude_settings_order(repo: Path, home: Path) -> list[Path]:
+    """Settings files whose env can set the base URL, highest precedence first, as measured for
+    claude 2.1.301 (docs/research/M0-proxy-measurements.md, finding 1a; M0-interception.md,
+    section 7): in a linked worktree the main checkout's settings.local.json is also loaded and
+    its base URL wins over the worktree's own files."""
+    order = []
+    main = main_checkout(repo)
+    if main is not None:
+        order.append(main / ".claude" / "settings.local.json")
+    order += [repo / ".claude" / "settings.local.json", repo / ".claude" / "settings.json",
+              home / ".claude" / "settings.json"]
+    return order
+
+
+def inherited_claude_base(repo: Path = REPO, home: Path | None = None) -> str | None:
+    """The base URL a throwaway Claude Code child started under repo would use without the spike:
+    the first settings env value in claude_settings_order, then the process env. Held in memory
+    only; never written."""
+    for path in claude_settings_order(repo, home or Path.home()):
         try:
             value = (json.loads(path.read_text()).get("env") or {}).get("ANTHROPIC_BASE_URL")
         except (OSError, ValueError, AttributeError):

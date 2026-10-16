@@ -42,10 +42,11 @@ which `spikes/m0/proxy/summarize.py` builds from the local proxy logs. Seat numb
 - `drive_l2d.py`: sends one planned turn to a test seat, waits for it in the session JSONL, and
   applies the stop rules. `stub401.py`: a zero-token routing stub. `cache_test.py`: the cache-miss
   experiment below.
-- `test_proxy.py` and `test_sessionlog.py`: 23 tests on synthetic fixtures. They cover end-to-end
+- `test_proxy.py`, `test_sessionlog.py`, and `test_run_session.py`: 25 tests on synthetic
+  fixtures and temporary git repos. They cover end-to-end
   transparency, SSE streaming, WebSocket tunneling with masked, fragmented, permessage-deflate
-  frames, the cap, block hashing, the session meter, and checks that a planted secret and planted
-  content never reach the logs.
+  frames, the cap, block hashing, the session meter, worktree base-URL resolution, and checks that
+  a planted secret and planted content never reach the logs.
 
 Output goes to the gitignored `.contexto/spikes/L1-a/`. Only the numbers-only CSV is committed.
 
@@ -56,7 +57,11 @@ with its working directory under this worktree, so it inherits the seat credenti
 and gets a flag-level override `--settings '{"disableAllHooks": true, "env": {"ANTHROPIC_BASE_URL":
 "http://127.0.0.1:<port>"}}'` plus `--strict-mcp-config`. Its environment drops this seat's
 `CLAUDE*`, `OPENRIG_*`, and `RIGGED_*` variables. The proxy upstream is the base URL the child
-would otherwise inherit, read at run time and never written. Runs use `--no-session-persistence`,
+would otherwise inherit, read at run time and never written. `inherited_claude_base()` resolves it
+the way Claude Code was measured to (finding 1a; `M0-interception.md` section 7). In a linked git
+worktree it reads the main checkout's `.claude/settings.local.json` first, found through
+`git rev-parse --git-common-dir`; then the worktree's local and project settings, the user
+settings, and finally the process env. Runs use `--no-session-persistence`,
 so no transcript is written; a throwaway that persists sessions would write one under
 `~/.claude/projects`, which stays local and is never committed.
 
@@ -308,7 +313,7 @@ uv run --python 3.14 --with pytest pytest spikes/m0/proxy
 cd spikes/m0/proxy
 uv run --python 3.14 python run_session.py claude --probe --budget 100000
 uv run --python 3.14 python run_session.py codex --probe --budget 60000
-uv run --python 3.14 python cache_test.py a && uv run --python 3.14 python cache_test.py b
+uv run --python 3.14 python cache_test.py a && uv run --python 3.14 python cache_test.py b  # M0_LAB_WORKTREE overrides the lab seat path
 uv run --python 3.14 python summarize.py ../../../.contexto/spikes/L1-a/<run>... --csv ../../../docs/research/M0-proxy-summary.csv
 # Seat runs (session JSONL meter); drive_l2d.py sends one planned turn per call
 python3 sessionlog.py status ~/.claude/projects/<escaped seat cwd>/<session>.jsonl
