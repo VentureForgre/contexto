@@ -12,7 +12,8 @@ Every condition measured so far hit the ceiling:
 - the replay at about 41k and 92k: 96/96 in both arms.
 
 Those probes cannot locate where quality slips (`docs/research/M0-quality-vs-context.md`). This
-set is built to sit near an 80% to 90% baseline at the smallest size, so that drops become visible.
+set is built to sit near a 75% to 92% baseline at the smallest size, intake's target, so that drops
+become visible.
 
 ## Probe types
 
@@ -73,10 +74,11 @@ each), with 34 probes per group.
 - At about 12k context, only depth-6 supersession chains miss, and every miss is stale: an older
   value.
 - Multi-hop at 3 hops, 5 near-duplicates, open/close sets and the reasoning tasks are all at
-  ceiling. The pilot overall is above the 80% to 90% target.
+  ceiling. The pilot overall is above the 75% to 92% target.
 - **Thinking on this route is inconsistent.** Two requests carried a replayed thinking block with no
   drop reported, and one had it dropped (`end_user_binding_mismatch`). That fits an identity that
-  varies per request on this route [inferred].
+  varies per request on this route [inferred]. Lane 1 saw the same inconsistency (L1-e, PR #21,
+  `docs/research/M0-interception.md` section 4).
   - The drop coincides with group b's three misses, but one fork with different probes is
     confounded, so it supports no claim.
   - **The route does not verifiably keep thinking.**
@@ -87,12 +89,13 @@ each), with 34 probes per group.
 - The pilot ran at about 12k context. Difficulty will rise with size, which is what the run is
   for [inferred].
 
-**Evidence for a pinned current-state block** [measured, small sample]. Revisions came only every
-few turns, yet at about 12k context the depth-6 chains were the one probe type that failed. All 3
-misses gave an older value. The model reached for a stale value even with the current one in
-context. The policy's pinned block lists only current values (policy doc, section 2), which
-targets this failure directly. The sample is small (8 probes), so the run should confirm it at
-size.
+**Deep supersession chains fail first.**
+- At about 12k context, the depth-6 chains were the one probe type that failed: 3 of 8 missed, and
+  all 3 gave an older value [measured, small sample].
+- The model reached for a stale value even with the current one in context. A pinned block that
+  lists only current values (policy doc, section 2) would address this failure directly [inferred,
+  intake's reading].
+- The sample is small, so the run should confirm it at size.
 
 ### Pilot 2 [measured, 2026-10-15]: missed, no result
 
@@ -143,7 +146,7 @@ rescaling. Counting fixes that before any generation.
   need either chains as the main probe type, or larger contexts.
 - Per intake's rule, pilot 3 missed and work stops here. Intake takes the best available set.
 
-**Recommended mix for the run** (120 probes per checkpoint), aiming at 80% to 90% at 41k
+**Recommended mix for the run** (120 probes per checkpoint), aiming at 75% to 92% at 41k
 [inferred, to be confirmed]:
 
 | Type | Count | Tiers |
@@ -186,6 +189,7 @@ contexts ran 6% to 9% above these estimates in L2d, so the totals carry a 10% ma
 ## Open questions
 
 1. A stable-identity route for the strip arm (lane 1's identity check).
-2. A second pilot (about 45k) with the recommended mix, to confirm 80% to 90% before the run.
+2. A second pilot (about 45k) with the recommended mix, to confirm 75% to 92% before the run.
+   Done: pilots 2 and 3 (below the pilot 1 section) did not reach it.
 3. Reasoning probes need phase 2's paging to depend on thinking. In an append-only replay they
    test only recomputation.
