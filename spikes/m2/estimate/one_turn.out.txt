@@ -1,0 +1,7 @@
+ESTIMATE (offline, simulated policy, no model): one probe turn, shared room
+code: 7c86774316f59abf10e1b7bcb454d8573d25a373
+METHOD: real MCP tool code; 15 paged turns rebuilt by run.plan(); window 81737, bytes/token 2.1240 (charge ratio 1.5); one shared room of 23000; ideal policy searches every probe; needed lines count if returned or in a non-paged turn; one recall at the first hit's last match offset if a hit lacks the line.
+median per-hit charge: 138 (compact entries count as hits)
+median standalone charge per category: {'paged_only': 133, 'multihop': 780, 'chain': 588, 'obligations': 460, 'distractor': 135} ; standalone sum 31002
+  probe-list order: 43/54 [paged_only 4/4 multihop 8/8 chain 30/30 obligations 1/6 distractor 0/6]; charged 22986; rooms [23000]; ran out at turn 1, probe #41
+  worst order (largest standalone charge first): 38/54 [paged_only 0/4 multihop 7/8 chain 28/30 obligations 3/6 distractor 0/6]; charged 22956; rooms [23000]; ran out at turn 1, probe #31

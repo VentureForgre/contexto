@@ -1,0 +1,50 @@
+ESTIMATE (offline, simulated policy, no model)
+code: 7c86774316f59abf10e1b7bcb454d8573d25a373
+METHOD
+  content: run.plan() 18 content turns byte for byte (user text, then assistant [empty thinking, 'OK']), one request each through the real RewriteEngine; Config(bound=150000) as the launcher builds it (headroom floor 25000, running headroom rule, window_fraction 0.5); real SessionStore in a temp dir; the engine decides every rotation and page out.
+  head: synthetic system text plus 21 tool definitions, 88317 bytes, sized so the store's W after the content turns equals the live recorded 81737 (got 81739).
+  usage synthesis: input_tokens = the engine's own pre-send estimate of each upstream request (state.last_estimate), no cache fields; output_tokens = 200 per tool-loop request, 600 for the request answered by a probe turn's final answer, 20 per content-turn 'OK'. Fed back with engine.observe_usage after each request, as the proxy does, so rooms are published at request time and at usage time (each publish resets spent, B14).
+  estimator seed: the store holds the live ratio 2.1240 bytes/token before the first request, so the engine's own restore path (A8) seeds it; without this the 3.5 text seed would be fed back as usage and never corrected.
+  D27: order = PROBES shuffled with random.Random(20261016); turn k asks order[9(k-1):9k]; user message = the acceptance probe-turn wording (names no tools) then 'q_id: question' lines.
+  tool loop: each tool call is one more request (assistant tool_use, user tool_result with the exact server text); final answer about 1274 characters of neutral 'q_id: answer' filler.
+  policy: the ideal policy searches every probe (exact key or subject; one recall on the first hit at its last shown matching line when the needed line is neither returned nor in view). In view = any text in the latest upstream request (retained turns, preamble, earlier tool results).
+  worst-first: within each turn, largest standalone charge first (fresh harness store, pages 0..14, room 23000).
+  static: harness store (pages 0..14 paged by hand, turns 15..17 in view, W 81737), rooms fixed per turn [29562, 10758, 9749, 8728, 7689, 6685], reset at each turn, no republish within a turn; in view = turns 15..17.
+totals: paged_only 4/4 multihop 8/8 chain 30/30 obligations 6/6 distractor 6/6; bar 44/54
+T1 assignment check: passed
+standalone charge per probe (fresh 23000 room): min 129 max 2276 sum 31002
+=== A engine sim, D27 order
+  before probes: 18 requests, 5 rotations, first retained content turn 15, turns paged 15, store W 81739
+  T1: headroom 25000; room at request time 23242; room seen by first call 23042; min/max room seen 18334/23042; calls {'contexto_search': 16}; charged 4809; budget-spent replies 0; answerable 9/9; no rotation
+  T2: headroom 25000; room at request time 17026; room seen by first call 16826; min/max room seen 13254/16826; calls {'contexto_search': 11}; charged 3762; budget-spent replies 0; answerable 9/9; no rotation
+  T3: headroom 25000; room at request time 12067; room seen by first call 11867; min/max room seen 6950/11867; calls {'contexto_search': 14}; charged 5715; budget-spent replies 0; answerable 9/9; no rotation
+  T4: headroom 25000; room at request time 5419; room seen by first call 5219; min/max room seen 738/5219; calls {'contexto_search': 12}; charged 5080; budget-spent replies 0; answerable 9/9; no rotation
+  T5: headroom 25000; room at request time 57043; room seen by first call 56843; min/max room seen 51977/56843; calls {'contexto_search': 14}; charged 5794; budget-spent replies 0; answerable 9/9; rotation(bound) k-> probe T1, turns_paged 18, F 43570, W 81430
+  T6: headroom 25000; room at request time 50406; room seen by first call 50206; min/max room seen 43971/50206; calls {'contexto_search': 17}; charged 6964; budget-spent replies 0; answerable 9/9; no rotation
+  answerable: paged_only 4/4 multihop 8/8 chain 30/30 obligations 6/6 distractor 6/6; total 54/54 vs bar 44/54 (meets)
+  engine events: {'page_out': 6, 'request': 108, 'rotation': 6, 'sizing_restored': 1}
+  requests 108; final k -> probe T1; turns paged 18; degraded False; estimator bytes/token at end 2.1579
+  where needed statements were found: {'returned_by_this_probe': 63, 'in_retained_content_turn': 21}
+=== B engine sim, worst-first within each turn
+  before probes: 18 requests, 5 rotations, first retained content turn 15, turns paged 15, store W 81739
+  T1: headroom 25000; room at request time 23242; room seen by first call 23042; min/max room seen 18242/23042; calls {'contexto_search': 16}; charged 4809; budget-spent replies 0; answerable 9/9; no rotation
+  T2: headroom 25000; room at request time 17025; room seen by first call 16825; min/max room seen 13251/16825; calls {'contexto_search': 11}; charged 3762; budget-spent replies 0; answerable 9/9; no rotation
+  T3: headroom 25000; room at request time 12064; room seen by first call 11864; min/max room seen 6627/11864; calls {'contexto_search': 14}; charged 5715; budget-spent replies 0; answerable 9/9; no rotation
+  T4: headroom 25000; room at request time 5416; room seen by first call 5216; min/max room seen 635/5216; calls {'contexto_search': 12}; charged 5080; budget-spent replies 0; answerable 9/9; no rotation
+  T5: headroom 25000; room at request time 57042; room seen by first call 56842; min/max room seen 51576/56842; calls {'contexto_search': 14}; charged 5794; budget-spent replies 0; answerable 9/9; rotation(bound) k-> probe T1, turns_paged 18, F 43570, W 81430
+  T6: headroom 25000; room at request time 50404; room seen by first call 50204; min/max room seen 43870/50204; calls {'contexto_search': 17}; charged 6964; budget-spent replies 0; answerable 9/9; no rotation
+  answerable: paged_only 4/4 multihop 8/8 chain 30/30 obligations 6/6 distractor 6/6; total 54/54 vs bar 44/54 (meets)
+  engine events: {'page_out': 6, 'request': 108, 'rotation': 6, 'sizing_restored': 1}
+  requests 108; final k -> probe T1; turns paged 18; degraded False; estimator bytes/token at end 2.1578
+  where needed statements were found: {'returned_by_this_probe': 63, 'in_retained_content_turn': 21}
+=== C static rooms (pessimistic), D27 order
+  T1: room 29562; charged 4809; budget-spent replies 0; answerable 9/9
+  T2: room 10758; charged 3762; budget-spent replies 0; answerable 9/9
+  T3: room 9749; charged 5715; budget-spent replies 0; answerable 9/9
+  T4: room 8728; charged 5080; budget-spent replies 0; answerable 9/9
+  T5: room 7689; charged 5492; budget-spent replies 0; answerable 9/9
+  T6: room 6685; charged 6144; budget-spent replies 0; answerable 9/9
+  answerable: paged_only 4/4 multihop 8/8 chain 30/30 obligations 6/6 distractor 6/6; total 54/54 vs bar 44/54 (meets)
+=== D sensitivity: engine sim, D27 order, input usage = upstream request bytes / 2.124 instead of the engine's estimate
+  answerable: paged_only 4/4 multihop 7/8 chain 30/30 obligations 6/6 distractor 6/6; total 53/54; rooms seen by first call per turn [22682, 15948, 10615, 3485, 55981, 48834]; charged per turn [4809, 3762, 5715, 3393, 5794, 6964]
+  min room seen per turn [17521, 12068, 5287, 0, 50685, 42045]; budget-spent replies per turn [0, 0, 0, 2, 0, 0]; not answerable (turn, id) [(4, 'q_a_007')]; rotations at probe turns [5]
