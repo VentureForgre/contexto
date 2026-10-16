@@ -16,11 +16,9 @@ import os
 import shutil
 import subprocess
 import sys
-import textwrap
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
@@ -64,24 +62,15 @@ def _captured() -> list[dict]:
     return [b["json"] for b in list(_Stub.bodies) if b["path"].startswith("/v1/messages") and "tools" in b["json"]]
 
 
-SERVER = textwrap.dedent("""
-    import sys
-    sys.path.insert(0, {tests!r})
-    from mcp_fakes import FakeStore, load_mcp
-    sys.exit(load_mcp().serve_stdio(FakeStore()))
-""")
-
-
 def test_real_claude_code_lists_all_five_contexto_tools(tmp_path):
     _Stub.bodies = []
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
-        server_script = tmp_path / "serve.py"
-        server_script.write_text(SERVER.format(tests=str(Path(__file__).resolve().parent)))
-        mcp_config = tmp_path / "mcp.json"
-        mcp_config.write_text(json.dumps({"mcpServers": {"contexto": {"command": sys.executable,
-                                                                      "args": [str(server_script)]}}}))
+        mcp_config = tmp_path / "mcp.json"  # the real CLI entry point, as the launcher will configure it
+        mcp_config.write_text(json.dumps({"mcpServers": {"contexto": {
+            "command": sys.executable,
+            "args": ["-m", "contexto", "mcp", "--session", "real-client", "--home", str(tmp_path / "home")]}}}))
         settings = tmp_path / "settings.json"
         settings.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{httpd.server_port}"}}))
         scratch = tmp_path / "scratch"

@@ -1,22 +1,20 @@
-"""Test doubles for the MCP server: a store with lane B's documented API, and a loader that does
-not need the package installed (B1 lands the package scaffolding)."""
+"""Test double for the MCP server's store: lane B's agreed API, including B2's pin, close, and
+state_text, which the real MemoryStore gains when B2 (PR #28) merges. Recall and search are also
+tested against the real MemoryStore in test_mcp.py."""
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 from typing import Any
 
-MCP_PATH = Path(__file__).resolve().parent.parent / "src" / "contexto" / "mcp.py"
+from contexto import mcp
+
+MCP_PATH = Path(mcp.__file__)
 
 
 def load_mcp():
-    spec = importlib.util.spec_from_file_location("contexto_mcp_under_test", MCP_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return mcp
 
 
 class FakeStore:

@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from mcp_fakes import MCP_PATH, FakeStore, load_mcp, page
-
-mcp = load_mcp()
+from contexto import mcp
+from contexto.store.memory import MemoryStore
+from mcp_fakes import MCP_PATH, FakeStore, page
 MODERN = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
           "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "0"},
           "io.modelcontextprotocol/clientCapabilities": {}}
@@ -248,6 +248,62 @@ def test_every_call_is_logged_without_text_content():
     dumped = json.dumps(store.events)
     for secret in ("TOP-SECRET-DECISION", "garnet-4821", "port = 4821"):
         assert secret not in dumped
+
+
+# Against the real MemoryStore (B1): keyed page ids, stubs, and exact search
+
+
+def _paged_store() -> tuple[MemoryStore, list[str]]:
+    store = MemoryStore("s1")
+    turns = [
+        [{"role": "user", "content": [{"type": "text", "text": "Decision: the queue backend is harbor-2291."}]},
+         {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "s"},
+                                           {"type": "text", "text": "OK"}]}],
+        [{"role": "user", "content": [{"type": "text", "text": "Read the config."}]},
+         {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "conf/a.toml"}}]},
+         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "shard_map = cobalt-5817"}]}],
+    ]
+    return store, store.page_out(turns, first_turn=4)
+
+
+def test_recall_and_search_on_the_real_memory_store():
+    store, ids = _paged_store()
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    first = tool(server, "contexto_recall", {"page_id": ids[0]})["result"]
+    assert first["isError"] is False and first["structuredContent"]["turn"] == 4
+    assert "harbor-2291" in first["content"][0]["text"] and "signature" not in first["content"][0]["text"]
+    hit = tool(server, "contexto_search", {"query": "cobalt-5817"})["result"]
+    assert hit["structuredContent"]["page_ids"] == [ids[1]]
+    assert "Read" in hit["content"][0]["text"]  # the stub's tool names
+    both = tool(server, "contexto_search", {"query": "e"})["result"]["structuredContent"]["page_ids"]
+    assert both == [ids[1], ids[0]]  # newest turn first
+    unknown = tool(server, "contexto_recall", {"page_id": "pg_" + "0" * 16})["result"]
+    assert unknown["isError"] is True
+    assert [e["tool"] for e in store.events] == ["contexto_recall", "contexto_search", "contexto_search", "contexto_recall"]
+
+
+# Through the CLI: python -m contexto mcp with a real SessionStore
+
+
+def test_contexto_mcp_cli_round_trip(tmp_path):
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {"_meta": MODERN}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": MODERN}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"_meta": MODERN, "name": "contexto_recall",
+                                                                         "arguments": {"page_id": "pg_0000000000000000"}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"_meta": MODERN, "name": "contexto_search",
+                                                                         "arguments": {"query": "anything"}}},
+    ]
+    proc = subprocess.run([sys.executable, "-m", "contexto", "mcp", "--session", "cli-test", "--home", str(tmp_path)],
+                          input="".join(json.dumps(r) + "\n" for r in requests), capture_output=True, text=True,
+                          timeout=60)
+    assert proc.returncode == 0, proc.stderr[-400:]
+    frames = [json.loads(line) for line in proc.stdout.splitlines()]
+    assert [f["id"] for f in frames] == [1, 2, 3, 4]
+    assert frames[1]["result"]["cacheScope"] == "private" and len(frames[1]["result"]["tools"]) == 5
+    assert frames[2]["result"]["isError"] is True  # unknown page in an empty session
+    assert frames[3]["result"]["structuredContent"]["page_ids"] == []
+    assert (tmp_path / "sessions" / "cli-test").is_dir()
 
 
 # Stdio round trip in a real subprocess
