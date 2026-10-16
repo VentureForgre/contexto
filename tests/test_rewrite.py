@@ -732,3 +732,86 @@ def test_carried_text_growing_per_turn_is_reported_early():
         _, _, ev = engine(request(msgs), {}, MESSAGES)
         seen.append("carried_text_growing" in names(ev))
     assert True in seen and seen.count(True) == 1  # reported once, when the growth starts per turn
+
+
+# A2b: over-bound accounting from real usage -------------------------------------------------------
+
+def test_real_usage_over_the_bound_is_flagged_even_when_the_estimate_was_low():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=Config(bound=100_000, headroom_floor=500))
+    req = request(history(2) + [user("p")])
+    _, _, ev = engine(req, {}, MESSAGES)
+    estimate = ev[-1]["estimate"]
+    assert estimate < 100_000 and not ev[-1].get("over_bound")  # the pre-send estimate was under the bound
+    out = engine.observe_usage(MESSAGES, {"input_tokens": 1_000, "cache_read_input_tokens": 100_500,
+                                          "cache_creation_input_tokens": 0, "output_tokens": 9}, req)
+    over = [e for e in out if e["event"] == "over_bound"]
+    assert over and over[0]["over_bound"] is True and over[0]["source"] == "real"
+    assert over[0]["real_tokens"] == 101_500 and over[0]["estimate"] == estimate
+    assert [e.get("source") for e in store.events if e["event"] == "over_bound"] == ["real"]
+
+
+def test_estimate_error_is_reported_when_real_exceeds_the_estimate_by_more_than_ten_percent():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=Config(bound=10_000_000))
+    req = request([user("p0")])
+    _, _, ev = engine(req, {}, MESSAGES)
+    estimate = ev[-1]["estimate"]
+    close = engine.observe_usage(MESSAGES, {"input_tokens": estimate}, req)
+    assert close == []
+    req2 = request([user("p0"), assistant("a0"), user("p1")])
+    _, _, ev2 = engine(req2, {}, MESSAGES)
+    low = engine.observe_usage(MESSAGES, {"input_tokens": int(ev2[-1]["estimate"] * 1.5) + 10}, req2)
+    err = [e for e in low if e["event"] == "estimate_error"]
+    assert err and err[0]["ratio"] < 0.91 and 0 < err[0]["mean_ratio"] <= 1.0
+    assert not any(e["event"] == "over_bound" for e in low)
+
+
+def test_count_tokens_usage_raises_nothing():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=Config(bound=1_000))
+    req = request([user("p0")])
+    engine(req, {}, MESSAGES)
+    assert engine.observe_usage(COUNT_TOKENS, {"input_tokens": 999_999}, req) == []
+    assert not any(e["event"] in ("over_bound", "estimate_error") for e in store.events)
+
+
+def test_estimate_after_a_rotation_is_of_the_transformed_request():
+    for factor, expect_error in ((1.0, False), (1.2, True)):
+        store = MemoryStore(key=b"k" * 32)
+        engine = RewriteEngine(store, config=CONFIG)
+        req = request(history(6) + [user("new prompt")])
+        _, _, ev = engine(req, {}, MESSAGES)
+        rotation = [e for e in ev if e["event"] == "rotation"]
+        sent = ev[-1]["sent_estimate"]
+        assert rotation and sent < ev[-1]["estimate"]  # the transformed request is smaller than the history
+        out = engine.observe_usage(MESSAGES, {"input_tokens": int(sent * factor)}, req)
+        assert ("estimate_error" in [e["event"] for e in out]) is expect_error, factor
+
+
+def test_pre_send_and_real_over_bound_records_are_distinct():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    loop = request(history(8) + [user("go"), tool_use(1), tool_result(1, FILL * 3)])
+    _, _, ev = engine(loop, {}, MESSAGES)
+    pre = [e for e in ev if e["event"] == "over_bound"]
+    assert [e["source"] for e in pre] == ["estimate"] and ev[-1]["over_bound"] is True  # rule 5, allowed
+    assert pre[0]["in_tool_loop"] is True
+    out = engine.observe_usage(MESSAGES, {"input_tokens": CONFIG.bound + 1}, loop)
+    assert [e["source"] for e in out if e["event"] == "over_bound"] == ["real"]  # acceptance 1 failure
+
+
+
+def test_over_bound_at_a_turn_start_is_never_the_tool_loop_exemption():
+    # A turn-start request whose estimate is over the bound but which cannot rotate (rotation_noop or
+    # bound_too_small) must not emit the source "estimate" exemption.
+    from dataclasses import replace
+    store = MemoryStore(key=b"k" * 32)
+    cfg = Config(bound=100_000, headroom_floor=500)
+    est = TokenEstimator()
+    msgs = history(3) + [user("p")]
+    _, st, _ = rewrite(request(msgs), None, store, cfg, est)
+    st = replace(st, last_input_tokens=150_000, head_tokens=1_000)
+    up, _, ev = rewrite(request(msgs + [assistant("a"), user("next")]), st, store, cfg, est)
+    assert ev[-1]["estimate"] > cfg.bound
+    assert not any(e["event"] == "over_bound" for e in ev) and not ev[-1].get("over_bound")

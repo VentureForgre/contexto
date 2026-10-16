@@ -114,6 +114,9 @@ class EpochState:
     paged_carried: frozenset[str] = frozenset()  # hashes of carried text messages paged by the fallback
     last_carried_text_count: int | None = None  # carried text messages at the previous turn start
     carried_text_streak: int = 0  # consecutive turn starts at which that count grew
+    last_estimate: int | None = None  # pre-send estimate of the previous request (A2b)
+    estimate_ratio_sum: float = 0.0  # running sum of estimate / real over observed requests
+    estimate_ratio_count: int = 0
 
 
 # Message classification -------------------------------------------------------------------------
@@ -554,18 +557,31 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
                 else:
                     state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "bound",
                                       sizing=(f, w))
-    over = estimate > config.bound and not any(e["event"] == "rotation" for e in events)
+    rotated = any(e["event"] == "rotation" for e in events)
+    # Pre-send over-bound is the allowed exception only inside a tool loop (rule 5): the newest turn
+    # already has model output. At a turn start an over-bound request is bound_too_small instead.
+    in_tool_loop = bool(turn_starts(messages)) and not at_turn_start(messages)
+    over = estimate > config.bound and not rotated and in_tool_loop
+    # The estimate observe_usage compares with real usage must describe what is actually sent: after a
+    # rotation that is the transformed request, not the history that triggered it (A2b review).
+    sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
 
     if state.initial_carried is None:
         state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
     upstream = {**request, "messages": transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
-    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
+    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent, last_estimate=sent_estimate,
                     last_window_tokens=window_tokens(upstream["messages"], estimator))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream["messages"]), "estimate": estimate, "sent_bytes": sent}
+    if rotated:
+        event["sent_estimate"] = sent_estimate
     if over:
+        # Pre-send over-bound (rule 5: a turn that grows past the bound inside a tool loop): the allowed,
+        # logged exception for acceptance 1, kept distinct from observe_usage's source "real" record.
         event["over_bound"] = True
+        events.append({"event": "over_bound", "source": "estimate", "in_tool_loop": True, "epoch": state.epoch,
+                       "estimate": estimate, "bound": config.bound})
     events.append(event)
     return upstream, state, events
 
@@ -608,18 +624,45 @@ class RewriteEngine:
         upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator)
         return upstream, headers, events
 
-    def observe_usage(self, endpoint: str, usage: dict, request: dict) -> None:
+    def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
+        """Feed a response's real usage back (``/v1/messages`` only; never ``count_tokens``). Returns the
+        content-free events it raised, which are also written to the session log through
+        ``store.log`` when the store has one (packet A2b; contract rule 3 as amended by PR #44):
+
+        - ``over_bound`` with ``source: "real"``: the real upstream input (input + cache read + cache
+          write) exceeded the bound, whatever the pre-send estimate said, so acceptance 1 can rely on
+          the session log (the pre-send flag stays on the request event);
+        - ``estimate_error``: the real input exceeded the pre-send estimate by more than 10%, with the
+          running mean of estimate / real for the conversation.
+        """
         if endpoint != MESSAGES:
-            return
+            return []
         key = conversation_key(request)
         state = self.states.get(key)
         if state is None:
-            return
+            return []
         real = usage_tokens(usage)
-        self.estimator.observe(state.last_sent_bytes, real)
+        self.estimator.observe(state.last_sent_bytes, real)  # the session's measured ratio from now on
         state = replace(state, last_input_tokens=real)
         if state.head_tokens is None and state.k == 0:
             # Rule 4: the first measured request gives the head (its input minus its non-carried
             # messages, which also covers a resumed first request with a long history).
             state = replace(state, head_tokens=max(0, real - state.last_window_tokens))
+        events: list[dict] = []
+        estimate = state.last_estimate
+        if estimate is not None and real > 0:
+            state = replace(state, estimate_ratio_sum=state.estimate_ratio_sum + estimate / real,
+                            estimate_ratio_count=state.estimate_ratio_count + 1)
+        if real > self.config.bound:
+            events.append({"event": "over_bound", "source": "real", "epoch": state.epoch, "over_bound": True,
+                           "real_tokens": real, "estimate": estimate, "bound": self.config.bound})
+        if estimate is not None and real > estimate * 1.1:
+            events.append({"event": "estimate_error", "epoch": state.epoch, "real_tokens": real, "estimate": estimate,
+                           "ratio": round(estimate / real, 3) if real else None,
+                           "mean_ratio": round(state.estimate_ratio_sum / state.estimate_ratio_count, 3)})
         self.states[key] = state
+        log = getattr(self.store, "log", None)
+        if callable(log):
+            for event in events:
+                log(event)
+        return events
