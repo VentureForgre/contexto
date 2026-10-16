@@ -143,7 +143,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
   An offline estimate on that run's pages (builder-3, zero spend, a simulated ideal searcher, not a
   model run; script and numbers-only output committed under `spikes/m2/estimate/`) found every
   probe answerable on its own (54 of 54, the search hit carrying the answer), but answering all 54
-  in one turn needs about 91,000 tokens of returned evidence (29,800 with the leaner hits of B17)
+  in one turn needs about 91,000 tokens of returned evidence (31,002 with the leaner hits of B17)
   against a measured recall room of 23,042 (bound 150,000), so even an ideal searcher tops out
   near 38 to 43. Under D17 (no paging inside a turn) and the per-turn recall room, Contexto cannot
   pull more evidence into a single turn than that room holds, and long real sessions do not ask 54
