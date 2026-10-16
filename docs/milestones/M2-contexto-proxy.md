@@ -127,9 +127,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    window, so the room it publishes is at least `min_turn_room`. It fires only if that rotation
    would actually restore a room of at least `min_turn_room`; otherwise the engine does not rotate
    for the room and logs `turn_room_low` once per epoch. When both triggers fire at the same turn
-   start, the room-sized target is used, since it is the one that guarantees the room. After any
-   rotation, including one fired by the bound alone, a published room below `min_turn_room` is
-   logged `turn_room_low`. This keeps a small bound from rotating on
+   start, the room-sized target is used if that rotation would restore the room and page at least
+   as far as the bound trigger's target; otherwise the bound trigger's own target applies and
+   `turn_room_low` is logged. A head change and the minimal window keep their own sizing. A turn
+   that starts with its room below `min_turn_room` logs `turn_room_low` whatever was decided. This keeps a small bound from rotating on
    every turn (reviewer-2: a plain re-trigger would thrash at bounds of 42,000 to 100,000).
    `budget.simulate` models both conditions. Estimate = last upstream
    `input_tokens + cache_read + cache_creation` for this session plus the bytes added since.
