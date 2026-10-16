@@ -1012,3 +1012,67 @@ def test_proxy_refuses_trailing_garbage_with_415(make_proxy):
     response, data = call(proxy, "POST", "/v1/messages", wire, dict(AUTH, **{"Content-Encoding": "gzip"}))
     assert response.status == 415 and Upstream.received == []
     assert "after the first compressed member" in json.loads(data)["error"]["message"]
+
+
+def slow_body(release: threading.Event, wait: float):
+    """An upstream script: answer the headers and half the body, then wait before the rest."""
+    def script(sock: socket.socket, got: bytearray) -> None:
+        while b"\r\n\r\n" not in got:
+            got += sock.recv(65536)
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 10\r\n\r\nhello")
+        release.wait(wait)
+        try:
+            sock.sendall(b"world")
+        except OSError:
+            pass
+    return script
+
+
+def open_request(proxy: ContextoProxy) -> http.client.HTTPConnection:
+    conn = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=10)
+    conn.request("POST", "/v1/other", body=b"small", headers={"Content-Type": "application/octet-stream"})
+    conn.getresponse()  # the relay has started; the body is still coming
+    return conn
+
+
+def test_stop_waits_for_an_in_flight_request_to_log(make_proxy, scripted_upstream):
+    # Packet A11: handler threads are daemons, so stop() must not return before an in-flight
+    # request has logged its entry, or a process exit right after it loses that entry.
+    release = threading.Event()
+    url, _ = scripted_upstream(slow_body(release, 0.5))
+    proxy, log = make_proxy(upstream=url)
+    conn = open_request(proxy)
+    proxy.stop()
+    assert [e["status"] for e in log.events if e["event"] == "request"] == [200]
+    assert [e["event"] for e in log.events][-1] == "proxy_stop"
+    assert not any(e["event"] == "proxy_stop_incomplete" for e in log.events)
+    conn.close()
+
+
+def test_stop_drain_is_bounded(make_proxy, scripted_upstream, monkeypatch):
+    monkeypatch.setattr(proxy_module, "STOP_DRAIN_S", 0.3)
+    release = threading.Event()
+    url, _ = scripted_upstream(slow_body(release, 30))
+    proxy, log = make_proxy(upstream=url)
+    conn = open_request(proxy)
+    started = time.monotonic()
+    proxy.stop()
+    assert time.monotonic() - started < 2  # shutdown's 0.5 s poll plus the 0.3 s drain, never the 30 s hang
+    tail = [e for e in log.events if e["event"].startswith("proxy_stop")]
+    assert [{k: v for k, v in e.items() if k != "ts"} for e in tail] == [
+        {"event": "proxy_stop_incomplete", "in_flight": 1}, {"event": "proxy_stop"}]
+    release.set()
+    conn.close()
+
+
+def test_idle_keep_alive_connections_do_not_delay_stop(make_proxy, scripted_upstream):
+    url, _ = scripted_upstream(answer_ok)
+    proxy, log = make_proxy(upstream=url)
+    conn = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=10)
+    conn.request("POST", "/v1/other", body=b"small", headers={"Content-Type": "application/octet-stream"})
+    assert conn.getresponse().read() == b'{"ok":true}'  # the connection stays open, idle
+    started = time.monotonic()
+    proxy.stop()
+    assert time.monotonic() - started < 1
+    assert not any(e["event"] == "proxy_stop_incomplete" for e in log.events)
+    conn.close()

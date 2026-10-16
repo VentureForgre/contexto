@@ -108,7 +108,7 @@ def test_a_hit_shows_the_page_then_offset_lines_matching_the_worked_example(stor
     [pid] = store.page_out([[{"role": "user", "content": text}]], 3)
     reply = search(store, "cache.ttl_seconds")
     head, *lines = reply.split("\n")
-    assert head.startswith(f"{pid} (turn 3): ")
+    assert head == f"{pid} (turn 3)"
     [match] = [line for line in lines if line.startswith(">")]
     offset = int(re.match(r"> (\d+): ", match).group(1))
     page = render_page(store.get_page(pid))
@@ -207,8 +207,8 @@ def test_separate_matches_log_separate_spans_and_a_cut_line_only_its_part(store)
     [event] = events(store, "contexto_search")
     page = render_page(store.get_page(pid))
     first, before_long, long_part = event["returned"]
-    assert page[first["start"]:first["end"]] == "filler\nfiller\nNEEDLE one\nfiller\nfiller"
-    assert page[before_long["start"]:before_long["end"]] == "filler\nfiller"
+    assert page[first["start"]:first["end"]] == "filler\nNEEDLE one\nfiller"  # 1 context line (B17)
+    assert page[before_long["start"]:before_long["end"]] == "filler"
     # The long line is shown from just before its match, so its span starts mid-line: a span of its own.
     assert page[long_part["start"]:long_part["end"]].endswith("x NEEDLE")
     assert long_part["end"] - long_part["start"] <= MATCH_LINE_CHARS
@@ -233,11 +233,14 @@ def test_only_hits_actually_returned_are_logged(store):
     store.set_window(200_000, 2.0)
     for i in range(30):
         store.page_out([[{"role": "user", "content": f"needle {i}\n" + LOG[:300]}]], i + 1)
-    store.set_turn_room("1", 400)  # room for a few hits only
+    full = search(store, "needle")
+    first_hit = full.split("\npg_", 1)[0]
+    store.set_turn_room("1", math.ceil((len(first_hit) + 90) / 1.5))  # room for one detailed hit only
     reply = search(store, "needle")
-    [event] = events(store, "contexto_search")
-    shown = [line.split(" ", 1)[0] for line in reply.split("\n") if line.startswith("pg_")]
-    assert 0 < len(shown) < 30 and [span["page_id"] for span in event["returned"]] == shown
+    event = events(store, "contexto_search")[-1]
+    detailed = [line.split(" ", 1)[0] for line in reply.split("\n") if re.fullmatch(r"pg_\w+ \(turn \d+\)", line)]
+    assert 0 < len(detailed) < mcp.SEARCH_LIMIT  # the room cut the detailed hits
+    assert [span["page_id"] for span in event["returned"]] == detailed  # compact entries return no page text
     store.set_turn_room("1", 0)
     assert search(store, "needle") == SPENT and events(store, "contexto_search")[-1]["returned"] == []
 
@@ -258,13 +261,13 @@ def test_a_long_query_stays_whole_in_its_matching_line():
 
 def test_a_hit_over_the_per_call_cap_returns_its_matching_lines_not_the_budget_message():
     store = MemoryStore("s1")
-    store.set_window(2_000, 1.0)  # a 500-character per-call limit, and no room published
-    filler = "\n".join(f"context line {i} " + "z" * 120 for i in range(10))
+    store.set_window(1_600, 1.0)  # a 400-character per-call limit, and no room published
+    filler = "\n".join(f"context line {i} " + "z" * 300 for i in range(10))  # context alone overflows the cap
     [pid] = store.page_out([[{"role": "user", "content": filler + "\ncfg deploy.target=blue\n" + filler}]], 1)
     reply = search(store, "deploy.target")
-    assert reply != SPENT and len(reply) <= 500
+    assert reply != SPENT and len(reply) <= 400
     lines = reply.split("\n")
-    assert lines[0].startswith(f"{pid} (turn 1): ")
+    assert lines[0] == f"{pid} (turn 1)"
     assert any(line.startswith("> ") and line.endswith("cfg deploy.target=blue") for line in lines)
     assert lines[-1] == "  [the rest of this hit is not shown; use a longer or more specific query]"
     [event] = events(store, "contexto_search")
@@ -286,3 +289,59 @@ def test_a_room_too_small_for_a_hit_still_gets_the_budget_message(store):
     store.page_out([[{"role": "user", "content": LOG}]], 1)
     store.set_turn_room("1", 20)  # 30 characters: the room binds, not the per-call limit
     assert search(store, "line 0123") == SPENT
+
+
+# B17: leaner hits (intake 05:37Z, variant 1d of the offline what-if)
+
+
+def test_a_hit_header_is_the_page_id_and_turn_and_the_index_keeps_the_stub(store):
+    text = "Deploy notes for the ledger service\n" + LOG.replace("line 0100 level=INFO", "line 0100 level=INFO NEEDLE")
+    [pid] = store.page_out([[{"role": "user", "content": text}]], 7)
+    reply = search(store, "NEEDLE")
+    assert reply.split("\n")[0] == f"{pid} (turn 7)"
+    assert "Deploy notes for the ledger service" not in reply  # no stub in a search hit
+    assert "Deploy notes for the ledger service" in store.index_text(4000)  # the index still shows it
+
+
+def test_one_line_of_context_either_side():
+    assert MATCH_CONTEXT == 1
+    shown, _ = match_lines("a\nb\nc\nNEEDLE\nd\ne\nf", "NEEDLE")
+    assert [line for _, _, _, line in shown] == ["c", "NEEDLE", "d"]
+
+
+def test_three_pages_in_detail_then_the_rest_compactly_with_their_offsets(store):
+    """Contract PR #108: pages 4+ listed as page id, turn, and @offset of their first match."""
+    for i in range(10):
+        store.page_out([[{"role": "user", "content": f"line one\nline two needle {i}"}]], i + 1)
+    reply = search(store, "needle")
+    newest = store.search("needle")
+    assert mcp.SEARCH_LIMIT == 3 and mcp.SEARCH_MORE_LIMIT == 50
+    detailed = [line for line in reply.split("\n") if re.fullmatch(r"pg_\w+ \(turn \d+\)", line)]
+    assert [line.split(" ")[0] for line in detailed] == newest[:3]
+    head, compact = reply.split("\n[more matching pages, newest first; recall one at its offset:]\n")
+    entries = compact.split("\n")
+    assert len(entries) == 7 and not reply.endswith("]")  # all listed: no count of further pages
+    for entry, pid in zip(entries, newest[3:]):
+        page = render_page(store.get_page(pid))
+        offset = page.index("line two needle")
+        assert entry == f"{pid} (turn {store.get_page(pid)['turn']}) @{offset}"
+        assert recall(store, pid, offset).startswith("line two needle")  # reachable at that offset
+    [event] = events(store, "contexto_search")
+    assert {span["page_id"] for span in event["returned"]} == set(newest[:3]) and event["hits"] == 10
+
+
+def test_a_stub_only_match_shows_the_stub_line_and_lists_as_stub():
+    """A tool input value is searched raw but rendered JSON-escaped, so a Windows path matches only the stub."""
+    store = MemoryStore("s1")
+    path = "C:\\work\\app.toml"
+    turns = [[{"role": "user", "content": f"check config {i}"},
+              {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "read_file",
+                                                  "input": {"path": path}}]}] for i in range(5)]
+    store.page_out(turns, 1)
+    newest = store.search(path)
+    assert len(newest) == 5 and path not in render_page(store.get_page(newest[0]))
+    reply = search(store, path)
+    assert f"{newest[0]} (turn 5)\n> stub: check config 4 | tools: read_file | paths: {path}" in reply
+    head, compact = reply.split("\n[more matching pages, newest first; recall one at its offset:]\n")
+    assert compact.split("\n") == [f"{pid} (turn {store.get_page(pid)['turn']}) @stub" for pid in newest[3:]]
+    assert events(store, "contexto_search")[-1]["returned"] == []  # no page text was returned

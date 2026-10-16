@@ -34,7 +34,8 @@ SERVER_VERSION = "0.1.0"
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
-SEARCH_LIMIT = 50  # page ids per contexto_search result
+SEARCH_LIMIT = 3  # pages shown with their matching lines per contexto_search reply, newest first (B17)
+SEARCH_MORE_LIMIT = 50  # further matching pages listed compactly (page id, turn, first-match offset)
 # Per-turn recall budget (M2 contract PR #69): what recall, search, and state return this turn.
 BUDGET_SPENT = ("Recall budget for this turn is used up; answer from what is in view, or say the detail is "
                 "unknown.")
@@ -47,7 +48,7 @@ RECALL_NEARLY_SPENT = ("The recall budget for this turn is nearly used up (about
 SEARCH_TOO_LONG = "This search result is longer than one call can return; use a longer or more specific query."
 NO_HIT = "No paged-out turn contains that exact text."
 # Fixed control replies are protocol text, never charged, and returned even when the room is smaller than they
-# are (contract PR #103); each is at most about 150 characters. RECALL_NEARLY_SPENT is a template, checked apart.
+# are (contract PR #103); the longest is about 225 characters. RECALL_NEARLY_SPENT is a template, checked apart.
 CONTROL_REPLIES = frozenset({BUDGET_SPENT, SEARCH_TOO_LONG, NO_HIT})
 UNMEASURED_CHARS_PER_TOKEN = 1.0  # before the engine records bytes per token: charges more, never less
 # Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
@@ -88,6 +89,10 @@ class Store(Protocol):
 
 class ToolError(Exception):
     """A tool execution error the model can act on: returned as a result with isError true."""
+
+
+def _lines(n: int) -> str:
+    return "1 line" if n == 1 else f"{n} lines"
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -164,10 +169,11 @@ TOOLS: list[dict[str, Any]] = [
         "name": "contexto_search",
         "description": (
             "Find paged-out turns containing an exact substring (case-sensitive) in their text or stub. "
-            f"Returns up to {SEARCH_LIMIT} pages, newest first, each with up to {MATCHES_PER_PAGE} matching "
-            f"lines (marked >) and {MATCH_CONTEXT} lines of context either side, every line prefixed with "
-            "its character offset in the page: answer from a matching line, or call contexto_recall with "
-            "that page id and offset to read on. No fuzzy or similarity matching."
+            f"For the newest {SEARCH_LIMIT} matching pages, returns up to {MATCHES_PER_PAGE} matching lines "
+            f"(marked >) with {_lines(MATCH_CONTEXT)} of context either side, every line prefixed with its "
+            f"character offset in the page; up to {SEARCH_MORE_LIMIT} further matching pages are listed as page "
+            "id, turn, and @offset of their first match. Answer from a matching line, or call contexto_recall "
+            "with a page id and offset to read on. No fuzzy or similarity matching."
         ),
         "inputSchema": {
             "type": "object",
@@ -400,15 +406,20 @@ class Server:
         _reject_extra(args, {"query"})
         query = _require_str(args, "query")
         found = self.store.search(query)
-        hits = [_hit_rows(page_id, self.store.get_page(page_id) or {}, query) for page_id in found[:SEARCH_LIMIT]]
+        pages = [(page_id, self.store.get_page(page_id) or {}) for page_id in found[:SEARCH_LIMIT + SEARCH_MORE_LIMIT]]
+        hits = [_hit_rows(page_id, page, query) for page_id, page in pages[:SEARCH_LIMIT]]
+        more = [_more_row(page_id, page, query) for page_id, page in pages[SEARCH_LIMIT:]]
         limit, _ = recall_limit(*self._window())  # one search reply is held to the per-call recall limit
         specific = "use a longer or more specific query"
 
-        def render(rows: list[Row], pages: int, why: str) -> str:
-            text = "\n".join(t for t, _ in rows)
-            if len(found) > pages:
-                text += f"\n[{len(found) - pages} more matching pages not shown; {why}]"
-            return text
+        def render(rows: list[Row], detailed: int, listed: int, why: str) -> str:
+            lines = [t for t, _ in rows]
+            if listed:
+                lines.append("[more matching pages, newest first; recall one at its offset:]")
+                lines += [t for t, _ in more[:listed]]
+            if len(found) > detailed + listed:
+                lines.append(f"[{len(found) - detailed - listed} more matching pages not shown; {why}]")
+            return "\n".join(lines)
 
         picked: dict[str, Any] = {"rows": [], "pages": 0}
 
@@ -418,18 +429,20 @@ class Server:
             cap = limit if room is None else min(room, limit)
             by_cap = room is None or limit <= room  # the per-call limit binds, not the turn's room
             why = specific if by_cap else "the recall budget for this turn is used up"
-            for count in range(len(hits), 0, -1):  # as many whole hits as fit
-                rows = [row for hit in hits[:count] for row in hit]
-                text = render(rows, count, specific if count == len(hits) else why)
-                if len(text) <= cap:
-                    picked.update(rows=rows, pages=count)
-                    return [text]
+            for detailed in range(len(hits), 0, -1):  # whole hits first, then as many compact entries as fit
+                rows = [row for hit in hits[:detailed] for row in hit]
+                for listed in range(len(more) if detailed == len(hits) else 0, -1, -1):
+                    complete = detailed == len(hits) and listed == len(more)
+                    text = render(rows, detailed, listed, specific if complete else why)
+                    if len(text) <= cap:
+                        picked.update(rows=rows, pages=detailed + listed)
+                        return [text]
             # Not even one whole hit: its page line and matching lines, without context, as far as they fit.
             header, *lines = hits[0]
             matches = [row for row in lines if row[0].startswith(">")]
             for count in range(len(matches), 0, -1):
                 rows = [header, *matches[:count], (f"  [the rest of this hit is not shown; {why}]", None)]
-                text = render(rows, 1, why)
+                text = render(rows, 1, 0, why)
                 if len(text) <= cap:
                     picked.update(rows=rows, pages=1)
                     return [text]
@@ -460,8 +473,9 @@ class Server:
         When nothing useful fits, the tool replies ``BUDGET_SPENT`` (or, for recall with some room
         left, ``RECALL_NEARLY_SPENT``). These and the other fixed control replies are protocol text:
         never charged, and returned even when the room is smaller than they are (contract PR #103).
-        Each is at most about 150 tokens, about 2,300 for 15 parallel calls, well inside the engine's
-        headroom floor (25,000 by default).
+        The longest, the nearly-used-up reply, is about 225 characters: about 60 tokens of real usage
+        (150 at the conservative 1.5 characters per token used for charging), so 15 parallel calls
+        add about 900, well inside the engine's headroom floor (25,000 by default).
 
         With no room published only the per-call limit applies. If the engine is present (it has
         recorded the window) but published no room, a ``turn_room_missing`` event makes the missed
@@ -514,15 +528,36 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     Each line carries the page span it shows, ``(page_id, start, end)`` with ``end`` exclusive, for
     the content-free log that acceptance 3 reads (contract PR #95).
     """
-    rows: list[Row] = [(f"{page_id} (turn {page.get('turn')}): {_stub_line(page.get('stub'))}", None)]
-    if page.get("messages") is not None:
-        shown, total = match_lines(render_page(page), query)
-        rows += [(f"{'>' if is_match else ' '} {start}: {text}", (page_id, start, end))
-                 for start, end, is_match, text in shown]
+    rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
+    shown, total = match_lines(render_page(page), query) if page.get("messages") is not None else ([], 0)
+    rows += [(f"{'>' if is_match else ' '} {start}: {text}", (page_id, start, end)) for start, end, is_match, text in shown]
+    if not shown:  # the match is in the stub only: show the stub line as the matching line
+        rows.append((f"> stub: {_stub_line(page.get('stub'))}", None))
+    else:
         if total > MATCHES_PER_PAGE:
             rows.append((f"  [{total - MATCHES_PER_PAGE} more matching lines in this page; call contexto_recall "
                          f"with page_id {page_id} and an offset to read further]", None))
     return rows
+
+
+def _more_row(page_id: str, page: dict[str, Any], query: str) -> Row:
+    """A further matching page, compactly: page id, turn, and where its first matching line starts."""
+    text = render_page(page) if page.get("messages") is not None else ""
+    pos = text.find(query)
+    where = "stub" if pos < 0 else str(text.rfind("\n", 0, pos) + 1)
+    return (f"{page_id} (turn {page.get('turn')}) @{where}", None)
+
+
+def _stub_line(stub: Any) -> str:
+    """One line from a page stub: the opening user text, then tool names and paths if any."""
+    if not isinstance(stub, dict):
+        return str(stub or "")
+    parts = [" ".join(str(stub.get("user_text", "")).split())]
+    if stub.get("tools"):
+        parts.append("tools: " + ", ".join(map(str, stub["tools"])))
+    if stub.get("paths"):
+        parts.append("paths: " + ", ".join(map(str, stub["paths"])))
+    return " | ".join(p for p in parts if p)
 
 
 def _spans(rows: list[Row]) -> list[dict[str, Any]]:
@@ -537,18 +572,6 @@ def _spans(rows: list[Row]) -> list[dict[str, Any]]:
         else:
             spans.append({"page_id": page_id, "start": start, "end": end})
     return spans
-
-
-def _stub_line(stub: Any) -> str:
-    """One line from a page stub: the opening user text, then tool names and paths if any."""
-    if not isinstance(stub, dict):
-        return str(stub or "")
-    parts = [" ".join(str(stub.get("user_text", "")).split())]
-    if stub.get("tools"):
-        parts.append("tools: " + ", ".join(map(str, stub["tools"])))
-    if stub.get("paths"):
-        parts.append("paths: " + ", ".join(map(str, stub["paths"])))
-    return " | ".join(p for p in parts if p)
 
 
 def _require_str(args: dict[str, Any], key: str) -> str:

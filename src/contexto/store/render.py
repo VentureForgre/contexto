@@ -98,7 +98,7 @@ def recall_chunk(page: dict[str, Any], offset: int = 0, limit: int = RECALL_LIMI
             "total_chars": len(text)}
 
 
-MATCH_CONTEXT = 2  # lines shown before and after each matching line
+MATCH_CONTEXT = 1  # lines shown before and after each matching line (B17: 1, down from 2)
 MATCHES_PER_PAGE = 3  # matching lines shown per page, each with its context
 MATCH_LINE_CHARS = 200  # characters shown of any one line
 
