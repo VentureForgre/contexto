@@ -245,7 +245,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     the main conversation's current epoch instead of rotating again from epoch 0, so a restart
     keeps the prompt byte-identical to what the previous process would have sent and the cache
     still holds. Measured basis (A28, builder-1, zero-spend replay of the Codex acceptance run,
-    reviewed in PR #174): the harness started a new proxy for each of 21 `codex exec` turns, every
+    PR #174; reviewer-1 confirmed the cause from the run's log and its own replay): the harness started a new proxy for each of 21 `codex exec` turns, every
     restart rotated from epoch 0, and replaying with epoch state resumed cut rotations from 19 to 9
     and modeled cost by 16.2 percent. Any user whose proxy restarts mid-session hits the same gap.
     - **Record.** At each rotation (a new epoch) and whenever the engine leaves degraded mode, the
