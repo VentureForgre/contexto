@@ -266,14 +266,25 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   more than half of an OpenRig seat's `W` near 33,000, and recall results arrive inside a tool
   loop where the engine cannot rotate (D17).
   **Per-turn recall budget.** Recall results stay in the window until the turn ends, so a turn
-  that recalls too much would push its own requests over the bound. The engine publishes, after
-  every response, the turn id and the room left in the current turn (`bound` minus the last real
-  input, minus `headroom_floor`) through the session store (`SessionStore.set_turn_room(turn_id,
-  room_tokens)`). `contexto_recall` and `contexto_search` count the tokens they return against
-  that room, converted with the same ratio as the per-call limit, and never return more than
-  remains; when the room is used up they return a plain message: "Recall budget for this turn is
-  used up; answer from what is in view, or say the detail is unknown." The room resets at the next
-  turn start. So heavy recall cannot exceed the bound inside a tool loop.
+  that recalls too much would push its own requests over the bound. Rules:
+  - The **turn id** is the number of turn-start messages in the CLI's full history, so it is
+    stable across rotation and proxy restarts.
+  - The **room** is `bound - (input + output) - headroom_floor`, using the last real usage once a
+    response completes (the output, including thinking and `tool_use`, is passed back in the
+    loop), and `sent_estimate` plus `max_tokens` before that.
+  - The engine publishes `(turn_id, room_tokens)` through `SessionStore.set_turn_room` twice per
+    request: at request time, before forwarding, from the estimate; and again when the response's
+    real usage arrives. The proxy relays SSE events before usage is observed, so the request-time
+    publish is what a tool call in the same response sees.
+  - `contexto_recall`, `contexto_search`, and `contexto_state` charge the tokens they return
+    against the room for the current turn id, converted with the same ratio as the per-call limit,
+    with an atomic, locked read-modify-write so parallel calls cannot overspend; the charge
+    counter resets when the turn id changes. They never return more than remains; when it is
+    used up they return: "Recall budget for this turn is used up; answer from what is in view, or
+    say the detail is unknown."
+  - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
+    output) are outside Contexto's control; a turn they push over the bound is logged
+    `over_bound` as before.
 - `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
