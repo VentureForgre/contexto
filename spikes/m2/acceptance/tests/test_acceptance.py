@@ -661,3 +661,19 @@ def test_last_resort_and_websocket_local_errors_fail():
     ws = {"event": "websocket_rejected", "path": "/responses"}
     r = detectors.analyze([last, forwarded, ws], [], bound=150_000)
     assert [(x["status"], x["mark"]) for x in r.local_5xx] == [(502, "proxy_error local_502"), (501, "websocket_rejected")]
+
+
+def test_a_failed_forward_original_fallback_counts_as_one_local_502():
+    # Reviewer-2 on PR #101: _handle's last resort first tries to forward the CLI's own bytes
+    # (fallback forward_original); if that also fails it logs proxy_error local_502 and answers 502.
+    first = {"event": "proxy_error", "method": "POST", "path": "/v1/messages", "error": "KeyError",
+             "fallback": "forward_original"}
+    again = {"event": "proxy_error", "path": "/v1/messages", "error": "OSError", "fallback": "local_502"}
+    r = detectors.analyze([first, again], [], bound=150_000)
+    assert [(x["line"], x["status"], x["mark"]) for x in r.local_5xx] == [(2, 502, "proxy_error local_502")]
+    assert not r.verdicts()["no_local_5xx"]
+    # the fallback that forwards and is answered by upstream is no local error
+    forwarded = {"event": "request", "method": "POST", "path": "/v1/messages", "fallback": True, "status": 200,
+                 "response_bytes": 900, "usage": {"input_tokens": 10, "output_tokens": 1}}
+    ok = detectors.analyze([first, forwarded], [], bound=150_000)
+    assert ok.local_5xx == [] and ok.verdicts()["no_local_5xx"]
