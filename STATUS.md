@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-16 11:15Z by intake.lead. Decisions taken and still open, with reasons:
+Updated 2026-10-16 11:50Z by intake.lead. Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -45,6 +45,27 @@ How it got here, all on record:
 
 D28's targeted experiment (532,157 tokens) replayed one of live run #2's failing turns on the
 fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
+
+## Usage against plain Claude Code (run #3's session, zero-spend analysis)
+
+Record: `docs/research/M2-usage-savings-run3.md` (per-request CSV alongside). Contexto's side is
+measured; plain Claude Code's side is modeled from the CLI's own request bytes for the 18 content
+turns and measured from the baseline arm for the 6 probe turns.
+
+| | Input tokens | Cost at Haiku 5.5 prices |
+|---|---|---|
+| Contexto (measured; 2,677,349 cache read, 1,047,954 cache write, 88 uncached) | 3,725,391 | about $0.29 |
+| Plain Claude Code, same session shape (modeled, best-case caching) | 6,972,335 | about $0.58 |
+| Saving | 46.6 percent | 49.7 percent (73.0 percent with the baseline's measured cache misses) |
+
+By phase: content turns 69.0 percent fewer tokens; probe turns only 9.3 percent fewer, because
+multihop probes add dependent search rounds that each resend the window
+(`docs/research/M2-tool-rounds-lever.md`: 13 of 14 extra rounds are dependency hops; batching would
+save about 2 percent, so neither multi-key search nor batching guidance is built). Plain Claude Code
+would not have compacted in this session (peak 493,902, modeled, against about 967K). 7 Contexto
+requests went just over Haiku 5.5's 100,000-token price tier (5x above it, M0 cost model), all in
+tool loops; a Haiku-only bound or room is under study (B27). Limits: one synthetic session, one
+run, one model.
 
 ## Token spend on live model calls (owner's proxy unless noted)
 
@@ -129,6 +150,7 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
 | v0.1.1 | 0769fdf | B22: in-view search skips the current turn's own question |
 | v0.1.2 | def6e8c | A18: `CONTEXTO_HOME` resolved to one absolute path for the proxy and every MCP server (Codex's MCP server ignored it before) |
 | v0.1.3 | 031ca59 | B23: search and index lines read Codex message parts, tool calls, and tool outputs (Codex search found nothing before; recall already worked, B20 in v0.1.0) |
+| v0.1.4 | 314d575 | B24: standalone `contexto mcp` resolves `CONTEXTO_HOME` and `--home` to an expanded absolute path |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
