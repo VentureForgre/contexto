@@ -283,8 +283,9 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   - The **room** is `bound - (input + output) - headroom_floor`, from the response's real usage
     (the output, including thinking and `tool_use`, is passed back in the loop). No `max_tokens`
     reservation: Claude Code sends `max_tokens` 128,000 on every request, which would leave no room.
-  - The engine publishes `(turn_id, room_tokens)` through `SessionStore.set_turn_room` when the
-    response's real usage arrives in `message_delta`. Measured by builder-1 at zero spend (Claude
+  - The engine publishes `(turn_id, room_tokens)` through `SessionStore.set_turn_room` at request
+    time, from the pre-send estimate (no `max_tokens` reservation), and again when the response's
+    real usage arrives in `message_delta`; the later publish replaces the earlier one. Measured by builder-1 at zero spend (Claude
     Code 2.1.301, three runs): Claude Code starts an MCP tool call 5 to 16 ms after a `tool_use`
     block's `content_block_stop`, 3.1 to 6.2 seconds before `message_delta`. So the proxy holds the
     stream from the first `tool_use` `content_block_start`: that event and all later events are
@@ -299,8 +300,14 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     therefore always sees the current turn's room. Keepalive pings may be sent during a hold.
   - `contexto_recall`, `contexto_search`, and `contexto_state` charge the tokens they return
     against the room for the current turn id, converted with the same ratio as the per-call limit,
-    with an atomic, locked read-modify-write so parallel calls cannot overspend; the charge
-    counter resets when the turn id changes. They never return more than remains; when it is
+    with an atomic, locked read-modify-write so parallel calls cannot overspend. The charge
+    counter resets on every publish, because each published room already accounts for everything
+    in the input it was measured from, including earlier recall results; charges after a publish
+    therefore count only results not yet in measured input. This is safe within one conversation
+    because of the stream hold: a tool call can only charge after its response's real-usage
+    publish, and the next request-time estimate includes its results. If a hold is released at end
+    of stream without usage, tool calls see the request-time room, which is off by at most one
+    response's output. `count_tokens` never publishes a room. They never return more than remains; when it is
     used up they return: "Recall budget for this turn is used up; answer from what is in view, or
     say the detail is unknown."
   - Charges convert at `min(bytes_per_token, 1.5)` characters per token, using 1.0 before
@@ -311,6 +318,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     budget does not apply and only the per-call limit holds. With an engine present but no room
     published for the call's turn, the same applies and the store logs `turn_room_missing`, so a
     missed publish shows up in acceptance logs.
+  - Known limitation for v0.1.0: subagents launched by the CLI share the session's room and
+    store. When subagents run concurrently with each other or with the main conversation, each
+    one's publish replaces the shared room and resets its counter, so the per-turn recall budget is
+    not enforced across overlapping conversations and they can overspend it; keying the room by
+    conversation is the later fix.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
