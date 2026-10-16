@@ -66,9 +66,11 @@ zero-token pre-flight, baseline, and config checks ran against the local stub.
    about 9,500). The largest real request was 24,897 against the 42,000 bound; 0 `over_bound` events of
    either source.
 3. **MCP tools (goal 3).**
-   - Measured (pre-flight): no Contexto tool name appears anywhere in the request, neither in the
-     `additional_tools` namespaces (`functions`, `clock`, `collaboration`, unchanged in name and count)
-     nor in any input item. Registering the server grows the code-mode `exec` tool's description from
+   - Measured (pre-flight): no Contexto tool appears in the top-level `tools` list or in the
+     `additional_tools` namespaces (`functions`, `clock`, `collaboration`, unchanged in name and
+     count). The only mention of a Contexto tool name in the request is the test prompt's own text,
+     which names `contexto_state` (input item 6 in all 12 pre-flight requests); no other item names
+     any of the five tools. Registering the server grows the code-mode `exec` tool's description from
      10,824 to 14,426 bytes and adds a "deferred" mention: Codex offers MCP tools as deferred tools
      behind tool search, not by name.
    - Measured (T4): the model found and called `contexto_state`, and Codex refused the call:
