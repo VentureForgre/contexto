@@ -244,11 +244,22 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   and builder-2's unpushed ledger work at commit 1ab5f29 (readable from the shared object store),
   append-only JSONL with a hash chain and crash-truncation repair. File sources require `sha256`;
   a missing file counts as stale. Records may cite pages as provenance (`type: page`).
-- **Pinned text** = open obligations, active decisions, then verified facts, newest first, each
-  with its id, capped at `pin_budget` (default 6,000 tokens). Over budget: list the newest, then a
+- **Pinned text** starts with fixed instruction lines, then lists open obligations, active
+  decisions, then verified facts, newest first, each with its id, capped at `pin_budget` (default
+  6,000 tokens). The instruction lines must say that earlier turns are paged out and how to reach
+  them (`contexto_search` with an exact key, name, or identifier, then `contexto_recall` with a page
+  id); that the model does this before relying on a detail from an earlier turn and before
+  answering that something is unknown; that it records decisions and obligations with
+  `contexto_pin` and closes finished ones with `contexto_close`; and one worked example of a
+  search followed by a recall. The preamble is placed before any carried context in the first
+  retained turn-start message. Measured (PR #70 experiment, 415,413 tokens): with the earlier
+  mechanism-only line the model made 0 tool calls in the H1 run; with this text it searched for
+  all four paged-only keys in its first response. Over budget: list the newest, then a
   count of omitted items and a pointer to `contexto_state`. It always starts with one line telling
   the model that earlier turns are paged out and how to recall them.
-- **Index text** = one line per page (id, turn number, stub), newest first, capped at
+- **Index text** = one line per page (id, turn number, stub, and `[ids: ...]` listing the page's
+  identifiers such as keys, names, and paths, never values after `=` and never identifiers
+  containing digits, so the index shows where a fact lives without giving it away), newest first, capped at
   `index_budget` (default 4,000 tokens), with a count of older pages omitted.
 
 ## MCP server
@@ -273,10 +284,19 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     (the output, including thinking and `tool_use`, is passed back in the loop). No `max_tokens`
     reservation: Claude Code sends `max_tokens` 128,000 on every request, which would leave no room.
   - The engine publishes `(turn_id, room_tokens)` through `SessionStore.set_turn_room` when the
-    response's real usage arrives, and the proxy relays the stream's final event only after that
-    publish (the terminator hold-back of PR #57). Lane A measures at zero spend whether Claude Code
-    can start an MCP tool call before the response stream ends; if it can, the proxy also holds
-    `tool_use` content blocks until the publish. Either way a tool call sees the current room.
+    response's real usage arrives in `message_delta`. Measured by builder-1 at zero spend (Claude
+    Code 2.1.301, three runs): Claude Code starts an MCP tool call 5 to 16 ms after a `tool_use`
+    block's `content_block_stop`, 3.1 to 6.2 seconds before `message_delta`. So the proxy holds the
+    stream from the first `tool_use` `content_block_start`: that event and all later events are
+    buffered in order and released in order at the first of: `message_delta` (after its usage is
+    observed and the room is published), an `error` event, or upstream end of stream, so an error
+    or disconnect is never swallowed. Text, thinking, and `message_start` before the first
+    `tool_use` still stream live. For the Responses dialect (Codex) the equivalent hold runs from
+    the first `response.output_item.added` whose item is any tool-call type (anything other than a
+    `message` or `reasoning` item; Codex 0.154.0 emits `custom_tool_call`, measured in the A6 smoke)
+    until `response.completed`, `response.incomplete`, or `response.failed` (whose usage, when
+    present, sets the room), an error event, or end of stream. A tool call
+    therefore always sees the current turn's room. Keepalive pings may be sent during a hold.
   - `contexto_recall`, `contexto_search`, and `contexto_state` charge the tokens they return
     against the room for the current turn id, converted with the same ratio as the per-call limit,
     with an atomic, locked read-modify-write so parallel calls cannot overspend; the charge
