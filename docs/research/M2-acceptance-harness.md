@@ -486,7 +486,10 @@ It goes straight to the owner's proxy, bypassing Contexto.
   thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05,
   per-turn-control-2026-07-01, mid-conversation-tool-changes-2026-07-01, effort-2025-11-24,
   dangerous-tool-use-2026-09-03, thinking-display-updates-2026-08-18, afk-mode-2026-01-31. Dropped:
-  claude-code-20250219. `replay.harness_betas` applies the same filter to every direct send.
+  claude-code-20250219. `replay.harness_betas` applies the same filter to every direct send. Feature
+  betas such as afk-mode-2026-01-31 and dangerous-tool-use-2026-09-03 are kept on purpose: D23 removes
+  only client identity markers, and the feature betas keep the baseline close to H1's real request
+  (intake, 2026-10-16 05:30Z).
   Caveat on record: the recall experiment's four sends (2026-10-16 03:24Z to 03:25Z) still carried
   all 11, claude-code-20250219 included, as H1's own requests did.
 - **Output, private only.** `baseline-answers.txt` and `replay-result.json` (sizes, the token
