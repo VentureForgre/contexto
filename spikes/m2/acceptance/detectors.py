@@ -55,11 +55,15 @@ class Report:
     upstream_4xx: int = 0
     over_bound_requests: int = 0  # usage above the bound
     over_bound_logged: int = 0  # requests flagged over_bound by the engine
-    unlogged_over_bound: list[int] = field(default_factory=list)  # request indexes over the bound but not flagged
+    # Request indexes whose measured input passed the bound without the engine's flag. The engine
+    # flags over-bound from its own estimate before sending (rewrite.py), so an entry here means
+    # the estimate ran low for that request: it fails acceptance 1 and points at the estimator.
+    unlogged_over_bound: list[int] = field(default_factory=list)
     max_input: int = 0
     rotations: int = 0
     epochs: int = 0
     requests_per_epoch: dict[str, int] = field(default_factory=dict)
+    engine_events: dict[str, int] = field(default_factory=dict)  # every transform event, by name
     stream_compactions: int = 0  # stream-json compact_boundary events seen by the driver
     cache_eligible: int = 0  # requests after the first in their epoch
     cache_hits: int = 0  # eligible requests that read cache
@@ -117,7 +121,11 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
         status = int(ev.get("status") or 0)
         r.statuses[status] = r.statuses.get(status, 0) + 1
         for te in ev.get("transform_events") or []:
-            if isinstance(te, dict) and _event_name(te) == "rotation":
+            if not isinstance(te, dict):
+                continue
+            name = _event_name(te)
+            r.engine_events[name] = r.engine_events.get(name, 0) + 1
+            if name == "rotation":
                 r.rotations += 1
         epoch = ev.get("epoch")
         r.requests_per_epoch[str(epoch)] = r.requests_per_epoch.get(str(epoch), 0) + 1
