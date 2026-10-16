@@ -72,7 +72,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   latest settings-only system message per settings key (rule 13); and tool-addition system
   messages. All are carried in the CLI's current form, never restored from a stored copy. Any
   other `role: "system"` message carries per-turn content (for example the output of a
-  context-injecting `UserPromptSubmit` hook) and belongs to its turn: it is paged with that turn. Lane A pins down, with stub evidence, exactly which blocks count as injected context.
+  context-injecting `UserPromptSubmit` hook) and belongs to its turn: it is paged with that turn. A system message the proxy cannot classify is
+  carried, and the proxy logs `unclassified_system_message`; carrying is the safe failure, since
+  paging a message that must persist would lose state. Lane A pins down, with stub evidence, exactly which blocks count as injected context.
 - The proxy keeps an epoch state `E = (k, carried, pinned_text, index_text, head_fingerprint)`:
   the turns before turn index `k` are paged out.
 
