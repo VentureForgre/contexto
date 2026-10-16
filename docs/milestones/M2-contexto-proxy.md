@@ -401,7 +401,10 @@ a no-replayed-thinking baseline.
    full-context baseline at the same session content. Pass: within 2 probes of baseline overall
    and no category more than 1 probe below.
 3. **Recall:** at least one probe answerable only from a paged-out turn is answered correctly,
-   and the session log shows the `contexto_recall` call.
+   and the session log shows that the answer reached the model through Contexto's tools: either a
+   `contexto_recall` of the page holding it, or a `contexto_search` hit whose returned lines contain
+   it. Either is retrieval of paged-out content; with search returning matching lines (B15),
+   answering from the hit is the intended path.
 4. **Cache:** within an epoch, requests read the head and window prefix from cache, except
    misses explained by the route (report the rate).
 5. **Tests:** unit tests for every rewrite rule, the store, and the MCP server; CI green.
