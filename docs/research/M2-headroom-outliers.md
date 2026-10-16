@@ -73,8 +73,8 @@ there.
 
 ## Interactions
 
-- **Rule 5 (never rotate inside a tool loop).** Unchanged by every candidate. Headroom is read in the
-  rotation decision at a turn start (`rotate_at_turn_start`) and in the window budget W, which an
+- **Rule 5 (never rotate inside a tool loop).** Unchanged by every candidate. Headroom is read in
+  the rotation decision at a turn start (`rotate_at_turn_start`) and in the window budget W, which an
   engine also sets once from the measured head after its first response (A8 (c)). The in-turn
   over-bound check never reads it. Decay is applied at turn starts only. The outlier turn itself is
   sent unrotated under every rule, as today.
