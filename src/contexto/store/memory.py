@@ -8,15 +8,18 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes
 from contexto.store import PageConflictError, redact
-from contexto.store.pages import build_page, render_index, render_pinned, search_pages
+from contexto.store.ledger import MemoryLedger
+from contexto.store.pages import build_page, render_index, search_pages
+from contexto.store.records import LedgerOps
 
 
-class MemoryStore:
+class MemoryStore(LedgerOps):
     def __init__(self, session_id: str = "memory", *, key: bytes | None = None) -> None:
         self.session_id = session_id
         self._key = key if key is not None else secrets.token_bytes(32)
         self.pages: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
+        self.ledger = MemoryLedger()
 
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]:
         ids = []
@@ -37,9 +40,6 @@ class MemoryStore:
 
     def search(self, query: str) -> list[str]:
         return search_pages(list(self.pages.values()), query)
-
-    def pinned_text(self, budget_tokens: int) -> str:
-        return render_pinned(budget_tokens)
 
     def index_text(self, budget_tokens: int) -> str:
         return render_index(list(self.pages.values()), budget_tokens)

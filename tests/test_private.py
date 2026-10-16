@@ -32,6 +32,15 @@ def test_session_dirs_0700_and_files_0600_under_a_permissive_umask(tmp_path, per
         assert mode(f) == 0o600, f
 
 
+def test_existing_wide_home_and_sessions_dirs_are_narrowed_on_first_use(tmp_path):
+    home = tmp_path / "home"
+    (home / "sessions").mkdir(parents=True)
+    os.chmod(home, 0o755)
+    os.chmod(home / "sessions", 0o777)
+    SessionStore(home, "s1")
+    assert mode(home) == 0o700 and mode(home / "sessions") == 0o700
+
+
 def test_existing_wide_session_dirs_are_narrowed(tmp_path):
     session = tmp_path / "sessions" / "s1"
     (session / "pages").mkdir(parents=True)

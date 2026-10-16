@@ -151,7 +151,3 @@ def render_index(pages: list[dict[str, Any]], budget_tokens: int) -> str:
         used += estimate_tokens(line + "\n")
     return "\n".join(lines)
 
-
-def render_pinned(budget_tokens: int) -> str:
-    """Pinned text without a ledger (B1): only the mandatory first line. B2 adds ledger items."""
-    return PINNED_FIRST_LINE

@@ -6,7 +6,11 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
 
 - ``pages/<page id>.json``: one immutable page per paged-out turn (see ``contexto.store.pages``).
 - ``page.key``: the random per-store HMAC key for page ids. It never leaves the store.
+- ``ledger.jsonl`` (with ``ledger.lock`` and ``quarantine/``): the hash-chained session ledger.
 - ``log.jsonl``: the session log, one canonical JSON event per line.
+
+Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``) come from
+``contexto.store.records.LedgerOps``; see that module for the API the MCP server uses.
 
 ``contexto.store.memory.MemoryStore`` has the same methods and keeps everything in memory.
 """
@@ -23,7 +27,9 @@ from typing import Any
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
-from contexto.store.pages import build_page, render_index, render_pinned, search_pages
+from contexto.store.ledger import Ledger
+from contexto.store.pages import build_page, render_index, search_pages
+from contexto.store.records import LedgerOps
 
 __all__ = ["SessionStore", "PageConflictError", "KeyFileError", "redact"]
 
@@ -54,14 +60,18 @@ def redact(event: Any) -> Any:
     return event
 
 
-class SessionStore:
+class SessionStore(LedgerOps):
     def __init__(self, home: Path, session_id: str) -> None:
         self.session_id = session_id
         self.dir = session_dir(home, session_id)
         self.pages_dir = self.dir / "pages"
+        # Narrow an existing wide CONTEXTO_HOME and sessions/ too, not only directories we create.
+        private_dir(Path(home))
+        private_dir(Path(home) / "sessions")
         private_dir(self.dir)
         private_dir(self.pages_dir)
         self._key = self._load_key()
+        self.ledger = Ledger(self.dir)
 
     def _load_key(self) -> bytes:
         """The store's HMAC key, created atomically on first use; refuses an empty or short key."""
@@ -117,9 +127,6 @@ class SessionStore:
     def search(self, query: str) -> list[str]:
         """Ids of pages whose stub or text contains ``query`` exactly, newest first."""
         return search_pages(self._pages(), query)
-
-    def pinned_text(self, budget_tokens: int) -> str:
-        return render_pinned(budget_tokens)
 
     def index_text(self, budget_tokens: int) -> str:
         return render_index(self._pages(), budget_tokens)
