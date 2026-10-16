@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hmac
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -24,7 +23,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from acceptance import driver
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from acceptance import driver  # noqa: E402
 
 
 def _helper_output(seat_settings: Path) -> str:
@@ -39,7 +41,12 @@ def check(seat_settings: Path, timeout: float = 90.0) -> dict[str, Any]:
     claude = shutil.which("claude")
     if claude is None:
         return {"ran": False, "reason": "claude CLI not installed"}
-    key = _helper_output(seat_settings)  # held in memory for the comparison only
+    if not seat_settings.is_file():
+        return {"ran": False, "reason": "the seat settings file does not exist"}
+    try:
+        key = _helper_output(seat_settings)  # held in memory for the comparison only
+    except (RuntimeError, OSError, subprocess.TimeoutExpired):
+        return {"ran": False, "reason": "the seat's apiKeyHelper did not produce a key; output not shown"}
     seen: dict[str, Any] = {}
 
     class Stub(BaseHTTPRequestHandler):
@@ -103,6 +110,14 @@ def check(seat_settings: Path, timeout: float = 90.0) -> dict[str, Any]:
     return result
 
 
+def main(argv: list[str]) -> int:
+    if len(argv) != 1:
+        print("usage: credcheck.py <seat settings file>", file=sys.stderr)
+        return 2
+    result = check(Path(argv[0]))
+    print(json.dumps(result, indent=2), flush=True)
+    return 0 if result.get("pass") else 1
+
+
 if __name__ == "__main__":
-    print(json.dumps(check(Path(sys.argv[1])), indent=2))
-    os._exit(0)
+    sys.exit(main(sys.argv[1:]))

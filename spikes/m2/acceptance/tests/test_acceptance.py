@@ -294,7 +294,32 @@ def test_credential_check_with_a_fake_helper_uses_the_helper_not_oauth(tmp_path)
     from acceptance import credcheck
 
     seat = tmp_path / "seat.json"
-    seat.write_text(json.dumps({"apiKeyHelper": "echo sk-ant-api00-fake-for-credcheck"}))
+    seat.write_text(json.dumps({"apiKeyHelper": "echo test-key-not-real"}))  # the key's format does not matter
     result = credcheck.check(seat)
     assert result["request_seen"] and result["key_matches_seat_helper"] and not result["oauth_beta_header"]
     assert result["pass"]
+
+
+def test_credcheck_script_output_survives_a_pipe(tmp_path):
+    # Run as a script with stdout piped and no claude on PATH: the JSON result must still arrive.
+    seat = tmp_path / "seat.json"
+    seat.write_text(json.dumps({"apiKeyHelper": "echo test-key-not-real"}))
+    script_path = Path(__file__).resolve().parents[1] / "credcheck.py"
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    proc = subprocess.run([sys.executable, str(script_path), str(seat)], capture_output=True, text=True,
+                          env=env, timeout=60)
+    result = json.loads(proc.stdout)
+    assert result == {"ran": False, "reason": "claude CLI not installed"}
+    assert proc.returncode == 1  # not a pass
+
+
+@pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
+@pytest.mark.parametrize("content", [None, "{}", '{"apiKeyHelper": "exit 3"}'])
+def test_credcheck_reports_a_broken_seat_settings_file_cleanly(tmp_path, content):
+    from acceptance import credcheck
+
+    seat = tmp_path / "seat.json"
+    if content is not None:
+        seat.write_text(content)
+    result = credcheck.check(seat)
+    assert result["ran"] is False and "pass" not in result and result["reason"]
