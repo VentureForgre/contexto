@@ -248,28 +248,36 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     PR #174; reviewer-1 confirmed the cause from the run's log and its own replay): the harness started a new proxy for each of 21 `codex exec` turns, every
     restart rotated from epoch 0, and replaying with epoch state resumed cut rotations from 19 to 9
     and modeled cost by 16.2 percent. Any user whose proxy restarts mid-session hits the same gap.
-    - **Record.** At each rotation (a new epoch) and whenever the engine leaves degraded mode, the
-      engine writes the main conversation's epoch record through
-      `SessionStore.set_epoch(record)`: `epoch`, `k`, `strip_upto`, `turns_paged`, the exact
-      `pinned_text` and `index_text` sent in that epoch, `head_fingerprint`, the dialect, the
-      model named by the request, the settings that decide rotation (`bound`, `window_fraction`,
-      `headroom_floor`, `min_turn_room`), the conversation's identity as the engine keys it, and
-      an anchor: the normalised hashes (rule 10) of messages `M[0..k)` and the count of messages
-      at epoch creation. It is a full atomic overwrite at mode 0600, never logged, never sent
-      upstream, and holds conversation text only in `pinned_text` and `index_text`, which the
-      store already holds in other forms. A degraded engine (rule 14) writes no record.
+    - **Record.** At every turn start of the main conversation (rotations happen only there)
+      and whenever the engine leaves degraded mode, the engine writes the main conversation's
+      epoch record through `SessionStore.set_epoch(record)`. The record holds every piece of
+      engine state that decides later request bytes or rotation decisions, so a resumed engine
+      behaves exactly as the old one would have: `epoch`, `k`, `strip_upto`, `turns_paged`, the
+      exact `pinned_text` and `index_text` sent in that epoch, `head_fingerprint`, `paged_carried`
+      (hashes only), `head_tokens`, `initial_carried`, `max_turn_growth`, the turn-start counters
+      (`last_turn_start_n`, `last_turn_count`, `last_carried_text_count`, `carried_text_streak`),
+      `window_budget`, `window_minimal_count`, and `turn_room_low_epoch`; the whole engine
+      configuration (every setting, including the recall preamble options and budgets); the
+      dialect; the model named by the request; the conversation's identity as the engine keys
+      it (a hash); and an anchor: the count `n` of messages in the request that wrote the record
+      and a hash over their normalised hashes (rule 10). Per-request values (the previous
+      request's hashes, sizes, and estimates) are not recorded. It is a full atomic overwrite at
+      mode 0600, never logged, never sent upstream, and holds conversation text only in
+      `pinned_text` and `index_text`, which the store already holds in other forms. A degraded
+      engine (rule 14) writes no record.
     - **Resume.** A new engine reads the record once, at the first request of a conversation
-      whose identity matches the record's, and resumes (adopts `epoch`, `k`, `strip_upto`,
-      `turns_paged`, `pinned_text`, `index_text`, and continues append-only, rules 1 to 3) only
-      if every check holds: same dialect, model, and rotation settings; the request's head
-      fingerprint equals the record's; the request has at least the record's message count; and
-      the request's messages `M[0..k)` hash to the record's anchor. Rule 4's rotation decisions
-      apply from the next turn start as usual. Any failed check, an unreadable or malformed
-      record, or no record starts the epoch from 0 as before, and the engine logs content-free
-      `epoch_not_resumed` with one reason (`no_record`, `unreadable`, `dialect_changed`,
-      `model_changed`, `settings_changed`, `head_changed`, `history_shorter`, `history_diverged`,
-      `other_conversation`). A resume logs `epoch_resumed` with `epoch` and `k`. Measured sizing
-      (packet A8's ratio restore) is unchanged and still applies.
+      whose identity matches the record's, and resumes only if every check holds: same dialect,
+      model, and configuration; the request's head fingerprint equals the record's; the request
+      has at least `n` messages; and its first `n` messages hash to the anchor. A resume adopts
+      every recorded field, seeds rule 10's previous-request hashes with the hashes of those
+      first `n` messages (so the request is matched as an append and does not start a new
+      epoch), makes this conversation the main one, and continues append-only (rules 1 to 3);
+      rule 4's decisions apply from the next turn start as usual. Any failed check, an
+      unreadable or malformed record, or no record starts the epoch from 0 as before, and the
+      engine logs content-free `epoch_not_resumed` with one reason (`no_record`, `unreadable`,
+      `dialect_changed`, `model_changed`, `settings_changed`, `head_changed`, `history_shorter`,
+      `history_diverged`, `other_conversation`). A resume logs `epoch_resumed` with `epoch` and
+      `k`. Measured sizing (packet A8's ratio restore) is unchanged and still applies.
     - **Write failures.** A failed `set_epoch` deletes or marks the previous record unusable, so
       a later restart cannot resume a stale epoch, and logs `epoch_record_stale`. It does not
       enter degraded mode: the record only saves cache, and losing it costs one rotation.
