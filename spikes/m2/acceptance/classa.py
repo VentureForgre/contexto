@@ -530,14 +530,15 @@ def body_fields(bodies: list[dict[str, Any]], exp: list[dict[str, Any]]) -> dict
 def out_in_git_tree(out: Path) -> bool:
     """Whether ``out`` (or, while it does not exist yet, its nearest existing parent) is inside a git
     repository (reviewer-2 on #133): requests, answers and tool output must never land in a repo.
-    Fails closed (reviewer-2 on #137): GIT_DIR and GIT_WORK_TREE are cleared so the caller's
-    environment cannot point the check elsewhere; only git's own "not a git repository" counts as
-    outside, and any other git error (dubious ownership, a broken repo) counts as inside. Raises
-    ExperimentError when git is not installed."""
+    Fails closed (reviewer-2 on #137 and #139): every GIT_* variable is dropped from the check's
+    environment (GIT_DIR, GIT_WORK_TREE, GIT_CEILING_DIRECTORIES, GIT_DISCOVERY_ACROSS_FILESYSTEM and the
+    rest can each make a path inside a repo read as outside) and LC_ALL=C keeps git's message in English;
+    only "not a git repository" counts as outside, and any other git error (dubious ownership, a broken
+    repo) counts as inside. Raises ExperimentError when git is not installed."""
     path = out.resolve()
     while not path.exists() and path != path.parent:
         path = path.parent
-    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, "LC_ALL": "C"}
     try:
         proc = subprocess.run(["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
                               capture_output=True, text=True, env=env)

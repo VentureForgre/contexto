@@ -183,9 +183,13 @@ def test_out_guard_fails_closed(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("GIT_DIR", str(tmp_path / "nowhere"))
     monkeypatch.setenv("GIT_WORK_TREE", str(outside))
     assert classa.out_in_git_tree(repo / "o") and not classa.out_in_git_tree(outside / "o")
+    # A ceiling at the repo root (or discovery limits) would make a path inside the repo read as outside.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(repo))
+    monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
+    assert classa.out_in_git_tree(repo / "sub" / "o")
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")  # the outside verdict does not depend on the locale
+    assert not classa.out_in_git_tree(outside / "o")
     assert classa.out_in_git_tree(repo / ".git")  # inside the git directory itself
-    real_run = subprocess.run
-
     def dubious(cmd, **kw):
         return subprocess.CompletedProcess(cmd, 128, "", "fatal: detected dubious ownership in repository\n")
 
@@ -201,4 +205,3 @@ def test_out_guard_fails_closed(tmp_path, monkeypatch, capsys):
     base = ["--run-dir", str(tmp_path), "--session", "s", "--run-code", str(tmp_path), "--seat-settings",
             str(tmp_path / "seat.json"), "--stub", "--out", str(outside / "o")]
     assert classa.main(base) == 2 and "git is not installed" in capsys.readouterr().err
-    monkeypatch.setattr(classa.subprocess, "run", real_run)
