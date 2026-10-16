@@ -35,8 +35,8 @@ class Params:
     index_tokens_per_page: int = 60
     pinned_tokens: int = 1_500  # what the model pins over the run [inferred]
     probe_output: int = 4_000  # answers plus thinking on the probe turn [measured: 4,169 in L2f pilot 3]
-    recalls: int = 6  # contexto_recall round trips on the probe turn [inferred]
-    recall_tokens: int = 8_000  # tokens a recall result adds, up to 32,000 characters
+    recalls: int = 2  # contexto_recall round trips on the probe turn: the script's cap (intake, 2026-10-16)
+    recall_tokens: int = 17_800  # a full recall: 32,000 characters (RECALL_LIMIT) of log text at 1.8 bytes per token
     max_tokens_reserve: int = 32_000  # the guard reserves this much output per request
 
 

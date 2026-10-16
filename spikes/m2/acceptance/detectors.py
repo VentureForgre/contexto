@@ -8,13 +8,10 @@ are engine events inside ``transform_events``; a rotation is an event named exac
 (a ``rotation_noop`` pages nothing and is not counted). Lane A's A2b (PR #48) adds standalone
 ``over_bound`` (``source: "real"``) and ``estimate_error`` events after each response.
 
-Acceptance 1 exempts only a tool loop the engine flagged over-bound before sending (D17, rule 5).
-Any other request over the bound fails it, and so does any real-source over_bound event that such
-a tool loop does not explain.
-
-Claude Code's JSONL marks a compaction with a ``system`` record whose subtype is
-``compact_boundary`` and a ``user`` record with ``isCompactSummary`` [inferred from the 2.1.301
-binary by lane 1, PR #9; not vendor-documented].
+Acceptance 1, under intake's strict rule for the acceptance run (2026-10-16), fails on any request
+over the bound, any real-source over_bound event, any ``bound_too_small``, and any pre-send
+over_bound record not marked as a tool loop. A pre-send record with ``source: "estimate"`` and
+``in_tool_loop: true`` (rule 5, PR #48) is reported only.
 """
 
 from __future__ import annotations
@@ -26,9 +23,7 @@ from pathlib import Path
 from typing import Any
 
 MESSAGES = "/v1/messages"
-# Engine events that only happen when a request starts a turn and the rotation trigger fired. A
-# request flagged over-bound before sending with none of them is inside a tool loop (rule 5).
-TURN_START_EVENTS = frozenset({"rotation", "rotation_noop", "bound_too_small", "window_minimal"})
+MAX_RECALLS = 2  # the probe turn's cap on contexto_recall calls (script.MAX_RECALLS)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -62,13 +57,14 @@ class Report:
     statuses: dict[int, int] = field(default_factory=dict)
     upstream_4xx: int = 0
     over_bound_requests: int = 0  # usage above the bound
-    over_bound_logged: int = 0  # requests the engine flagged over_bound before sending
-    # Acceptance 1's only exemption (D17, rule 5): a tool loop that grew past the bound, which the
-    # engine flagged before sending. These request indexes are over the bound and exempt.
-    over_bound_tool_loop: list[int] = field(default_factory=list)
-    # Every other request over the bound fails acceptance 1: an estimator miss (no pre-send flag),
-    # or a flagged turn start (``bound_too_small``, a configuration failure).
-    over_bound_failures: list[int] = field(default_factory=list)
+    # Intake's strict rule for the acceptance run (2026-10-16): any request over the bound fails
+    # acceptance 1. Indexes of every such request.
+    over_bound_indexes: list[int] = field(default_factory=list)
+    # The engine's pre-send over_bound records (PR #48). One with ``source: "estimate"`` and
+    # ``in_tool_loop: true`` is rule 5's tool-loop growth: reported only. Any other pre-send record
+    # fails acceptance 1.
+    pre_send_tool_loop: list[int] = field(default_factory=list)
+    pre_send_other: list[int] = field(default_factory=list)
     bound_too_small: int = 0  # requests whose new turn alone could not fit the window
     window_minimal: int = 0  # requests that kept only the new turn (contract PR #50, lane A's A2c)
     max_input: int = 0
@@ -76,11 +72,9 @@ class Report:
     # the bound, so they must not count as passing acceptance 1.
     unverified_requests: list[int] = field(default_factory=list)
     # Lane A's A2b (PR #48) logs these from real usage, as standalone session-log events.
-    over_bound_real: int = 0  # ``over_bound`` events with ``source: "real"``
-    # Real-source over_bound events not explained by an exempt tool loop: the estimate missed.
-    # Each fails acceptance 1; reported with the largest real input among them.
-    estimator_misses: int = 0
-    estimator_miss_max_tokens: int = 0
+    # ``over_bound`` events with ``source: "real"``: each fails acceptance 1.
+    over_bound_real: int = 0
+    over_bound_real_max_tokens: int = 0
     # Informational only: until lane A fixes PR #48's B1, a rotation request's estimate is the
     # pre-rotation one, which skews these. No verdict uses them.
     estimate_errors: int = 0  # ``estimate_error`` events: real input over the estimate by more than 10%
@@ -106,12 +100,14 @@ class Report:
     def verdicts(self) -> dict[str, bool]:
         return {
             "zero_compaction": self.compaction_events == 0 and self.stream_compactions == 0,
-            "over_bound_only_in_tool_loop": not self.over_bound_failures,
-            "no_estimator_misses": self.estimator_misses == 0,
+            "no_request_over_bound": self.over_bound_requests == 0,
+            "no_pre_send_over_bound_outside_tool_loop": not self.pre_send_other,
+            "no_real_over_bound": self.over_bound_real == 0,
             "no_bound_too_small": self.bound_too_small == 0,
             "every_request_has_usage": not self.unverified_requests,
             "zero_4xx": self.upstream_4xx == 0 and not any(400 <= s < 500 for s in self.statuses),
             "recall_called": self.recall_ok > 0,
+            "recalls_within_cap": self.recall_calls <= MAX_RECALLS,
         }
 
 
@@ -129,12 +125,10 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
             stream_compactions: int = 0) -> Report:
     r = Report(stream_compactions=stream_compactions)
     session_log = list(session_log)
-    real_over: dict[int, int] = {}  # real_tokens -> count of over_bound events from real usage
     for ev in session_log:
         if ev.get("event") == "over_bound" and ev.get("source") == "real":
             r.over_bound_real += 1
-            tokens = int(ev.get("real_tokens") or 0)
-            real_over[tokens] = real_over.get(tokens, 0) + 1
+            r.over_bound_real_max_tokens = max(r.over_bound_real_max_tokens, int(ev.get("real_tokens") or 0))
         elif ev.get("event") == "estimate_error":
             r.estimate_errors += 1
             ratio = ev.get("ratio")
@@ -164,7 +158,7 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
         status = int(ev.get("status") or 0)
         r.statuses[status] = r.statuses.get(status, 0) + 1
         names = set()
-        pre_send_over = bool(ev.get("over_bound"))
+        pre_send: list[bool] = []  # per pre-send over_bound record: is it a tool loop
         for te in ev.get("transform_events") or []:
             if not isinstance(te, dict):
                 continue
@@ -173,8 +167,8 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
             r.engine_events[name] = r.engine_events.get(name, 0) + 1
             if name == "rotation":
                 r.rotations += 1
-            if te.get("over_bound") is True and te.get("source") != "real":
-                pre_send_over = True  # the engine's request event, or its record tagged source "estimate"
+            if name == "over_bound" and te.get("source") != "real":
+                pre_send.append(te.get("source") == "estimate" and te.get("in_tool_loop") is True)
         r.bound_too_small += int("bound_too_small" in names)
         r.window_minimal += int("window_minimal" in names)
         epoch = ev.get("epoch")
@@ -186,14 +180,9 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
             r.max_input = max(r.max_input, inp)
             if inp > bound:
                 r.over_bound_requests += 1
-                if pre_send_over and not names & TURN_START_EVENTS:
-                    r.over_bound_tool_loop.append(index)
-                    if real_over.get(inp):  # the estimate did not miss this one
-                        real_over[inp] -= 1
-                else:
-                    r.over_bound_failures.append(index)
-        if pre_send_over:
-            r.over_bound_logged += 1
+                r.over_bound_indexes.append(index)
+        if pre_send:
+            (r.pre_send_tool_loop if all(pre_send) else r.pre_send_other).append(index)
         if epoch not in seen_epochs:
             seen_epochs.add(epoch)
             first_in_epoch.add(index)
@@ -204,9 +193,6 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
             else:
                 r.cache_misses.append(index)
     r.epochs = len(seen_epochs)
-    misses = [tokens for tokens, count in real_over.items() for _ in range(count)]
-    r.estimator_misses = len(misses)
-    r.estimator_miss_max_tokens = max(misses, default=0)
     for rec in cc_jsonl:
         if (rec.get("type") == "system" and rec.get("subtype") == "compact_boundary") or rec.get("isCompactSummary"):
             r.compaction_events += 1
