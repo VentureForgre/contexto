@@ -383,10 +383,16 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   this format costs a median of about 138 tokens per hit instead of 359, and the 54 probes' total
   demand falls from 91,249 to 31,002 tokens. An answer more than one line away from its match is not shown in
   the hit and needs a recall at the offset. Every reply states its coverage: paged hits come only from paged-out turns, and the conversation
-  in view is newer than any of them. Search also matches the retained window: the engine publishes a
-  private snapshot of the retained window's rendered text to the session store at each room
-  publish (mode 0600, overwritten each time, bounded by the window, never logged), and matches in it
-  are listed first, labeled in view, as the matching line only. Measured basis (live run #2 chain
+  in view is newer than any of them. Search also matches the retained window: at every room publish (after a
+  rotation and after each request's transform, never from `count_tokens`) the engine calls
+  `SessionStore.set_retained(epoch, k, turns)` with entries `{turn, message_index, role, text}`
+  (text blocks only, no thinking or images), a full atomic overwrite at mode 0600, bounded by the
+  window, stamped with the room-publish sequence, never logged; a store error is handled per rule
+  14 (degraded, never raised). Search refuses a snapshot whose stamp does not match the current
+  room publish and says "in view not checked". Matches in the snapshot are listed first, labeled in
+  view, newest first, as the matching line only, charged, with their returned spans logged
+  content-free under a distinct source marker. In-view hits do not count toward acceptance 3,
+  which measures retrieval of paged-out content. Measured basis (live run #2 chain
   analysis, builder-3, zero spend): 4 of H1's 5 extra chain misses had a newer link in the retained
   window, but the model answered from a search reply whose newest paged hit looked current.
   Results are charged against the per-turn room. No embeddings, no
