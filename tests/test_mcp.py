@@ -129,24 +129,23 @@ def test_recall_renders_the_page_without_thinking(server, stores):
     _, a, _ = stores
     result = tool(server, "contexto_recall", {"page_id": a})["result"]
     text = result["content"][0]["text"]
-    assert result["isError"] is False and result["structuredContent"]["turn"] == 3
+    assert result["isError"] is False and "structuredContent" not in result
     assert "SECRET-THOUGHT" not in text
     assert "[turn 3] user:\nRemember: the staging port is garnet-4821." in text
     assert 'tool_use read_file {"path": "conf/app.toml"}' in text
     assert "tool_result:\nport = 4821" in text
-    assert result["structuredContent"]["next_offset"] is None and len(result["content"]) == 1
+    assert len(result["content"]) == 1  # no continuation hint: the page ended
 
 
 def test_recall_pages_at_the_32000_boundary(server, stores):
     store, _, b = stores
     store.set_window(200_000, 2.0)  # a large window, so the 32,000-character cap applies (B9)
     first = tool(server, "contexto_recall", {"page_id": b})["result"]
-    total = first["structuredContent"]["total_chars"]
+    total = len(mcp.render_page(store.get_page(b)))
     assert len(first["content"][0]["text"]) == mcp.RECALL_LIMIT
-    assert first["structuredContent"]["next_offset"] == mcp.RECALL_LIMIT
     assert "offset 32000" in first["content"][1]["text"]
     second = tool(server, "contexto_recall", {"page_id": b, "offset": mcp.RECALL_LIMIT})["result"]
-    assert second["structuredContent"]["next_offset"] is None
+    assert len(second["content"]) == 1
     assert first["content"][0]["text"] + second["content"][0]["text"] == mcp.render_page(store.get_page(b))
     past = tool(server, "contexto_recall", {"page_id": b, "offset": total + 1})["result"]
     assert past["isError"] is True
@@ -159,7 +158,7 @@ def test_recall_exactly_at_the_limit_has_no_continuation():
     (pid,) = store.page_out([[{"role": "user", "content": [{"type": "text", "text": "y" * exact}]}]], first_turn=1)
     result = tool(mcp.Server(store, io.StringIO(), io.StringIO()), "contexto_recall", {"page_id": pid})["result"]
     assert len(result["content"][0]["text"]) == mcp.RECALL_LIMIT
-    assert result["structuredContent"]["next_offset"] is None and len(result["content"]) == 1
+    assert len(result["content"]) == 1
 
 
 @pytest.mark.parametrize("args", [{"page_id": "pg_ffffffffffffffff"}, {"page_id": ""}, {},
@@ -174,10 +173,12 @@ def test_recall_argument_and_unknown_id_errors_are_tool_errors(server, stores, a
 def test_search_is_exact_substring_newest_first(server, stores):
     _, a, b = stores
     hit = tool(server, "contexto_search", {"query": "garnet-4821"})["result"]
-    assert hit["structuredContent"]["page_ids"] == [a]
-    assert f"{a} (turn 3): Remember: the staging port is garnet-4821." in hit["content"][0]["text"]
-    assert tool(server, "contexto_search", {"query": "GARNET"})["result"]["structuredContent"]["page_ids"] == []
-    assert tool(server, "contexto_search", {"query": "x"})["result"]["structuredContent"]["page_ids"][0] == b
+    assert "structuredContent" not in hit
+    assert hit["content"][0]["text"].startswith(f"{a} (turn 3): Remember: the staging port is garnet-4821.")
+    assert "\n" not in hit["content"][0]["text"]  # one hit
+    assert (tool(server, "contexto_search", {"query": "GARNET"})["result"]["content"][0]["text"]
+            == "No paged-out turn contains that exact text.")
+    assert tool(server, "contexto_search", {"query": "x"})["result"]["content"][0]["text"].startswith(b)
     assert tool(server, "contexto_search", {"query": ""})["result"]["isError"] is True
 
 
@@ -187,9 +188,9 @@ def test_search_says_when_results_are_cut():
     store.page_out([[{"role": "user", "content": [{"type": "text", "text": f"needle {i}"}]}]
                     for i in range(mcp.SEARCH_LIMIT + 5)], first_turn=1)
     result = tool(mcp.Server(store, io.StringIO(), io.StringIO()), "contexto_search", {"query": "needle"})["result"]
-    assert len(result["structuredContent"]["page_ids"]) == mcp.SEARCH_LIMIT
-    assert result["structuredContent"]["total_matches"] == mcp.SEARCH_LIMIT + 5
-    assert "5 more matching pages not shown" in result["content"][0]["text"]
+    lines = result["content"][0]["text"].split("\n")
+    assert len(lines) == mcp.SEARCH_LIMIT + 1
+    assert lines[-1] == "[5 more matching pages not shown; use a longer or more specific query]"
 
 
 def test_render_page_survives_malformed_blocks():
@@ -295,7 +296,7 @@ def test_contexto_mcp_cli_round_trip_and_stdout_carries_only_frames(tmp_path):
     assert by_id[2]["result"]["cacheScope"] == "private" and len(by_id[2]["result"]["tools"]) == 5
     assert "garnet-4821" in by_id[3]["result"]["content"][0]["text"]
     assert "ship it" in by_id[5]["result"]["content"][0]["text"]
-    assert by_id[6]["result"]["structuredContent"]["page_ids"] == [pid]
+    assert by_id[6]["result"]["content"][0]["text"].startswith(f"{pid} (turn ")
     assert by_id[7]["result"]["isError"] is True
     reopened = SessionStore(tmp_path, "cli-test")  # the pin is durable in the session's ledger
     assert "ship it" in reopened.state_text()
@@ -306,4 +307,4 @@ def test_module_imports_only_the_standard_library():
     imports = [line.split()[1].split(".")[0] for line in source.splitlines()
                if line.startswith(("import ", "from ")) and not line.startswith("from __future__")]
     # Standard library plus the contexto package itself (the shared page rendering in contexto.store.render).
-    assert set(imports) <= {"json", "sys", "collections", "typing", "contexto"}
+    assert set(imports) <= {"json", "math", "sys", "collections", "typing", "contexto"}
