@@ -48,26 +48,32 @@ Organization-managed settings still outrank `--settings`; document that limit.
 
 ## Rewrite engine (normative)
 
-Terms. The CLI sends its full local history `M[0..n)` on every request. Claude Code 2.1.301
-measured (reviewer-2, zero-spend stub): `messages[0]` is a user message carrying context blocks
-(CLAUDE.md and similar) plus the first prompt, and `role: "system"` messages appear inside
-`messages` (session start, tool additions, effort changes), including as the last message of a
-new-turn request; they can carry `cache_control`.
+Terms. The CLI sends its full local history `M[0..n)` on every request. Measured by
+reviewer-2 with zero-spend stubs on Claude Code 2.1.301 (PR #20 review comments):
+`role: "system"` messages appear inside `messages` (session start, tool additions, effort
+changes), including as the last message of a new-turn request, and can carry `cache_control`;
+injected context blocks (CLAUDE.md and similar) ride in a turn-start user message, `messages[0]`
+in a fresh session but the resumed turn's user message after `--resume`; and the CLI empties
+earlier turns' system messages in place (vendor-documented as valid; rewording is not).
 
 - A **turn-start message** is a user message whose content includes user-authored text and no
   `tool_result` block.
 - A **turn** is a turn-start message plus every following assistant, `tool_result` user, and
   `role: "system"` message up to the next turn-start message.
-- **Carried content** is never paged: the context blocks of `messages[0]` other than the user's
-  prompt text, and every `role: "system"` message. Lane A pins down, with stub evidence, exactly
-  which blocks count as context blocks and where carried system messages may legally sit.
+- **Carried content** is never paged: the injected context blocks of any turn-start message
+  (everything but the user's own prompt text), and every `role: "system"` message, always in the
+  CLI's current form (an emptied system message is carried as empty, never restored from a stored
+  copy). Lane A pins down, with stub evidence, exactly which blocks count as injected context.
 - The proxy keeps an epoch state `E = (k, carried, pinned_text, index_text, head_fingerprint)`:
   the turns before turn index `k` are paged out.
 
-1. **Upstream request** = the CLI's `system` and `tools` byte for byte, plus: the carried content
-   in its original order; a preamble text block (pinned state and page index) merged into the
-   first retained turn-start message ahead of its text (so no `tool_result` is displaced); then
-   the retained turns as sent. In the first epoch `k = 0`, nothing is carried separately, and the
+1. **Upstream request** = the CLI's `system` and `tools` byte for byte, plus the retained turns as
+   sent, where the first retained turn-start message gets, ahead of its own content, the carried
+   context blocks in their original order and then a preamble text block (pinned state and page
+   index). Carried system messages from paged turns are placed immediately before that first
+   retained turn-start message in their original order, unless lane A's stub evidence shows that
+   ordering is rejected, in which case their text is merged into the same message as labeled text
+   blocks. No `tool_result` is displaced either way. In the first epoch `k = 0`, nothing is carried separately, and the
    preamble is empty. Every other request field passes through unchanged, including
    `cache_control`, `anthropic-beta`, `stream`, and `thinking`.
 2. **Thinking.** For every retained message that existed when `E` was created, strip thinking and
@@ -99,7 +105,8 @@ new-turn request; they can carry `cache_control`.
    `message_delta` usage. No hold-back is needed because recall is an MCP tool (D19).
 10. **Matching history.** Recognise each retained message in later requests by a hash of its
     canonical JSON with every `cache_control` field removed (the CLI moves `cache_control` along
-    the tail). On a mismatch, resynchronise: find the longest prefix of the stored messages that
+    the tail). A system message whose content the CLI has emptied matches its earlier, non-empty
+    version at the same position; any other change to a system message is a mismatch. On a mismatch, resynchronise: find the longest prefix of the stored messages that
     still matches and continue from there; if paged turns themselves changed (for example the CLI
     compacted locally), start a new epoch at the current turn start with everything before it
     paged. Never fall back to sending the full history unbounded.
