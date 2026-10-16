@@ -250,7 +250,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     and modeled cost by 16.2 percent. Any user whose proxy restarts mid-session hits the same gap.
     - **Record.** At every turn start of the main conversation (rotations happen only there)
       and whenever the engine leaves degraded mode, the engine writes the main conversation's
-      epoch record through `SessionStore.set_epoch(record)`. The record holds every piece of
+      epoch record, after that request's transform and before it is sent (as for
+      `set_retained`; a failed write never blocks the send). The record holds every piece of
       engine state that decides later request bytes or rotation decisions, so a resumed engine
       behaves exactly as the old one would have: `epoch`, `k`, `strip_upto`, `turns_paged`, the
       exact `pinned_text` and `index_text` sent in that epoch, `head_fingerprint`, `paged_carried`
@@ -268,7 +269,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     - **Resume.** A new engine reads the record once, at the first request of a conversation
       whose identity matches the record's, and resumes only if every check holds: same dialect,
       model, and configuration; the request's head fingerprint equals the record's; the request
-      has at least `n` messages; and its first `n` messages hash to the anchor. A resume adopts
+      has at least `n` messages; and its first `n` messages hash to the anchor. The newest record written is
+      trusted: if a write and its invalidation both failed, an older record can still be found,
+      which is consistent but has a smaller `k`, so a resume at a turn start applies rule 4's
+      decisions to that request at once, and a resume mid-turn is sent under rule 5 (a logged
+      in-turn over-bound turn if it is over). A resume adopts
       every recorded field, seeds rule 10's previous-request hashes with the hashes of those
       first `n` messages (so the request is matched as an append and does not start a new
       epoch), makes this conversation the main one, and continues append-only (rules 1 to 3);
@@ -278,12 +283,19 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       `dialect_changed`, `model_changed`, `settings_changed`, `head_changed`, `history_shorter`,
       `history_diverged`, `other_conversation`). A resume logs `epoch_resumed` with `epoch` and
       `k`. Measured sizing (packet A8's ratio restore) is unchanged and still applies.
-    - **Write failures.** A failed `set_epoch` deletes or marks the previous record unusable, so
-      a later restart cannot resume a stale epoch, and logs `epoch_record_stale`. It does not
+    - **Store interface.** `SessionStore.set_epoch(record)` writes `epoch.json` atomically at
+      mode 0600 with `version: 1`, never logged; on a failed write it unlinks the previous record
+      and raises. `SessionStore.epoch_record()` returns the record or `None`. The store validates
+      shape and version (an unknown version returns `None`); the engine validates meaning (the
+      resume checks). `MemoryStore` behaves the same.
+    - **Write failures.** A failed `set_epoch` leaves no usable record (the store unlinks the
+      previous one), so a later restart cannot resume a stale epoch, and the engine logs
+      `epoch_record_stale`. It does not
       enter degraded mode: the record only saves cache, and losing it costs one rotation.
     - **Not covered.** Subagents and side requests are not recorded (they rotate from 0 after a
       restart, as today). A record written by an older version, or with a field missing, does
-      not resume.
+      not resume. Two proxies serving one session at once are out of scope (the last writer
+      wins).
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
