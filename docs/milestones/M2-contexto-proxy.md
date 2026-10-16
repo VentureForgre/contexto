@@ -126,7 +126,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    target as `0.5 * (W - min_turn_room)` instead of `0.5 * W` (rule 4), falling back to the minimal
    window, so the room it publishes is at least `min_turn_room`. It fires only if that rotation
    would actually restore a room of at least `min_turn_room`; otherwise the engine does not rotate
-   for the room and logs `turn_room_low` once per epoch. This keeps a small bound from rotating on
+   for the room and logs `turn_room_low` once per epoch. When both triggers fire at the same turn
+   start, the room-sized target is used, since it is the one that guarantees the room. After any
+   rotation, including one fired by the bound alone, a published room below `min_turn_room` is
+   logged `turn_room_low`. This keeps a small bound from rotating on
    every turn (reviewer-2: a plain re-trigger would thrash at bounds of 42,000 to 100,000).
    `budget.simulate` models both conditions. Estimate = last upstream
    `input_tokens + cache_read + cache_creation` for this session plus the bytes added since.
