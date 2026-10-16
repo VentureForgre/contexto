@@ -320,3 +320,32 @@ def check_fits(input_tokens: int, max_tokens: int, context_window: int, approved
     if input_tokens + max_tokens > approved:
         return f"the replay could cost {input_tokens + max_tokens:,} tokens, over the approved {approved:,}"
     return None
+
+
+def turn_requests(cc_records: list[dict[str, Any]], probe_texts: list[str], max_tokens: int) -> dict[str, Any]:
+    """D27's symmetric baseline (intake, 2026-10-16 05:42Z): the parts of the k-th full-context request.
+
+    The first probe turn's request is built as for the one-request baseline (same replay rules). Its
+    messages before the first probe turn are the recorded history; the messages Claude Code sent after
+    that probe turn's text (its per-turn reminder) are the tail repeated after every probe turn.
+    ``baseline_request(parts, answers, k)`` assembles request k from them and the baseline's OWN
+    answers to turns 1..k-1; H1's answers are never read (decoding stops at the first probe turn).
+    """
+    first = build_request(cc_records, probe_texts[0], max_tokens)
+    at = next(i for i, m in enumerate(first["messages"]) if m.get("role") == "user" and _has_text(m, probe_texts[0]))
+    return {"template": {k: v for k, v in first.items() if k != "messages"},
+            "history": first["messages"][:at], "tail": first["messages"][at + 1:], "probe_texts": list(probe_texts)}
+
+
+def baseline_request(parts: dict[str, Any], answers: list[str], k: int) -> dict[str, Any]:
+    """Request k (1-based): the history, probe turns 1..k-1 each answered with ``answers`` (the
+    baseline's own, in order), then probe turn k."""
+    if len(answers) < k - 1:
+        raise ReplayError(f"request {k} needs the baseline's answers to turns 1..{k - 1}")
+    messages = list(parts["history"])
+    for j in range(k):
+        messages.append({"role": "user", "content": [{"type": "text", "text": parts["probe_texts"][j]}]})
+        messages.extend(parts["tail"])
+        if j < k - 1:
+            messages.append({"role": "assistant", "content": [{"type": "text", "text": answers[j]}]})
+    return {**parts["template"], "messages": messages}

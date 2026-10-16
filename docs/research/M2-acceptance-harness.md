@@ -200,6 +200,44 @@ of the 150,000 bound), the run switches to **option (b)**: the logs become files
 directory that the model reads with the Read tool, so they arrive as `tool_result` content at the
 1.5 seed. The budget is then recomputed before asking for the go.
 
+## D27: the probes over six turns, and a symmetric baseline (intake, 2026-10-16)
+
+**Why (intake).** Answering all 54 probes in one turn needs about 91,000 tokens of returned evidence,
+while each probe alone is 54 of 54 answerable (search reachability). The test changed after a failure
+(the second live H1 run); the single-turn mega-query is a known limitation, recorded as such.
+
+**Protocol.** The same 54 L2f probes, with the same per-probe question text, are asked over 6 user
+turns of 9, each turn worded as a user asking nine questions in one message (no tool or cap named).
+The assignment was fixed and written down at 05:39:09Z before anything was computed, and is never
+tuned: take the script's probe list in order (`run.plan()`, seed 20261016), shuffle a copy with
+`random.Random(20261016).shuffle`, and give probe turn k positions `[9(k-1), 9k)`.
+
+| Turn | Probe ids |
+|---|---|
+| 1 | q_a_001 q_a_020 q_a_028 q_p_03 q_a_016 q_a_038 q_a_046 q_a_002 q_a_006 |
+| 2 | q_a_050 q_a_041 q_a_012 q_a_035 q_a_021 q_a_049 q_a_004 q_a_013 q_p_02 |
+| 3 | q_a_022 q_a_044 q_a_026 q_a_031 q_a_036 q_a_009 q_a_047 q_a_045 q_a_024 |
+| 4 | q_a_017 q_a_018 q_a_010 q_a_042 q_a_019 q_a_027 q_p_01 q_a_033 q_a_007 |
+| 5 | q_p_04 q_a_014 q_a_037 q_a_011 q_a_030 q_a_034 q_a_003 q_a_008 q_a_025 |
+| 6 | q_a_015 q_a_048 q_a_023 q_a_040 q_a_039 q_a_029 q_a_032 q_a_043 q_a_005 |
+
+**Symmetric baseline (05:42Z).** The baseline is rerun as 6 sequential full-context requests under
+the same assignment. Request k is the recorded history up to the first probe turn, then probe turns
+1..k-1, each followed by the baseline's own answer, then probe turn k. It never contains H1's
+answers, because decoding stops at the first probe turn. The same replay rules apply
+(no-replayed-thinking, Contexto's tools removed, display `omitted` labeled, D23 headers), with a
+count_tokens gate before each send against what is left of the approval. Acceptance 2 compares H1's 6x9
+answers with the baseline's 6x9 answers per probe id.
+
+**Budget.** `budget.simulate` runs each probe turn as a turn. The rotation rules apply, A9's room is
+`max(0, bound - (first input + output) - 25,000)`, and recalls are priced at the largest B9 chunk and
+stop at the room. Evidence and answers stay in the history. Every input token counts toward the
+approval, cached or not: caching lowers the price, not the token count. The live gate is the
+combined worst case (H1 plus baseline); H1's guards stop at the approval minus the baseline's worst.
+Rooms at the six probe-turn starts in this model are 29,562, 10,758, 9,749, 8,728, 7,689, and
+6,685. They are a pessimistic bound: one full recall per turn keeps its evidence in the window. The
+combined worst case exceeds the earlier 4,000,000 budget, so D27 needs a new approval.
+
 ## Zero-spend dry run through the launcher (2026-10-16)
 
 ```
@@ -247,10 +285,10 @@ KB, head 47,600, bound 150,000, 2 recalls sized by B9 (below).
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy (live refuses an approval below its worst case) | 2,185,257 | 2,852,497 |
-| Full-context baseline, one direct replay request (recommended) | 449,643 | 477,643 |
-| Full-context baseline through a plain CLI session (alternative) | 5,054,009 | - |
-| **Total, H1 + replay baseline** | **2,634,900** | **3,330,140** |
+| H1 acceptance run through the proxy, 6 probe turns (D27) | 2,630,342 | 3,425,786 |
+| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,684,549 | 2,872,553 |
+| Full-context baseline through a plain CLI session (alternative) | 5,054,342 | - |
+| **Total, H1 + baseline (live refuses an approval below the worst case)** | **5,314,891** | **6,298,339** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
