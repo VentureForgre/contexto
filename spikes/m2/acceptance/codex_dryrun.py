@@ -43,6 +43,22 @@ def build(seed: int, bound: int, turn_bytes: int) -> script.Script:
         n += 1
 
 
+def acceptance_3(s: script.Script, answers: str, events: list[dict], session_dir: Path) -> dict:
+    """Acceptance 3 through the harness path (A21 item 3): codex_recall_credit.credit (A20) over the
+    session log and the stored pages, with D27's probe turns and the expected turn count, plus the
+    in-view spans search returned (content-free: turn, message index, offsets)."""
+    try:
+        from acceptance import codex_recall_credit
+    except ImportError:  # A20 (PR #159) not on this main yet
+        return {"available": False}
+    pages = [json.loads(p.read_text()) for p in sorted((session_dir / "pages").glob("pg_*.json"))]
+    result = codex_recall_credit.credit(list(s.probes), answers, events, pages, probe_turn_ids=s.probe_turn_ids,
+                                        expected_turns=len(s.turns))
+    in_view = [r for e in events if e.get("event") == "mcp_call" for r in e.get("returned") or []
+               if r.get("source") == "in_view"]
+    return {"available": True, "credit": result, "in_view_spans": len(in_view), "in_view": in_view}
+
+
 def turn_estimates(s: script.Script, b: codex_budget.CodexBudget) -> list[int]:
     """Each turn's worst case under the H1 terms of codex_budget (requests x (bound + output))."""
     per = b.bound + codex_budget.OUTPUT_ALLOWANCE
@@ -84,7 +100,8 @@ def main(argv: list[str] | None = None) -> int:
                                           inflight=a.bound + codex_budget.OUTPUT_ALLOWANCE)
         stub_requests = list(stub.requests)
     events = codex_driver.read_log(log)
-    scored = l2f.score(s.probes, record.pop("answers"))
+    answers_text = record.pop("answers")
+    scored = l2f.score(s.probes, answers_text)
     # The proxy's stream hold per reply kind: requests are sequential, so the stub's POSTs and the proxy's
     # /responses entries pair up in order.
     kinds = [r["kind"] for r in stub_requests if r["method"] == "POST"]
@@ -101,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         "analysis": codex_driver.analyze(events, a.bound),
         "held_events": {k: {"requests": len(v), "min": min(v), "max": max(v)} for k, v in held.items()},
         "score": {"correct": scored["correct"], "total": scored["total"]},
+        "acceptance_3": acceptance_3(s, answers_text, events, log.parent),
         "budget": {"h1_worst": b.h1_worst, "baseline_worst": b.baseline_worst, "total_worst": b.total_worst,
                    "baseline_fits": b.baseline_fits, "formula": codex_budget.formula(b)},
         "home_workaround": a.home_workaround,
