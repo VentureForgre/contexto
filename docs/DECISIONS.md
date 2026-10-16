@@ -216,6 +216,24 @@ the owner's delegation. Open decisions are listed at the end with the options an
   number that cannot change the verdict); run both arms at once as for Claude (rejected: staging
   let a failed H1 stop before the baseline spend).
 
+- **D31. Keep the default bound at 150,000, including for OpenRig seats; this settles O3.**
+  Intake, 2026-10-16. A32 (`docs/research/M2-seat-bound.md`, modeled on a synthetic seat session
+  matched to M0's measured heads, labelled) compared 150,000, 160,000, and 170,000 on Opus 5.5.
+  The decisive figure is the largest single turn that still stays under Claude Code's 200,000
+  idle-compaction minimum: on a 92k head 87,141 at 150,000, 78,133 at 160,000, and 67,225 at
+  170,000 (82k head 88,133, 77,225, 71,350). A larger bound lets smaller reads trigger the
+  compaction the owner's first principle (D2) rules out. 170,000 would give a larger window (about
+  51k against 31k, 10 rotations against 15) for up to 13.8 percent more cost on a 92k head, and no
+  accuracy figure says it is needed (recall room never below 12,000; M0 found no slip by context
+  size). Options considered: 170,000 for seats (rejected: smaller safe single turn, more cost, no
+  measured gain); a per-head automatic bound (not pursued: it would still trade the safe turn size
+  against window). Revisit only if a live seat check shows the 150,000 window costs recall. What
+  no bound fixes: a single read near 149,000 tokens crosses 200,000 at every bound; the headroom it
+  leaves behind is A33's subject. This rests on an inferred premise, not yet verified: that
+  Claude Code's idle compaction counts the bounded usage Contexto reports. If it counts the local
+  history instead, no bound helps, and only Claude Code's own `idleCompaction: false` setting, which
+  belongs to whoever runs the CLI, prevents it.
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
@@ -249,19 +267,7 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   does not enforce by default; on the OpenAI Responses API, editing or dropping a turn before an
   encrypted reasoning item returns 200, and whether the reasoning was used is not observable.
   Lean: strip all thinking at rotation, pending the strip-thinking arm's accuracy numbers.
-- **O3. Working-window bound.** Provisional default 150,000 (M2 contract), with the launcher
-  refusing more than 170,000 to stay under Claude Code's 200,000 idle-compaction minimum (the premise
-  that idle compaction counts the bounded reported usage is inferred; acceptance run 1 verifies it). Evidence:
-  every M0 probe hit its ceiling on stated facts (96/96 at 98,910 and 256,783 on `lab.subject`;
-  96/96 in the replay at 40,749 and 91,861), while deep supersession chains failed even at small
-  contexts (5/8 at about 12k; one depth-8 miss in 29/30 at 15,002; PR #22). So no slip point by
-  context size was located, and the failures that do occur argue for an explicit current-state
-  block rather than for a smaller window. M2 acceptance measures H1 against the full-context
-  baseline; the deferred 852,610-token run can be revived if the bound needs more evidence.
-  Heads: `lab.subject` 81,808 to 84,073 (plain Claude Code 45,925), Codex 32,331 after onboarding.
-  Large heads leave little room: an OpenRig seat (fixed overhead near 92k) gets a window budget
-  of about 33k at 150,000, so the bound for seat use should be weighed upward, toward the 170,000
-  launcher cap, once acceptance shows how the idle-compaction premise holds.
+- **O3. Working-window bound.** Settled by D31 (150,000, including for seats).
 - **O4. End-user authentication guidance.** API key only, or also subscription logins, for people
   who run Contexto themselves. Needs the terms question answered in the product docs. Owner
   decision, because it bears on what may be shared beyond this repository.
