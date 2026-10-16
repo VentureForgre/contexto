@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import gzip
 import http.client
 import json
 import socket
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,6 +15,7 @@ from typing import Any
 
 import pytest
 
+import contexto.proxy as proxy_module
 from contexto.store.memory import MemoryStore
 from contexto.proxy import (
     THINKING_BINDING_BETA,
@@ -404,6 +407,173 @@ def test_unreachable_upstream_returns_local_502_once(make_proxy):
     response, data = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
     assert response.status == 502 and json.loads(data)["type"] == "error"
     assert log.requests()[0]["status"] == 502 and "unreachable" in log.requests()[0]["error"]
+    assert log.requests()[0]["upstream_phase"] == "connect"
+    assert log.requests()[0]["errno"] == errno.ECONNREFUSED
+    # Contract rule 8 (PR #95): a connect failure is retried once; the second failure is the 502.
+    assert [(e["upstream_phase"], e["error"]) for e in log.events if e["event"] == "upstream_retry"] == [
+        ("connect", "ConnectionRefusedError")]
+    assert log.requests()[0]["upstream_retried"] is True
+
+
+@pytest.fixture
+def stalled_upstream():
+    """An upstream that accepts and then never answers. With read=False it never reads either,
+    and a small receive buffer makes a large body stall the proxy's send."""
+    servers = []
+
+    def make(read: bool) -> str:
+        server = socket.socket()
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        held: list[socket.socket] = []
+
+        def accept() -> None:
+            try:
+                sock, _ = server.accept()
+            except OSError:
+                return
+            held.append(sock)
+            if read:
+                sock.recv(65536)
+
+        threading.Thread(target=accept, daemon=True).start()
+        servers.append((server, held))
+        return f"http://127.0.0.1:{server.getsockname()[1]}"
+
+    yield make
+    for server, held in servers:
+        for sock in held:
+            sock.close()
+        server.close()
+
+
+@pytest.mark.parametrize("read, phase, size, retries", [
+    (True, "wait_headers", 100, 0),  # the body was fully written: upstream may be running it
+    (False, "send", 32 * 1024 * 1024, 1),  # the body never fully left: safe to resend once
+])
+def test_upstream_timeout_names_the_phase(make_proxy, stalled_upstream, monkeypatch, read, phase, size, retries):
+    # Contract rule 8 (PR #95): a TimeoutError says which step failed and how long that step took.
+    monkeypatch.setattr(proxy_module, "UPSTREAM_TIMEOUT_S", 0.5)
+    proxy, log = make_proxy(upstream=stalled_upstream(read))
+    response, data = call(proxy, "POST", "/v1/other", b"x" * size, {"Content-Type": "application/octet-stream"})
+    assert response.status == 502 and b"upstream unreachable (TimeoutError)" in data
+    entry = log.requests()[0]
+    assert entry["error"] == "upstream unreachable: TimeoutError"
+    assert entry["upstream_phase"] == phase and 400 <= entry["phase_ms"] <= entry["duration_ms"]
+    assert [e["upstream_phase"] for e in log.events if e["event"] == "upstream_retry"] == [phase] * retries
+
+
+@pytest.fixture
+def scripted_upstream():
+    """A raw upstream that runs one script per accepted connection, in order, and records the bytes
+    each connection received. A script gets the socket and returns when it is done with it."""
+    servers = []
+
+    def make(*scripts, tls_url: bool = False) -> tuple[str, list[bytearray]]:
+        server = socket.socket()
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        received: list[bytearray] = []
+
+        def serve() -> None:
+            for script in scripts:
+                try:
+                    sock, _ = server.accept()
+                except OSError:
+                    return
+                got = bytearray()
+                received.append(got)
+                with sock:
+                    script(sock, got)
+
+        threading.Thread(target=serve, daemon=True).start()
+        servers.append(server)
+        scheme = "https" if tls_url else "http"
+        return f"{scheme}://127.0.0.1:{server.getsockname()[1]}", received
+
+    yield make
+    for server in servers:
+        server.close()
+
+
+def reset_after_some_bytes(sock: socket.socket, got: bytearray) -> None:
+    got += sock.recv(65536)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    # closing with linger 0 sends RST: the proxy's send fails mid-body
+
+
+def answer_ok(sock: socket.socket, got: bytearray) -> None:
+    while b"\r\n\r\n" not in got:
+        got += sock.recv(65536)
+    head = bytes(got).split(b"\r\n\r\n", 1)[0].decode()
+    length = int(next(line.split(":", 1)[1] for line in head.split("\r\n") if line.lower().startswith("content-length")))
+    while len(got) < len(head) + 4 + length:
+        got += sock.recv(1 << 20)
+    payload = b'{"ok":true}'
+    sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
+                 % (len(payload), payload))
+
+
+def test_failure_mid_send_is_retried_once_byte_for_byte(make_proxy, scripted_upstream):
+    url, received = scripted_upstream(reset_after_some_bytes, answer_ok)
+    proxy, log = make_proxy(upstream=url)
+    body = bytes(range(256)) * (64 * 1024)  # 16 MB, larger than the upstream's receive buffer
+    response, data = call(proxy, "POST", "/v1/other", body, {"Content-Type": "application/octet-stream"})
+    assert response.status == 200 and data == b'{"ok":true}'  # the client sees one answer
+    retries = [e for e in log.events if e["event"] == "upstream_retry"]
+    assert len(retries) == 1 and retries[0]["upstream_phase"] == "send"
+    assert retries[0]["error"] in ("ConnectionResetError", "BrokenPipeError")
+    assert set(retries[0]) == {"ts", "event", "path", "error", "elapsed_ms", "upstream_phase", "phase_ms", "errno"}
+    first, second = (bytes(r) for r in received)
+    assert second.endswith(body) and second.startswith(first)  # the same bytes, resent from the start
+    entry = log.requests()[0]
+    assert entry["status"] == 200 and entry["upstream_retried"] is True and "error" not in entry
+
+
+def test_a_transformed_request_is_resent_unchanged(make_proxy, scripted_upstream):
+    url, received = scripted_upstream(reset_after_some_bytes, answer_ok)
+    proxy, log = make_proxy(upstream=url)
+    big = json.loads(REQUEST_BYTES)
+    big["messages"][0]["content"] = [{"type": "text", "text": "y" * (16 * 1024 * 1024)}]
+    response, _ = call(proxy, "POST", "/v1/messages", json.dumps(big).encode(), AUTH)
+    assert response.status == 200
+    first, second = (bytes(r) for r in received)
+    assert second.startswith(first) and len(second) > len(first)
+    assert [e["upstream_phase"] for e in log.events if e["event"] == "upstream_retry"] == ["send"]
+
+
+def test_failure_after_the_first_response_byte_is_not_retried(make_proxy, scripted_upstream):
+    def partial_status_then_reset(sock: socket.socket, got: bytearray) -> None:
+        answer_head = b"HTTP/1.1 20"
+        while b"\r\n\r\n" not in got:
+            got += sock.recv(65536)
+        sock.sendall(answer_head)
+        time.sleep(0.05)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+
+    url, received = scripted_upstream(partial_status_then_reset, answer_ok)
+    proxy, log = make_proxy(upstream=url)
+    response, _ = call(proxy, "POST", "/v1/other", b"small", {"Content-Type": "application/octet-stream"})
+    assert response.status == 502
+    assert log.requests()[0]["upstream_phase"] == "wait_headers"
+    assert [e for e in log.events if e["event"] == "upstream_retry"] == [] and len(received) == 1
+
+
+def test_tls_failure_is_named_and_retried_once(make_proxy, scripted_upstream):
+    def not_tls(sock: socket.socket, got: bytearray) -> None:
+        got += sock.recv(65536)  # the ClientHello
+        sock.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+
+    url, received = scripted_upstream(not_tls, not_tls, tls_url=True)
+    proxy, log = make_proxy(upstream=url)
+    response, _ = call(proxy, "POST", "/v1/other", b"small", {"Content-Type": "application/octet-stream"})
+    assert response.status == 502
+    assert [e["upstream_phase"] for e in log.events if e["event"] == "upstream_retry"] == ["tls"]
+    entry = log.requests()[0]
+    assert entry["upstream_phase"] == "tls" and entry["upstream_retried"] is True and len(received) == 2
+    assert b"small" not in b"".join(received)  # the request never left before TLS
 
 
 @pytest.mark.parametrize("mode, error", [("raise", "RuntimeError"), ("bad-return", "TypeError")])

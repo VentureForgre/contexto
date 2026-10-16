@@ -81,6 +81,7 @@ USAGE_FEEDBACK_PATHS = frozenset({MESSAGES_PATH}) | RESPONSES_PATHS
 RESPONSE_END_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
 THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 UPSTREAM_TIMEOUT_S = 900
+RETRYABLE_PHASES = frozenset({"connect", "tls", "send"})  # before the body is fully written (rule 8, PR #95)
 MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
 # Hop-by-hop headers (RFC 9110 7.6.1) plus Host and Content-Length, which the proxy sets itself.
 HOP_BY_HOP = frozenset({
@@ -428,6 +429,22 @@ class StreamHold:
         return out
 
 
+class _UpstreamHTTPS(http.client.HTTPSConnection):
+    """HTTPSConnection whose connect() records whether it reached TLS, so a failure names the step
+    (contract rule 8, PR #95). Upstream connections never use a CONNECT tunnel."""
+
+    def __init__(self, host: str, port: int, *, timeout: float, context: ssl.SSLContext) -> None:
+        super().__init__(host, port, timeout=timeout, context=context)
+        self.tls_context = context
+        self.phase = "connect"
+
+    def connect(self) -> None:
+        self.phase = "connect"
+        http.client.HTTPConnection.connect(self)
+        self.phase = "tls"
+        self.sock = self.tls_context.wrap_socket(self.sock, server_hostname=self.host)
+
+
 class ContextoProxy:
     def __init__(self, upstream: str, log: SessionLog, transform: Transform = identity_transform, *,
                  observe_usage: ObserveUsage | None = None, observe_thinking: bool = False,
@@ -494,8 +511,8 @@ class ContextoProxy:
 
     def connection(self) -> http.client.HTTPConnection:
         if self.scheme == "https":
-            return http.client.HTTPSConnection(self.upstream_host, self.upstream_port,
-                                               timeout=UPSTREAM_TIMEOUT_S, context=ssl.create_default_context())
+            return _UpstreamHTTPS(self.upstream_host, self.upstream_port,
+                                  timeout=UPSTREAM_TIMEOUT_S, context=ssl.create_default_context())
         return http.client.HTTPConnection(self.upstream_host, self.upstream_port, timeout=UPSTREAM_TIMEOUT_S)
 
     def log(self, event: dict[str, Any]) -> None:
@@ -669,23 +686,49 @@ class _Handler(BaseHTTPRequestHandler):
     def _forward(self, body: bytes, headers: Headers, entry: dict[str, Any], started: float,
                  original: dict[str, Any] | None) -> None:
         owner = self.owner
-        conn = owner.connection()
-        try:
-            conn.putrequest(self.command, owner.base_path + self.path, skip_host=True, skip_accept_encoding=True)
-            conn.putheader("Host", owner.upstream_netloc)
-            for name, value in headers.items():
-                conn.putheader(name, value)
-            if body or self.command in ("POST", "PUT", "PATCH"):
-                conn.putheader("Content-Length", str(len(body)))
-            self._upstream_sent = True
-            conn.endheaders(body or None)
-            response = conn.getresponse()
-        except OSError as exc:
-            conn.close()
-            entry.update(status=502, error=f"upstream unreachable: {type(exc).__name__}", duration_ms=_ms(started))
-            self._send_local_error(502, f"contexto proxy: upstream unreachable ({type(exc).__name__})")
-            owner.log(entry)
-            return
+        # Contract rule 8 (PR #95): each upstream step is named, so a failure says where it happened:
+        # "connect" (TCP), "tls", "send" (headers and body), "wait_headers" (only once endheaders has
+        # returned, so the whole body is written). A failure before that point is retried once, byte
+        # for byte, on a new connection: upstream cannot act on a request it never fully received.
+        # From wait_headers on, upstream may be running it, so that failure is a 502 and the CLI decides.
+        retried = False
+        while True:
+            conn = owner.connection()  # a new connection per request: nothing is pooled or reused
+            phase, phase_started = "connect", time.monotonic()
+            try:
+                conn.connect()
+                phase, phase_started = "send", time.monotonic()
+                conn.putrequest(self.command, owner.base_path + self.path, skip_host=True,
+                                skip_accept_encoding=True)
+                conn.putheader("Host", owner.upstream_netloc)
+                for name, value in headers.items():
+                    conn.putheader(name, value)
+                if body or self.command in ("POST", "PUT", "PATCH"):
+                    conn.putheader("Content-Length", str(len(body)))
+                self._upstream_sent = True
+                conn.endheaders(body or None)
+                phase, phase_started = "wait_headers", time.monotonic()
+                response = conn.getresponse()
+                break
+            except OSError as exc:
+                conn.close()
+                if phase == "connect":
+                    phase = getattr(conn, "phase", phase)
+                failure = {"upstream_phase": phase, "phase_ms": _ms(phase_started), "errno": exc.errno}
+                if not retried and phase in RETRYABLE_PHASES:
+                    retried = True
+                    owner.log({"event": "upstream_retry", "path": entry["path"], "error": type(exc).__name__,
+                               "elapsed_ms": _ms(started), **failure})
+                    continue
+                entry.update(status=502, error=f"upstream unreachable: {type(exc).__name__}",
+                             duration_ms=_ms(started), **failure)
+                if retried:
+                    entry["upstream_retried"] = True
+                self._send_local_error(502, f"contexto proxy: upstream unreachable ({type(exc).__name__})")
+                owner.log(entry)
+                return
+        if retried:
+            entry["upstream_retried"] = True
 
         content_type = response.getheader("Content-Type")
         reader = UsageReader(content_type, entry.get("api", "messages"))
