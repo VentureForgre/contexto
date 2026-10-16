@@ -248,3 +248,32 @@ def test_a_resume_mid_turn_sends_without_rotating():
     after = RewriteEngine(store, config=CONFIG)
     _, events = send(after, sequence[-1] + [tool_use(9), tool_result(9)])
     assert "epoch_resumed" in names(events) and "rotation" not in names(events)
+
+
+@pytest.mark.skipif(not hasattr(MemoryStore, "set_epoch"), reason="lane B's B31 store side not on this base")
+@pytest.mark.parametrize("kind", ["session", "memory"])
+def test_the_real_store_round_trips_the_record_and_the_engine_resumes(tmp_path, kind):
+    import shutil
+
+    from contexto.store import SessionStore
+
+    if kind == "session":
+        restarted_store = SessionStore(tmp_path / "a", "s1")
+        keys = list((tmp_path / "a").rglob("page.key"))
+        if keys:  # the steady engine's store pages with the same key, so page ids match
+            target = tmp_path / "b" / keys[0].relative_to(tmp_path / "a")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(keys[0], target)
+        steady_store = SessionStore(tmp_path / "b", "s1")
+    else:
+        restarted_store, steady_store = MemoryStore(key=b"k" * 32), MemoryStore(key=b"k" * 32)
+    sequence = turns(9)
+    steady = RewriteEngine(steady_store, config=CONFIG)
+    before = RewriteEngine(restarted_store, config=CONFIG)
+    for messages in sequence[:-1]:
+        send(steady, messages)
+        send(before, messages)
+    after = RewriteEngine(restarted_store, config=CONFIG)
+    expected, _ = send(steady, sequence[-1])
+    got, events = send(after, sequence[-1])
+    assert "epoch_resumed" in names(events) and got == expected
