@@ -380,10 +380,58 @@ All [documented, 2026-10-15] unless marked.
   [documented: https://platform.claude.com/docs/en/build-with-claude/preserved-thinking], so the
   measured reason string differs from the documented one); change `system` while keeping thinking 400 (invalid
   signature); add text to an earlier user turn 400; full epoch rewrite with thinking stripped 200;
-  `drop_block` 200; `clear_thinking_20251015` 200. Reading [inferred by lane 2]: the probe's account
-  does not enforce the binding by default for dropped turns, but edits before signed thinking still
-  fail with 400. A proxy can therefore drop old turns or rewrite whole epochs with thinking stripped,
-  but must not edit content that precedes a signed thinking block it keeps.
+  `drop_block` 200; `clear_thinking_20251015` 200. Reading, scoped to the route: on the rig proxy
+  route, dropped turns did not produce a 400 [measured by lane 2]; L1-e below shows that route spreads
+  requests across several upstream end-user identities, so this is likely a route artifact, not the
+  account's policy [inferred]. The two 400s (changing `system` while keeping thinking, and adding text
+  to an earlier user turn; lane 2's A4e and A5e) stay valid: edits before a kept signed thinking block
+  fail. A proxy must not edit content that precedes a signed thinking block it keeps.
+- **The rig proxy route's identity (L1-e)** [measured: `spikes/m0/route-identity/probe.py` and
+  `classes.py`, black-box requests through the seat's own route, credential from the seat's
+  `apiKeyHelper` held in memory, synthetic content, 2026-10-15 23:54Z to 00:05Z]. The rig proxy is
+  owner infrastructure (D11); nothing about it was read or probed beyond `/v1/messages` requests.
+  - **No identity headers:** responses carry no Anthropic request, organization, workspace, or
+    rate-limit headers; only CDN headers and a per-request trace id. Header hashing cannot show
+    which upstream identity served a request.
+  - **Reporting needs the binding beta:** without `thinking-binding-controls-2026-08-01`, responses
+    report no `input_transformations` at all. With it and `prefix_mismatch_behavior=drop_block`
+    (and a fixed synthetic `metadata.user_id`), most requests that replay signed thinking report
+    `thinking_dropped` with reason `end_user_binding_mismatch`, but only for some of the replayed
+    blocks. With `prefix_mismatch_behavior=error` the same partial drops return HTTP 200, never 400.
+  - **Series A** (`claude-haiku-5-5`, thinking enabled, 10 pure appends about 5 s apart, every
+    earlier signed thinking block replayed verbatim; a block produced by request j sits at
+    `messages[2j-1]`):
+
+    | Request | Thinking produced | Replayed blocks | Dropped (`messages.N`) | Class |
+    |---|---|---|---|---|
+    | 1 | yes | 0 | none | X |
+    | 2 | yes | 1 | none | X |
+    | 3 | yes | 2 | 1, 3 | Y |
+    | 4 | yes | 3 | 1, 3, 5 | Z |
+    | 5 | no | 4 | 1, 3, 5 | Z |
+    | 6 | no | 4 | 5, 7 | X |
+    | 7 | no | 4 | 1, 3, 5 | Z |
+    | 8 | yes | 4 | 1, 3, 5 | Z |
+    | 9 | no | 5 | 5, 7, 15 | X |
+    | 10 | yes | 5 | 1, 3, 7, 15 | Y |
+
+    A kept block means the two requests share an end-user binding and a dropped one means they do
+    not. `classes.py` derives 9 "same" and 23 "different" pairs with no contradiction and three
+    classes, X = {1, 2, 6, 9}, Y = {3, 10}, Z = {4, 5, 7, 8} [measured: the pattern]. Reading the
+    classes as three upstream end-user identities is [inferred].
+  - **Series B and B2** (`claude-haiku-5-5`, byte-identical requests with a cached system prefix,
+    about 5 s apart, no thinking): B (7,139-token prefix, stopped at 6 requests by its token cap)
+    wrote the cache on requests 1, 2, and 3, then read it; B2 (1,819-token prefix, 10 requests)
+    wrote on 1, 2, and 4, then read on every other request [measured]. Exactly 3 writes each time
+    matches the 3 classes in Series A; that the cache scope follows the same identities is
+    [inferred]. It would explain byte-identical full cache misses on this route.
+  - **Series C** (`claude-opus-5-5`, intake-approved, 5 appends with harder questions so thinking
+    appears): every replayed block was kept and no `thinking_dropped` was reported; one class
+    [measured]. INCONCLUSIVE: either one identity served all 5 requests, or Opus thinking is not
+    bound per end user; 5 requests cannot separate the two.
+  - **Consequence:** whether this account preserves or strips thinking across turns stays
+    INCONCLUSIVE until a route with a stable upstream identity exists. Per-session upstream affinity
+    on the rig proxy is an owner-side fix that intake is raising.
 - **Server-side edits are exempt:** context editing (`clear_tool_uses_20250919`,
   `clear_thinking_20251015`, beta `context-management-2025-06-27`) and server compaction "never
   trigger" the prefix check, because it compares what the client sent
@@ -611,8 +659,8 @@ env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION \
 
 ### OpenRig operational notes for lane experiments
 
-- **Routing miss on the lab seat: the measured cause** [measured by L1-a, builder-1; doc
-  `docs/research/M0-proxy-measurements.md` pending]. After the lab seat was recreated (23:09Z), its
+- **Routing miss on the lab seat: the measured cause** [measured by L1-a, builder-1;
+  `docs/research/M0-proxy-measurements.md`, PR #16]. After the lab seat was recreated (23:09Z), its
   model calls went to the owner-operated rig proxy instead of the spike proxy. Three throwaway runs
   (Claude Code 2.1.301, environment stripped, `--settings '{"disableAllHooks": true}'` only,
   `--strict-mcp-config`, `--no-session-persistence`, `claude -p hi < /dev/null`, a 401 stub on
@@ -628,10 +676,20 @@ env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION \
     firstParty", and the stub got 0 requests.
 
   Conclusion: in a git worktree, Claude Code also loads the main checkout's
-  `.claude/settings.local.json` [measured by L1-a], and that file's `env.ANTHROPIC_BASE_URL` wins
-  over the worktree's own file [inferred from the outcome; the precedence order itself was not
-  printed]. The live-call recipe above was not affected because its base URL comes from the
-  flag-level `--settings`, which outranks both files.
+  `.claude/settings.local.json`, and that file's `env.ANTHROPIC_BASE_URL` wins over the worktree's
+  own file [measured: `spikes/m0/routing/precedence_repro.sh`, Claude Code 2.1.301, zero tokens,
+  together with L1-a's T1 to T3]. The repro builds a temporary git repo with a linked worktree,
+  gives the main checkout's and the worktree's settings files different loopback stubs, points the
+  process environment at a third, and runs from the worktree with an isolated config dir, a dummy
+  key, and `--model claude-haiku-5-5`:
+  - With no flag-level override, `POST /v1/messages` went to the main checkout's stub, the
+    worktree's stub got nothing, and `HEAD /api/hello` went to the stub named by the inherited
+    environment variable.
+  - With a flag-level `--settings` base URL, both requests went to that URL.
+
+  Because the startup `HEAD /api/hello` uses the inherited URL, a routing check must observe the
+  `POST /v1/messages`, not the `HEAD`. The flag-level override is also what made the live-call
+  recipe above route correctly (its proof is in this section).
 - **Launch before projection** [observed by manager-1, 2026-10-15]: on a rig shrink and expand of
   the lab pod, the seat's `claude` process started at 18:22:35 local time, and OpenRig's projection
   rewrote that seat's `.claude/settings.local.json` at 18:22:37 and again later. This is an
@@ -680,10 +738,36 @@ Research for this packet used three in-session research subagents (Anthropic doc
 Code binary; Codex source and docs; API protocol docs). Their own consumption, as reported by the
 harness: 206,547 + 232,154 + 228,620 = 667,321 tokens. No experiment called a model.
 
+### Lane 1 spend, all packets
+
+Model tokens by packet and experiment (input, cache write, cache read, and output summed). Lane 1
+numbers come from each packet's document as merged; this is the one place they are collected.
+
+| Packet | Experiment | Model | Tokens | Source |
+|---|---|---|---|---|
+| L1-a (builder-1) | Packet total, including the lines below | haiku-5-5, fable-5-1, gpt-6-astra | about 2,100,000 | `M0-proxy-measurements.md` (PR #16) |
+| L1-a | Seat seed turn | haiku-5-5 | 364,343 | same |
+| L1-a | Seat routing check | haiku-5-5 | 83,882 | same |
+| L1-a | Autocompact 100k run, one turn (violated D3) | haiku-5-5 | 720,446 | same |
+| L1-a | Routing T1 and T3 without `--model` (fell to the user default) | fable-5-1 | about 366,000 (T1 about 183,000 estimated, T3 183,275) | same |
+| L2d (run under lane 1) | L2d run, its own approved line | haiku-5-5 | 1,796,949 | same |
+| manager-1 | One `/status` sent to a lab seat by `rig send` (a manager mistake) | haiku-5-5 | 283,931 | measured by manager-1 |
+| L1-b (this doc) | All experiments | none | 0 | section 8 |
+| L1-c | Five seeded rollover runs | haiku-5-5 | 317,901 | `M0-rollover.md` (PR #15) |
+| L1-d | Six Codex turns (turns 2 to 6) | gpt-6-astra | 351,842 | `M0-codex-measurements.md` (PR #10) |
+| L1-d | Seat onboarding, outside the lane budget | gpt-6-astra | 58,985 | same |
+| L1-e | Route identity series A, B, B2 | haiku-5-5 | 78,064 | section 4 |
+| L1-e | Series C | opus-5-5 | 3,255 | section 4 |
+
+The manager-1 `/status` line is a mistake, stated plainly: slash commands sent through `rig send`
+arrive as tasks (section 7), so the lab seat ran a full turn. It is also evidence for the owner's
+problem: one stray turn at about 85K tokens of context cost 284K tokens when the prompt cache
+missed [measured by manager-1; reading inferred].
+
 ## 9. Related measurements
 
-- **Proxy measurements (placeholder):** builder-1's pass-through proxy measurements are delivered
-  separately in `docs/research/M0-proxy-measurements.md`: per-turn request sizes, reported usage,
+- **Proxy measurements:** builder-1's pass-through proxy measurements are in
+  `docs/research/M0-proxy-measurements.md` (PR #16): per-turn request sizes, reported usage,
   cache behavior, the mid-turn `--autocompact` run (section 3), and the Codex WebSocket probe
   (section 4). Not duplicated here.
 - **Codex session growth:** `docs/research/M0-codex-measurements.md` (PR #10)
