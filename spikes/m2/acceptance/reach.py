@@ -63,7 +63,15 @@ def reach(probes: list[Any], pages: list[dict[str, Any]], turn_texts: list[str] 
     texts = {p["id"]: _page_text(p) for p in pages}
     mapping = map_pages(pages, turn_texts) if turn_texts is not None else None
     if mapping is not None:
-        paged_turns = {m["script_turn"] for m in mapping["pages"] if m["script_turn"] is not None}
+        # Fail closed (reviewer-2, PR #91): a page that matches no turn, or several, may hold any of
+        # them, so its page number and every candidate turn count as paged, never as in the window.
+        paged_turns = set()
+        for m in mapping["pages"]:
+            if m["script_turn"] is not None:
+                paged_turns.add(m["script_turn"])
+            else:
+                paged_turns.update(m["candidates"])
+                paged_turns.add(m["page_turn"])
     else:
         paged_turns = {p.get("turn") for p in pages}
     window = ([t for i, t in enumerate(turn_texts) if i not in paged_turns] if turn_texts is not None else None)
@@ -97,6 +105,7 @@ def reach(probes: list[Any], pages: list[dict[str, Any]], turn_texts: list[str] 
            "by_type": by_type, "unreachable": [r for r in rows if not r["reachable"]], "rows": rows}
     if mapping is not None:
         out["turn_mapping"] = {k: v for k, v in mapping.items() if k != "pages"}
+        out["mapping_ok"] = not (mapping["drift"] or mapping["unmatched"] or mapping["ambiguous"])
     return out
 
 
@@ -113,7 +122,8 @@ def map_pages(pages: list[dict[str, Any]], turn_texts: list[str], probe_chars: i
                      "candidates": matches})
     return {"pages": rows,
             "drift": [r for r in rows if r["script_turn"] is not None and r["script_turn"] != r["page_turn"]],
-            "unmatched": [r["id"] for r in rows if r["script_turn"] is None]}
+            "unmatched": [r["id"] for r in rows if not r["candidates"]],
+            "ambiguous": [r["id"] for r in rows if len(r["candidates"]) > 1]}
 
 
 def load_pages(session_dir: Path) -> list[dict[str, Any]]:
