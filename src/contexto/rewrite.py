@@ -121,6 +121,7 @@ STORE_ERRORS = (OSError, LedgerError, KeyFileError, SessionNotFoundError, PageNo
 STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
+RETAINED_ROLES = ("user", "assistant", "tool_result")  # A14: the roles set_retained accepts (lane B PR #128)
 RESTORED_RATIO_RANGE = (1.0, 6.0)  # bytes per token a restore accepts; outside it the seed is safer (A2e)
 
 
@@ -1077,6 +1078,10 @@ def retained_entries(messages: list[dict], k: int, dialect: Dialect) -> list[dic
         if dialect.is_system_like(item):
             continue
         for role, block in dialect.retained_blocks(item):
+            # The store's roles (lane B PR #128): a tool result is its own role, whoever carried it.
+            role = "tool_result" if block.get("type") == "tool_result" else role
+            if role not in RETAINED_ROLES:
+                continue
             _, _, text = render_page({"turn": turn, "messages": [{"role": role, "content": [block]}]}).partition("\n")
             if text:
                 entries.append({"turn": turn, "message_index": i, "role": role, "text": text})

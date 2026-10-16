@@ -453,7 +453,7 @@ def test_retained_snapshot_on_the_responses_dialect():
     assert [(e["turn"], e["message_index"], e["role"], e["text"]) for e in entries] == [
         (1, 4, "user", "prompt 0"),
         (1, 6, "assistant", 'tool_use exec {"a": 1, "cmd": "ls"}'),
-        (1, 7, "user", "tool_result:\nchain link 3 at node 12"),
+        (1, 7, "tool_result", "tool_result:\nchain link 3 at node 12"),
         (1, 8, "assistant", "answer 0")]
     assert "opaque-synthetic" not in json.dumps(entries) and "environment_context" not in json.dumps(entries)
 

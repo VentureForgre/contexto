@@ -1480,7 +1480,8 @@ def test_retained_entries_are_rendered_blocks_without_thinking_images_or_context
             tool_use(1, think="a1"), tool_result(1, "chain link 7 is at node 42"), assistant("done", redacted=True)]
     entries = retained_entries(msgs, 0, ANTHROPIC)
     assert [(e["turn"], e["message_index"], e["role"]) for e in entries] == [
-        (1, 0, "user"), (1, 2, "assistant"), (2, 3, "user"), (2, 4, "assistant"), (2, 5, "user"), (2, 6, "assistant")]
+        (1, 0, "user"), (1, 2, "assistant"), (2, 3, "user"), (2, 4, "assistant"), (2, 5, "tool_result"),
+        (2, 6, "assistant")]
     texts = [e["text"] for e in entries]
     assert texts[0] == "prompt 0" and texts[1] == "answer 0" and texts[2] == "prompt 1 about the picture"
     assert texts[3] == 'tool_use Read {"file_path": "f1.txt"}'  # exactly as render_page shows it in a page
