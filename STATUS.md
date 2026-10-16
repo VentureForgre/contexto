@@ -64,7 +64,11 @@ multihop probes add dependent search rounds that each resend the window
 save about 2 percent, so neither multi-key search nor batching guidance is built). Plain Claude Code
 would not have compacted in this session (peak 493,902, modeled, against about 967K). 7 Contexto
 requests went just over Haiku 5.5's 100,000-token price tier (5x above it, M0 cost model), all in
-tool loops; a Haiku-only bound or room is under study (B27). Limits: one synthetic session, one
+tool loops. B27 (`docs/research/M2-haiku-100k-tier.md`): replaying run #3 at bound 125,000 with the
+model's behavior held fixed kept every request under the tier, for a modeled 45.7 percent lower
+cost, with 9 rotations instead of 6; accuracy at that bound is unmeasured and long tool loops can
+still cross it. Decision: no default change and no live run (the owner's seats run Opus 5.5,
+which has no price step); the README gives `--bound 125000` as a Haiku tip with those caveats. Limits: one synthetic session, one
 run, one model.
 
 ## Token spend on live model calls (owner's proxy unless noted)
