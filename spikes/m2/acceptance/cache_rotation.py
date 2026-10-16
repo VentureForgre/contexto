@@ -253,6 +253,17 @@ def common_prefix(a: bytes, b: bytes) -> int:
     return lo
 
 
+class AsRunStore(SessionStore):
+    """The run's own store behaviour: no epoch record (rule 16, contract PR #176). The recorded runs
+    predate it, so a new engine at a restart rotates from epoch 0, as each run's did. ``set_epoch`` is
+    absent for the engine (it writes only through a callable) and ``epoch_record`` finds nothing."""
+
+    set_epoch = None
+
+    def epoch_record(self) -> None:
+        return None
+
+
 def oldest_first_index(pages: list[dict[str, Any]], budget_tokens: int, salient: bool = False) -> str:
     """Candidate (a): the page index oldest first, so a rotation appends lines and the previous index
     stays a byte prefix of the new one; past the budget, newer pages are counted, not listed."""
@@ -293,8 +304,9 @@ def replay(run: dict[str, Any], config: Config, prototype: str = "", baseline_by
     """Each request as the engine would send it under ``config``: bytes, modeled tokens and cache, and
     the engine's decisions. ``baseline_bytes`` is the baseline replay's bytes, the reference for the
     token model (None: this is the baseline). A new engine (same store) starts at each of the run's
-    proxy restarts, as in the run; ``resume`` keeps one engine instead, modeling a proxy that resumes
-    its epoch state across restarts. ``rate`` converts byte differences to tokens (default: the run's
+    proxy restarts, as in the run, on a store with no epoch record (``AsRunStore``), so it rotates from
+    epoch 0 as the run's did; ``resume`` keeps one engine instead, modeling a proxy that resumes its
+    epoch state across restarts. Each call uses a fresh home, so no candidate reads another's record. ``rate`` converts byte differences to tokens (default: the run's
     average bytes per token, head included; ``--rate`` sets a content rate, as A27 calibrates)."""
     rate = rate or bytes_per_token(run)
     head = run.get("head_tokens") or head_tokens(run)
@@ -303,10 +315,10 @@ def replay(run: dict[str, Any], config: Config, prototype: str = "", baseline_by
     sent: list[bytes] = []
     try:
         with variant(prototype):
-            engine = RewriteEngine(SessionStore(home, "a28"), config=config)
+            engine = RewriteEngine(AsRunStore(home, "a28"), config=config)
             for i, body in enumerate(run["bodies"]):
                 if i in run["restarts"] and not resume:
-                    engine = RewriteEngine(SessionStore(home, "a28"), config=config)
+                    engine = RewriteEngine(AsRunStore(home, "a28"), config=config)
                 request = copy.deepcopy(body)
                 original = json.loads(ser(request))
                 upstream, _, events = engine(request, dict(run["headers"][i]), run["endpoint"])

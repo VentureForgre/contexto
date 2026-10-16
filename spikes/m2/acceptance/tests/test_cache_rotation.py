@@ -135,3 +135,14 @@ def test_rate_converts_byte_differences_from_the_baseline():
     extra = [d["tokens"] - m["input"] for d, m in zip(default, run["measured"])]
     extra_halved = [h["tokens"] - m["input"] for h, m in zip(halved, run["measured"])]
     assert any(extra) and all(abs(b - 2 * a) <= 1 for a, b in zip(extra, extra_halved))
+
+
+def test_the_as_run_replay_ignores_epoch_records_even_when_the_store_has_them():
+    # Rule 16 (PR #176) gave SessionStore set_epoch; the recorded runs had no record, so the as-run
+    # replay must still rotate from epoch 0 at every restart (reviewer-2 on #180).
+    from contexto.store import SessionStore
+
+    assert callable(getattr(SessionStore, "set_epoch", None))
+    run = synthetic_run(12, restarts={10, 11})
+    rows = cr.replay(run, Config(bound=64_000, headroom_floor=10_000, min_turn_room=5_000))
+    assert [r["epoch"] for r in rows[9:]] == [1, 1, 1]
