@@ -80,6 +80,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
@@ -118,6 +119,11 @@ class Config:
     index_budget: int = 4_000
     carried_budget: int = 4_000  # rule 13: carried growth above this is reported
     carried_text_budget: int = 8_000  # Terms fallback: carried growth above this pages old text messages
+    # Recall knobs (packet A7, H1 recall fix). Defaults keep today's request byte for byte.
+    recall_rule: str = ""  # placed before the store's pinned and index text in the preamble
+    recall_example: str = ""  # one line placed after the rule
+    preamble_first: bool = False  # the preamble block goes before carried context blocks, not after
+    turn_reminder: str = ""  # appended to each retained turn-start user message while turns are paged
 
 
 @dataclass(frozen=True)
@@ -453,8 +459,34 @@ def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
     return out
 
 
+_DEFAULT_CONFIG = Config()
+_KNOBS: ContextVar[Config | None] = ContextVar("contexto_rewrite_knobs", default=None)
+
+
+@contextmanager
+def recall_knobs(config: Config):
+    """Apply ``config``'s recall knobs to transforms in this context (RewriteEngine does this per call)."""
+    token = _KNOBS.set(config)
+    try:
+        yield
+    finally:
+        _KNOBS.reset(token)
+
+
+def _knobs() -> Config:
+    return _KNOBS.get() or _DEFAULT_CONFIG
+
+
 def preamble(state: EpochState) -> str:
-    return "\n\n".join(part for part in (state.pinned_text, state.index_text) if part)
+    knobs = _knobs()
+    parts = (knobs.recall_rule, knobs.recall_example, state.pinned_text, state.index_text)
+    return "\n\n".join(part for part in parts if part)
+
+
+def _with_reminder(message: dict, reminder: str) -> dict:
+    content = message.get("content")
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
+    return {**message, "content": [*blocks, {"type": "text", "text": reminder}]}
 
 
 def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
@@ -471,7 +503,20 @@ def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
     lead = list(messages[: d.lead_count(messages)])  # items before the first turn start stay first
     blocks, systems = carried_content(messages, state.k, state.paged_carried)
     systems = [m for m in systems if not any(m is x for x in lead)]
-    return [*lead, d.merge_first(out[0], blocks, preamble(state)), *systems, *out[1:]]
+    knobs = _knobs()
+    if knobs.preamble_first:  # the preamble ahead of the carried context blocks
+        first = d.merge_first(d.merge_first(out[0], blocks, ""), [], preamble(state))
+    else:
+        first = d.merge_first(out[0], blocks, preamble(state))
+    result = [*lead, first, *systems, *out[1:]]
+    if knobs.turn_reminder and d is ANTHROPIC:
+        # Every retained turn start carries the reminder, so the newest one ends the window. A
+        # message's form changes only at a rotation (when k first becomes positive or moves), where
+        # rule 2 strips thinking anyway: no content changes under a kept signed thinking block, and
+        # the prefix stays byte-identical within an epoch (cache cost: the reminder's tokens per
+        # retained turn, not a moving tail). Messages API only; other dialects ignore it.
+        result = [_with_reminder(m, knobs.turn_reminder) if is_turn_start(m) else m for m in result]
+    return result
 
 
 def headroom(state: EpochState, config: Config) -> int:
@@ -510,7 +555,8 @@ def fixed_overhead(request: dict, messages: list[dict], state: EpochState, store
         head = state.head_tokens + max(0, carried - (state.initial_carried or 0))
     else:
         head = estimator.estimate(canonical_json(_dialect().head_estimate_source(request))) + carried
-    pre = "\n\n".join(t for t in (store.pinned_text(config.pin_budget), store.index_text(config.index_budget)) if t)
+    pre = "\n\n".join(t for t in (config.recall_rule, config.recall_example, store.pinned_text(config.pin_budget),
+                                  store.index_text(config.index_budget)) if t)
     return head + (estimator.estimate(pre) if pre else 0)
 
 
@@ -939,6 +985,10 @@ class RewriteEngine:
             self.estimator = TokenEstimator()
 
     def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
+        with recall_knobs(self.config):
+            return self._call(request, headers, endpoint)
+
+    def _call(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
         dialect = dialect_for(endpoint)
         if dialect is None:
             return request, headers, []
