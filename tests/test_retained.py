@@ -95,7 +95,8 @@ def test_a_failed_snapshot_write_leaves_the_old_snapshot_stale_by_stamp(tmp_path
     with pytest.raises(OSError):
         store.set_retained(2, 9, ENTRIES)
     store.set_turn_room("5", 10_000)
-    assert store.retained()[2] == 1 and store.room_stamp() == 2  # mismatch: in view not checked
+    assert store.retained() is None and store.room_stamp() == 2  # removed, and nothing current to match
+    assert store.retained_current() is None
 
 
 def test_a_failed_room_publish_after_a_good_snapshot_never_matches_the_old_room(tmp_path, monkeypatch):
@@ -128,3 +129,48 @@ def test_the_snapshot_is_never_logged(tmp_path):
     request(store)
     log = store.dir / "log.jsonl"
     assert not log.exists() or "cache.ttl" not in log.read_text()
+
+
+# Reviewer-1 on PR #128: the double failure, and each defense on its own
+
+
+def test_snapshot_write_and_room_publish_both_fail_never_serves_the_previous_window(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path, "s1")
+    request(store)  # request N-1: snapshot and room both stamped 1
+    real_update, real_write = store._update_meta, store._write_atomic
+    monkeypatch.setattr(store, "_write_atomic", lambda path, data: (_ for _ in ()).throw(OSError("ENOSPC")))
+    with pytest.raises(OSError):
+        store.set_retained(2, 9, ENTRIES)  # request N: sequence bumped to 2, snapshot write fails
+    monkeypatch.setattr(store, "_update_meta", lambda updates: (_ for _ in ()).throw(OSError("ENOSPC")))
+    with pytest.raises(OSError):
+        store.set_turn_room("6", 10_000)  # and its room publish fails too: the room stays stamped 1
+    assert store.retained_current() is None
+
+
+def test_a_failed_snapshot_write_removes_the_old_snapshot_and_its_temp_file(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path, "s1")
+    request(store)
+    monkeypatch.setattr("os.fsync", lambda fd: (_ for _ in ()).throw(OSError("EIO")))
+    with pytest.raises(OSError):
+        store.set_retained(2, 9, ENTRIES)
+    assert store.retained() is None and not list(store.dir.glob(".retained.json.*"))
+
+
+def test_current_needs_the_stamp_to_equal_the_room_and_the_persisted_sequence(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path, "s1")
+    request(store)
+    assert store.retained_current() == store.retained()
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: (_ for _ in ()).throw(OSError("ro")))
+    monkeypatch.setattr(store, "_write_atomic", lambda path, data: (_ for _ in ()).throw(OSError("ENOSPC")))
+    with pytest.raises(OSError):
+        store.set_retained(2, 9, ENTRIES)  # the sequence moves to 2; the old snapshot cannot even be removed
+    assert store.retained()[2] == store.room_stamp() == 1  # the old pair still agrees with itself ...
+    assert store.retained_current() is None  # ... but not with the persisted sequence
+
+
+def test_memory_store_current_follows_the_same_rule():
+    store = MemoryStore("s1")
+    request(store)
+    assert store.retained_current() == store.retained()
+    store._request_seq += 1  # as if a later request bumped the sequence without a snapshot
+    assert store.retained_current() is None

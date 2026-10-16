@@ -66,6 +66,10 @@ class MemoryStore(LedgerOps):
     def retained(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
         return self._retained
 
+    def retained_current(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
+        r = self._retained
+        return r if r is not None and r[2] == self._request_seq == self._room_stamp else None
+
     def room_stamp(self) -> int | None:
         return self._room_stamp
 

@@ -314,8 +314,25 @@ class SessionStore(LedgerOps):
                 pass  # rooms stay stamped None in this store, so the old snapshot still cannot match
             raise
         self._retained_stamp = seq["n"]
-        self._write_atomic(self.dir / "retained.json",
-                           canonical_bytes({"stamp": seq["n"], "epoch": epoch, "k": k, "entries": entries}))
+        try:
+            self._write_atomic(self.dir / "retained.json",
+                               canonical_bytes({"stamp": seq["n"], "epoch": epoch, "k": k, "entries": entries}))
+        except OSError:
+            try:  # defense in depth: no previous request's snapshot stays behind (reviewer-1, PR #128)
+                (self.dir / "retained.json").unlink(missing_ok=True)
+            except OSError:
+                pass  # retained_current() still refuses it: its stamp is behind the persisted sequence
+            raise
+
+    def retained_current(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
+        """The snapshot only if it is the current request's: its stamp equals both the room's stamp and
+        the persisted request sequence. Search uses this, so it cannot serve an older request's window."""
+        snapshot = self.retained()
+        meta = self._meta()
+        seq = meta.get("request_seq")
+        if snapshot is None or not isinstance(seq, int) or isinstance(seq, bool):
+            return None
+        return snapshot if snapshot[2] == seq == read_room_stamp(meta) else None
 
     def retained(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
         """(epoch, k, stamp, entries) of the retained snapshot, or None when there is none or it is malformed."""
@@ -350,11 +367,15 @@ class SessionStore(LedgerOps):
         tmp = self.dir / f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
         fd = open_private(tmp, os.O_WRONLY | os.O_EXCL)
         try:
-            os.write(fd, data)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, path)
+            try:
+                os.write(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)  # leave no partial temp file behind
+            raise
 
     def _update_meta(self, updates: dict[str, Any]) -> None:
         """Merge ``updates`` into meta.json: writers serialize on meta.lock; readers never block."""
