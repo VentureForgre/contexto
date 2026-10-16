@@ -306,8 +306,37 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       not resume. Two proxies serving one session at once are out of scope (the last writer
       wins).
 
-Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
-online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
+17. **Headroom.** At a turn start, headroom = max(`headroom_floor`, min(ceil(`headroom_factor` x
+    `max_turn_growth`), floor(`headroom_cap` x bound))), with `headroom_cap` = 0.25. At each turn
+    start where the engine measures the turn's growth g (as before: a previous turn start is
+    recorded and the turn count has grown), and before the rotation decision, `max_turn_growth` =
+    max(floor(previous `max_turn_growth` x `headroom_decay`), g), where g is the tokens of the
+    messages added since the previous turn start, per turn start (averaged when several turns
+    arrive at once), as before, and `headroom_decay` = 0.5. A turn start sent
+    again with no new turn (a retry) measures no growth and does not decay. So one outlier turn
+    raises headroom by at most a quarter of the bound, and its weight halves at every later turn
+    start that measures growth. Both are configuration settings (`headroom_cap`,
+    `headroom_decay`), included in rule 16's configuration check. Rule 16 records
+    `max_turn_growth` as before (one integer): a resumed engine applies the cap at every use and
+    the decay at its next turn start that measures growth (not at the turn start that wrote the
+    record), so it forgets exactly as the previous engine would have. A record written by an
+    engine without these settings does not resume (`settings_changed`). Headroom enters only the
+    turn-start rotation decision and the window budget `W` (which an engine also sets once from
+    the measured head after its first response, packet A8); the in-turn over-bound check never
+    reads it, so rule 5 is unchanged: nothing rotates inside a tool loop, and an in-turn request
+    over the bound is logged as before. Measured basis (A33, `docs/research/M2-headroom-outliers.md`,
+    zero-spend replay, reviewed in PR #184): on A32's synthetic seat session with one 149,140-token
+    read (92k head, bound 150,000), the unbounded headroom left the session at the minimal window
+    for good (34 rotations, 27 minimal windows, `W` as low as -136,986); with this rule, 15
+    rotations, 1 minimal window, and `W` never below 18,907. Live run #3 and the Codex acceptance
+    run are unchanged. The cost: in synthetic sessions with two large reads, a band of second-read
+    sizes (about 6,000 tokens wide three turns later, up to about 36,000 eight turns later with a
+    30,000-token head) now goes over the bound inside its tool loop where the stuck session's
+    minimal window had kept it under; the largest later read kept under the bound is never below
+    that of a session with no outlier at the same turn.
+
+Defaults (configurable flags and env): `bound` 150,000 tokens (D31); `headroom` 1.25 times the
+largest per-turn growth, decaying and capped per rule 17, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
 Constraint: `bound` plus the largest expected over-bound turn must stay below both Claude Code's
 idle-compaction minimum (200,000 by default, `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`) and the model's
 compaction trigger, or the CLI may compact; the launcher refuses a `bound` above 170,000 unless
