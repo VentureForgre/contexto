@@ -4,7 +4,11 @@ proxy, rotations happen, recall is callable (the stub's probe turns call context
 contexto_recall through Codex's exec tool), and the harness scores and writes its record.
 
     uv run python spikes/m2/acceptance/codex_dryrun.py <contexto executable> <out dir> [--bound N]
-        [--turn-kbytes K] [--seed S] [--home-workaround]
+        [--turn-kbytes K] [--seed S] [--home-workaround] [--approved N] [--fail-post N]
+
+``--approved`` sets the H1 approval line (default: the H1 worst case) so the spend watcher can be made
+to trip; ``--fail-post`` makes the stub answer that POST (1-based) with a 500, to show the pinned
+retries (A21).
 
 The run sets CONTEXTO_HOME (PR #148, v0.1.2); ``--home-workaround`` uses the scratch-HOME workaround
 for a build before it (codex_driver.child_env). Writes ``<out>/codex-dry-run.json`` and prints it. No credential is
@@ -55,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--turn-kbytes", type=int, default=DEFAULT_TURN_KBYTES)
     ap.add_argument("--seed", type=int, default=script.DEFAULT_SEED)
     ap.add_argument("--home-workaround", action="store_true")
+    ap.add_argument("--approved", type=int, default=None)
+    ap.add_argument("--fail-post", type=int, action="append", default=[])
     a = ap.parse_args(argv)
     s = build(a.seed, a.bound, a.turn_kbytes * 1000)
     b = codex_budget.estimate(s, a.bound)
@@ -69,11 +75,12 @@ def main(argv: list[str] | None = None) -> int:
     session = "codex-dry"
     answers = {p.id: p.answer for p in s.probes}
     # Every paged-only plant is a "cfg <svc>.retention_days=<value>" line in turn 1 (script.build).
-    with CodexStub(answers, query="retention_days") as stub:
+    approved = a.approved if a.approved is not None else b.h1_worst
+    with CodexStub(answers, query="retention_days", fail_posts=frozenset(a.fail_post)) as stub:
         turns = codex_driver.CodexTurns(a.contexto, session, a.bound, stub.url, str(helper), scratch, env,
                                         codex_upstream=stub.url + "/v1")
         log = store / "sessions" / session / "log.jsonl"
-        record = codex_driver.run_session(s, turns, log, b.h1_worst, turn_estimates(s, b),
+        record = codex_driver.run_session(s, turns, log, approved, turn_estimates(s, b),
                                           inflight=a.bound + codex_budget.OUTPUT_ALLOWANCE)
         stub_requests = list(stub.requests)
     events = codex_driver.read_log(log)
@@ -87,8 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "ran": record, "turns": {"content": s.n_content, "probe": len(s.probe_turn_ids)},
         "stub": {"posts": sum(1 for r in stub_requests if r["method"] == "POST"),
+                 "failed_posts": sum(1 for r in stub_requests if r.get("kind") == "failed"),
                  "kinds": {k: sum(1 for r in stub_requests if r.get("kind") == k)
-                           for k in ("ok", "recall_call", "answers")},
+                           for k in ("ok", "recall_call", "answers", "failed")},
                  "gets": sum(1 for r in stub_requests if r["method"] == "GET")},
         "analysis": codex_driver.analyze(events, a.bound),
         "held_events": {k: {"requests": len(v), "min": min(v), "max": max(v)} for k, v in held.items()},

@@ -354,3 +354,49 @@ def test_a_stub_tool_call_round_is_held_by_the_real_proxy(tmp_path):
     held = [(e.get("stream_hold") or {}).get("held_events", 0) for e in entries]
     assert [r["kind"] for r in stub.requests if r["method"] == "POST"] == ["ok", "recall_call"]
     assert held[0] == 0 and held[1] > 0 and "custom_tool_call" in probe and '"OK"' in content
+
+
+# A21: reviewer-1's #154 notes and intake's step-1 conditions ---------------------------------------
+
+def test_a_fresh_turn_may_start_without_a_log_within_the_startup_window(tmp_path):
+    """Reviewer-1 on #154: on a fresh session's first turn the log appears only once the launcher has
+    started the proxy. Inside the startup window a missing log is not a failure; past it, it is."""
+    log = tmp_path / "log.jsonl"
+    watch = codex_driver.SpendWatch(log, approved=10**9, inflight=1)
+    watch.begin_turn()
+    assert all(watch() is False for _ in range(10))  # well past 2 polls, still inside 30 seconds
+    late = codex_driver.SpendWatch(log, approved=10**9, inflight=1, startup_seconds=0.05)
+    late.begin_turn()
+    time.sleep(0.1)
+    assert late() is False and late() is False  # past the window: the grace now counts
+    with pytest.raises(codex_driver.WatchFailed, match="missing"):
+        late()
+
+
+def test_records_of_an_attempt_and_its_resume_join_into_one_scored_record(tmp_path):
+    s = script.build(turns=4, turn_bytes=2_000)
+    first = codex_driver.run_session(s, _turns(tmp_path, FakeCodex(exit_at=s.n_content + 2)), tmp_path / "log.jsonl",
+                                     10**9, [1] * len(s.turns))
+    assert first["failed_turn"] == s.n_content + 1 and len(first["answers_by_turn"]) == 1
+    again = _turns(tmp_path, FakeCodex())
+    again.thread = first["thread_id"]
+    second = codex_driver.run_session(s, again, tmp_path / "log.jsonl", 10**9, [1] * len(s.turns),
+                                      start=first["turns_completed"])
+    joined = codex_driver.join_records(s, [first, second])
+    probe_turns = [str(i) for i in range(s.n_content, len(s.turns))]
+    assert joined["complete"] and sorted(joined["answers_by_turn"], key=int) == probe_turns
+    assert [a["failed_turn"] for a in joined["attempts"]] == [s.n_content + 1, None]  # the twice-run turn
+    assert joined["answers"].count("q_a_001: x") == len(probe_turns)
+    assert not codex_driver.join_records(s, [first])["complete"]
+
+
+def test_every_acceptance_turn_carries_both_retry_pins(tmp_path):
+    """Intake's condition 1(a): the harness pins Codex's retries on every turn's command line (users keep
+    Codex's own retries: run_codex is unchanged)."""
+    s = script.build(turns=4, turn_bytes=2_000)
+    runner = FakeCodex()
+    codex_driver.run_session(s, _turns(tmp_path, runner), tmp_path / "log.jsonl", 10**9, [1] * len(s.turns))
+    assert len(runner.calls) == len(s.turns)
+    for argv in runner.calls:
+        pins = [argv[i + 1] for i, a in enumerate(argv) if a == "-c" and "max_retries" in argv[i + 1]]
+        assert pins == ["model_providers.contexto.request_max_retries=0", "model_providers.contexto.stream_max_retries=0"]

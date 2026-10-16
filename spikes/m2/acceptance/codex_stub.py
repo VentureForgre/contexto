@@ -98,9 +98,11 @@ def stream_events(rid: str, output: list[dict[str, Any]], usage: dict[str, Any])
 class CodexStub:
     """``with CodexStub(answers, query) as stub:`` serves on ``stub.url`` (no ``/v1``) until exit."""
 
-    def __init__(self, answers: dict[str, str] | None = None, query: str = "retention_days") -> None:
+    def __init__(self, answers: dict[str, str] | None = None, query: str = "retention_days",
+                 fail_posts: frozenset[int] = frozenset()) -> None:
         self.answers = dict(answers or {})
         self.query = query
+        self.fail_posts = fail_posts  # 1-based POST numbers answered with a 500 (A21: retries pinned)
         self.requests: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         stub = self
@@ -130,6 +132,10 @@ class CodexStub:
                     self._send(404, b'{"error": {"message": "stub"}}')
                     return
                 body = json.loads(raw)
+                if sum(1 for r in stub.requests if r["method"] == "POST") + 1 in stub.fail_posts:
+                    stub._record({"method": "POST", "path": path, "status": 500, "kind": "failed"})
+                    self._send(500, b'{"error": {"message": "stub failure"}}')
+                    return
                 kind, output = reply_items(body.get("input") or [], stub.answers, stub.query)
                 tokens = int(len(raw) / BYTES_PER_TOKEN)
                 with stub._lock:
