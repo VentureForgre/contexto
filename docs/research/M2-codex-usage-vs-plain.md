@@ -9,7 +9,8 @@ the method diverges, and each divergence is stated. Every figure is labeled **me
 run's logs) or **modeled** (computed, with the method and error stated). Numbers only.
 
 The per-request numbers are in [`data/M2-codex-usage-vs-plain.csv`](data/M2-codex-usage-vs-plain.csv).
-Its columns are: request; user turn; held stream events (above 0 for a tool round); the bytes Codex
+Its columns are: request; user turn; held stream events (above 0 for a tool round); the user turns
+paged when it was sent (from the rotation events); the bytes Codex
 sent and the bytes Contexto sent; measured input, cached input and output tokens; and plain input at
 the same point (**modeled**).
 Reproduce them with `uv run --with tiktoken python spikes/m2/acceptance/codex_usage_vs_plain.py <run dir>
@@ -20,24 +21,25 @@ Reproduce them with `uv run --with tiktoken python spikes/m2/acceptance/codex_us
 | | Input tokens | Requests | Peak request | Cost, USD (**modeled**) |
 |---|---|---|---|---|
 | Contexto (**measured**) | 919,998 | 44 | 26,066 | 3.78 |
-| Plain Codex, plain-run shape (**modeled**) | 1,668,116 (1,661,084 to 1,701,565) | 21 | 115,860 | 3.04 (best-case cache) |
-| Plain Codex, same request points (**modeled**) | 4,768,798 (4,710,802 to 4,873,509) | 44 | 147,207 | 6.58 (best-case cache) |
+| Plain Codex, plain-run shape (**modeled**) | 1,672,525 (1,667,862 to 1,705,855) | 21 | 116,731 | 3.05 (best-case cache) |
+| Plain Codex, same request points (**modeled**) | 4,789,302 (4,742,328 to 4,893,461) | 44 | 148,079 | 6.60 (best-case cache) |
 
-- **Tokens, against the plain-run shape** (the fair comparison): Contexto used **44.8% fewer input
-  tokens** (44.6% to 45.9% over the band).
-- **Cost, against the plain-run shape:** Contexto cost **24% more** (**modeled**: 3.78 against 3.04),
+- **Tokens, against the plain-run shape** (the fair comparison): Contexto used **45.0% fewer input
+  tokens** (44.8% to 46.1% over the band).
+- **Cost, against the plain-run shape:** Contexto cost **24% more** (**modeled**: 3.78 against 3.05),
   even though it used fewer tokens.
   - The plain side assumes a best-case prefix cache.
-  - With uncached input priced at the input rate instead of the cache-write rate, it is still 16% more
-    (3.18 against 2.75).
+  - With uncached input priced at the input rate instead of the cache-write rate, it is still 15% more
+    (3.18 against 2.76).
+  - This holds for this run's bound of 64,000 with 20 KB turns (see Limits).
 - **Content turns: Contexto saves.** 284,788 tokens against 981,040 plain (**modeled**), or −71.0%. The
   cost is 2.00 USD against 2.29 (−12.5%). Per content request, plain is cheaper up to turn 5 and Contexto
   from turn 6 on.
-- **Probe turns: Contexto costs more.** 635,210 tokens against 687,078 plain (**modeled**), or −7.5%. The
-  cost is 1.78 USD against 0.75. Contexto's search loops made 29 requests where plain makes 6. Each
+- **Probe turns: Contexto costs more.** 635,210 tokens against 691,485 plain (**modeled**), or −8.1%. The
+  cost is 1.78 USD against 0.76. Contexto's search loops made 29 requests where plain makes 6. Each
   probe turn's first request also rotates the window, which breaks the cache.
 - **Compaction:** Codex's own compaction (about 244,800 tokens) would not have fired. The plain history
-  peaks at 115,860 (plain-run shape) and 147,207 (same points), both **modeled**.
+  peaks at 116,731 (plain-run shape) and 148,079 (same points), both **modeled**.
 
 ## Method
 
@@ -60,15 +62,21 @@ The proxy logs two sizes for every request:
 - `original_request_bytes`: what Codex sent, its full history, its head and the current turn;
 - `request_bytes`: what Contexto sent upstream.
 
-Every rotation in this run paged all completed turns. So at a request in turn *t*, the difference is
-turns 1 to *t*−1, net of Contexto's preamble. As in B25, only that difference is converted; the part
-both sides share stays measured:
+The paged turns at each request come from the logged rotation events, carried forward to requests
+that do not rotate. The engine counts Codex's opening context as its turn 0, so `turns_paged` = *p*
+pages user turns 1 to *p*−1.
+- In content turns 3 to 15, each rotation paged every completed turn.
+- In probe turns it did not: the previous turn stayed in the window with its tool loop. From probe
+  turn 1 on, `retained_messages` was 3, then 14, 10, 9, 12 and 12.
+
+The difference is the paged turns, net of Contexto's preamble. As in B25, only that difference is
+converted; the part both sides share, including a retained turn's tool loop, stays measured:
 
 `plain = measured input + (paged bytes − paged tool-loop bytes) / text rate + paged tool-loop bytes / JSON rate`
 
 **Divergence 1: two rates.** B25 converts the whole difference at one text rate and notes that paged
 tool JSON overstates plain. Here the paged bytes split exactly:
-- the tool loops of earlier probe turns, which are the bytes Codex appended inside each probe turn;
+- the tool loops of the paged probe turns, which are the bytes Codex appended inside each probe turn;
 - everything else, which is content-turn text, probe questions and answers, and the preamble, net.
 
 **Text rate.** 2.9805 bytes per token (**measured**). It is the one added turn between the two epoch-0
@@ -91,11 +99,13 @@ rotation, and the same growth on both sides.
 
 | | Low | Central | High |
 |---|---|---|---|
-| Plain, same points | 4,710,802 | 4,768,798 | 4,873,509 |
-| Plain, plain-run shape | 1,661,084 | 1,668,116 | 1,701,565 |
+| Plain, same points | 4,742,328 | 4,789,302 | 4,893,461 |
+| Plain, plain-run shape | 1,667,862 | 1,672,525 | 1,705,855 |
 
-The plain-run shape depends on the text rate only. The tool loops it removes and the paged loops it
-adds convert at the same JSON rate, so they cancel.
+The plain-run shape depends mainly on the text rate. Removing a paged tool loop cancels the JSON rate
+it was added at. Only the retained previous loop is removed at the JSON rate while it entered as
+measured tokens. With the text rate held, the JSON band alone moves the plain-run shape by −0.05% to
++0.15%.
 
 **Validation** (divergence 2: B25 used Anthropic `count_tokens` from its baseline arm; this run has no
 baseline arm and no zero-spend OpenAI counter). At probe turn 1's first request (request 16):
@@ -125,17 +135,13 @@ turn's final answer as Contexto **measured** it: 662 tokens.
     request, less every earlier probe turn's tool loop.
   - **Divergence 3:** B25 measured these 6 requests in its baseline arm. Here they are modeled, because
     step 2 was not run.
-  - One artifact: probe turn 2's input comes out 879 tokens below probe turn 1's (−0.8%), where a real
-    history only grows. Contexto's view at request 22 is 2,714 bytes larger but 554 tokens smaller than
-    at request 16, so some retained items tokenize unlike text; they were not read. Read the per-request
-    figures as ±1%.
 
 ### (c) Compaction, both scenarios
 
 - **Trigger:** `min(model_auto_compact_token_limit, 90% of the context window)`, about 244,800 tokens for
   gpt-6-astra's 272,000 window. Sources: `docs/research/M0-codex-measurements.md` section 5, and
   `CODEX_COMPACT_AT` in `spikes/m2/acceptance/codex_budget.py`.
-- **Without compaction:** the plain history peaks at 115,860 (plain-run shape) and 147,207 (same
+- **Without compaction:** the plain history peaks at 116,731 (plain-run shape) and 148,079 (same
   points), both **modeled**.
 - **With compaction:** both peaks are under the trigger, so it never fires. The two scenarios are
   identical here, with no sawtooth, and no post-compaction size is needed.
@@ -150,8 +156,8 @@ reads the previous request's whole prompt from cache, and the rest is uncached. 
 
 | Plain scenario | Best case | At the run's measured prefix-hit fraction | No cache |
 |---|---|---|---|
-| Plain-run shape, USD (**modeled**) | 3.04 | 3.19 | 20.88 |
-| Same request points, USD (**modeled**) | 6.58 | 7.01 | 59.72 |
+| Plain-run shape, USD (**modeled**) | 3.05 | 3.19 | 20.94 |
+| Same request points, USD (**modeled**) | 6.60 | 7.04 | 59.98 |
 
 The measured prefix-hit fraction is 0.9919: cached tokens over the previous request's input, on
 Contexto's 23 append-only requests.
@@ -165,7 +171,7 @@ million tokens:
 
 - The M0 model's OpenAI rule is that writes cost 1.25 times input. Every uncached input token is
   counted as written (an assumption).
-- With uncached input at the input rate instead: Contexto 3.18, plain-run shape 2.75, same points 6.21
+- With uncached input at the input rate instead: Contexto 3.18, plain-run shape 2.76, same points 6.23
   (best-case cache).
 - Above 272,000 input tokens, input doubles and output rises 1.5 times. No request here reaches that.
 
@@ -173,13 +179,14 @@ million tokens:
 
 | Class | Contexto (**measured**) | Plain (**modeled**) |
 |---|---|---|
-| Cached input | 680,832 | 1,551,378 |
-| Uncached input | 239,166 | 116,738 |
+| Cached input | 680,832 | 1,555,793 |
+| Uncached input | 239,166 | 116,731 |
 | Output | 2,203 | 662 |
 
 - **Uncached:** Contexto's is twice plain's.
   - 19 requests cached only the 9,088-token head (17 rotated requests) or nothing (requests 1 and 39).
-    They account for 196,275 of Contexto's 239,166 uncached tokens (82%) (**measured**).
+    They account for 196,275 of Contexto's 239,166 uncached tokens (82%) (**measured**). The 19
+    rotated requests (request 16 among them, which cached 18,944) hold 178,923 (74.8%).
   - A rotation changes the preamble right after Codex's head, so everything after the head is re-sent
     uncached.
   - Plain pays uncached only for each new turn, about 6,800 tokens (**modeled**).
@@ -207,11 +214,11 @@ million tokens:
 | 14 | content | 1 | 19,024 | 9,936 | 0.1335 | 106,512 | 106,512 | 6,925 | 0.1864 |
 | 15 | content | 1 | 19,105 | 10,017 | 0.1346 | 113,430 | 113,430 | 6,917 | 0.1932 |
 | 16 | probe 1 | 6 | 136,768 | 7,104 | 0.2373 | 702,717 | 113,760 | 330 | 0.1221 |
-| 17 | probe 2 | 4 | 84,943 | 13,903 | 0.2602 | 485,194 | 112,881 | 0 | 0.1175 |
-| 18 | probe 3 | 3 | 60,088 | 13,240 | 0.2313 | 381,331 | 114,277 | 1,396 | 0.1359 |
-| 19 | probe 4 | 5 | 108,440 | 14,488 | 0.2893 | 664,388 | 114,954 | 677 | 0.1274 |
-| 20 | probe 5 | 5 | 106,188 | 14,540 | 0.2890 | 688,496 | 115,346 | 392 | 0.1245 |
-| 21 | probe 6 | 6 | 138,783 | 26,911 | 0.4717 | 865,632 | 115,860 | 514 | 0.1270 |
+| 17 | probe 2 | 4 | 84,943 | 13,903 | 0.2602 | 489,689 | 114,005 | 245 | 0.1215 |
+| 18 | probe 3 | 3 | 60,088 | 13,240 | 0.2313 | 383,262 | 114,920 | 916 | 0.1311 |
+| 19 | probe 4 | 5 | 108,440 | 14,488 | 0.2893 | 669,270 | 115,930 | 1,010 | 0.1322 |
+| 20 | probe 5 | 5 | 106,188 | 14,540 | 0.2890 | 692,461 | 116,139 | 209 | 0.1232 |
+| 21 | probe 6 | 6 | 138,783 | 26,911 | 0.4717 | 870,863 | 116,731 | 593 | 0.1288 |
 
 - Turns 1 and 2 are equal: Contexto passes requests through until its first rotation.
 - After that, plain grows by about 6,800 tokens per content turn (**modeled**), while Contexto's content
@@ -224,7 +231,7 @@ million tokens:
     9,100 to 10,000 tokens) where plain pays only the new turn (about 6,800).
   - At OpenAI's cache pricing, that decides the cost.
   - Fewer rotations, or a preamble that does not change the prefix, is the lever.
-- **Tool-loop rounds**, as B25 found. Contexto's probe turns cost 2.4 times the plain-run shape's,
+- **Tool-loop rounds**, as B25 found. Contexto's probe turns cost 2.3 times the plain-run shape's,
   because every search round re-sends the window (29 requests against 6).
 
 ## Limits
@@ -236,13 +243,16 @@ million tokens:
   - The text rate rests on one pass-through pair, banded by o200k's per-turn range (−2.6% to +0.6% on
     the rate) and validated to 0.18% at one point.
   - The JSON rate's pairs spread widely (quartiles 3.41 to 3.95).
-  - The totals' bands are −1.2% to +2.2% (same points) and −0.4% to +2.0% (plain-run shape). Per request,
-    read ±1%.
+  - The totals' bands are −1.0% to +2.2% (same points) and −0.3% to +2.0% (plain-run shape).
 - **o200k is not gpt-6-astra's documented tokenizer.** It is used only as a cross-check and for the band.
   On the one measured pair it agrees within 0.15%.
 - **Compaction model.** Not needed here, because the trigger is never reached. Beyond about 19 more such
   turns it would be an assumption.
 - **Cache assumption.** Plain gets the best case. The sensitivity table shows the range.
+- **The cost result is specific to this configuration.** Bound 64,000 with 20 KB turns made every
+  content request from turn 3 on rotate, and each cached only the 9,088-token head. At a larger bound,
+  rotations are rarer and the window's prefix stays cached between them. Contexto's uncached share, and
+  with it the cost comparison, would then differ. A28 will measure this.
 - **Price assumption.** Uncached input is priced at the cache-write rate. The input-rate variant is given
   above.
 - **Single run, probe protocol.** One run of 21 turns: 15 synthetic 20 KB content turns, then 6 probe
