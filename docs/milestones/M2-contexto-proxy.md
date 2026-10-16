@@ -392,7 +392,12 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   inside the stream hold sees a snapshot that matches its room. Search refuses a snapshot whose
   request sequence differs from the latest room publish's and says "in view not checked". A failed
   snapshot write only marks the snapshot stale (search then says "in view not checked"); it does
-  not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Matches in the
+  not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Only the main
+  conversation publishes the room and the snapshot: the engine keeps state per conversation (the
+  main one, subagents, side requests), and the main conversation is the one with the most turn
+  starts, sticky once chosen. Other conversations publish neither, so their tool calls see the
+  main conversation's room and snapshot (part of the documented subagent limitation); the MCP
+  server cannot tell which conversation issued a call. Matches in the
   snapshot are listed first, labeled in view, newest first, as the matching line only, charged,
   with their returned spans logged content-free under a distinct source marker and no page id. In-view hits do not count toward acceptance 3,
   which measures retrieval of paged-out content. Measured basis (live run #2 chain
