@@ -99,7 +99,37 @@ Checked by page ids, offsets, turn numbers and record kinds, never by reading te
 - *Recount (not the recorded verdict).* The same `credit` rule, with pages passed in turn order so the
   earliest occurrence is the plant, credits 17: all 4 paged-only probes (adding `q_p_01`, `q_p_02`,
   `q_p_03`) and 13 `q_a` (adding `q_a_007`, `q_a_042`, `q_a_044`). None are lost, and acceptance 3 is
-  true either way. Re-running the harness's own order reproduces the recorded 11 exactly.
+  true either way. Re-running the harness's own order reproduces the recorded 11 exactly. The fixed
+  verdict, rescored on main after B30, is in the next section.
+
+### Acceptance 3 rescored with the fix (A25)
+
+Lane B's B30 (PR #169) makes `recall_credit.plant_spans` take the page with the earliest turn as the
+plant, whatever order the caller passes the pages in. The recorded run was rescored on main
+`24cfe23` from its stored session log, pages and answers. No live request was sent and nothing was
+re-run.
+
+| | Recorded under the page-order bug (main `ca05b29`) | Rescored with B30 (main `24cfe23`) |
+|---|---|---|
+| Acceptance 3 | true | true |
+| Credited | 11 | 17 |
+| Paged-only credited | 1 of 4 (`q_p_04`) | 4 of 4 (`q_p_01` to `q_p_04`) |
+| Credited per probe turn | 3, 1, 0, 0, 3, 4 | 4, 2, 1, 3, 3, 4 |
+| `q_a` credited | 10 | 13 (adds `q_a_007`, `q_a_042`, `q_a_044`) |
+| Answered correctly, not credited | 43 | 37 |
+| expected_turns | 21 | 21 |
+| In-view spans | 23 | 23 |
+
+- **Cause.** The harness passed pages in file-name order (random page ids), and the old
+  `plant_spans` took the first page holding a statement. For 3 paged-only probes it located a later
+  probe turn's copy, which no search covered, instead of the plant.
+- **Control.** The same rescore command run from a clean checkout of `ca05b29` reproduces the
+  recorded column exactly.
+- **Command.** From the repository root of a clean checkout at the named commit, with the run's
+  stored directory kept locally outside Git:
+  `uv run python <rescore script> <run dir>`. The script calls `codex_dryrun.acceptance_3` with
+  `codex_budget.history_turns(64000, 20000)`, the run's `log.jsonl` and pages, and the 6 probe turns'
+  last messages. It prints counts and probe ids only.
 
 **Scores by category** (`credit`'s rule: the answer for an id equals the key, ignoring case). All
 correct.
