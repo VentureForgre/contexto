@@ -116,7 +116,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    text block `[thinking omitted]`. Messages added after the rotation pass through untouched.
 3. **Rotation trigger.** Rotate only at the start of a turn: the request's newest turn contains no
    assistant message yet (only its turn-start message and any system messages). Rotate when the
-   estimated upstream input would exceed `bound - headroom`. Estimate = last upstream
+   estimated upstream input would exceed `bound - headroom`, or when the per-turn recall room that
+   would be published for the new turn (`bound - estimate - headroom_floor`) is below `min_turn_room`
+   (default 20,000); without that second condition the room is smallest on the turn just before a
+   rotation, because both shrink toward the same line (engine-driven estimate, PR #113: 5,219 at
+   the start of turn 4, 738 at its lowest). Estimate = last upstream
    `input_tokens + cache_read + cache_creation` for this session plus the bytes added since.
    Until the first real usage arrives, count `tool_result` content at 1.5 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
