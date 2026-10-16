@@ -67,23 +67,33 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   `tool_result` block.
 - A **turn** is a turn-start message plus every following assistant, `tool_result` user, and
   `role: "system"` message up to the next turn-start message.
-- **Carried content** is never paged: the injected context blocks of any turn-start message
-  (everything but the user's own prompt text); the session-start `role: "system"` message; the
-  latest settings-only system message per settings key (rule 13, where settings-only means empty
-  content plus settings fields); and tool-addition system messages, which are vendor-documented
-  but not observed on Claude Code 2.1.301 (builder-2 measured that adding or removing an MCP server
-  on resume changes `tools`, a head change under rule 6, and adds no system message). All are carried in the CLI's current form, never restored from a stored copy. Any
-  other `role: "system"` message carries per-turn content (for example the output of a
-  context-injecting `UserPromptSubmit` hook) and belongs to its turn: it is paged with that turn. Classification, deterministic and in this order: (1) a
-  session-start message carries both content and settings fields such as `output_config`
-  (measured: the session-start message has `output_config`, hook messages do not; position is not
-  used, so resumes of hand-written session files classify correctly); (2) a settings-only message has empty content plus settings fields; (3) any other system
-  message whose content is text only is per-turn content and is paged with the turn it sits in,
-  wherever it sits in that turn (measured by reviewer-2 at zero spend in the PR #30 review: a
-  `PostToolUse` hook's `additionalContext` arrives as a system message right after the
-  `tool_result`); (4) a system message with non-text blocks is unclassified: it is carried, and the
-  proxy logs `unclassified_system_message`. Carrying is the safe failure, since paging a message
-  that must persist would lose state. Lane A pins down, with stub evidence, exactly which blocks count as injected context.
+- **Carried content** is never paged, except under the bounded fallback below: the injected
+  context blocks of any turn-start message (everything but the user's own prompt text), and the
+  `role: "system"` messages that the classification below marks as carried. All carried content is
+  forwarded in the CLI's current form, never restored from a stored copy.
+- **Classification of `role: "system"` messages**, deterministic and in this order:
+  1. **Session-start**: content and settings fields such as `output_config` together (measured:
+     the session-start message has `output_config`, hook messages do not; position is not used,
+     so resumes of hand-written session files classify correctly). Carried.
+  2. **Settings-only**: empty content plus settings fields. Carried, latest per settings key
+     (rule 13).
+  3. **Hook output**: text-only content matching the hook-output signature that lane A documents
+     with stub evidence in the A2 PR. Per-turn: paged with the turn it sits in, wherever it sits
+     in that turn (measured by reviewer-2 at zero spend in the PR #30 review: `UserPromptSubmit`
+     output arrives after the new prompt, and `PostToolUse` `additionalContext` right after the
+     `tool_result`).
+  4. **Other text-only content**: carried, because it may be a standing instruction (the vendor
+     documents output-style changes and plan mode as instructions delivered as a message that
+     keep applying; lane A measures how both arrive before A2 merges).
+  5. **Tool-addition messages and anything with non-text blocks**: carried; non-text ones are
+     logged as `unclassified_system_message`. Tool-addition messages are vendor-documented but
+     not observed on Claude Code 2.1.301 (builder-2 measured that adding or removing an MCP
+     server on resume changes `tools`, a head change under rule 6, and adds no system message).
+  Carrying is the safe failure, since paging a message that must persist would lose state.
+  Bounded fallback: if carried content grows more than 8,000 tokens over its size at the
+  session's first request, the oldest step 4 messages are paged at the next rotation, each listed
+  in the index with its first line and recallable, and the proxy logs `carried_paged`. Lane A
+  pins down, with stub evidence, exactly which blocks count as injected context.
 - The proxy keeps an epoch state `E = (k, carried, pinned_text, index_text, head_fingerprint)`:
   the turns before turn index `k` are paged out.
 
