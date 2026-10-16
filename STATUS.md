@@ -6,16 +6,14 @@ Updated 2026-10-15 by intake.lead.
 
 Decisions taken and decisions still open, with reasons: `docs/DECISIONS.md`.
 
-M0: infinite-session design study (2026-10-15). The owner described the problem and asked the team
-to look; intake framed it as M0. Brief: `docs/milestones/M0-infinite-session-study.md`. Success bar
-(owner): compaction never fires and accuracy equals full context.
+M2: build the Contexto proxy (context virtual memory at the API boundary). Contract:
+`docs/milestones/M2-contexto-proxy.md`. Why: `docs/research/M0-recommendation.md`.
 
-- Lane 1 (interception surfaces, test seats): management.manager-1. PRs #9, #10 in review.
-- Lane 2 (policy, cost, fidelity): management.manager-2. PRs #7, #8 in review; probe design ready.
-- Phase 2 (rewriting prototype) is authorized (DECISIONS D12) and starts after phase 1 synthesis.
+- Lane A (launcher, proxy, rewrite engine, then Codex): management.manager-1.
+- Lane B (scaffolding, store, MCP server, acceptance harness): management.manager-2.
 
-M1 (ledger, checkpoints, recovery; contract on main) is paused. Open PRs #2, #3, #4 stay as they
-are until decision O1.
+M0 (study) is complete on main except three follow-ups still running: harder probes (L2f), the
+route-identity test (L1-e), and lane 2's synthesis note. M1 is folded into M2 (D21).
 
 ## Verified on main
 
@@ -35,7 +33,7 @@ are until decision O1.
 - Release automation REL-1 (manager-2): CI and release workflows; no real release until
   decision O5.
 - Intake: M0 recommendation (docs/research), then phase 2 plan. Q5 settled for development by D12.
-- Parked on gate qitem-20261015222349-14b703cb until intake decides O1: M1 lane rows, PRs #2,
+- Parked on gate qitem-20261015222349-14b703cb (being closed under D21): M1 lane rows, PRs #2,
   #3, #4, and their review rows.
 
 ## Test seats
