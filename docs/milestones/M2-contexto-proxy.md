@@ -17,7 +17,9 @@ same design after Claude Code works.
   standard library only. Tests with `pytest` via `uv run --with pytest pytest`. CI on `main` runs
   them (`.github/workflows/ci.yml`).
 - Data lives under `$CONTEXTO_HOME` (default `~/.contexto`), one directory per session:
-  `sessions/<session id>/`. Nothing in it is committed. Never edit the user's Claude or Codex
+  `sessions/<session id>/`. Nothing in it is committed. Everything under `$CONTEXTO_HOME` is
+  private to the user: directories `0700`, files `0600`, created atomically (secrets such as the
+  page key are written to a temporary file and renamed, never left empty by a race). Never edit the user's Claude or Codex
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
   stores or logs them.
@@ -54,11 +56,12 @@ reviewer-2 with zero-spend stubs on Claude Code 2.1.301 (PR #20 review comments)
 request, and can carry `cache_control` (their kinds, such as tool additions and effort changes,
 are vendor-documented); injected context blocks (CLAUDE.md and similar) ride in a turn-start user
 message, `messages[0]` in a fresh session but the resumed turn's user message after `--resume`;
-and earlier turns' system messages arrive with empty content. That last item is measured CLI
-behavior whose validity is undocumented: the vendor's valid case is a turn-scoped system message
-cleared server-side via `clear_at` while the client resends the original unchanged, and editing
-an earlier system message is listed as invalid. The proxy forwards whatever the CLI sends, so it
-adds no edit of its own; lane A verifies which case this is (rule 12).
+and a system message with empty `content` can appear. Lane A resolved that last item (rule 12; measured by builder-2, reported by manager-1, pending
+review, evidence to land in the A2 PR):
+it is a settings-only message, `{role: system, content: [], output_config: {effort: ...}}`, seen at
+`messages[1]` only when a session file lacking the CLI's own system record is resumed; with real
+CLI-written history, including a tool loop and two resumes, the original system message is never
+emptied, only its form changes (one text block with `cache_control` becomes a plain string).
 
 - A **turn-start message** is a user message whose content includes user-authored text and no
   `tool_result` block.
@@ -74,10 +77,12 @@ adds no edit of its own; lane A verifies which case this is (rule 12).
 1. **Upstream request** = the CLI's `system` and `tools` byte for byte, plus the retained turns as
    sent, where the first retained turn-start message gets, ahead of its own content, the carried
    context blocks in their original order and then a preamble text block (pinned state and page
-   index). Carried system messages from paged turns are placed immediately before that first
-   retained turn-start message in their original order, unless lane A's stub evidence shows that
-   ordering is rejected, in which case their text is merged into the same message as labeled text
-   blocks. No `tool_result` is displaced either way. In the first epoch `k = 0`, nothing is carried separately, and the
+   index). Carried system messages from paged turns are placed immediately after that first
+   retained turn-start message, in their original order, matching Claude Code's own
+   user-then-system shape. Measured by builder-2, reported by manager-1, pending review, evidence to land in the A2 PR
+   (341 tokens, haiku via the owner's proxy): a
+   `role: "system"` message before the first retained turn-start message returns 400; after it,
+   or merged into it as text, returns 200. No `tool_result` is displaced. In the first epoch `k = 0`, nothing is carried separately, and the
    preamble is empty. Every other request field passes through unchanged, including
    `cache_control`, `anthropic-beta`, `stream`, and `thinking`.
 2. **Thinking.** For every retained message that existed when `E` was created, strip thinking and
@@ -109,34 +114,35 @@ adds no edit of its own; lane A verifies which case this is (rule 12).
    `message_delta` usage. No hold-back is needed because recall is an MCP tool (D19).
 10. **Matching history.** Recognise each retained message in later requests by a hash of its
     canonical JSON with every `cache_control` field removed (the CLI moves `cache_control` along
-    the tail). A system message whose content the CLI has emptied matches its earlier, non-empty
-    version at the same position; any other change to a system message is a mismatch. On a mismatch, resynchronise: find the longest prefix of the stored messages that
+    the tail), and with content normalised so that a plain string and a single text block holding
+    the same text hash equal (the CLI converts one to the other along the history). On a mismatch, resynchronise: find the longest prefix of the stored messages that
     still matches and continue from there; if paged turns themselves changed (for example the CLI
     compacted locally), start a new epoch at the current turn start with everything before it
     paged. Never fall back to sending the full history unbounded.
 11. **Other endpoints.** `/v1/messages/count_tokens` is transformed exactly like `/v1/messages`, so
     the CLI's own counts match what is sent. `HEAD /api/hello` and any other endpoint pass through
     unchanged.
-12. **Emptied system messages.** Lane A determines, with stub and conformance evidence, whether the
-    CLI empties earlier system messages itself or the content is cleared server-side with the
-    original resent. If client-emptied, it runs a conformance check with
-    `prefix_mismatch_behavior: error` on a thinking-bearing turn after an emptied system message.
-    If that returns 400, the proxy treats each newly emptied system message as a rotation boundary
-    for thinking: thinking before and after it is stripped at the next turn start, so no kept
-    thinking follows an edited message. Either way the proxy never restores a stored copy.
+12. **Settings-only system messages.** A system message with empty `content` and only settings
+    fields (such as `output_config`) is carried like any other system message and forwarded as the
+    CLI sends it. Lane A measured that Claude Code does not empty earlier system messages, so no
+    client-side edit precedes kept thinking (zero-spend stubs; measured by builder-2, reported by
+    manager-1, pending review; evidence to land in the A2 PR under `spikes/m2/carried/`). If a later CLI
+    version starts emptying them, re-run that check before relying on kept thinking after one.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_target` 50% of the bound.
 Constraint: `bound` plus the largest expected over-bound turn must stay below both Claude Code's
 idle-compaction minimum (200,000 by default, `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`) and the model's
 compaction trigger, or the CLI may compact; the launcher refuses a `bound` above 170,000 unless
-`--allow-large-bound` is given.
+`--allow-large-bound` is given. That this keeps idle compaction away assumes it counts the bounded reported
+usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 
 ## Store (normative)
 
 - **Pages:** `pages/<page id>.json`, one per paged-out turn, holding the exact message JSON of that
-  turn (thinking included as received), its turn number, byte and token estimates, and a stub:
-  first 200 characters of the user text, tool names used, and file paths mentioned.
+  turn (thinking included as received), its turn number, byte size (canonical JSON, summed per
+  content block) and token estimate, and a stub: first 200 characters of the user text, tool names
+  used, and at most 20 file paths mentioned.
   Page id: `pg_` + first 16 hex of HMAC-SHA256 over the canonical JSON, keyed with a random
   per-store key kept in the store and never sent upstream (ids appear in prompts, and short turns
   must not be guessable from their id). Pages are immutable.
@@ -207,8 +213,9 @@ a no-replayed-thinking baseline.
    (bound set to 100,000 for this run to keep spend down and well under every compaction trigger) shows zero compaction events, every
    upstream request under the bound except logged over-bound turns, and zero 4xx responses.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
-   only probe type that failed at small contexts across three pilots: 5/8 at about 12k, 29/30
-   at 15,002 counted tokens), asked at the end of that run, scored against the
+   only probe type that failed at small contexts in the two scored pilots, measured by builder-4
+   in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the
+   one miss in a depth-8 chain; pilot 2 overran with no score), asked at the end of that run, scored against the
    full-context baseline at the same session content. Pass: within 2 probes of baseline overall
    and no category more than 1 probe below.
 3. **Recall:** at least one probe answerable only from a paged-out turn is answered correctly,

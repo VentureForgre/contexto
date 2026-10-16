@@ -136,12 +136,15 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   does not enforce by default; on the OpenAI Responses API, editing or dropping a turn before an
   encrypted reasoning item returns 200, and whether the reasoning was used is not observable.
   Lean: strip all thinking at rotation, pending the strip-thinking arm's accuracy numbers.
-- **O3. Working-window bound.** Pending the quality-versus-context-size probe: on `lab.subject`, measured at
-  98,910 and 256,783 context (planned 91,133 and 242,822): 96/96 at both, at the probe ceiling, plus a direct-API
-  replay at 40k and about 92k, each with thinking preserved and stripped. Known so far, measured by lane
-  1 and not yet reviewed: `lab.subject`'s fixed head is 81,808 tokens, of which plain Claude Code is
-  45,925 and OpenRig seat context about 36k; Codex's head was 32.3k (PR #10, merged). Lane 2's
-  earlier 42k figure was inferred.
+- **O3. Working-window bound.** Provisional default 150,000 (M2 contract), with the launcher
+  refusing more than 170,000 to stay under Claude Code's 200,000 idle-compaction minimum. Evidence:
+  every M0 probe hit its ceiling on stated facts (96/96 at 98,910 and 256,783 on `lab.subject`;
+  96/96 in the replay at 40,749 and 91,861), while deep supersession chains failed even at small
+  contexts (5/8 at about 12k; one depth-8 miss in 29/30 at 15,002; PR #22). So no slip point by
+  context size was located, and the failures that do occur argue for an explicit current-state
+  block rather than for a smaller window. M2 acceptance measures H1 against the full-context
+  baseline; the deferred 852,610-token run can be revived if the bound needs more evidence.
+  Heads: `lab.subject` 81,808 to 84,073 (plain Claude Code 45,925), Codex 32,331 after onboarding.
 - **O4. End-user authentication guidance.** API key only, or also subscription logins, for people
   who run Contexto themselves. Needs the terms question answered in the product docs. Owner
   decision, because it bears on what may be shared beyond this repository.
