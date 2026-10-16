@@ -94,7 +94,7 @@ def test_the_turn_room_lives_in_private_meta_beside_the_window(tmp_path):
     store.set_turn_room("3", 2_000)
     store.charge_turn_room(lambda remaining: 5)
     meta = json.loads((store.dir / "meta.json").read_text())
-    assert meta["turn_room"] == {"turn_id": "3", "room_tokens": 2_000, "spent_tokens": 5}
+    assert meta["turn_room"] == {"turn_id": "3", "room_tokens": 2_000, "spent_tokens": 5, "seq": None}
     assert (meta["window_tokens"], meta["bytes_per_token"]) == (33_000, 1.2)
     assert (store.dir / "meta.json").stat().st_mode & 0o777 == 0o600
     assert SessionStore(tmp_path, "s1").turn_room() == ("3", 2_000, 5)  # survives a restart

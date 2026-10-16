@@ -119,6 +119,50 @@ def check_turn_room(turn_id: Any, room_tokens: Any) -> str:
     return turn_id
 
 
+RETAINED_ROLES = ("user", "assistant", "tool_result")
+
+
+def check_retained(epoch: Any, k: Any, turns: Any) -> list[dict[str, Any]]:
+    """The retained-window entries ``{turn, message_index, role, text}`` (contract PR #125); ValueError otherwise."""
+    for name, value in (("epoch", epoch), ("k", k)):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer, not {value!r}")
+    if not isinstance(turns, list):
+        raise ValueError("turns must be a list of entries")
+    entries = []
+    for entry in turns:
+        if not isinstance(entry, dict) or set(entry) != {"turn", "message_index", "role", "text"}:
+            raise ValueError("each entry must be exactly {turn, message_index, role, text}")
+        for name in ("turn", "message_index"):
+            if not isinstance(entry[name], int) or isinstance(entry[name], bool) or entry[name] < 0:
+                raise ValueError(f"entry {name} must be a non-negative integer")
+        if entry["role"] not in RETAINED_ROLES or not isinstance(entry["text"], str):
+            raise ValueError(f"entry role must be one of {', '.join(RETAINED_ROLES)} and text a string")
+        entries.append(dict(entry))
+    return entries
+
+
+def read_retained(data: Any) -> tuple[int, int, int, list[dict[str, Any]]] | None:
+    """(epoch, k, stamp, entries) from a retained snapshot; anything malformed reads as no snapshot."""
+    if not isinstance(data, dict):
+        return None
+    stamp = data.get("stamp")
+    if not isinstance(stamp, int) or isinstance(stamp, bool):
+        return None
+    try:
+        entries = check_retained(data.get("epoch"), data.get("k"), data.get("entries"))
+    except ValueError:
+        return None
+    return data["epoch"], data["k"], stamp, entries
+
+
+def read_room_stamp(meta: dict[str, Any]) -> int | None:
+    """The request sequence the current turn room was published under; None when unstamped."""
+    room = meta.get("turn_room")
+    seq = room.get("seq") if isinstance(room, dict) else None
+    return seq if isinstance(seq, int) and not isinstance(seq, bool) else None
+
+
 def read_turn_room(meta: dict[str, Any]) -> tuple[str | None, int | None, int]:
     """(turn id, room tokens, tokens spent this turn) from session metadata; malformed reads as unpublished."""
     room = meta.get("turn_room")
@@ -236,7 +280,71 @@ class SessionStore(LedgerOps):
         meta.lock, so a racing charge lands either before the reset or against the new room.
         """
         turn_id = check_turn_room(turn_id, room_tokens)
-        self._update_meta({"turn_room": {"turn_id": turn_id, "room_tokens": room_tokens, "spent_tokens": 0}})
+        # B19: stamped with this request's sequence only if this request's set_retained persisted it.
+        stamp = getattr(self, "_retained_stamp", None)
+        self._update_meta({"turn_room": {"turn_id": turn_id, "room_tokens": room_tokens, "spent_tokens": 0,
+                                         "seq": stamp}})
+
+    def set_retained(self, epoch: int, k: int, turns: list[dict[str, Any]]) -> None:
+        """Snapshot the retained window for search (contract PR #125, lane A's A14 calls this once per request).
+
+        Increments the session's persisted request sequence, then overwrites ``retained.json`` (0600,
+        atomic) stamped with it; the room publishes that follow carry the same stamp, and search uses
+        the snapshot only when the stamps match. If the increment cannot be persisted, the old
+        snapshot is removed, and in any case this store's rooms are stamped None until a later call
+        succeeds, so a previous request's snapshot can never match. If the snapshot write fails, the
+        sequence has moved on, so the old snapshot no longer matches (lane A logs ``retained_stale``).
+        Errors are raised for the caller to handle. Never logged; the index and stubs never read it.
+        """
+        entries = check_retained(epoch, k, turns)
+        self._retained_stamp = None
+        seq: dict[str, int] = {}
+
+        def bump(meta: dict[str, Any]) -> dict[str, Any]:
+            current = meta.get("request_seq")
+            seq["n"] = (current if isinstance(current, int) and not isinstance(current, bool) else 0) + 1
+            return {"request_seq": seq["n"]}
+
+        try:
+            self._modify_meta(bump)
+        except OSError:
+            try:
+                (self.dir / "retained.json").unlink(missing_ok=True)
+            except OSError:
+                pass  # rooms stay stamped None in this store, so the old snapshot still cannot match
+            raise
+        self._retained_stamp = seq["n"]
+        try:
+            self._write_atomic(self.dir / "retained.json",
+                               canonical_bytes({"stamp": seq["n"], "epoch": epoch, "k": k, "entries": entries}))
+        except OSError:
+            try:  # defense in depth: no previous request's snapshot stays behind (reviewer-1, PR #128)
+                (self.dir / "retained.json").unlink(missing_ok=True)
+            except OSError:
+                pass  # retained_current() still refuses it: its stamp is behind the persisted sequence
+            raise
+
+    def retained_current(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
+        """The snapshot only if it is the current request's: its stamp equals both the room's stamp and
+        the persisted request sequence. Search uses this, so it cannot serve an older request's window."""
+        snapshot = self.retained()
+        meta = self._meta()
+        seq = meta.get("request_seq")
+        if snapshot is None or not isinstance(seq, int) or isinstance(seq, bool):
+            return None
+        return snapshot if snapshot[2] == seq == read_room_stamp(meta) else None
+
+    def retained(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
+        """(epoch, k, stamp, entries) of the retained snapshot, or None when there is none or it is malformed."""
+        try:
+            data = json.loads((self.dir / "retained.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return read_retained(data)
+
+    def room_stamp(self) -> int | None:
+        """The request sequence of the current turn room; None when unpublished or unstamped."""
+        return read_room_stamp(self._meta())
 
     def turn_room(self) -> tuple[str | None, int | None, int]:
         """(turn id, room tokens, tokens spent this turn); (None, None, 0) until the engine publishes."""
@@ -250,9 +358,24 @@ class SessionStore(LedgerOps):
         """
         def update(meta: dict[str, Any]) -> dict[str, Any] | None:
             record = charge_room(read_turn_room(meta), charge)
-            return None if record is None else {"turn_room": record}
+            return None if record is None else {"turn_room": {**record, "seq": read_room_stamp(meta)}}
 
         self._modify_meta(update)
+
+    def _write_atomic(self, path: Path, data: bytes) -> None:
+        """Write ``path`` privately and atomically: a fsynced temp file renamed into place."""
+        tmp = self.dir / f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        fd = open_private(tmp, os.O_WRONLY | os.O_EXCL)
+        try:
+            try:
+                os.write(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)  # leave no partial temp file behind
+            raise
 
     def _update_meta(self, updates: dict[str, Any]) -> None:
         """Merge ``updates`` into meta.json: writers serialize on meta.lock; readers never block."""
