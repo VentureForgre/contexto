@@ -34,9 +34,13 @@ All throwaway CLI runs use an isolated `CLAUDE_CONFIG_DIR`, a dummy key that is 
    `output_config: {effort: medium}` field.
 2. **Placement of carried system messages** [measured: `live_check.py`, 341 tokens]: a role
    `system` message as `messages[0]`, before the first user turn-start message, returns 400
-   `invalid_request_error`, with and without Claude Code's beta list. The same text merged into
+   `invalid_request_error`. The same text merged into
    the user message returns 200; a system message right after the user message (Claude Code's own
-   shape) returns 200. The engine uses the latter (rule 1).
+   shape) returns 200. The engine uses the latter (rule 1). In the recorded run, P-a was retried once
+   after its 400 with Claude Code 2.1.301's beta list (including `claude-code-20250219`); it returned
+   400 again, at 0 tokens. P-b and P-c were sent without betas, and R12 was not run. Under intake
+   rule D23 (2026-10-16) `live_check.py` no longer retries with another product's betas and sends the
+   User-Agent `contexto-test/live_check`.
 3. **Form changes along the history** [measured: `live_probe.sh`]: the CLI turns a one-text-block
    message with `cache_control` into a plain string on later requests (the system message at
    `messages[1]` from the second request of turn 1 on, earlier prompts later) and moves
