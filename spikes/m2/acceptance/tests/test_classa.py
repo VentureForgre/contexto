@@ -168,3 +168,37 @@ def test_out_inside_a_git_work_tree_is_refused(tmp_path):
     base = ["--run-dir", str(tmp_path), "--session", "s", "--run-code", str(tmp_path), "--seat-settings",
             str(tmp_path / "seat.json"), "--stub"]
     assert classa.main([*base, "--out", str(repo / "o")]) == 2
+
+
+def test_out_guard_fails_closed(tmp_path, monkeypatch, capsys):
+    # Reviewer-2 on #137: the guard must not fail open on git errors or a misleading environment.
+    import subprocess
+
+    repo, outside = tmp_path / "repo", tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    # GIT_DIR / GIT_WORK_TREE from the caller are ignored: a bogus GIT_DIR neither hides a repo nor
+    # makes an outside path look inside.
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "nowhere"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(outside))
+    assert classa.out_in_git_tree(repo / "o") and not classa.out_in_git_tree(outside / "o")
+    assert classa.out_in_git_tree(repo / ".git")  # inside the git directory itself
+    real_run = subprocess.run
+
+    def dubious(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 128, "", "fatal: detected dubious ownership in repository\n")
+
+    monkeypatch.setattr(classa.subprocess, "run", dubious)
+    assert classa.out_in_git_tree(outside / "o")  # any other git error counts as inside
+
+    def no_git(cmd, **kw):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(classa.subprocess, "run", no_git)
+    with pytest.raises(classa.ExperimentError):
+        classa.out_in_git_tree(outside / "o")
+    base = ["--run-dir", str(tmp_path), "--session", "s", "--run-code", str(tmp_path), "--seat-settings",
+            str(tmp_path / "seat.json"), "--stub", "--out", str(outside / "o")]
+    assert classa.main(base) == 2 and "git is not installed" in capsys.readouterr().err
+    monkeypatch.setattr(classa.subprocess, "run", real_run)

@@ -33,7 +33,9 @@ import copy
 import importlib
 import io
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -527,11 +529,23 @@ def body_fields(bodies: list[dict[str, Any]], exp: list[dict[str, Any]]) -> dict
 
 def out_in_git_tree(out: Path) -> bool:
     """Whether ``out`` (or, while it does not exist yet, its nearest existing parent) is inside a git
-    work tree (reviewer-2 on #133): requests, answers and tool output must never land in a repo."""
+    repository (reviewer-2 on #133): requests, answers and tool output must never land in a repo.
+    Fails closed (reviewer-2 on #137): GIT_DIR and GIT_WORK_TREE are cleared so the caller's
+    environment cannot point the check elsewhere; only git's own "not a git repository" counts as
+    outside, and any other git error (dubious ownership, a broken repo) counts as inside. Raises
+    ExperimentError when git is not installed."""
     path = out.resolve()
     while not path.exists() and path != path.parent:
         path = path.parent
-    return driver.inside_git(path)
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    try:
+        proc = subprocess.run(["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+                              capture_output=True, text=True, env=env)
+    except FileNotFoundError:
+        raise ExperimentError("git is not installed, so --out cannot be checked") from None
+    if proc.returncode == 0:
+        return True  # "true", or "false" inside a .git directory: either way inside a repository
+    return "not a git repository" not in proc.stderr
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -563,8 +577,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.stub and not args.upstream:
         print("refusing: pass --upstream for a live run, or --stub", file=sys.stderr)
         return 2
-    if out_in_git_tree(args.out):
-        print("refusing: --out is inside a git work tree; experiment output stays outside any repo", file=sys.stderr)
+    try:
+        inside = out_in_git_tree(args.out)
+    except ExperimentError as exc:
+        print(f"refusing: {exc}", file=sys.stderr)
+        return 2
+    if inside:
+        print("refusing: --out is inside a git repository (or git could not tell); output stays outside any repo",
+              file=sys.stderr)
         return 2
     from acceptance import credcheck
     from contexto.store import SessionStore
