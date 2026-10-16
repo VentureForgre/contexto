@@ -255,6 +255,11 @@ class UsageReader:
     ``response.completed``, ``response.incomplete``, or ``response.failed`` (or a JSON body), kept
     as given: ``input_tokens`` includes cached tokens, with ``input_tokens_details.cached_tokens``,
     ``cache_write_tokens``, ``output_tokens``, and ``output_tokens_details.reasoning_tokens``.
+
+    It also records how the response ended (packet A23), from enum fields only (``_enum``), never
+    text or error messages: for Responses, the end event (completed, incomplete, failed, or none when
+    a stream ended without one), ``response.status``, ``incomplete_details.reason``, and
+    ``error.code``; for Messages, ``stop_reason`` and an ``error`` event's ``error.type``.
     """
 
     def __init__(self, content_type: str | None, api: str = "messages") -> None:
@@ -262,6 +267,8 @@ class UsageReader:
         self.sse = "text/event-stream" in (content_type or "").lower()
         self.usage: dict[str, Any] = {}
         self.input_transformations: list[Any] | None = None
+        self.end_event: str | None = None  # Responses stream: completed, incomplete, or failed
+        self.ending: dict[str, str] = {}  # response_status, incomplete_reason, error_code, stop_reason, error_type
         self._buffer = bytearray()
         self._overflow = False
 
@@ -291,9 +298,11 @@ class UsageReader:
             if isinstance(body, dict):
                 if self.api == "responses":
                     self._take_responses_usage(body)
+                    self._take_responses_end(body)
                 else:
                     self._take_usage(body.get("usage"))
                     self._take_transformations(body)
+                    self._take_messages_end(body)
         self._buffer.clear()
 
     def _event(self, raw: bytes) -> None:
@@ -305,8 +314,15 @@ class UsageReader:
         if not isinstance(payload, dict):
             return
         if self.api == "responses":
-            if payload.get("type") in RESPONSE_END_EVENTS and isinstance(payload.get("response"), dict):
-                self._take_responses_usage(payload["response"])
+            if payload.get("type") in RESPONSE_END_EVENTS:
+                self.end_event = payload["type"].split(".", 1)[1]
+                if isinstance(payload.get("response"), dict):
+                    self._take_responses_usage(payload["response"])
+                    self._take_responses_end(payload["response"])
+            elif payload.get("type") == "error":
+                self._keep("error_code", payload.get("code"))
+        elif payload.get("type") == "error":
+            self._take_messages_end(payload)
         elif payload.get("type") == "message_start":
             message = payload.get("message") or {}
             self._take_usage(message.get("usage"))
@@ -314,6 +330,31 @@ class UsageReader:
         elif payload.get("type") == "message_delta":
             self._take_usage(payload.get("usage"))
             self._take_transformations(payload)
+            if isinstance(payload.get("delta"), dict):
+                self._keep("stop_reason", payload["delta"].get("stop_reason"))
+
+    def end_fields(self) -> dict[str, str]:
+        """How the response ended, for the request's log entry (packet A23): enum strings only."""
+        out = dict(self.ending)
+        if self.api == "responses" and self.sse:
+            out = {"end_event": self.end_event or "none", **out}
+        return out
+
+    def _keep(self, key: str, value: Any) -> None:
+        if (value := _enum(value)) is not None:
+            self.ending[key] = value
+
+    def _take_responses_end(self, response: dict[str, Any]) -> None:
+        self._keep("response_status", response.get("status"))
+        if isinstance(response.get("incomplete_details"), dict):
+            self._keep("incomplete_reason", response["incomplete_details"].get("reason"))
+        if isinstance(response.get("error"), dict):
+            self._keep("error_code", response["error"].get("code"))
+
+    def _take_messages_end(self, body: dict[str, Any]) -> None:
+        self._keep("stop_reason", body.get("stop_reason"))
+        if isinstance(body.get("error"), dict):
+            self._keep("error_type", body["error"].get("type"))
 
     def _take_responses_usage(self, response: dict[str, Any]) -> None:
         usage = response.get("usage")
@@ -332,6 +373,13 @@ class UsageReader:
 
 
 _SSE_EVENT_END = re.compile(rb"\r\n\r\n|\n\n|\r\r")
+_ENUM_VALUE = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
+
+
+def _enum(value: Any) -> str | None:
+    """An API enum value (``end_turn``, ``content_filter``, ``rate_limit_exceeded``), else None: free
+    text, which could quote content, never matches (lowercase identifier characters, 64 at most)."""
+    return value if isinstance(value, str) and _ENUM_VALUE.fullmatch(value) else None
 
 
 def sse_event_type(raw: bytes) -> str | None:
@@ -853,7 +901,9 @@ class _Handler(BaseHTTPRequestHandler):
         entry.update(status=response.status, response_bytes=response_bytes, duration_ms=_ms(started), usage=usage)
         if reader.input_transformations is not None:
             entry["input_transformations"] = reader.input_transformations
-        if not decoder.supported:
+        if decoder.supported:
+            entry.update(reader.end_fields())  # packet A23: how the response ended, content-free
+        else:
             entry["usage_unavailable"] = f"response content-encoding {decoder.encoding}"
         observe()  # streams without a trigger event and non-SSE responses: after the body, before completion
         owner.log(entry)
