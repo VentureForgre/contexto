@@ -50,11 +50,15 @@ Organization-managed settings still outrank `--settings`; document that limit.
 
 Terms. The CLI sends its full local history `M[0..n)` on every request. Measured by
 reviewer-2 with zero-spend stubs on Claude Code 2.1.301 (PR #20 review comments):
-`role: "system"` messages appear inside `messages` (session start, tool additions, effort
-changes), including as the last message of a new-turn request, and can carry `cache_control`;
-injected context blocks (CLAUDE.md and similar) ride in a turn-start user message, `messages[0]`
-in a fresh session but the resumed turn's user message after `--resume`; and the CLI empties
-earlier turns' system messages in place (vendor-documented as valid; rewording is not).
+`role: "system"` messages appear inside `messages`, including as the last message of a new-turn
+request, and can carry `cache_control` (their kinds, such as tool additions and effort changes,
+are vendor-documented); injected context blocks (CLAUDE.md and similar) ride in a turn-start user
+message, `messages[0]` in a fresh session but the resumed turn's user message after `--resume`;
+and earlier turns' system messages arrive with empty content. That last item is measured CLI
+behavior whose validity is undocumented: the vendor's valid case is a turn-scoped system message
+cleared server-side via `clear_at` while the client resends the original unchanged, and editing
+an earlier system message is listed as invalid. The proxy forwards whatever the CLI sends, so it
+adds no edit of its own; lane A verifies which case this is (rule 12).
 
 - A **turn-start message** is a user message whose content includes user-authored text and no
   `tool_result` block.
@@ -113,6 +117,13 @@ earlier turns' system messages in place (vendor-documented as valid; rewording i
 11. **Other endpoints.** `/v1/messages/count_tokens` is transformed exactly like `/v1/messages`, so
     the CLI's own counts match what is sent. `HEAD /api/hello` and any other endpoint pass through
     unchanged.
+12. **Emptied system messages.** Lane A determines, with stub and conformance evidence, whether the
+    CLI empties earlier system messages itself or the content is cleared server-side with the
+    original resent. If client-emptied, it runs a conformance check with
+    `prefix_mismatch_behavior: error` on a thinking-bearing turn after an emptied system message.
+    If that returns 400, the proxy treats each newly emptied system message as a rotation boundary
+    for thinking: thinking before and after it is stripped at the next turn start, so no kept
+    thinking follows an edited message. Either way the proxy never restores a stored copy.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_target` 50% of the bound.
@@ -166,7 +177,7 @@ the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
 ## Lanes
 
 - **Lane A, management.manager-1 (builder-1, builder-2):** launcher, proxy server and SSE relay,
-  rewrite engine (rules 1 to 11), upstream resolution, session log; then the Codex adapter
+  rewrite engine (rules 1 to 12), upstream resolution, session log; then the Codex adapter
   (Responses API over HTTP through a temporary `CODEX_HOME` whose provider uses `auth.command`;
   force HTTP or handle WebSocket deltas, decided with evidence).
 - **Lane B, management.manager-2 (builder-3, builder-4):** package scaffolding first (harvest PR #2),
