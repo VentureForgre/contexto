@@ -198,3 +198,17 @@ def test_replay_dry_makes_no_calls(tmp_path, stub, capsys):
     assert run.main(["replay", "--cc-jsonl", str(jsonl), "--out", str(tmp_path / "o"), "--dry"]) == 0
     assert _Stub.seen == [] and json.loads(capsys.readouterr().out)["request"]["messages"] == 8
     assert driver.MODEL == "claude-haiku-5-5"
+
+
+def test_parse_sse_collects_tool_calls_with_their_input():
+    events = [
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t1",
+                                                                      "name": "mcp__contexto__contexto_search", "input": {}}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"query": "chec'}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": 'kout-api"}'}},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 40}},
+    ]
+    out = replay.parse_sse([f"data: {json.dumps(e)}" for e in events])
+    assert out["tool_uses"] == [{"name": "mcp__contexto__contexto_search", "input": {"query": "checkout-api"}}]
+    assert out["stop_reason"] == "tool_use" and out["text"] == ""

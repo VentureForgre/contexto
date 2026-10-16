@@ -160,11 +160,12 @@ def summary(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_sse(lines: Any) -> dict[str, Any]:
-    """Text, usage, and stop reason from a Messages API event stream."""
+    """Text, tool calls, usage, and stop reason from a Messages API event stream."""
     text: list[str] = []
     usage: dict[str, int] = {}
     stop_reason = None
     blocks: dict[str, int] = {}
+    tools: dict[int, dict[str, Any]] = {}  # content block index -> {name, partial input JSON}
     for raw in lines:
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
         if not line.startswith("data: "):
@@ -177,8 +178,15 @@ def parse_sse(lines: Any) -> dict[str, Any]:
         if kind == "message_start":
             usage.update({k: v for k, v in (event.get("message", {}).get("usage") or {}).items() if isinstance(v, int)})
         elif kind == "content_block_start":
-            btype = str((event.get("content_block") or {}).get("type"))
+            block = event.get("content_block") or {}
+            btype = str(block.get("type"))
             blocks[btype] = blocks.get(btype, 0) + 1
+            if btype == "tool_use":
+                tools[int(event.get("index") or 0)] = {"name": block.get("name"), "json": ""}
+        elif kind == "content_block_delta" and (event.get("delta") or {}).get("type") == "input_json_delta":
+            index = int(event.get("index") or 0)
+            if index in tools:
+                tools[index]["json"] += event["delta"].get("partial_json", "")
         elif kind == "content_block_delta" and (event.get("delta") or {}).get("type") == "text_delta":
             text.append(event["delta"].get("text", ""))
         elif kind == "message_delta":
@@ -186,7 +194,15 @@ def parse_sse(lines: Any) -> dict[str, Any]:
             stop_reason = (event.get("delta") or {}).get("stop_reason", stop_reason)
         elif kind == "error":
             raise ReplayError(f"stream error: {(event.get('error') or {}).get('type')}")
-    return {"text": "".join(text), "usage": usage, "stop_reason": stop_reason, "blocks": blocks}
+    tool_uses = []
+    for index in sorted(tools):
+        try:
+            tool_input = json.loads(tools[index]["json"] or "{}")
+        except json.JSONDecodeError:
+            tool_input = {"_unparsed_chars": len(tools[index]["json"])}
+        tool_uses.append({"name": tools[index]["name"], "input": tool_input})
+    return {"text": "".join(text), "usage": usage, "stop_reason": stop_reason, "blocks": blocks,
+            "tool_uses": tool_uses}
 
 
 def send(request: dict[str, Any], upstream: str, key: str, timeout: float = 900.0) -> dict[str, Any]:
