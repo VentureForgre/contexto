@@ -62,6 +62,37 @@ def answer_index(session_log: list[dict[str, Any]]) -> int | None:
     return last
 
 
+def turn_answer_indices(session_log: list[dict[str, Any]]) -> list[int]:
+    """Log indices of the Messages requests that answered a user turn, in order (B29).
+
+    A request whose response called no tool ends its turn: the content turns' replies, then each
+    probe turn's final answer. The proxy's stream hold (A9) holds a response from its first
+    ``tool_use`` block, any tool, so ``stream_hold.held_events == 0`` marks a response with no tool
+    call. A log without ``stream_hold`` falls back to "no ``mcp_call`` before the next request",
+    which misses non-MCP tools (Bash, Read). Only 2xx responses count, so a failed request the CLI
+    retried (a local 502, say) is not a turn end. Codex logs need their own rule: pass ``turn_ends``.
+    """
+    requests = [i for i, ev in enumerate(session_log)
+                if ev.get("event") == "request" and str(ev.get("path") or "").split("?")[0] == "/v1/messages"
+                and _ok(ev.get("status"))]
+    ends = []
+    for n, i in enumerate(requests):
+        hold = session_log[i].get("stream_hold")
+        if isinstance(hold, dict) and isinstance(hold.get("held_events"), int):
+            if hold["held_events"] == 0:
+                ends.append(i)
+            continue
+        nxt = requests[n + 1] if n + 1 < len(requests) else len(session_log)
+        if not any(session_log[j].get("event") == "mcp_call" for j in range(i + 1, nxt)):
+            ends.append(i)
+    return ends
+
+
+def _ok(status: Any) -> bool:
+    """A 2xx response; a request logged without a status (older logs) counts as answered."""
+    return status is None or (isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 300)
+
+
 def plant_spans(probes: list[Any], pages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Where each probe's first statement sits: page id and [start, end) in that page's rendered text."""
     rendered = [(p["id"], render_page(p)) for p in pages]
@@ -77,27 +108,54 @@ def plant_spans(probes: list[Any], pages: list[dict[str, Any]]) -> dict[str, dic
 
 
 def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
-           pages: list[dict[str, Any]]) -> dict[str, Any]:
+           pages: list[dict[str, Any]], probe_turn_ids: tuple[tuple[str, ...], ...] | None = None,
+           turn_ends: list[int] | None = None, expected_turns: int | None = None) -> dict[str, Any]:
+    """Credit each paged-only probe answered correctly from a range returned before its answer.
+
+    With ``probe_turn_ids`` (D27's assignment), a probe's cutoff is the answer of the probe turn that
+    asked it, so a range returned in a later probe turn never credits an earlier answer (B29);
+    without it, the session's last answer request. ``turn_ends`` (log indices of the requests that
+    answered each user turn, in order) lets a caller with its own dialect supply them: it replaces
+    ``turn_answer_indices`` and its last entry replaces ``answer_index``; omitted, the Messages rules
+    apply. ``expected_turns`` (content turns plus probe turns) makes the turn mapping exact: unless
+    the turn ends, detected or supplied, number exactly that many, nothing is credited, since a
+    spurious or missing end would shift every probe's cutoff silently. Either way it fails closed
+    (B28): with no answer request to cut off at, nothing is credited and the result says why.
+    """
     given = {}
     for line in answers.splitlines():
         qid, sep, value = line.partition(":")
         if sep:
             given[qid.strip()] = value.strip()
-    cutoff = answer_index(session_log)
+    cutoff = answer_index(session_log) if turn_ends is None else (turn_ends[-1] if turn_ends else None)
+    cutoffs: dict[str, int | None] = {probe.id: cutoff for probe in probes}
+    reason = None if cutoff is not None else "answer request not found"
+    if probe_turn_ids is not None and cutoff is not None:
+        ends = turn_answer_indices(session_log) if turn_ends is None else list(turn_ends)
+        if expected_turns is not None and len(ends) != expected_turns:
+            cutoffs = {probe.id: None for probe in probes}
+            reason = f"turn answers do not match the script ({len(ends)} found, {expected_turns} expected)"
+        elif len(ends) < len(probe_turn_ids):
+            cutoffs, reason = {probe.id: None for probe in probes}, "probe turn answers not found"
+        else:
+            turn_end = ends[len(ends) - len(probe_turn_ids):]
+            of_turn = {pid: turn_end[k] for k, ids in enumerate(probe_turn_ids) for pid in ids}
+            cutoffs = {probe.id: of_turn.get(probe.id) for probe in probes}
     # Fail closed (B28): with no answer request to cut off at, nothing can be shown to precede the
-    # answer, so nothing is credited and acceptance 3 fails, with the reason in the result.
-    ranges = returned_ranges(session_log) if cutoff is not None else []
+    # answer, so nothing is credited, with the reason in the result.
+    ranges = returned_ranges(session_log) if reason is None else []
     spans = plant_spans(probes, pages)
     rows = []
     for probe in probes:
         correct = bool(probe.answer) and given.get(probe.id, "").lower() == probe.answer.lower()
         span = spans.get(probe.id)
         via = None
-        if span:
+        cut = cutoffs.get(probe.id)
+        if span and cut is not None:
             # B16 pages a recall over several calls, so a line may span adjacent returned ranges:
             # merge the page's ranges (overlapping or touching) before checking containment.
             merged: list[dict[str, Any]] = []
-            for r in sorted((r for r in ranges if r["at"] < cutoff and r["page_id"] == span["page_id"]),
+            for r in sorted((r for r in ranges if r["at"] < cut and r["page_id"] == span["page_id"]),
                             key=lambda r: r["start"]):
                 if merged and r["start"] <= merged[-1]["end"]:
                     merged[-1]["end"] = max(merged[-1]["end"], r["end"])
@@ -115,4 +173,4 @@ def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
     return {"paged_only": rows, "credited": sum(r["credited"] for r in rows),
             "correct_not_credited": [r["id"] for r in rows if r["answered_correctly"] and not r["credited"]],
             "acceptance_3": any(r["credited"] for r in rows), "in_view_spans": in_view_spans(session_log),
-            **({"reason": "answer request not found"} if cutoff is None else {})}
+            **({"reason": reason} if reason else {})}
