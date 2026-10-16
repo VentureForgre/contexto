@@ -47,15 +47,79 @@ no watcher stop.
 | Bound | largest input 26,066 against 64,000; 0 `over_bound` real; no failure events |
 | Rotations | 16 for size (`bound`) and 3 for room (`min_turn_room`) |
 
-**Acceptance 3: true** (`codex_recall_credit`).
+**Acceptance 3: true** (`codex_recall_credit`, as recorded by the harness).
+
+1 of the 4 paged-only probes was credited: `q_p_04`, via `contexto_search`. That meets acceptance 3's
+contract.
 
 | | |
 |---|---|
 | Credited | 11, with expected_turns 21 |
 | Credited per probe turn | 3, 1, 0, 0, 3, 4 |
-| Paged-only plants | 1 of 4 credited (`q_p_04`, via `contexto_search`); the other 3 were answered correctly without their span being returned, so not credited |
 | Answered correctly | 54 of 54; 43 of them not credited |
 | In-view spans | 23 |
+
+**What the two counts are.** `credit` scores all 54 probes of the script. Its result list is named
+`paged_only`, but it holds every probe:
+- the 4 paged-only probes `q_p_01` to `q_p_04` (type `paged_only`, planted in an early content turn);
+- the 50 probes `q_a_001` to `q_a_050` (chain, distractor, multihop and obligations types).
+
+A probe is credited when it was answered correctly and a `paged` span returned before its probe
+turn's answer covers its plant.
+- **11 credited** = `q_p_04` plus 10 `q_a` probes: `q_a_001`, `q_a_002`, `q_a_003`, `q_a_004`,
+  `q_a_005`, `q_a_006`, `q_a_008`, `q_a_039`, `q_a_040`, `q_a_043`.
+- **1 of 4 paged-only** = `q_p_04`, the one paged-only probe among those 11.
+
+**The 3 paged-only probes answered correctly but not credited** (`q_p_01`, `q_p_02`, `q_p_03`).
+Checked by page ids, offsets, turn numbers and record kinds, never by reading text.
+
+- *Pinned state (hypothesis): ruled out by timing.*
+  - The plants' content turn was paged out at turn 3's request and never came back into view: every
+    later `page_out` starts at turn index 0.
+  - Content turns 1 to 15 made no MCP call at all.
+  - The 9 `contexto_pin` calls came in probe turns 17 (1), 18 (4) and 21 (4), so no pin was made
+    while the plants were in view. `q_p_03` was asked in turn 16, before any pin existed.
+  - The pins are ledger records of kind `obligation` with empty `provenance`, so none links to a page
+    by id or offset.
+- *In view at answer time: no.* All 42 requests from turn 3 on were sent rewritten (smaller than
+  Codex's original body). The index line of a paged page carries only its first 200 characters of user
+  text and key-position identifiers. The plants sit past offset 900 of their page.
+- *Codex's own memories: none.* Its `memories_1.sqlite` holds 0 rows of output.
+- *Retrieval: it happened.*
+  - All 4 plants sit on the same original content page.
+  - For each of the 4, a `contexto_search` call returned a `paged` range covering the plant on that
+    page before its probe turn's answer.
+  - The statements of `q_p_01`, `q_p_02` and `q_p_03` also occur on later pages, of probe turns
+    (0-based page turn indices 16, 17 and 19; turn numbers elsewhere in this note are 1-based). How the
+    copies got there is unverified: their text was not read. They are consistent with search results
+    carried into the probe turns.
+  - `recall_credit.plant_spans` takes the first page, in the order given, that holds the statement.
+    The harness (`codex_live` and `codex_dryrun`) passes pages sorted by file name, that is by random
+    page id. So for these 3 it located the later copy, which no search covered.
+- *Recount (not the recorded verdict).* The same `credit` rule, with pages passed in turn order so the
+  earliest occurrence is the plant, credits 17: all 4 paged-only probes (adding `q_p_01`, `q_p_02`,
+  `q_p_03`) and 13 `q_a` (adding `q_a_007`, `q_a_042`, `q_a_044`). None are lost, and acceptance 3 is
+  true either way. Re-running the harness's own order reproduces the recorded 11 exactly.
+
+**Scores by category** (`credit`'s rule: the answer for an id equals the key, ignoring case). All
+correct.
+
+| Type | Tier | Correct |
+|---|---|---|
+| chain | depth6-current | 8 of 8 |
+| chain | depth6-previous | 7 of 7 |
+| chain | depth8-current | 8 of 8 |
+| chain | depth8-previous | 7 of 7 |
+| distractor | 8-dups | 6 of 6 |
+| multihop | 3-hop | 4 of 4 |
+| multihop | 4-hop | 4 of 4 |
+| obligations | single | 4 of 4 |
+| obligations | set6 | 2 of 2 |
+| paged_only | turn-1 | 4 of 4 |
+| **Total** | | **54 of 54** |
+
+The run's answers and the plan's answer key are kept locally for an independent rescore, never in
+Git.
 
 **Spend** (real usage from the proxy's log):
 
@@ -70,13 +134,46 @@ no watcher stop.
 
 | | |
 |---|---|
-| Requests | 44: 21 that ended a turn and 23 that held a tool call |
+| Requests | 44: 21 that ended a turn and 23 that held a tool call. Content turns used no tool round; the 6 probe turns used 5, 3, 2, 4, 4 and 5 |
 | Max input / max output | 26,066 / 136 |
 | MCP calls through Codex's `exec` | `contexto_search` 84, `contexto_recall` 0, `contexto_pin` 9, `contexto_state` 1; 0 failed |
 | Stream hold | 23 requests held (largest hold 128 events), 21 unheld |
 
 The model also called `contexto_pin` and `contexto_state`, which the stub never did, and never
 `contexto_recall`. Neither is a stop rule; both are noted as observed.
+
+## Spend against the estimate
+
+The approval was codex_budget's step-1 worst case: 51 requests at the bound plus the output allowance,
+plus a 10% margin. That is 51 × (64,000 + 32,000) × 1.10 = 5,385,600. The run spent 922,201, so the
+estimate was 5.84 times the spend. Term by term:
+
+| Term | Priced | Actual | Factor |
+|---|---|---|---|
+| Requests | 51: 15 content + 6 probe turns × (1 + 5 tool rounds) | 44: 15 + 6 + 23 tool rounds (probe turns used 5, 3, 2, 4, 4, 5) | 1.16 |
+| Tokens per request (input + output) | 96,000 | 20,959 mean | 4.58 |
+| Margin | 1.10 | none | 1.10 |
+| **Product** | | | **5.84** |
+
+Within the per-request term:
+
+| | Priced per request | Actual | Total priced (× 51 × 1.10) | Total actual | Share of the 4,463,399 gap |
+|---|---|---|---|---|---|
+| Input | 64,000 (the bound) | mean 20,909, median 20,800, range 16,731 to 26,066 | 3,590,400 | 919,998 | 59.8% |
+| Output | 32,000 (the allowance) | mean 50, max 136 | 1,795,200 | 2,203 | 40.2% |
+
+- **Input.** The engine kept each request near its retained-window budget, not the bound. In the 19
+  rotations, `window_budget` was 24,823 to 25,678 tokens, with a fixed overhead of 13,322 to 13,429.
+  The largest input was 40.7% of the bound.
+- **Output.** At low effort the model's replies were short: identifiers and values, at most 136
+  tokens. The 32,000 allowance is a reserve, because Codex sets no output cap.
+- **Cache.** 680,832 of the input tokens (74.0%) were cached. The line counts cached input in full, so
+  caching does not lower the counted spend. It matters only for a cost estimate.
+- **Requests.** The tool-round allowance of 5 per probe turn was reached in 2 of the 6 probe turns
+  (mean 3.8).
+
+For the next estimate table, measured on this run: 20,909 mean input per request (26,066 max) with
+this engine and 20 KB turns, 50 mean output (136 max), and 3.8 tool rounds per probe turn (5 max).
 
 ## Calls outside the proxy
 
