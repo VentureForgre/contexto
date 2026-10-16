@@ -354,8 +354,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
 - `contexto_search(query)`: exact substring search over page stubs and text. For each hit it returns
-  the page id, the matching lines with a small bounded context, and their character offsets in the
-  rendered page, so the model can answer from the hit or recall exactly that offset instead of
+  a short header (page id and turn number, no stub), the matching lines with one line of context, and
+  their character offsets in the rendered page; at most 3 pages per reply, followed by a note giving
+  how many more pages match so the model can narrow the query (measured offline: about 144 tokens per
+  hit instead of 359, total demand for the 54 probes 29,800 instead of 91,249), so the model can answer from the hit or recall exactly that offset instead of
   reading a page from the top (measured in the second live H1 run: a full recall from offset 0
   reached character 30,651 of a 39,405-character page within the turn's room, and the two facts
   beyond it were lost). Results are charged against the per-turn room. No embeddings, no
