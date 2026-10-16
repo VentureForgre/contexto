@@ -230,7 +230,7 @@ flag-level base URL, the runs reached the model through the route set by the mai
 `M0-interception.md` section 7].
 
 ```sh
-python3 spikes/m0/rollover/make_handoff.py <approx_tokens> <out.md>  # synthetic handoff
+python3 spikes/m0/rollover/make_handoff.py <size_unit> <out.md>     # synthetic handoff of size_unit * 4 bytes
 spikes/m0/rollover/run_seed.sh <label> <handoff.md> <key_index>     # one seeded run; key 0 = no recall question
 python3 spikes/m0/rollover/session_usage.py <session.jsonl>           # usage per message id, hook count
 ```
