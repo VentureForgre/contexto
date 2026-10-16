@@ -196,7 +196,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   Page id: `pg_` + first 16 hex of HMAC-SHA256 over the canonical JSON of `{turn, messages}`
   only (not the stub or token estimate, so ids stay stable when those rules change), keyed with a
   random per-store key kept in the store and never sent upstream (ids appear in prompts, and short turns
-  must not be guessable from their id). Pages are immutable.
+  must not be guessable from their id). Pages are immutable: paging a turn whose id
+  already exists is a no-op that keeps the stored page, and only a differing `{turn, messages}`
+  under the same id is a conflict. No migration is needed, because no real stores existed before
+  this rule.
 - **Ledger:** the M1 record model (kinds `event`, `decision`, `obligation`, `artifact`,
   `reference`, `closure`; epistemic `verified`, `reported`, `summary`, `hypothesis`; provenance;
   supersession; open obligations) harvested from PR #2 (record model), PR #3 (state derivation),
