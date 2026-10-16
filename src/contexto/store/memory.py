@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from contexto.store import (PageConflictError, PageNotFoundError, charge_room, check_page_id,
+from contexto.store import (PageConflictError, PageNotFoundError, charge_room, check_page_id, check_retained,
                              check_model, check_turn_room, check_window, redact)
 from contexto.store.ledger import MemoryLedger
 from contexto.store.recall import lists_identifiers
@@ -27,6 +27,10 @@ class MemoryStore(LedgerOps):
         self.quarantined: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
         self._workdir: Path | None = None
         self._turn_room: tuple[str | None, int | None, int] = (None, None, 0)
+        self._room_stamp: int | None = None
+        self._request_seq = 0
+        self._retained_stamp: int | None = None
+        self._retained: tuple[int, int, int, list[dict[str, Any]]] | None = None
         self._room_lock = threading.Lock()
 
     def set_workdir(self, path: Path) -> None:
@@ -50,6 +54,20 @@ class MemoryStore(LedgerOps):
         turn_id = check_turn_room(turn_id, room_tokens)
         with self._room_lock:  # every publish resets what was spent (see SessionStore.set_turn_room)
             self._turn_room = (turn_id, room_tokens, 0)
+            self._room_stamp = self._retained_stamp
+
+    def set_retained(self, epoch: int, k: int, turns: list[dict[str, Any]]) -> None:
+        entries = check_retained(epoch, k, turns)
+        with self._room_lock:
+            self._request_seq += 1
+            self._retained_stamp = self._request_seq
+            self._retained = (epoch, k, self._request_seq, [dict(e) for e in entries])
+
+    def retained(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
+        return self._retained
+
+    def room_stamp(self) -> int | None:
+        return self._room_stamp
 
     def turn_room(self) -> tuple[str | None, int | None, int]:
         return self._turn_room
