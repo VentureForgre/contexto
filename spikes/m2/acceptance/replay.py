@@ -5,9 +5,11 @@ the request needs, and nothing leaves that private directory except the answers 
 
 - ``api-request-shape``: the system prompt and tools Claude Code sent;
 - ``api-request``: the request params (model, betas, thinking, output config);
-- ``user`` and ``assistant`` records: the local history, which the proxy never shortened.
+- ``api-request`` records as deltas (``base``, ``keep``, ``tail`` hashes) and ``api-request-blob``,
+  ``user`` and ``assistant`` records: each request's messages, which the proxy never shortened.
 
-The replay sends the history up to the probe turn, then the probe turn, straight to the upstream
+The replay sends H1's probe-turn request as Claude Code built it, decoded from its request records
+(the session-start system message, per-turn reminders, and every turn), straight to the upstream
 (the owner's proxy), bypassing Contexto. Thinking blocks are stripped, so it is a no-replayed-thinking
 baseline. Contexto's tools are removed and ``tool_choice`` is ``none``, so the model answers from the
 context alone. ``context_management`` is dropped so nothing edits the context away.
@@ -18,6 +20,7 @@ header; it is never written, logged, or printed. The first 401 or 403 stops the 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import urllib.error
@@ -38,53 +41,103 @@ class ReplayError(Exception):
     pass
 
 
-def _strip_assistant(content: Any) -> list[dict]:
-    blocks = content if isinstance(content, list) else [{"type": "text", "text": str(content or "")}]
-    kept = [b for b in blocks if isinstance(b, dict) and b.get("type") not in ("thinking", "redacted_thinking")]
-    return kept or [{"type": "text", "text": "OK"}]
+def message_hash(message: dict[str, Any]) -> str:
+    """How Claude Code 2.1.301 names a message in its request records: sha256 of sorted compact JSON."""
+    canonical = json.dumps(message, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _content_list(content: Any) -> list[dict]:
-    return content if isinstance(content, list) else [{"type": "text", "text": str(content or "")}]
+def _known_messages(cc_records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Every message a request record can name, by hash: request blobs, user records, and assistant
+    replies. Claude Code writes one assistant record per content block (thinking, then text) under
+    the same message id, so consecutive records of one message are merged first, as it sent them."""
+    known: dict[str, dict[str, Any]] = {}
+    current_id, current = None, None
+
+    def flush() -> None:
+        if current is not None:
+            known[message_hash(current)] = current
+
+    for r in cc_records:
+        kind = r.get("type")
+        if kind == "api-request-blob" and isinstance(r.get("message"), dict):
+            known[r["hash"]] = r["message"]
+        if r.get("isSidechain") or not isinstance(r.get("message"), dict):
+            continue
+        if kind == "assistant":
+            msg_id = r["message"].get("id")
+            blocks = r["message"].get("content")
+            blocks = blocks if isinstance(blocks, list) else [{"type": "text", "text": str(blocks or "")}]
+            if current is not None and msg_id is not None and msg_id == current_id:
+                current["content"] = current["content"] + blocks
+            else:
+                flush()
+                current_id, current = msg_id, {"role": "assistant", "content": list(blocks)}
+        elif kind == "user":
+            flush()
+            current_id, current = None, None
+            m = r["message"]
+            user = {"role": m.get("role"), "content": m.get("content")}
+            known[message_hash(user)] = user
+    flush()
+    return known
+
+
+def recorded_messages(cc_records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Each api-request's messages, decoded from Claude Code's delta records (``base`` request id,
+    ``keep`` messages kept from it, ``tail`` message hashes). Raises ReplayError on a hash it cannot
+    resolve: no guessing."""
+    known = _known_messages(cc_records)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in cc_records:
+        if r.get("type") != "api-request":
+            continue
+        base = r.get("base")
+        if base and base not in out:
+            raise ReplayError("a request record names a base request the JSONL does not hold")
+        messages = list(out.get(base, []))[: int(r.get("keep") or 0)]
+        for h in r.get("tail") or []:
+            if h not in known:
+                raise ReplayError("a request record names a message the JSONL does not hold")
+            messages.append(known[h])
+        out[r["id"]] = messages
+    return out
+
+
+def _has_text(message: dict[str, Any], text: str) -> bool:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content == text
+    return any(isinstance(b, dict) and b.get("text") == text for b in content or [])
 
 
 def build_request(cc_records: list[dict[str, Any]], probe_text: str, max_tokens: int) -> dict[str, Any]:
-    """The replay request: the head and params Claude Code recorded, the history before the probe
-    turn, and the probe turn. Raises ReplayError when the JSONL lacks a part."""
-    shapes = [r for r in cc_records if r.get("type") == "api-request-shape" and isinstance(r.get("shape"), dict)]
-    params = [r for r in cc_records if r.get("type") == "api-request" and isinstance(r.get("params"), dict)]
-    if not shapes or not params:
+    """The replay request: H1's probe-turn request as Claude Code sent it (system and tools from its
+    shape, params, and every message, including system messages and per-turn reminders), with
+    thinking stripped from assistant messages. Raises ReplayError when the JSONL lacks a part."""
+    shapes = {r.get("shapeHash"): r["shape"] for r in cc_records
+              if r.get("type") == "api-request-shape" and isinstance(r.get("shape"), dict)}
+    requests = [r for r in cc_records if r.get("type") == "api-request" and isinstance(r.get("params"), dict)]
+    if not shapes or not requests:
         raise ReplayError("the session JSONL has no api-request-shape or api-request record")
-    shape, p = shapes[-1]["shape"], params[-1]["params"]
-
-    messages: list[dict[str, Any]] = []
-    probe_seen = False
-    for r in cc_records:
-        if r.get("type") not in ("user", "assistant") or r.get("isSidechain") or r.get("isMeta"):
-            continue
-        msg = r.get("message")
-        if not isinstance(msg, dict):
-            continue
-        role = msg.get("role")
-        if role == "user":
-            blocks = _content_list(msg.get("content"))
-            if any(isinstance(b, dict) and b.get("text") == probe_text for b in blocks):
-                probe_seen = True
-                break
-        elif role == "assistant":
-            blocks = _strip_assistant(msg.get("content"))
-        else:
-            continue
-        if messages and messages[-1]["role"] == role:  # Claude Code can split one turn over records
-            messages[-1]["content"].extend(blocks)
-        else:
-            messages.append({"role": role, "content": list(blocks)})
-    if not probe_seen:
+    decoded = recorded_messages(cc_records)
+    probe = next((r for r in requests if any(m.get("role") == "user" and _has_text(m, probe_text)
+                                              for m in decoded.get(r["id"], []))), None)
+    if probe is None:
         raise ReplayError("the probe turn is not in the session JSONL; the H1 run did not reach it")
-    if messages and messages[-1]["role"] == "user":
-        raise ReplayError("the history before the probe turn ends without an assistant reply")
-    messages.append({"role": "user", "content": [{"type": "text", "text": probe_text}]})
-
+    shape = shapes.get(probe.get("shapeHash"))
+    if shape is None:
+        raise ReplayError("the probe request's shape is not in the session JSONL")
+    messages = []
+    for m in decoded[probe["id"]]:
+        if m.get("role") == "assistant":
+            content = m.get("content") if isinstance(m.get("content"), list) else [{"type": "text", "text": m.get("content")}]
+            kept = [b for b in content if isinstance(b, dict) and b.get("type") not in ("thinking", "redacted_thinking")]
+            if not kept:
+                raise ReplayError("an assistant message holds only thinking; nothing is left to replay")
+            m = {"role": "assistant", "content": kept}
+        messages.append(m)
+    p = probe["params"]
     tools = [t for t in shape.get("tools") or [] if not str(t.get("name", "")).startswith(CONTEXTO_TOOL_PREFIX)]
     request: dict[str, Any] = {"model": p.get("model", driver.MODEL), "max_tokens": max_tokens,
                                "system": shape.get("system") or [], "messages": messages, "stream": True}

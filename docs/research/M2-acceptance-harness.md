@@ -364,14 +364,20 @@ uv run python spikes/m2/acceptance/run.py replay --cc-jsonl <H1 session JSONL> -
     --approved 477681 --seat-settings <seat settings> [--dry]
 ```
 
-Intake chose this order (2026-10-16): run H1, then send the baseline as one direct request. Claude
-Code's own session JSONL in the H1 run's isolated config directory holds everything it needs:
-- `api-request-shape`: the system prompt and tools Claude Code sent;
-- `api-request`: the request params (model, betas, thinking, output config);
-- the `user` and `assistant` records: the full local history, which the proxy never shortened.
+Intake chose this order (2026-10-16): run H1, then send the baseline as one direct request. It is
+H1's probe-turn request as Claude Code built it, read from Claude Code's session JSONL in the H1
+run's isolated config directory:
+- `api-request` records are deltas: `base` (the previous request's id), `keep` (messages kept from
+  it), and `tail` (hashes of the new messages). A hash is the sha256 of the message as sorted
+  compact JSON, and resolves to an `api-request-blob` (the session-start messages and per-turn
+  reminders) or a `user` or `assistant` record. Claude Code writes one assistant record per
+  content block (thinking, then text) under one message id; merged, they hash to what it sent.
+- `api-request-shape` (matched by `shapeHash`): the system prompt and tools; the request's
+  `params`: model, betas, thinking, output config.
+- The first request that holds the probe turn is replayed with all its messages, system messages
+  included. A hash that resolves to nothing stops the replay; nothing is guessed or synthesized.
 
-The replay sends the history up to the probe turn, then the probe turn, straight to the owner's
-proxy, bypassing Contexto.
+It goes straight to the owner's proxy, bypassing Contexto.
 - **No replayed thinking.** Thinking blocks are stripped, so it is labeled a no-replayed-thinking
   baseline.
 - **No tool loop.** Contexto's tools are removed and `tool_choice` is `none`, so the model answers
@@ -386,9 +392,9 @@ proxy, bypassing Contexto.
   count, usage, stop reason, block counts). `run.py score --h1 ... --baseline ...` compares the two
   answer sets.
 
-`--dry` builds the request and prints its sizes with no calls. On the 40 KB stub run's JSONL it gave
-37 messages (18 turn pairs and the probe), 21 tools, about 802 KB, and about 422,000 modelled input
-tokens, against the budget's 445,681.
+`--dry` builds the request and prints its sizes with no calls. On the H1 rerun's JSONL
+(`acceptance-20261016T024733Z`) it decodes all 56 messages of the probe-turn request (18 turns, each
+with its reminder, then the probe turn and its reminder), with 21 tools and about 814 KB.
 
 ## Open questions
 

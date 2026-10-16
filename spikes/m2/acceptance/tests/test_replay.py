@@ -21,46 +21,69 @@ from acceptance import driver, replay, run  # noqa: E402
 PROBE = "Final step. Answer the questions below."
 
 
-def _records(probe: str = PROBE, extra_after_probe: bool = True) -> list[dict[str, Any]]:
+def _records(probe: str = PROBE) -> list[dict[str, Any]]:
+    """Claude Code 2.1.301's shape: one assistant record per content block under one message id, and
+    each api-request a delta (base request, messages kept, hashes of new messages)."""
+    H = replay.message_hash
+    session_start = {"role": "user", "content": [{"type": "text", "text": "<system-reminder>ctx</system-reminder>"},
+                                                 {"type": "text", "text": "turn 1"}]}
+    sys_msg = {"role": "system", "content": [{"type": "text", "text": "session start"}]}
+    reminder = {"role": "system", "content": [{"type": "text", "text": "reminder"}]}
+    a1 = {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"},
+                                           {"type": "text", "text": "OK"}]}
+    u2 = {"role": "user", "content": [{"type": "text", "text": "turn 2"}]}
+    a2 = {"role": "assistant", "content": [{"type": "text", "text": "OK."}]}
+    u3 = {"role": "user", "content": [{"type": "text", "text": probe}]}
     shape = {"system": [{"type": "text", "text": "sys"}],
              "tools": [{"name": "Read", "input_schema": {}}, {"name": "mcp__contexto__contexto_recall", "input_schema": {}}]}
-    recs: list[dict[str, Any]] = [
-        {"type": "api-request-shape", "shape": shape},
-        {"type": "api-request", "params": {"model": "claude-haiku-5-5", "betas": ["b1"], "max_tokens": 128000,
-                                           "thinking": {"type": "adaptive"}, "context_management": {"edits": []},
-                                           "output_config": {"effort": "medium"}}},
-        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "turn 1"}]}},
-        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "t"},
-                                                                          {"type": "text", "text": "OK"}]}},
+    params = {"model": "claude-haiku-5-5", "betas": ["b1"], "max_tokens": 128000, "thinking": {"type": "adaptive"},
+              "context_management": {"edits": []}, "output_config": {"effort": "medium"}}
+    return [
+        {"type": "api-request-shape", "shapeHash": "sh", "shape": shape},
+        {"type": "api-request-blob", "hash": H(session_start), "message": session_start},
+        {"type": "api-request-blob", "hash": H(sys_msg), "message": sys_msg},
+        {"type": "api-request-blob", "hash": H(reminder), "message": reminder},
+        {"type": "api-request", "id": "r1", "shapeHash": "sh", "params": params, "keep": 0,
+         "tail": [H(session_start), H(sys_msg)]},
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant", "content": a1["content"][:1]}},
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant", "content": a1["content"][1:]}},
+        {"type": "user", "message": u2},
+        {"type": "api-request", "id": "r2", "shapeHash": "sh", "params": params, "base": "r1", "keep": 2,
+         "tail": [H(a1), H(u2), H(reminder)]},
+        {"type": "assistant", "message": {"id": "m2", "role": "assistant", "content": a2["content"]}},
+        {"type": "user", "message": u3},
+        {"type": "api-request", "id": "r3", "shapeHash": "sh", "params": params, "base": "r2", "keep": 5,
+         "tail": [H(a2), H(u3), H(reminder)]},
         {"type": "user", "isSidechain": True, "message": {"role": "user", "content": "side"}},
-        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "turn 2"}]}},
-        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "redacted_thinking", "data": "x"}]}},
-        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": probe}]}},
     ]
-    if extra_after_probe:  # the probe turn's own tool loop is not part of the baseline
-        recs += [{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1"}]}},
-                 {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1"}]}}]
-    return recs
 
 
-def test_build_request_keeps_history_strips_thinking_and_contexto_tools():
+def test_build_request_is_the_recorded_probe_request_without_thinking():
     req = replay.build_request(_records(), PROBE, 32_000)
-    assert [m["role"] for m in req["messages"]] == ["user", "assistant", "user", "assistant", "user"]
-    blocks = [b for m in req["messages"] for b in m["content"]]
-    assert not any(b["type"] in ("thinking", "redacted_thinking", "tool_use", "tool_result") for b in blocks)
-    assert req["messages"][3]["content"] == [{"type": "text", "text": "OK"}]  # emptied by stripping
-    assert req["messages"][-1]["content"] == [{"type": "text", "text": PROBE}]
+    assert [m["role"] for m in req["messages"]] == ["user", "system", "assistant", "user", "system", "assistant",
+                                                    "user", "system"]
+    assert req["messages"][1]["content"][0]["text"] == "session start"  # what H1 actually sent
+    assert req["messages"][2]["content"] == [{"type": "text", "text": "OK"}]  # merged, then thinking stripped
+    assert req["messages"][5]["content"] == [{"type": "text", "text": "OK."}]  # nothing synthesized
+    assert req["messages"][6]["content"] == [{"type": "text", "text": PROBE}]
     assert [t["name"] for t in req["tools"]] == ["Read"] and req["tool_choice"] == {"type": "none"}
     assert "context_management" not in req and req["thinking"] == {"type": "adaptive"}
     assert req["max_tokens"] == 32_000 and req["stream"] is True and req["_betas"] == ["b1"]
-    assert replay.summary(req)["messages"] == 5
+    assert replay.summary(req)["messages"] == 8
 
 
 def test_build_request_refuses_an_incomplete_jsonl():
+    recs = _records()
     with pytest.raises(replay.ReplayError, match="api-request-shape"):
-        replay.build_request(_records()[2:], PROBE, 1_000)
+        replay.build_request([r for r in recs if r["type"] != "api-request-shape"], PROBE, 1_000)
     with pytest.raises(replay.ReplayError, match="probe turn"):
         replay.build_request(_records(probe="something else"), PROBE, 1_000)
+    with pytest.raises(replay.ReplayError, match="does not hold"):  # an unresolvable hash is not guessed
+        replay.build_request([r for r in recs if r.get("message", {}).get("id") != "m2"], PROBE, 1_000)
+    thinking_only = [r for r in recs if not (r["type"] == "assistant" and r["message"]["content"][0]["type"] == "text"
+                                             and r["message"]["id"] == "m1")]
+    with pytest.raises(replay.ReplayError):
+        replay.build_request(thinking_only, PROBE, 1_000)
 
 
 def test_check_fits_stops_rather_than_trimming():
@@ -173,5 +196,5 @@ def test_replay_stops_on_the_first_401(tmp_path, stub):
 def test_replay_dry_makes_no_calls(tmp_path, stub, capsys):
     jsonl, _ = _setup(tmp_path)
     assert run.main(["replay", "--cc-jsonl", str(jsonl), "--out", str(tmp_path / "o"), "--dry"]) == 0
-    assert _Stub.seen == [] and json.loads(capsys.readouterr().out)["request"]["messages"] == 5
+    assert _Stub.seen == [] and json.loads(capsys.readouterr().out)["request"]["messages"] == 8
     assert driver.MODEL == "claude-haiku-5-5"
