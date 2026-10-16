@@ -36,11 +36,15 @@ proxy (Anthropic Messages API)        mcp server (stdio, JSON-RPC)
                      (session S)        contexto_close, contexto_state
 ```
 
-Upstream resolution: the launcher reads the base URL Claude Code would otherwise use (explicit
-`--upstream`, else `ANTHROPIC_BASE_URL` in the environment, else the value from the settings
-files Claude Code loads, including the main checkout's `settings.local.json` in a worktree, else
-`https://api.anthropic.com`). Organization-managed settings still outrank `--settings`; document
-that limit.
+Upstream resolution: the launcher computes the base URL Claude Code would otherwise use, in this
+order (measured in M0, PR #16 findings 1 and 1a: a settings-file `env.ANTHROPIC_BASE_URL`
+overrides the process environment, and in a git worktree the main checkout's
+`settings.local.json` wins): explicit `--upstream`; else the first settings file that sets
+`env.ANTHROPIC_BASE_URL`, in Claude Code's precedence (in a worktree the main checkout's
+`.claude/settings.local.json` first, then the local, project, and user settings files); else
+`ANTHROPIC_BASE_URL` in the process environment; else `https://api.anthropic.com`. The launcher's
+own flag-level `--settings` outranks all of these, which is what makes the proxy attachment work.
+Organization-managed settings still outrank `--settings`; document that limit.
 
 ## Rewrite engine (normative)
 

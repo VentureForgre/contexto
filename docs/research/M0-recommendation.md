@@ -34,7 +34,7 @@ Ranked by the owner's bar (D2): compaction never fires, accuracy equals full con
 H1 is cheaper than compaction from turn 14 on (modeled). Its cost rises with route-side cache
 misses: at a 23% miss rate (3 of 13 eligible throwaway calls in the cost model; lane 1 counts 4
 of 14 including one compaction summary call), $212.47 against $971.37 for compaction
-(modeled), so its advantage widens rather than shrinks.
+(modeled), so its advantage in dollars widens rather than shrinks.
 
 ## Constraints the design must obey (all measured or vendor-documented)
 
@@ -47,8 +47,8 @@ of 14 including one compaction summary call), $212.47 against $971.37 for compac
    index change only at rotation, and the window is append-only, so each epoch reads its prefix
    from cache.
 4. **Attachment.** In a git worktree Claude Code also loads the main checkout's
-   `settings.local.json`, and its base URL wins (measured). The launcher passes an explicit
-   `--settings` (D16).
+   `settings.local.json`, and model requests go to that file's base URL, not the worktree's
+   (measured, PR #13; vendor-documented, D16). The launcher passes an explicit `--settings` (D16).
 5. **Usage.** The `usage` the CLI sees decides whether it compacts. Forwarding the true usage of
    the bounded upstream prompt should keep the CLI from ever compacting (inferred); the acceptance
    run must prove it.
