@@ -285,7 +285,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       from 0 as before, and the engine logs content-free `epoch_not_resumed` with one reason
       (`no_record`, `unreadable`, `dialect_changed`, `model_changed`, `settings_changed`,
       `preamble_changed`, `head_changed`, `history_shorter`, `history_diverged`,
-      `other_conversation`). A resume logs `epoch_resumed` with `epoch` and `k`. Measured sizing
+      `other_conversation`, `pages_missing`: the store holds fewer pages than the record's
+      `turns_paged`, packet A31). A resume logs `epoch_resumed` with `epoch` and `k`. Measured sizing
       (packet A8's ratio restore) is unchanged and still applies.
     - **Who writes.** Only the main conversation writes. After a restart, no conversation writes
       until one has resumed from the record or has strictly more turn starts than the record's
