@@ -934,3 +934,18 @@ def test_a12_logs_turn_room_low_after_a_rotation_that_leaves_the_room_low():
     assert after
     for r in after:
         assert p.bound - r.input_tokens - budget.HEADROOM_FLOOR < p.min_turn_room  # still low after it
+
+
+def test_head_follows_contexto_tool_bytes():
+    # The head is derived (intake 2026-10-16 09:42Z): the measured 47,600 plus Contexto's own tool
+    # definitions' byte change at 3.0 bytes per token. If the definitions change, update
+    # budget.CONTEXTO_TOOL_BYTES (and the head with it) before any live approval.
+    from contexto.mcp import TOOLS
+
+    as_sent = [{"name": "mcp__contexto__" + t["name"], "description": t["description"], "input_schema": t["inputSchema"]}
+               for t in TOOLS]
+    measured = sum(len(json.dumps(t, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) for t in as_sent)
+    assert measured == budget.CONTEXTO_TOOL_BYTES, f"Contexto's tool definitions are {measured} bytes; update budget.HEAD"
+    assert budget.HEAD == budget.Params().head == 47_628
+    assert budget.HEAD == budget.HEAD_MEASURED + math.ceil(
+        (budget.CONTEXTO_TOOL_BYTES - budget.CONTEXTO_TOOL_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN)

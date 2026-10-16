@@ -25,6 +25,18 @@ from contexto.store.render import RECALL_LIMIT, recall_limit
 
 BYTES_PER_TOKEN_LOG = 1.8
 BYTES_PER_TOKEN_TEXT = 3.5
+OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it (stubrun.OTHER_BYTES_PER_TOKEN)
+
+# The head (Params.head), derived (intake 2026-10-16 09:42Z). 47,600 is the engine's fixed overhead F
+# measured in the stub dry runs through the launcher (dry runs #1 to #4, main up to c8f0b08): system,
+# tools and preamble. The part of it this repo controls is Contexto's own tool definitions in Claude
+# Code's request form; when they change, the head moves by their byte change at OTHER_BYTES_PER_TOKEN.
+# B19 and B21 (main 8571095, dry run #5) grew them from 2,743 to 2,827 bytes: 47,600 + ceil(84 / 3.0) =
+# 47,628. test_head_follows_contexto_tool_bytes fails when the definitions change without this.
+HEAD_MEASURED = 47_600
+CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
+CONTEXTO_TOOL_BYTES = 2_827  # main 8571095
+HEAD = HEAD_MEASURED + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
 HEADROOM_FLOOR = 25_000
 
 
@@ -39,7 +51,7 @@ def engine_default(name: str) -> int:
 @dataclass(frozen=True)
 class Params:
     bound: int = 150_000  # intake 00:40Z: the shipped default; history must reach 2.5x (375,000)
-    head: int = 47_600  # the engine's fixed overhead F in the stub dry run through the launcher (M0 figure: 54,500)
+    head: int = HEAD  # the engine's fixed overhead F, derived above (M0 figure: 54,500)
     window_fraction: float = 0.5  # rule 4: retained window targets this share of W
     reply_tokens: int = 20  # "OK" plus a little thinking per build turn
     preamble_base: int = 300  # the preamble's fixed lines
