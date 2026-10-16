@@ -68,9 +68,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
 - A **turn** is a turn-start message plus every following assistant, `tool_result` user, and
   `role: "system"` message up to the next turn-start message.
 - **Carried content** is never paged: the injected context blocks of any turn-start message
-  (everything but the user's own prompt text), and every `role: "system"` message, always in the
-  CLI's current form (an emptied system message is carried as empty, never restored from a stored
-  copy). Lane A pins down, with stub evidence, exactly which blocks count as injected context.
+  (everything but the user's own prompt text); the session-start `role: "system"` message; the
+  latest settings-only system message per settings key (rule 13); and tool-addition system
+  messages. All are carried in the CLI's current form, never restored from a stored copy. Any
+  other `role: "system"` message carries per-turn content (for example the output of a
+  context-injecting `UserPromptSubmit` hook) and belongs to its turn: it is paged with that turn. Lane A pins down, with stub evidence, exactly which blocks count as injected context.
 - The proxy keeps an epoch state `E = (k, carried, pinned_text, index_text, head_fingerprint)`:
   the turns before turn index `k` are paged out.
 
@@ -138,16 +140,17 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     client-side edit precedes kept thinking (zero-spend stubs; measured by builder-2, reported by
     manager-1, pending review; evidence to land in the A2 PR under `spikes/m2/carried/`). If a
     later CLI version starts emptying them, re-run that check before relying on kept thinking.
-13. **Carried growth.** Measured by builder-2 (zero spend, real CLI-written history, one fresh
-    start and five resumes; reported by manager-1, pending review): system messages accrue per
-    settings change, not per turn or per resume; each effort change adds one settings-only message
-    of about 66 bytes after the new prompt, and injected context blocks stay in `messages[0]`. So
-    carried content grows only with settings changes. At rotation only (deterministic, and safe for
-    thinking because rotation strips it), keep the latest settings-only system message per
-    settings key and drop superseded ones from the carried set. If carried content grows by more
-    than 4,000 tokens over its size at the session's first request, log `carried_over_budget` in
-    the session log (the initial size, which includes CLAUDE.md, is normal); tool-addition system messages
-    from MCP tool-list changes are not yet measured and would show up there.
+13. **Carried growth.** Measured by builder-2 without hooks (zero spend, real CLI-written history,
+    one fresh start and five resumes; reported by manager-1, pending review): system messages
+    accrue per settings change; each effort change adds one settings-only message of about 66
+    bytes after the new prompt. Measured by reviewer-2 with a context-injecting `UserPromptSubmit`
+    hook (zero spend, three real CLI-written turns, PR #30 review): one content system message per
+    turn, so OpenRig seats and other hook users add one every turn. Hence the split in the Terms:
+    per-turn content system messages page with their turn, and only session-start,
+    settings-only, and tool-addition messages are carried. At rotation only (deterministic, and
+    safe for thinking because rotation strips it), keep the latest settings-only message per
+    settings key. If carried content grows by more than 4,000 tokens over its size at the
+    session's first request, log `carried_over_budget` in the session log.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
