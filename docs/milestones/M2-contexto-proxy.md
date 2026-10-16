@@ -77,8 +77,9 @@ new-turn request; they can carry `cache_control`.
    Until the first real usage arrives, count `tool_result` content at 2.0 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
    character); after that, use the session's measured bytes-per-token ratio.
-4. **Rotation.** Choose the largest `k` such that the retained turns fit in `window_target`
-   (default 50% of the bound) and the newest turn is always retained; write the newly paged turns
+4. **Rotation.** Choose the smallest `k` (retain as many recent turns as fit) such that the
+   retained turns fit in `window_target` (default 50% of the bound), always retaining the newest
+   complete turn and the new turn; write the newly paged turns
    to the page store, one page per turn, minus carried content; add any newly paged system
    messages to `carried`; rebuild `pinned_text` and `index_text`; strip thinking per rule 2.
 5. **Never rotate inside a tool loop** (D17). A turn that grows past the bound is sent as is and
