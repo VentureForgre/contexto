@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-16 16:00Z by intake.lead. Decisions taken and still open, with reasons:
+Updated 2026-10-16 16:45Z by intake.lead. Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -104,7 +104,7 @@ fewer tokens but 2.3 times the cost. The main cause is Contexto's handling of re
 bound: the acceptance harness started a new Contexto proxy for each of the 21 `codex exec` turns,
 and a new proxy kept no epoch state, so every one of the 19 rotations was the first request after
 a restart (verified from the run's log). Each rotation changes the text right after Codex's
-9,088-token head, so those requests read only the head from cache. A zero-spend replay (A28,
+9,088-token head, so 17 of those 19 requests read only the head from cache. A zero-spend replay (A28,
 `docs/research/M2-cache-aware-rotation.md`) models resuming the epoch after a restart at 9 rotations
 instead of 19 and 9.8 to 16.2 percent lower cost, depending on the bytes-per-token rate; that is
 rule 16, being built (A30, B31). Codex's own compaction would not have fired (plain peak 116,731,
