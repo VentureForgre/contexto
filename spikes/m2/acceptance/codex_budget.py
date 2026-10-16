@@ -21,10 +21,15 @@ Total = (H1 + baseline) × (1 + margin). The driver stops H1 at ``approved - bas
 
 from __future__ import annotations
 
+import json
 import math
+import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 
-from acceptance import script
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from acceptance import script  # noqa: E402
 
 # One adapter over budget.py (lane B): builder-4 is changing that module (Params.recalls becomes
 # tool_rounds), so everything A16 takes from it passes through here and a rename is one line.
@@ -106,3 +111,78 @@ def formula(b: CodexBudget) -> str:
             f"{b.retries_per_turn}) x ({b.bound:,} + {OUTPUT_ALLOWANCE:,}) = {b.h1_requests} x {b.bound + OUTPUT_ALLOWANCE:,} "
             f"= {b.h1_worst:,}; baseline = {b.baseline_worst:,} over {b.baseline_requests} requests (largest input "
             f"{b.baseline_max_input:,}); total = (H1 + baseline) x {1 + b.margin:.2f} = {b.total_worst:,}")
+
+
+CODEX_WINDOW = 272_000  # gpt-6-astra's context window (docs/research/M2-codex-adapter.md); a replayed
+# request goes to the upstream directly, so Codex's own compaction does not apply, but the window does
+
+
+def baseline_breakdown(s: script.Script, head: int = CODEX_HEAD, output: int = OUTPUT_ALLOWANCE,
+                       retries_per_turn: int = 1) -> dict[str, int]:
+    """The session baseline's worst case (``estimate``) split into its terms: every request's input
+    (head plus history), the output allowance, and the retry allowance that repeats each request."""
+    history, inputs, requests = head, 0, 0
+    for size in s.content_bytes:
+        history += turn_tokens(size)
+        inputs, requests, history = inputs + history, requests + 1, history + REPLY_TOKENS
+    for size in s.probe_bytes:
+        history += turn_tokens(size)
+        inputs, requests, history = inputs + history, requests + 1, history + PROBE_ANSWER_TOKENS
+    first = inputs + requests * output
+    return {"requests": requests, "head_per_request": head, "head_total": head * requests,
+            "history_total": inputs - head * requests, "input_total": inputs, "output_total": requests * output,
+            "once": first, "retries": retries_per_turn * first, "total": (1 + retries_per_turn) * first,
+            "retry_requests": retries_per_turn * requests}
+
+
+def replay_baseline(s: script.Script, head: int = CODEX_HEAD, output: int = OUTPUT_ALLOWANCE,
+                    retries_per_turn: int = 1) -> dict[str, int | bool]:
+    """A cheaper baseline, built as Claude's (run.py replay): only the 6 probe requests, each sent once
+    to the upstream with the whole history before it (from Codex's rollout), tools off. Every request
+    must fit the model's window with its output allowance."""
+    history = head + sum(turn_tokens(x) + REPLY_TOKENS for x in s.content_bytes)
+    inputs = []
+    for size in s.probe_bytes:
+        history += turn_tokens(size)
+        inputs.append(history)
+        history += PROBE_ANSWER_TOKENS
+    once = sum(x + output for x in inputs)
+    return {"requests": len(inputs) * (1 + retries_per_turn), "largest_input": max(inputs),
+            "fits": max(inputs) + output <= CODEX_WINDOW, "total": (1 + retries_per_turn) * once}
+
+
+def history_turns(bound: int, turn_bytes: int, seed: int = script.DEFAULT_SEED) -> script.Script:
+    """D27's script: the fewest content turns whose history reaches 2.5x the bound (run.build_script)."""
+    n = 4
+    while True:
+        s = script.build(seed, n, turn_bytes)
+        if sum(turn_tokens(x) + REPLY_TOKENS for x in s.content_bytes) >= 2.5 * bound:
+            return s
+        n += 1
+
+
+def staged(s: script.Script, bound: int, margin: float = 0.10) -> dict[str, int | bool]:
+    """Intake's staged design: step 1 is the H1 arm alone (acceptance 1 and 3), step 2 the baseline replay
+    and the fidelity score (acceptance 2), run only if step 1 passes. Each step's worst case carries the
+    margin, and each is its own stop cap."""
+    b = estimate(s, bound, margin=margin)
+    replay = replay_baseline(s)
+    step1 = math.ceil(b.h1_worst * (1 + margin))
+    step2 = math.ceil(replay["total"] * (1 + margin))
+    return {"bound": bound, "content_turns": s.n_content, "step1_h1": step1, "step2_baseline_replay": step2,
+            "total": step1 + step2, "replay_fits": replay["fits"], "replay_largest_input": replay["largest_input"],
+            "session_baseline": b.baseline_worst, "session_baseline_fits": b.baseline_fits}
+
+
+def main() -> None:
+    """The figures the plan cites: the shipped default bound (150,000, launcher.DEFAULT_BOUND) at D27's 40 KB
+    turns, and 64,000 at 20 KB and 40 KB turns."""
+    for bound, kb in ((150_000, 40), (64_000, 20), (64_000, 40)):
+        s = history_turns(bound, kb * 1000)
+        print(json.dumps({"turn_kbytes": kb, **staged(s, bound)}))
+    s = history_turns(64_000, 20_000)
+    print(json.dumps({"baseline_breakdown_64000_20kb": baseline_breakdown(s)}))
+
+
+if __name__ == "__main__":
+    main()

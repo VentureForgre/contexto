@@ -159,3 +159,22 @@ def test_dry_run_end_to_end_against_the_local_stub(tmp_path):
     assert a["mcp_calls"] == {"contexto_recall": d["turns"]["probe"], "contexto_search": d["turns"]["probe"]}
     assert a["mcp_failed"] == 0 and d["score"]["correct"] == d["score"]["total"] == 54
     assert subprocess.run(["git", "-C", str(tmp_path), "rev-parse"], capture_output=True).returncode != 0
+
+
+def test_baseline_breakdown_adds_up_to_the_session_baseline():
+    s = codex_budget.history_turns(64_000, 20_000)
+    parts = codex_budget.baseline_breakdown(s)
+    assert parts["requests"] == s.n_content + len(s.probe_turn_ids) == 21
+    assert parts["head_total"] == 21 * codex_budget.CODEX_HEAD
+    assert parts["input_total"] == parts["head_total"] + parts["history_total"]
+    assert parts["once"] == parts["input_total"] + parts["output_total"]
+    assert parts["total"] == 2 * parts["once"] == codex_budget.estimate(s, 64_000).baseline_worst
+
+
+def test_staged_steps_and_the_default_bound_baseline_that_cannot_fit():
+    small = codex_budget.staged(codex_budget.history_turns(64_000, 20_000), 64_000)
+    assert small["replay_fits"] and small["total"] == small["step1_h1"] + small["step2_baseline_replay"]
+    assert small["step2_baseline_replay"] < small["session_baseline"]  # the replay is the cheaper design
+    default = codex_budget.staged(codex_budget.history_turns(150_000, 40_000), 150_000)
+    assert default["content_turns"] == 18 and not default["replay_fits"]
+    assert default["replay_largest_input"] + codex_budget.OUTPUT_ALLOWANCE > codex_budget.CODEX_WINDOW
