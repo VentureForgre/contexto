@@ -391,8 +391,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   same request (request time and real usage) carry the same request sequence, so a tool call
   inside the stream hold sees a snapshot that matches its room. Search refuses a snapshot whose
   request sequence differs from the latest room publish's and says "in view not checked". A failed
-  snapshot write only marks the snapshot stale (search then says "in view not checked"); it does
-  not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Only the main
+  snapshot write only marks the snapshot stale (search then says "in view not checked") and logs
+  `retained_stale`, not `store_error`; it does not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Only the main
   conversation publishes the room and the snapshot: the engine keeps state per conversation (the
   main one, subagents, side requests), and the main conversation is the one with the most turn
   starts, sticky once chosen. Other conversations publish neither, so their tool calls see the
@@ -455,7 +455,7 @@ a no-replayed-thinking baseline.
    example `upstream unreachable`) fails the run; an upstream 5xx passed through unchanged is
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
-   `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, or
+   `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`, or
    `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
