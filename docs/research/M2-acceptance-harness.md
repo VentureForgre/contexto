@@ -314,15 +314,15 @@ request. Its 5 rotation requests are left out of the gaps above. With PR #48 the
 **The approval figure.** `run.py live` refuses an approval below `budget.simulate`'s worst-case H1,
 so that simulation is the budget to approve. `run.py approval-table` prints it, and the table
 between the markers below is that output; a test fails if they differ. Defaults: 18 turns of 40
-KB, head 47,600, bound 150,000, 2 recalls sized by B9 (below).
+KB, head 47,628, bound 150,000, 2 recalls sized by B9 (below).
 
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy, 6 probe turns (D27) | 2,951,215 | 4,001,059 |
-| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,684,549 | 2,872,553 |
-| Full-context baseline through a plain CLI session (alternative) | 5,054,342 | - |
-| **Total, H1 + baseline (live refuses an approval below the worst case)** | **5,635,764** | **6,873,612** |
+| H1 acceptance run through the proxy, 6 probe turns (D27) | 2,952,139 | 4,001,983 |
+| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,684,717 | 2,872,721 |
+| Full-context baseline through a plain CLI session (alternative) | 5,054,874 | - |
+| **Total, H1 + baseline (live refuses an approval below the worst case)** | **5,636,856** | **6,874,704** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
@@ -359,7 +359,13 @@ until the engine records `W` with `set_window`. The budget prices each recall at
 over D27's six probe turns, across the whole session; no verdict uses it.
 
 Under option (a) the pre-usage request stays far below 135,000, so the logs stay pasted user
-text. `Params.head` is now 47,600 (the engine's `F` here) and the default turn size 40 KB.
+text. `Params.head` was 47,600 (the engine's `F` here) and the default turn size 40 KB. The head is
+now derived (intake 2026-10-16 09:42Z): 47,600 measured in the stub dry runs (dry runs #1 to #4, main
+up to c8f0b08) plus Contexto's own tool-definition bytes since then at 3.0 bytes per token. B19 and
+B21 grew those definitions, in Claude Code's request form, from 2,743 to 2,827 bytes (main 8571095,
+dry run #5): 47,600 + ceil(84 / 3.0) = 47,628 (`budget.HEAD`). A test fails when the definitions
+change without updating it. The engine's own estimate of `F` rose about 85 at the dry runs'
+rotations, because it counts tool JSON more conservatively; the gate follows the measured bytes.
 
 **Intake's parameters** (2026-10-16 00:40Z): bound 150,000 with at least 375,000 tokens of
 history; the replay baseline, labeled no-replayed-thinking; up to 4,000,000 tokens with the guard
