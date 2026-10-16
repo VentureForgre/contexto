@@ -345,7 +345,7 @@ planned over-bound requests.
 
 ## Tests
 
-`uv run --with pytest pytest spikes/m2` runs 45 tests with no live calls. Most use synthetic
+`uv run --with pytest pytest spikes/m2` runs 54 tests with no live calls. Most use synthetic
 fixtures; `test_engine_log.py` drives the real proxy and rewrite engine against a stub upstream,
 once with JSON replies and once with SSE replies, since the acceptance session streams.
 They cover:
@@ -357,9 +357,47 @@ They cover:
   scratch directory, and the environment.
 - **Run:** the pass rule, live refusal without budget, and the dry-run output.
 
+## Replay baseline (acceptance 2)
+
+```
+uv run python spikes/m2/acceptance/run.py replay --cc-jsonl <H1 session JSONL> --out <private dir> \
+    --approved 477681 --seat-settings <seat settings> [--dry]
+```
+
+Intake chose this order (2026-10-16): run H1, then send the baseline as one direct request. It is
+H1's probe-turn request as Claude Code built it, read from Claude Code's session JSONL in the H1
+run's isolated config directory:
+- `api-request` records are deltas: `base` (the previous request's id), `keep` (messages kept from
+  it), and `tail` (hashes of the new messages). A hash is the sha256 of the message as sorted
+  compact JSON, and resolves to an `api-request-blob` (the session-start messages and per-turn
+  reminders) or a `user` or `assistant` record. Claude Code writes one assistant record per
+  content block (thinking, then text) under one message id; merged, they hash to what it sent.
+- `api-request-shape` (matched by `shapeHash`): the system prompt and tools; the request's
+  `params`: model, betas, thinking, output config.
+- The first request that holds the probe turn is replayed with all its messages, system messages
+  included. A hash that resolves to nothing stops the replay; nothing is guessed or synthesized.
+
+It goes straight to the owner's proxy, bypassing Contexto.
+- **No replayed thinking.** Thinking blocks are stripped, so it is labeled a no-replayed-thinking
+  baseline.
+- **No tool loop.** Contexto's tools are removed and `tool_choice` is `none`, so the model answers
+  from the context alone. The probe turn's own tool calls in H1 are not part of the baseline.
+- **Nothing edits the context.** `context_management` is dropped.
+- **Intake's check, no silent trimming.** `count_tokens` on the exact request must fit
+  `claude-haiku-5-5`'s 1,000,000-token context window with `max_tokens` (32,000, the guard's
+  reserve), and the approval; otherwise the replay stops before sending and reports why.
+- **Credential.** The key comes from the seat's apiKeyHelper at call time and is held in memory for
+  the request headers only. The first 401 or 403 stops it.
+- **Output, private only.** `baseline-answers.txt` and `replay-result.json` (sizes, the token
+  count, usage, stop reason, block counts). `run.py score --h1 ... --baseline ...` compares the two
+  answer sets.
+
+`--dry` builds the request and prints its sizes with no calls. On the H1 rerun's JSONL
+(`acceptance-20261016T024733Z`) it decodes all 56 messages of the probe-turn request (18 turns, each
+with its reminder, then the probe turn and its reminder), with 21 tools and about 814 KB.
+
 ## Open questions
 
-1. **Replay baseline.** It needs the CLI's request shape: either the JSONL's `api-request-shape`
-   record, or an opt-in proxy dump of the last full request under the session directory.
-2. **Budget and bound.** Decided by intake: bound 150k, budget up to 4,000,000. Pending: the
-   zero-spend dry run with lane A's real `contexto run` and the measured head.
+1. **Tokenizer.** The 1.8 bytes per token rate comes from M0's measurements. The replay's
+   `count_tokens` gives the exact figure for this content on `claude-haiku-5-5`; the guard stops H1
+   at the approval if real usage runs higher.

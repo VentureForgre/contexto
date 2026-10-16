@@ -1,4 +1,4 @@
-"""Rewrite engine: rules 1 to 12 of docs/milestones/M2-contexto-proxy.md (rule text as aligned in
+"""Rewrite engine: rules 1 to 14 of docs/milestones/M2-contexto-proxy.md (rule text as aligned in
 PR #25; placement and system-message evidence in spikes/m2/carried/).
 
 The proxy calls one ``RewriteEngine`` per session: ``engine(request, headers, endpoint)`` returns the
@@ -6,9 +6,11 @@ upstream request, the headers (unchanged), and content-free events; ``engine.obs
 usage, request)`` feeds real usage back after each ``/v1/messages`` response. The work is done by
 the pure function ``rewrite(request, state, store, config, estimator)``, which never mutates its
 input, returns ``system`` and ``tools`` as the same objects, and is deterministic, so the proxy's
-deterministic serializer sends byte-identical prefixes within an epoch. The store is touched only on
-rotation (``page_out``, ``pinned_text``, ``index_text``); the estimator only through
-``estimate``, ``estimate_messages`` and ``observe``.
+deterministic serializer sends byte-identical prefixes within an epoch. The store is touched only at
+a turn start's rotation and a paged_changed resync (``page_out``, ``pinned_text``, ``index_text``,
+``set_window``, ``quarantine_page``) and by ``observe_usage``
+(``log``, ``set_window``); the estimator only through ``estimate``, ``estimate_messages``,
+``observe`` and ``measured_bytes_per_token``.
 
 Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 
@@ -53,19 +55,39 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   with everything before it paged. In that forced epoch an in-flight tool loop keeps its thinking
   (only messages before the turn start count as existing), and the full history is never sent.
 - ``count_tokens`` (rule 11) gets the current epoch's transform with no side effects.
+- Transform failures (rule 14, PR #52; manager-1 2026-10-16 02:00Z): a ``PageConflictError`` is a
+  ``page_conflict``; ``OSError``, ``LedgerError``, ``KeyFileError``, ``SessionNotFoundError`` and
+  ``PageNotFoundError`` (from ``quarantine_page``) are a ``store_error``. Either one at a turn start keeps the state from before the attempt and enters
+  degraded mode (``degraded_enter``): no paging, no rotation, the current epoch's transform extended
+  append-only, and every request event marked ``degraded: true``. Each later turn start tries the
+  store once (a read of the pinned and index text, then the normal rotation); success logs
+  ``degraded_leave``, failure stays degraded. A conflict on the same page at that retry is
+  persistent: the store quarantines the page (``quarantine_page``, lane B PR #59, which logs
+  ``page_quarantined`` itself) and the rotation re-pages it once from the current messages. A paged_changed resync whose
+  paging fails, or a failure building the degraded transform, is terminal for the request: the
+  original request is forwarded and ``fallback_failed`` logged. Any other exception propagates to
+  the proxy as ``transform_error``.
+- The window budget ``W`` and the measured bytes-per-token ratio are published through
+  ``set_window`` (lane B B9, PR #56, for ``contexto_recall``'s per-call cap) when ``W`` changes at a
+  rotation or head change, or when the ratio moves more than 1% after real usage; never before the
+  ratio is measured, never for a ``W`` that is not positive (``bound_too_small`` reports that case;
+  the store accepts positive values only), never from ``observe_usage`` while degraded, and never
+  from ``count_tokens``.
 """
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import math
 import re
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json
+from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError
+from contexto.store.ledger import LedgerError
 from contexto.tokens import TokenEstimator
 
 MESSAGES = "/v1/messages"
@@ -73,12 +95,18 @@ COUNT_TOKENS = "/v1/messages/count_tokens"
 THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
 THINKING_OMITTED = "[thinking omitted]"
 CONTEXT_TAG = "<system-reminder>"
+STORE_ERRORS = (OSError, LedgerError, KeyFileError, SessionNotFoundError, PageNotFoundError)  # rule 14 store_error
+STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
+PAGE_ID = re.compile(r"\bpg_[0-9a-f]{16}\b")
+WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 
 
 class Store(Protocol):
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]: ...
     def pinned_text(self, budget_tokens: int) -> str: ...
     def index_text(self, budget_tokens: int) -> str: ...
+    def set_window(self, window_tokens: int, bytes_per_token: float) -> None: ...
+    def quarantine_page(self, page_id: str) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -91,6 +119,11 @@ class Config:
     index_budget: int = 4_000
     carried_budget: int = 4_000  # rule 13: carried growth above this is reported
     carried_text_budget: int = 8_000  # Terms fallback: carried growth above this pages old text messages
+    # Recall knobs (packet A7, H1 recall fix). Defaults keep today's request byte for byte.
+    recall_rule: str = ""  # placed before the store's pinned and index text in the preamble
+    recall_example: str = ""  # one line placed after the rule
+    preamble_first: bool = False  # the preamble block goes before carried context blocks, not after
+    turn_reminder: str = ""  # appended to each retained turn-start user message while turns are paged
 
 
 @dataclass(frozen=True)
@@ -119,6 +152,10 @@ class EpochState:
     last_estimate: int | None = None  # pre-send estimate of the previous request (A2b)
     estimate_ratio_sum: float = 0.0  # running sum of estimate / real over observed requests
     estimate_ratio_count: int = 0
+    degraded: bool = False  # rule 14: the store failed; no paging and no rotation until a retry succeeds
+    conflict_page: str | None = None  # page id of the page_conflict that entered degraded mode
+    window_budget: int | None = None  # W at the latest rotation decision
+    published_window: tuple[int, float] | None = None  # (W, bytes per token) last given to set_window
 
 
 # Message classification -------------------------------------------------------------------------
@@ -422,8 +459,34 @@ def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
     return out
 
 
+_DEFAULT_CONFIG = Config()
+_KNOBS: ContextVar[Config | None] = ContextVar("contexto_rewrite_knobs", default=None)
+
+
+@contextmanager
+def recall_knobs(config: Config):
+    """Apply ``config``'s recall knobs to transforms in this context (RewriteEngine does this per call)."""
+    token = _KNOBS.set(config)
+    try:
+        yield
+    finally:
+        _KNOBS.reset(token)
+
+
+def _knobs() -> Config:
+    return _KNOBS.get() or _DEFAULT_CONFIG
+
+
 def preamble(state: EpochState) -> str:
-    return "\n\n".join(part for part in (state.pinned_text, state.index_text) if part)
+    knobs = _knobs()
+    parts = (knobs.recall_rule, knobs.recall_example, state.pinned_text, state.index_text)
+    return "\n\n".join(part for part in parts if part)
+
+
+def _with_reminder(message: dict, reminder: str) -> dict:
+    content = message.get("content")
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
+    return {**message, "content": [*blocks, {"type": "text", "text": reminder}]}
 
 
 def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
@@ -440,7 +503,20 @@ def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
     lead = list(messages[: d.lead_count(messages)])  # items before the first turn start stay first
     blocks, systems = carried_content(messages, state.k, state.paged_carried)
     systems = [m for m in systems if not any(m is x for x in lead)]
-    return [*lead, d.merge_first(out[0], blocks, preamble(state)), *systems, *out[1:]]
+    knobs = _knobs()
+    if knobs.preamble_first:  # the preamble ahead of the carried context blocks
+        first = d.merge_first(d.merge_first(out[0], blocks, ""), [], preamble(state))
+    else:
+        first = d.merge_first(out[0], blocks, preamble(state))
+    result = [*lead, first, *systems, *out[1:]]
+    if knobs.turn_reminder and d is ANTHROPIC:
+        # Every retained turn start carries the reminder, so the newest one ends the window. A
+        # message's form changes only at a rotation (when k first becomes positive or moves), where
+        # rule 2 strips thinking anyway: no content changes under a kept signed thinking block, and
+        # the prefix stays byte-identical within an epoch (cache cost: the reminder's tokens per
+        # retained turn, not a moving tail). Messages API only; other dialects ignore it.
+        result = [_with_reminder(m, knobs.turn_reminder) if is_turn_start(m) else m for m in result]
+    return result
 
 
 def headroom(state: EpochState, config: Config) -> int:
@@ -479,7 +555,8 @@ def fixed_overhead(request: dict, messages: list[dict], state: EpochState, store
         head = state.head_tokens + max(0, carried - (state.initial_carried or 0))
     else:
         head = estimator.estimate(canonical_json(_dialect().head_estimate_source(request))) + carried
-    pre = "\n\n".join(t for t in (store.pinned_text(config.pin_budget), store.index_text(config.index_budget)) if t)
+    pre = "\n\n".join(t for t in (config.recall_rule, config.recall_example, store.pinned_text(config.pin_budget),
+                                  store.index_text(config.index_budget)) if t)
     return head + (estimator.estimate(pre) if pre else 0)
 
 
@@ -577,6 +654,220 @@ def matching_prefix(hashes: tuple[str, ...], messages: list[dict]) -> int:
 
 # The engine --------------------------------------------------------------------------------------
 
+def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: int, state: EpochState,
+                         store: Store, config: Config, estimator: TokenEstimator, events: list[dict]) -> EpochState:
+    """Rules 3, 4, and 6 at a turn start: rotate, rotate to the minimal window, or do nothing. May raise
+    store failures (page_out, pinned_text, index_text, set_window); ``guarded_rotation`` handles them."""
+    trigger = estimate > config.bound - headroom(state, config)
+    if state.head_changed or trigger:
+        f = fixed_overhead(request, messages, state, store, config, estimator)
+        w = config.bound - headroom(state, config) - f
+        starts = turn_starts(messages)
+        new_start = starts[-1]
+        newest_start = starts[-2] if len(starts) >= 2 else new_start
+        sizing = {"epoch": state.epoch, "fixed_overhead": f, "window_budget": w}
+        target = int(config.window_fraction * w)
+        if state.head_changed:  # rule 6: always a new epoch; page only if the budget allows
+            k = choose_k(messages, state, target, estimator) if w > 0 else state.k
+            state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "head_change",
+                              sizing=(f, w))
+        elif w <= 0 or window_tokens(messages, estimator, newest_start) > w:
+            # Rule 4 window_minimal (contract PR #50, intake 2026-10-16): W cannot hold the newest
+            # complete turn plus the new turn, so retain only the new turn; the previous turn is paged
+            # and recallable. If even the new turn exceeds W, still rotate to this minimal window (it
+            # is smaller than sending unrotated) and log bound_too_small as well.
+            new_tokens = window_tokens(messages, estimator, new_start)
+            previous_tokens = (window_tokens(messages, estimator, newest_start) - new_tokens
+                               if newest_start < new_start else 0)
+            if new_start > state.k:
+                state = new_epoch(messages, request, state, store, config, estimator, new_start, n, events,
+                                  "window_minimal", sizing=(f, w))
+                state = replace(state, window_minimal_count=state.window_minimal_count + 1)
+                events.append({"event": "window_minimal", "epoch": state.epoch, "window_budget": w,
+                               "new_turn_tokens": new_tokens, "previous_turn_tokens": previous_tokens,
+                               "k": new_start, "count": state.window_minimal_count})
+            if w <= 0 or new_tokens > w:
+                events.append({"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
+                               "new_turn_tokens": new_tokens})
+        else:
+            k = choose_k(messages, state, target, estimator)
+            if k == state.k:  # rule 4: nothing to page, so no strip and no rebuild
+                events.append({"event": "rotation_noop", **sizing, "k": k})
+            else:
+                state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "bound",
+                                  sizing=(f, w))
+        state = publish_window(store, replace(state, window_budget=w), estimator)
+    return state
+
+
+class StoreCalls:
+    """The store as the engine sees it, recording the last method looked up so a failure can name its
+    operation in a content-free event (the exception text may hold paths and is never logged)."""
+
+    def __init__(self, store: Store) -> None:
+        self._store = store
+        self.last: str | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._store, name)
+        if callable(value):
+            self.last = name
+        return value
+
+
+def publish_window(store: Store, state: EpochState, estimator: TokenEstimator) -> EpochState:
+    """Lane B B9: give ``W`` and the measured ratio to ``set_window`` when ``W`` changed or the ratio moved
+    more than ``WINDOW_RATIO_CHANGE``. Skipped before the ratio is measured and for a ``W`` that is not
+    positive, which ``set_window`` rejects."""
+    ratio = estimator.measured_bytes_per_token
+    if state.window_budget is None or state.window_budget <= 0 or ratio is None:
+        return state
+    published = state.published_window
+    if (published is not None and published[0] == state.window_budget
+            and abs(ratio - published[1]) <= WINDOW_RATIO_CHANGE * published[1]):
+        return state
+    store.set_window(state.window_budget, ratio)
+    return replace(state, published_window=(state.window_budget, ratio))
+
+
+def store_failure(error: Exception, calls: StoreCalls, state: EpochState) -> dict:
+    """The content-free ``page_conflict`` or ``store_error`` event for ``error`` (rule 14)."""
+    kind = "page_conflict" if isinstance(error, PageConflictError) else "store_error"
+    failure = {"event": kind, "epoch": state.epoch, "operation": calls.last, "error": type(error).__name__}
+    if state.degraded:
+        failure["degraded"] = True
+    page = PAGE_ID.search(str(error)) if kind == "page_conflict" else None
+    if page:
+        failure["page_id"] = page.group(0)
+    return failure
+
+
+def enter_degraded(state: EpochState, failure: dict, events: list[dict]) -> EpochState:
+    events.append(failure)
+    if not state.degraded:
+        events.append({"event": "degraded_enter", "epoch": state.epoch, "reason": failure["event"]})
+    conflict = failure.get("page_id") if failure["event"] == "page_conflict" else state.conflict_page
+    return replace(state, degraded=True, conflict_page=conflict)
+
+
+def guarded_rotation(request: dict, messages: list[dict], n: int, estimate: int, state: EpochState,
+                     store: Store, config: Config, estimator: TokenEstimator, events: list[dict]) -> EpochState:
+    """Rule 14 around a turn start's rotation. A store failure keeps the state from before the attempt
+    (its partial events are dropped; pages already written are rewritten identically on the next
+    attempt) and enters degraded mode. In degraded mode this call is the once-per-turn-start retry: it
+    reads the store even when nothing is due to page, and leaves degraded mode when that and the
+    rotation succeed. A conflict on the page that entered degraded mode is persistent: the store
+    quarantines the page and the rotation is attempted once more, re-paging it from the current
+    messages (manager-1 2026-10-16 02:00Z; the store logs ``page_quarantined``)."""
+    calls, attempt = StoreCalls(store), []
+    try:
+        if state.degraded:
+            calls.pinned_text(config.pin_budget)
+            calls.index_text(config.index_budget)
+        new = rotate_at_turn_start(request, messages, n, estimate, state, calls, config, estimator, attempt)
+    except STORE_FAILURES as error:
+        failure = store_failure(error, calls, state)
+        page = failure.get("page_id")
+        if not (state.degraded and page is not None and page == state.conflict_page):
+            return enter_degraded(state, failure, events)
+        events.append(failure)
+        calls, attempt = StoreCalls(store), []
+        try:
+            calls.quarantine_page(page)
+            new = rotate_at_turn_start(request, messages, n, estimate, state, calls, config, estimator, attempt)
+        except STORE_FAILURES as error:
+            return enter_degraded(state, store_failure(error, calls, state), events)
+        events.append({"event": "degraded_leave", "epoch": state.epoch, "quarantined": page})
+    else:
+        if state.degraded:
+            events.append({"event": "degraded_leave", "epoch": state.epoch})
+    events.extend(attempt)
+    return replace(new, degraded=False, conflict_page=None)
+
+
+def forward_original(request: dict, messages: list[dict], state: EpochState, reason: str,
+                     events: list[dict]) -> tuple[dict, EpochState, list[dict]]:
+    """Rule 14 terminal step: send the CLI's request unchanged and log ``fallback_failed``. The epoch keeps
+    its previous hashes, so the next request detects the same mismatch and tries once more."""
+    sent = len(canonical_bytes(request))
+    events.append({"event": "fallback_failed", "epoch": state.epoch, "reason": reason, "messages": len(messages)})
+    events.append({"event": "request", "epoch": state.epoch, "k": state.k, "messages": len(messages),
+                   "upstream_messages": len(messages), "sent_bytes": sent, "degraded": True,
+                   "fallback_failed": True})
+    return request, replace(state, degraded=True, last_sent_bytes=sent, last_estimate=None, last_input_tokens=None), events
+
+
+def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str, state: EpochState, store: Store,
+         config: Config, estimator: TokenEstimator, events: list[dict]) -> tuple[dict, EpochState, list[dict]]:
+    """Rules 3 to 6 after history matching: head change, the turn-start rotation, and the request event."""
+    field_name = _dialect().field
+    n = len(messages)
+    # Rule 6: a head change waits for the next turn start.
+    if fingerprint != state.head_fingerprint and not state.head_changed:
+        state = replace(state, head_changed=True)
+        events.append({"event": "head_changed", "epoch": state.epoch})
+
+    estimate = estimate_upstream(request, messages, previous_n, state, estimator)
+    if n > previous_n and at_turn_start(messages):
+        count = len(turn_starts(messages))
+        if state.last_turn_start_n is not None and count > state.last_turn_count and n > state.last_turn_start_n:
+            # Per-turn growth: the messages added since the previous turn start, estimated at the current
+            # ratio, averaged when several turns arrive at once (a resume or a missed request).
+            added = estimate_items(estimator, messages[state.last_turn_start_n:])
+            growth = added // (count - state.last_turn_count)
+            state = replace(state, max_turn_growth=max(state.max_turn_growth, growth))
+        state = replace(state, last_turn_start_n=n, last_turn_count=count)
+        # Early warning (reviewers): carried text messages (contract step 4) growing at consecutive turn
+        # starts means a new hook or mode is adding standing messages per turn.
+        texts = sum(1 for i, m in enumerate(messages) if is_system_like(m)
+                    and classify_system(messages, i) == CARRIED_TEXT and message_hash(m) not in state.paged_carried)
+        if state.last_carried_text_count is not None and texts > state.last_carried_text_count:
+            streak = state.carried_text_streak + 1
+            if streak == 2:
+                events.append({"event": "carried_text_growing", "epoch": state.epoch, "messages": texts})
+        else:
+            streak = 0
+        state = replace(state, last_carried_text_count=texts, carried_text_streak=streak)
+        state = guarded_rotation(request, messages, n, estimate, state, store, config, estimator, events)
+    rotated = any(e["event"] == "rotation" for e in events)
+    # Pre-send over-bound is the allowed exception only inside a tool loop (rule 5): the newest turn
+    # already has model output. At a turn start an over-bound request is bound_too_small instead.
+    in_tool_loop = bool(turn_starts(messages)) and not at_turn_start(messages)
+    # Rule 14: a degraded request may exceed the bound at a turn start too; it is logged the same way.
+    over = estimate > config.bound and not rotated and (in_tool_loop or state.degraded)
+    # The estimate observe_usage compares with real usage must describe what is actually sent: after a
+    # rotation that is the transformed request, not the history that triggered it (A2b review).
+    sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
+
+    if state.initial_carried is None:
+        state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
+    upstream = {**request, field_name: transform_messages(messages, state)}
+    sent = len(canonical_bytes(upstream))
+    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent, last_estimate=sent_estimate,
+                    last_window_tokens=window_tokens(upstream[field_name], estimator))
+    event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
+             "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
+    if rotated:
+        event["sent_estimate"] = sent_estimate
+    if state.degraded:
+        event["degraded"] = True
+    if over:
+        # Pre-send over-bound (rule 5: a turn that grows past the bound inside a tool loop): the allowed,
+        # logged exception for acceptance 1, kept distinct from observe_usage's source "real" record.
+        event["over_bound"] = True
+        bound_event = {"event": "over_bound", "source": "estimate", "in_tool_loop": in_tool_loop, "epoch": state.epoch,
+                       "estimate": estimate, "bound": config.bound}
+        if state.degraded:
+            bound_event["degraded"] = True
+        events.append(bound_event)
+    events.append(event)
+    return upstream, state, events
+
+
+def names_of(events: list[dict]) -> list[str]:
+    return [e["event"] for e in events]
+
+
 def rewrite(request: dict, state: EpochState | None, store: Store, config: Config,
             estimator: TokenEstimator, dialect: Dialect | None = None) -> tuple[dict, EpochState, list[dict]]:
     """Return (upstream_request, new_state, events) for one request (``/v1/messages`` by default;
@@ -615,105 +906,32 @@ def _rewrite(request: dict, state: EpochState | None, store: Store, config: Conf
                            "matched": match, "previous_messages": previous_n, "messages": n,
                            "inflight_thinking_kept": inflight})
             fresh = replace(state, k=0, turns_paged=state.turns_paged)
-            state = new_epoch(messages, request, fresh, store, config, estimator, current, current, events,
-                              "paged_changed")
+            calls, attempt = StoreCalls(store), []
+            try:
+                resynced = new_epoch(messages, request, fresh, calls, config, estimator, current, current, attempt,
+                                     "paged_changed")
+            except STORE_FAILURES as error:
+                # Rule 14: the changed turns cannot be paged and no earlier transform covers them.
+                state = enter_degraded(state, store_failure(error, calls, state), events)
+                return forward_original(request, messages, state, "resync_paged_changed", events)
+            if state.degraded:
+                events.append({"event": "degraded_leave", "epoch": state.epoch})
+            events.extend(attempt)
+            state = replace(resynced, degraded=False, conflict_page=None)
         else:
             events.append({"event": "resync", "epoch": state.epoch, "kind": "window_changed",
                            "matched": match, "previous_messages": previous_n, "messages": n})
             state = replace(state, last_input_tokens=None)
         previous_n = match
 
-    # Rule 6: a head change waits for the next turn start.
-    if fingerprint != state.head_fingerprint and not state.head_changed:
-        state = replace(state, head_changed=True)
-        events.append({"event": "head_changed", "epoch": state.epoch})
-
-    estimate = estimate_upstream(request, messages, previous_n, state, estimator)
-    if n > previous_n and at_turn_start(messages):
-        count = len(turn_starts(messages))
-        if state.last_turn_start_n is not None and count > state.last_turn_count and n > state.last_turn_start_n:
-            # Per-turn growth: the messages added since the previous turn start, estimated at the current
-            # ratio, averaged when several turns arrive at once (a resume or a missed request).
-            added = estimate_items(estimator, messages[state.last_turn_start_n:])
-            growth = added // (count - state.last_turn_count)
-            state = replace(state, max_turn_growth=max(state.max_turn_growth, growth))
-        state = replace(state, last_turn_start_n=n, last_turn_count=count)
-        # Early warning (reviewers): carried text messages (contract step 4) growing at consecutive turn
-        # starts means a new hook or mode is adding standing messages per turn.
-        texts = sum(1 for i, m in enumerate(messages) if is_system_like(m)
-                    and classify_system(messages, i) == CARRIED_TEXT and message_hash(m) not in state.paged_carried)
-        if state.last_carried_text_count is not None and texts > state.last_carried_text_count:
-            streak = state.carried_text_streak + 1
-            if streak == 2:
-                events.append({"event": "carried_text_growing", "epoch": state.epoch, "messages": texts})
-        else:
-            streak = 0
-        state = replace(state, last_carried_text_count=texts, carried_text_streak=streak)
-        trigger = estimate > config.bound - headroom(state, config)
-        if state.head_changed or trigger:
-            f = fixed_overhead(request, messages, state, store, config, estimator)
-            w = config.bound - headroom(state, config) - f
-            starts = turn_starts(messages)
-            new_start = starts[-1]
-            newest_start = starts[-2] if len(starts) >= 2 else new_start
-            sizing = {"epoch": state.epoch, "fixed_overhead": f, "window_budget": w}
-            target = int(config.window_fraction * w)
-            if state.head_changed:  # rule 6: always a new epoch; page only if the budget allows
-                k = choose_k(messages, state, target, estimator) if w > 0 else state.k
-                state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "head_change",
-                                  sizing=(f, w))
-            elif w <= 0 or window_tokens(messages, estimator, newest_start) > w:
-                # Rule 4 window_minimal (contract PR #50, intake 2026-10-16): W cannot hold the newest
-                # complete turn plus the new turn, so retain only the new turn; the previous turn is paged
-                # and recallable. If even the new turn exceeds W, still rotate to this minimal window (it
-                # is smaller than sending unrotated) and log bound_too_small as well.
-                new_tokens = window_tokens(messages, estimator, new_start)
-                previous_tokens = (window_tokens(messages, estimator, newest_start) - new_tokens
-                                   if newest_start < new_start else 0)
-                if new_start > state.k:
-                    state = new_epoch(messages, request, state, store, config, estimator, new_start, n, events,
-                                      "window_minimal", sizing=(f, w))
-                    state = replace(state, window_minimal_count=state.window_minimal_count + 1)
-                    events.append({"event": "window_minimal", "epoch": state.epoch, "window_budget": w,
-                                   "new_turn_tokens": new_tokens, "previous_turn_tokens": previous_tokens,
-                                   "k": new_start, "count": state.window_minimal_count})
-                if w <= 0 or new_tokens > w:
-                    events.append({"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
-                                   "new_turn_tokens": new_tokens})
-            else:
-                k = choose_k(messages, state, target, estimator)
-                if k == state.k:  # rule 4: nothing to page, so no strip and no rebuild
-                    events.append({"event": "rotation_noop", **sizing, "k": k})
-                else:
-                    state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "bound",
-                                      sizing=(f, w))
-    rotated = any(e["event"] == "rotation" for e in events)
-    # Pre-send over-bound is the allowed exception only inside a tool loop (rule 5): the newest turn
-    # already has model output. At a turn start an over-bound request is bound_too_small instead.
-    in_tool_loop = bool(turn_starts(messages)) and not at_turn_start(messages)
-    over = estimate > config.bound and not rotated and in_tool_loop
-    # The estimate observe_usage compares with real usage must describe what is actually sent: after a
-    # rotation that is the transformed request, not the history that triggered it (A2b review).
-    sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
-
-    if state.initial_carried is None:
-        state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
-    upstream = {**request, field_name: transform_messages(messages, state)}
-    sent = len(canonical_bytes(upstream))
-    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent, last_estimate=sent_estimate,
-                    last_window_tokens=window_tokens(upstream[field_name], estimator))
-    event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
-             "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
-    if rotated:
-        event["sent_estimate"] = sent_estimate
-    if over:
-        # Pre-send over-bound (rule 5: a turn that grows past the bound inside a tool loop): the allowed,
-        # logged exception for acceptance 1, kept distinct from observe_usage's source "real" record.
-        event["over_bound"] = True
-        events.append({"event": "over_bound", "source": "estimate", "in_tool_loop": True, "epoch": state.epoch,
-                       "estimate": estimate, "bound": config.bound})
-    events.append(event)
-    return upstream, state, events
+    try:
+        return send(request, messages, previous_n, fingerprint, state, store, config, estimator, events)
+    except Exception as error:
+        if not (state.degraded or "degraded_enter" in names_of(events)):
+            raise  # a genuine bug: the proxy forwards the original request and logs transform_error
+        # Rule 14: a failure inside degraded mode is terminal for this request.
+        return forward_original(request, messages, replace(state, degraded=True),
+                                f"degraded_transform:{type(error).__name__}", events)
 
 
 def count_tokens_view(request: dict, state: EpochState | None, dialect: Dialect | None = None) -> dict:
@@ -767,6 +985,10 @@ class RewriteEngine:
             self.estimator = TokenEstimator()
 
     def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
+        with recall_knobs(self.config):
+            return self._call(request, headers, endpoint)
+
+    def _call(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
         dialect = dialect_for(endpoint)
         if dialect is None:
             return request, headers, []
@@ -815,9 +1037,17 @@ class RewriteEngine:
             events.append({"event": "estimate_error", "epoch": state.epoch, "real_tokens": real, "estimate": estimate,
                            "ratio": round(estimate / real, 3) if real else None,
                            "mean_ratio": round(state.estimate_ratio_sum / state.estimate_ratio_count, 3)})
+        calls = StoreCalls(self.store)
+        try:
+            if not state.degraded:  # a degraded store is retried at the next turn start, not here
+                state = publish_window(calls, state, self.estimator)
+            log = getattr(calls, "log", None)
+            if callable(log):
+                for event in events:
+                    log(event)
+        except STORE_FAILURES as error:
+            # Rule 14: a store that cannot be written after a response is a store_error like any other;
+            # the next turn start retries it. The events are still returned to the proxy.
+            state = enter_degraded(state, store_failure(error, calls, state), events)
         self.states[key] = state
-        log = getattr(self.store, "log", None)
-        if callable(log):
-            for event in events:
-                log(event)
         return events
