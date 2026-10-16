@@ -16,6 +16,8 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
+          # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
+          ignore-nothing-to-cache: true
       - name: Lint with Ruff when the repository configures it
         run: |
           if [ -f ruff.toml ] || [ -f .ruff.toml ] || { [ -f pyproject.toml ] && grep -q '^\[tool\.ruff' pyproject.toml; }; then
@@ -32,6 +34,8 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
+          # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
+          ignore-nothing-to-cache: true
       - name: Run pytest when the tree has tests
         run: |
           if git ls-files -- '*test_*.py' '*_test.py' | grep -q .; then
