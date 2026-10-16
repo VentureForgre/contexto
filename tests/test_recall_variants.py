@@ -69,15 +69,12 @@ def test_salient_identifiers_list_keys_never_values_rarest_first():
     assert ids.index("latency_ms") > 1
 
 
-def test_values_in_prose_and_identifiers_with_digits_are_never_listed():
+def test_names_in_prose_are_never_listed_and_keys_with_digits_are_not_either():
     text = ("Cohort update: the archive-hub rollout cohort is now onyx-4681.\n"
             "Action item AI-93532 is done.\nrelease v2.13.0 of payments-api shipped\n"
             "the canary region for ledger-edge is west-lo2")
-    ids = salient_identifiers([text])
-    assert "archive-hub" in ids and "payments-api" in ids and "ledger-edge" in ids
-    for value in ("onyx-4681", "AI-93532", "v2.13.0", "west-lo2"):
-        assert value not in ids
-    assert salient_identifiers(["upload to s3-bucket"]) == []  # the documented cost of the digit rule
+    assert salient_identifiers([text]) == []  # nothing here is in key position
+    assert salient_identifiers(["AI-93532=done s3-bucket=on cache.ttl=short"]) == ["cache.ttl"]
 
 
 def test_no_answer_of_the_acceptance_script_reaches_the_index():
@@ -193,6 +190,44 @@ def test_values_after_equals_or_colon_are_never_listed_in_any_layout(text):
     assert not {"blue-canary", "eu-west", "data-platform"} & set(ids)
 
 
-def test_a_value_in_plain_prose_is_the_documented_limit():
-    # No = or : marks it, and it has no digit, so it reads as a name. Documented in salient_identifiers.
-    assert "blue-canary" in salient_identifiers(["the deploy target is now blue-canary"])
+def test_a_value_in_plain_prose_is_never_listed():
+    assert salient_identifiers(["the deploy target is now blue-canary, owned by data-platform"]) == []
+
+
+def test_a_value_written_in_key_position_is_the_documented_limit():
+    # An answer used as a key reads as a key. Documented in salient_identifiers.
+    assert salient_identifiers(['{"blue-canary": true}']) == ["blue-canary"]
+
+
+# Reviewer-1's list cases on PR #71 (7e9f2d3): list items and array elements are never listed.
+LISTS = {
+    "json array": '{"regions": ["eu-west", "us-east"], "owner_team": "data-platform"}',
+    "pretty json array": '{\n  "regions": [\n    "eu-west",\n    "us-east"\n  ],\n  "owner_team": "data-platform"\n}',
+    "cut-off json": '{"regions": [\n    "eu-west",\n    "us-east",\n  "owner_team": "data-pla',
+    "yaml sequence": "regions:\n  - eu-west\n  - us-east\nowner_team: data-platform\n",
+    "comma list": "regions=eu-west,us-east owner_team=data-platform",
+    "json lines": '{"regions": ["eu-west"]}\n{"owner_team": "data-platform", "regions": ["us-east"]}',
+}
+
+
+@pytest.mark.parametrize("layout", sorted(LISTS))
+def test_list_items_and_array_elements_are_never_listed(layout):
+    ids = salient_identifiers([LISTS[layout]])
+    assert {"regions", "owner_team"} <= set(ids)
+    assert not {"eu-west", "us-east", "data-platform", "data-pla"} & set(ids)
+
+
+def test_list_values_in_a_tool_result_never_reach_the_index(store):
+    turn = [{"role": "user", "content": "where does it deploy?"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                                "input": {"command": "cat deploy.json"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                          "content": LISTS["pretty json array"]}]}]
+    [pid] = store.page_out([turn], 2)
+    assert store.index_text(4000) == (f"{pid} turn 2: where does it deploy? [tools: Bash] "
+                                      "[ids: deploy.json, regions, owner_team]")
+
+
+def test_file_paths_are_listed_unless_they_are_a_value_or_list_item():
+    text = "see conf/app.toml and README.md\npath: src/secret_target.py\n- docs/item.md\nx=[a/b.py]"
+    assert salient_identifiers([text]) == ["conf/app.toml", "README.md", "path", "x"]
