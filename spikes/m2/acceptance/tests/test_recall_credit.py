@@ -75,3 +75,22 @@ def test_a_line_split_across_paged_recall_ranges_is_credited():
     gap = [_req(), _call("contexto_recall", [{"page_id": PAGE["id"], "start": 0, "end": mid}]),
            _call("contexto_recall", [{"page_id": PAGE["id"], "start": mid + 1, "end": mid + 200}]), _req()]
     assert recall_credit.credit([PROBE], ANSWERED, gap, [PAGE])["credited"] == 0  # one character never returned
+
+
+def test_in_view_spans_never_credit_and_unmarked_spans_count_as_paged():
+    # B19: every returned span carries source paged or in_view; only paged content credits acceptance 3.
+    span = {"page_id": PAGE["id"], "start": POS - 5, "end": POS + len(PLANT) + 1}
+    in_view = [_req(), _call("contexto_search", [{**span, "source": "in_view"}]), _req()]
+    r = recall_credit.credit([PROBE], ANSWERED, in_view, [PAGE])
+    assert r["credited"] == 0 and not r["acceptance_3"] and r["correct_not_credited"] == ["q_p_01"]
+    assert r["in_view_spans"] == 1
+    # B19's in_view shape has no page_id at all (turn, message_index, start, end)
+    shaped = [_req(), _call("contexto_search", [{"source": "in_view", "turn": 17, "message_index": 3, "start": 0, "end": 40}]),
+              _req()]
+    assert recall_credit.credit([PROBE], ANSWERED, shaped, [PAGE])["credited"] == 0
+    for marked in ({**span, "source": "paged"}, span):  # marked paged, and unmarked (logs before B19)
+        log = [_req(), _call("contexto_search", [marked]), _req()]
+        r = recall_credit.credit([PROBE], ANSWERED, log, [PAGE])
+        assert r["credited"] == 1 and r["acceptance_3"] and r["in_view_spans"] == 0
+    unknown = [_req(), _call("contexto_search", [{**span, "source": "other"}]), _req()]
+    assert recall_credit.credit([PROBE], ANSWERED, unknown, [PAGE])["credited"] == 0  # fails closed

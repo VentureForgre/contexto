@@ -12,6 +12,11 @@ overlapping ranges are merged), from calls logged before the answer.
 Ranges, per call:
 - ``contexto_recall``: ``[offset, offset + chars)`` from its existing fields.
 - either tool: each entry of ``returned``, ``{page_id, start, end}`` (B15; end exclusive).
+
+B19 marks each returned span with ``source``: ``paged`` (a stored page) or ``in_view`` (lines of the
+retained window the model already has). Only paged spans credit: acceptance 3 is about content that
+was paged out. A span with no ``source`` (logs before B19) counts as paged; any other value never
+credits. In-view spans are counted and reported, never credited.
 """
 
 from __future__ import annotations
@@ -21,6 +26,13 @@ from typing import Any
 from contexto.store.render import render_page
 
 TOOLS = ("contexto_search", "contexto_recall")
+PAGED_SOURCES = (None, "paged")  # None: a span logged before B19 marked sources
+
+
+def in_view_spans(session_log: list[dict[str, Any]]) -> int:
+    """Returned spans marked in_view (B19): reported beside the credit, never credited."""
+    return sum(1 for ev in session_log if ev.get("event") == "mcp_call" and ev.get("tool") in TOOLS
+               for e in ev.get("returned") or [] if isinstance(e, dict) and e.get("source") == "in_view")
 
 
 def returned_ranges(session_log: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -34,6 +46,8 @@ def returned_ranges(session_log: list[dict[str, Any]]) -> list[dict[str, Any]]:
             start = int(ev.get("offset") or 0)
             entries = [{"page_id": ev["page_id"], "start": start, "end": start + int(ev["chars"])}]
         for e in entries:
+            if e.get("source") not in PAGED_SOURCES:
+                continue  # in_view (or an unknown marker) never credits acceptance 3
             if isinstance(e.get("start"), int) and isinstance(e.get("end"), int) and e.get("page_id"):
                 out.append({"at": i, "tool": ev["tool"], "page_id": e["page_id"], "start": e["start"], "end": e["end"]})
     return out
@@ -98,4 +112,4 @@ def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
                      "credited": correct and via is not None, **({"via": via} if via else {})})
     return {"paged_only": rows, "credited": sum(r["credited"] for r in rows),
             "correct_not_credited": [r["id"] for r in rows if r["answered_correctly"] and not r["credited"]],
-            "acceptance_3": any(r["credited"] for r in rows)}
+            "acceptance_3": any(r["credited"] for r in rows), "in_view_spans": in_view_spans(session_log)}
