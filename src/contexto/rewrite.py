@@ -43,6 +43,13 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   to the current one is a no-op (``rotation_noop``: nothing paged, nothing stripped); a ``W`` that is
   not positive or cannot hold the newest complete turn logs ``bound_too_small`` and sends the request
   unrotated. ``F`` and ``W`` appear in these events.
+- A second rotation condition (packet A12, contract PR #115): at a turn start, when the recall room
+  the request-time publish would give the new turn (``bound - estimate - headroom_floor``) is below
+  ``min_turn_room`` (default 12,000), the engine rotates with the window target ``0.5 * (W -
+  min_turn_room)`` (minimal window as the fallback), reason ``min_turn_room``, but only if that
+  restores at least ``min_turn_room``; when the size trigger fires too, the room target is used when it
+  restores the room, so the next turn does not rotate again. A turn that still starts below
+  ``min_turn_room`` logs ``turn_room_low`` once per epoch.
 - Thinking (rule 2): retained messages that existed when the epoch was created lose their thinking and
   redacted-thinking blocks on every request; an assistant message left empty gets one text block
   ``[thinking omitted]``; other blocks keep their order.
@@ -123,6 +130,7 @@ class Config:
     bound: int = 150_000
     window_fraction: float = 0.5  # rule 4: retained window target as a share of the window budget W
     headroom_floor: int = 25_000
+    min_turn_room: int = 12_000  # A12 (contract PR #115; 12,000 per intake/m2-min-room-12k): a turn's minimum recall room
     headroom_factor: float = 1.25
     pin_budget: int = 6_000
     index_budget: int = 4_000
@@ -157,6 +165,7 @@ class EpochState:
     paged_carried: frozenset[str] = frozenset()  # hashes of carried text messages paged by the fallback
     last_carried_text_count: int | None = None  # carried text messages at the previous turn start
     carried_text_streak: int = 0  # consecutive turn starts at which that count grew
+    turn_room_low_epoch: int | None = None  # A12: the epoch whose turn_room_low was logged (once per epoch)
     window_minimal_count: int = 0  # rotations that kept only the new turn (A2c, contract PR #50)
     last_estimate: int | None = None  # pre-send estimate of the previous request (A2b)
     estimate_ratio_sum: float = 0.0  # running sum of estimate / real over observed requests
@@ -671,9 +680,17 @@ def matching_prefix(hashes: tuple[str, ...], messages: list[dict]) -> int:
 def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: int, state: EpochState,
                          store: Store, config: Config, estimator: TokenEstimator, events: list[dict]) -> EpochState:
     """Rules 3, 4, and 6 at a turn start: rotate, rotate to the minimal window, or do nothing. May raise
-    store failures (page_out, pinned_text, index_text, set_window); ``guarded_rotation`` handles them."""
+    store failures (page_out, pinned_text, index_text, set_window); ``guarded_rotation`` handles them.
+
+    Two conditions (contract PR #115): the size trigger (the estimate passes ``bound - headroom``) and,
+    packet A12, the room condition: the recall room the request-time publish would give the new turn,
+    ``bound - estimate - headroom_floor``, is below ``min_turn_room``. A rotation for the room sizes its
+    window target as ``0.5 * (W - min_turn_room)`` (minimal window as the fallback) and fires only if it
+    would restore at least ``min_turn_room``; otherwise there is no rotation for the room and
+    ``turn_room_low`` is logged once per epoch, so a small bound does not rotate on every turn."""
     trigger = estimate > config.bound - headroom(state, config)
-    if state.head_changed or trigger:
+    room_low = config.bound - estimate - config.headroom_floor < config.min_turn_room
+    if state.head_changed or trigger or room_low:
         f = fixed_overhead(request, messages, state, store, config, estimator)
         w = config.bound - headroom(state, config) - f
         starts = turn_starts(messages)
@@ -681,7 +698,21 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
         newest_start = starts[-2] if len(starts) >= 2 else new_start
         sizing = {"epoch": state.epoch, "fixed_overhead": f, "window_budget": w}
         target = int(config.window_fraction * w)
-        if state.head_changed:  # rule 6: always a new epoch; page only if the budget allows
+        room_k, room = state.k, 0
+        if room_low:
+            room_target = int(config.window_fraction * (w - config.min_turn_room))
+            if room_target > 0 and window_tokens(messages, estimator, newest_start) <= room_target:
+                room_k = choose_k(messages, state, room_target, estimator)
+            else:
+                room_k = new_start  # the minimal window: only the new turn
+            room = config.bound - config.headroom_floor - f - window_tokens(messages, estimator, room_k)
+        restores = room_low and room_k > state.k and room >= config.min_turn_room
+        epoch_before = state.epoch
+        if room_low and not (state.head_changed or trigger):
+            if restores:
+                state = new_epoch(messages, request, state, store, config, estimator, room_k, n, events,
+                                  "min_turn_room", sizing=(f, w))
+        elif state.head_changed:  # rule 6: always a new epoch; page only if the budget allows
             k = choose_k(messages, state, target, estimator) if w > 0 else state.k
             state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "head_change",
                               sizing=(f, w))
@@ -705,11 +736,24 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
                                "new_turn_tokens": new_tokens})
         else:
             k = choose_k(messages, state, target, estimator)
+            if restores and room_k > k:
+                # Both conditions: the room target keeps the turn's room, so the next turn start does not
+                # rotate again for it (no back-to-back rotations).
+                k = room_k
             if k == state.k:  # rule 4: nothing to page, so no strip and no rebuild
                 events.append({"event": "rotation_noop", **sizing, "k": k})
             else:
                 state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "bound",
                                   sizing=(f, w))
+        if room_low and state.turn_room_low_epoch != state.epoch:
+            # The turn starts with less than min_turn_room even after this decision (no rotation could
+            # restore it, or a size rotation could not): say so once per epoch, never per turn.
+            sent_room = (config.bound - estimate - config.headroom_floor if state.epoch == epoch_before
+                         else config.bound - config.headroom_floor - f - window_tokens(messages, estimator, state.k))
+            if sent_room < config.min_turn_room:
+                events.append({"event": "turn_room_low", "epoch": state.epoch, "room": sent_room,
+                               "best_room": room, "min_turn_room": config.min_turn_room})
+                state = replace(state, turn_room_low_epoch=state.epoch)
         state = publish_window(store, replace(state, window_budget=w), estimator, window_model_name(request))
     return state
 
