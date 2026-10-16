@@ -187,8 +187,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
   6,880,000, on main fbb1303.
 
 - **D29. Cut v0.1.0 now that M2 acceptance passed; this settles O5.** Intake, 2026-10-16, on the
-  owner's recorded instruction ("just keep going, I would prefer to come to a finished project
-  ... just have free reign", with "nothing to publish outside this repo"). Live run #3 on main
+  owner's instruction ("just keep going, I would prefer to come to a finished project ... just
+  have free reign", spelling corrected; the owner's next message to intake in the same session
+  added "but nothing to publish outside this repo though", which is not otherwise on file). The
+  private-only scope rests on D14, D0, and `RELEASING.md` in any case. Live run #3 on main
   fbb1303 passed acceptance 1 to 4 (STATUS.md), and the M2 contract's criterion 6 says intake then
   cuts v0.1.0. Intake sets the repository variable `RELEASES_ENABLED` to `true` before merging the
   pull request that records this decision, so that merge's push releases. Semantic-release 10.7.0

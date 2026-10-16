@@ -18,6 +18,8 @@ compaction never fires, and accuracy equals full context.
 
 ## Acceptance, live run #3 (main fbb1303, claude-haiku-5-5, bound 150,000, owner's proxy)
 
+Numbers-only record: `docs/research/M2-acceptance-run3.md`.
+
 | Criterion | Result |
 |---|---|
 | 1. Long run | PASS: 24 of 24 turns, 0 compaction events, max upstream input 109,868 of 150,000, 0 model 4xx, 0 local 5xx, 0 failure events (`turn_room_low` 0, `retained_stale` 0), usage on 44 of 44 requests, 6 rotations; the spend watcher stopped the CLI after the last response was fully logged and stored (exit 143, nothing lost) |
@@ -28,8 +30,8 @@ compaction never fires, and accuracy equals full context.
 
 Per category (Contexto / baseline): chain 28 / 25, obligations 5 / 5 of 6, multihop 8 / 8,
 distractor 6 / 6, paged-only 4 / 4. Contexto missed 3 (2 chain, 1 obligations); the baseline
-missed 6, every one a stale value, which fits the owner's premise that very long contexts hurt
-accuracy. One run on one model, so the 3-probe lead is a measurement, not a claim of
+missed 6, every one a stale value, which is consistent with the owner's premise that very long
+contexts hurt accuracy. One run on one model, so the 3-probe lead is a measurement, not a claim of
 superiority. The baseline is a no-replayed-thinking baseline (O6).
 
 How it got here, all on record:
@@ -64,7 +66,8 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
 - D18: build H1, context virtual memory at the API boundary; the only approach that bounds the
   context without a lossy reset.
 - D19: recall through MCP tools, not a hidden proxy tool; far simpler and no shadow history.
-- D20: strip all thinking at each rotation; the only strategy measured to return 200.
+- D20: strip all thinking at each rotation; measured to return 200 after a history edit (its
+  accuracy cost could not be isolated in M0).
 - D25: recall preamble V2, after the model made no tool calls in H1 #1.
 - D26: acceptance fails on any off-path event, not only over-bound or 4xx.
 - D27: probes over 6 turns of 9 for both arms; one turn cannot hold 54 deep questions' evidence.
@@ -104,7 +107,7 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
 - Cache efficiency depends on the upstream route (O6): 29 of 31 and 36 of 37 in the live runs.
 - Organization-managed Claude Code settings outrank the launcher's `--settings`; a user-supplied
   `--settings` is refused (exit 2); a user `--mcp-config` is allowed.
-- The proxy retries once, on a new connection, only for connect, TLS, or send failures (rule 8);
+- The proxy never reuses upstream connections, and retries once, on a new connection, only for connect, TLS, or send failures (rule 8);
   a failure after the body is sent returns 502 and relies on the CLI's own retry.
 - Compressed request bodies: gzip and deflate are decoded (zstd only on Python 3.14+); other
   encodings get 415 (rule 15). `count_tokens` errors from upstream pass through unchanged (the
