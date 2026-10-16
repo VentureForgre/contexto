@@ -231,3 +231,17 @@ def test_list_values_in_a_tool_result_never_reach_the_index(store):
 def test_file_paths_are_listed_unless_they_are_a_value_or_list_item():
     text = "see conf/app.toml and README.md\npath: src/secret_target.py\n- docs/item.md\nx=[a/b.py]"
     assert salient_identifiers([text]) == ["conf/app.toml", "README.md", "path", "x"]
+
+
+def test_the_json_lines_scan_is_linear_on_a_large_tool_output():
+    """B13: 8 MB of mixed JSON Lines and log lines. Linear takes well under a second; the earlier
+    quadratic scan took over ten seconds here (and 2.3 s on 2 MB in reviewer-1's probe)."""
+    import time
+
+    json_line = '{"event": "tick", "service_name": "ledger-edge", "detail": "' + "x" * 80 + '"}\n'
+    log_line = "level=INFO shard_id=ok path=conf/app.toml " + "y" * 60 + "\n"
+    text = "".join(json_line if i % 2 else log_line for i in range(64_000))
+    started = time.perf_counter()
+    ids = salient_identifiers([text])
+    assert time.perf_counter() - started < 5
+    assert ids == ["level", "shard_id", "path", "event", "service_name", "detail"]
