@@ -394,3 +394,13 @@ def test_probe_turn_caps_recalls_and_the_detector_checks_the_cap():
     calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * 3
     assert detectors.analyze(calls[:2], [], bound=150_000).verdicts()["recalls_within_cap"]
     assert not detectors.analyze(calls, [], bound=150_000).verdicts()["recalls_within_cap"]
+
+
+def test_the_doc_carries_the_budget_live_gates_on():
+    import re
+
+    doc = (Path(__file__).resolve().parents[4] / "docs" / "research" / "M2-acceptance-harness.md").read_text()
+    block = re.search(r"<!-- approval-table:begin -->\n(.*?)\n<!-- approval-table:end -->", doc, re.S)
+    _, b = run.plan()
+    assert block and block.group(1) == budget.approval_table(b)
+    assert f"{b.h1_worst:,}" in block.group(1)  # the figure run.py live refuses to go below

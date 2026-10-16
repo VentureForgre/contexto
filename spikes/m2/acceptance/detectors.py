@@ -23,7 +23,9 @@ from pathlib import Path
 from typing import Any
 
 MESSAGES = "/v1/messages"
-MAX_RECALLS = 2  # the probe turn's cap on contexto_recall calls (script.MAX_RECALLS)
+# The probe turn's cap on contexto_recall calls (script.MAX_RECALLS). The verdict counts every recall
+# in the session: a build-turn recall adds unplanned tokens too, so it counts against the cap.
+MAX_RECALLS = 2
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
