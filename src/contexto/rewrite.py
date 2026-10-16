@@ -746,9 +746,15 @@ def store_failure(error: Exception, calls: StoreCalls, state: EpochState) -> dic
     failure = {"event": kind, "epoch": state.epoch, "operation": calls.last, "error": type(error).__name__}
     if state.degraded:
         failure["degraded"] = True
-    page = PAGE_ID.search(str(error)) if kind == "page_conflict" else None
-    if page:
-        failure["page_id"] = page.group(0)
+    if kind == "page_conflict":
+        page = getattr(error, "page_id", None)  # structured id (asked of lane B, A2e)
+        if not isinstance(page, str) or not PAGE_ID.fullmatch(page):
+            # Fallback until PageConflictError carries page_id: both stores put the id in the message
+            # ("page <id> exists ..." or the page file's path), never the page content.
+            found = PAGE_ID.search(str(error))
+            page = found.group(0) if found else None
+        if page:
+            failure["page_id"] = page
     return failure
 
 

@@ -12,6 +12,9 @@ import pytest
 from contexto.canonical import canonical_bytes
 from contexto.rewrite import (
     COUNT_TOKENS,
+    EpochState,
+    StoreCalls,
+    store_failure,
     MESSAGES,
     THINKING_OMITTED,
     Config,
@@ -23,7 +26,7 @@ from contexto.rewrite import (
     rewrite,
     window_tokens,
 )
-from contexto.store import KeyFileError, PageNotFoundError, SessionNotFoundError, SessionStore
+from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, SessionStore
 from contexto.store.ledger import LedgerCorruptError, LedgerError
 from contexto.store.memory import MemoryStore
 from contexto.tokens import TokenEstimator
@@ -1290,3 +1293,19 @@ def test_first_usage_w_counts_the_recall_knobs_like_fixed_overhead():
         widths[knob] = (next(iter(engine.states.values())).window_budget, engine.estimator.estimate(rule))
     (plain, _), (with_rule, rule_tokens) = widths[""], widths[rule]
     assert plain - with_rule == rule_tokens > 0
+
+
+def test_page_conflict_id_prefers_the_structured_attribute_and_falls_back_to_the_message():
+    """A2e (reviewer-2 note 1 on PR #65): the page id comes from PageConflictError.page_id when the store
+    sets it; until lane B adds it, from the message both stores write."""
+    structured, quoted = "pg_" + "a" * 16, "pg_" + "b" * 16
+    error = PageConflictError(f"page {quoted} exists with different turn or messages")
+    error.page_id = structured
+    state = EpochState()
+    calls = StoreCalls(MemoryStore(key=b"k" * 32))
+    assert store_failure(error, calls, state)["page_id"] == structured
+    assert store_failure(PageConflictError(f"page {quoted} exists"), calls, state)["page_id"] == quoted
+    assert "page_id" not in store_failure(PageConflictError("no id here"), calls, state)
+    malformed = PageConflictError(f"page {quoted} exists")
+    malformed.page_id = "not-a-page-id"
+    assert store_failure(malformed, calls, state)["page_id"] == quoted
