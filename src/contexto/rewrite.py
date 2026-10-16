@@ -1062,7 +1062,7 @@ class RewriteEngine:
             return request, headers, []
         key = keyed(dialect, request)
         state = self.states.get(key)
-        if endpoint == COUNT_TOKENS:
+        if endpoint == COUNT_TOKENS:  # never publishes a room, here or on usage (contract PR #89, 6ffc22b)
             epoch = state.epoch if state else 0
             return count_tokens_view(request, state), headers, [{"event": "count_tokens", "epoch": epoch}]
         restore = None
@@ -1072,7 +1072,7 @@ class RewriteEngine:
             if restore and restore["event"] == "sizing_restored":
                 self.restored = restore
         upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator, dialect)
-        # Per-turn recall budget, request-time publish (contract PR #69): before forwarding, from the
+        # Per-turn recall budget, request-time publish (contract PR #69, kept by 367916a): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
         # to 128,000, which would leave no room at all; the response-time publish adds the real output.
         state = self.states[key]
