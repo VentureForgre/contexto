@@ -12,8 +12,10 @@ M2: build the Contexto proxy (context virtual memory at the API boundary). Contr
 - Lane A (launcher, proxy, rewrite engine, then Codex): management.manager-1.
 - Lane B (scaffolding, store, MCP server, acceptance harness): management.manager-2.
 
-M0 (study) is complete on main except three follow-ups still running: harder probes (L2f), the
-route-identity test (L1-e), and lane 2's synthesis note. M1 is folded into M2 (D21).
+M0 (study) is complete on main: interception, Codex measurements, rollover, proxy measurements,
+fidelity, paging policy, cost model, quality versus context, harder probes, and both lane
+syntheses (PRs #7 to #10, #13, #15, #16, #18, #19, #21, #22), plus the recommendation (PR #20).
+M1 is folded into M2 (D21).
 
 ## Verified on main
 

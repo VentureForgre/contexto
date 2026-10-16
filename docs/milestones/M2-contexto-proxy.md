@@ -207,8 +207,9 @@ a no-replayed-thinking baseline.
    (bound set to 100,000 for this run to keep spend down and well under every compaction trigger) shows zero compaction events, every
    upstream request under the bound except logged over-bound turns, and zero 4xx responses.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
-   only probe type that failed at small contexts across three pilots: 5/8 at about 12k, 29/30
-   at 15,002 counted tokens), asked at the end of that run, scored against the
+   only probe type that failed at small contexts in the two scored pilots, measured by builder-4
+   in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the
+   one miss in a depth-8 chain; pilot 2 overran with no score), asked at the end of that run, scored against the
    full-context baseline at the same session content. Pass: within 2 probes of baseline overall
    and no category more than 1 probe below.
 3. **Recall:** at least one probe answerable only from a paged-out turn is answered correctly,
