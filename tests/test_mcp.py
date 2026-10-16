@@ -80,6 +80,18 @@ def test_modern_discover_and_version_check(server):
     assert listed["resultType"] == "complete"
 
 
+def test_modern_cacheable_results_carry_ttl_and_scope(server):
+    # Claude Code 2.1.301 rejects a modern tools/list result without these (PR #24 review B1).
+    listed = call(server, "tools/list", {"_meta": MODERN})["result"]
+    assert listed["ttlMs"] == 0 and listed["cacheScope"] == "private"
+    discovered = call(server, "server/discover", {"_meta": MODERN})["result"]
+    assert discovered["ttlMs"] == 0 and discovered["cacheScope"] == "private"
+    called = tool(server, "contexto_state", {}, meta=MODERN)["result"]
+    assert called["resultType"] == "complete" and "ttlMs" not in called and called["isError"] is False
+    legacy = call(server, "tools/list")["result"]
+    assert "ttlMs" not in legacy and "resultType" not in legacy
+
+
 def test_tools_list_is_the_contract_set_in_stable_order(server):
     tools = call(server, "tools/list")["result"]["tools"]
     assert [t["name"] for t in tools] == ["contexto_recall", "contexto_pin", "contexto_close",
@@ -199,6 +211,28 @@ def test_search_is_exact_substring_newest_first(server):
     both = tool(server, "contexto_search", {"query": "x"})["result"]["structuredContent"]["page_ids"]
     assert both[0] == "pg_000000000000bbbb"  # turn 7 before turn 3
     assert tool(server, "contexto_search", {"query": ""})["result"]["isError"] is True
+
+
+def test_search_says_when_results_are_cut():
+    pages = {f"pg_{i:016x}": page(f"pg_{i:016x}", i, [{"role": "user", "content": "needle"}], user_text="needle")
+             for i in range(mcp.SEARCH_LIMIT + 5)}
+    server = mcp.Server(FakeStore(pages), io.StringIO(), io.StringIO())
+    result = tool(server, "contexto_search", {"query": "needle"})["result"]
+    assert len(result["structuredContent"]["page_ids"]) == mcp.SEARCH_LIMIT
+    assert result["structuredContent"]["total_matches"] == mcp.SEARCH_LIMIT + 5
+    assert "5 more matching pages not shown" in result["content"][0]["text"]
+
+
+def test_render_page_survives_malformed_blocks():
+    text = mcp.render_page({"turn": 2, "messages": [
+        "not a message",
+        {"role": "user", "content": 42},
+        {"role": "assistant", "content": ["bare string", {"type": "text", "text": "fine"},
+                                         {"type": "tool_result", "content": [7, {"type": "image"}]},
+                                         {"type": "tool_result", "content": None}]},
+    ]})
+    assert "[malformed message omitted]" in text and "[malformed content omitted]" in text
+    assert "[malformed block omitted]" in text and "fine" in text and "[image omitted]" in text
 
 
 def test_every_call_is_logged_without_text_content():

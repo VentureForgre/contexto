@@ -32,6 +32,11 @@ LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
 RECALL_LIMIT = 32_000  # characters per contexto_recall call
 SEARCH_LIMIT = 50  # page ids per contexto_search result
+# Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
+# rejects a tools/list result without them (reviewer-2, real client, 2026-10-16). The tool list is
+# per-session and never cached by the client.
+CACHE_FIELDS = {"ttlMs": 0, "cacheScope": "private"}
+_CACHEABLE = frozenset({"server/discover", "tools/list"})
 RECORD_KINDS = ("event", "decision", "obligation", "artifact", "reference")
 EPISTEMICS = ("verified", "reported", "summary", "hypothesis")
 
@@ -155,14 +160,23 @@ def render_page(page: dict[str, Any]) -> str:
     """Render a page's messages as plain text, thinking omitted. Deterministic for a given page."""
     lines: list[str] = []
     turn = page.get("turn")
-    for message in page.get("messages", []):
+    for message in page.get("messages") or []:
+        if not isinstance(message, dict):
+            lines.append("[malformed message omitted]")
+            continue
         role = message.get("role", "unknown")
         lines.append(f"[turn {turn}] {role}:")
         content = message.get("content")
         if isinstance(content, str):
             lines.append(content)
             continue
-        for block in content or []:
+        if not isinstance(content, list):
+            lines.append("[malformed content omitted]" if content is not None else "")
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                lines.append("[malformed block omitted]")
+                continue
             kind = block.get("type")
             if kind == "text":
                 lines.append(block.get("text", ""))
@@ -176,9 +190,11 @@ def render_page(page: dict[str, Any]) -> str:
                 inner = block.get("content")
                 if isinstance(inner, str):
                     lines.append(inner)
-                else:
-                    for part in inner or []:
-                        if part.get("type") == "text":
+                elif isinstance(inner, list):
+                    for part in inner:
+                        if not isinstance(part, dict):
+                            lines.append("[malformed block omitted]")
+                        elif part.get("type") == "text":
                             lines.append(part.get("text", ""))
                         else:
                             lines.append(f"[{part.get('type', 'block')} omitted]")
@@ -254,6 +270,8 @@ class Server:
         result = handler(params)
         if modern and method != "initialize":
             result = {"resultType": "complete", **result}
+            if method in _CACHEABLE:
+                result.update(CACHE_FIELDS)
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
     def _initialize(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -369,15 +387,19 @@ class Server:
         _reject_extra(args, {"query"})
         query = _require_str(args, "query")
         hits: list[dict[str, Any]] = []
-        for page_id in self.store.search(query)[:SEARCH_LIMIT]:
+        found = self.store.search(query)
+        for page_id in found[:SEARCH_LIMIT]:
             page = self.store.get_page(page_id) or {}
             hits.append({"page_id": page_id, "turn": page.get("turn"), "stub": _stub_line(page.get("stub"))})
         if hits:
             text = "\n".join(f"{h['page_id']} (turn {h['turn']}): {h['stub']}" for h in hits)
+            if len(found) > len(hits):
+                text += (f"\n[{len(found) - len(hits)} more matching pages not shown; "
+                         "use a longer or more specific query]")
         else:
             text = "No paged-out turn contains that exact text."
-        return ([{"type": "text", "text": text}], {"page_ids": [h["page_id"] for h in hits]},
-                {"query_chars": len(query), "hits": len(hits)})
+        return ([{"type": "text", "text": text}], {"page_ids": [h["page_id"] for h in hits], "total_matches": len(found)},
+                {"query_chars": len(query), "hits": len(hits), "total_matches": len(found)})
 
     def _diag(self, message: str) -> None:
         self.stderr.write(f"contexto mcp: {message}\n")
