@@ -51,7 +51,7 @@ from acceptance import detectors, driver, replay, run, script  # noqa: E402
 from fidelity.l2f import normalize, parse_answers  # noqa: E402  (script.py puts spikes/m0 on the path)
 
 TARGETS = ("q_a_016", "q_a_012", "q_a_035", "q_a_024")  # builder-3's class-A H1-only misses, live run #2
-APPROVAL = 600_000
+APPROVAL = 600_000  # the class-A line's first approval; --ceiling carries a raised one (intake 09:15Z: 740,000)
 MAX_TOKENS = 16_000
 LOOP_CAP = 3
 MCP_PREFIX = "mcp__contexto__"
@@ -70,11 +70,58 @@ def _ser_len(obj: Any) -> int:
     return len(json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "backslashreplace"))
 
 
+def _known_messages(cc: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """replay's known messages plus each run of consecutive tool_result user records merged into one
+    message: Claude Code writes one record per tool result but sends them as one user message (the
+    probe turns' tool loops; live run #2, request 20)."""
+    known = replay._known_messages(cc)
+    run_blocks: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        if len(run_blocks) > 1:
+            merged = {"role": "user", "content": list(run_blocks)}
+            known[replay.message_hash(merged)] = merged
+        run_blocks.clear()
+
+    for r in cc:
+        if r.get("isSidechain") or r.get("type") not in ("user", "assistant"):
+            continue
+        content = (r.get("message") or {}).get("content")
+        if r["type"] == "user" and isinstance(content, list) and content and all(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            run_blocks.extend(content)
+        else:
+            flush()
+    flush()
+    return known
+
+
+def decode_requests(cc: list[dict[str, Any]], stop: Callable[[list[dict[str, Any]]], bool]) -> dict[str, list[dict[str, Any]]]:
+    """replay.recorded_messages over the extended known messages; refuses on any unresolved hash."""
+    known = _known_messages(cc)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in cc:
+        if r.get("type") != "api-request":
+            continue
+        base = r.get("base")
+        if base and base not in out:
+            raise ExperimentError("a request record names a base request the JSONL does not hold")
+        messages = list(out.get(base, []))[: int(r.get("keep") or 0)]
+        for h in r.get("tail") or []:
+            if h not in known:
+                raise ExperimentError("a request record names a message the JSONL does not hold")
+            messages.append(known[h])
+        out[r["id"]] = messages
+        if stop(messages):
+            break
+    return out
+
+
 def original_bodies(cc: list[dict[str, Any]], probe_text: str) -> list[dict[str, Any]]:
     """Each original Claude Code request up to and including the first one carrying ``probe_text``,
     as sent: shape system and tools, the record's params and cache markers, system-role messages with
     string content unless cache-marked (the wire form; the JSONL keeps a one-block list)."""
-    decoded = replay.recorded_messages(cc, stop=lambda msgs: any(
+    decoded = decode_requests(cc, stop=lambda msgs: any(
         m.get("role") == "user" and replay._has_text(m, probe_text) for m in msgs))
     shapes = {r.get("shapeHash"): r["shape"] for r in cc if r.get("type") == "api-request-shape"}
     records = [r for r in cc if r.get("type") == "api-request" and isinstance(r.get("params"), dict)]
@@ -484,11 +531,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seat-settings", type=Path, required=True)
     ap.add_argument("--stub", action="store_true", help="answer every model call with a local stub (zero spend)")
     ap.add_argument("--upstream", default=None)
-    ap.add_argument("--approved", type=int, default=APPROVAL)
+    ap.add_argument("--approved", type=int, default=APPROVAL, help="tokens this invocation may spend")
+    ap.add_argument("--ceiling", type=int, default=APPROVAL,
+                    help="the approval line's total; --approved must not exceed it (pass what is left of it)")
     ap.add_argument("--samples", type=int, default=1)
+    ap.add_argument("--probe-turn", type=int, default=0,
+                    help="faithful mode: replay this probe turn (1-6) with its recorded 9-probe wording; "
+                         "0 (default) is the approved option C, the 4 targets in one turn at probe turn 1")
+    ap.add_argument("--h1-answers", type=Path, default=None,
+                    help="run #2's H1 answers file: faithful mode scores each probe against it")
     args = ap.parse_args(argv)
-    if args.approved > APPROVAL:
-        print(f"refusing: the approval is at most {APPROVAL:,}", file=sys.stderr)
+    if args.approved > args.ceiling:
+        print(f"refusing: --approved {args.approved:,} is over the ceiling {args.ceiling:,}", file=sys.stderr)
         return 2
     if not args.stub and not args.upstream:
         print("refusing: pass --upstream for a live run, or --stub", file=sys.stderr)
@@ -506,16 +560,24 @@ def main(argv: list[str] | None = None) -> int:
     log = detectors.read_jsonl(session_dir / "log.jsonl")
     cc = detectors.read_jsonl(next((args.run_dir / "claude-config" / "projects").glob("*/*.jsonl")))
     s, _ = run.plan()
-    probe_text = s.probe_texts[0]
+    turn = args.probe_turn or 1
+    if not 1 <= turn <= len(s.probe_texts):
+        print(f"refusing: --probe-turn is 1 to {len(s.probe_texts)}", file=sys.stderr)
+        return 2
+    probe_text = s.probe_texts[turn - 1]
+    scored = tuple(s.probe_turn_ids[turn - 1]) if args.probe_turn else TARGETS
     bodies = original_bodies(cc, probe_text)
-    result: dict[str, Any] = {"targets": list(TARGETS), "approved": args.approved, "stub": args.stub,
+    result: dict[str, Any] = {"targets": list(TARGETS), "approved": args.approved, "ceiling": args.ceiling,
+                              "stub": args.stub,
                               "store_has_set_retained": hasattr(SessionStore, "set_retained")}
     result["rebuild"] = rebuild_check(bodies, log, session_dir, args.session, args.run_code, args.out)
     if not result["rebuild"]["ok"]:
         (args.out / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
         print("refusing: the rebuild does not reproduce the run's engine decisions", file=sys.stderr)
         return 1
-    exp, changes = experiment_bodies(bodies, probe_text, targets_text(s), main_tools())
+    new_text = probe_text if args.probe_turn else targets_text(s)  # faithful: the recorded wording
+    exp, changes = experiment_bodies(bodies, probe_text, new_text, main_tools())
+    result["mode"] = {"probe_turn": turn, "faithful": bool(args.probe_turn), "scored": list(scored)}
     result["changes"] = {**changes, "fields": body_fields(bodies, exp),
                          "sent_as": {"max_tokens": MAX_TOKENS, "thinking_display": "omitted",
                                      "betas_dropped": [b for b in bodies[-1]["_betas"] if b not in replay.harness_betas(bodies[-1]["_betas"])]}}
@@ -537,7 +599,11 @@ def main(argv: list[str] | None = None) -> int:
                                 replay.count_tokens, send_message, require_snapshot=not args.stub)
             answer = sample.pop("answer")
             (Path(sample["home"]) / "answer.txt").write_text(answer + "\n", encoding="utf-8")  # private
-            sample["score"] = score_targets(s, answer)
+            sample["score"] = score_targets(s, answer, scored)
+            if args.h1_answers is not None:
+                was = score_targets(s, args.h1_answers.read_text(encoding="utf-8"), scored)["targets"]
+                sample["vs_run2"] = {pid: {"run2_correct": was[pid]["correct"], "now_correct": row["correct"]}
+                                     for pid, row in sample["score"]["targets"].items()}
             samples.append(sample)
             if sample["stopped"]:
                 break
