@@ -193,8 +193,9 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   turn (thinking included as received), its turn number, byte size (canonical JSON, summed per
   content block) and token estimate, and a stub: first 200 characters of the user text, tool names
   used, and at most 20 file paths mentioned.
-  Page id: `pg_` + first 16 hex of HMAC-SHA256 over the canonical JSON, keyed with a random
-  per-store key kept in the store and never sent upstream (ids appear in prompts, and short turns
+  Page id: `pg_` + first 16 hex of HMAC-SHA256 over the canonical JSON of `{turn, messages}`
+  only (not the stub or token estimate, so ids stay stable when those rules change), keyed with a
+  random per-store key kept in the store and never sent upstream (ids appear in prompts, and short turns
   must not be guessable from their id). Pages are immutable.
 - **Ledger:** the M1 record model (kinds `event`, `decision`, `obligation`, `artifact`,
   `reference`, `closure`; epistemic `verified`, `reported`, `summary`, `hypothesis`; provenance;
