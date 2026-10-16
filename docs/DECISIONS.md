@@ -85,6 +85,25 @@ the owner's delegation. Open decisions are listed at the end with the options an
   for a turn that still exceeds the bound; it is lossy, so its accuracy cost must be measured
   before it ships.
 
+## Build (M2)
+
+- **D18. Build H1, context virtual memory at the API boundary.** Intake under D0, 2026-10-16. It is
+  the only approach that bounds working context without a lossy reset (modeled: 0 of 20 seeds over
+  a 250k bound; at 100k with online headroom 4 of 20 seeds sent some requests over, logged as
+  over-bound), and the cheapest modeled ($87.95 against $382.10 for compaction, 300 turns, Opus 5.5). Evidence and
+  ranking: `docs/research/M0-recommendation.md`. Contract: `docs/milestones/M2-contexto-proxy.md`.
+- **D19. Recall and pinning go through an MCP server, not a hidden proxy tool.** Intake, 2026-10-16.
+  Lane 1 judged (inferred) that MCP recall avoids stream hold-back, stitching, and byte-exact
+  reinsertion of hidden exchanges; this resolves the conflict with lane 2's hidden-tool design.
+  Cost: recalled pages enter the CLI's local history until the next rotation pages them out.
+- **D20. Strip all thinking at each rotation.** Intake, 2026-10-16. The only strategy measured to
+  return 200 after a history edit. Its accuracy cost is measured by M2's acceptance run against the
+  full-context baseline, because the owner's proxy drops replayed thinking on some requests and M0
+  could not isolate it.
+- **D21. M1 is folded into M2 (resolves O1).** Intake under D0, 2026-10-16. The M1 record model
+  becomes M2's pinned-state store. PRs #2 and #3 are harvested by lane B and then closed; PR #4 is
+  closed as superseded; branches are kept.
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
@@ -105,10 +124,6 @@ the owner's delegation. Open decisions are listed at the end with the options an
 
 All open decisions are intake's to make under D0 unless marked otherwise.
 
-- **O1. Fate of M1 and PRs #2, #3, #4.** Options: adopt the ledger as the backing store for the
-  pinned state block; revise it to fit the phase 2 design; close it. Lean: decide from the M0
-  recommendation; the hash-chained ledger with provenance and epistemic labels is a natural fit for
-  pinned state, so revising beats closing.
 - **O2. History-edit strategy under preserved thinking.** Vendor-documented: on Fable 5.1, Opus 5.5,
   Sonnet 5.5, and Haiku 5.5, editing history before a thinking block invalidates it, and the API
   returns 400 by default only for accounts created on or after 2026-08-31. Measured by builder-4's
@@ -121,8 +136,8 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   does not enforce by default; on the OpenAI Responses API, editing or dropping a turn before an
   encrypted reasoning item returns 200, and whether the reasoning was used is not observable.
   Lean: strip all thinking at rotation, pending the strip-thinking arm's accuracy numbers.
-- **O3. Working-window bound.** Pending the quality-versus-context-size probe: on `lab.subject` at
-  about 91k and 243k (three checkpoints exceeded the budget gate), plus a direct-API
+- **O3. Working-window bound.** Pending the quality-versus-context-size probe: on `lab.subject`, measured at
+  98,910 and 256,783 context (planned 91,133 and 242,822): 96/96 at both, at the probe ceiling, plus a direct-API
   replay at 40k and about 92k, each with thinking preserved and stripped. Known so far, measured by lane
   1 and not yet reviewed: `lab.subject`'s fixed head is 81,808 tokens, of which plain Claude Code is
   45,925 and OpenRig seat context about 36k; Codex's head was 32.3k (PR #10, merged). Lane 2's
@@ -133,3 +148,17 @@ All open decisions are intake's to make under D0 unless marked otherwise.
 - **O5. First real release.** The release workflow runs dry until a release is cut. A GitHub Release
   on this private repository stays inside the repository, so it is within D0. Lean: cut v0.1.0
   when the first working Contexto build merges with passing CI.
+- **O6. Upstream affinity on the owner's proxy.** Measured: full cache misses with byte-identical
+  prefixes (4 of 14 eligible throwaway calls) and thinking dropped on every request
+  (`end_user_binding_mismatch`) through `cliproxy.sullylab.de`. Lane 1's black-box test (L1-e,
+  81,319 tokens): over 10 haiku requests the keep/drop pattern falls into exactly 3 consistent
+  classes, and a byte-identical series shows exactly 3 cache writes before steady reads (counts
+  measured; reported by manager-1, doc pending in lane 1's L1-f PR). Inferred: the route spreads
+  requests across at least 3 upstream identities, and each byte-identical miss is the first request
+  to reach an identity. Opus over 5 requests kept all thinking (inconclusive). Fix is a per-session upstream affinity setting on the owner's
+  infrastructure. Owner decision; intake does not touch the proxy (D11).
+- **O7. OpenRig context-usage clock bug.** Measured by lane 1: every seat's context usage reads
+  `stale_generation` because tenure boot times are stored in UTC without `Z` and parsed as local
+  time (UTC-5), blinding `rig ps`, `whoami`, and compaction planning for about 5 hours after boot.
+  Upstream OpenRig fix; not Contexto code. Owner decision whether to report it.
+
