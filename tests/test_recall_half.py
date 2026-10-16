@@ -109,9 +109,58 @@ def test_the_per_call_cap_still_bounds_a_large_room(store):
     assert len(chunk) == RECALL_LIMIT and next_offset(hint) == RECALL_LIMIT
 
 
-def test_a_tiny_room_gets_the_used_up_reply(store):
+NEARLY = ("The recall budget for this turn is nearly used up (about {} tokens left), too little for a recall. "
+          "Use contexto_search with an exact key to get the matching lines, answer from what is in view, or say "
+          "the detail is unknown.")
+
+
+def test_a_small_room_gets_the_nearly_used_up_reply_uncharged_and_search_still_fits(store):
+    """Intake (05:20Z): room left, but half of it cannot hold RECALL_MIN_CHARS of page text and the hint."""
     pid = page(store, 40_000)
-    store.set_turn_room("1", 150)  # half is 75 tokens: no room for a chunk and its offset hint
+    store.set_turn_room("1", 300)  # half is 150 tokens, 225 characters: the hint leaves under 200 for text
+    assert recall(store, pid) == [NEARLY.format(300)]
+    assert store.turn_room() == ("1", 300, 0)  # charged nothing
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    reply = server.handle_line(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+        "name": "contexto_search", "arguments": {"query": "line 00500 "}}}))["result"]["content"][0]["text"]
+    assert reply.startswith(f"{pid} (turn 1): ") and "> " in reply  # a search hit that fits still returns
+    assert 0 < store.turn_room()[2] <= 300
+    left = 300 - store.turn_room()[2]
+    assert recall(store, pid) == [NEARLY.format(left)]  # N is the room that remains
+    store.charge_turn_room(lambda remaining: remaining)  # spend the rest
+    assert recall(store, pid) == [SPENT]  # an empty room keeps the used-up reply
+
+
+def test_the_nearly_used_up_boundary_is_at_recall_min_chars_of_page_text(store):
+    """At the room where half holds exactly RECALL_MIN_CHARS of page text and its hint: a recall; one
+    token-pair below: the nearly-used-up reply, uncharged (contract PR #103)."""
+    from contexto.store.render import recall_limit
+
+    pid = page(store, 40_000)
+    total = len(render_page(store.get_page(pid)))
+    minimum = mcp.RECALL_MIN_CHARS
+    hint = (f"[{total - minimum} more characters: call contexto_recall with page_id {pid} and offset {minimum}; "
+            f"{recall_limit(*store.window())[1]}]")
+    half = math.ceil((minimum + len(hint)) / RATIO)  # the fewest half-room tokens that hold both
+    store.set_turn_room("1", 2 * half)
+    chunk, _ = recall(store, pid)
+    assert len(chunk) >= minimum
+    store.set_turn_room("2", 2 * half - 2)  # one token less of half-room
+    assert recall(store, pid) == [NEARLY.format(2 * half - 2)]
+    assert store.turn_room() == ("2", 2 * half - 2, 0)
+
+
+def test_a_short_rest_of_the_page_is_returned_even_below_the_threshold(store):
+    pid = page(store, 1_000)
+    full = render_page(store.get_page(pid))
+    store.set_turn_room("1", 300)  # 225 characters of half-room
+    [rest] = recall(store, pid, len(full) - 50)  # 50 characters left: they fit whole, no hint needed
+    assert rest == full[-50:]
+
+
+def test_an_empty_room_keeps_the_used_up_reply(store):
+    pid = page(store, 40_000)
+    store.set_turn_room("1", 0)
     assert recall(store, pid) == [SPENT]
 
 
@@ -120,3 +169,21 @@ def test_no_room_published_keeps_only_the_per_call_cap():
     pid = page(store, 40_000)
     chunk, _ = recall(store, pid)
     assert len(chunk) == 12_000  # the B9 default before a window is recorded
+
+
+
+def test_a_no_hit_search_at_a_room_smaller_than_its_text_returns_it_uncharged(store):
+    page(store, 1_000)
+    store.set_turn_room("1", 5)  # 7 characters, far less than the reply
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    reply = server.handle_line(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "contexto_search", "arguments": {"query": "absent-key"}}}))["result"]["content"][0]["text"]
+    assert reply == mcp.NO_HIT
+    assert store.turn_room() == ("1", 5, 0)
+
+
+def test_the_used_up_reply_is_never_charged(store):
+    pid = page(store, 40_000)
+    store.set_turn_room("1", 0)
+    assert recall(store, pid) == [SPENT]
+    assert store.turn_room() == ("1", 0, 0)

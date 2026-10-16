@@ -12,6 +12,11 @@ from contexto.store import SessionStore, read_turn_room
 from contexto.store.memory import MemoryStore
 
 SPENT = "Recall budget for this turn is used up; answer from what is in view, or say the detail is unknown."
+
+
+def nearly(text):
+    """The recall reply when some room is left but too little for a recall (intake 05:20Z)."""
+    return text.startswith("The recall budget for this turn is nearly used up (about ")
 RATIO = 1.5  # set_window(200_000, 2.0): min(measured 2.0, 1.5) characters per token
 
 
@@ -249,13 +254,15 @@ def test_fifteen_concurrent_tool_calls_charge_exactly_the_room(tmp_path, room):
     for text, events in replies:
         [event] = events
         charges.append(event["charged_tokens"])
-        if text == SPENT:  # nothing useful fit: the exact reply, charged at what was left, up to its size
-            assert event["turn_budget"] == "spent" and event["charged_tokens"] <= math.ceil(len(SPENT) / RATIO)
+        if text == SPENT:  # nothing useful fit: the exact reply, protocol text, never charged
+            assert event["turn_budget"] == "spent" and event["charged_tokens"] == 0
+        elif nearly(text):  # some room left, too little for a recall: uncharged
+            assert event["turn_budget"] == "nearly_spent" and event["charged_tokens"] == 0
         else:  # what came back is exactly what was charged
             assert event["turn_budget"] == "charged" and event["charged_tokens"] == math.ceil(len(text) / RATIO)
     assert sum(charges) == store.turn_room()[2] <= room
     assert store.turn_room()[:2] == ("7", room)
-    spent_replies = sum(text == SPENT for text, _ in replies)
+    spent_replies = sum(text == SPENT or nearly(text) for text, _ in replies)
     if room == 0:
         assert spent_replies == 15
     elif room == 3_000:  # one full recall alone is more than this room: someone gets the reply
@@ -289,12 +296,12 @@ def test_recall_returns_the_message_once_the_room_is_spent_and_resets_next_turn(
     offset, replies = 0, []
     for _ in range(20):  # each partial reply spends room; the hint alone soon no longer fits
         reply = text_of(call(store, "contexto_recall", {"page_id": pid, "offset": offset}))
-        if reply == SPENT:
+        if reply == SPENT or nearly(reply):
             break
         replies.append(reply)
         offset = int(reply.rsplit("and offset ", 1)[1].split(";")[0])
-    assert reply == SPENT and replies and store.turn_room()[2] <= 1_000
-    assert calls(store)[-1]["turn_budget"] == "spent" and calls(store)[-1]["chars"] == 0
+    assert nearly(reply) and replies and store.turn_room()[2] <= 1_000  # some room left, too little to recall
+    assert calls(store)[-1]["turn_budget"] == "nearly_spent" and calls(store)[-1]["chars"] == 0
     store.set_turn_room("2", 1_000)  # a new turn's room: nothing spent of it
     again = text_of(call(store, "contexto_recall", {"page_id": pid, "offset": offset}))
     assert again != SPENT and again.startswith("a")
@@ -386,10 +393,10 @@ def test_a_reply_after_a_same_turn_republish_sees_the_whole_new_room(store):
     offset = 0
     for _ in range(20):  # read on until the room is spent
         reply = text_of(call(store, "contexto_recall", {"page_id": pid, "offset": offset}))
-        if reply == SPENT:
+        if reply == SPENT or nearly(reply):
             break
         offset = int(reply.rsplit("and offset ", 1)[1].split(";")[0])
-    assert reply == SPENT
+    assert nearly(reply)
     store.set_turn_room("4", 2_000)  # real usage arrives for the same turn
     assert store.turn_room() == ("4", 2_000, 0)
     text = text_of(call(store, "contexto_recall", {"page_id": pid, "offset": offset}))

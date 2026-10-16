@@ -38,7 +38,17 @@ SEARCH_LIMIT = 50  # page ids per contexto_search result
 # Per-turn recall budget (M2 contract PR #69): what recall, search, and state return this turn.
 BUDGET_SPENT = ("Recall budget for this turn is used up; answer from what is in view, or say the detail is "
                 "unknown.")
+# Intake (2026-10-16 05:20Z): some room is left, but half of it cannot hold RECALL_MIN_CHARS of page text
+# and the offset hint, so a recall would return too little to be worth its call.
+RECALL_MIN_CHARS = 200
+RECALL_NEARLY_SPENT = ("The recall budget for this turn is nearly used up (about {tokens} tokens left), too little "
+                       "for a recall. Use contexto_search with an exact key to get the matching lines, answer from "
+                       "what is in view, or say the detail is unknown.")
 SEARCH_TOO_LONG = "This search result is longer than one call can return; use a longer or more specific query."
+NO_HIT = "No paged-out turn contains that exact text."
+# Fixed control replies are protocol text, never charged, and returned even when the room is smaller than they
+# are (contract PR #103); each is at most about 150 characters. RECALL_NEARLY_SPENT is a template, checked apart.
+CONTROL_REPLIES = frozenset({BUDGET_SPENT, SEARCH_TOO_LONG, NO_HIT})
 UNMEASURED_CHARS_PER_TOKEN = 1.0  # before the engine records bytes per token: charges more, never less
 # Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
 # rejects a tools/list result without them (reviewer-2, real client, 2026-10-16). The tool list is
@@ -316,11 +326,13 @@ class Server:
             size = room - len(hint(offset))  # a later offset's hint is never shorter
             while size > 0 and size + len(hint(offset + size)) > room:
                 size -= 1
-            return [full[:size], hint(offset + size)] if size > 0 else None
+            return [full[:size], hint(offset + size)] if size >= RECALL_MIN_CHARS else None
 
         texts, budget = self._within_room(build, "contexto_recall", half=True)
-        texts = texts or [BUDGET_SPENT]
-        chunk = texts[0] if budget["turn_budget"] != "spent" else ""
+        chunk = texts[0] if texts else ""
+        if texts is None:
+            texts = [RECALL_NEARLY_SPENT.format(tokens=budget["room_left"]) if budget["turn_budget"] == "nearly_spent"
+                     else BUDGET_SPENT]
         return ([{"type": "text", "text": t} for t in texts], None,
                 {"page_id": page_id, "offset": offset, "chars": len(chunk), "total_chars": total,
                  "returned": [{"page_id": page_id, "start": offset, "end": offset + len(chunk)}] if chunk else [],
@@ -402,7 +414,7 @@ class Server:
 
         def build(room: int | None) -> list[str] | None:
             if not hits:
-                return ["No paged-out turn contains that exact text."]
+                return [NO_HIT]
             cap = limit if room is None else min(room, limit)
             by_cap = room is None or limit <= room  # the per-call limit binds, not the turn's room
             why = specific if by_cap else "the recall budget for this turn is used up"
@@ -445,10 +457,11 @@ class Server:
         ``half``, ``room_chars`` is half the room that remains (``floor(remaining / 2)`` tokens), so
         one recall cannot consume the turn (contract PR #96); the rest is read by offset.
 
-        When nothing useful fits, the tool replies ``BUDGET_SPENT``, charged at the room that is
-        left, up to its own size. That text is required, so a call with no room left still returns
-        it, uncharged: at most about 67 tokens per such call (100 characters at 1.5), about 1,000
-        for 15 parallel calls, well inside the engine's headroom floor (25,000 by default).
+        When nothing useful fits, the tool replies ``BUDGET_SPENT`` (or, for recall with some room
+        left, ``RECALL_NEARLY_SPENT``). These and the other fixed control replies are protocol text:
+        never charged, and returned even when the room is smaller than they are (contract PR #103).
+        Each is at most about 150 tokens, about 2,300 for 15 parallel calls, well inside the engine's
+        headroom floor (25,000 by default).
 
         With no room published only the per-call limit applies. If the engine is present (it has
         recorded the window) but published no room, a ``turn_room_missing`` event makes the missed
@@ -463,9 +476,12 @@ class Server:
             out["texts"] = texts
             if remaining is None:
                 return 0
-            used = min(remaining, math.ceil(sum(map(len, texts or [BUDGET_SPENT])) / ratio))
-            out["budget"] = {"turn_budget": "spent" if texts is None else "charged", "charged_tokens": used,
-                             "room_left": remaining - used}
+            if texts is None or (len(texts) == 1 and texts[0] in CONTROL_REPLIES):  # protocol text: uncharged
+                state = ("nearly_spent" if half and remaining > 0 else "spent") if texts is None else "control"
+                out["budget"] = {"turn_budget": state, "charged_tokens": 0, "room_left": remaining}
+                return 0
+            used = min(remaining, math.ceil(sum(map(len, texts)) / ratio))
+            out["budget"] = {"turn_budget": "charged", "charged_tokens": used, "room_left": remaining - used}
             return used
 
         charge_turn_room = getattr(self.store, "charge_turn_room", None)
