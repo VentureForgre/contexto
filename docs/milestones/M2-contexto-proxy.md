@@ -317,10 +317,16 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     publish, and the next request-time estimate includes its results. If a hold is released at end
     of stream without usage, tool calls see the request-time room, which is off by at most one
     response's output. `count_tokens` never publishes a room. A single `contexto_recall` call
-    returns at most half of the room that remains when it is made, with offset paging for the
-    rest, so one recall cannot consume the turn (measured in the second live H1 run: one full-page
-    recall used about 89 percent of a 23,000-token room and every later call found the room
-    spent). `contexto_recall`, `contexto_search`, and `contexto_state` never return more than
+    returns at most the smaller of its per-call limit and half of the room that remains when it is
+    made, with offset paging for the rest, so one recall cannot consume the turn; parallel recalls
+    therefore get successively smaller halves. Measured in the second live H1 run
+    (acceptance-20261016T044723Z): the room was 23,042, one full-page recall took 20,550 of it (89.2
+    percent; the half cap would have allowed about 10,683), the next recall took the last 816, and
+    the four calls after that found the room spent. When the room is above zero but half of it
+    cannot hold recall text plus its offset hint, `contexto_recall` replies: "The recall budget for
+    this turn is nearly used up (about N tokens left), too little for a recall. Use contexto_search
+    with an exact key to get the matching lines, answer from what is in view, or say the detail is
+    unknown." `contexto_search` keeps working while its hits fit. `contexto_recall`, `contexto_search`, and `contexto_state` never return more than
     remains; when it is
     used up they return: "Recall budget for this turn is used up; answer from what is in view, or
     say the detail is unknown."
