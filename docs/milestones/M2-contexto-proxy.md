@@ -207,11 +207,14 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       `transform_error` at error level, and reported prominently by `contexto sessions show`.
     Acceptance counts any `over_bound`, `fallback_failed`, or `transform_error` as a failure. Lane
     A lists every engine path that can raise and covers each with a fault-injection test.
-15. **Encoded request bodies.** The launcher disables request compression, so a compressed request
-    body (for example `Content-Encoding: zstd`) means a misconfigured client. The proxy rejects it
-    with HTTP 415 in the API's error format, with a message beginning `contexto:` that names the
-    encoding and the fix (run through `contexto run`, or disable request compression), and logs
-    `encoded_body_rejected`. This is client misconfiguration, not a Contexto defect, so rule 14's
+15. **Encoded request bodies.** The launcher disables request compression, so a compressed
+    request body means a misconfigured client. The proxy decodes the encodings the standard
+    library supports (`gzip`, `deflate`, and `zstd` on Python 3.14 or newer), transforms the
+    request as usual, and forwards it uncompressed. Any other encoding, or a body that fails to
+    decode, is rejected with HTTP 415 in the API's error format, with a message beginning
+    `contexto:` that names the encoding and the fix (run through `contexto run`, or disable
+    request compression), logged `encoded_body_rejected`. The request is never forwarded
+    unbounded. This is client misconfiguration, not a Contexto defect, so rule 14's
     degrade-instead-of-block policy does not apply.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
