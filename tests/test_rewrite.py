@@ -141,9 +141,9 @@ def test_rotation_at_turn_start_pages_turns_and_merges_preamble():
     assert "rotation" in names(ev) and "page_out" in names(ev)
     first = up["messages"][0]
     assert first["role"] == "user" and is_turn_start(msgs[st.k])
-    assert first["content"][0] == ctx_block()  # carried context first
     expected = "\n\n".join(t for t in (store.pinned_text(CONFIG.pin_budget), store.index_text(CONFIG.index_budget)) if t)
-    assert first["content"][1] == {"type": "text", "text": expected} and expected  # the preamble block
+    assert first["content"][0] == {"type": "text", "text": expected} and expected  # the preamble block first (V2)
+    assert first["content"][1] == ctx_block()  # then the carried context
     assert first["content"][2:] == msgs[st.k]["content"]  # then its own content
     assert all(b.get("type") != "tool_result" for b in first["content"])
     assert len(store.pages) == sum(1 for i in range(0, st.k) if is_turn_start(msgs[i]))

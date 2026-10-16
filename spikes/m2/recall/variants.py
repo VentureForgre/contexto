@@ -35,19 +35,45 @@ import glob
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from contexto.canonical import canonical_json
-from contexto.rewrite import ANTHROPIC, MESSAGES, Config, RewriteEngine, _DIALECT, is_turn_start, strip_thinking
-from contexto.store import SessionStore
+from contexto.paths import session_dir
+from contexto.rewrite import ANTHROPIC, MESSAGES, Config, RewriteEngine, _DIALECT, is_context_block, is_turn_start, strip_thinking
+from contexto.store import KEY_BYTES, SessionStore
 from contexto.tokens import TokenEstimator
 
 RECALL_FIELDS = {"recall_rule", "recall_example", "preamble_first", "turn_reminder"}
 CONTEXTO_TOOLS = ("contexto_search", "contexto_recall")
 STORE_VARIANT_ENV = "CONTEXTO_RECALL_VARIANT"
+# A fixed page key, so page ids, and therefore every written probe request, are byte-deterministic.
+FIXED_PAGE_KEY = hashlib.sha256(b"contexto spikes/m2/recall fixed page key").digest()[:KEY_BYTES]
+
+
+def write_private(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` with mode 0600 (outputs hold synthetic transcript content)."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(path, 0o600)
+
+
+def check_out_is_ignored(out: Path) -> None:
+    """Refuse an output directory inside a git work tree unless git ignores it."""
+    probe = out.resolve()
+    while not probe.exists():
+        probe = probe.parent
+    top = subprocess.run(["git", "-C", str(probe), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if top.returncode != 0:
+        return  # not inside a repository
+    ignored = subprocess.run(["git", "-C", top.stdout.strip(), "check-ignore", "-q", str(out.resolve())])
+    if ignored.returncode != 0:
+        raise SystemExit(f"--out {out} is inside a git work tree and not ignored; use a gitignored path such as .contexto/")
 
 
 def message_hash(message: dict) -> str:
@@ -93,7 +119,11 @@ def substitute_probe_text(request: dict, text: str) -> dict:
         m = messages[i]
         if is_turn_start(m):
             content = m["content"] if isinstance(m["content"], list) else [{"type": "text", "text": m["content"]}]
-            last_text = max(j for j, b in enumerate(content) if isinstance(b, dict) and b.get("type") == "text")
+            texts = [j for j, b in enumerate(content) if isinstance(b, dict) and b.get("type") == "text"
+                     and not is_context_block(b)]  # never a trailing system-reminder block
+            if not texts:
+                continue
+            last_text = texts[-1]
             content = [*content[:last_text], {**content[last_text], "text": text}, *content[last_text + 1:]]
             messages = [*messages[:i], {**m, "content": content}, *messages[i + 1:]]
             return {**request, "messages": messages}
@@ -138,13 +168,17 @@ def replay(requests: list[dict], recorded: list[dict], name: str, spec: dict, ou
     if unknown:
         raise SystemExit(f"variant {name}: unknown engine knobs {sorted(unknown)}")
     previous = os.environ.get(STORE_VARIANT_ENV)
+    scratch = None
     store_variant = spec.get("store_variant")  # None: the store's own default
     if store_variant is None:
         os.environ.pop(STORE_VARIANT_ENV, None)
     else:
         os.environ[STORE_VARIANT_ENV] = store_variant
     try:
-        home = Path(tempfile.mkdtemp(prefix=f"a7-{name}-"))
+        scratch = tempfile.TemporaryDirectory(prefix=f"a7-{name}-")  # pages hold transcript text: removed after
+        home = Path(scratch.name)
+        session_dir(home, "replay").mkdir(parents=True, mode=0o700)
+        (session_dir(home, "replay") / "page.key").write_text(FIXED_PAGE_KEY.hex(), encoding="ascii")
         store = SessionStore(home, "replay")
         config = Config(bound=spec.get("bound", 150_000), **engine_knobs)
         engine = RewriteEngine(store, config=config, estimator=TokenEstimator())
@@ -165,9 +199,7 @@ def replay(requests: list[dict], recorded: list[dict], name: str, spec: dict, ou
         if strip:
             upstream, stripped = strip_all_thinking(upstream)
         store_texts = (store.pinned_text(config.pin_budget), store.index_text(config.index_budget))
-        directory = out / name
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "probe_request.json").write_text(json.dumps(upstream, ensure_ascii=False))
+        write_private(out / name / "probe_request.json", json.dumps(upstream, ensure_ascii=False))
         estimator = TokenEstimator()
         first = upstream["messages"][0]
         position = preamble_position(first, config, store_texts)
@@ -196,6 +228,8 @@ def replay(requests: list[dict], recorded: list[dict], name: str, spec: dict, ou
             },
         }
     finally:
+        if scratch is not None:
+            scratch.cleanup()
         if previous is None:
             os.environ.pop(STORE_VARIANT_ENV, None)
         else:
@@ -213,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="file whose text replaces the recorded probe turn's text in the final request, for "
                              "every variant (default: the probe exactly as recorded)")
     args = parser.parse_args(argv)
+    check_out_is_ignored(args.out)
     variants = {"baseline": {}}
     if args.variants:
         variants.update(json.loads(args.variants.read_text(encoding="utf-8")))
@@ -231,8 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = {"requests": len(requests), "recorded_requests": len(recorded),
 
                "approximate_assistant_tails": approximate, "variants": rows}
-    args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "summary.json").write_text(json.dumps(summary, indent=1))
+    write_private(args.out / "summary.json", json.dumps(summary, indent=1))
     print(json.dumps(summary, indent=1))
     return 0
 
