@@ -116,7 +116,17 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    text block `[thinking omitted]`. Messages added after the rotation pass through untouched.
 3. **Rotation trigger.** Rotate only at the start of a turn: the request's newest turn contains no
    assistant message yet (only its turn-start message and any system messages). Rotate when the
-   estimated upstream input would exceed `bound - headroom`. Estimate = last upstream
+   estimated upstream input would exceed `bound - headroom`, or when the per-turn recall room that
+   would be published for the new turn (`bound - estimate - headroom_floor`) is below `min_turn_room`
+   (default 20,000); without that second condition the room is smallest on the turn just before a
+   rotation, because both shrink toward the same line (engine-driven estimate, PR #113: 5,219 at
+   the start of turn 4, 738 at its lowest). A rotation fired by the room condition sizes its window
+   target as `0.5 * (W - min_turn_room)` instead of `0.5 * W` (rule 4), falling back to the minimal
+   window, so the room it publishes is at least `min_turn_room`. It fires only if that rotation
+   would actually restore a room of at least `min_turn_room`; otherwise the engine does not rotate
+   for the room and logs `turn_room_low` once per epoch. This keeps a small bound from rotating on
+   every turn (reviewer-2: a plain re-trigger would thrash at bounds of 42,000 to 100,000).
+   `budget.simulate` models both conditions. Estimate = last upstream
    `input_tokens + cache_read + cache_creation` for this session plus the bytes added since.
    Until the first real usage arrives, count `tool_result` content at 1.5 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
@@ -418,7 +428,8 @@ a no-replayed-thinking baseline.
    example `upstream unreachable`) fails the run; an upstream 5xx passed through unchanged is
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
-   `fallback_failed`, `transform_error`, `turn_room_missing`, or `unclassified_system_message`.
+   `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, or
+   `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the
