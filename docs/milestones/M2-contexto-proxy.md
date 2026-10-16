@@ -382,7 +382,31 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   were lost). Measured offline by builder-3 (numbers-only output under `spikes/m2/estimate/`):
   this format costs a median of about 138 tokens per hit instead of 359, and the 54 probes' total
   demand falls from 91,249 to 31,002 tokens. An answer more than one line away from its match is not shown in
-  the hit and needs a recall at the offset. Results are charged against the per-turn room. No embeddings, no
+  the hit and needs a recall at the offset. Every reply states its coverage: paged hits come only from paged-out turns, and the conversation
+  in view is newer than any of them. Search also matches the retained window: after each request's transform (never from
+  `count_tokens`) the engine calls `SessionStore.set_retained(epoch, k, turns)` with entries
+  `{turn, message_index, role, text}` (text blocks of the retained messages, including
+  `tool_result` text; no thinking or images), a full atomic overwrite at mode 0600, bounded by the
+  window, never logged, stamped with that request's sequence number. Both room publishes of the
+  same request (request time and real usage) carry the same request sequence, so a tool call
+  inside the stream hold sees a snapshot that matches its room. Search refuses a snapshot whose
+  request sequence differs from the latest room publish's and says "in view not checked". A failed
+  snapshot write only marks the snapshot stale (search then says "in view not checked") and logs
+  `retained_stale`, not `store_error`; it does not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Only the main
+  conversation publishes the room and the snapshot: the engine keeps state per conversation (the
+  main one, subagents, side requests), and the main conversation is the one with the most turn
+  starts, re-evaluated at each turn start: it changes only when another conversation has strictly
+  more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
+  stay main. Other conversations publish neither, so their tool calls see the
+  main conversation's room and snapshot, and for a subagent "in view" refers to the main
+  conversation's window (part of the documented subagent limitation); the MCP
+  server cannot tell which conversation issued a call. Matches in the
+  snapshot are listed first, labeled in view, newest first, as the matching line only, charged,
+  with their returned spans logged content-free under a distinct source marker and no page id. In-view hits do not count toward acceptance 3,
+  which measures retrieval of paged-out content. Measured basis (live run #2 chain
+  analysis, builder-3, zero spend): 4 of H1's 5 extra chain misses had a newer link in the retained
+  window, but the model answered from a search reply whose newest paged hit looked current.
+  Results are charged against the per-turn room. No embeddings, no
   similarity ranking (owner: not RAG).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
@@ -434,7 +458,7 @@ a no-replayed-thinking baseline.
    example `upstream unreachable`) fails the run; an upstream 5xx passed through unchanged is
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
-   `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, or
+   `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`, or
    `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
