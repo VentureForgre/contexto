@@ -4,10 +4,10 @@ proxy, rotations happen, recall is callable (the stub's probe turns call context
 contexto_recall through Codex's exec tool), and the harness scores and writes its record.
 
     uv run python spikes/m2/acceptance/codex_dryrun.py <contexto executable> <out dir> [--bound N]
-        [--turn-kbytes K] [--seed S] [--fixed-home]
+        [--turn-kbytes K] [--seed S] [--home-workaround]
 
-``--fixed-home`` runs with CONTEXTO_HOME set (after PR #148); by default the scratch-HOME workaround is
-used (codex_driver.child_env). Writes ``<out>/codex-dry-run.json`` and prints it. No credential is
+The run sets CONTEXTO_HOME (PR #148, v0.1.2); ``--home-workaround`` uses the scratch-HOME workaround
+for a build before it (codex_driver.child_env). Writes ``<out>/codex-dry-run.json`` and prints it. No credential is
 read: the key helper prints a dummy, and the stub checks none."""
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bound", type=int, default=DEFAULT_BOUND)
     ap.add_argument("--turn-kbytes", type=int, default=DEFAULT_TURN_KBYTES)
     ap.add_argument("--seed", type=int, default=script.DEFAULT_SEED)
-    ap.add_argument("--fixed-home", action="store_true")
+    ap.add_argument("--home-workaround", action="store_true")
     a = ap.parse_args(argv)
     s = build(a.seed, a.bound, a.turn_kbytes * 1000)
     b = codex_budget.estimate(s, a.bound)
@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     helper = root / "key-helper.sh"
     helper.write_text("#!/bin/sh\necho dummy-not-a-credential\n")
     helper.chmod(0o700)
-    env, store = codex_driver.child_env(root / "store", home, mcp_home_workaround=not a.fixed_home)
+    env, store = codex_driver.child_env(root / "store", home, mcp_home_workaround=a.home_workaround)
     session = "codex-dry"
     answers = {p.id: p.answer for p in s.probes}
     # Every paged-only plant is a "cfg <svc>.retention_days=<value>" line in turn 1 (script.build).
@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         "score": {"correct": scored["correct"], "total": scored["total"]},
         "budget": {"h1_worst": b.h1_worst, "baseline_worst": b.baseline_worst, "total_worst": b.total_worst,
                    "baseline_fits": b.baseline_fits, "formula": codex_budget.formula(b)},
-        "home_workaround": not a.fixed_home,
+        "home_workaround": a.home_workaround,
     }
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / "codex-dry-run.json").write_text(json.dumps(summary, indent=2))

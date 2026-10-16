@@ -13,10 +13,10 @@ Claude; a turn is never started that could pass it.
 
 Isolation (D22, D12): API-key mode only, a key helper command (the key is never in a file here), a
 non-Git scratch directory, ``env -i`` style environment without OpenRig, Claude Code, or credential
-variables, and Codex's home inside the Contexto session directory (run_codex). Until PR #148 (A18)
-is on main, Codex starts the contexto MCP server without CONTEXTO_HOME, so ``mcp_home_workaround``
-points HOME at a scratch home and leaves CONTEXTO_HOME unset, so the proxy and the MCP server
-open the same store; after #148 the run sets CONTEXTO_HOME as usual."""
+variables, and Codex's home inside the Contexto session directory (run_codex). The run sets
+CONTEXTO_HOME (since PR #148, v0.1.2, Codex's MCP server receives it as an absolute path); for an
+older build, ``mcp_home_workaround`` points HOME at a scratch home and leaves CONTEXTO_HOME unset
+instead, so the proxy and the MCP server still open the same store."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def turn_command(contexto: str, session: str, bound: int, upstream: str, key_hel
     return cmd + (["resume", thread, "-"] if thread else ["-"])
 
 
-def child_env(store_home: Path, scratch_home: Path, mcp_home_workaround: bool = True,
+def child_env(store_home: Path, scratch_home: Path, mcp_home_workaround: bool = False,
               base: dict[str, str] | None = None) -> tuple[dict[str, str], Path]:
     """The child's environment and the Contexto home the run's session lives in. Nothing from the
     seat's environment that could select another credential, provider, or home is passed."""

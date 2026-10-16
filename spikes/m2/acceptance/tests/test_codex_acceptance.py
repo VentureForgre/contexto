@@ -37,11 +37,11 @@ def test_child_env_keeps_no_credential_or_seat_variables(tmp_path):
             "OPENRIG_SESSION": "x", "CLAUDE_CODE_ENTRYPOINT": "x", "CODEX_HOME": "/x", "CONTEXTO_HOME": "/y",
             "HOME": "/real/home"}
     env, store = codex_driver.child_env(tmp_path / "store", tmp_path / "home", base=base)
-    assert env == {"PATH": "/bin", "TERM": "xterm", "HOME": str(tmp_path / "home")}  # before PR #148
+    assert env == {"PATH": "/bin", "TERM": "xterm", "HOME": str(tmp_path / "home"),
+                   "CONTEXTO_HOME": str(tmp_path / "store")} and store == tmp_path / "store"
+    env, store = codex_driver.child_env(tmp_path / "store", tmp_path / "home", mcp_home_workaround=True, base=base)
+    assert env == {"PATH": "/bin", "TERM": "xterm", "HOME": str(tmp_path / "home")}  # a build before PR #148
     assert store == tmp_path / "home" / ".contexto"
-    env, store = codex_driver.child_env(tmp_path / "store", tmp_path / "home", mcp_home_workaround=False, base=base)
-    assert env["CONTEXTO_HOME"] == str(tmp_path / "store") and store == tmp_path / "store"
-    assert env["HOME"] != "/real/home"
 
 
 def _entry(path="/responses", inp=100, cached=0, out=5, status=200, rotation=None, usage_events=()):

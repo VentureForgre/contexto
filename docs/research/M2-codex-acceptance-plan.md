@@ -25,10 +25,9 @@ Tags: **measured** (seen in a run here or in A5/A6), **source** (read in code or
   - API-key mode only, with a key helper command. The key is never in a file here; the stub run uses a dummy helper.
   - Codex's home is the session directory's `codex-home`. The user's Codex and Claude config is never read or written.
   - The scratch directory is outside Git. The environment keeps only `PATH`, `TERM`, `LANG` and `TMPDIR`, with no OpenRig, Claude Code, OpenAI, Codex or Contexto variables.
-- **MCP home** [measured, finding A18].
-  - Until PR #148 is on main, Codex starts the contexto MCP server without `CONTEXTO_HOME`, so the server opens `~/.contexto`, a different store from the proxy's.
-  - Workaround until then: the harness points `HOME` at a scratch home and leaves `CONTEXTO_HOME` unset (`child_env(mcp_home_workaround=True)`).
-  - After #148, the harness sets `CONTEXTO_HOME` as usual (`codex_dryrun.py --fixed-home`).
+- **MCP home** [measured, finding A18; met in v0.1.2, PR #148].
+  - Before #148, Codex started the contexto MCP server without `CONTEXTO_HOME`, so the server opened `~/.contexto`, a different store from the proxy's.
+  - The harness now sets `CONTEXTO_HOME` as usual. For an older build, `child_env(mcp_home_workaround=True)` (`codex_dryrun.py --home-workaround`) points `HOME` at a scratch home and leaves `CONTEXTO_HOME` unset instead.
 - **How the model reaches the Contexto tools** [measured].
   - `gpt-6-astra` gets no Contexto tool by name. The MCP tools are deferred behind the code-mode `exec` tool, a custom tool whose input is JavaScript: `await tools[<name>]({...})`, with names from `ALL_TOOLS` such as `mcp__contexto__contexto_search`.
   - `--disable code_mode` and `--disable search_tool` change nothing for this model.
@@ -58,7 +57,7 @@ The shared detectors read only `/v1/messages` and Anthropic usage keys. `codex_d
 3. **Recall.**
    - **What counts:** `contexto_recall` and `contexto_search` calls appear as `mcp_call` events in the session log, with their returned spans.
    - **Credit:** `recall_credit.credit` hard-codes `/v1/messages` in `answer_index`, so Codex credit needs a Responses-path counterpart. This is proposed as a new `codex_*` module before the live run (section 6).
-   - **Search prerequisite:** paged search cannot match a Codex page yet, which is lane B's B23 (section 6).
+   - **Search prerequisite:** paged search could not match a Codex page; lane B's B23 fixed it, met in v0.1.3 (section 6).
 4. **Cache.** The share of 200 responses with `cached_tokens > 0`. The first request and any request that rotated (its prefix changed) are not counted. This is reported only, as for Claude.
 
 **What differs from Claude:**
@@ -100,11 +99,10 @@ For comparison, 64,000 with 40 KB turns gives 10,068,124. That has fewer content
 
 ## 6. Risks and open questions
 
-1. **Codex paged search finds nothing** [measured; lane B B23].
-   - `store.pages.page_matches` reads only Messages API blocks, and Codex pages' stub `user_text` is empty.
-   - In the dry run, all 6 searches returned 0 paged hits; the stub proved recall through an index page id instead.
-   - **Answer:** B23 must be on main before a live Codex run.
-2. **MCP server home** [measured; A18, PR #148]. **Answer:** run with `--fixed-home` once #148 is on main.
+1. **Codex paged search found nothing** [measured; lane B B23]. **Met in v0.1.3** (031ca59).
+   - Before B23, `store.pages.page_matches` read only Messages API blocks, and Codex pages' stub `user_text` was empty.
+   - In the first dry run all 6 searches returned 0 paged hits. On main 031ca59 each returns 1 to 3 paged hits, and recall reads the page search names [measured, section 7].
+2. **MCP server home** [measured; A18]. **Met in v0.1.2** (PR #148): the harness sets `CONTEXTO_HOME` as usual.
 3. **Recall credit for Responses** (`recall_credit.answer_index` reads `/v1/messages`). **Answer:** a new `codex_recall_credit.py` in A16's follow-up, reusing `recall_credit` through a path parameter. It is a lane B file, so not edited here.
 4. **No in-turn spend watcher.** The Claude driver's `SessionWatcher` kills a turn mid-way on projected spend; the Codex driver checks between turns only. **Answer:** add a watcher on the session log, killing the turn's process group, before the live run. Until then the per-turn worst case bounds a turn.
 5. **Cheaper model.** Only `gpt-6-astra` is measured. **Answer:** ask the owner which Codex-capable models the proxy serves. The estimate scales with the request counts above, not with the model.
@@ -121,18 +119,18 @@ uv run python spikes/m2/acceptance/codex_dryrun.py "$PWD/.venv/bin/contexto" /tm
 
 The stub (`spikes/m2/acceptance/codex_stub.py`) serves streamed Responses replies:
 - `OK` to content turns;
-- on a probe turn's first request, an `exec` call whose JavaScript runs `contexto_search`, then `contexto_recall` on the first page id search names, else on the first page id the preamble's index lists;
+- on a probe turn's first request, an `exec` call whose JavaScript runs `contexto_search`, then `contexto_recall` on the first page id search names (else on the first page id the preamble's index lists, which a build before B23 needed);
 - then the probe answers, which it is given, so the run checks scoring rather than model quality.
 
-Measured run (bound 64,000, 20 KB turns, seed 20261016, main 1c203d5, about 16 seconds):
+Measured run (bound 64,000, 20 KB turns, seed 20261016, main 031ca59 with B23 and A18, `CONTEXTO_HOME` set, about 16 seconds):
 
 | | |
 |---|---|
 | Turns | 15 content + 6 probe; all 21 completed, every Codex exit 0 |
 | Requests through the proxy | 27 `POST /v1/responses` (15 `OK`, 6 tool calls, 6 answers); 22 `GET /v1/models` |
-| Rotations | 18 for size and 2 for room; largest real input 26,046 (stub tokens) |
+| Rotations | 18 for size and 2 for room; largest real input 27,015 (stub tokens) |
 | Acceptance 1 | holds: no 4xx, no real `over_bound`, no failure event |
-| Recall | 6 `contexto_search` and 6 `contexto_recall` calls through Codex's `exec`, 0 failed |
+| Recall | 6 `contexto_search` calls (1 to 3 paged hits each) and 6 `contexto_recall` calls on the page search named, through Codex's `exec`, 0 failed |
 | Cache-hit rate | 1.0 (stub usage) |
 | Score | 54 of 54 (stub answers) |
 | Record | `codex-dry-run.json`: the run record, analysis, score, and the estimate |
