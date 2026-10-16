@@ -35,7 +35,7 @@ from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, render_index, search_pages
 from contexto.store.records import LedgerOps
 
-__all__ = ["SessionStore", "PageConflictError", "KeyFileError", "redact"]
+__all__ = ["SessionStore", "PageConflictError", "KeyFileError", "SessionNotFoundError", "redact"]
 
 KEY_BYTES = 32
 
@@ -44,6 +44,10 @@ _SECRET_KEYS = {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-aut
 
 class PageConflictError(RuntimeError):
     """A page file exists under an id with different content; pages are immutable."""
+
+
+class SessionNotFoundError(LookupError):
+    """``SessionStore.open_existing`` was asked for a session that does not exist."""
 
 
 class KeyFileError(RuntimeError):
@@ -74,7 +78,7 @@ class SessionStore(LedgerOps):
         private_dir(Path(home) / "sessions")
         private_dir(self.dir)
         private_dir(self.pages_dir)
-        self._key = self._load_key()
+        self._key_cache = self._load_key()
         self.ledger = Ledger(self.dir)
         self._repair_ledger()
 
@@ -113,6 +117,30 @@ class SessionStore(LedgerOps):
         value = self._meta().get("workdir")
         return Path(value) if isinstance(value, str) and value else None
 
+    @classmethod
+    def open_existing(cls, home: Path, session_id: str) -> SessionStore:
+        """Open a session for reading without creating anything; SessionNotFoundError if it is absent.
+
+        Writing pages through a store opened this way loads (or creates) the page key on first use.
+        """
+        path = session_dir(home, session_id)
+        if not path.is_dir():
+            raise SessionNotFoundError(f"no session {session_id!r} under {Path(home) / 'sessions'}")
+        store = cls.__new__(cls)
+        store.session_id = session_id
+        store.dir = path
+        store.pages_dir = path / "pages"
+        store._key_cache = None
+        store.ledger = Ledger(path)
+        return store
+
+    @property
+    def _key(self) -> bytes:
+        if self._key_cache is None:
+            private_dir(self.pages_dir)
+            self._key_cache = self._load_key()
+        return self._key_cache
+
     def _load_key(self) -> bytes:
         """The store's HMAC key, created atomically on first use; refuses an empty or short key."""
         path = self.dir / "page.key"
@@ -144,6 +172,8 @@ class SessionStore(LedgerOps):
 
     def _pages(self) -> list[dict[str, Any]]:
         out = []
+        if not self.pages_dir.is_dir():
+            return out
         for path in self.pages_dir.glob("pg_*.json"):
             try:
                 out.append(json.loads(path.read_text(encoding="utf-8")))

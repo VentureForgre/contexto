@@ -58,8 +58,9 @@ uv tool install .            # or: pip install .
 contexto --version
 ```
 
-Planned commands for milestone M2 (`docs/milestones/M2-contexto-proxy.md`); full documentation,
-exit codes, and `--help` text come with the CLI packet:
+Commands for milestone M2 (`docs/milestones/M2-contexto-proxy.md`). `contexto run` and
+`contexto proxy` are documented with the proxy, `contexto mcp` in "MCP server" above, and the rest
+in "Inspecting sessions" below. Every command accepts `--help`.
 
 | Command | Purpose |
 |---|---|
@@ -72,3 +73,53 @@ exit codes, and `--help` text come with the CLI packet:
 | `contexto state` | Print the session's pinned state |
 
 Session data lives under `$CONTEXTO_HOME` (default `~/.contexto`) and is never committed.
+
+## Inspecting sessions (`contexto sessions`, `contexto recall`, `contexto state`)
+
+These commands read a session's store under `$CONTEXTO_HOME/sessions/<id>/`. They never create a
+session or change its pages, ledger, or log.
+
+**Session selection** for `recall` and `state`: `--session ID`, else the `CONTEXTO_SESSION`
+environment variable, else the session with the most recent activity. The chosen session and how
+it was chosen are printed to stderr, for example `session 7f3a (most recent)`, so stdout carries
+only the page or state text.
+
+### `contexto sessions list [--json]`
+
+One row per session, most recent activity first (ties broken by id): id, created time, page count,
+ledger record count (`?` if the ledger cannot be read), and last activity. Times are UTC. `--json`
+prints a list of objects with the keys `id`, `created`, `pages`, `records`, `last_activity`.
+
+### `contexto sessions show ID [--json]`
+
+A summary of one session:
+
+- created and last activity times;
+- page count, ledger record count, active records, and open obligations;
+- how many session-log events, over-bound turns, and upstream 4xx responses were recorded;
+- the last epoch state the proxy logged;
+- whether the ledger verifies.
+
+`--json` adds the event counts by type.
+
+### `contexto recall PAGE_ID [--session ID] [--offset N]`
+
+Prints a paged-out turn as plain text with thinking omitted, rendered exactly as the MCP
+`contexto_recall` tool renders it, 32,000 characters at a time. When more remains, stderr says
+`[N more characters: rerun with --offset M]`.
+
+### `contexto state [--session ID]`
+
+Prints the session's full pinned state without the budget cap: open obligations, active
+decisions, and verified facts with their record ids. This is the same text as the MCP
+`contexto_state` tool. File sources are checked against the session's recorded working
+directory; if none is recorded, the output says staleness was not checked.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success (an empty session list is a success) |
+| 1 | Unknown or invalid session id, unknown page id, an offset past the end of the page, or an unreadable ledger |
+| 2 | Usage error: unknown command or option, or a missing argument (`contexto` with no command prints help and exits 2) |
+
