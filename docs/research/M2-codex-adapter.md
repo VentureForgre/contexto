@@ -12,12 +12,14 @@ that are not real); **[source]** Codex source at that tag, `S:<path>:<lines>` un
 - **Transport:** force HTTP through a custom provider defined with `-c`; never the built-in `openai`
   provider. The proxy URL has no `/v1`; the upstream base carries the version path (agreed with
   builder-1), and the proxy transforms any path ending in `/responses`.
-- **API-key mode (default, the only mode run live, D12):** a temporary `CODEX_HOME` (directory 0700,
-  files 0600, removed on exit) holding a custom provider that points at the proxy, with
+- **API-key mode (default, the only mode run live, D12):** a `CODEX_HOME` in the Contexto session
+  dir (`codex-home`, directory 0700, files 0600; `config.toml` removed on exit) holding a custom
+  provider that points at the proxy, with
   `auth.command` running the existing key helper command; upstream is the owner's proxy. The
   temporary config names the helper command only, never the key; nothing from it is committed or
   logged. The helper command is configurable (flag or environment), and its default comes from the
-  same place Claude Code's `apiKeyHelper` is configured rather than a hard-coded path.
+  same place Claude Code's `apiKeyHelper` is configured rather than a hard-coded path. Codex local
+  history lives in the 0700 session-dir `CODEX_HOME` (same exposure as `~/.codex`).
 - **ChatGPT mode (`--codex-auth chatgpt`, a product feature):** the user's own `CODEX_HOME` with `-c`
   overrides only, a custom provider at the proxy with `requires_openai_auth = true`, credentials and
   `/models` passed through unchanged. Tested only with synthetic credentials, never live on the
