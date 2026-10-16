@@ -372,10 +372,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 - `contexto_state()` returns the full pinned state without the budget cap.
 - `contexto_search(query)`: exact substring search over page stubs and text. For each of the 3 newest matching pages
   (newest first, as in the index; for superseded facts the newest statement is the current one) it
-  returns a short header (page id and turn number, no stub) and up to 3 matching lines, the last 3 in page order (a turn's latest statements), each with one
-  line of context and its character offset in the rendered page; when a match is in the stub
+  returns a short header (page id and turn number, no stub) and up to 3 matching lines, the last 3 in page order (a turn's latest statements, shown oldest to
+  newest, so the last line shown is the newest), each with one line of context and its character
+  offset in the rendered page; when a page has more matches than it shows, a note gives their
+  count and the offset of the page's first match, so earlier statements stay reachable by recall; when a match is in the stub
   itself, the stub line is shown as the matching line. Any further matching pages are listed
-  compactly as page id, turn, and the offset of their last match (about 10 tokens each), so every
+  compactly as page id, turn, and the offsets of their first and last match (`@first..last`, or
+  one offset when they coincide; about 10 tokens each), so every
   match stays reachable by `contexto_recall` at that offset even when the query cannot be
   narrowed. The model can answer from a hit or recall exactly that offset instead of reading a
   page from the top (measured in the second live H1 run: a full recall from offset 0 reached
