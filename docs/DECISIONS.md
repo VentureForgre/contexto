@@ -186,6 +186,21 @@ the owner's delegation. Open decisions are listed at the end with the options an
   (head 47,628 measured after the tool definitions grew, #140); the approval line is a hard stop at
   6,880,000, on main fbb1303.
 
+- **D29. Cut v0.1.0 now that M2 acceptance passed; this settles O5.** Intake, 2026-10-16, on the
+  owner's instruction ("just keep going, I would prefer to come to a finished project ... just
+  have free reign", spelling corrected; the owner's next message to intake in the same session
+  added "but nothing to publish outside this repo though", which is not otherwise on file). The
+  private-only scope rests on D14, D0, and `RELEASING.md` in any case. Live run #3 on main
+  fbb1303 passed acceptance 1 to 4 (STATUS.md), and the M2 contract's criterion 6 says intake then
+  cuts v0.1.0. Intake sets the repository variable `RELEASES_ENABLED` to `true` before merging the
+  pull request that records this decision, so that merge's push releases. Semantic-release 10.7.0
+  (the workflow's pin), run locally with `--noop` on main 75105f5, proposes `v0.1.0` with no
+  earlier tag. The release is a tag and a GitHub Release on this private repository with the sdist
+  and wheel attached; no package registry (D14, D0). Options considered: wait for the owner to
+  return (rejected: the owner asked to come back to a finished project, and a private release
+  is reversible by deleting the tag and release); release after B22 (rejected: B22 refines search
+  but is not needed for what acceptance measured, and it ships in a later version).
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
@@ -235,9 +250,7 @@ All open decisions are intake's to make under D0 unless marked otherwise.
 - **O4. End-user authentication guidance.** API key only, or also subscription logins, for people
   who run Contexto themselves. Needs the terms question answered in the product docs. Owner
   decision, because it bears on what may be shared beyond this repository.
-- **O5. First real release.** The release workflow runs dry until a release is cut. A GitHub Release
-  on this private repository stays inside the repository, so it is within D0. Lean: cut v0.1.0
-  when the first working Contexto build merges with passing CI.
+- **O5. First real release.** Settled by D29 (v0.1.0 after M2 acceptance).
 - **O6. Upstream affinity on the owner's proxy.** Measured: full cache misses with byte-identical
   prefixes (4 of 14 eligible throwaway calls) and thinking dropped on every request
   (`end_user_binding_mismatch`) through `cliproxy.sullylab.de`. Lane 1's black-box test (L1-e,
