@@ -80,12 +80,27 @@ def test_room_is_clamped_at_zero():
 
 
 def test_count_tokens_never_publishes():
+    """Contract PR #89 (6ffc22b): count_tokens publishes no room on the request or on usage."""
     store = RoomStore()
     engine = RewriteEngine(store, config=CONFIG)
     msgs = history(2) + [user("question")]
     engine(request(msgs), {}, COUNT_TOKENS)
     assert engine.observe_usage(COUNT_TOKENS, USAGE, request(msgs)) == []
     assert store.rooms == []
+
+
+def test_count_tokens_after_a_turn_does_not_publish():
+    """With a live epoch and an estimate, a count_tokens probe for a new turn still publishes nothing."""
+    store = RoomStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    msgs = history(2) + [user("question")]
+    engine(request(msgs), {}, MESSAGES)
+    published = list(store.rooms)
+    assert published
+    probe = msgs + [assistant("answer"), user("next question")]
+    engine(request(probe), {}, COUNT_TOKENS)
+    assert engine.observe_usage(COUNT_TOKENS, USAGE, request(probe)) == []
+    assert store.rooms == published
 
 
 def test_a_new_engine_on_the_same_history_uses_the_same_turn_id():
