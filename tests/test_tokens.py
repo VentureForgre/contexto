@@ -36,3 +36,5 @@ def test_estimator_switches_to_measured_ratio():
     assert est.estimate_messages(msgs) == 35
     est.observe(request_bytes=0, input_tokens=10)  # ignored
     assert est.measured_bytes_per_token == 2.0
+    est.observe(request_bytes=3000, input_tokens=500)  # cumulative: 4000 bytes over 1000 tokens
+    assert est.measured_bytes_per_token == 4.0

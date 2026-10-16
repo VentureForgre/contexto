@@ -59,12 +59,19 @@ class TokenEstimator:
     """Per-session estimator: the defaults until real usage arrives, then the measured ratio."""
 
     def __init__(self) -> None:
-        self.measured_bytes_per_token: float | None = None
+        self.total_bytes = 0
+        self.total_tokens = 0
+
+    @property
+    def measured_bytes_per_token(self) -> float | None:
+        """Cumulative ratio over every observed request, or None before the first."""
+        return self.total_bytes / self.total_tokens if self.total_tokens else None
 
     def observe(self, request_bytes: int, input_tokens: int) -> None:
-        """Record a request's byte size and its real input tokens (uncached, cache read, and cache write)."""
+        """Add a request's byte size and its real input tokens (uncached, cache read, and cache write)."""
         if request_bytes > 0 and input_tokens > 0:
-            self.measured_bytes_per_token = request_bytes / input_tokens
+            self.total_bytes += request_bytes
+            self.total_tokens += input_tokens
 
     def estimate(self, data: str | bytes, *, tool_result: bool = False) -> int:
         return estimate_tokens(data, tool_result=tool_result, bytes_per_token=self.measured_bytes_per_token)

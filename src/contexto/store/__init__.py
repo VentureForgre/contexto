@@ -2,6 +2,8 @@
 
 ``SessionStore`` keeps one directory per session (``$CONTEXTO_HOME/sessions/<id>/``):
 
+Directories are 0700 and files 0600 whatever the umask (``contexto.private``, contract PR #25).
+
 - ``pages/<page id>.json``: one immutable page per paged-out turn (see ``contexto.store.pages``).
 - ``page.key``: the random per-store HMAC key for page ids. It never leaves the store.
 - ``log.jsonl``: the session log, one canonical JSON event per line.
@@ -20,9 +22,12 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
+from contexto.private import open_private, private_dir, write_new
 from contexto.store.pages import build_page, render_index, render_pinned, search_pages
 
-__all__ = ["SessionStore", "PageConflictError", "redact"]
+__all__ = ["SessionStore", "PageConflictError", "KeyFileError", "redact"]
+
+KEY_BYTES = 32
 
 _SECRET_KEYS = {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"}
 
@@ -31,8 +36,17 @@ class PageConflictError(RuntimeError):
     """A page file exists under an id with different content; pages are immutable."""
 
 
+class KeyFileError(RuntimeError):
+    """The store's page key file is empty, short, or not hex; page ids cannot be trusted."""
+
+
 def redact(event: Any) -> Any:
-    """Copy of ``event`` with credential-bearing keys replaced, at any depth."""
+    """Copy of ``event`` with credential-bearing keys replaced, at any depth.
+
+    Redaction is by key name only (``authorization``, ``x-api-key``, cookies). A credential inside
+    a string value under another key is not detected, so callers must not log raw header blobs
+    or request bodies.
+    """
     if isinstance(event, dict):
         return {k: ("[redacted]" if str(k).lower() in _SECRET_KEYS else redact(v)) for k, v in event.items()}
     if isinstance(event, list):
@@ -40,43 +54,27 @@ def redact(event: Any) -> Any:
     return event
 
 
-def _write_new(path: Path, data: bytes) -> bool:
-    """Create ``path`` with ``data`` atomically; False if it already exists."""
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    try:
-        os.link(tmp, path)  # fails if path exists, so a page is never replaced
-        return True
-    except FileExistsError:
-        return False
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
 class SessionStore:
     def __init__(self, home: Path, session_id: str) -> None:
         self.session_id = session_id
         self.dir = session_dir(home, session_id)
         self.pages_dir = self.dir / "pages"
-        self.pages_dir.mkdir(parents=True, exist_ok=True)
+        private_dir(self.dir)
+        private_dir(self.pages_dir)
         self._key = self._load_key()
 
     def _load_key(self) -> bytes:
+        """The store's HMAC key, created atomically on first use; refuses an empty or short key."""
         path = self.dir / "page.key"
+        if not path.exists():
+            # A losing racer's write_new returns False and reads the winner's complete key below.
+            write_new(path, secrets.token_bytes(KEY_BYTES).hex().encode("ascii"))
         try:
-            return bytes.fromhex(path.read_text().strip())
-        except FileNotFoundError:
-            pass
-        key = secrets.token_bytes(32)
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:  # another process created it first
-            return bytes.fromhex(path.read_text().strip())
-        with os.fdopen(fd, "w") as f:
-            f.write(key.hex())
+            key = bytes.fromhex(path.read_text(encoding="ascii").strip())
+        except (ValueError, UnicodeDecodeError) as e:
+            raise KeyFileError(f"{path} is not a hex key: {e}") from e
+        if len(key) != KEY_BYTES:
+            raise KeyFileError(f"{path} holds a {len(key)}-byte key, expected {KEY_BYTES}")
         return key
 
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]:
@@ -89,7 +87,7 @@ class SessionStore:
             page = build_page(self._key, turn, first_turn + offset)
             path = self.pages_dir / f"{page['id']}.json"
             data = canonical_bytes(page)
-            if not _write_new(path, data) and path.read_bytes() != data:
+            if not write_new(path, data) and path.read_bytes() != data:
                 raise PageConflictError(f"{path} exists with different content")
             ids.append(page["id"])
         return ids
@@ -130,6 +128,9 @@ class SessionStore:
         """Append ``event`` (credentials redacted, ``ts`` added if absent) to ``log.jsonl``."""
         record = redact(dict(event))
         record.setdefault("ts", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-        line = canonical_json(record) + "\n"
-        with open(self.dir / "log.jsonl", "a", encoding="utf-8") as f:
-            f.write(line)
+        line = (canonical_json(record) + "\n").encode("utf-8")
+        fd = open_private(self.dir / "log.jsonl", os.O_WRONLY | os.O_APPEND)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
