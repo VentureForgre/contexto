@@ -13,6 +13,7 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes
 from contexto.store.recall import DEFAULT_LINES, salient_identifiers
+from contexto.store.render import as_message
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
 STUB_TEXT_CHARS = 200
@@ -51,9 +52,14 @@ def _user_text(message: dict[str, Any]) -> str:
     return "\n".join(b.get("text", "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text")
 
 
+def _view(turn: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The turn as Messages API messages: Messages pages unchanged, Responses items mapped (B23)."""
+    return [m for m in (as_message(item) for item in turn) if isinstance(m, dict)]
+
+
 def _texts(turn: list[dict[str, Any]]):
-    """Every human-readable string in a turn: text, tool inputs, and tool results."""
-    for message in turn:
+    """Every human-readable string in a turn: text, tool inputs, and tool results (both dialects)."""
+    for message in _view(turn):
         content = message.get("content")
         if isinstance(content, str):
             yield content
@@ -65,7 +71,10 @@ def _texts(turn: list[dict[str, Any]]):
             if kind == "text":
                 yield block.get("text", "")
             elif kind == "tool_use":
-                for v in (block.get("input") or {}).values():
+                tool_input = block.get("input")
+                if isinstance(tool_input, str):  # a Codex custom_tool_call's raw input (B23)
+                    yield tool_input
+                for v in (tool_input.values() if isinstance(tool_input, dict) else ()):
                     if isinstance(v, str):
                         yield v
             elif kind == "tool_result":
@@ -97,10 +106,11 @@ def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
     placeholder when it is empty. Pages with user text keep exactly the three fields, so their ids
     are unchanged.
     """
-    first_user = next((m for m in turn if m.get("role") == "user"), {})
+    view = _view(turn)  # Responses (Codex) items as Messages API messages, the same view search reads (B23)
+    first_user = next((m for m in view if m.get("role") == "user"), {})
     tools: list[str] = []
     paths: list[str] = []
-    for message in turn:
+    for message in view:
         content = message.get("content")
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
@@ -108,7 +118,8 @@ def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
                 if name and name not in tools:
                     tools.append(name)
                 for key in _PATH_KEYS:
-                    value = (block.get("input") or {}).get(key)
+                    tool_input = block.get("input")
+                    value = tool_input.get(key) if isinstance(tool_input, dict) else None
                     if isinstance(value, str) and value and value not in paths:
                         paths.append(value)
     for text in _texts(turn):
