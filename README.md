@@ -151,6 +151,11 @@ Your own Claude Code settings, hooks, and MCP servers still load; nothing in you
 configuration is edited. Limit: organization-managed settings outrank `--settings`, so if they set
 `ANTHROPIC_BASE_URL`, Claude Code bypasses the proxy.
 
+Passing your own `--settings` (or `--settings=...`) after `claude` is refused with exit code 2:
+Claude Code accepts a single `--settings`, and a second one could replace the launcher's and route
+requests around the proxy. Put those settings in your Claude settings files instead. Your own
+`--mcp-config` is allowed; Claude Code loads it alongside Contexto's.
+
 | Option | Default | Meaning |
 |---|---|---|
 | `--bound N` | 150,000 | Upstream prompt bound in tokens. Above 170,000 needs `--allow-large-bound`, because Claude Code may then compact on its own. |

@@ -87,6 +87,21 @@ class LaunchOptions:
     claude_bin: str = "claude"
 
 
+def check_user_args(claude_args: list[str]) -> None:
+    """Fail closed on a user ``--settings``: Claude Code 2.1.301 takes a single ``--settings``, so a
+    second one could replace ours and silently send requests around the proxy. ``--mcp-config`` is
+    variadic and allowed. Arguments after ``--`` are positional for claude and not checked."""
+    for arg in claude_args:
+        if arg == "--":
+            return
+        if arg == "--settings" or arg.startswith("--settings="):
+            raise LaunchError(
+                "--settings in the claude arguments is not supported: Claude Code accepts one --settings, "
+                "and contexto uses it to route requests through its proxy, so a second one could bypass "
+                "the proxy. Put those settings in your Claude settings files instead "
+                "(see README, 'contexto run').", EXIT_USAGE)
+
+
 def check_bound(bound: int, allow_large_bound: bool) -> None:
     if bound <= 0:
         raise LaunchError(f"--bound must be positive, got {bound}", EXIT_USAGE)
@@ -208,6 +223,7 @@ def run_claude(options: LaunchOptions, *, stderr=None) -> int:
 
 
 def _run(options: LaunchOptions, stderr) -> int:
+    check_user_args(options.claude_args)
     check_bound(options.bound, options.allow_large_bound)
     if options.window_fraction is not None and not 0 < options.window_fraction < 1:
         raise LaunchError(f"--window-fraction must be between 0 and 1, got {options.window_fraction}", EXIT_USAGE)

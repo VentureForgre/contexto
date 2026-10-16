@@ -28,6 +28,7 @@ from contexto.launcher import (
     LaunchError,
     LaunchOptions,
     check_bound,
+    check_user_args,
     engine_config,
     exit_code,
     mcp_payload,
@@ -152,9 +153,11 @@ def test_run_wires_settings_mcp_and_args_and_cleans_up(env, upstream, tmp_path):
     assert kinds[:2] == ["proxy_start", "launch"] and kinds[-2:] == ["proxy_stop", "exit"]
     launch_event = next(e for e in events if e["event"] == "launch")
     assert launch_event["upstream_source"] == "flag" and launch_event["config"] == {"bound": 150_000}
-    assert launch_event["user_arg_count"] == 4 and launch_event["engine"] in ("identity", "rewrite")
+    assert launch_event["user_arg_count"] == 4 and launch_event["engine"] == "rewrite"  # A2 is on main
+    assert not any(e["event"] == "engine_unavailable" for e in events)
     request = next(e for e in events if e["event"] == "request")
     assert request["path"] == "/v1/messages" and request["status"] == 200
+    assert request["transform_events"] and all("epoch" in e for e in request["transform_events"])
     log_text = json.dumps(events)
     assert "fake-key" not in log_text and "hello" not in log_text and upstream not in log_text
 
@@ -311,3 +314,31 @@ def test_notice_log_shows_engine_sizing_problems_once(tmp_path):
     lines = err.getvalue().splitlines()
     assert len(store.events) == 5 and len(lines) == 2
     assert "window budget 20,000" in lines[0] and "bound 150,000 is too small" in lines[1]
+
+
+@pytest.mark.parametrize("user_args", [["--settings", "mine.json"], ["-p", "hi", "--settings={}"]])
+def test_user_settings_are_refused_before_anything_starts(env, upstream, tmp_path, user_args):
+    proc = launch(env, "--upstream", upstream, "--session", "r1", "claude", *user_args, cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE and "--settings in the claude arguments is not supported" in err
+    assert not Path(env["FAKE_RECORD"]).exists()  # claude never ran
+    assert not (Path(env["CONTEXTO_HOME"]) / "sessions" / "r1").exists()  # no session, proxy, or temp files
+
+
+def test_user_mcp_config_passes_through(env, upstream, tmp_path):
+    mine = tmp_path / "my-mcp.json"
+    mine.write_text(json.dumps({"mcpServers": {}}))
+    proc = launch(env, "--upstream", upstream, "--session", "r2", "claude", "--mcp-config", str(mine), "-p", "x",
+                  cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    argv = json.loads(Path(env["FAKE_RECORD"]).read_text())["argv"]
+    assert argv[2] == "--mcp-config" and argv[4:] == ["--mcp-config", str(mine), "-p", "x"]
+
+
+def test_check_user_args():
+    check_user_args(["-p", "x", "--mcp-config", "a.json", "b.json"])
+    check_user_args(["-p", "--", "--settings"])  # positional after --, not a flag
+    for args in (["--settings", "f"], ["--settings=f"], ["-p", "x", "--settings", "f"]):
+        with pytest.raises(LaunchError):
+            check_user_args(args)
