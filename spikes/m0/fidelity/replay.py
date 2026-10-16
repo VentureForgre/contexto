@@ -52,7 +52,7 @@ class RequestFailed(Exception):
     pass
 
 
-Post = Callable[[dict[str, Any]], tuple[int, dict[str, Any]]]
+Post = Callable[..., tuple[int, dict[str, Any]]]  # (body, extra headers=None) -> (status, payload)
 
 
 def http_post(settings: Path) -> Post:
@@ -69,8 +69,10 @@ def http_post(settings: Path) -> Post:
         raise SystemExit(f"apiKeyHelper failed (exit {proc.returncode}); output not shown")
     key = proc.stdout.strip()
 
-    def post(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        req = urllib.request.Request(base + "/v1/messages", data=json.dumps(body).encode("utf-8"), method="POST")
+    def post(body: dict[str, Any], headers: dict[str, str] | None = None, path: str = "/v1/messages") -> tuple[int, dict[str, Any]]:
+        req = urllib.request.Request(base + path, data=json.dumps(body).encode("utf-8"), method="POST")
+        for name, value in (headers or {}).items():
+            req.add_header(name, value)
         req.add_header("content-type", "application/json")
         req.add_header("user-agent", "contexto-replay/0.1")
         req.add_header("anthropic-version", "2023-06-01")
@@ -107,8 +109,11 @@ def usage_total(usage: dict[str, Any]) -> int:
 
 
 class Runner:
-    def __init__(self, post: Post, cap: int, estimates: dict[str, int], spent: int = 0, margin: float = 1.2) -> None:
+    def __init__(self, post: Post, cap: int, estimates: dict[str, int], spent: int = 0, margin: float = 1.2,
+                 max_tokens: int = MAX_TOKENS, effort: str = EFFORT) -> None:
         self.post = post
+        self.max_tokens = max_tokens
+        self.effort = effort
         self.cap = cap
         self.estimates = estimates  # turn id -> estimated input context, from l2d.replay_requests
         self.margin = margin  # applied to estimates; 1.0 when the estimate is a measured figure
@@ -116,12 +121,13 @@ class Runner:
         self.records: list[dict[str, Any]] = []
 
     def call(self, label: str, turn_id: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        projected = self.spent + int(self.margin * self.estimates.get(turn_id, 0)) + MAX_TOKENS // 4
+        # Reserve the full output allowance: a fork can think until max_tokens (L2f pilot 2 did).
+        projected = self.spent + int(self.margin * self.estimates.get(turn_id, 0)) + self.max_tokens
         if projected > self.cap:
             raise CapExceeded(f"{label}: projected {projected} would pass the cap {self.cap}")
         body = {
-            "model": MODEL, "max_tokens": MAX_TOKENS, "system": SYSTEM, "messages": messages,
-            "thinking": {"type": "adaptive"}, "output_config": {"effort": EFFORT},
+            "model": MODEL, "max_tokens": self.max_tokens, "system": SYSTEM, "messages": messages,
+            "thinking": {"type": "adaptive"}, "output_config": {"effort": self.effort},
         }
         started = time.monotonic()
         status, payload = self.post(body)
