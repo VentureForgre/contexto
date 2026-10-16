@@ -241,6 +241,41 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     request compression), logged `encoded_body_rejected`. The request is never forwarded
     unbounded. This is client misconfiguration, not a Contexto defect, so rule 14's
     degrade-instead-of-block policy does not apply.
+16. **Resuming an epoch after a proxy restart.** A new engine on an existing session continues
+    the main conversation's current epoch instead of rotating again from epoch 0, so a restart
+    keeps the prompt byte-identical to what the previous process would have sent and the cache
+    still holds. Measured basis (A28, builder-1, zero-spend replay of the Codex acceptance run,
+    reviewed in PR #174): the harness started a new proxy for each of 21 `codex exec` turns, every
+    restart rotated from epoch 0, and replaying with epoch state resumed cut rotations from 19 to 9
+    and modeled cost by 16.2 percent. Any user whose proxy restarts mid-session hits the same gap.
+    - **Record.** At each rotation (a new epoch) and whenever the engine leaves degraded mode, the
+      engine writes the main conversation's epoch record through
+      `SessionStore.set_epoch(record)`: `epoch`, `k`, `strip_upto`, `turns_paged`, the exact
+      `pinned_text` and `index_text` sent in that epoch, `head_fingerprint`, the dialect, the
+      model named by the request, the settings that decide rotation (`bound`, `window_fraction`,
+      `headroom_floor`, `min_turn_room`), the conversation's identity as the engine keys it, and
+      an anchor: the normalised hashes (rule 10) of messages `M[0..k)` and the count of messages
+      at epoch creation. It is a full atomic overwrite at mode 0600, never logged, never sent
+      upstream, and holds conversation text only in `pinned_text` and `index_text`, which the
+      store already holds in other forms. A degraded engine (rule 14) writes no record.
+    - **Resume.** A new engine reads the record once, at the first request of a conversation
+      whose identity matches the record's, and resumes (adopts `epoch`, `k`, `strip_upto`,
+      `turns_paged`, `pinned_text`, `index_text`, and continues append-only, rules 1 to 3) only
+      if every check holds: same dialect, model, and rotation settings; the request's head
+      fingerprint equals the record's; the request has at least the record's message count; and
+      the request's messages `M[0..k)` hash to the record's anchor. Rule 4's rotation decisions
+      apply from the next turn start as usual. Any failed check, an unreadable or malformed
+      record, or no record starts the epoch from 0 as before, and the engine logs content-free
+      `epoch_not_resumed` with one reason (`no_record`, `unreadable`, `dialect_changed`,
+      `model_changed`, `settings_changed`, `head_changed`, `history_shorter`, `history_diverged`,
+      `other_conversation`). A resume logs `epoch_resumed` with `epoch` and `k`. Measured sizing
+      (packet A8's ratio restore) is unchanged and still applies.
+    - **Write failures.** A failed `set_epoch` deletes or marks the previous record unusable, so
+      a later restart cannot resume a stale epoch, and logs `epoch_record_stale`. It does not
+      enter degraded mode: the record only saves cache, and losing it costs one rotation.
+    - **Not covered.** Subagents and side requests are not recorded (they rotate from 0 after a
+      restart, as today). A record written by an older version, or with a field missing, does
+      not resume.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
@@ -472,8 +507,8 @@ a no-replayed-thinking baseline.
    example `upstream unreachable`) fails the run; an upstream 5xx passed through unchanged is
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
-   `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`, or
-   `unclassified_system_message`.
+   `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`,
+   `epoch_record_stale`, or `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the
