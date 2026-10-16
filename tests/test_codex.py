@@ -188,6 +188,7 @@ import json
 import os
 import stat
 import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -465,3 +466,42 @@ def test_retained_snapshot_on_the_responses_dialect():
     engine = RewriteEngine(store, config=Config(bound=1_000_000))
     engine(request(items + [prompt("prompt 1")]), {}, "/v1/responses")
     assert len(store.snapshots) == 1 and store.snapshots[0][2][-1]["text"] == "prompt 1"
+
+
+def test_mcp_server_gets_contexto_home_in_api_key_mode(tmp_path, monkeypatch):
+    """Packet A18: Codex starts MCP servers with a restricted environment, so the contexto server is
+    given CONTEXTO_HOME explicitly; without it the server opened ~/.contexto, a different store."""
+    store_home = tmp_path / 'store home with "quotes" and spaces'
+    launch = plan_codex([], PROXY, "S1", env={}, cwd=tmp_path, home=claude_home(tmp_path),
+                        upstream="https://u.invalid/v1", contexto_home=store_home)
+    try:
+        config = tomllib.loads((launch.codex_home / "config.toml").read_text())
+        assert config["mcp_servers"]["contexto"]["env"] == {"CONTEXTO_HOME": str(store_home)}
+    finally:
+        launch.cleanup()
+    # Always passed, the default home too, so proxy and MCP server always agree.
+    monkeypatch.delenv("CONTEXTO_HOME", raising=False)
+    launch = plan_codex([], PROXY, "S1", env={}, cwd=tmp_path, home=claude_home(tmp_path),
+                        upstream="https://u.invalid/v1")
+    try:
+        config = tomllib.loads((launch.codex_home / "config.toml").read_text())
+        assert config["mcp_servers"]["contexto"]["env"]["CONTEXTO_HOME"] == str(Path.home() / ".contexto")
+    finally:
+        launch.cleanup()
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "from-env"))
+    launch = plan_codex([], PROXY, "S1", env={}, cwd=tmp_path, home=claude_home(tmp_path),
+                        upstream="https://u.invalid/v1")
+    try:
+        config = tomllib.loads((launch.codex_home / "config.toml").read_text())
+        assert config["mcp_servers"]["contexto"]["env"]["CONTEXTO_HOME"] == str(tmp_path / "from-env")
+    finally:
+        launch.cleanup()
+
+
+def test_mcp_server_gets_contexto_home_in_chatgpt_mode(tmp_path):
+    store_home = tmp_path / "store home"
+    launch = plan_codex(["exec", "hi"], PROXY, "S2", auth_mode=CHATGPT_MODE, env={"PATH": "/bin"},
+                        cwd=tmp_path, home=tmp_path, contexto_home=store_home)
+    overrides = dict(launch.argv[i + 1].split("=", 1) for i, a in enumerate(launch.argv) if a == "-c")
+    value = overrides["mcp_servers.contexto.env.CONTEXTO_HOME"]
+    assert tomllib.loads(f"v = {value}")["v"] == str(store_home)  # a valid TOML string, as codex parses -c
