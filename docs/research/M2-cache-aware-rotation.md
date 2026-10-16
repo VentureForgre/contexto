@@ -64,6 +64,11 @@ Read in place, never copied:
   baseline replay, at the run's bytes per token (4.2702 on Codex, 2.399 on Claude). This is builder-4's
   B27 method, so a candidate's decisions see what it would have sent. The model's behaviour (tool
   calls, results, replies) is held fixed.
+- **Limit of that rate.** It is a run average that includes the head, which packs more bytes per token
+  than conversation content. On Codex, A27's content rates give 3.0193 bytes per token for the
+  no-rotation difference, so every Codex token difference from the baseline in this document may be
+  understated by up to 1.41 times (4.2702 / 3.0193). The rows were not recomputed at that rate, and
+  whether the candidate ranking holds at it is not checked; it is open.
 - **Turn room** in the tables is the bound minus the request's input tokens minus the headroom floor.
   It ignores output: at most 136 tokens per request on Codex A22 and 2,583 on Claude run #3.
 - **Baseline check.** At each run's own config the replay reproduces every logged rotation:
@@ -172,6 +177,12 @@ Accuracy risk: the larger windows that are no longer rotated away lower the mini
     as one request with no tool loop), which has different request points.
   - **A28:** at Contexto's own request points, no rotation costs 40.0% more than Contexto at 64,000,
     so Contexto is 28.6% cheaper there, under this document's cache model.
+  - **Why the token totals differ (checked).** A28's no-rotation input is 3,655,890 tokens, against
+    A27's 4,789,302 for plain Codex at the same points (+31%). The no-rotation replay sends Codex's
+    own bytes (within 15 bytes of each logged `original_request_bytes`), so the bytes agree. The
+    difference is the conversion: A28 converts the 11,682,734 bytes above the baseline at the run's
+    average of 4.2702 bytes per token, which includes the denser head. A27 converts paged bytes at
+    its calibrated text and tool-JSON rates, which here work out to 3.0193 bytes per token.
 - **Claude at 100,000** is 25.8% cheaper than at 150,000. No request crosses Haiku's 100,000 long-context
   tier (7 do at 150,000), but it rotates 19 times, 11 of them `window_minimal`. Its minimum turn room
   is 6,745, below `min_turn_room`.
