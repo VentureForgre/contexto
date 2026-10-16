@@ -11,7 +11,9 @@ import pytest
 
 from contexto.canonical import canonical_bytes
 from contexto.rewrite import (
+    ANTHROPIC,
     COUNT_TOKENS,
+    retained_entries,
     EpochState,
     StoreCalls,
     store_failure,
@@ -918,6 +920,12 @@ class FaultyStore:
     def set_turn_room(self, turn_id, room_tokens):  # lane B B11; published by the engine (packet A9)
         return self._call("set_turn_room", turn_id, room_tokens)
 
+    def set_retained(self, epoch, k, turns):  # lane B's A14 store side, as contract PR #125 specifies it
+        self.calls.append("set_retained")
+        if "set_retained" in self.fail:
+            raise self.fail["set_retained"]
+        self.retained = (epoch, k, turns)  # a full overwrite: only the latest snapshot is kept
+
 
 def turn_start_after(msgs, t):
     return msgs + [assistant(f"answer {t} {FILL}"), user(f"prompt {t + 1} {FILL}")]
@@ -1460,3 +1468,154 @@ def test_count_tokens_never_rotates_or_publishes_for_the_room():
     view, _, events = engine(req, {}, COUNT_TOKENS)
     assert events == [{"event": "count_tokens", "epoch": 0}] and view is req
     assert store.calls == [] and engine.states == {}
+
+
+# A14: the retained-window snapshot for in-view search (contract PR #125) --------------------------
+
+def test_retained_entries_are_rendered_blocks_without_thinking_images_or_context():
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "c3ludGhldGlj"}}
+    msgs = [user("prompt 0", context=True), system("carried synthetic system"),
+            assistant("answer 0", think="a0"),
+            {"role": "user", "content": [image, {"type": "text", "text": "prompt 1 about the picture"}]},
+            tool_use(1, think="a1"), tool_result(1, "chain link 7 is at node 42"), assistant("done", redacted=True)]
+    entries = retained_entries(msgs, 0, ANTHROPIC)
+    assert [(e["turn"], e["message_index"], e["role"]) for e in entries] == [
+        (1, 0, "user"), (1, 2, "assistant"), (2, 3, "user"), (2, 4, "assistant"), (2, 5, "tool_result"),
+        (2, 6, "assistant")]
+    texts = [e["text"] for e in entries]
+    assert texts[0] == "prompt 0" and texts[1] == "answer 0" and texts[2] == "prompt 1 about the picture"
+    assert texts[3] == 'tool_use Read {"file_path": "f1.txt"}'  # exactly as render_page shows it in a page
+    assert texts[4] == "tool_result:\nchain link 7 is at node 42"
+    joined = "\n".join(texts)
+    assert "system-reminder" not in joined and "carried synthetic system" not in joined
+    assert "sig-" not in joined and "opaque-synthetic" not in joined and "c3ludGhldGlj" not in joined
+
+
+def test_snapshot_is_written_once_per_request_before_the_room_and_never_from_count_tokens():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    req = request(history(2) + [user("new")])
+    engine(req, {}, MESSAGES)
+    assert store.calls[-2:] == ["set_retained", "set_turn_room"]  # the store stamps both with one sequence
+    state = next(iter(engine.states.values()))
+    epoch, k, turns = store.retained
+    assert (epoch, k) == (state.epoch, state.k) and turns == retained_entries(req["messages"], k, ANTHROPIC)
+    store.calls.clear()
+    engine.observe_usage(MESSAGES, {"input_tokens": 500, "output_tokens": 9}, req)
+    assert store.calls.count("set_turn_room") == 1 and "set_retained" not in store.calls  # real usage: room only
+    store.calls.clear()
+    engine(req, {}, COUNT_TOKENS)
+    assert store.calls == []
+    longer = request(history(3) + [user("newer")])
+    engine(longer, {}, MESSAGES)
+    assert store.retained[2] == retained_entries(longer["messages"], 0, ANTHROPIC)  # overwritten whole
+
+
+def test_snapshot_after_a_rotation_holds_only_the_retained_turns():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    msgs = history(6) + [user("new prompt")]
+    _, _, events = engine(request(msgs), {}, MESSAGES)
+    state = next(iter(engine.states.values()))
+    assert "rotation" in names(events) and state.k > 0
+    epoch, k, turns = store.retained
+    assert (epoch, k) == (state.epoch, state.k)
+    assert min(e["message_index"] for e in turns) >= k
+    paged_turns = sum(1 for m in msgs[:k] if is_turn_start(m))
+    assert turns[0]["turn"] == paged_turns + 1 and turns[-1]["turn"] == sum(1 for m in msgs if is_turn_start(m))
+
+
+def test_failed_snapshot_write_logs_retained_stale_once_and_is_not_degraded_mode():
+    store = FaultyStore()
+    store.fail["set_retained"] = OSError("synthetic")
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    _, _, events = engine(request(history(2) + [user("new")]), {}, MESSAGES)
+    stale = [e for e in events if e["event"] == "retained_stale"]
+    assert stale == [{"event": "retained_stale", "epoch": 0, "error": "OSError"}]
+    assert "store_error" not in names(events) and events[-1]["event"] == "request"
+    assert store.calls[-2:] == ["set_retained", "set_turn_room"]  # the room is still published
+    assert not next(iter(engine.states.values())).degraded
+
+
+def test_snapshot_text_is_never_logged():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    marker = "synthetic-chain-marker-93"
+    req = request(history(6) + [tool_use(1), tool_result(1, marker), user("new prompt")])
+    _, _, events = engine(req, {}, MESSAGES)
+    usage_events = engine.observe_usage(MESSAGES, {"input_tokens": 900}, req)
+    assert any(marker in e["text"] for e in store.retained[2])
+    assert marker not in json.dumps(events + usage_events) and marker not in json.dumps(store.inner.events)
+
+
+def conversation(first, turns, mid_loop=False):
+    msgs = [user(first, context=True), system()]
+    for t in range(1, turns):
+        msgs += [assistant(f"a{t}"), user(f"{first} prompt {t}")]
+    return msgs + ([tool_use(9), tool_result(9)] if mid_loop else [])
+
+
+def test_only_the_main_conversation_publishes_and_a_short_subagent_never_takes_over():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    engine(request(conversation("main", 3)), {}, MESSAGES)
+    published = store.calls.count("set_retained")
+    sub = request(conversation("subagent", 1))
+    engine(sub, {}, MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": 400}, sub)
+    assert store.calls.count("set_retained") == published and store.calls.count("set_turn_room") == published
+    assert store.retained[2][0]["text"] == "main"  # the snapshot is still the main conversation's
+
+
+def test_main_switches_only_on_strictly_more_turn_starts_and_only_at_a_turn_start():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    key = lambda first: "anthropic:" + message_hash(user(first, context=True))  # noqa: E731
+    assert engine.publishes(key("main"), conversation("main", 2), ANTHROPIC)  # the first one seen is main
+    assert not engine.publishes(key("other"), conversation("other", 2), ANTHROPIC)  # a tie keeps main
+    assert not engine.publishes(key("other"), conversation("other", 3, mid_loop=True), ANTHROPIC)  # mid loop
+    assert engine.publishes(key("other"), conversation("other", 3), ANTHROPIC)  # strictly more, at a turn start
+    assert not engine.publishes(key("main"), conversation("main", 3), ANTHROPIC)  # now a tie: other stays main
+    assert engine.publishes(key("main"), conversation("main", 4), ANTHROPIC)
+
+
+@pytest.mark.parametrize("kind", ["memory", "session"])
+def test_snapshot_and_both_room_publishes_share_the_request_sequence_in_the_real_stores(kind, tmp_path):
+    """Against lane B's store side (PR #128): set_retained bumps the persisted request sequence and
+    stamps the snapshot; the request-time and the real-usage room publishes that follow carry the same
+    stamp, so search trusts the snapshot for this request's tool calls; the next request moves it on."""
+    store = MemoryStore(key=b"k" * 32) if kind == "memory" else SessionStore(tmp_path, "a14")
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    req = request(history(2) + [tool_use(1), tool_result(1, "chain link 5"), user("new")])
+    engine(req, {}, MESSAGES)
+    epoch, k, stamp, entries = store.retained_current()  # what search reads: the current request's pair
+    assert stamp == store.room_stamp() and (epoch, k) == (0, 0)
+    assert entries == retained_entries(req["messages"], 0, ANTHROPIC) and entries[-1]["text"] == "new"
+    engine.observe_usage(MESSAGES, {"input_tokens": 700, "output_tokens": 5}, req)
+    assert store.retained_current()[2] == stamp  # the real-usage publish keeps the request's stamp
+    engine(request(history(3) + [user("newer")]), {}, MESSAGES)
+    assert store.retained_current()[2] == store.room_stamp() == stamp + 1
+    if kind == "session":
+        assert oct((tmp_path / "sessions" / "a14" / "retained.json").stat().st_mode & 0o777) == "0o600"
+
+
+
+def test_a_failed_snapshot_write_leaves_no_current_snapshot_in_the_real_store(tmp_path, monkeypatch):
+    """With lane B's PR #128: the snapshot write fails after the sequence moved on; the engine logs one
+    retained_stale, stays out of degraded mode, still publishes the room, and search finds no current
+    snapshot ('in view not checked'), never the previous request's."""
+    store = SessionStore(tmp_path, "a14-stale")
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    engine(request(history(2) + [user("new")]), {}, MESSAGES)
+    assert store.retained_current() is not None
+    real_write = store._write_atomic
+
+    def failing(path, data):
+        if path.name == "retained.json":
+            raise OSError("synthetic disk full")
+        return real_write(path, data)
+
+    monkeypatch.setattr(store, "_write_atomic", failing)
+    _, _, events = engine(request(history(3) + [user("newer")]), {}, MESSAGES)
+    assert [e["event"] for e in events if e["event"] in ("retained_stale", "store_error")] == ["retained_stale"]
+    assert not next(iter(engine.states.values())).degraded
+    assert store.turn_room()[0] == "4" and store.retained_current() is None
