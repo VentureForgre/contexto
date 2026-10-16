@@ -57,7 +57,7 @@ def test_in_view_lines_come_first_newest_first_and_labelled(store):
     assert lines[3].startswith("pg_")  # then the paged hits
     assert coverage == mcp.SEARCH_COVERAGE  # in view was checked
     event = last_event(store)
-    assert event["in_view_checked"] is True and event["in_view_hits"] == 2
+    assert event["in_view_checked"] is True and event["in_view_hits"] == 2 and event["in_view_more"] == 0
 
 
 def test_in_view_lines_are_charged_with_the_reply(store):
@@ -127,3 +127,30 @@ def test_a_tool_input_in_view_matches_through_its_escaped_form(store):
     snapshot(store, [entry(16, 1, 'tool_use run {"note": "say \\"hi\\" twice"}', "assistant")])
     body, _ = search(store, 'say "hi" twice')
     assert body.split("\n")[1].startswith("> in view (turn 16): tool_use run")
+
+
+
+# Reviewer-1 on PR #131: the newest matches win, within one message and across messages
+
+
+def test_the_newest_in_view_matches_win_within_one_message(store):
+    text = "\n".join(f"deploy.target=v{i}" for i in range(1, 7))  # v1 oldest ... v6 newest, one message
+    snapshot(store, [entry(16, 0, text)])
+    body, _ = search(store, "deploy.target")
+    lines = body.split("\n")
+    assert lines[1:4] == ["> in view (turn 16): deploy.target=v6", "> in view (turn 16): deploy.target=v5",
+                          "> in view (turn 16): deploy.target=v4"]
+    assert lines[4] == "  [3 more matching lines in view]"
+    event = last_event(store)
+    assert event["in_view_hits"] == 3 and event["in_view_more"] == 3  # shown hits only; the rest counted apart
+    assert [s["start"] for s in event["returned"] if s["source"] == "in_view"] == [
+        text.index("deploy.target=v6"), text.index("deploy.target=v5"), text.index("deploy.target=v4")]
+
+
+def test_the_newest_in_view_matches_win_across_messages(store):
+    snapshot(store, [entry(16, 0, "deploy.target=a1\ndeploy.target=a2\ndeploy.target=a3\ndeploy.target=a4"),
+                     entry(17, 1, "deploy.target=b1\ndeploy.target=b2", "tool_result")])
+    body, _ = search(store, "deploy.target")
+    assert body.split("\n")[1:5] == ["> in view (turn 17): deploy.target=b2", "> in view (turn 17): deploy.target=b1",
+                                      "> in view (turn 16): deploy.target=a4", "  [3 more matching lines in view]"]
+    assert last_event(store)["in_view_hits"] == 3

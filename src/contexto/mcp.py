@@ -419,7 +419,8 @@ class Server:
         pages = [(page_id, self.store.get_page(page_id) or {}) for page_id in found[:SEARCH_LIMIT + SEARCH_MORE_LIMIT]]
         hits = [_hit_rows(page_id, page, query) for page_id, page in pages[:SEARCH_LIMIT]]
         more = [_more_row(page_id, page, query) for page_id, page in pages[SEARCH_LIMIT:]]
-        in_view = self._in_view_rows(query)  # None: in view not checked
+        in_view_found = [0]
+        in_view = self._in_view_rows(query, in_view_found)  # None: in view not checked
         lead = in_view or []
         limit, _ = recall_limit(*self._window())  # one search reply is held to the per-call recall limit
         specific = "use a longer or more specific query"
@@ -473,10 +474,12 @@ class Server:
         coverage = SEARCH_COVERAGE if in_view is not None else SEARCH_COVERAGE_UNCHECKED
         return ([{"type": "text", "text": text}, {"type": "text", "text": coverage}], None,
                 {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": len(found),
-                 "in_view_hits": max(0, len(lead) - 1) if shown else 0, "in_view_checked": in_view is not None,
+                 "in_view_hits": sum(1 for _, span in lead if span) if shown else 0,
+                 "in_view_more": max(0, in_view_found[0] - IN_VIEW_LIMIT) if shown else 0,
+                 "in_view_checked": in_view is not None,
                  "returned": _spans(lead + picked["rows"]) if shown else [], **budget})
 
-    def _in_view_rows(self, query: str) -> list[Row] | None:
+    def _in_view_rows(self, query: str, total: list[int]) -> list[Row] | None:
         """Matching lines of the conversation in view, newest first (B19 b, contract PR #125).
 
         Uses the retained-window snapshot only when the store says it is the current request's
@@ -491,12 +494,14 @@ class Server:
         found = []
         for entry in snapshot[3]:
             for form in _rendered_forms(query):
-                shown, _ = match_lines(entry["text"], form, context=0)
+                every = entry["text"].count("\n") + 1  # ALL matching lines: the newest are chosen below
+                shown, _ = match_lines(entry["text"], form, context=0, per_page=every)
                 if shown:
                     found += [(entry["turn"], entry["message_index"], start, end, text)
                               for start, end, is_match, text in shown if is_match]
                     break
         found.sort(key=lambda m: (m[0], m[1], m[2]), reverse=True)
+        total[0] = len(found)
         if not found:
             return []
         rows: list[Row] = [("[in view, newest first:]", None)]
