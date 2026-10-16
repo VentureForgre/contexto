@@ -1430,7 +1430,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
               lambda tr, b=bound, m=m: (lambda bp: replace(bp, headroom_online=True, headroom_margin=m) if bp else None)(
                   policy_for_bound(policy, b, tr.head_tokens, policy.headroom_floor_tokens)))
              for m in rep["headroom_margins"]] + [
-            (f"online + 25%, ingest paging over {_k(INGEST_PAGE_OVER)}",
+            (f"online + 25%, ingest paging over {_k(INGEST_PAGE_OVER)} (fidelity of paged results unscored)",
              lambda tr, b=bound: (lambda bp: replace(bp, headroom_online=True, headroom_margin=0.25,
                                                      page_tool_output_over=INGEST_PAGE_OVER) if bp else None)(
                  policy_for_bound(policy, b, tr.head_tokens, policy.headroom_floor_tokens)))]]
@@ -1567,15 +1567,15 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
     miss_c = run_plain(trace, focus, None, comp, route_miss_rate=rep["sweep_route_miss"][1][1])
     miss_v = run_cvm(trace, focus, None, policy, route_miss_rate=rep["sweep_route_miss"][1][1])
     blocks["findings"] = "\n".join([
-        "- Under the owner's bar (no compaction, a hard working-context bound), only (iii) meets a 100k or 250k bound "
-        "without a lossy reset: (i) and (ii) at the CLI default exceed it, (ii) configured to reset inside the bound compacts, H4 "
-        "hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a "
-        f"{_k(trace.head_tokens)} head."
-        + (f" At 100k with online headroom (running max of completed turns + 25%), (iii) costs "
-           f"{_usd(b100[1].total.usd)} on seed {profile['seed']}; across seeds 1 to {rep['bound_seeds']} it sends a "
-           f"request over the bound on {o100[0]} of {rep['bound_seeds']} seeds ({o100[1]} requests in all, worst seed "
-           f"{o100[2]}), so the bound holds for most turns but not every one. Heavier tool use needs more headroom "
-           "than a 100k bound leaves (bound stress table)." if b100 else ""),
+        f"- Under the owner's bar (no compaction, a hard working-context bound), (iii) with online headroom (running "
+        f"max of completed turns + 25%) is the only strategy that stays inside a bound without a lossy reset, and only "
+        f"on some workloads: it meets 250k on all {rep['bound_seeds']} seeds and 100k on "
+        f"{rep['bound_seeds'] - o100[0]} of {rep['bound_seeds']} (the other {o100[0]} send {o100[1]} requests over in "
+        f"all, worst seed {o100[2]}). (i) and (ii) at the CLI default exceed the bound, (ii) configured to reset inside "
+        "it compacts, H4 hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a "
+        f"{_k(trace.head_tokens)} head, and heavier tool use needs more headroom than a 100k bound leaves (bound "
+        "stress table)."
+        + (f" On seed {profile['seed']} at 100k, (iii) costs {_usd(b100[1].total.usd)}." if b100 else ""),
         f"- Cost, second: over {st['turns']} turns on {focus.display} with API-key billing (5 min TTL), (iii) costs {_usd(rs['cvm'].total.usd)} against "
         f"{_usd(rs['compaction'].total.usd)} for (ii) built-in compaction, {_usd(rs['rollover'].total.usd)} for H4 "
         f"rollover, and {_usd(plain.total.usd)} for (i) plain, which would pass the "

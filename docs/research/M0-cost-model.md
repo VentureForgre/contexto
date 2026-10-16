@@ -18,7 +18,7 @@ Claim tags used below:
 ## Summary
 
 <!-- BEGIN GENERATED: findings -->
-- Under the owner's bar (no compaction, a hard working-context bound), only (iii) meets a 100k or 250k bound without a lossy reset: (i) and (ii) at the CLI default exceed it, (ii) configured to reset inside the bound compacts, H4 hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a 42.0k head. At 100k with online headroom (running max of completed turns + 25%), (iii) costs $69.10 on seed 20261015; across seeds 1 to 20 it sends a request over the bound on 4 of 20 seeds (5 requests in all, worst seed 2), so the bound holds for most turns but not every one. Heavier tool use needs more headroom than a 100k bound leaves (bound stress table).
+- Under the owner's bar (no compaction, a hard working-context bound), (iii) with online headroom (running max of completed turns + 25%) is the only strategy that stays inside a bound without a lossy reset, and only on some workloads: it meets 250k on all 20 seeds and 100k on 16 of 20 (the other 4 send 5 requests over in all, worst seed 2). (i) and (ii) at the CLI default exceed the bound, (ii) configured to reset inside it compacts, H4 hands off lossily, and tool-result clearing still grows past it. No strategy meets 30k with a 42.0k head, and heavier tool use needs more headroom than a 100k bound leaves (bound stress table). On seed 20261015 at 100k, (iii) costs $69.10.
 - Cost, second: over 300 turns on Claude Opus 5.5 with API-key billing (5 min TTL), (iii) costs $87.95 against $382.10 for (ii) built-in compaction, $337.07 for H4 rollover, and $716.23 for (i) plain, which would pass the 1.00M window at turn 157. Across the five models (iii) costs 0.07 to 0.76 of (ii) (Claude Haiku 5.5 to gpt-6-astra).
 - On the inferred think-time mix (35% of gaps over 5 min), cache expiry is the largest single cost in (i): 65% of its cost is the premium (write price minus read price) for re-writing prefixes after idle gaps over the 5 minute TTL. The 1 h TTL cuts (i) to $337.42 and (ii) to $173.31; (iii) gains less ($72.84) because its prefix is small. Keepalive pings bring (iii) to $65.72.
 - Bounding the prompt is most of the cost saving: compaction configured at 100k costs $100.79, within 15% of (iii), but only by compacting 61 times, which the owner's bar rules out.
@@ -172,12 +172,12 @@ Over-bound counts depend on the seed, so they are reported across 20 seeds, not 
 | 100.0k | online headroom: running max + 0% | 6 of 20 | 9 | 0.45 | 3 | $66.90 |
 | 100.0k | online headroom: running max + 25% | 4 of 20 | 5 | 0.25 | 2 | $68.00 |
 | 100.0k | online headroom: running max + 50% | 3 of 20 | 4 | 0.20 | 2 | $68.46 |
-| 100.0k | online + 25%, ingest paging over 8.0k | 0 of 20 | 0 | 0.00 | 0 | $63.27 |
+| 100.0k | online + 25%, ingest paging over 8.0k (fidelity of paged results unscored) | 0 of 20 | 0 | 0.00 | 0 | $63.27 |
 | 250.0k | oracle p99 headroom (upper bound for a live proxy) | 0 of 20 | 0 | 0.00 | 0 | $97.57 |
 | 250.0k | online headroom: running max + 0% | 0 of 20 | 0 | 0.00 | 0 | $98.84 |
 | 250.0k | online headroom: running max + 25% | 0 of 20 | 0 | 0.00 | 0 | $98.84 |
 | 250.0k | online headroom: running max + 50% | 0 of 20 | 0 | 0.00 | 0 | $98.85 |
-| 250.0k | online + 25%, ingest paging over 8.0k | 0 of 20 | 0 | 0.00 | 0 | $97.57 |
+| 250.0k | online + 25%, ingest paging over 8.0k (fidelity of paged results unscored) | 0 of 20 | 0 | 0.00 | 0 | $97.57 |
 
 Claude Opus 5.5, the inferred profile, seeds 1 to 20, 300 turns each. Online headroom starts at 25.0k (inferred floor) and becomes the largest completed turn so far times (1 + margin). The oracle row reads each seed's p99 in advance, which a live proxy cannot do. Sweep basis: modeled, inferred profile.
 <!-- END GENERATED: seed_sweep -->
