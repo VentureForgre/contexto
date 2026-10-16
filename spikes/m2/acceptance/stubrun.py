@@ -195,12 +195,12 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
                if isinstance(te, dict) and isinstance(te.get("window_budget"), (int, float))]
     window = budgets[-1] if budgets else 0
     per_recall = budget.recall_tokens(p)
-    recall_inputs = [probe_input + k * per_recall for k in range(1, p.recalls + 1)]
+    recall_inputs = [probe_input + k * per_recall for k in range(1, p.tool_rounds + 1)]
     all_inputs = inputs[:len(inputs) - len(probe_inputs)]
     outputs = [p.reply_tokens] * len(all_inputs)
     for x in probe_inputs:
-        all_inputs += [x] + [x + k * per_recall for k in range(1, p.recalls + 1)]
-        outputs += [200] * p.recalls + [output_per_probe_turn]
+        all_inputs += [x] + [x + k * per_recall for k in range(1, p.tool_rounds + 1)]
+        outputs += [200] * p.tool_rounds + [output_per_probe_turn]
     h1_expected = sum(all_inputs) + sum(outputs)
     h1_worst = sum(x + p.max_tokens_reserve for x in all_inputs)
     # D27's symmetric baseline: one full-context request per probe turn, request k carrying probe

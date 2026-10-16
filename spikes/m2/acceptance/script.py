@@ -28,8 +28,9 @@ DEFAULT_SEED = 20261016
 CHAIN_HEAVY = Mix(multihop=((3, 4), (4, 4)), chain=((6, 15), (8, 15)), obligation_single=4, obligation_sets=2,
                   set_size=6, distractor=((8, 6),), reasoning=0)
 PAGED_ONLY = 4  # probes whose only statement sits in turn 1
-# The budget prices this many recalls in the probe turn's tool loop, which cannot rotate (a full
-# recall adds about 17,800 tokens). Intake (2026-10-16): a cost guard only, not told to the model.
+# A report-only recall cap per probe turn (detectors.recalls_over_budget). Intake (2026-10-16): a cost
+# guard only, not told to the model. The budget prices tool-loop rounds instead (budget.Params.tool_rounds,
+# calibrated on live run #3).
 MAX_RECALLS = 2
 # Intake D27 (2026-10-16 05:37Z): the probes are asked over PROBE_TURNS user turns of PROBES_PER_TURN,
 # by a fixed assignment (assign_probes), written down before any result and never tuned.

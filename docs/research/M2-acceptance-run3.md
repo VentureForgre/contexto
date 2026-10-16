@@ -76,7 +76,8 @@ the run, and none of them credits.
 
 ## Probe turns (H1)
 
-The room is taken at each probe turn's first request: 150,000 - input - 200 - 25,000.
+The room is taken at each probe turn's first request: bound 150,000 - input - 200 (the simulation's
+output allowance for that request) - 25,000 (the headroom floor).
 
 | Probe turn | Room | Requests | Searches | Spans in_view / paged | Epoch | Rotation at start |
 |---|---|---|---|---|---|---|
@@ -94,11 +95,13 @@ rotations were at content turns 4, 7, 10, 13 and 16.
 
 | Line | Tokens | Limit |
 |---|---|---|
-| H1 (record: driver = proxy log, in-flight 0) | 3,748,084 | cap 4,007,279 |
+| H1 (record: driver = proxy log, in-flight 0) | 3,748,084 | cap in force 4,007,279 |
 | Baseline (6 requests, each 200 end_turn) | 2,634,365 | worst 2,872,721 |
 | **Total** | **6,382,449** | approval 6,880,000 (line finished) |
 
-The approval table at this main gives expected 5,636,856 and worst 6,874,704: H1 4,001,983 plus
+The H1 cap in force was 4,007,279: the approval 6,880,000 minus the baseline worst 2,872,721. The
+table's own H1 worst at this main is 4,001,983. The approval table gives expected 5,636,856 and worst
+6,874,704: H1 4,001,983 plus
 baseline 2,872,721. The head is derived from measured bytes (PR #140). The live gate refused 6,874,703 and
 accepted 6,874,704 and 6,880,000 (zero-spend check against a stub, main fbb1303). The baseline's
 `count_tokens` ran from 435,590 to 438,406 tokens per request, over 56 to 71 messages.
@@ -119,7 +122,7 @@ accepted 6,874,704 and 6,880,000 (zero-spend check against a stub, main fbb1303)
 - `HEAD /api/hello` returned 401 once. This is Claude Code's unauthenticated connectivity probe, a
   non-model path, and is known from earlier runs.
 
-## Spend calibration (a later change, after v0.1.0)
+## Spend calibration (made after v0.1.0)
 
 H1 cost 795,945 more than the model's expected 2,952,139.
 
@@ -129,10 +132,16 @@ H1 cost 795,945 more than the model's expected 2,952,139.
   and each round re-sends the whole window. Input grew 1,302 to 8,164 per round, against 17,778
   per recall in the model.
 - **Cause:** the round count, not input growth.
-- **Proposal** (row `qitem-m2-tool-rounds-calibration`, after the release): rename `budget.Params.recalls`
-  to `tool_rounds`. Price the worst case at the observed maximum (5 rounds, 8,200 tokens per
-  round) and the expected case at the observed mean (about 3.3 rounds, about 2,300 per round), with a test pinned to
-  this run.
+- **Done after the release** (row `qitem-m2-tool-rounds-calibration`): `budget.Params.recalls` is
+  now `tool_rounds`.
+  - The worst case prices 5 rounds of 8,200 tokens on every probe turn: the most rounds and the
+    largest growth, rounded up to 100.
+  - The expected case prices 20 rounds over the 6 probe turns (4, 4, 3, 3, 3, 3) at 2,100 tokens,
+    run #3's rounds-weighted mean growth (2,094) rounded up to 100.
+  - Neither is limited by the turn room, since run #3's rounds were not.
+  - `test_tool_rounds_are_calibrated_on_live_run_3` pins both to this run.
+  - The expected H1 is now 3,880,890, 3.5% over this run's 3,748,084. The worst H1 is 6,561,088 and
+    the table worst 9,433,809, so the next full run needs an approval of at least that.
 - **Product note** (intake): fewer, larger search rounds are a cost lever worth a later look.
 
 ## Earlier runs
