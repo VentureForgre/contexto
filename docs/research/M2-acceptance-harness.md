@@ -136,7 +136,8 @@ measured this case, PR #9). So:
   never read as a real over-bound, because a pre-send tool-loop record sets it too.
 - **Failure events (acceptance 1).** Intake (2026-10-16, contract PR at `147b182`): any of
   `degraded_enter`, `store_error`, `page_conflict`, `fallback_failed`, `transform_error`,
-  `turn_room_missing`, or `unclassified_system_message` fails it, wherever it appears (a request's
+  `turn_room_missing`, `turn_room_low` (contract PR #115), `retained_stale` (a failed snapshot
+  write, contract PR #125 at 01a58a2) or `unclassified_system_message` fails it, wherever it appears (a request's
   transform events, its `usage_events`, or a separate session-log line). `failure_events` counts each
   by name, once, and `no_failure_events` fails unless it is empty.
 - **Local 5xx (acceptance 1, contract PR #98).** A 5xx Contexto's own proxy generates on a model
@@ -468,6 +469,21 @@ planned over-bound requests.
   `run_h1` with the stub as upstream, and checks that its runs took every live-only path (see
   the dry-run section).
 - **Artifacts** (private, never in Git): `.contexto/runs/acceptance-20261016T070859Z/`.
+
+## Plant order within a turn: fixed after live run #2 (2026-10-16)
+
+- **Defect** (builder-3, verified in source): `script.build` inserted each plant at an independent
+  random line of its turn. When two links of one chain were planted in the same turn, the newer one
+  could appear first. In live run #2's 40 KB script, 13 of the 30 chains had such an inversion (19
+  of 30 at 70 KB), q_a_023 and q_a_031 among them. Both arms missed those two.
+- **Fix:** a turn's plants take sorted random slots, each shifted by the plants already placed, so
+  every plant's events keep the statement order `_merge` gives them. All other content stays
+  deterministic from the seed. `tests/test_plant_order.py` checks every chain at 40 and 70 KB.
+- **Unchanged:** the D27 6x9 assignment (probe ids and order are seed-derived), reach (54/54 at 40
+  and 70 KB, mapping clean, stub runs) and the 40 KB approval table (turn sizes are unchanged). The
+  rendered content changes, so live run #2's scores (H1 44, baseline 45 of 54; acceptance 2 failed
+  on chain, 22 against 24) are not reusable. **The next acceptance run reruns both arms on the new
+  content.**
 
 ## Acceptance 3 credit (contract PR #95)
 

@@ -866,6 +866,16 @@ def test_turn_room_low_fails_acceptance_1():
     assert r.failure_events == {"turn_room_low": 1} and not r.verdicts()["no_failure_events"]
 
 
+def test_retained_stale_fails_acceptance_1():
+    # A failed snapshot write logs retained_stale, an acceptance 1 failure (contract PR #125 at 01a58a2),
+    # whether it arrives as a request's transform event or as its own session-log line.
+    assert "retained_stale" in detectors.FAILURE_EVENTS
+    r = detectors.analyze([_req(1, 90_000, events=[{"event": "retained_stale", "epoch": 1}])], [], bound=150_000)
+    assert r.failure_events == {"retained_stale": 1} and not r.verdicts()["no_failure_events"]
+    r = detectors.analyze([_req(1, 90_000), {"event": "retained_stale", "epoch": 1}], [], bound=150_000)
+    assert r.failure_events == {"retained_stale": 1} and not r.verdicts()["no_failure_events"]
+
+
 def test_h1_spend_takes_the_proxy_logged_usage_after_a_mid_turn_stop():
     # Reviewer-2 on PR #112: the driver's spend grows only per finished turn; a stop inside the probe
     # turn's tool loop drops that turn's requests. The proxy-logged usage is what was billed.

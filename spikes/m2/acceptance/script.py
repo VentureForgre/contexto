@@ -127,8 +127,12 @@ def build(seed: int = DEFAULT_SEED, turns: int = 20, turn_bytes: int = 30_000, m
         used = sum(len(x.encode("utf-8")) + 1 for x in items)
         filler_lines = max(0, int((turn_bytes - used - 80) / line_bytes))
         log = _filler_text(rng, filler_lines, f"s{t}").split("\n") if filler_lines else []
-        for item in items:  # spread plants through the turn's log
-            log.insert(rng.randrange(0, len(log) + 1), item)
+        # Spread the turn's plants through its log in statement order: sorted slots, each shifted by
+        # the plants already placed. Independent random slots put two links of a chain planted in
+        # the same turn in reverse order (13 of 30 chains in live run #2's script; intake 08:10Z).
+        slots = sorted(rng.randrange(0, len(log) + 1) for _ in items)
+        for k, (slot, item) in enumerate(zip(slots, items)):
+            log.insert(slot + k, item)
         head = INSTRUCTIONS if t == 0 else "Next part of the working log:"
         text = "\n".join([head, *log, "Reply with exactly: OK"])
         texts.append(text)
