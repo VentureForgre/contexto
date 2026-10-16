@@ -166,6 +166,10 @@ def _hex64(v: Any) -> bool:
     return isinstance(v, str) and bool(_HEX64.fullmatch(v))
 
 
+def _is_epoch_version(v: Any) -> bool:
+    return type(v) is int and v == EPOCH_VERSION  # not True, 1.0, or "1"
+
+
 def _nat(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and v >= 0
 
@@ -189,7 +193,7 @@ EPOCH_FIELDS: dict[str, Callable[[Any], bool]] = {
     "dialect": lambda v: v in EPOCH_DIALECTS,
     "conversation": lambda v: isinstance(v, str) and bool(_CONVERSATION.fullmatch(v)),
     "model": lambda v: v is None or isinstance(v, str),
-    "paged_carried": lambda v: isinstance(v, list) and all(_hex64(h) for h in v),
+    "paged_carried": lambda v: isinstance(v, list) and all(_hex64(h) for h in v) and v == sorted(set(v)),
     # dataclasses.asdict(Config), kept opaque: the engine compares it for equality, so a new setting
     # needs no store change.
     "config": lambda v: isinstance(v, dict),
@@ -201,7 +205,7 @@ def check_epoch(record: Any) -> dict[str, Any]:
     """An epoch record with exactly the rule 16 fields, version stamped; ValueError otherwise."""
     if not isinstance(record, dict):
         raise ValueError("an epoch record must be an object")
-    if record.get("version", EPOCH_VERSION) != EPOCH_VERSION:
+    if "version" in record and not _is_epoch_version(record["version"]):
         raise ValueError(f"epoch record version must be {EPOCH_VERSION}")
     fields = {k: v for k, v in record.items() if k != "version"}
     if set(fields) != set(EPOCH_FIELDS):
@@ -215,7 +219,7 @@ def check_epoch(record: Any) -> dict[str, Any]:
 
 def read_epoch(data: Any) -> dict[str, Any] | None:
     """The epoch record if its shape and version are right; anything else reads as no record."""
-    if not isinstance(data, dict) or data.get("version") != EPOCH_VERSION:
+    if not isinstance(data, dict) or not _is_epoch_version(data.get("version")):
         return None
     try:
         return check_epoch(data)

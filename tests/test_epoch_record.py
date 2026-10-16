@@ -124,3 +124,39 @@ def test_the_engines_record_as_lane_a_sends_it(tmp_path):
     for store in (MemoryStore("s1"), SessionStore(tmp_path, "s1")):
         store.set_epoch(record)
         assert store.epoch_record() == {**record, "version": 1}
+
+
+
+# Reviewer-1 on #178: the version is exactly the integer 1, and paged_carried is sorted and unique
+
+
+@pytest.mark.parametrize("version", [True, 1.0, "1", 2, None])
+def test_a_version_other_than_the_integer_one_is_rejected_and_reads_as_none(tmp_path, version):
+    store = SessionStore(tmp_path, "s1")
+    with pytest.raises(ValueError):
+        store.set_epoch({**RECORD, "version": version})
+    (store.dir / "epoch.json").write_text(json.dumps({**RECORD, "version": version}))
+    assert store.epoch_record() is None
+
+
+def test_an_explicit_integer_version_one_is_accepted(store):
+    store.set_epoch({**RECORD, "version": 1})
+    assert store.epoch_record()["version"] == 1
+
+
+@pytest.mark.parametrize("hashes", [["b" * 64, "a" * 64], ["a" * 64, "a" * 64]])
+def test_paged_carried_must_be_sorted_and_unique(tmp_path, hashes):
+    store = SessionStore(tmp_path, "s1")
+    with pytest.raises(ValueError):
+        store.set_epoch({**RECORD, "paged_carried": hashes})
+    (store.dir / "epoch.json").write_text(json.dumps({**RECORD, "version": 1, "paged_carried": hashes}))
+    assert store.epoch_record() is None
+    store.set_epoch({**RECORD, "paged_carried": sorted(set(hashes))})
+    assert store.epoch_record()["paged_carried"] == sorted(set(hashes))
+
+
+@pytest.mark.parametrize("name", ["epoch", "k", "head_tokens", "window_budget"])
+@pytest.mark.parametrize("value", [True, 1.0])
+def test_integer_fields_reject_bools_and_floats(store, name, value):
+    with pytest.raises(ValueError):
+        store.set_epoch({**RECORD, name: value})
