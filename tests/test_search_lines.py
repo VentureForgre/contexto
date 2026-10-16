@@ -122,8 +122,11 @@ def test_more_matches_than_shown_say_how_to_read_on(store):
     [pid] = store.page_out([[{"role": "user", "content": LOG.replace("shard=3 ok", "shard=3 ok NEEDLE")}]], 1)
     reply = search(store, "NEEDLE")
     more = LOG.count("shard=3 ok") - MATCHES_PER_PAGE
-    assert reply.endswith(f"  [{more} more matching lines in this page; call contexto_recall with page_id {pid} "
-                          "and an offset to read further]")
+    page = render_page(store.get_page(pid))
+    first = page.rfind("\n", 0, page.index("NEEDLE")) + 1  # where the page's first matching line starts
+    assert reply.endswith(f"  [{more} more matching lines in this page, the first at offset {first}; call "
+                          f"contexto_recall with page_id {pid} and that offset to read them]")
+    assert recall(store, pid, first).startswith(page[first:page.index("\n", first)])
 
 
 def test_a_search_reply_is_charged_exactly(store):
@@ -390,3 +393,46 @@ def test_the_tool_description_and_worked_example_state_the_coverage():
     [tool] = [t for t in mcp.TOOLS if t["name"] == "contexto_search"]
     assert "covers only paged-out turns" in tool["description"]
     assert "covers only paged-out turns" in EXAMPLE_LINE
+
+
+
+# B21 (contract PR #134): a page's LAST matching lines, oldest to newest; compact entries @first..last
+
+
+def test_a_page_shows_its_last_three_matches_oldest_to_newest(store):
+    text = "\n".join([f"filler {i}\ndeploy.target=v{i}" for i in range(1, 7)])  # v1 oldest ... v6 newest
+    [pid] = store.page_out([[{"role": "user", "content": text}]], 1)
+    reply = search(store, "deploy.target")
+    page = render_page(store.get_page(pid))
+    matches = [line for line in reply.split("\n") if line.startswith("> ")]
+    assert [m.split(": ", 1)[1] for m in matches] == ["deploy.target=v4", "deploy.target=v5", "deploy.target=v6"]
+    for m in matches:  # each offset recalls its own line
+        offset = int(re.match(r"> (\d+): ", m).group(1))
+        assert recall(store, pid, offset).startswith(m.split(": ", 1)[1])
+    first = page.rfind("\n", 0, page.index("deploy.target=v1")) + 1
+    assert f"3 more matching lines in this page, the first at offset {first};" in reply
+
+
+def test_a_page_with_three_or_fewer_matches_is_unchanged(store):
+    [pid] = store.page_out([[{"role": "user", "content": "a\nNEEDLE one\nb\nNEEDLE two\nc"}]], 1)
+    reply = search(store, "NEEDLE")
+    assert [line.split(": ", 1)[1] for line in reply.split("\n") if line.startswith("> ")] == ["NEEDLE one",
+                                                                                                "NEEDLE two"]
+    assert "more matching lines" not in reply
+
+
+def test_compact_entries_give_the_first_and_last_match_offsets(store):
+    for i in range(5):
+        store.page_out([[{"role": "user", "content": f"intro {i}\nNEEDLE old {i}\nmiddle\nNEEDLE new {i}"}]], i + 1)
+    store.page_out([[{"role": "user", "content": "x\nNEEDLE only once"}]], 0)  # the oldest page: one match
+    reply = search(store, "NEEDLE")
+    compact = reply.split("recall one at its offset:]\n")[1].split("\n")
+    newest = store.search("NEEDLE")
+    for entry, pid in zip(compact, newest[3:]):
+        page = render_page(store.get_page(pid))
+        first = page.rfind("\n", 0, page.index("NEEDLE")) + 1
+        last = page.rfind("\n", 0, page.rindex("NEEDLE")) + 1
+        expected = f"@{first}" if first == last else f"@{first}..{last}"
+        assert entry == f"{pid} (turn {store.get_page(pid)['turn']}) {expected}"
+        assert recall(store, pid, last).startswith("NEEDLE")  # the last offset recalls the page's last match
+    assert compact[-1].endswith(f"@{render_page(store.get_page(newest[-1])).index('NEEDLE only once')}")

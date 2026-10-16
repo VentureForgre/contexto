@@ -536,19 +536,24 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     """
     rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
     text = render_page(page) if page.get("messages") is not None else ""
-    shown, total = [], 0
+    shown, total, form = [], 0, query
     for form in _rendered_forms(query):  # the query as typed, then as a tool input renders it
-        shown, total = match_lines(text, form)
+        shown, total = match_lines(text, form, last=True)  # the page's LAST matching lines (B21)
         if shown:
             break
     rows += [(f"{'>' if is_match else ' '} {start}: {text}", (page_id, start, end)) for start, end, is_match, text in shown]
     if not shown:  # the match is in the stub only: show the stub line as the matching line
         rows.append((f"> stub: {_stub_line(page.get('stub'))}", None))
     else:
-        if total > MATCHES_PER_PAGE:
-            rows.append((f"  [{total - MATCHES_PER_PAGE} more matching lines in this page; call contexto_recall "
-                         f"with page_id {page_id} and an offset to read further]", None))
+        if total > MATCHES_PER_PAGE:  # earlier statements stay reachable from the first match's offset
+            first = _line_start(text, text.find(form))
+            rows.append((f"  [{total - MATCHES_PER_PAGE} more matching lines in this page, the first at offset "
+                         f"{first}; call contexto_recall with page_id {page_id} and that offset to read them]", None))
     return rows
+
+
+def _line_start(text: str, pos: int) -> int:
+    return text.rfind("\n", 0, pos) + 1
 
 
 def _rendered_forms(query: str) -> list[str]:
@@ -562,10 +567,14 @@ def _rendered_forms(query: str) -> list[str]:
 
 
 def _more_row(page_id: str, page: dict[str, Any], query: str) -> Row:
-    """A further matching page, compactly: page id, turn, and where its first matching line starts."""
+    """A further matching page, compactly: page id, turn, and where its first and last matching lines
+    start (``@first..last``, one offset when they coincide; B21, contract PR #134)."""
     text = render_page(page) if page.get("messages") is not None else ""
-    pos = next((p for p in (text.find(form) for form in _rendered_forms(query)) if p >= 0), -1)
-    where = "stub" if pos < 0 else str(text.rfind("\n", 0, pos) + 1)
+    form = next((f for f in _rendered_forms(query) if f in text), None)
+    if form is None:
+        return (f"{page_id} (turn {page.get('turn')}) @stub", None)
+    first, last = _line_start(text, text.find(form)), _line_start(text, text.rfind(form))
+    where = str(first) if first == last else f"{first}..{last}"
     return (f"{page_id} (turn {page.get('turn')}) @{where}", None)
 
 
