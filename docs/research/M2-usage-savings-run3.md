@@ -47,7 +47,9 @@ The proxy logged two sizes for every request:
 - `original_request_bytes`: what Claude Code sent, its full local history at that point;
 - `request_bytes`: what Contexto sent upstream.
 
-The difference is the history Contexto paged out, net of its preamble, and it is content-turn text. So:
+The difference is the history Contexto paged out, net of its preamble. For the 18 content requests it
+is content-turn text, the same kind of text the rate is fitted on. Later same-points rows may also
+hold paged tool-loop JSON, which tokenizes more sparsely, so those rows overstate plain. So:
 
 `plain tokens = Contexto's measured input tokens + (original_request_bytes - request_bytes) / 1.8274`
 
@@ -62,6 +64,11 @@ Only the paged-out difference is converted; the part both runs share comes from 
   is 434,154. The baseline arm's measured `count_tokens` for the same history is 435,590 (its request
   carries no Contexto tools and no thinking blocks), so the model is 0.33% low. (A single whole-body bytes-per-token fit was
   rejected: 8.6% mean error, because log text and tool JSON tokenize differently.)
+
+**Plain output.** The plain-run shape's output, 12,836 in the cache-class table, is Contexto's
+**measured** content-turn outputs (1,208 over the 18 content requests) plus the baseline arm's
+**measured** outputs (11,628 over its 6 requests). The same-points cost uses Contexto's 44 measured
+outputs.
 
 **Two plain shapes:**
 - **Same request points** (44 requests). Plain Claude Code's history at each point where Contexto sent
@@ -97,8 +104,8 @@ The plain history peaks at 493,902 tokens at the same request points (**modeled*
 the plain-run shape (**measured**: the baseline arm's last `count_tokens`). Both are far under that threshold.
 
 **So native compaction would not have fired anywhere in this run.** The "plain with compaction" model
-equals the "plain without compaction" model here: no sawtooth. The plain run simply grows to about
-440k to 490k tokens per request.
+equals the "plain without compaction" model here: no sawtooth. The plain run simply grows to 438,406
+(**measured**, plain-run shape) to 493,902 (**modeled**, same request points) tokens per request.
 
 ## By cache class (plain-run shape: 18 content turns modeled, 6 probe turns measured; best-case cache)
 
@@ -144,7 +151,7 @@ equals the "plain without compaction" model here: no sawtooth. The plain run sim
 | 24 | probe 6 | 5 | 486,808 | 2,456,593 | 0.0098 | 0.1352 |
 
 Turns 1 to 3 are equal: Contexto passes the request through until its first rotation. After that the
-plain input grows by about 22,700 tokens per turn, while Contexto's content requests stay between
+plain input grows by about 22,700 tokens per turn (**modeled**), while Contexto's content requests stay between
 50,906 and 98,583.
 
 ## Two findings for the product
@@ -173,7 +180,7 @@ It is the plain-run shape's probe phase, used above. It is not a Contexto figure
 - **Counter error.** The paged-text rate comes from 2 requests (1.818 to 1.837 bytes per token). It is
   validated to within 0.33% at one point (probe turn 1). The band on the totals is ±0.4%.
 - **Cache assumption.** Plain gets the best case, a full prefix hit on every request. Real routes
-  miss sometimes: the baseline arm missed on 2 of 6, which raises plain's cost about 1.9×.
+  miss sometimes: the baseline arm missed on 2 of 6, which raises plain's cost about 1.9× (**modeled**: 1.08 / 0.58).
 - **Synthetic session.** Run #3 pastes about 40 KB of log per turn, larger than typical Claude Code
   turns. The plain history grows faster than usual, and the saving per turn may be smaller in real
   sessions.
