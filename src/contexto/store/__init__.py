@@ -76,6 +76,26 @@ def check_window(window_tokens: Any, bytes_per_token: Any) -> None:
         raise ValueError(f"bytes_per_token must be a positive number, not {bytes_per_token!r}")
 
 
+MODEL_CHARS = 200  # a model name, at most
+
+
+def check_model(model: Any) -> str | None:
+    """A model name for the window record: None, or 1 to 200 printable characters."""
+    if model is None:
+        return None
+    if not isinstance(model, str) or not 0 < len(model) <= MODEL_CHARS or not model.isprintable():
+        raise ValueError(f"model must be None or 1 to {MODEL_CHARS} printable characters, not {model!r}")
+    return model
+
+
+def read_window_model(meta: dict[str, Any]) -> str | None:
+    """The recorded window model; anything malformed reads as unknown."""
+    try:
+        return check_model(meta.get("window_model"))
+    except ValueError:
+        return None
+
+
 def read_window(meta: dict[str, Any]) -> tuple[int | None, float | None]:
     """Valid recorded window values from session metadata; anything malformed reads as unknown."""
     w, r = meta.get("window_tokens"), meta.get("bytes_per_token")
@@ -191,13 +211,24 @@ class SessionStore(LedgerOps):
         """Record the session's working directory (absolute), which file sources are checked against."""
         self._update_meta({"workdir": str(Path(path).resolve())})
 
-    def set_window(self, window_tokens: int, bytes_per_token: float) -> None:
+    def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None:
         """Record the engine's window budget W (tokens) and the session's measured bytes per token.
 
         Lane A's engine calls this when either value changes; recall sizes its chunks from it.
+        ``model`` is the request model the ratio was measured on, so the engine can tell whether a
+        restored ratio still applies; it is stored as ``window_model``, and None removes it.
         """
         check_window(window_tokens, bytes_per_token)
-        self._update_meta({"window_tokens": window_tokens, "bytes_per_token": float(bytes_per_token)})
+        model = check_model(model)
+
+        def change(meta: dict[str, Any]) -> dict[str, Any]:
+            meta.pop("window_model", None)
+            updates: dict[str, Any] = {"window_tokens": window_tokens, "bytes_per_token": float(bytes_per_token)}
+            if model is not None:
+                updates["window_model"] = model
+            return updates
+
+        self._modify_meta(change)
 
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None:
         """Publish the room left in the current turn (M2 contract PR #69, per-turn recall budget).
@@ -270,6 +301,10 @@ class SessionStore(LedgerOps):
     def window(self) -> tuple[int | None, float | None]:
         """(window budget W in tokens, measured bytes per token), each None until the engine records it."""
         return read_window(self._meta())
+
+    def window_model(self) -> str | None:
+        """The model the recorded window was measured on; None when not recorded."""
+        return read_window_model(self._meta())
 
     @classmethod
     def open_existing(cls, home: Path, session_id: str) -> SessionStore:

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from contexto.store import (PageConflictError, PageNotFoundError, apply_turn_room, charge_room, check_page_id,
-                             check_turn_room, check_window, redact)
+                             check_model, check_turn_room, check_window, redact)
 from contexto.store.ledger import MemoryLedger
 from contexto.store.pages import build_page, render_index, same_content, search_pages
 from contexto.store.records import LedgerOps
@@ -34,12 +34,16 @@ class MemoryStore(LedgerOps):
     def workdir(self) -> Path | None:
         return self._workdir
 
-    def set_window(self, window_tokens: int, bytes_per_token: float) -> None:
+    def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None:
         check_window(window_tokens, bytes_per_token)
+        self._window_model = check_model(model)
         self._window = (window_tokens, float(bytes_per_token))
 
     def window(self) -> tuple[int | None, float | None]:
         return getattr(self, "_window", (None, None))
+
+    def window_model(self) -> str | None:
+        return getattr(self, "_window_model", None)
 
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None:
         turn_id = check_turn_room(turn_id, room_tokens)
