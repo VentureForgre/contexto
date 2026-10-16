@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
+
+from contexto.paths import contexto_home
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -24,5 +25,5 @@ def run(args: argparse.Namespace) -> int:
     from contexto.mcp import serve_stdio
     from contexto.store import SessionStore
 
-    home = args.home or Path(os.environ.get("CONTEXTO_HOME") or Path.home() / ".contexto")
+    home = args.home or contexto_home()  # the same resolution as the other subcommands (B24)
     return serve_stdio(SessionStore(home, args.session))

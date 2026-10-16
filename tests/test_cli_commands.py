@@ -213,3 +213,28 @@ def test_recall_chunk_edges_match_the_mcp_tool():
     for bad in (-1, len(text) + 1, True):
         with pytest.raises(ValueError):
             recall_chunk(page, bad)
+
+
+# mcp: the home resolution (B24)
+
+
+@pytest.mark.parametrize("value", ["~/x", "rel", None])
+def test_mcp_resolves_contexto_home_like_the_other_subcommands(tmp_path, monkeypatch, value):
+    # `contexto mcp` used the raw $CONTEXTO_HOME: '~/x' opened a literal ./~/x while `contexto sessions`
+    # read the expanded path. Both now use paths.contexto_home(): expanded and absolute.
+    import contexto.mcp
+    from contexto import paths
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    if value is None:
+        monkeypatch.delenv("CONTEXTO_HOME", raising=False)
+    else:
+        monkeypatch.setenv("CONTEXTO_HOME", value)
+    seen = {}
+    monkeypatch.setattr(contexto.mcp, "serve_stdio", lambda store: seen.setdefault("dir", store.dir) and 0)
+    assert cli.main(["mcp", "--session", "s1"]) == 0
+    expected = {"~/x": tmp_path / "home" / "x", "rel": tmp_path / "rel", None: tmp_path / "home" / ".contexto"}[value]
+    assert seen["dir"] == expected / "sessions" / "s1"
+    assert seen["dir"].is_absolute() and paths.contexto_home() == expected  # what `contexto sessions` reads
+    assert not (tmp_path / "~").exists()  # no literal ./~ directory
