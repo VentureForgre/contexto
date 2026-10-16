@@ -156,6 +156,62 @@ def read_retained(data: Any) -> tuple[int, int, int, list[dict[str, Any]]] | Non
     return data["epoch"], data["k"], stamp, entries
 
 
+EPOCH_VERSION = 1
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def _nat(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def _nat_or_none(v: Any) -> bool:
+    return v is None or _nat(v)
+
+
+# Rule 16 (contract PR #176): the main conversation's epoch record. Names follow the engine's
+# EpochState and Config; the store checks shape only, the engine checks meaning (the resume checks).
+EPOCH_FIELDS: dict[str, Callable[[Any], bool]] = {
+    **{name: _nat for name in ("epoch", "k", "strip_upto", "turns_paged", "max_turn_growth", "last_turn_count",
+                               "carried_text_streak", "window_minimal_count")},
+    **{name: _nat_or_none for name in ("last_turn_start_n", "head_tokens", "initial_carried",
+                                       "last_carried_text_count", "turn_room_low_epoch", "window_budget")},
+    **{name: (lambda v: isinstance(v, str)) for name in ("pinned_text", "index_text", "head_fingerprint", "dialect",
+                                                         "conversation")},
+    "preamble_sha256": lambda v: isinstance(v, str) and bool(_HEX64.fullmatch(v)),
+    "model": lambda v: v is None or isinstance(v, str),
+    "paged_carried": lambda v: isinstance(v, list) and all(isinstance(h, str) for h in v),
+    "config": lambda v: isinstance(v, dict),
+    "anchor": lambda v: (isinstance(v, dict) and set(v) == {"n", "hash"} and _nat(v["n"])
+                         and isinstance(v["hash"], str)),
+}
+
+
+def check_epoch(record: Any) -> dict[str, Any]:
+    """An epoch record with exactly the rule 16 fields, version stamped; ValueError otherwise."""
+    if not isinstance(record, dict):
+        raise ValueError("an epoch record must be an object")
+    if record.get("version", EPOCH_VERSION) != EPOCH_VERSION:
+        raise ValueError(f"epoch record version must be {EPOCH_VERSION}")
+    fields = {k: v for k, v in record.items() if k != "version"}
+    if set(fields) != set(EPOCH_FIELDS):
+        missing, extra = sorted(set(EPOCH_FIELDS) - set(fields)), sorted(set(fields) - set(EPOCH_FIELDS))
+        raise ValueError(f"epoch record fields differ (missing {missing}, unexpected {extra})")
+    bad = sorted(name for name, ok in EPOCH_FIELDS.items() if not ok(fields[name]))
+    if bad:
+        raise ValueError(f"epoch record fields have the wrong type: {bad}")
+    return {**json.loads(canonical_json(fields)), "version": EPOCH_VERSION}
+
+
+def read_epoch(data: Any) -> dict[str, Any] | None:
+    """The epoch record if its shape and version are right; anything else reads as no record."""
+    if not isinstance(data, dict) or data.get("version") != EPOCH_VERSION:
+        return None
+    try:
+        return check_epoch(data)
+    except ValueError:
+        return None
+
+
 def read_room_stamp(meta: dict[str, Any]) -> int | None:
     """The request sequence the current turn room was published under; None when unstamped."""
     room = meta.get("turn_room")
@@ -323,6 +379,34 @@ class SessionStore(LedgerOps):
             except OSError:
                 pass  # retained_current() still refuses it: its stamp is behind the persisted sequence
             raise
+
+    def set_epoch(self, record: dict[str, Any]) -> None:
+        """Save the main conversation's epoch record (rule 16, contract PR #176), for a restart to resume.
+
+        Writes ``epoch.json`` atomically at mode 0600 with ``version: 1``; never logged. The store
+        checks shape and version only (ValueError for a wrong one); the engine checks meaning when
+        it resumes. On a failed write the previous record is unlinked and the error is raised; if
+        the unlink fails too, that older record stays, which the contract accepts (the newest record
+        written is trusted, and rules 4 and 5 bound a resume with a smaller ``k``).
+        """
+        data = canonical_bytes(check_epoch(record))
+        try:
+            self._write_atomic(self.dir / "epoch.json", data)
+        except OSError:
+            try:
+                (self.dir / "epoch.json").unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def epoch_record(self) -> dict[str, Any] | None:
+        """The saved epoch record, or None when there is none or it is unreadable, malformed, or of
+        an unknown version."""
+        try:
+            data = json.loads((self.dir / "epoch.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return read_epoch(data)
 
     def retained_current(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
         """The snapshot only if it is the current request's: its stamp equals both the room's stamp and
