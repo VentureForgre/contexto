@@ -9,7 +9,8 @@ Replies follow the D27 protocol the harness drives:
 - a content turn gets ``OK``;
 - a probe turn's first request gets one ``exec`` custom tool call whose JavaScript calls the Contexto
   MCP tools Codex exposes inside code mode (``contexto_search``, then ``contexto_recall`` on the
-  first page id the search names), so the run proves recall is callable end to end;
+  first page id the search names, else on the first page id the request carries in its preamble's
+  index), so the run proves recall is callable end to end;
 - the request that carries that call's output gets the probe answers, one ``q_id: answer`` line per
   probe of the turn, from ``answers`` (the stub is told them, so the dry run exercises scoring, not
   model quality).
@@ -21,12 +22,14 @@ The stub keeps a content-free record per request (path, bytes, tokens, reply kin
 from __future__ import annotations
 
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 BYTES_PER_TOKEN = 3.0
 PROBE_MARK = "Answer the questions below about this conversation."
+INDEX_LINE = re.compile(r"(pg_[0-9a-f]{16}) turn \d+:")  # store.pages.index_line, not a lookalike in a log
 SEARCH_JS = """\
 const find = (suffix) => ALL_TOOLS.find((t) => t.name.endsWith(suffix));
 const search = find("contexto_search");
@@ -34,9 +37,10 @@ const recall = find("contexto_recall");
 const hits = await tools[search.name]({query: %s});
 const seen = JSON.stringify(hits);
 text("search: " + seen.length + " chars");
-const page = seen.match(/pg_[0-9a-f]{16}/);
+const found = seen.match(/pg_[0-9a-f]{16}/);
+const page = found ? found[0] : %s;
 if (page) {
-  const got = await tools[recall.name]({page_id: page[0]});
+  const got = await tools[recall.name]({page_id: page});
   text("recall: " + JSON.stringify(got).length + " chars");
 }
 """
@@ -59,7 +63,8 @@ def reply_items(items: list[dict[str, Any]], answers: dict[str, str], query: str
         return "ok", [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}]
     called = any(it.get("type") == "custom_tool_call_output" for it in items[last_user:])
     if not called:
-        code = SEARCH_JS % json.dumps(query)
+        indexed = INDEX_LINE.search(json.dumps(items))  # the preamble's index lists the paged ids
+        code = SEARCH_JS % (json.dumps(query), json.dumps(indexed.group(1) if indexed else None))
         return "recall_call", [{"type": "custom_tool_call", "call_id": f"call_{len(items)}", "name": "exec", "input": code}]
     ids = [line.split(":", 1)[0].strip() for line in _user_text(items[last_user]).splitlines()
            if line.startswith("q_") and ":" in line]
