@@ -70,13 +70,16 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
 - D27: probes over 6 turns of 9 for both arms; one turn cannot hold 54 deep questions' evidence.
 - D28: fix stale chain answers in search (matches in view first, latest lines per page), then
   rerun both arms. Rejected: accept as a limitation, widen the tolerance, rerun one arm only.
+- D29: cut v0.1.0 after acceptance, on the owner's instruction to come back to a finished
+  project; private GitHub Release only.
 
 ## Open decisions (details in DECISIONS.md)
 
 - O3 (intake): the working-window bound stays 150,000; it passed acceptance. Raising it toward
   the 170,000 launcher cap for heavy heads (an OpenRig seat) is unmeasured.
 - O4 (owner): end-user auth guidance (API key only, or subscription logins too).
-- O5 (intake): first release v0.1.0, now unblocked by acceptance.
+- O5: settled by D29. v0.1.0 is cut from the merge of this status (tag and GitHub Release on this
+  private repository, sdist and wheel attached, no package registry).
 - O6 (owner): per-session upstream affinity on the owner's proxy (cache misses and dropped
   thinking traced to the proxy spreading requests across identities).
 - O7 (owner): OpenRig context-usage clock bug (UTC parsed as local time).
