@@ -73,9 +73,11 @@ there.
 
 ## Interactions
 
-- **Rule 5 (never rotate inside a tool loop).** Unchanged by every candidate. Headroom is read only
-  in the rotation decision at a turn start (`rotate_at_turn_start`). Decay is applied at turn starts
-  only. The outlier turn itself is sent unrotated under every rule, as today.
+- **Rule 5 (never rotate inside a tool loop).** Unchanged by every candidate. Headroom is read in the
+  rotation decision at a turn start (`rotate_at_turn_start`) and in the window budget W, which an
+  engine also sets once from the measured head after its first response (A8 (c)). The in-turn
+  over-bound check never reads it. Decay is applied at turn starts only. The outlier turn itself is
+  sent unrotated under every rule, as today.
 - **Rule 16 (resume).**
   - Decay keeps `max_turn_growth` one integer, the decayed value. The record is unchanged, and a
     resumed engine applies the next decay at its next turn start, as the old engine would have.
@@ -153,12 +155,14 @@ leaves extra margin as a side effect.
 > messages added since the previous turn start, per turn start, as today, and `headroom_decay` =
 > 0.5. A turn start sent again with no new turn (a retry) measures no growth and does not decay.
 > So one outlier turn raises headroom by at most a quarter of the bound, and its weight halves at
-> every later turn start. Both are configuration settings (`headroom_cap`, `headroom_decay`),
-> included in the rule 16 configuration check. Rule 16 records `max_turn_growth` as today (one
-> integer): a resumed engine applies the cap at every use and the decay at its next turn start
-> that measures growth (not at the turn start that wrote the record), so it forgets exactly as the
-> previous engine would have. A record written by an engine without these settings does not resume
-> (`settings_changed`). Headroom is used only in rotation decisions at a turn start, so rule 5 is
+> every later turn start that measures growth. Both are configuration settings (`headroom_cap`,
+> `headroom_decay`), included in the rule 16 configuration check. Rule 16 records
+> `max_turn_growth` as today (one integer): a resumed engine applies the cap at every use and the
+> decay at its next turn start that measures growth (not at the turn start that wrote the record),
+> so it forgets exactly as the previous engine would have. A record written by an engine without
+> these settings does not resume (`settings_changed`). Headroom enters only the turn-start
+> rotation decision and the window budget W (which an engine also sets once from the measured head
+> after its first response, A8 (c)); the in-turn over-bound check never reads it, so rule 5 is
 > unchanged: nothing rotates inside a tool loop, and an in-turn request over the bound is logged
 > as today.
 
