@@ -381,8 +381,12 @@ page one of its terms returns:
 - obligation set: each id's last statement;
 - otherwise: the statements holding the answer, or the last one.
 
-It reports the rate per category with counts, the rank of each hit (search lists newest first), and
-every unreachable probe. On the H1 rerun's store (`acceptance-20261016T024733Z`, 15 pages): 54 of 54
+A statement on no page counts as in the window only if it sits in a script turn the store did not
+page out, and hits are cut at `contexto_search`'s limit (`SEARCH_LIMIT`, 50 ids). It reports the rate
+per category with counts, the rank of each hit (search lists newest first), and every unreachable
+probe. `stubrun.py` also reports it on the dry run's own store, and `--inflate N:FACTOR` makes the
+stub report inflated usage from the n-th request so a real over_bound is logged; on main with PR #76
+the detectors count it from the request entries' `usage_events`. On the H1 rerun's store (`acceptance-20261016T024733Z`, 15 pages): 54 of 54
 reachable.
 
 | Category | Probes | Reachable | Needing a paged statement |

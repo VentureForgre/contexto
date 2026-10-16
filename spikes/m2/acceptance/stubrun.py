@@ -32,7 +32,7 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from acceptance import budget, credcheck, detectors, driver  # noqa: E402
+from acceptance import budget, credcheck, detectors, driver, reach  # noqa: E402
 
 OTHER_BYTES_PER_TOKEN = 3.0
 LOG_BLOCK_MIN_BYTES = 5_000  # a user text block this large is a pasted log turn
@@ -63,6 +63,9 @@ def model_tokens(body: dict) -> dict[str, int]:
 @dataclass
 class Stub:
     key: str  # the seat helper's output, held in memory for comparison only
+    # (n, factor): from the n-th Messages request on (0-based), report usage times factor, so real
+    # usage outruns the engine's estimate and a real over_bound is logged (a detector proof run).
+    inflate: tuple[int, float] | None = None
     records: list[dict[str, Any]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -82,6 +85,9 @@ class Stub:
                 model = model_tokens(body)
                 with stub.lock:
                     index = len(stub.records)
+                    nth = sum(1 for r in stub.records if r["path"] == "/v1/messages")
+                    if stub.inflate and path == "/v1/messages" and nth >= stub.inflate[0]:
+                        model = {**model, "tokens": int(model["tokens"] * stub.inflate[1]), "inflated": True}
                     stub.records.append({
                         "index": index, "path": path, "stream": bool(body.get("stream")), "bytes": len(raw),
                         "messages": len(body.get("messages") or []), "tools": len(body.get("tools") or []),
@@ -215,7 +221,8 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
 
 
 def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = budget.Params(),
-            seed: int = 20261016, turn_bytes: int = 40_000, timeout: float = 1_800.0) -> dict[str, Any]:
+            seed: int = 20261016, turn_bytes: int = 40_000, timeout: float = 1_800.0,
+            inflate: tuple[int, float] | None = None) -> dict[str, Any]:
     from acceptance.run import build_script
 
     if shutil.which("claude") is None:
@@ -224,7 +231,7 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
         key = credcheck._helper_output(seat_settings)
     except (RuntimeError, OSError):
         return {"ran": False, "reason": "the seat's apiKeyHelper did not produce a key; output not shown"}
-    stub = Stub(key)
+    stub = Stub(key, inflate=inflate)
     del key
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), stub.handler())
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -275,9 +282,18 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
         "detectors": {"requests": report.requests, "rotations": report.rotations, "epochs": report.epochs,
                       "requests_per_epoch": report.requests_per_epoch, "over_bound_requests": report.over_bound_requests,
                       "unverified_requests": report.unverified_requests, "upstream_4xx": report.upstream_4xx,
-                      "compaction_events": report.compaction_events, "engine_events": report.engine_events},
+                      "compaction_events": report.compaction_events, "engine_events": report.engine_events,
+                      **{name: getattr(report, name) for name in (
+                          "over_bound_real", "over_bound_real_max_tokens", "estimate_errors", "failure_events",
+                          "pre_send_tool_loop", "pre_send_other", "window_minimal", "bound_too_small",
+                          "non_model_4xx", "model_request_4xx") if hasattr(report, name)}},
         "paged_only_in_pages": paged,
+        "inflate": list(inflate) if inflate else None,
     })
+    pages = reach.load_pages(home / "sessions" / session)
+    if pages:
+        r = reach.reach(list(s.probes), pages, turn_texts=list(s.turns[:-1]))
+        result["reach"] = {k: v for k, v in r.items() if k != "rows"}
     if messages and log:
         result.update(summarize(stub.records, log, len(s.turns) - 1, p, s.turn_bytes[-1], list(s.turn_bytes[:-1])))
     out.mkdir(parents=True, exist_ok=True)
@@ -287,12 +303,18 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
 
 
 def main(argv: list[str]) -> int:
+    inflate = None
+    if "--inflate" in argv:  # --inflate N:FACTOR, a detector proof run
+        i = argv.index("--inflate")
+        n, factor = argv[i + 1].split(":")
+        inflate = (int(n), float(factor))
+        argv = argv[:i] + argv[i + 2:]
     if len(argv) not in (3, 4):
-        print("usage: stubrun.py <seat settings file> <contexto executable> <output dir> [turn kbytes, default 40]",
-              file=sys.stderr)
+        print("usage: stubrun.py <seat settings file> <contexto executable> <output dir> [turn kbytes, default 40]"
+              " [--inflate N:FACTOR]", file=sys.stderr)
         return 2
     turn_bytes = int(argv[3]) * 1_000 if len(argv) == 4 else 40_000
-    result = dry_run(Path(argv[0]), argv[1], Path(argv[2]), turn_bytes=turn_bytes)
+    result = dry_run(Path(argv[0]), argv[1], Path(argv[2]), turn_bytes=turn_bytes, inflate=inflate)
     print(json.dumps({k: v for k, v in result.items() if k != "rows"}, indent=1, default=str), flush=True)
     return 0 if result.get("ran") else 1
 
