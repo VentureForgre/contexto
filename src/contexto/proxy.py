@@ -56,7 +56,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Protocol
 from urllib.parse import urlsplit
 
+try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
+    from compression import zstd as _zstd
+except ImportError:  # pragma: no cover - depends on the interpreter
+    _zstd = None
+
 LISTEN_HOST = "127.0.0.1"
+# Contract rule 15 (PR #58): decoded request bodies are capped. A request carries the CLI's whole
+# local history, which may legitimately be many times the bound, so the cap guards against a
+# decompression bomb rather than enforcing the bound.
+MAX_DECODED_BODY_BYTES = 64 * 1024 * 1024
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 # OpenAI Responses API for the Codex adapter (lane A packet A5). Codex's base_url is the proxy root
@@ -117,6 +126,44 @@ def add_beta(headers: Headers, beta: str) -> Headers:
         present.append(beta)
     out[name] = ",".join(present)
     return out
+
+
+class EncodedBodyError(Exception):
+    """A request body that cannot be decoded; ``reason`` explains it to the user."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def decode_request_body(body: bytes, encoding: str, limit: int = MAX_DECODED_BODY_BYTES) -> bytes:
+    """Decode a gzip, deflate, or (Python 3.14+) zstd request body, refusing anything over ``limit``.
+
+    Raises EncodedBodyError for an unsupported encoding, a corrupt or truncated body, or a body that
+    decodes to more than ``limit`` bytes."""
+    if encoding == "gzip":
+        candidates = [lambda: zlib.decompressobj(16 + zlib.MAX_WBITS)]
+    elif encoding == "deflate":  # HTTP deflate is zlib-wrapped; some clients send raw deflate
+        candidates = [lambda: zlib.decompressobj(zlib.MAX_WBITS), lambda: zlib.decompressobj(-zlib.MAX_WBITS)]
+    elif encoding == "zstd":
+        if _zstd is None:
+            raise EncodedBodyError("zstd decoding needs Python 3.14 or newer")
+        candidates = [_zstd.ZstdDecompressor]
+    else:
+        raise EncodedBodyError("this encoding is not supported (gzip, deflate, and zstd on Python 3.14+ are)")
+    for make in candidates:
+        decompressor = make()
+        try:
+            out = decompressor.decompress(body, limit + 1)
+        except MemoryError:
+            raise
+        except Exception:  # zlib.error, or zstd's own ZstdError: try the next form, else corrupt
+            continue
+        if len(out) > limit:
+            raise EncodedBodyError(f"the body decodes to more than {limit:,} bytes")
+        if decompressor.eof:
+            return out
+    raise EncodedBodyError("the body could not be decoded")
 
 
 def _scalar_summary(value: Any) -> Any:
@@ -409,6 +456,19 @@ class _Handler(BaseHTTPRequestHandler):
         original = None
         if self.command == "POST" and path_only in TRANSFORMED_PATHS:
             entry["api"] = "responses" if path_only in RESPONSES_PATHS else "messages"
+            encoding = (self.headers.get("Content-Encoding") or "").strip().lower()
+            if encoding not in ("", "identity"):
+                # Contract rule 15 (PR #58): decode, transform as usual, forward uncompressed.
+                try:
+                    decoded = decode_request_body(body, encoding, MAX_DECODED_BODY_BYTES)
+                except EncodedBodyError as exc:
+                    self._reject_encoded(encoding, exc.reason, path_only, entry["api"])
+                    return
+                entry.update(request_content_encoding=encoding, wire_request_bytes=len(body),
+                             original_request_bytes=len(decoded))
+                body = decoded
+                headers = {k: v for k, v in headers.items() if k.lower() != "content-encoding"}
+                self._raw = (body, dict(headers))
             body, headers, original = self._transform(body, headers, entry, path_only)
         entry["request_bytes"] = len(body)
         self._forward(body, headers, entry, started, original)
@@ -416,14 +476,6 @@ class _Handler(BaseHTTPRequestHandler):
     def _transform(self, body: bytes, headers: Headers, entry: dict[str, Any],
                    endpoint: str) -> tuple[bytes, Headers, dict[str, Any] | None]:
         owner = self.owner
-        encoding = self.headers.get("Content-Encoding")
-        if encoding:
-            # Forwarded untouched (the proxy never re-encodes), but unbounded: say so loudly.
-            entry["transform_skipped"] = f"request content-encoding {encoding.strip().lower()}"
-            entry["unbounded"] = True
-            self.owner.log({"event": "request_not_transformed", "path": entry["path"],
-                            "reason": entry["transform_skipped"]})
-            return body, headers, None
         try:
             request = json.loads(body)
         except (ValueError, RecursionError):
@@ -565,6 +617,26 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             except OSError:
                 self.close_connection = True
+
+    def _reject_encoded(self, encoding: str, reason: str, endpoint: str, api: str) -> None:
+        """Contract rule 15 (PR #58): a body the proxy cannot decode is a client problem, not a
+        Contexto defect, so it is refused with HTTP 415 in the API's own error format and never
+        forwarded, because an unread request cannot be kept bounded."""
+        message = (f"contexto: cannot read a request body with Content-Encoding {encoding}: {reason}. Run the CLI "
+                   f"through 'contexto run', or disable request compression.")
+        if api == "responses":
+            payload = {"error": {"message": message, "type": "invalid_request_error", "param": None,
+                                 "code": "unsupported_content_encoding"}}
+        else:
+            payload = {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
+        self.owner.log({"event": "encoded_body_rejected", "encoding": encoding, "endpoint": endpoint,
+                        "reason": reason})
+        body = json.dumps(payload).encode()
+        self.send_response_only(415)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _log_transform_error(self, error: str, stage: str, endpoint: str) -> None:
         self.owner.log({"event": "transform_error", "level": "error", "error": error, "stage": stage,

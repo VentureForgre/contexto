@@ -629,19 +629,101 @@ def test_websocket_upgrade_is_refused_and_logged(make_proxy):
     assert [e["event"] for e in log.events if e["event"] == "websocket_rejected"] == ["websocket_rejected"]
 
 
-def test_encoded_request_body_is_forwarded_untouched_and_flagged(make_proxy):
-    Upstream.mode = "json"
+def _deflate(data: bytes, raw: bool = False) -> bytes:
+    compressor = __import__("zlib").compressobj(9, 8, -15 if raw else 15)
+    return compressor.compress(data) + compressor.flush()
+
+
+@pytest.mark.parametrize("encoding, encode", [
+    ("gzip", gzip.compress),
+    ("deflate", _deflate),
+    ("deflate", lambda data: _deflate(data, raw=True)),
+])
+@pytest.mark.parametrize("path, body", [("/v1/messages", REQUEST_BYTES), ("/responses", RESPONSES_BYTES)])
+def test_encoded_body_is_decoded_transformed_and_forwarded_uncompressed(make_proxy, encoding, encode, path, body):
+    engine = StubEngine("drop-first" if path == "/v1/messages" else "identity")
+    proxy, log = make_proxy(transform=engine)
+    wire = encode(body)
+    response, _ = call(proxy, "POST", path, wire, dict(AUTH, **{"Content-Encoding": encoding}))
+    assert response.status == 200 and [c[0] for c in engine.calls] == [path]
+    _, _, headers, sent = Upstream.received[0]
+    assert "Content-Encoding" not in headers and int(headers["Content-Length"]) == len(sent)
+    if path == "/v1/messages":
+        assert len(json.loads(sent)["messages"]) == 1  # the engine's rewrite went upstream
+    else:
+        assert sent == body  # unchanged request: the decoded CLI bytes, uncompressed
+    entry = log.requests()[0]
+    assert entry["request_content_encoding"] == encoding and entry["wire_request_bytes"] == len(wire)
+    assert entry["original_request_bytes"] == len(body)
+
+
+def test_zstd_is_decoded_on_314_and_rejected_before(make_proxy):
+    proxy, log = make_proxy(transform=StubEngine())
+    try:
+        from compression import zstd
+    except ImportError:
+        zstd = None
+    wire = zstd.compress(REQUEST_BYTES) if zstd else b"\x28\xb5\x2f\xfdzstd-frame"
+    response, data = call(proxy, "POST", "/v1/messages", wire, dict(AUTH, **{"Content-Encoding": "zstd"}))
+    if zstd:
+        assert response.status == 200 and Upstream.received[0][3] == REQUEST_BYTES
+    else:
+        assert response.status == 415 and b"Python 3.14" in data and Upstream.received == []
+
+
+@pytest.mark.parametrize("encoding, wire", [("br", b"\x0b\x02\x80opaque"), ("gzip", b"\x1f\x8b corrupt"),
+                                            ("deflate", b"not deflate at all")])
+@pytest.mark.parametrize("path, api", [("/v1/messages", "messages"), ("/v1/messages/count_tokens", "messages"),
+                                       ("/responses", "responses")])
+def test_undecodable_body_is_rejected_415_in_the_api_error_format(make_proxy, encoding, wire, path, api):
     engine = StubEngine("drop-first")
     proxy, log = make_proxy(transform=engine)
-    opaque = b"\x28\xb5\x2f\xfd" + b"zstd-frame-bytes"  # zstd magic; not decodable on 3.12
-    conn = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=10)
-    conn.request("POST", "/responses", body=opaque, headers=dict(AUTH, **{"Content-Encoding": "zstd"}))
-    conn.getresponse().read()
-    conn.close()
-    assert Upstream.received[0][3] == opaque and engine.calls == []
-    entry = log.requests()[0]
-    assert entry["transform_skipped"] == "request content-encoding zstd" and entry["unbounded"] is True
-    assert any(e["event"] == "request_not_transformed" for e in log.events)
+    response, data = call(proxy, "POST", path, wire, dict(AUTH, **{"Content-Encoding": encoding}))
+    assert response.status == 415
+    error = json.loads(data)
+    if api == "messages":
+        assert error["type"] == "error" and error["error"]["type"] == "invalid_request_error"
+        message = error["error"]["message"]
+    else:
+        assert error["error"]["code"] == "unsupported_content_encoding" and "param" in error["error"]
+        message = error["error"]["message"]
+    assert message.startswith("contexto:") and encoding in message and "contexto run" in message
+    assert Upstream.received == [] and engine.calls == []  # never forwarded, never transformed
+    rejected = [e for e in log.events if e["event"] == "encoded_body_rejected"]
+    assert rejected == [dict(rejected[0], encoding=encoding, endpoint=path)] and rejected[0]["reason"]
+
+
+def test_decompression_bomb_is_rejected(make_proxy, monkeypatch):
+    monkeypatch.setattr("contexto.proxy.MAX_DECODED_BODY_BYTES", 1000)
+    proxy, log = make_proxy(transform=StubEngine())
+    response, data = call(proxy, "POST", "/v1/messages", gzip.compress(b"0" * 1_000_000),
+                          dict(AUTH, **{"Content-Encoding": "gzip"}))
+    assert response.status == 415 and b"more than 1,000 bytes" in data and Upstream.received == []
+
+
+def test_decode_request_body_unit():
+    from contexto.proxy import EncodedBodyError, decode_request_body
+
+    assert decode_request_body(gzip.compress(b"abc"), "gzip") == b"abc"
+    assert decode_request_body(_deflate(b"abc"), "deflate") == b"abc"
+    with pytest.raises(EncodedBodyError):
+        decode_request_body(gzip.compress(b"abc")[:-6], "gzip")  # truncated
+    with pytest.raises(EncodedBodyError, match="more than 10 bytes"):
+        decode_request_body(gzip.compress(b"x" * 11), "gzip", limit=10)
+    assert decode_request_body(gzip.compress(b"x" * 10), "gzip", limit=10) == b"x" * 10
+
+
+def test_identity_content_encoding_is_not_rejected(make_proxy):
+    Upstream.mode = "json"
+    proxy, log = make_proxy()
+    response, _ = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, dict(AUTH, **{"Content-Encoding": "identity"}))
+    assert response.status == 200 and Upstream.received[0][3] == REQUEST_BYTES
+
+
+def test_encoded_body_on_other_paths_passes_through(make_proxy):
+    proxy, log = make_proxy()
+    response, _ = call(proxy, "POST", "/v1/other", b"opaque", dict(AUTH, **{"Content-Encoding": "gzip"}))
+    assert Upstream.received[0][3] == b"opaque"
 
 
 def test_usage_reaches_the_engine_before_the_client_sees_the_end(make_proxy):
