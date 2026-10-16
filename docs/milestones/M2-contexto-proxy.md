@@ -56,8 +56,8 @@ reviewer-2 with zero-spend stubs on Claude Code 2.1.301 (PR #20 review comments)
 request, and can carry `cache_control` (their kinds, such as tool additions and effort changes,
 are vendor-documented); injected context blocks (CLAUDE.md and similar) ride in a turn-start user
 message, `messages[0]` in a fresh session but the resumed turn's user message after `--resume`;
-and a system message with empty `content` can appear. Lane A resolved that last item (rule 12; measured by builder-2, reported by manager-1, pending
-review, evidence to land in the A2 PR):
+and a system message with empty `content` can appear. Lane A resolved that last item (rule 12; measured by builder-2, evidence in `spikes/m2/carried/` (PR #30,
+reviewed)):
 it is a settings-only message, `{role: system, content: [], output_config: {effort: ...}}`, seen at
 `messages[1]` only when a session file lacking the CLI's own system record is resumed; with real
 CLI-written history, including a tool loop and two resumes, the original system message is never
@@ -104,7 +104,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    context blocks in their original order and then a preamble text block (pinned state and page
    index). Carried system messages from paged turns are placed immediately after that first
    retained turn-start message, in their original order, matching Claude Code's own
-   user-then-system shape. Measured by builder-2, reported by manager-1, pending review, evidence to land in the A2 PR
+   user-then-system shape. Measured by builder-2, evidence in `spikes/m2/carried/` (PR #30, reviewed)
    (341 tokens, haiku via the owner's proxy): a
    `role: "system"` message before the first retained turn-start message returns 400; after it,
    or merged into it as text, returns 200. No `tool_result` is displaced. In the first epoch `k = 0`, nothing is carried separately, and the
@@ -129,7 +129,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    head) and from the estimator before that. The window budget is `W = bound - headroom - F`, and
    the retained window after rotation targets `window_fraction * W` (default 0.5), so the window
    can grow before the next trigger. Choose the smallest `k` (retain as many recent turns as fit)
-   within that target, always retaining the newest complete turn and the new turn, and never below
+   within that target, retaining the newest complete turn and the new turn (except under the
+   minimal-window fallback below), and never below
    the current `E.k` (a rotation never un-pages a turn already in the store). If the chosen `k`
    equals `E.k`, the rotation is a no-op: nothing is paged and no thinking is stripped. Write the
    newly paged turns to the page store, one page per turn, minus carried content; add any newly
@@ -138,7 +139,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    only the new turn (the newest complete turn is paged like any other and stays recallable) and
    log `window_minimal`; this keeps the request under the bound at the cost of the previous turn's
    verbatim text. Only if `W` is not positive or cannot hold even the new turn, log
-   `bound_too_small` and send the request unrotated; the launcher warns at start when the measured
+   `bound_too_small` and still rotate to the minimal window (the new turn alone), which is
+   smaller than sending unrotated; the launcher warns at start when the measured
    head leaves less than 25,000 tokens of window budget and suggests a larger `--bound`. Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
    OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
@@ -166,11 +168,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
 12. **Settings-only system messages.** A system message with empty `content` and only settings
     fields (such as `output_config`) is carried like any other system message and forwarded as the
     CLI sends it. Lane A measured that Claude Code does not empty earlier system messages, so no
-    client-side edit precedes kept thinking (zero-spend stubs; measured by builder-2, reported by
-    manager-1, pending review; evidence to land in the A2 PR under `spikes/m2/carried/`). If a
+    client-side edit precedes kept thinking (zero-spend stubs; measured by builder-2; evidence in
+    `spikes/m2/carried/`, PR #30, reviewed). If a
     later CLI version starts emptying them, re-run that check before relying on kept thinking.
 13. **Carried growth.** Measured by builder-2 without hooks (zero spend, real CLI-written history,
-    one fresh start and five resumes; reported by manager-1, pending review): system messages
+    one fresh start and five resumes; evidence in `spikes/m2/carried/`, PR #30,
+    reviewed): system messages
     accrue per settings change; each effort change adds one settings-only message of about 66
     bytes after the new prompt. Measured by reviewer-2 with a context-injecting `UserPromptSubmit`
     hook (a single zero-spend probe of three real CLI-written turns, PR #30 review; builder-2's
@@ -181,17 +184,19 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     safe for thinking because rotation strips it), keep the latest settings-only message per
     settings key. If carried content grows by more than 4,000 tokens over its size at the
     session's first request, log `carried_over_budget` in the session log.
-14. **Transform failures.** Expected failures never reuse the component that failed and never
-    forward the history unbounded:
-    - **Degraded mode** is entered on `page_conflict` (a stored page differs in
+14. **Transform failures.** Expected failures never reuse the component that failed, and only the
+    terminal step below may forward the CLI's original request:
+    - **Degraded mode** (every request sent in it is logged with `degraded: true`) is entered on `page_conflict` (a stored page differs in
       `{turn, messages}` under its id, which can only mean corruption) or `store_error` (the store
       cannot be read or written). In degraded mode the engine pages nothing and never rotates: it
       sends the last good transform (the current `E`, with its in-memory `pinned_text` and
       `index_text`) extended append-only with the new messages. That is always protocol-valid,
       keeps thinking and the cache intact, and loses nothing, because no turn is paged while the
       store is broken. Requests may then exceed the bound; each is logged `over_bound` and fails
-      acceptance. At each new turn start the engine tries the store once; if it is healthy and the
-      conflicting page is not needed, it leaves degraded mode and rotates normally. Mid tool loop
+      acceptance. At each new turn start the engine tries the store once; if it is healthy, it leaves
+      degraded mode and rotates normally. A persistent `page_conflict` is resolved by moving the
+      corrupt stored page to quarantine (never deleted) and paging the turn again from the CLI's
+      current messages, logged `page_quarantined`. Mid tool loop
       nothing changes, because degraded mode only appends.
     - **Terminal step.** A failure inside degraded mode, or a resync (rule 10) that cannot be
       completed without paging while the store is broken, is final for that request: the proxy
@@ -202,6 +207,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       `transform_error` at error level, and reported prominently by `contexto sessions show`.
     Acceptance counts any `over_bound`, `fallback_failed`, or `transform_error` as a failure. Lane
     A lists every engine path that can raise and covers each with a fault-injection test.
+15. **Encoded request bodies.** The launcher disables request compression, so a compressed request
+    body (for example `Content-Encoding: zstd`) means a misconfigured client. The proxy rejects it
+    with HTTP 415 in the API's error format, with a message beginning `contexto:` that names the
+    encoding and the fix (run through `contexto run`, or disable request compression), and logs
+    `encoded_body_rejected`. This is client misconfiguration, not a Contexto defect, so rule 14's
+    degrade-instead-of-block policy does not apply.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
@@ -244,7 +255,9 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 - `contexto_recall(page_id)` returns the page's messages rendered as plain text (thinking omitted),
   exactly, up to a per-call limit with `offset` for more. The limit is the smaller of 32,000
   characters and about one quarter of the session's window budget `W` in tokens, converted with the
-  session's measured bytes-per-token ratio; the engine publishes `W` and the ratio through the
+  smaller of the session's measured bytes-per-token ratio and the 1.5 `tool_result` seed (recalled
+  pages are often numeric, and the session average would let one recall reach about 0.42 `W`);
+  until `set_window` has been called, the limit is 12,000 characters; the engine publishes `W` and the ratio through the
   session store (`SessionStore.set_window(window_tokens, bytes_per_token)`, kept in the private
   session metadata). Reason: a 32,000-character recall of numeric log text is about 17,800 tokens,
   more than half of an OpenRig seat's `W` near 33,000, and recall results arrive inside a tool
@@ -267,7 +280,7 @@ the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
 ## Lanes
 
 - **Lane A, management.manager-1 (builder-1, builder-2):** launcher, proxy server and SSE relay,
-  rewrite engine (rules 1 to 14), upstream resolution, session log; then the Codex adapter
+  rewrite engine (rules 1 to 15), upstream resolution, session log; then the Codex adapter
   (Responses API over HTTP through a temporary `CODEX_HOME` whose provider uses `auth.command`;
   force HTTP or handle WebSocket deltas, decided with evidence).
 - **Lane B, management.manager-2 (builder-3, builder-4):** package scaffolding first (harvest PR #2),
