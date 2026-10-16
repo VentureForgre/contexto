@@ -219,6 +219,13 @@ def _toml(value: object) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
+# Exec mode runs with approval policy "never", which refuses every MCP call that needs approval, so
+# recall would never work there (measured in the A6 smoke, docs/research/M2-codex-smoke.md). The
+# contexto tools only read the session store or append to its ledger, so they are pre-approved.
+# codex-cli 0.154.0 accepts auto, prompt, writes, or approve.
+MCP_APPROVAL_MODE = "approve"
+
+
 def _mcp_args(session_id: str) -> list[str]:
     return ["mcp", "--session", session_id]
 
@@ -246,6 +253,7 @@ def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_bin: s
         f"[mcp_servers.{PROVIDER_ID}]",
         f"command = {_toml(contexto_bin)}",
         f"args = {_toml(_mcp_args(session_id))}",
+        f"default_tools_approval_mode = {_toml(MCP_APPROVAL_MODE)}",
         "",
     ]
     return "\n".join(lines)
@@ -257,7 +265,8 @@ def chatgpt_overrides(proxy_url: str, session_id: str, contexto_bin: str = "cont
     return ["-c", f"model_providers.{PROVIDER_ID}={provider}", "-c", f"model_provider={PROVIDER_ID}",
             "-c", "features.enable_request_compression=false",
             "-c", f"mcp_servers.{PROVIDER_ID}.command={_toml(contexto_bin)}",
-            "-c", f"mcp_servers.{PROVIDER_ID}.args={_toml(_mcp_args(session_id))}"]
+            "-c", f"mcp_servers.{PROVIDER_ID}.args={_toml(_mcp_args(session_id))}",
+            "-c", f"mcp_servers.{PROVIDER_ID}.default_tools_approval_mode={_toml(MCP_APPROVAL_MODE)}"]
 
 
 def resolve_codex_upstream(auth_mode: str, explicit: str | None, env: dict[str, str],

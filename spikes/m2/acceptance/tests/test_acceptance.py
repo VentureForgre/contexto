@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import math
 import shutil
 import subprocess
@@ -223,7 +224,7 @@ def test_child_env_drops_credentials_and_sets_the_config_dir(monkeypatch, tmp_pa
 def test_auth_watcher_stops_the_process_on_the_first_401(tmp_path):
     log = tmp_path / "log.jsonl"
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    watcher = driver.AuthWatcher(log, proc)
+    watcher = driver.SessionWatcher(log, proc)
     log.write_text(json.dumps({"event": "request", "path": "/v1/messages", "status": 200}) + "\n"
                    + json.dumps({"event": "upstream_4xx", "status": 401, "path": "/v1/messages"}) + "\n")
     assert proc.wait(timeout=10) != 0
@@ -234,7 +235,7 @@ def test_auth_watcher_ignores_the_unauthenticated_startup_probe(tmp_path):
     # First live H1 attempt: Claude Code's HEAD /api/hello probe got 401 from the owner's proxy.
     log = tmp_path / "log.jsonl"
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    watcher = driver.AuthWatcher(log, proc)
+    watcher = driver.SessionWatcher(log, proc)
     try:
         log.write_text(json.dumps({"event": "request", "method": "HEAD", "path": "/api/hello", "status": 401,
                                    "usage": None}) + "\n"
@@ -422,13 +423,15 @@ def test_stub_dry_run_models_log_text_and_the_rest_separately():
     assert body["messages"][0]["content"][0]["text"] == log  # the caller's body is not changed
 
 
-def test_probe_turn_caps_recalls_and_the_detector_checks_the_cap():
+def test_probe_turn_is_tool_neutral_and_the_recall_budget_is_report_only():
     s4 = script.build(turns=4, turn_bytes=8_000)
-    assert f"at most {script.MAX_RECALLS} contexto_recall calls" in s4.turns[-1]
+    probe = s4.turns[-1]
+    assert "contexto" not in probe and "recall" not in probe  # intake: product-realistic wording
+    assert "If the conversation does not contain it, say unknown." in probe
     assert detectors.MAX_RECALLS == script.MAX_RECALLS == budget.Params().recalls == 2
     calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * 3
-    assert detectors.analyze(calls[:2], [], bound=150_000).verdicts()["recalls_within_cap"]
-    assert not detectors.analyze(calls, [], bound=150_000).verdicts()["recalls_within_cap"]
+    r = detectors.analyze(calls, [], bound=150_000)
+    assert r.recalls_over_budget == 1 and "recalls_within_cap" not in r.verdicts()
 
 
 def test_the_doc_carries_the_budget_live_gates_on():
@@ -486,3 +489,205 @@ def test_local_model_path_4xx_and_encoded_body_rejections_fail_zero_4xx():
     slash = {"event": "request", "method": "POST", "path": "/v1/messages/", "status": 400}
     assert detectors.analyze([slash], [], bound=150_000).model_request_4xx == 1
     assert driver.is_auth_failure({"event": "request", "method": "POST", "path": "/v1/messages/", "status": 401})
+
+
+def _wait(proc, seconds=10):
+    try:
+        return proc.wait(timeout=seconds)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_spend_watcher_stops_inside_a_turn_before_real_spend_can_pass_the_approval(tmp_path):
+    # PR #68 review: the probe turn's tool loop runs inside one Claude Code turn, so the pre-turn
+    # projection cannot stop extra recalls; the watcher stops on real usage as it is logged.
+    def req(inp, out=100):
+        return json.dumps({"event": "request", "method": "POST", "path": "/v1/messages", "status": 200,
+                           "usage": {"input_tokens": 2, "cache_read_input_tokens": inp - 2, "output_tokens": out}})
+    log = tmp_path / "log.jsonl"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    watcher = driver.SessionWatcher(log, proc, approved=900_000, reserve=32_000)
+    try:
+        log.write_text(req(100_000) + "\n" + req(120_000) + "\n")  # 220,200 + 2 x 152,000 = 524,200: fine
+        time.sleep(1.0)
+        assert proc.poll() is None and watcher.spent == 220_200 and watcher.spend_stop is None
+        with log.open("a") as fh:  # 360,300 + 2 x 172,000 = 704,300: fine; then 520,400 + 2 x 192,000 = 904,400
+            fh.write(req(140_000) + "\n" + req(160_000) + "\n")
+        assert _wait(proc) != 0 and "could pass the approved 900,000" in (watcher.spend_stop or "")
+        assert watcher.spent == 520_400 and watcher.status is None
+    finally:
+        watcher.stop()
+
+
+def test_spend_watcher_ignores_spend_without_an_approval_and_other_paths(tmp_path):
+    log = tmp_path / "log.jsonl"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    watcher = driver.SessionWatcher(log, proc)
+    try:
+        log.write_text(json.dumps({"event": "request", "path": "/v1/messages", "status": 200,
+                                   "usage": {"input_tokens": 10_000_000}}) + "\n")
+        time.sleep(0.6)
+        assert proc.poll() is None and watcher.spend_stop is None
+    finally:
+        watcher.stop()
+        proc.kill()
+        proc.wait(timeout=10)
+    log = tmp_path / "log2.jsonl"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    watcher = driver.SessionWatcher(log, proc, approved=100)
+    try:
+        log.write_text(json.dumps({"event": "request", "path": "/v1/messages/count_tokens", "status": 200,
+                                   "usage": {"input_tokens": 10_000}}) + "\n")
+        time.sleep(0.6)
+        assert proc.poll() is None and watcher.spent == 0
+    finally:
+        watcher.stop()
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_transport_reports_an_in_turn_spend_stop_as_budget_exceeded(tmp_path):
+    # A fake 'claude' that waits; the watcher kills it, and send() says why.
+    log = tmp_path / "log.jsonl"
+    log.write_text(json.dumps({"event": "request", "path": "/v1/messages", "status": 200,
+                               "usage": {"input_tokens": 90_000, "output_tokens": 100}}) + "\n")
+    t = driver.StreamJsonTransport([sys.executable, "-c", "import sys, time; sys.stdin.readline(); time.sleep(30)"],
+                                   tmp_path, dict(os.environ), log, approved=100_000, reserve=1_000)
+    try:
+        with pytest.raises(driver.BudgetExceeded, match="stopped inside the turn"):
+            t.send("hello")
+    finally:
+        t.close()  # reaps the stopped process and its pipes (no ResourceWarning or BrokenPipe noise)
+
+
+# Real-usage events in both log forms (lane A's A2e, PR #76: fixtures follow its code, read-only).
+
+def _entry(epoch, inp, usage_events=None, over=False, events=()):
+    e = _req(epoch, inp, events=events)
+    e["over_bound"] = over
+    if usage_events is not None:
+        e["usage_events"] = usage_events
+    return e
+
+
+REAL = {"event": "over_bound", "source": "real", "over_bound": True, "real_tokens": 151_000, "estimate": 140_000,
+        "bound": 150_000}
+ERR = {"event": "estimate_error", "real_tokens": 151_000, "estimate": 120_000, "ratio": 0.795, "mean_ratio": 0.9}
+
+
+def test_usage_events_on_request_entries_are_read():
+    log = [_entry(1, 50_000), _entry(1, 151_000, usage_events=[REAL, ERR], over=True)]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert r.over_bound_real == 1 and r.over_bound_real_max_tokens == 151_000 and not r.verdicts()["no_real_over_bound"]
+    assert r.estimate_errors == 1 and r.estimate_min_ratio == 0.795 and r.estimate_mean_ratio == 0.9
+
+
+def test_separate_usage_event_lines_are_still_read():
+    log = [_entry(1, 50_000), _entry(1, 151_000), {**REAL, "epoch": 1}, {**ERR, "epoch": 1}]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert r.over_bound_real == 1 and r.estimate_errors == 1 and not r.verdicts()["no_real_over_bound"]
+
+
+def test_a_mixed_log_counts_each_real_over_bound_once():
+    log = [
+        _entry(1, 151_000, usage_events=[REAL], over=True), {**REAL, "epoch": 1},  # both forms: one event
+        _entry(2, 152_000), {**REAL, "epoch": 2, "real_tokens": 152_000},  # old form only
+        _entry(3, 153_000, usage_events=[{**REAL, "real_tokens": 153_000}], over=True),  # new form only
+    ]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert r.over_bound_real == 3 and r.over_bound_real_max_tokens == 153_000
+
+
+def test_the_entry_over_bound_flag_is_not_a_real_over_bound_signal():
+    # Reviewer-2 on PR #76: the pre-send tool-loop exemption sets the entry's over_bound flag too, so
+    # only {event: over_bound, source: real} in usage_events (or an old separate line) counts.
+    pre_send = {"event": "over_bound", "source": "estimate", "in_tool_loop": True, "epoch": 1, "estimate": 151_000}
+    loop = _entry(1, 149_000, usage_events=[ERR], over=True, events=[pre_send])
+    r = detectors.analyze([loop], [], bound=150_000)
+    assert r.over_bound_real == 0 and r.pre_send_tool_loop == [1] and r.verdicts()["no_real_over_bound"]
+    flag_only = _entry(1, 149_000, over=True)  # no usage_events: the flag alone counts for nothing
+    assert detectors.analyze([flag_only], [], bound=150_000).over_bound_real == 0
+    # ...and a real event inside usage_events is never missed (no vacuous pass after #76)
+    real = _entry(1, 151_000, usage_events=[ERR, REAL], over=True, events=[pre_send])
+    assert not detectors.analyze([real], [], bound=150_000).verdicts()["no_real_over_bound"]
+
+
+def test_failure_events_fail_acceptance_1_wherever_they_appear():
+    # Intake 03:39Z (contract PR at 147b182). Shapes follow lane A's PR #76 (read-only).
+    store_error = {"event": "store_error", "epoch": 2, "operation": "set_window", "error": "OSError"}
+    degraded = {"event": "degraded_enter", "epoch": 2, "reason": "store_error"}
+    log = [
+        _entry(1, 90_000, events=[{"event": "unclassified_system_message", "epoch": 1}]),  # transform event
+        _entry(2, 95_000, usage_events=[store_error, degraded]),  # on the request entry
+        {**store_error, "ts": "x"}, degraded,  # the same two as separate lines too: counted once
+        {"event": "fallback_failed", "epoch": 2},  # a separate store.log line only
+        _entry(3, 96_000, events=[{"event": "page_conflict", "epoch": 3, "page_id": "pg_1"}]),
+    ]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert r.failure_events == {"unclassified_system_message": 1, "store_error": 1, "degraded_enter": 1,
+                                "fallback_failed": 1, "page_conflict": 1}
+    assert not r.verdicts()["no_failure_events"]
+    for name in detectors.FAILURE_EVENTS:  # each one alone fails
+        assert not detectors.analyze([{"event": name, "epoch": 0}], [], bound=150_000).verdicts()["no_failure_events"]
+    assert detectors.analyze([_entry(1, 90_000)], [], bound=150_000).verdicts()["no_failure_events"]
+
+
+def test_a_real_over_bound_without_a_pre_send_estimate_is_still_read():
+    no_estimate = {**REAL, "estimate": None}  # PR #76: estimate is null after a fallback_failed forward
+    r = detectors.analyze([_entry(1, 151_000, usage_events=[no_estimate], over=True)], [], bound=150_000)
+    assert r.over_bound_real == 1 and r.over_bound_real_max_tokens == 151_000
+
+
+# Local versus upstream 5xx on model requests (contract PR #98).
+
+def test_a_local_upstream_unreachable_502_on_a_model_request_fails_acceptance_1():
+    local = {"event": "request", "method": "POST", "path": "/v1/messages", "status": 502,
+             "error": "upstream unreachable: TimeoutError", "duration_ms": 18187}
+    r = detectors.analyze([_req(1, 50_000), local], [], bound=150_000)
+    assert [x["mark"] for x in r.local_5xx] == ["upstream unreachable"] and not r.verdicts()["no_local_5xx"]
+
+
+def test_the_same_502_on_a_non_model_path_does_not_fail():
+    probe = {"event": "request", "method": "HEAD", "path": "/api/hello", "status": 502,
+             "error": "upstream unreachable: TimeoutError"}
+    r = detectors.analyze([probe], [], bound=150_000)
+    assert r.local_5xx == [] and r.verdicts()["no_local_5xx"]
+
+
+def test_an_upstream_5xx_passed_through_is_reported_and_does_not_fail():
+    for status in (500, 529):
+        passed = {"event": "request", "method": "POST", "path": "/v1/messages", "status": status,
+                  "response_bytes": 120, "usage": None}
+        r = detectors.analyze([passed], [], bound=150_000)
+        assert r.local_5xx == [] and r.upstream_5xx[0]["status"] == status and r.verdicts()["no_local_5xx"]
+
+
+def test_an_unmarked_model_path_5xx_fails_closed():
+    unmarked = {"event": "request", "method": "POST", "path": "/v1/messages/count_tokens", "status": 503}
+    r = detectors.analyze([unmarked], [], bound=150_000)
+    assert r.local_5xx[0]["mark"] == "unmarked" and not r.verdicts()["no_local_5xx"]
+
+
+def test_last_resort_and_websocket_local_errors_fail():
+    last = {"event": "proxy_error", "method": "POST", "path": "/v1/messages", "error": "KeyError", "fallback": "local_502"}
+    forwarded = {**last, "fallback": "forward_original"}  # forwarded the CLI's bytes: not a local error
+    ws = {"event": "websocket_rejected", "path": "/responses"}
+    r = detectors.analyze([last, forwarded, ws], [], bound=150_000)
+    assert [(x["status"], x["mark"]) for x in r.local_5xx] == [(502, "proxy_error local_502"), (501, "websocket_rejected")]
+
+
+def test_a_failed_forward_original_fallback_counts_as_one_local_502():
+    # Reviewer-2 on PR #101: _handle's last resort first tries to forward the CLI's own bytes
+    # (fallback forward_original); if that also fails it logs proxy_error local_502 and answers 502.
+    first = {"event": "proxy_error", "method": "POST", "path": "/v1/messages", "error": "KeyError",
+             "fallback": "forward_original"}
+    again = {"event": "proxy_error", "path": "/v1/messages", "error": "OSError", "fallback": "local_502"}
+    r = detectors.analyze([first, again], [], bound=150_000)
+    assert [(x["line"], x["status"], x["mark"]) for x in r.local_5xx] == [(2, 502, "proxy_error local_502")]
+    assert not r.verdicts()["no_local_5xx"]
+    # the fallback that forwards and is answered by upstream is no local error
+    forwarded = {"event": "request", "method": "POST", "path": "/v1/messages", "fallback": True, "status": 200,
+                 "response_bytes": 900, "usage": {"input_tokens": 10, "output_tokens": 1}}
+    ok = detectors.analyze([first, forwarded], [], bound=150_000)
+    assert ok.local_5xx == [] and ok.verdicts()["no_local_5xx"]

@@ -68,6 +68,13 @@ contexto run --bound 150000 --session <id> --upstream <url> claude -p --input-fo
 - No `--settings` or `--mcp-config` of the harness's own is passed; the launcher supplies both.
 - `--upstream` is passed explicitly: the owner's proxy (D12), from `$ANTHROPIC_BASE_URL` unless
   given.
+- **A hard spend stop inside a turn** (PR #68 review). The guard in `Run` projects spend before each
+  turn and checks real spend after it, so it cannot see the probe turn's tool loop, which runs
+  inside one Claude Code turn. `SessionWatcher` tails the session log beside the auth stop: after
+  each Messages API response it adds the real usage and terminates the run if two more requests of
+  the last input size plus the 32,000 output reserve could pass the approval. Two, because the proxy
+  logs a request when its response ends, when Claude Code may already have sent the next one. The
+  model never sees this limit. The run then reports `BudgetExceeded` with the spend so far.
 
 **Credential** (intake-approved, D12). If the scratch run inherits `HOME`, Claude Code falls back
 to the owner's claude.ai subscription login, which the rig proxy rejects with a 401 (lane 1
@@ -119,6 +126,25 @@ measured this case, PR #9). So:
   PR #48) is reported in `pre_send_tool_loop` only. `window_minimal` requests (contract PR #50,
   lane A's A2c) are counted. `estimate_error` events are reported (count, lowest ratio, last
   `mean_ratio`); no verdict uses them.
+- **Where the real-usage events live.** Lane A's A2b wrote `over_bound` (`source: "real"`) and
+  `estimate_error` as separate session-log lines; A2e (PR #76) moves them onto the request's entry as
+  `usage_events`. The detectors read both forms and count an event that appears in both once (same
+  event, epoch, `real_tokens`, `estimate`); `estimate` may be null. The entry's `over_bound` flag is
+  never read as a real over-bound, because a pre-send tool-loop record sets it too.
+- **Failure events (acceptance 1).** Intake (2026-10-16, contract PR at `147b182`): any of
+  `degraded_enter`, `store_error`, `page_conflict`, `fallback_failed`, `transform_error`,
+  `turn_room_missing`, or `unclassified_system_message` fails it, wherever it appears (a request's
+  transform events, its `usage_events`, or a separate session-log line). `failure_events` counts each
+  by name, once, and `no_failure_events` fails unless it is empty.
+- **Local 5xx (acceptance 1, contract PR #98).** A 5xx Contexto's own proxy generates on a model
+  request fails the run; an upstream 5xx passed through is reported (`upstream_5xx`). The proxy at
+  main marks every local model-path 5xx in the session log: `_forward`'s unreachable upstream (a
+  request entry with status 502 and `error: "upstream unreachable: ..."`, no `response_bytes`),
+  `_handle`'s last resort (`proxy_error` with `fallback: "local_502"`, no request entry), and a
+  WebSocket upgrade (`websocket_rejected`, answered 501). A passed-through 5xx has `response_bytes`
+  and no such error. A model-path 5xx with neither mark fails closed as local. `local_5xx` lists each,
+  and `no_local_5xx` is the verdict. The second live H1 run's request 6 (502, upstream unreachable,
+  TimeoutError) re-scores as a local 5xx.
 - **Unverified requests (acceptance 1).** A `/v1/messages` request whose `usage` is null or
   missing cannot be checked against the bound, so it must not hide an over-bound request. Their
   indexes are reported in `unverified_requests`, and the `every_request_has_usage` verdict fails
@@ -222,10 +248,10 @@ KB, head 47,600, bound 150,000, 2 recalls sized by B9 (below).
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy (live refuses an approval below its worst case) | 2,185,371 | 2,852,611 |
-| Full-context baseline, one direct replay request (recommended) | 449,681 | 477,681 |
-| Full-context baseline through a plain CLI session (alternative) | 5,054,047 | - |
-| **Total, H1 + replay baseline** | **2,635,052** | **3,330,292** |
+| H1 acceptance run through the proxy (live refuses an approval below its worst case) | 2,185,257 | 2,852,497 |
+| Full-context baseline, one direct replay request (recommended) | 449,643 | 477,643 |
+| Full-context baseline through a plain CLI session (alternative) | 5,054,009 | - |
+| **Total, H1 + replay baseline** | **2,634,900** | **3,330,140** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
@@ -251,14 +277,15 @@ Every acceptance verdict passed in both runs except `recall_called`, since the s
 tools. The stub run's 40 KB total (2,387,214 / 3,082,454) sits about 248,000 tokens under the
 approval table, so the guard never stops a run the stub run predicts.
 
-**Recalls in the probe turn.** The probe turn's tool loop cannot rotate, so intake capped it at 2
-recalls (2026-10-16). B9 (PR #56) sizes each recall at `W / 4` tokens times the smaller of the
+**Recalls in the probe turn.** The probe turn's tool loop cannot rotate, so the budget prices 2
+recalls. Intake made this a cost guard only (2026-10-16): the probe turn is product-realistic and
+names neither Contexto's tools nor a cap ("If the conversation does not contain it, say unknown."),
+so the preamble and page index must lead the model to recall. B9 (PR #56) sizes each recall at `W / 4` tokens times the smaller of the
 session's measured bytes per token and 1.5, never above 32,000 characters, and at 12,000 characters
 until the engine records `W` with `set_window`. The budget prices each recall at the largest chunk,
 32,000 characters of log text, 17,778 tokens; at this run's `W` (62,000 to 85,000) B9 returns
-13,000 to 17,600 tokens. `recalls_within_cap` counts every `contexto_recall` in the session, not
-only the probe turn's: a recall during a build turn also adds unplanned tokens, so it counts
-against the cap too.
+13,000 to 17,600 tokens. `recalls_over_budget` reports recall calls beyond the 2 priced, across the
+whole session; no verdict uses it.
 
 Under option (a) the pre-usage request stays far below 135,000, so the logs stay pasted user
 text. `Params.head` is now 47,600 (the engine's `F` here) and the default turn size 40 KB.
@@ -344,9 +371,69 @@ planned over-bound requests.
   zero-4xx counts model requests only, and other 4xx are reported apart (see Detectors).
 - **Artifacts** (private, never in Git): `.contexto/runs/acceptance-20261016T022918Z/`.
 
+## Acceptance 3 credit (contract PR #95)
+
+```
+uv run python spikes/m2/acceptance/run.py check --session-log ... --cc-jsonl ... --session-dir ... --answers ...
+```
+
+An answer counts as recall when it reached the model through Contexto's tools: a `contexto_recall` of
+its page, or a `contexto_search` hit whose returned lines hold it (B15). `recall_credit.py` reads
+nothing from the transcript or tool output. It takes each call's returned ranges from the
+content-free `mcp_call` events: B15's `returned: [{page_id, start, end}]`, 0-based characters into
+`render_page(page)` with the end exclusive, or, for a recall, `[offset, offset + chars)`. It finds
+each paged-only plant's line in its stored page's rendered text. A probe is credited when it was
+answered correctly and its whole line lies inside the union of the ranges returned for that page
+(merged when they overlap or touch, since B16 pages a recall over several calls), from calls logged
+before the last Messages request (the answer). `recall_credited` is the verdict.
+
+On the live H1 rerun (`acceptance-20261016T044723Z`): q_p_01 and q_p_02 are credited through the
+recall of the turn-0 page (range 0 to 30,651; plants at 27,057 and 9,706). q_p_03 and q_p_04 were
+not returned (plants at 33,800 and 38,598) and were answered unknown.
+
+## Search reachability (offline, zero spend)
+
+```
+uv run python spikes/m2/acceptance/run.py reach --session-dir <CONTEXTO_HOME>/sessions/<id>
+```
+
+Intake (2026-10-16): before a live rerun, show that `contexto_search` can reach every probe's answer,
+so a miss can be attributed to the model and not to the index or the search. `reach.py` runs the
+store's own search (`search_pages`, exact case-sensitive substring) on a session's stored pages with
+each probe's key terms:
+- the probe's `subjects` (its config key, chain subject, or action item id; for a multi-hop probe,
+  every hop's name, which the model learns hop by hop);
+- for a probe with none (an obligation set), the identifiers its question names.
+
+A probe is reachable when every statement it needs is in the context window (on no page) or on a
+page one of its terms returns:
+- multi-hop: every statement;
+- obligation set: each id's last statement;
+- otherwise: the statements holding the answer, or the last one.
+
+Pages are mapped to script turns by content (the turn's opening text inside the page), not by the
+page's turn number, which can drift when carried text is paged. Drift, unmatched, and ambiguous
+pages are reported (H1 rerun store: none), and reach fails closed on them: such a page's number and
+candidate turns count as paged, never as in the window, and `run.py reach` exits 1. A statement on no page counts as in the window only if it sits in a
+script turn the store did not page out, and hits are cut at `contexto_search`'s limit (`SEARCH_LIMIT`, 50 ids). It reports the rate
+per category with counts, the rank of each hit (search lists newest first), and every unreachable
+probe. `stubrun.py` also reports it on the dry run's own store, and `--inflate N:FACTOR` makes the
+stub report inflated usage from the n-th request so a real over_bound is logged; on main with PR #76
+the detectors count it from the request entries' `usage_events`. On the H1 rerun's store (`acceptance-20261016T024733Z`, 15 pages): 54 of 54
+reachable.
+
+| Category | Probes | Reachable | Needing a paged statement |
+|---|---|---|---|
+| chain | 30 | 30 | 13 |
+| obligations | 6 | 6 | 6 |
+| multihop | 8 | 8 | 8 |
+| distractor | 6 | 6 | 6 |
+| paged_only | 4 | 4 | 4 |
+
 ## Tests
 
-`uv run --with pytest pytest spikes/m2` runs 46 tests with no live calls. Most use synthetic
+`uv run --with pytest pytest spikes/m2` runs the harness tests with no live calls (the count changes
+with each PR, so it is not kept here). Most use synthetic
 fixtures; `test_engine_log.py` drives the real proxy and rewrite engine against a stub upstream,
 once with JSON replies and once with SSE replies, since the acceptance session streams.
 They cover:
@@ -358,9 +445,78 @@ They cover:
   scratch directory, and the environment.
 - **Run:** the pass rule, live refusal without budget, and the dry-run output.
 
+## Replay baseline (acceptance 2)
+
+```
+uv run python spikes/m2/acceptance/run.py replay --cc-jsonl <H1 session JSONL> --out <private dir> \
+    --approved 477681 --seat-settings <seat settings> [--dry]
+```
+
+Intake chose this order (2026-10-16): run H1, then send the baseline as one direct request. It is
+H1's probe-turn request as Claude Code built it, read from Claude Code's session JSONL in the H1
+run's isolated config directory:
+- `api-request` records are deltas: `base` (the previous request's id), `keep` (messages kept from
+  it), and `tail` (hashes of the new messages). A hash is the sha256 of the message as sorted
+  compact JSON, and resolves to an `api-request-blob` (the session-start messages and per-turn
+  reminders) or a `user` or `assistant` record. Claude Code writes one assistant record per
+  content block (thinking, then text) under one message id; merged, they hash to what it sent.
+- `api-request-shape` (matched by `shapeHash`): the system prompt and tools; the request's
+  `params`: model, betas, thinking, output config.
+- The first request that holds the probe turn is replayed with all its messages, system messages
+  included. A hash that resolves to nothing stops the replay; nothing is guessed or synthesized.
+
+It goes straight to the owner's proxy, bypassing Contexto.
+- **No replayed thinking.** Thinking blocks are stripped, so it is labeled a no-replayed-thinking
+  baseline.
+- **No tool loop.** Contexto's tools are removed and `tool_choice` is `none`, so the model answers
+  from the context alone. The probe turn's own tool calls in H1 are not part of the baseline.
+- **Nothing edits the context.** `context_management` is dropped.
+- **Intake's check, no silent trimming.** `count_tokens` on the exact request must fit
+  `claude-haiku-5-5`'s 1,000,000-token context window with `max_tokens` (32,000, the guard's
+  reserve), and the approval; otherwise the replay stops before sending and reports why.
+- **Credential and headers.** The key comes from the seat's apiKeyHelper at call time and is held in
+  memory for the request headers only. The owner's proxy refused direct requests with urllib's user
+  agent (403) and with the key in `x-api-key` alone (401). Intake approved this set (2026-10-16
+  03:24Z), which it accepted: the user agent `contexto-acceptance-harness/0.1
+  (+VentureForgre/contexto)`, and the key in both `x-api-key` and `Authorization: Bearer`. Nothing
+  presents the harness as Claude Code. The first 401 or 403 stops the replay. Tests check that the key
+  never reaches stdout, stderr, or any file the replay writes.
+- **Beta set (label for the baseline).** The replay sends the betas H1's probe-turn request recorded,
+  minus every `claude-code-*` beta (intake, 2026-10-16: no Claude Code client marker on a direct
+  harness send). For H1's run (Claude Code 2.1.301) that is these 10: interleaved-thinking-2025-05-14,
+  thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05,
+  per-turn-control-2026-07-01, mid-conversation-tool-changes-2026-07-01, effort-2025-11-24,
+  dangerous-tool-use-2026-09-03, thinking-display-updates-2026-08-18, afk-mode-2026-01-31. Dropped:
+  claude-code-20250219. `replay.harness_betas` applies the same filter to every direct send. Feature
+  betas such as afk-mode-2026-01-31 and dangerous-tool-use-2026-09-03 are kept on purpose: D23 removes
+  only client identity markers, and the feature betas keep the baseline close to H1's real request
+  (intake, 2026-10-16 05:30Z).
+  Caveat on record: the recall experiment's four sends (2026-10-16 03:24Z to 03:25Z) still carried
+  all 11, claude-code-20250219 included, as H1's own requests did.
+- **Output, private only.** `baseline-answers.txt` and `replay-result.json` (sizes, the token
+  count, usage, stop reason, block counts). `run.py score --h1 ... --baseline ...` compares the two
+  answer sets.
+
+`--dry` builds the request and prints its sizes with no calls. On the H1 rerun's JSONL
+(`acceptance-20261016T024733Z`) it decodes all 56 messages of the probe-turn request (18 turns, each
+with its reminder, then the probe turn and its reminder), with 21 tools and about 814 KB.
+
+**Replay of the live H1 rerun (2026-10-16, main `7da8f78`).**
+- **JSONL-copy workaround (disclosed, accepted).** At that SHA the replay decoded every request record
+  first, and the probe turn's own tool-loop requests (21 and 22) named assistant messages the JSONL
+  did not hold, so it refused. The probe-turn request (20) decoded completely. The baseline ran from a
+  private copy of the JSONL without records 21 and 22, which builds the same probe-turn request. The
+  replay now stops decoding at the first request that holds the probe turn, so the original JSONL
+  builds it directly (verified: same 56 messages, 814,024 bytes).
+- **One field changed (intake 04:56Z).** Claude Code recorded `thinking.display: "updates"`, which
+  `count_tokens` rejects (`summarized` or `omitted` only). The baseline used `omitted`; display
+  controls only what the response returns, not the input or the reasoning. The replay now makes this
+  change itself and reports it in `changes_from_recorded`.
+- **Result.** count_tokens 437,447 input; spend 447,659; the baseline scored 44 of 54. The beta set
+  is the 10 listed above, labeled a no-replayed-thinking baseline.
+
 ## Open questions
 
-1. **Replay baseline.** It needs the CLI's request shape: either the JSONL's `api-request-shape`
-   record, or an opt-in proxy dump of the last full request under the session directory.
-2. **Budget and bound.** Decided by intake: bound 150k, budget up to 4,000,000. Pending: the
-   zero-spend dry run with lane A's real `contexto run` and the measured head.
+1. **Tokenizer.** The 1.8 bytes per token rate comes from M0's measurements. The replay's
+   `count_tokens` gives the exact figure for this content on `claude-haiku-5-5`; the guard stops H1
+   at the approval if real usage runs higher.

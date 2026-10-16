@@ -104,6 +104,39 @@ the owner's delegation. Open decisions are listed at the end with the options an
   becomes M2's pinned-state store. PRs #2 and #3 are harvested by lane B and then closed; PR #4 is
   closed as superseded; branches are kept.
 
+- **D22. Codex: forced HTTP and two auth modes.** Intake, 2026-10-16. Measured: Codex's built-in
+  provider always tries WebSockets first, while a custom provider defined with `-c` is HTTP-only and
+  sends the full input. The adapter forces HTTP through a custom provider. API-key mode (default,
+  and the only mode the team runs live under D12): a temporary `CODEX_HOME` whose provider reads the
+  rig key with `auth.command`. ChatGPT mode (behind `--codex-auth chatgpt`): the user's own
+  `CODEX_HOME` with `-c` overrides only, credentials passed through unchanged; tested only with
+  synthetic credentials. Its end-user terms stay with O4.
+- **D23. Direct requests identify honestly.** Intake, 2026-10-16. Any request the team sends
+  directly, rather than through the real CLI, uses a user agent naming the harness and never carries
+  another product's client marker such as a `claude-code-*` beta. In the acceptance harness a shared
+  filter with a test enforces it (PR #75); lane A's live-check spike sets an honest user agent and
+  only the feature beta it tests (PR #79), without a test. Prompted by the recall experiment, whose four result sends carried
+  `claude-code-20250219` copied from H1; that result is kept with the caveat recorded in
+  `docs/research/M2-recall-experiment.md`.
+- **D24. Engine behaviour settled during the build.** Intake, 2026-10-16, each from a measurement or
+  review recorded in the M2 contract: per-turn hook system messages page with their turn while
+  other system messages are carried (rules 12 and 13); the window is sized after fixed overhead,
+  with a minimal-window fallback (rule 4); expected failures enter an append-only degraded mode, and
+  only the terminal step (`fallback_failed`) or a genuine bug forwards the original request (rule
+  14); compressed bodies are decoded or
+  refused with a 415 (rule 15); recall size and a per-turn recall budget follow the window, with the
+  stream held from the first tool call until the room is published. The store side of the budget is
+  merged (PR #73); the engine-side room publish and stream hold (lane A's A9) are still pending.
+- **D25. Recall preamble V2.** Intake, 2026-10-16. In the first live acceptance run the model made
+  no tool calls and lost every paged-only fact. A first-response experiment (415,413 tokens) showed
+  that explicit search-then-recall instructions, a worked example, identifier stubs without values,
+  and the preamble placed first made the model search for every paged key. V2 is the chosen design:
+  `preamble_first` is the engine default on main (PR #77); the store text and identifier stubs are
+  in lane B's PR #71, still in review. Its effect on recall accuracy is measured by the H1 rerun.
+- **D26. Acceptance fails on any off-path event.** Intake, 2026-10-16. Besides over-bound requests
+  (except logged in-turn over-bound turns per rule 5) and model-request 4xx, acceptance 1 fails on `degraded_enter`, `store_error`, `page_conflict`,
+  `fallback_failed`, `transform_error`, `turn_room_missing`, or `unclassified_system_message`.
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
@@ -124,7 +157,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
 
 All open decisions are intake's to make under D0 unless marked otherwise.
 
-- **O2. History-edit strategy under preserved thinking.** Vendor-documented: on Fable 5.1, Opus 5.5,
+- **O2. History-edit strategy under preserved thinking.** Resolved by D20 (strip all thinking at
+  rotation); kept here for its evidence. Vendor-documented: on Fable 5.1, Opus 5.5,
   Sonnet 5.5, and Haiku 5.5, editing history before a thinking block invalidates it, and the API
   returns 400 by default only for accounts created on or after 2026-08-31. Measured by builder-4's
   conformance probe (4,973 tokens; claude-haiku-5-5 and gpt-6-astra, both through the owner's

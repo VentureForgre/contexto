@@ -39,6 +39,60 @@ def compare(h1: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
             "pass": overall_gap <= 2 and all(g <= 1 for g in gaps.values())}
 
 
+def run_replay(args: argparse.Namespace) -> int:
+    """Phase 2: the full-context baseline. Builds the request from the H1 run's own JSONL, checks the
+    exact token count against the context window and the approval, then sends it once."""
+    from acceptance import credcheck, replay
+
+    s, _ = plan(args.seed, 0, args.turn_kbytes * 1_000)
+    try:
+        request = replay.build_request(detectors.read_jsonl(args.cc_jsonl), s.turns[-1], args.max_tokens)
+    except (replay.ReplayError, OSError) as exc:
+        print(f"refusing: {exc}", file=sys.stderr)
+        return 2
+    out: dict[str, Any] = {"request": replay.summary(request), "label": "no-replayed-thinking baseline",
+                           "changes_from_recorded": request.get("_changes") or {},
+                           "betas": replay.harness_betas(request.get("_betas"))}
+    if args.dry:
+        print(json.dumps(out, indent=2))
+        return 0
+    upstream = args.upstream or os.environ.get("ANTHROPIC_BASE_URL")
+    if not upstream:
+        print("refusing: no upstream (pass --upstream or set ANTHROPIC_BASE_URL)", file=sys.stderr)
+        return 2
+    if args.seat_settings is None or not args.seat_settings.is_file():
+        print("refusing: --seat-settings must name the seat's settings file", file=sys.stderr)
+        return 2
+    args.out.mkdir(parents=True, exist_ok=True)
+    try:
+        key = credcheck._helper_output(args.seat_settings)  # in memory; header only
+    except (RuntimeError, OSError):
+        print("refusing: the seat's apiKeyHelper did not produce a key; output not shown", file=sys.stderr)
+        return 2
+    status = 0
+    try:
+        tokens = replay.count_tokens(request, upstream, key)
+        out["count_tokens"] = tokens
+        window = args.context_window or replay.CONTEXT_WINDOW
+        reason = replay.check_fits(tokens, args.max_tokens, window, args.approved)
+        if reason:
+            out["stopped"] = reason
+            status = 1
+        else:
+            result = replay.send(request, upstream, key)
+            (args.out / "baseline-answers.txt").write_text(result["text"] + "\n", encoding="utf-8")
+            out.update({"status": result["status"], "usage": result["usage"], "stop_reason": result["stop_reason"],
+                        "blocks": result["blocks"], "answer_chars": len(result["text"])})
+    except (replay.ReplayError, driver.AuthFailure, OSError) as exc:
+        out["stopped"] = str(exc)
+        status = 1
+    finally:
+        del key
+    (args.out / "replay-result.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
+    print(json.dumps(out, indent=2))
+    return status
+
+
 def plan(seed: int = script.DEFAULT_SEED, turns: int = 0, turn_bytes: int = 40_000,
          params: budget.Params = budget.Params()) -> tuple[script.Script, budget.Budget]:
     """The script and its simulated budget: the one figure dry-run prints, the doc shows, and live gates on."""
@@ -80,14 +134,32 @@ def main(argv: list[str] | None = None) -> int:
     live.add_argument("--seat-settings", type=Path, required=True,
                       help="the seat's settings file whose apiKeyHelper the run uses, read-only")
     live.add_argument("--upstream", default=None, help="upstream base URL (default: $ANTHROPIC_BASE_URL)")
+    rep = sub.add_parser("replay", help="full-context baseline: one direct request after the H1 run")
+    rep.add_argument("--cc-jsonl", type=Path, required=True, help="the H1 run's Claude Code session JSONL")
+    rep.add_argument("--out", type=Path, required=True, help="private directory for the answers and counts")
+    rep.add_argument("--dry", action="store_true", help="build the request and print its sizes; no calls")
+    rep.add_argument("--approved", type=int, default=0, help="tokens intake approved for the replay")
+    rep.add_argument("--seat-settings", type=Path, default=None)
+    rep.add_argument("--upstream", default=None, help="upstream base URL (default: $ANTHROPIC_BASE_URL)")
+    rep.add_argument("--context-window", type=int, default=None)
+    rep.add_argument("--max-tokens", type=int, default=budget.Params.max_tokens_reserve)
+    rep.add_argument("--seed", type=int, default=script.DEFAULT_SEED)
+    rep.add_argument("--turn-kbytes", type=int, default=40)
     cred = sub.add_parser("check-credential")
     cred.add_argument("--seat-settings", type=Path, required=True)
+    rc = sub.add_parser("reach", help="offline: can contexto_search reach every probe's answer page")
+    rc.add_argument("--session-dir", type=Path, required=True, help="a run's sessions/<id> directory (pages/)")
+    rc.add_argument("--seed", type=int, default=script.DEFAULT_SEED)
+    rc.add_argument("--turn-kbytes", type=int, default=40)
     chk = sub.add_parser("check")
     chk.add_argument("--session-log", type=Path, required=True)
     chk.add_argument("--cc-jsonl", type=Path, required=True)
     chk.add_argument("--bound", type=int, default=150_000)
     chk.add_argument("--session-dir", type=Path, default=None,
                      help="session directory, to confirm the paged-only plants were really paged")
+    chk.add_argument("--answers", type=Path, default=None,
+                     help="the run's answers file: with --session-dir, credits acceptance 3 from the logged "
+                          "returned ranges (contract PR #95)")
     args = parser.parse_args(argv)
 
     if args.command == "check-credential":
@@ -96,6 +168,17 @@ def main(argv: list[str] | None = None) -> int:
         result = credcheck.check(args.seat_settings)
         print(json.dumps(result, indent=2))
         return 0 if result.get("pass") else 1
+
+    if args.command == "replay":
+        return run_replay(args)
+
+    if args.command == "reach":
+        from acceptance import reach
+
+        s, _ = plan(args.seed, 0, args.turn_kbytes * 1_000)
+        result = reach.reach(list(s.probes), reach.load_pages(args.session_dir), turn_texts=list(s.turns[:-1]))
+        print(json.dumps({k: v for k, v in result.items() if k != "rows"}, indent=2))
+        return 0 if not result["unreachable"] and result.get("mapping_ok", True) else 1  # fails closed
 
     if args.command == "check":
         report = detectors.analyze(detectors.read_jsonl(args.session_log), detectors.read_jsonl(args.cc_jsonl), args.bound)
@@ -108,6 +191,14 @@ def main(argv: list[str] | None = None) -> int:
                                                                   if p.id in s0.paged_only])
             out["paged_only_plants_paged"] = f"{sum(paged.values())}/{len(paged)}"
             out["verdicts"]["paged_only_plants_paged"] = all(paged.values())
+            if args.answers is not None:
+                from acceptance import reach, recall_credit
+
+                probes = [p for p in s0.probes if p.id in s0.paged_only]
+                credit = recall_credit.credit(probes, args.answers.read_text(encoding="utf-8"),
+                                              detectors.read_jsonl(args.session_log), reach.load_pages(args.session_dir))
+                out["recall_credit"] = credit
+                out["verdicts"]["recall_credited"] = credit["acceptance_3"]
         print(json.dumps(out, indent=2, default=str))
         return 0 if all(out["verdicts"].values()) else 1
 
@@ -156,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
     estimates = [r.input_tokens for r in b.rows if r.kind == "turn"] + [max(r.input_tokens for r in b.rows if r.kind != "turn")]
     session_log = args.home / "sessions" / args.session / "log.jsonl"
     transport = driver.StreamJsonTransport(driver.launcher_command(args.session, args.bound, upstream), args.scratch,
-                                           driver.child_env(args.home, config), session_log)
+                                           driver.child_env(args.home, config), session_log,
+                                           approved=args.approved, reserve=params.max_tokens_reserve)
     run = driver.Run(transport, args.approved, params.max_tokens_reserve, estimates)
     status = 0
     try:

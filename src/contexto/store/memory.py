@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import secrets
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from contexto.store import PageConflictError, PageNotFoundError, check_page_id, check_window, redact
+from contexto.store import (PageConflictError, PageNotFoundError, charge_room, check_page_id,
+                             check_model, check_turn_room, check_window, redact)
 from contexto.store.ledger import MemoryLedger
+from contexto.store.recall import lists_identifiers
 from contexto.store.pages import build_page, render_index, same_content, search_pages
 from contexto.store.records import LedgerOps
 
@@ -22,6 +26,8 @@ class MemoryStore(LedgerOps):
         self.ledger = MemoryLedger()
         self.quarantined: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
         self._workdir: Path | None = None
+        self._turn_room: tuple[str | None, int | None, int] = (None, None, 0)
+        self._room_lock = threading.Lock()
 
     def set_workdir(self, path: Path) -> None:
         self._workdir = Path(path).resolve()
@@ -29,12 +35,30 @@ class MemoryStore(LedgerOps):
     def workdir(self) -> Path | None:
         return self._workdir
 
-    def set_window(self, window_tokens: int, bytes_per_token: float) -> None:
+    def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None:
         check_window(window_tokens, bytes_per_token)
+        self._window_model = check_model(model)
         self._window = (window_tokens, float(bytes_per_token))
 
     def window(self) -> tuple[int | None, float | None]:
         return getattr(self, "_window", (None, None))
+
+    def window_model(self) -> str | None:
+        return getattr(self, "_window_model", None)
+
+    def set_turn_room(self, turn_id: str, room_tokens: int) -> None:
+        turn_id = check_turn_room(turn_id, room_tokens)
+        with self._room_lock:  # every publish resets what was spent (see SessionStore.set_turn_room)
+            self._turn_room = (turn_id, room_tokens, 0)
+
+    def turn_room(self) -> tuple[str | None, int | None, int]:
+        return self._turn_room
+
+    def charge_turn_room(self, charge: Callable[[int | None], int]) -> None:
+        with self._room_lock:
+            record = charge_room(self._turn_room, charge)
+            if record is not None:
+                self._turn_room = (record["turn_id"], record["room_tokens"], record["spent_tokens"])
 
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]:
         ids = []
@@ -44,7 +68,8 @@ class MemoryStore(LedgerOps):
             if existing is None:
                 self.pages[page["id"]] = page
             elif not same_content(existing, page):  # same id, different turn or messages
-                raise PageConflictError(f"page {page['id']} exists with different turn or messages")
+                raise PageConflictError(f"page {page['id']} exists with different turn or messages",
+                                        page_id=page["id"])
             ids.append(page["id"])
         return ids
 
@@ -71,8 +96,15 @@ class MemoryStore(LedgerOps):
     def search(self, query: str) -> list[str]:
         return search_pages(list(self.pages.values()), query)
 
-    def index_text(self, budget_tokens: int) -> str:
-        return render_index(list(self.pages.values()), budget_tokens)
+    def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
+        return render_index(list(self.pages.values()), budget_tokens,
+                            salient=lists_identifiers(self.recall_variant(variant)))
+
+    def _recorded_variant(self) -> str | None:
+        return getattr(self, "_variant", None)
+
+    def _record_variant(self, variant: str) -> None:
+        self._variant = variant
 
     def log(self, event: dict) -> None:
         record = redact(dict(event))

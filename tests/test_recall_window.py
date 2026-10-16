@@ -132,7 +132,7 @@ def test_mcp_recall_uses_the_recorded_window():
     store.set_window(33_000, 1.2)
     result = call_recall(store, pid)
     assert len(result["content"][0]["text"]) == 9_900
-    assert result["structuredContent"]["next_offset"] == 9_900
+    assert "structuredContent" not in result  # text only, so the per-turn charge is exact (PR #69)
     assert result["content"][1]["text"].endswith(
         "offset 9900; chunks are 9,900 characters, about a quarter of this session's window budget]")
 

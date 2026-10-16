@@ -152,9 +152,18 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
 7. **Usage.** Return the upstream `usage` unchanged. The CLI therefore sees the bounded prompt's
    real size.
 8. **Errors.** Forward upstream errors unchanged. Never retry by silently changing the request.
-   Log every 4xx with the epoch state for diagnosis.
-9. **Streaming.** Relay SSE events as they arrive; the proxy only reads `message_start` and
-   `message_delta` usage. No hold-back is needed because recall is an MCP tool (D19).
+   Log every 4xx with the epoch state for diagnosis. Every locally generated upstream failure is
+   logged with its phase (`connect`, `tls`, `send`, `wait_headers`), elapsed milliseconds, and
+   errno, content-free. One exception to never retrying, from the second live H1 run (a locally
+   generated 502 after an 18.2 s OS-level timeout; the proxy opens a fresh upstream connection for
+   every request): if the failure happened before the request body was fully written (`connect`,
+   `tls`, or mid-`send`), upstream cannot have acted on the request, so the proxy resends the same
+   bytes once on a new connection and logs `upstream_retry` with the original phase and error. A
+   failure after the body was fully sent (`wait_headers`) or after any response byte is never
+   retried, because upstream may be running it; it returns the 502 as before, and the CLI may
+   retry on its own.
+9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
+   per-turn recall budget; the proxy reads `message_start` and `message_delta` usage.
 10. **Matching history.** Recognise each retained message in later requests by a hash of its
     canonical JSON with every `cache_control` field removed (the CLI moves `cache_control` along
     the tail), and with content normalised so that a plain string and a single text block holding
@@ -205,7 +214,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     - **Genuine bugs.** An exception on a path not listed by lane A is handled the same way: the
       original request is forwarded so the user is never blocked by a Contexto defect, logged as
       `transform_error` at error level, and reported prominently by `contexto sessions show`.
-    Acceptance counts any `over_bound`, `fallback_failed`, or `transform_error` as a failure. Lane
+    Acceptance counts these and the other off-path events listed in acceptance 1 as failures. Lane
     A lists every engine path that can raise and covers each with a fault-injection test.
 15. **Encoded request bodies.** The launcher disables request compression, so a compressed
     request body means a misconfigured client. The proxy decodes the encodings the standard
@@ -244,11 +253,22 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   and builder-2's unpushed ledger work at commit 1ab5f29 (readable from the shared object store),
   append-only JSONL with a hash chain and crash-truncation repair. File sources require `sha256`;
   a missing file counts as stale. Records may cite pages as provenance (`type: page`).
-- **Pinned text** = open obligations, active decisions, then verified facts, newest first, each
-  with its id, capped at `pin_budget` (default 6,000 tokens). Over budget: list the newest, then a
+- **Pinned text** starts with fixed instruction lines, then lists open obligations, active
+  decisions, then verified facts, newest first, each with its id, capped at `pin_budget` (default
+  6,000 tokens). The instruction lines must say that earlier turns are paged out and how to reach
+  them (`contexto_search` with an exact key, name, or identifier, then `contexto_recall` with a page
+  id); that the model does this before relying on a detail from an earlier turn and before
+  answering that something is unknown; that it records decisions and obligations with
+  `contexto_pin` and closes finished ones with `contexto_close`; and one worked example of a
+  search followed by a recall. The preamble is placed before any carried context in the first
+  retained turn-start message. Measured (PR #70 experiment, 415,413 tokens): with the earlier
+  mechanism-only line the model made 0 tool calls in the H1 run; with this text it searched for
+  all four paged-only keys in its first response. Over budget: list the newest, then a
   count of omitted items and a pointer to `contexto_state`. It always starts with one line telling
   the model that earlier turns are paged out and how to recall them.
-- **Index text** = one line per page (id, turn number, stub), newest first, capped at
+- **Index text** = one line per page (id, turn number, stub, and `[ids: ...]` listing the page's
+  identifiers such as keys, names, and paths, never values after `=` and never identifiers
+  containing digits, so the index shows where a fact lives without giving it away), newest first, capped at
   `index_budget` (default 4,000 tokens), with a count of older pages omitted.
 
 ## MCP server
@@ -265,11 +285,81 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   session metadata). Reason: a 32,000-character recall of numeric log text is about 17,800 tokens,
   more than half of an OpenRig seat's `W` near 33,000, and recall results arrive inside a tool
   loop where the engine cannot rotate (D17).
+  **Per-turn recall budget.** Recall results stay in the window until the turn ends, so a turn
+  that recalls too much would push its own requests over the bound. Rules:
+  - The **turn id** is the number of turn-start messages in the CLI's full history, so it is
+    stable across rotation and proxy restarts.
+  - The **room** is `bound - (input + output) - headroom_floor`, from the response's real usage
+    (the output, including thinking and `tool_use`, is passed back in the loop). No `max_tokens`
+    reservation: Claude Code sends `max_tokens` 128,000 on every request, which would leave no room.
+  - The engine publishes `(turn_id, room_tokens)` through `SessionStore.set_turn_room` at request
+    time, from the pre-send estimate (no `max_tokens` reservation), and again when the response's
+    real usage arrives in `message_delta`; the later publish replaces the earlier one. Measured by builder-1 at zero spend (Claude
+    Code 2.1.301, three runs): Claude Code starts an MCP tool call 5 to 16 ms after a `tool_use`
+    block's `content_block_stop`, 3.1 to 6.2 seconds before `message_delta`. So the proxy holds the
+    stream from the first `tool_use` `content_block_start`: that event and all later events are
+    buffered in order and released in order at the first of: `message_delta` (after its usage is
+    observed and the room is published), an `error` event, or upstream end of stream, so an error
+    or disconnect is never swallowed. Text, thinking, and `message_start` before the first
+    `tool_use` still stream live. For the Responses dialect (Codex) the equivalent hold runs from
+    the first `response.output_item.added` whose item is any tool-call type (anything other than a
+    `message` or `reasoning` item; Codex 0.154.0 emits `custom_tool_call`, measured in the A6 smoke)
+    until `response.completed`, `response.incomplete`, or `response.failed` (whose usage, when
+    present, sets the room), an error event, or end of stream. A tool call
+    therefore always sees the current turn's room. Keepalive pings may be sent during a hold.
+  - `contexto_recall`, `contexto_search`, and `contexto_state` charge the tokens they return
+    against the room for the current turn id, converted with the same ratio as the per-call limit,
+    with an atomic, locked read-modify-write so parallel calls cannot overspend. The charge
+    counter resets on every publish, because each published room already accounts for everything
+    in the input it was measured from, including earlier recall results; charges after a publish
+    therefore count only results not yet in measured input. This is safe within one conversation
+    because of the stream hold: a tool call can only charge after its response's real-usage
+    publish, and the next request-time estimate includes its results. If a hold is released at end
+    of stream without usage, tool calls see the request-time room, which is off by at most one
+    response's output. `count_tokens` never publishes a room. A single `contexto_recall` call
+    returns at most the smaller of its per-call limit and half of the room that remains when it is
+    made, with offset paging for the rest, so one recall cannot consume the turn; parallel recalls
+    therefore get successively smaller halves. Measured in the second live H1 run
+    (acceptance-20261016T044723Z): the room was 23,042, one full-page recall took 20,550 of it (89.2
+    percent; the half cap would have allowed about 10,683), the next recall took the last 816, and
+    the four calls after that found the room spent. When the room is above zero but half of it
+    cannot hold about 200 page characters (below that a recall returns almost nothing useful;
+    reviewer-1 measured 20 characters at a room of 200), `contexto_recall` replies: "The recall budget for
+    this turn is nearly used up (about N tokens left), too little for a recall. Use contexto_search
+    with an exact key to get the matching lines, answer from what is in view, or say the detail is
+    unknown." `contexto_search` keeps working while its hits fit. The fixed short control replies (no hit, budget
+    used up, budget nearly used up) are protocol text and are not charged; each is at most about 60
+    tokens (the nearly-used-up reply is about 225 characters), so even 15 parallel calls add about
+    900 tokens, well inside `headroom_floor`. `contexto_recall`, `contexto_search`, and `contexto_state` never return more than
+    remains, apart from these uncharged control replies; when it is
+    used up they return: "Recall budget for this turn is used up; answer from what is in view, or
+    say the detail is unknown."
+  - Charges convert at `min(bytes_per_token, 1.5)` characters per token, using 1.0 before
+    `set_window` has recorded a ratio. `contexto_recall`, `contexto_search`, and `contexto_state`
+    return text content blocks only (no `structuredContent`), and the charge counts exactly what
+    they return.
+  - With no engine (no window recorded, for example tests or a direct `contexto mcp`), the per-turn
+    budget does not apply and only the per-call limit holds. With an engine present but no room
+    published for the call's turn, the same applies and the store logs `turn_room_missing`, so a
+    missed publish shows up in acceptance logs.
+  - Known limitation for v0.1.0: subagents launched by the CLI share the session's room and
+    store. When subagents run concurrently with each other or with the main conversation, each
+    one's publish replaces the shared room and resets its counter, so the per-turn recall budget is
+    not enforced across overlapping conversations and they can overspend it; keying the room by
+    conversation is the later fix.
+  - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
+    output) are outside Contexto's control; a turn they push over the bound is logged
+    `over_bound` as before.
 - `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
-- `contexto_search(query)`: exact substring search over page stubs and text, returning page ids.
-  No embeddings, no similarity ranking (owner: not RAG).
+- `contexto_search(query)`: exact substring search over page stubs and text. For each hit it returns
+  the page id, the matching lines with a small bounded context, and their character offsets in the
+  rendered page, so the model can answer from the hit or recall exactly that offset instead of
+  reading a page from the top (measured in the second live H1 run: a full recall from offset 0
+  reached character 30,651 of a 39,405-character page within the turn's room, and the two facts
+  beyond it were lost). Results are charged against the per-turn room. No embeddings, no
+  similarity ranking (owner: not RAG).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
@@ -316,7 +406,11 @@ a no-replayed-thinking baseline.
    upstream request under the bound except logged over-bound turns, and zero 4xx responses to
    model requests (`/v1/messages`, `/responses`, and their `count_tokens`); 4xx answers to
    non-model requests, such as Claude Code's unauthenticated `HEAD /api/hello` startup probe (the
-   owner's proxy answers it 401), are reported separately and do not fail the run.
+   owner's proxy answers it 401), are reported separately and do not fail the run. A 5xx that Contexto's own proxy generates on a model request (for
+   example `upstream unreachable`) fails the run; an upstream 5xx passed through unchanged is
+   reported. The run also fails on any event that
+   means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
+   `fallback_failed`, `transform_error`, `turn_room_missing`, or `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the
@@ -324,7 +418,10 @@ a no-replayed-thinking baseline.
    full-context baseline at the same session content. Pass: within 2 probes of baseline overall
    and no category more than 1 probe below.
 3. **Recall:** at least one probe answerable only from a paged-out turn is answered correctly,
-   and the session log shows the `contexto_recall` call.
+   and the session log shows that the answer reached the model through Contexto's tools: either a
+   `contexto_recall` of the page holding it, or a `contexto_search` hit whose returned lines contain
+   it. Either is retrieval of paged-out content; with search returning matching lines (B15),
+   answering from the hit is the intended path.
 4. **Cache:** within an epoch, requests read the head and window prefix from cache, except
    misses explained by the route (report the rate).
 5. **Tests:** unit tests for every rewrite rule, the store, and the MCP server; CI green.

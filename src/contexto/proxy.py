@@ -26,7 +26,10 @@ complete, under the same lock, with the upstream usage dict
 dict, so a per-conversation engine can attribute
 it. It is not called for ``count_tokens``, errors, or responses without usage. The engine's
 estimator (rule 4) uses it. The launcher passes a ``contexto.rewrite.RewriteEngine`` instance as
-the transform (it is callable) and its ``observe_usage`` method (lane A packet A2). Calls to the
+the transform (it is callable) and its ``observe_usage`` method (lane A packet A2). The events the
+callable returns (real-usage ``over_bound``, ``estimate_error``, rule 14 store failures) are written,
+reduced to scalars, on that request's log entry as ``usage_events``, and a real ``over_bound`` sets the
+entry's ``over_bound``; this is the only place they are logged (packet A2e). Calls to the
 transform are serialized under a lock, so a stateful engine sees one request at a time.
 
 Byte stability: the transformed request is serialized deterministically (original key order,
@@ -47,6 +50,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import ssl
 import threading
 import time
@@ -77,6 +81,8 @@ USAGE_FEEDBACK_PATHS = frozenset({MESSAGES_PATH}) | RESPONSES_PATHS
 RESPONSE_END_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
 THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 UPSTREAM_TIMEOUT_S = 900
+STOP_DRAIN_S = 2.0  # how long stop() waits for in-flight requests to finish and log
+RETRYABLE_PHASES = frozenset({"connect", "tls", "send"})  # before the body is fully written (rule 8, PR #95)
 MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
 # Hop-by-hop headers (RFC 9110 7.6.1) plus Host and Content-Length, which the proxy sets itself.
 HOP_BY_HOP = frozenset({
@@ -325,6 +331,121 @@ class UsageReader:
                 self.input_transformations = [_scalar_summary(v) for v in value]
 
 
+_SSE_EVENT_END = re.compile(rb"\r\n\r\n|\n\n|\r\r")
+
+
+def sse_event_type(raw: bytes) -> str | None:
+    """The ``type`` of one raw SSE event (from its data JSON, else its ``event:`` line)."""
+    data = b"\n".join(line[5:].lstrip() for line in raw.splitlines() if line.startswith(b"data:"))
+    if data:
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("type"), str):
+            return payload["type"]
+    for line in raw.splitlines():
+        if line.startswith(b"event:"):
+            return line[6:].strip().decode("utf-8", "replace")
+    return None
+
+
+def _sse_payload(raw: bytes) -> dict[str, Any]:
+    data = b"\n".join(line[5:].lstrip() for line in raw.splitlines() if line.startswith(b"data:"))
+    try:
+        payload = json.loads(data) if data else {}
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+class StreamHold:
+    """The stream hold of contract PR #74 (at a64f70b). Claude Code starts an MCP tool call as soon
+    as a ``tool_use`` block completes, before the stream ends (measured: 5 to 16 ms after
+    ``content_block_stop``, seconds before ``message_stop``), so the per-turn recall room must be
+    published before the CLI sees any tool call:
+
+    - Messages: events stream live until the first ``tool_use`` ``content_block_start``; from there
+      EVERY event is held in order until ``message_delta`` (the usage publish runs first), an
+      ``error`` event, or end of stream, then released in its original order.
+    - Responses: the hold starts at the first ``response.output_item.added`` whose item type is a
+      tool call (``*_call``: ``custom_tool_call``, ``function_call``, and others) and ends at
+      ``response.completed``, ``response.incomplete``, ``response.failed``, an error, or end of stream.
+    - ``ping`` keepalives pass during the hold (they are not content, so content order is unchanged).
+    - Held bytes are bounded by one response: everything after the first tool call of that response.
+
+    ``on_trigger`` is called once, at the first ``message_delta`` or terminal ``response.*`` event,
+    whether or not anything is held, before that event or any held event is released.
+    """
+
+    def __init__(self, api: str, on_trigger: Callable[[], None]) -> None:
+        self.api = api
+        self.on_trigger = on_trigger
+        self.held: list[bytes] = []
+        self.holding = False
+        self.triggered = False
+        self.held_events = 0
+
+    def _starts_hold(self, kind: str | None, raw: bytes) -> bool:
+        if self.api == "responses":
+            if kind != "response.output_item.added":
+                return False
+            item = _sse_payload(raw).get("item")
+            return isinstance(item, dict) and str(item.get("type", "")).endswith("_call")
+        if kind != "content_block_start":
+            return False
+        block = _sse_payload(raw).get("content_block")
+        return isinstance(block, dict) and block.get("type") == "tool_use"
+
+    def _is_trigger(self, kind: str | None) -> bool:
+        return kind == "message_delta" if self.api == "messages" else kind in RESPONSE_END_EVENTS
+
+    def _is_error(self, kind: str | None) -> bool:
+        return kind in ("error", "response.error")
+
+    def feed(self, raw: bytes) -> list[bytes]:
+        """One complete raw SSE event in; the raw events to write now, in order."""
+        kind = sse_event_type(raw)
+        if self._is_trigger(kind) and not self.triggered:
+            self.triggered = True
+            self.on_trigger()  # publish the real-usage room before anything held reaches the CLI
+            return self._release() + [raw]
+        if self._is_error(kind):
+            return self._release() + [raw]
+        if kind == "ping":
+            return [raw]
+        if not self.holding and self._starts_hold(kind, raw):
+            self.holding = True
+        if self.holding:
+            self.held.append(raw)
+            self.held_events += 1
+            return []
+        return [raw]
+
+    def eof(self) -> list[bytes]:
+        return self._release()
+
+    def _release(self) -> list[bytes]:
+        out, self.held, self.holding = self.held, [], False
+        return out
+
+
+class _UpstreamHTTPS(http.client.HTTPSConnection):
+    """HTTPSConnection whose connect() records whether it reached TLS, so a failure names the step
+    (contract rule 8, PR #95). Upstream connections never use a CONNECT tunnel."""
+
+    def __init__(self, host: str, port: int, *, timeout: float, context: ssl.SSLContext) -> None:
+        super().__init__(host, port, timeout=timeout, context=context)
+        self.tls_context = context
+        self.phase = "connect"
+
+    def connect(self) -> None:
+        self.phase = "connect"
+        http.client.HTTPConnection.connect(self)
+        self.phase = "tls"
+        self.sock = self.tls_context.wrap_socket(self.sock, server_hostname=self.host)
+
+
 class ContextoProxy:
     def __init__(self, upstream: str, log: SessionLog, transform: Transform = identity_transform, *,
                  observe_usage: ObserveUsage | None = None, observe_thinking: bool = False,
@@ -344,6 +465,8 @@ class ContextoProxy:
         self.upstream_source = upstream_source
         self.transform_lock = threading.Lock()
         self.last_epoch: Any = None  # the engine's epoch from its last successful transform
+        self._in_flight = 0  # requests being handled; idle keep-alive connections are not counted
+        self._idle = threading.Condition()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -373,10 +496,19 @@ class ContextoProxy:
         return self.port
 
     def stop(self) -> None:
+        """Stop accepting connections, then wait up to STOP_DRAIN_S for in-flight requests to finish
+        and log their entries (handler threads are daemons, so a process exit would cut them off)."""
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
             self._server = None
+            deadline = time.monotonic() + STOP_DRAIN_S
+            with self._idle:
+                while self._in_flight and (left := deadline - time.monotonic()) > 0:
+                    self._idle.wait(left)
+                in_flight = self._in_flight
+            if in_flight:
+                self.log({"event": "proxy_stop_incomplete", "in_flight": in_flight})
             self.log({"event": "proxy_stop"})
 
     def serve_forever(self, port: int = 0) -> None:
@@ -391,8 +523,8 @@ class ContextoProxy:
 
     def connection(self) -> http.client.HTTPConnection:
         if self.scheme == "https":
-            return http.client.HTTPSConnection(self.upstream_host, self.upstream_port,
-                                               timeout=UPSTREAM_TIMEOUT_S, context=ssl.create_default_context())
+            return _UpstreamHTTPS(self.upstream_host, self.upstream_port,
+                                  timeout=UPSTREAM_TIMEOUT_S, context=ssl.create_default_context())
         return http.client.HTTPConnection(self.upstream_host, self.upstream_port, timeout=UPSTREAM_TIMEOUT_S)
 
     def log(self, event: dict[str, Any]) -> None:
@@ -435,6 +567,16 @@ class _Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _handle(self) -> None:
+        with self.owner._idle:
+            self.owner._in_flight += 1
+        try:
+            self._handle_counted()
+        finally:
+            with self.owner._idle:
+                self.owner._in_flight -= 1
+                self.owner._idle.notify_all()
+
+    def _handle_counted(self) -> None:
         self._response_started = False
         self._upstream_sent = False
         self._raw: tuple[bytes, Headers] | None = None
@@ -489,6 +631,10 @@ class _Handler(BaseHTTPRequestHandler):
         original = None
         if self.command == "POST" and path_only in TRANSFORMED_PATHS:
             entry["api"] = "responses" if path_only in RESPONSES_PATHS else "messages"
+            # The proxy must read these responses (usage, and the stream hold of PR #74), so it asks
+            # upstream for an unencoded body instead of forwarding the CLI's Accept-Encoding.
+            headers = {k: v for k, v in headers.items() if k.lower() != "accept-encoding"}
+            headers["Accept-Encoding"] = "identity"
             encoding = (self.headers.get("Content-Encoding") or "").strip().lower()
             if encoding not in ("", "identity"):
                 # Contract rule 15 (PR #58): decode, transform as usual, forward uncompressed.
@@ -562,23 +708,49 @@ class _Handler(BaseHTTPRequestHandler):
     def _forward(self, body: bytes, headers: Headers, entry: dict[str, Any], started: float,
                  original: dict[str, Any] | None) -> None:
         owner = self.owner
-        conn = owner.connection()
-        try:
-            conn.putrequest(self.command, owner.base_path + self.path, skip_host=True, skip_accept_encoding=True)
-            conn.putheader("Host", owner.upstream_netloc)
-            for name, value in headers.items():
-                conn.putheader(name, value)
-            if body or self.command in ("POST", "PUT", "PATCH"):
-                conn.putheader("Content-Length", str(len(body)))
-            self._upstream_sent = True
-            conn.endheaders(body or None)
-            response = conn.getresponse()
-        except OSError as exc:
-            conn.close()
-            entry.update(status=502, error=f"upstream unreachable: {type(exc).__name__}", duration_ms=_ms(started))
-            self._send_local_error(502, f"contexto proxy: upstream unreachable ({type(exc).__name__})")
-            owner.log(entry)
-            return
+        # Contract rule 8 (PR #95): each upstream step is named, so a failure says where it happened:
+        # "connect" (TCP), "tls", "send" (headers and body), "wait_headers" (only once endheaders has
+        # returned, so the whole body is written). A failure before that point is retried once, byte
+        # for byte, on a new connection: upstream cannot act on a request it never fully received.
+        # From wait_headers on, upstream may be running it, so that failure is a 502 and the CLI decides.
+        retried = False
+        while True:
+            conn = owner.connection()  # a new connection per request: nothing is pooled or reused
+            phase, phase_started = "connect", time.monotonic()
+            try:
+                conn.connect()
+                phase, phase_started = "send", time.monotonic()
+                conn.putrequest(self.command, owner.base_path + self.path, skip_host=True,
+                                skip_accept_encoding=True)
+                conn.putheader("Host", owner.upstream_netloc)
+                for name, value in headers.items():
+                    conn.putheader(name, value)
+                if body or self.command in ("POST", "PUT", "PATCH"):
+                    conn.putheader("Content-Length", str(len(body)))
+                self._upstream_sent = True
+                conn.endheaders(body or None)
+                phase, phase_started = "wait_headers", time.monotonic()
+                response = conn.getresponse()
+                break
+            except OSError as exc:
+                conn.close()
+                if phase == "connect":
+                    phase = getattr(conn, "phase", phase)
+                failure = {"upstream_phase": phase, "phase_ms": _ms(phase_started), "errno": exc.errno}
+                if not retried and phase in RETRYABLE_PHASES:
+                    retried = True
+                    owner.log({"event": "upstream_retry", "path": entry["path"], "error": type(exc).__name__,
+                               "elapsed_ms": _ms(started), **failure})
+                    continue
+                entry.update(status=502, error=f"upstream unreachable: {type(exc).__name__}",
+                             duration_ms=_ms(started), **failure)
+                if retried:
+                    entry["upstream_retried"] = True
+                self._send_local_error(502, f"contexto proxy: upstream unreachable ({type(exc).__name__})")
+                owner.log(entry)
+                return
+        if retried:
+            entry["upstream_retried"] = True
 
         content_type = response.getheader("Content-Type")
         reader = UsageReader(content_type, entry.get("api", "messages"))
@@ -602,9 +774,47 @@ class _Handler(BaseHTTPRequestHandler):
         # a Content-Length response, is written only after usage feedback and logging.
         held = b""
         relay_ok = True
+        observed = False
+        feedback = (original is not None and entry["path"] in USAGE_FEEDBACK_PATHS and 200 <= response.status < 300)
+
+        def observe() -> None:
+            nonlocal observed
+            if feedback and not observed and reader.usage:
+                observed = True
+                # Packet A2e: the returned events go on this request's entry, logged once with it.
+                usage_events = self._observe_usage(entry["path"], reader.usage, original)
+                if usage_events:
+                    entry["usage_events"] = [_scalar_summary(e) for e in usage_events]
+                    entry["over_bound"] = bool(entry.get("over_bound")) or any(bool(e.get("over_bound"))
+                                                                               for e in usage_events)
+
+        # Contract PR #74: SSE with identity encoding on a transformed endpoint is relayed event by event
+        # through StreamHold, so no tool call reaches the CLI before the real-usage room is published.
+        hold = (StreamHold(entry.get("api", "messages"), observe)
+                if feedback and reader.sse and chunked and decoder.encoding in ("", "identity") else None)
+        if feedback and reader.sse and hold is None:
+            # Not silently: an upstream that encodes anyway (or does not chunk) defeats the hold.
+            owner.log({"event": "hold_skipped", "path": entry["path"], "encoding": decoder.encoding or "identity",
+                       "chunked": chunked})
+        pending = bytearray()
+
+        def write_events(events: list[bytes]) -> None:
+            for raw in events:
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(raw), raw))
+            if events:
+                self.wfile.flush()
+
         try:
             while chunk := response.read1(65536):
                 response_bytes += len(chunk)
+                if hold is not None:
+                    pending += chunk
+                    while match := _SSE_EVENT_END.search(pending):
+                        raw = bytes(pending[: match.end()])
+                        del pending[: match.end()]
+                        reader.feed(raw)
+                        write_events(hold.feed(raw))
+                    continue
                 reader.feed(decoder.decode(chunk))
                 if chunked:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
@@ -613,6 +823,11 @@ class _Handler(BaseHTTPRequestHandler):
                         self.wfile.write(held)
                     held = chunk
                 self.wfile.flush()
+            if hold is not None:
+                if pending:  # a final event without its blank line
+                    reader.feed(bytes(pending))
+                    write_events(hold.feed(bytes(pending)))
+                write_events(hold.eof())
         except (BrokenPipeError, ConnectionResetError):
             entry["client_aborted"] = True
             self.close_connection = True
@@ -623,6 +838,13 @@ class _Handler(BaseHTTPRequestHandler):
             relay_ok = False
         finally:
             conn.close()
+            if hold is not None and hold.held:  # upstream failed mid-hold: release what is held, in order
+                try:
+                    write_events(hold.eof())
+                except OSError:
+                    relay_ok = False
+        if hold is not None:
+            entry["stream_hold"] = {"held_events": hold.held_events, "triggered": hold.triggered}
         reader.finish()
         if entry.get("api") == "responses":
             usage = reader.usage or None  # Responses usage kept as given (see UsageReader)
@@ -633,9 +855,7 @@ class _Handler(BaseHTTPRequestHandler):
             entry["input_transformations"] = reader.input_transformations
         if not decoder.supported:
             entry["usage_unavailable"] = f"response content-encoding {decoder.encoding}"
-        if (original is not None and entry["path"] in USAGE_FEEDBACK_PATHS and 200 <= response.status < 300
-                and reader.usage):
-            self._observe_usage(entry["path"], reader.usage, original)
+        observe()  # streams without a trigger event and non-SSE responses: after the body, before completion
         owner.log(entry)
         if 400 <= response.status < 500:
             owner.log({"event": "upstream_4xx", "status": response.status, "path": entry["path"],
@@ -675,15 +895,18 @@ class _Handler(BaseHTTPRequestHandler):
         self.owner.log({"event": "transform_error", "level": "error", "error": error, "stage": stage,
                         "endpoint": endpoint, "epoch": self.owner.last_epoch})
 
-    def _observe_usage(self, endpoint: str, usage: dict[str, Any], original: dict[str, Any]) -> None:
+    def _observe_usage(self, endpoint: str, usage: dict[str, Any], original: dict[str, Any]) -> list[dict[str, Any]]:
+        """Run the usage callback; return the dict events it reports (anything else is ignored)."""
         callback = self.owner.observe_usage
         if callback is None:
-            return
+            return []
         try:
             with self.owner.transform_lock:
-                callback(endpoint, dict(usage), original)
+                events = callback(endpoint, dict(usage), original)
         except Exception as exc:
             self.owner.log({"event": "observe_usage_error", "error": type(exc).__name__})
+            return []
+        return [e for e in events if isinstance(e, dict)] if isinstance(events, list) else []
 
     def _send_local_error(self, status: int, message: str, error_type: str = "api_error") -> None:
         body = json.dumps({"type": "error", "error": {"type": error_type, "message": message}}).encode()

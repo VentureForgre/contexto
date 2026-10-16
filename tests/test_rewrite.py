@@ -5,12 +5,16 @@ loops, signed and redacted thinking, settings-only system messages, and the CLI'
 single text block to a plain string. All content is synthetic."""
 
 import copy
+import json
 
 import pytest
 
 from contexto.canonical import canonical_bytes
 from contexto.rewrite import (
     COUNT_TOKENS,
+    EpochState,
+    StoreCalls,
+    store_failure,
     MESSAGES,
     THINKING_OMITTED,
     Config,
@@ -22,9 +26,12 @@ from contexto.rewrite import (
     rewrite,
     window_tokens,
 )
+from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, SessionStore
+from contexto.store.ledger import LedgerCorruptError, LedgerError
 from contexto.store.memory import MemoryStore
 from contexto.tokens import TokenEstimator
 
+MODEL = "claude-haiku-5-5"  # the model request() names
 FILL = "synthetic filler text " * 90  # about 2,000 bytes, about 570 tokens at 3.5 bytes per token
 CONFIG = Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=200)
 
@@ -138,9 +145,9 @@ def test_rotation_at_turn_start_pages_turns_and_merges_preamble():
     assert "rotation" in names(ev) and "page_out" in names(ev)
     first = up["messages"][0]
     assert first["role"] == "user" and is_turn_start(msgs[st.k])
-    assert first["content"][0] == ctx_block()  # carried context first
     expected = "\n\n".join(t for t in (store.pinned_text(CONFIG.pin_budget), store.index_text(CONFIG.index_budget)) if t)
-    assert first["content"][1] == {"type": "text", "text": expected} and expected  # the preamble block
+    assert first["content"][0] == {"type": "text", "text": expected} and expected  # the preamble block first (V2)
+    assert first["content"][1] == ctx_block()  # then the carried context
     assert first["content"][2:] == msgs[st.k]["content"]  # then its own content
     assert all(b.get("type") != "tool_result" for b in first["content"])
     assert len(store.pages) == sum(1 for i in range(0, st.k) if is_turn_start(msgs[i]))
@@ -750,7 +757,7 @@ def test_real_usage_over_the_bound_is_flagged_even_when_the_estimate_was_low():
     over = [e for e in out if e["event"] == "over_bound"]
     assert over and over[0]["over_bound"] is True and over[0]["source"] == "real"
     assert over[0]["real_tokens"] == 101_500 and over[0]["estimate"] == estimate
-    assert [e.get("source") for e in store.events if e["event"] == "over_bound"] == ["real"]
+    assert not store.events  # the proxy logs the returned events on the request's entry (A2e)
 
 
 def test_estimate_error_is_reported_when_real_exceeds_the_estimate_by_more_than_ten_percent():
@@ -860,3 +867,503 @@ def test_window_minimal_count_grows_and_normal_rotation_does_not_use_it():
     assert [e["count"] for e in ev if e["event"] == "window_minimal"] == [2]
     _, _, normal, _ = run(history(6) + [user("new prompt")])  # both fit: ordinary rotation
     assert "rotation" in names(normal) and "window_minimal" not in names(normal)
+
+
+# Rule 14: degraded mode and the terminal step (A2d) ---------------------------------------------
+
+class FaultyStore:
+    """A ``MemoryStore`` with fault injection: ``fail[method]`` is raised by that method while present;
+    ``fail_at = (method, n, error)`` raises on the n-th call of ``method`` counted in ``calls``."""
+
+    def __init__(self):
+        self.inner = MemoryStore(key=b"k" * 32)
+        self.fail: dict[str, Exception] = {}
+        self.fail_at: tuple[str, int, Exception] | None = None
+        self.calls: list[str] = []
+        self.windows: list[tuple[int, float]] = []
+
+    def _call(self, name, *args, **kwargs):
+        self.calls.append(name)
+        if name in self.fail:
+            raise self.fail[name]
+        if self.fail_at and self.fail_at[:2] == (name, self.calls.count(name)):
+            raise self.fail_at[2]
+        return getattr(self.inner, name)(*args, **kwargs)
+
+    def page_out(self, turns, first_turn):
+        return self._call("page_out", turns, first_turn)
+
+    def pinned_text(self, budget):
+        return self._call("pinned_text", budget)
+
+    def index_text(self, budget):
+        return self._call("index_text", budget)
+
+    def log(self, event):
+        return self._call("log", event)
+
+    def quarantine_page(self, page_id):
+        return self._call("quarantine_page", page_id)
+
+    def window(self):
+        return self._call("window")
+
+    def window_model(self):
+        return self._call("window_model")
+
+    def set_window(self, window_tokens, bytes_per_token, *, model):  # strict: every call names the model (A2f)
+        self._call("set_window", window_tokens, bytes_per_token, model=model)
+        self.windows.append((window_tokens, bytes_per_token, model))
+
+    def set_turn_room(self, turn_id, room_tokens):  # lane B B11; published by the engine (packet A9)
+        return self._call("set_turn_room", turn_id, room_tokens)
+
+
+def turn_start_after(msgs, t):
+    return msgs + [assistant(f"answer {t} {FILL}"), user(f"prompt {t + 1} {FILL}")]
+
+
+def seeded_conflict(msgs, store):
+    """Store a corrupt copy of the first page a rotation of ``msgs`` writes, under its real id."""
+    _, _, _, reference = run(msgs)
+    page_id = next(iter(reference.pages))
+    store.inner.pages[page_id] = {**reference.pages[page_id], "messages": [user("corrupted synthetic page")]}
+    return page_id, reference.pages[page_id]
+
+
+def test_page_conflict_enters_degraded_mode_and_sends_the_last_good_transform():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    page_id, _ = seeded_conflict(msgs, store)
+    up, st, ev, _ = run(msgs, store=store)
+    assert names(ev) == ["page_conflict", "degraded_enter", "over_bound", "request"]
+    assert ev[0] == {"event": "page_conflict", "epoch": 0, "operation": "page_out", "error": "PageConflictError",
+                     "page_id": page_id}
+    assert ev[1]["reason"] == "page_conflict" and ev[-1]["degraded"] is True
+    assert st.degraded and st.conflict_page == page_id and st.k == 0 and st.epoch == 0
+    assert up["messages"] == msgs  # epoch 0's transform: nothing paged, nothing lost
+    # Mid tool loop the engine only appends, touches no store, and marks every request degraded.
+    store.calls.clear()
+    loop = msgs + [tool_use(1), tool_result(1)]
+    up2, _, ev2, _ = run(loop, state=st, store=store)
+    assert up2["messages"][:len(up["messages"])] == up["messages"] and len(up2["messages"]) == len(loop)
+    assert names(ev2) == ["over_bound", "request"] and ev2[-1]["degraded"] is True and store.calls == []
+    assert ev2[0]["degraded"] is True and ev2[0]["in_tool_loop"] is True
+
+
+@pytest.mark.parametrize("method,error", [
+    ("page_out", OSError("synthetic disk full")),
+    ("page_out", SessionNotFoundError("synthetic")),
+    ("pinned_text", LedgerError("synthetic")),
+    ("pinned_text", LedgerCorruptError("synthetic")),
+    ("index_text", OSError("synthetic")),
+    ("index_text", KeyFileError("synthetic")),
+])
+def test_store_error_at_a_rotation_keeps_the_last_good_epoch(method, error):
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    up, st, ev, _ = run(msgs, store=store)
+    assert "rotation" in names(ev) and not st.degraded
+    store.fail[method] = error
+    msgs2 = turn_start_after(msgs, 6)
+    msgs2 = turn_start_after(msgs2, 7)
+    up2, st2, ev2, _ = run(msgs2, state=st, store=store)
+    assert names(ev2)[:2] == ["store_error", "degraded_enter"] and "rotation" not in names(ev2)
+    assert ev2[0] == {"event": "store_error", "epoch": st.epoch, "operation": method, "error": type(error).__name__}
+    assert (st2.epoch, st2.k, st2.pinned_text, st2.index_text) == (st.epoch, st.k, st.pinned_text, st.index_text)
+    assert st2.degraded and ev2[-1]["degraded"] is True
+    assert up2["messages"][:len(up["messages"])] == up["messages"]  # append-only from the last good transform
+    assert len(up2["messages"]) == len(up["messages"]) + len(msgs2) - len(msgs)
+    assert str(error) not in repr(ev2)  # exception text (paths) is never logged
+
+
+def test_degraded_retry_succeeds_once_and_leaves_degraded_mode():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    store.fail["page_out"] = OSError("synthetic")
+    _, st, _, _ = run(msgs, store=store)
+    del store.fail["page_out"]
+    msgs2 = turn_start_after(msgs, 6)
+    _, st2, ev2, _ = run(msgs2, state=st, store=store)
+    assert names(ev2)[0] == "degraded_leave" and "rotation" in names(ev2)
+    assert not st2.degraded and "degraded" not in ev2[-1] and st2.k > 0
+
+
+def test_degraded_retry_failure_stays_degraded_and_tries_once():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    store.fail["page_out"] = OSError("synthetic")
+    _, st, _, _ = run(msgs, store=store)
+    store.calls.clear()
+    msgs2 = turn_start_after(msgs, 6)
+    up2, st2, ev2, _ = run(msgs2, state=st, store=store)
+    assert names(ev2) == ["store_error", "over_bound", "request"]
+    assert ev2[0]["degraded"] is True and "degraded_enter" not in names(ev2)
+    assert store.calls.count("page_out") == 1 and st2.degraded and up2["messages"] == msgs2
+
+
+def test_degraded_retry_reads_the_store_when_no_rotation_is_due():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    store.fail["page_out"] = OSError("synthetic")
+    _, st, _, _ = run(msgs, store=store)
+    roomy = Config(bound=10_000_000, headroom_floor=500, pin_budget=200, index_budget=200)
+    store.fail = {"pinned_text": OSError("synthetic")}
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store, config=roomy)
+    assert ev2[0]["operation"] == "pinned_text" and st2.degraded
+    store.fail = {}
+    _, st3, ev3, _ = run(turn_start_after(turn_start_after(msgs, 6), 7), state=st2, store=store, config=roomy)
+    assert names(ev3) == ["degraded_leave", "request"] and not st3.degraded
+
+
+def test_degraded_turn_start_over_the_bound_is_logged_over_bound():
+    store = FaultyStore()
+    msgs = history(12) + [user("new prompt")]
+    store.fail["page_out"] = OSError("synthetic")
+    _, _, ev, _ = run(msgs, store=store)
+    bound = [e for e in ev if e["event"] == "over_bound"]
+    assert bound == [{"event": "over_bound", "source": "estimate", "in_tool_loop": False, "epoch": 0,
+                      "estimate": bound[0]["estimate"], "bound": CONFIG.bound, "degraded": True}]
+
+
+def test_persistent_conflict_is_quarantined_and_repaged_leaving_degraded_mode():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    page_id, good = seeded_conflict(msgs, store)
+    _, st, ev, _ = run(msgs, store=store)
+    assert names(ev)[:2] == ["page_conflict", "degraded_enter"] and not store.inner.quarantined  # first time
+    msgs2 = turn_start_after(msgs, 6)
+    _, st2, ev2, _ = run(msgs2, state=st, store=store)
+    assert names(ev2)[:2] == ["page_conflict", "degraded_leave"] and "rotation" in names(ev2)
+    assert ev2[0]["degraded"] is True and ev2[1]["quarantined"] == page_id
+    assert "page_quarantined" not in names(ev2)  # the store logs it, never the engine
+    assert [e["page_id"] for e in store.inner.events if e["event"] == "page_quarantined"] == [page_id]
+    assert store.inner.quarantined[page_id][-1][1]["messages"] == [user("corrupted synthetic page")]  # kept
+    assert store.inner.pages[page_id] == good  # re-paged under the same id from the current messages
+    assert not st2.degraded and st2.conflict_page is None and st2.k > 0
+
+
+def test_failed_quarantine_stays_degraded():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    seeded_conflict(msgs, store)
+    _, st, _, _ = run(msgs, store=store)
+    store.fail["quarantine_page"] = OSError("synthetic")
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert names(ev2)[:2] == ["page_conflict", "store_error"] and ev2[1]["operation"] == "quarantine_page"
+    assert st2.degraded and not store.inner.quarantined and "degraded_leave" not in names(ev2)
+
+
+def test_paged_changed_resync_with_a_broken_store_forwards_the_original_request():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    _, st, _, _ = run(msgs, store=store)
+    assert st.k > 0
+    changed = [user("compacted synthetic summary", context=True), *msgs[1:]] + [assistant("a"), user("next")]
+    store.fail["page_out"] = OSError("synthetic")
+    req = request(changed)
+    up, st2, ev = rewrite(req, st, store, CONFIG, TokenEstimator())
+    assert up is req  # the CLI's request, unchanged
+    assert names(ev) == ["resync", "store_error", "degraded_enter", "fallback_failed", "request"]
+    assert ev[3]["reason"] == "resync_paged_changed" and ev[-1]["fallback_failed"] is True
+    assert ev[-1]["degraded"] is True and store.calls.count("page_out") == 2  # one attempt in this request
+    assert st2.hashes == st.hashes and st2.k == st.k and st2.degraded  # the next request tries once more
+    del store.fail["page_out"]
+    up3, st3, ev3 = rewrite(request(changed + [assistant("b"), user("again")]), st2, store, CONFIG, TokenEstimator())
+    assert names(ev3)[:2] == ["resync", "degraded_leave"] and not st3.degraded and up3["messages"] != changed
+
+
+def test_failure_building_the_degraded_transform_forwards_the_original_request(monkeypatch):
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    store.fail["page_out"] = OSError("synthetic")
+    _, st, _, _ = run(msgs, store=store)
+
+    def broken(messages, state):
+        raise RuntimeError("synthetic")
+
+    monkeypatch.setattr("contexto.rewrite.transform_messages", broken)
+    req = request(msgs + [tool_use(1), tool_result(1)])
+    up, st2, ev = rewrite(req, st, store, CONFIG, TokenEstimator())
+    assert up is req and "fallback_failed" in names(ev) and st2.degraded
+    assert next(e for e in ev if e["event"] == "fallback_failed")["reason"] == "degraded_transform:RuntimeError"
+    # Outside degraded mode the same exception is a genuine bug: it reaches the proxy (transform_error).
+    with pytest.raises(RuntimeError):
+        rewrite(request(history(2) + [user("new")]), None, MemoryStore(key=b"k" * 32), CONFIG, TokenEstimator())
+
+
+def test_unlisted_store_exception_is_a_genuine_bug_and_propagates():
+    store = FaultyStore()
+    store.fail["page_out"] = ValueError("synthetic bug")
+    with pytest.raises(ValueError):
+        run(history(6) + [user("new prompt")], store=store)
+
+
+def test_observe_usage_never_logs_itself_even_with_a_broken_log():
+    """A2e: observe_usage returns its events for the proxy's request entry and does not call store.log, so
+    a broken log cannot fail it and no event is written twice."""
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=Config(bound=1_000))
+    req = request(history(2) + [user("new")])
+    engine(req, {}, MESSAGES)
+    store.fail["log"] = OSError("synthetic")
+    events = engine.observe_usage(MESSAGES, {"input_tokens": 5_000}, req)
+    assert names(events)[:2] == ["over_bound", "estimate_error"] and "log" not in store.calls
+
+
+def test_set_window_publishes_w_and_the_measured_ratio_only_when_they_change():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    msgs = history(6) + [user("new prompt")]
+    req = request(msgs)
+    engine(req, {}, MESSAGES)
+    assert "set_window" not in store.calls  # no measured ratio yet
+    state = next(iter(engine.states.values()))
+    sent = state.last_sent_bytes
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, req)
+    assert store.windows == [(state.window_budget, engine.estimator.measured_bytes_per_token, MODEL)]
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, req)  # ratio unchanged
+    assert len(store.windows) == 1
+    engine(req, {}, COUNT_TOKENS)  # never from count_tokens
+    assert len(store.windows) == 1
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 2}, req)  # ratio moves well over 1%
+    assert len(store.windows) == 2 and store.windows[-1][1] == engine.estimator.measured_bytes_per_token
+    assert store.inner.window() == store.windows[-1][:2]  # the real MemoryStore accepted both
+    assert store.inner.window_model() == MODEL  # and kept the model (a call without it would clear it)
+
+
+def test_set_window_is_skipped_for_a_non_positive_w_and_failing_enters_degraded_mode():
+    store = FaultyStore()
+    tight = Config(bound=4_000, headroom_floor=6_000, pin_budget=200, index_budget=200)  # W < 0
+    engine = RewriteEngine(store, config=tight)
+    req = request(history(6) + [user("new prompt")])
+    _, _, events = engine(req, {}, MESSAGES)
+    assert "bound_too_small" in names(events)
+    engine.observe_usage(MESSAGES, {"input_tokens": 3_000}, req)
+    assert next(iter(engine.states.values())).published_window is None and "set_window" not in store.calls
+    req = request(history(6) + [user("new prompt")])
+    failing = FaultyStore()
+    failing.fail["set_window"] = OSError("synthetic")
+    engine = RewriteEngine(failing, config=CONFIG)
+    engine(req, {}, MESSAGES)
+    events = engine.observe_usage(MESSAGES, {"input_tokens": 3_000}, req)
+    assert [e["operation"] for e in events if e["event"] == "store_error"] == ["set_window"]
+    assert next(iter(engine.states.values())).degraded
+
+
+def test_quarantine_of_a_vanished_page_is_a_store_error_and_stays_degraded():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    page_id, _ = seeded_conflict(msgs, store)
+    _, st, _, _ = run(msgs, store=store)
+    store.fail["quarantine_page"] = PageNotFoundError(f"no stored or quarantined page {page_id}")
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert ev2[1] == {"event": "store_error", "epoch": st.epoch, "operation": "quarantine_page",
+                      "error": "PageNotFoundError", "degraded": True}
+    assert st2.degraded
+
+
+def test_persistent_conflict_on_a_session_store_quarantines_the_file_and_repages(tmp_path):
+    store = SessionStore(tmp_path, "a2d-test")
+    msgs = history(6) + [user("new prompt")]
+    run(msgs, store=store)  # a first conversation writes real page files
+    first = min(store.pages_dir.glob("pg_*.json"), key=lambda p: json.loads(p.read_text())["turn"])
+    good = first.read_text()
+    page = json.loads(good)
+    first.write_text(json.dumps({**page, "messages": [user("corrupted synthetic page")]}))
+    # The same conversation from a fresh state pages turn 0 again under the same id: a conflict.
+    _, st, ev, _ = run(msgs, store=store)
+    assert ev[0]["event"] == "page_conflict" and ev[0]["page_id"] == page["id"] and st.degraded
+    assert str(tmp_path) not in repr(ev)  # the exception's path is never logged
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert names(ev2)[:2] == ["page_conflict", "degraded_leave"] and not st2.degraded
+    assert json.loads(first.read_text()) == page  # re-paged under the same id from the current messages
+    assert list((store.dir / "quarantine").glob(f"{page['id']}.*.json"))  # moved aside, never deleted
+
+
+def test_failure_after_pages_were_written_rewrites_them_identically_on_the_retry():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    store.fail_at = ("pinned_text", 2, OSError("synthetic"))  # fixed_overhead reads it, then new_epoch
+    _, st, ev, _ = run(msgs, store=store)
+    assert ev[0]["operation"] == "pinned_text" and "page_out" in store.calls and store.inner.pages
+    assert st.degraded and st.k == 0 and st.turns_paged == 0  # the written pages are not counted
+    store.fail_at = None
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert names(ev2)[0] == "degraded_leave" and "page_conflict" not in names(ev2) and not st2.degraded
+
+
+def test_carried_text_paging_failure_enters_degraded_mode():
+    store = FaultyStore()
+    cfg = Config(bound=30_000, headroom_floor=500, carried_text_budget=1_000, carried_budget=1_000_000)
+    msgs = [user(f"prompt 0 {FILL}", context=True), system("sys A")]
+    _, st0, _, _ = run(msgs, store=store, config=cfg)  # the carried baseline (rule 13) is this first request
+    msgs.append(assistant(f"a0 {FILL}"))
+    for t in range(1, 10):
+        msgs += [user(f"prompt {t} {FILL}"), style_message(f"Style{t}"), assistant(f"a{t} {FILL}")]
+    for t in range(10, 30):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    store.fail_at = ("page_out", 2, OSError("synthetic"))  # the turns page, then the carried text fails
+    up, st, ev, _ = run(msgs, state=st0, store=store, config=cfg)
+    assert ev[0] == {"event": "store_error", "epoch": 0, "operation": "page_out", "error": "OSError"}
+    assert "carried_paged" not in names(ev) and "rotation" not in names(ev) and up["messages"] == msgs
+    store.fail_at = None
+    _, st2, ev2, _ = run(msgs + [assistant("a"), user("next")], state=st, store=store, config=cfg)
+    assert names(ev2)[:2] == ["degraded_leave", "page_out"] and "rotation" in names(ev2) and not st2.degraded
+
+
+def test_set_window_failure_at_a_rotation_enters_degraded_mode():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    first = request(history(2) + [user("new")])
+    engine(first, {}, MESSAGES)
+    sent = next(iter(engine.states.values())).last_sent_bytes
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, first)  # publishes W from the measured head
+    assert store.calls.count("set_window") == 1
+    store.fail["set_window"] = OSError("synthetic")  # the rotation's W differs (headroom grew), so it republishes
+    _, _, events = engine(request(history(6) + [user("new prompt")]), {}, MESSAGES)
+    assert [e["operation"] for e in events if e["event"] == "store_error"] == ["set_window"]
+    assert "rotation" not in names(events) and next(iter(engine.states.values())).degraded
+
+
+def test_repage_failure_after_quarantine_stays_degraded_with_the_page_moved_aside():
+    store = FaultyStore()
+    msgs = history(6) + [user("new prompt")]
+    page_id, good = seeded_conflict(msgs, store)
+    _, st, _, _ = run(msgs, store=store)
+    store.calls.clear()
+    store.fail_at = ("page_out", 2, OSError("synthetic"))  # the conflict, the quarantine, then the re-page
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert names(ev2)[:2] == ["page_conflict", "store_error"] and ev2[1]["operation"] == "page_out"
+    assert st2.degraded and page_id in store.inner.quarantined and "degraded_leave" not in names(ev2)
+    store.fail_at = None
+    _, st3, ev3, _ = run(turn_start_after(turn_start_after(msgs, 6), 7), state=st2, store=store)
+    assert names(ev3)[0] == "degraded_leave" and not st3.degraded and store.inner.pages[page_id] == good
+
+
+def test_first_request_that_rotates_does_not_report_carried_growth():
+    """Rule 13 baseline (A8 b): measured in the A6 smoke, a new engine's first request rotated and logged
+    carried_over_budget with growth equal to the whole carried content."""
+    cfg = Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=200, carried_budget=100)
+    msgs = history(6) + [user("new prompt")]
+    msgs.insert(1, system("synthetic session start " * 60))  # carried content far above carried_budget
+    _, st, ev, _ = run(msgs, config=cfg)
+    assert "rotation" in names(ev) and "carried_over_budget" not in names(ev)
+    assert st.initial_carried > cfg.carried_budget  # the baseline is the first request's carried size
+
+
+def test_a_second_engine_on_the_same_session_sizes_like_the_first():
+    """A8 (c): measured in the A6 smoke, each restarted engine began from the seed ratio. Now the first
+    response publishes W and the ratio, and a new engine on the same store starts from that ratio."""
+    store = MemoryStore(key=b"k" * 32)
+    cfg = Config(bound=20_000, headroom_floor=500, pin_budget=200, index_budget=200)
+    first = RewriteEngine(store, config=cfg)
+    assert first.restored is None  # a new session has nothing to restore
+    msgs = history(4) + [user("new prompt")]
+    req = request(msgs)
+    first(req, {}, MESSAGES)
+    sent = next(iter(first.states.values())).last_sent_bytes
+    first.observe_usage(MESSAGES, {"input_tokens": sent // 2}, req)  # real ratio 2.0, seed 3.5
+    ratio = first.estimator.measured_bytes_per_token
+    assert store.window()[1] == ratio and store.window()[0] > 0  # published after the first response
+    second = RewriteEngine(store, config=cfg)
+    assert second.restored is None  # A2f: the restore waits for the first request, which names the model
+    # The restarted engine's first estimate of the same request matches the measured one.
+    _, _, events = second(req, {}, MESSAGES)
+    assert second.restored == events[0] == {"event": "sizing_restored", "bytes_per_token": round(ratio, 4),
+                                            "weight_tokens": 10_000}
+    assert second.estimator.measured_bytes_per_token == pytest.approx(ratio, rel=1e-3)
+    assert events[-1]["estimate"] == pytest.approx(sent // 2, rel=0.05)
+    assert not store.events  # the event travels with the request's events, logged once by the proxy
+    seeded = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)  # what a restart did before A8
+    _, _, events = seeded(req, {}, MESSAGES)
+    assert events[-1]["estimate"] < 0.75 * (sent // 2)
+
+
+def test_ratio_restore_is_skipped_when_the_store_cannot_be_read():
+    store = FaultyStore()
+    store.fail["window"] = OSError("synthetic")
+    engine = RewriteEngine(store, config=CONFIG)
+    engine(request([user("p0")]), {}, MESSAGES)
+    assert engine.restored is None and engine.estimator.measured_bytes_per_token is None
+
+
+def test_first_usage_w_counts_the_recall_knobs_like_fixed_overhead():
+    """A8 after PR #70: observe_usage's first W uses the same preamble composition as what is sent, so a
+    recall rule (A7 knob) is part of F there too."""
+    rule = "Synthetic recall rule. " * 40
+    widths = {}
+    for knob in ("", rule):
+        cfg = Config(bound=20_000, headroom_floor=500, pin_budget=200, index_budget=200, recall_rule=knob)
+        engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
+        req = request(history(2) + [user("new")])
+        engine(req, {}, MESSAGES)
+        engine.observe_usage(MESSAGES, {"input_tokens": 3_000}, req)
+        widths[knob] = (next(iter(engine.states.values())).window_budget, engine.estimator.estimate(rule))
+    (plain, _), (with_rule, rule_tokens) = widths[""], widths[rule]
+    assert plain - with_rule == rule_tokens > 0
+
+
+def test_page_conflict_id_comes_from_the_structured_attribute_only():
+    """A2e (reviewer-2 note 1 on PR #65): the page id is PageConflictError.page_id (lane B B11, PR #73);
+    the message is never parsed, so an id that appears only in the text is not reported."""
+    page, quoted = "pg_" + "a" * 16, "pg_" + "b" * 16
+    state = EpochState()
+    calls = StoreCalls(MemoryStore(key=b"k" * 32))
+    failure = store_failure(PageConflictError(f"page {quoted} exists", page_id=page), calls, state)
+    assert failure["page_id"] == page
+    assert "page_id" not in store_failure(PageConflictError(f"page {quoted} exists"), calls, state)
+
+
+@pytest.mark.parametrize("ratio", [0.4, 9.5])
+def test_a_restored_ratio_outside_the_sane_range_is_ignored(ratio):
+    """A2e (reviewer-2 on PR #72): a ratio outside 1.0 to 6.0 bytes per token keeps the seed and logs why."""
+    store = MemoryStore(key=b"k" * 32)
+    store.set_window(10_000, ratio, model=MODEL)
+    engine = RewriteEngine(store, config=CONFIG)
+    _, _, events = engine(request([user("p0")]), {}, MESSAGES)
+    assert engine.restored is None and engine.estimator.measured_bytes_per_token is None
+    assert [e["reason"] for e in events if e["event"] == "sizing_not_restored"] == ["ratio_out_of_range"]
+    store = MemoryStore(key=b"k" * 32)
+    store.set_window(10_000, 4.2, model=MODEL)
+    engine = RewriteEngine(store, config=CONFIG)
+    engine(request([user("p0")]), {}, MESSAGES)
+    assert engine.restored["bytes_per_token"] == 4.2
+
+
+def test_every_set_window_call_path_passes_the_request_model():
+    """A2f (reviewer-1 on PR #82): a set_window call without a model clears the recorded one, so both call
+    paths, observe_usage and the rotation decision, pass the request's model. FaultyStore.set_window takes
+    model as a required keyword, so a path that omitted it would raise here."""
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    small = request(history(2) + [user("new")])
+    engine(small, {}, MESSAGES)
+    sent = next(iter(engine.states.values())).last_sent_bytes
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, small)  # path 1: first response
+    _, _, events = engine(request(history(6) + [user("new prompt")]), {}, MESSAGES)  # path 2: rotation
+    assert "rotation" in names(events) and len(store.windows) == 2
+    assert [w[2] for w in store.windows] == [MODEL, MODEL] and store.inner.window_model() == MODEL
+    other = request(history(6) + [user("new prompt")], model="claude-opus-5-5")
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, other)  # same W and ratio, new model
+    assert store.windows[-1][2] == "claude-opus-5-5"  # republished because the model changed
+
+
+@pytest.mark.parametrize("recorded,requested,restored", [
+    ("claude-haiku-5-5", "claude-haiku-5-5", True),
+    ("claude-opus-5-5", "claude-haiku-5-5", False),
+    (None, "claude-haiku-5-5", True),  # a record from before lane B B12: clamp only, as before
+])
+def test_restore_compares_the_recorded_model_with_the_first_request(recorded, requested, restored):
+    store = MemoryStore(key=b"k" * 32)
+    store.set_window(10_000, 3.0, model=recorded)
+    engine = RewriteEngine(store, config=CONFIG)
+    _, _, events = engine(request([user("p0")], model=requested), {}, MESSAGES)
+    if restored:
+        assert events[0]["event"] == "sizing_restored" and engine.estimator.measured_bytes_per_token == 3.0
+    else:
+        assert events[0] == {"event": "sizing_not_restored", "reason": "model_changed", "bytes_per_token": 3.0}
+        assert engine.restored is None and engine.estimator.measured_bytes_per_token is None
+    _, _, again = engine(request([user("p0")], model=requested), {}, MESSAGES)
+    assert not any(e["event"].startswith("sizing_") for e in again)  # decided once, at the first request

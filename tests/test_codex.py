@@ -124,6 +124,21 @@ def test_reasoning_after_rotation_passes_untouched_and_prefix_is_stable():
     assert [canonical_bytes(i) for i in up2["input"][:n]] == [canonical_bytes(i) for i in up1["input"]]
 
 
+def test_store_failure_enters_degraded_mode_with_the_responses_dialect():
+    """Rule 14 on the Responses dialect (A2d after the #43 seam): the input list is extended append-only."""
+    class FailingStore(MemoryStore):
+        def page_out(self, turns, first_turn):
+            raise OSError("synthetic")
+
+    items = history(8) + [prompt("new prompt")]
+    up, st, ev, _ = run(items, store=FailingStore(key=b"k" * 32))
+    assert names(ev)[:2] == ["store_error", "degraded_enter"] and "rotation" not in names(ev)
+    assert st.degraded and up["input"] == items and ev[-1]["degraded"] is True
+    loop = items + [reasoning(99), call(99), output(99)]
+    up2, _, ev2, _ = run(loop, state=st, store=FailingStore(key=b"k" * 32))
+    assert up2["input"] == loop and ev2[-1]["degraded"] is True and "store_error" not in names(ev2)
+
+
 def test_no_rotation_inside_a_tool_loop():
     items = history(10) + [prompt("go"), call(50), output(50, FILL * 3)]
     up, st, ev, store = run(items)
@@ -192,6 +207,8 @@ def test_api_key_mode_writes_a_private_temporary_codex_home(tmp_path):
         assert provider["auth"] == {"command": "/synthetic/bin/key-helper", "args": ["--profile", "synthetic"]}
         assert config["features"]["enable_request_compression"] is False
         assert config["mcp_servers"]["contexto"]["args"] == ["mcp", "--session", "S1"]
+        # A6 measured exec mode refusing MCP calls without this (approval policy "never").
+        assert config["mcp_servers"]["contexto"]["default_tools_approval_mode"] == "approve"
         assert launch.env["CODEX_HOME"] == str(root) and launch.argv == ["codex", "exec", "hi"]
         assert launch.upstream == "https://owner-proxy.invalid/v1"
     finally:
@@ -234,6 +251,9 @@ def test_chatgpt_mode_uses_overrides_only(tmp_path):
     assert "model_provider=contexto" in argv and "features.enable_request_compression=false" in argv
     assert launch.argv[-2:] == ["exec", "hi"] and launch.upstream == CHATGPT_UPSTREAM
     assert any("O4" in note for note in launch.notes)
+    overrides = dict(launch.argv[i + 1].split("=", 1) for i, a in enumerate(launch.argv) if a == "-c")
+    approval = overrides["mcp_servers.contexto.default_tools_approval_mode"]
+    assert tomllib.loads(f"v = {approval}")["v"] == "approve"  # a valid TOML value, as codex parses -c
     launch.cleanup()  # nothing to remove
 
 

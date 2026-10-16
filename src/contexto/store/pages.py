@@ -12,16 +12,15 @@ import re
 from typing import Any
 
 from contexto.canonical import canonical_bytes
+from contexto.store.recall import DEFAULT_LINES, salient_identifiers
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
 STUB_TEXT_CHARS = 200
 STUB_MAX_PATHS = 20
 EMPTY_SYSTEM_STUB = "(empty system message)"
 
-PINNED_FIRST_LINE = (
-    "Earlier turns of this conversation are paged out. Each line of the page index below is one "
-    "paged turn; call contexto_recall with its page id to read it, or contexto_search to find one."
-)
+# The mandatory first line of the pinned text (default variant); see contexto.store.recall.
+PINNED_FIRST_LINE = DEFAULT_LINES[0]
 
 _PATH_KEYS = ("file_path", "path", "notebook_path")
 # Absolute or relative paths with at least one separator and a file name, as written in text.
@@ -158,7 +157,10 @@ def search_pages(pages: list[dict[str, Any]], query: str) -> list[str]:
     return [p["id"] for p in sorted(hits, key=lambda p: (p["turn"], p["id"]), reverse=True)]
 
 
-def index_line(page: dict[str, Any]) -> str:
+_TOKEN = re.compile(r"[\w.\-/]+")
+
+
+def index_line(page: dict[str, Any], salient: bool = False) -> str:
     stub = page["stub"]
     text = " ".join(stub["user_text"].split())
     if not text and stub.get("system_text"):
@@ -168,16 +170,21 @@ def index_line(page: dict[str, Any]) -> str:
         line += f" [tools: {', '.join(stub['tools'])}]"
     if stub["paths"]:
         line += f" [files: {', '.join(stub['paths'])}]"
+    if salient:
+        shown = set(_TOKEN.findall(line))  # an identifier already on the line adds nothing
+        ids = [i for i in salient_identifiers(_texts(page["messages"])) if i not in shown]
+        if ids:
+            line += f" [ids: {', '.join(ids)}]"
     return line
 
 
-def render_index(pages: list[dict[str, Any]], budget_tokens: int) -> str:
+def render_index(pages: list[dict[str, Any]], budget_tokens: int, salient: bool = False) -> str:
     """One line per page, newest first, within the budget, then a count of older pages omitted."""
     ordered = sorted(pages, key=lambda p: (p["turn"], p["id"]), reverse=True)
     lines: list[str] = []
     used = 0
     for i, page in enumerate(ordered):
-        line = index_line(page)
+        line = index_line(page, salient)
         rest = len(ordered) - i - 1
         tail = f"({rest} older pages omitted; use contexto_search to find them)" if rest else ""
         cost = estimate_tokens(line + "\n") + (estimate_tokens(tail) if tail else 0)

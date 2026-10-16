@@ -91,22 +91,58 @@ def is_auth_failure(event: dict) -> bool:
     return event.get("method", "POST") == "POST"
 
 
-class AuthWatcher:
-    """Tail the session log; on the first credential failure (``is_auth_failure``), terminate the
-    process and remember the status."""
+def _usage_tokens(usage: dict) -> tuple[int, int]:
+    """(input, total) tokens of one response's usage: input = input + cache write + cache read."""
+    inp = sum(int(usage.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    return inp, inp + int(usage.get("output_tokens") or 0)
 
-    def __init__(self, session_log: Path, proc: subprocess.Popen) -> None:
+
+class SessionWatcher:
+    """Tail the session log and terminate the process on the first credential failure
+    (``is_auth_failure``) or, when ``approved`` is given, before real spend can pass it.
+
+    The spend stop is the harness's hard limit inside a turn, which the model never sees: the
+    pre-turn projection in ``Run`` cannot see a tool loop's requests. After each Messages API
+    response it adds the real usage, then stops the run if two more requests of the last input size
+    plus the full output reserve could pass ``approved``. Two, because the proxy logs a request when
+    its response ends, by which time Claude Code may already have sent the next one.
+    """
+
+    def __init__(self, session_log: Path, proc: subprocess.Popen, approved: int | None = None,
+                 reserve: int = 0, poll: float = 0.1) -> None:
         self.session_log = session_log
         self.proc = proc
+        self.approved = approved
+        self.reserve = reserve
+        self.poll = poll
         self.status: int | None = None
+        self.spent = 0
+        self.spend_stop: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def _check(self, event: dict) -> bool:
+        """True when the run must stop."""
+        if is_auth_failure(event):
+            self.status = int(event["status"])
+            return True
+        if (self.approved is None or event.get("event") != "request"
+                or str(event.get("path") or "").split("?")[0] != "/v1/messages" or not event.get("usage")):
+            return False
+        last_input, total = _usage_tokens(event["usage"])
+        self.spent += total
+        projected = self.spent + 2 * (last_input + self.reserve)
+        if projected > self.approved:
+            self.spend_stop = (f"real spend {self.spent:,} plus two more requests of up to "
+                               f"{last_input + self.reserve:,} could pass the approved {self.approved:,}")
+            return True
+        return False
+
     def _run(self) -> None:
         offset = 0
         pending = ""  # a line still being written
-        while not self._stop.is_set() and self.status is None:
+        while not self._stop.is_set():
             try:
                 with self.session_log.open("r", encoding="utf-8") as fh:
                     fh.seek(offset)
@@ -121,11 +157,10 @@ class AuthWatcher:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(event, dict) and is_auth_failure(event):
-                    self.status = int(event["status"])
+                if isinstance(event, dict) and self._check(event):
                     self.proc.terminate()
                     return
-            time.sleep(0.5)
+            time.sleep(self.poll)
 
     def stop(self) -> None:
         self._stop.set()
@@ -134,19 +169,23 @@ class AuthWatcher:
 class StreamJsonTransport:
     """One ``contexto run claude`` process; stream-json in, stream-json out."""
 
-    def __init__(self, command: list[str], cwd: Path, env: dict[str, str], session_log: Path | None = None) -> None:
+    def __init__(self, command: list[str], cwd: Path, env: dict[str, str], session_log: Path | None = None,
+                 approved: int | None = None, reserve: int = 0) -> None:
         if (cwd / ".git").exists() or inside_git(cwd):
             raise ValueError("the scratch directory must not be inside a git repository")
         self.proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, text=True, bufsize=1)
-        self.watcher = AuthWatcher(session_log, self.proc) if session_log else None
+        self.watcher = SessionWatcher(session_log, self.proc, approved, reserve) if session_log else None
         self.compactions = 0  # stream-json system events with subtype compact_boundary
 
     def send(self, text: str) -> dict[str, Any]:
         assert self.proc.stdin and self.proc.stdout
         msg = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
-        self.proc.stdin.write(json.dumps(msg) + "\n")
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(json.dumps(msg) + "\n")
+            self.proc.stdin.flush()
+        except BrokenPipeError:  # the watcher stopped the process between turns; say why below
+            self.proc.wait(timeout=30)
         for line in self.proc.stdout:
             try:
                 event = json.loads(line)
@@ -158,14 +197,23 @@ class StreamJsonTransport:
                 return event
         if self.watcher and self.watcher.status:
             raise AuthFailure(f"upstream returned {self.watcher.status}; run stopped at the first auth error")
+        if self.watcher and self.watcher.spend_stop:
+            raise BudgetExceeded(f"stopped inside the turn: {self.watcher.spend_stop}")
         raise RuntimeError(f"claude exited before the turn finished (code {self.proc.poll()})")
 
     def close(self) -> int:
         if self.watcher:
             self.watcher.stop()
         if self.proc.stdin:
-            self.proc.stdin.close()
-        return self.proc.wait(timeout=120)
+            try:
+                self.proc.stdin.close()
+            except BrokenPipeError:
+                pass
+        code = self.proc.wait(timeout=120)
+        for pipe in (self.proc.stdout, self.proc.stderr):  # release the pipes, so nothing is left open
+            if pipe:
+                pipe.close()
+        return code
 
 
 def child_env(contexto_home: Path, config_dir: Path | None = None) -> dict[str, str]:

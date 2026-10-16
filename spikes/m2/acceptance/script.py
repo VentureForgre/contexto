@@ -28,8 +28,8 @@ DEFAULT_SEED = 20261016
 CHAIN_HEAVY = Mix(multihop=((3, 4), (4, 4)), chain=((6, 15), (8, 15)), obligation_single=4, obligation_sets=2,
                   set_size=6, distractor=((8, 6),), reasoning=0)
 PAGED_ONLY = 4  # probes whose only statement sits in turn 1
-# Intake (2026-10-16): the probe turn's tool loop cannot rotate, so its recalls are capped. A full
-# recall adds about 17,800 tokens; 2 keep the probe turn under the bound. Acceptance 3 needs one.
+# The budget prices this many recalls in the probe turn's tool loop, which cannot rotate (a full
+# recall adds about 17,800 tokens). Intake (2026-10-16): a cost guard only, not told to the model.
 MAX_RECALLS = 2
 INSTRUCTIONS = (
     "This is a long working session. Each message pastes the next part of a working log. Read it, keep "
@@ -91,12 +91,14 @@ def build(seed: int = DEFAULT_SEED, turns: int = 20, turn_bytes: int = 30_000, m
         texts.append(text)
         sizes.append(len(text.encode("utf-8")))
     all_probes = tuple(paged) + tuple(probes)
+    # Product-realistic (intake, 2026-10-16): no mention of Contexto's tools or a recall cap; the
+    # preamble and page index must lead the model to recall.
     probe_turn = "\n".join([
-        "Final step. Answer the questions below about this conversation. You may use the contexto tools "
-        f"(contexto_recall, contexto_search, contexto_state) to read earlier turns, with at most {MAX_RECALLS} "
-        "contexto_recall calls in total. Reply with one line per question, in the form",
+        "Final step. Answer the questions below about this conversation. Reply with one line per question, "
+        "in the form",
         "q_id: answer",
-        "with the answer only. For a list, give the ids separated by commas. If you do not know, write unknown.",
+        "with the answer only. For a list, give the ids separated by commas. If the conversation does not "
+        "contain it, say unknown.",
         "",
         *[f"{p.id}: {p.question}" for p in all_probes],
     ])

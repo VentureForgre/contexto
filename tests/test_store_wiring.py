@@ -9,6 +9,7 @@ from contexto.store import SessionStore
 from contexto.store.ledger import LedgerCorruptError
 from contexto.store.memory import MemoryStore
 from contexto.store.pinned import UNCHECKED_LINE
+from contexto.store.recall import DEFAULT_LINES
 
 
 def sha(data: bytes) -> str:
@@ -88,7 +89,7 @@ def test_without_a_workdir_staleness_is_marked_unchecked(store):
     store.pin("event", "x", epistemic="verified",
               provenance=[{"type": "file", "locator": "gone.py", "sha256": sha(b"x")}])
     for text in (store.pinned_text(6000), store.state_text()):
-        assert text.splitlines()[1] == UNCHECKED_LINE and "STALE" not in text
+        assert text.splitlines()[len(DEFAULT_LINES)] == UNCHECKED_LINE and "STALE" not in text
 
 
 def test_workdir_is_stored_privately_in_meta_json(tmp_path):

@@ -55,6 +55,7 @@ if os.environ.get("FAKE_REQUEST"):
                                      headers={"Content-Type": "application/json", "x-api-key": "fake-key"})
     with urllib.request.urlopen(request, timeout=10) as response:
         record["response_status"] = response.status
+        response.read()  # to the end, as Claude Code does: the proxy logs the entry before the last bytes
 # Write atomically: the tests wait for this file to appear and then read it at once.
 with open(os.environ["FAKE_RECORD"] + ".tmp", "w") as f:
     json.dump(record, f)
@@ -71,6 +72,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 class Upstream(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     seen: list[tuple[str, str, str | None]] = []
+    body_delay = 0.0
 
     def log_message(self, *args):
         pass
@@ -84,12 +86,18 @@ class Upstream(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        if Upstream.body_delay:
+            # Headers first, the body later: the proxy has relayed the status before it can log the
+            # request, which is the window a client that stops at the status falls into.
+            self.wfile.flush()
+            time.sleep(Upstream.body_delay)
         self.wfile.write(body)
 
 
 @pytest.fixture
 def upstream():
     Upstream.seen = []
+    Upstream.body_delay = 0.0
     server = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -162,6 +170,21 @@ def test_run_wires_settings_mcp_and_args_and_cleans_up(env, upstream, tmp_path):
     assert request["transform_events"] and all("epoch" in e for e in request["transform_events"])
     log_text = json.dumps(events)
     assert "fake-key" not in log_text and "hello" not in log_text and upstream not in log_text
+
+
+def test_request_entry_is_logged_before_the_cli_sees_the_response_end(env, upstream, tmp_path):
+    """The flake in test_run_wires_settings_mcp_and_args_and_cleans_up (StopIteration, CI on PR #99): the
+    fake claude read only the status, so it could exit, and the launcher stop the proxy, while the proxy
+    was still relaying the body and had not logged the request. The proxy logs before the last bytes,
+    so a client that reads to the end, as Claude Code does, always finds the entry. A slow upstream body
+    makes that window wide: without the fake's read this fails every time."""
+    env["FAKE_REQUEST"] = "1"
+    Upstream.body_delay = 0.5
+    proc = launch(env, "--upstream", upstream, "--session", "s9", "claude", "-p", "hello", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    kinds = [e["event"] for e in session_log(env, "s9")]
+    assert "request" in kinds and kinds.index("request") < kinds.index("proxy_stop")
 
 
 def test_exit_code_is_propagated(env, upstream, tmp_path):
