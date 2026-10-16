@@ -911,6 +911,9 @@ class FaultyStore:
         self._call("set_window", window_tokens, bytes_per_token)
         self.windows.append((window_tokens, bytes_per_token))
 
+    def set_turn_room(self, turn_id, room_tokens):  # lane B B11; published by the engine (packet A9)
+        return self._call("set_turn_room", turn_id, room_tokens)
+
 
 def turn_start_after(msgs, t):
     return msgs + [assistant(f"answer {t} {FILL}"), user(f"prompt {t + 1} {FILL}")]
