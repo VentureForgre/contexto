@@ -292,8 +292,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     observed and the room is published), an `error` event, or upstream end of stream, so an error
     or disconnect is never swallowed. Text, thinking, and `message_start` before the first
     `tool_use` still stream live. For the Responses dialect (Codex) the equivalent hold runs from
-    the first `response.output_item.added` whose item is a `function_call` until
-    `response.completed` (whose usage sets the room), an error event, or end of stream. A tool call
+    the first `response.output_item.added` whose item is any tool-call type (anything other than a
+    `message` or `reasoning` item; Codex 0.154.0 emits `custom_tool_call`, measured in the A6 smoke)
+    until `response.completed`, `response.incomplete`, or `response.failed` (whose usage, when
+    present, sets the room), an error event, or end of stream. A tool call
     therefore always sees the current turn's room. Keepalive pings may be sent during a hold.
   - `contexto_recall`, `contexto_search`, and `contexto_state` charge the tokens they return
     against the room for the current turn id, converted with the same ratio as the per-call limit,
