@@ -16,6 +16,7 @@ from contexto.tokens import estimate_message_tokens, estimate_tokens, message_by
 
 STUB_TEXT_CHARS = 200
 STUB_MAX_PATHS = 20
+EMPTY_SYSTEM_STUB = "(empty system message)"
 
 PINNED_FIRST_LINE = (
     "Earlier turns of this conversation are paged out. Each line of the page index below is one "
@@ -66,8 +67,26 @@ def _texts(turn: list[dict[str, Any]]):
                         yield b.get("text", "")
 
 
+def _system_first_line(turn: list[dict[str, Any]]) -> str | None:
+    """First non-empty line of the turn's system text, a placeholder if it is empty, None if no system message."""
+    systems = [m for m in turn if isinstance(m, dict) and m.get("role") == "system"]
+    if not systems:
+        return None
+    for message in systems:
+        for line in _user_text(message).splitlines():
+            if line.strip():
+                return line.strip()[:STUB_TEXT_CHARS]
+    return EMPTY_SYSTEM_STUB
+
+
 def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
-    """First 200 characters of the turn-start user text, tool names used, and file paths mentioned."""
+    """First 200 characters of the turn-start user text, tool names used, and file paths mentioned.
+
+    A page with no user text but a system message (lane A's carried-text fallback pages each such
+    message on its own) adds ``system_text``: the first non-empty line of the system text, or a
+    placeholder when it is empty. Pages with user text keep exactly the three fields, so their ids
+    are unchanged.
+    """
     first_user = next((m for m in turn if m.get("role") == "user"), {})
     tools: list[str] = []
     paths: list[str] = []
@@ -86,11 +105,16 @@ def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
         for match in _PATH_RE.findall(text):
             if match not in paths:
                 paths.append(match)
-    return {
+    stub = {
         "user_text": _user_text(first_user)[:STUB_TEXT_CHARS],
         "tools": tools,
         "paths": paths[:STUB_MAX_PATHS],
     }
+    if not stub["user_text"].strip():
+        system = _system_first_line(turn)
+        if system is not None:
+            stub["system_text"] = system
+    return stub
 
 
 def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int) -> dict[str, Any]:
@@ -112,7 +136,8 @@ def page_matches(page: dict[str, Any], query: str) -> bool:
     if not query:
         return False
     stub = page["stub"]
-    haystacks = [stub["user_text"], *stub["tools"], *stub["paths"], *_texts(page["messages"])]
+    haystacks = [stub["user_text"], stub.get("system_text", ""), *stub["tools"], *stub["paths"],
+                 *_texts(page["messages"])]
     return any(query in h for h in haystacks)
 
 
@@ -125,6 +150,8 @@ def search_pages(pages: list[dict[str, Any]], query: str) -> list[str]:
 def index_line(page: dict[str, Any]) -> str:
     stub = page["stub"]
     text = " ".join(stub["user_text"].split())
+    if not text and stub.get("system_text"):
+        text = "[system] " + stub["system_text"]
     line = f"{page['id']} turn {page['turn']}: {text}"
     if stub["tools"]:
         line += f" [tools: {', '.join(stub['tools'])}]"
