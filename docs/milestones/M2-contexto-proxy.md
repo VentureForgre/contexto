@@ -205,7 +205,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     - **Genuine bugs.** An exception on a path not listed by lane A is handled the same way: the
       original request is forwarded so the user is never blocked by a Contexto defect, logged as
       `transform_error` at error level, and reported prominently by `contexto sessions show`.
-    Acceptance counts any `over_bound`, `fallback_failed`, or `transform_error` as a failure. Lane
+    Acceptance counts these and the other off-path events listed in acceptance 1 as failures. Lane
     A lists every engine path that can raise and covers each with a fault-injection test.
 15. **Encoded request bodies.** The launcher disables request compression, so a compressed
     request body means a misconfigured client. The proxy decodes the encodings the standard
@@ -365,7 +365,9 @@ a no-replayed-thinking baseline.
    upstream request under the bound except logged over-bound turns, and zero 4xx responses to
    model requests (`/v1/messages`, `/responses`, and their `count_tokens`); 4xx answers to
    non-model requests, such as Claude Code's unauthenticated `HEAD /api/hello` startup probe (the
-   owner's proxy answers it 401), are reported separately and do not fail the run.
+   owner's proxy answers it 401), are reported separately and do not fail the run. The run also fails on any event that
+   means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
+   `fallback_failed`, `transform_error`, `turn_room_missing`, or `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the
