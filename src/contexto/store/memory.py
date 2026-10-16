@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from contexto.store import PageConflictError, check_window, redact
+from contexto.store import PageConflictError, PageNotFoundError, check_page_id, check_window, redact
 from contexto.store.ledger import MemoryLedger
 from contexto.store.pages import build_page, render_index, same_content, search_pages
 from contexto.store.records import LedgerOps
@@ -20,6 +20,7 @@ class MemoryStore(LedgerOps):
         self.pages: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.ledger = MemoryLedger()
+        self.quarantined: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
         self._workdir: Path | None = None
 
     def set_workdir(self, path: Path) -> None:
@@ -46,6 +47,20 @@ class MemoryStore(LedgerOps):
                 raise PageConflictError(f"page {page['id']} exists with different turn or messages")
             ids.append(page["id"])
         return ids
+
+    def quarantine_page(self, page_id: str) -> Path:
+        """In-memory counterpart of ``SessionStore.quarantine_page``; the returned path is a label."""
+        check_page_id(page_id)
+        page = self.pages.pop(page_id, None)
+        if page is None:
+            earlier = self.quarantined.get(page_id)
+            if not earlier:
+                raise PageNotFoundError(f"no stored or quarantined page {page_id}")
+            return earlier[-1][0]
+        path = Path("quarantine") / f"{page_id}.{time.time_ns()}.json"
+        self.quarantined.setdefault(page_id, []).append((path, page))
+        self.log({"event": "page_quarantined", "page_id": page_id, "path": str(path)})
+        return path
 
     def get_page(self, page_id: str) -> dict[str, Any] | None:
         return self.pages.get(page_id)

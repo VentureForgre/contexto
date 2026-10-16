@@ -39,7 +39,17 @@ from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, render_index, same_content, search_pages
 from contexto.store.records import LedgerOps
 
-__all__ = ["SessionStore", "PageConflictError", "KeyFileError", "SessionNotFoundError", "redact"]
+__all__ = ["SessionStore", "PageConflictError", "PageNotFoundError", "KeyFileError", "SessionNotFoundError",
+           "redact"]
+
+_PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")
+
+
+def check_page_id(page_id: Any) -> str:
+    """``page_id`` if it is a well-formed page id; ValueError before any path is built from it."""
+    if not isinstance(page_id, str) or not _PAGE_ID.fullmatch(page_id):
+        raise ValueError(f"not a page id: {page_id!r}")
+    return page_id
 
 KEY_BYTES = 32
 
@@ -68,6 +78,10 @@ def read_window(meta: dict[str, Any]) -> tuple[int | None, float | None]:
 
 class SessionNotFoundError(LookupError):
     """``SessionStore.open_existing`` was asked for a session that does not exist."""
+
+
+class PageNotFoundError(LookupError):
+    """``quarantine_page`` was given a page that is neither stored nor already quarantined."""
 
 
 class KeyFileError(RuntimeError):
@@ -224,6 +238,42 @@ class SessionStore(LedgerOps):
                     raise PageConflictError(f"{path} exists with different turn or messages")
             ids.append(page["id"])
         return ids
+
+    def quarantine_page(self, page_id: str) -> Path:
+        """Move a stored page aside so the same id can be paged afresh (contract rule 14, PR #52).
+
+        ``pages/<id>.json`` is renamed atomically to ``quarantine/<id>.<UTC timestamp>.<suffix>.json``
+        (directory 0700, file 0600); its content is never changed or deleted. Returns the quarantine
+        path and logs ``page_quarantined`` with the page id and file name only. Idempotent: if the
+        page is no longer stored but was quarantined before, returns its most recent quarantine
+        path; if it was never stored, raises ``PageNotFoundError``. Concurrent calls move the file
+        once and all return that path.
+        """
+        check_page_id(page_id)
+        source = self.pages_dir / f"{page_id}.json"
+        quarantine = self.dir / "quarantine"
+        private_dir(quarantine)
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + f"{time.time_ns() % 1_000_000_000:09d}Z"
+        target = quarantine / f"{page_id}.{stamp}.{secrets.token_hex(4)}.json"
+        try:
+            os.rename(source, target)  # atomic on one filesystem; the unique name never overwrites
+        except FileNotFoundError:
+            earlier = self._quarantined(page_id)
+            if earlier is None:
+                raise PageNotFoundError(f"no stored or quarantined page {page_id}") from None
+            return earlier
+        os.chmod(target, 0o600)
+        fd = os.open(quarantine, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        self.log({"event": "page_quarantined", "page_id": page_id, "path": f"quarantine/{target.name}"})
+        return target
+
+    def _quarantined(self, page_id: str) -> Path | None:
+        found = sorted((self.dir / "quarantine").glob(f"{page_id}.*.json"))
+        return found[-1] if found else None
 
     def _pages(self) -> list[dict[str, Any]]:
         out = []
