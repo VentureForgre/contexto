@@ -36,7 +36,8 @@ def _records(probe: str = PROBE) -> list[dict[str, Any]]:
     u3 = {"role": "user", "content": [{"type": "text", "text": probe}]}
     shape = {"system": [{"type": "text", "text": "sys"}],
              "tools": [{"name": "Read", "input_schema": {}}, {"name": "mcp__contexto__contexto_recall", "input_schema": {}}]}
-    params = {"model": "claude-haiku-5-5", "betas": ["b1"], "max_tokens": 128000, "thinking": {"type": "adaptive"},
+    params = {"model": "claude-haiku-5-5", "betas": ["b1", "claude-code-20250219"], "max_tokens": 128000,
+              "thinking": {"type": "adaptive"},
               "context_management": {"edits": []}, "output_config": {"effort": "medium"}}
     return [
         {"type": "api-request-shape", "shapeHash": "sh", "shape": shape},
@@ -178,7 +179,7 @@ def test_replay_counts_then_sends_once_with_the_helper_key(tmp_path, stub, capsy
                      "--seat-settings", str(seat), "--upstream", stub])
     assert code == 0
     assert [x["path"] for x in _Stub.seen] == ["/v1/messages/count_tokens", "/v1/messages"]
-    assert all(x["key"] == "test-key-not-real" and x["beta"] == "b1" for x in _Stub.seen)
+    assert all(x["key"] == "test-key-not-real" and x["beta"] == "b1" for x in _Stub.seen)  # claude-code-* dropped
     assert all(x["bearer"] == "Bearer test-key-not-real" for x in _Stub.seen)  # the approved header set
     assert all(x["ua"] == replay.USER_AGENT and "claude" not in x["ua"].lower() for x in _Stub.seen)
     assert "max_tokens" not in _Stub.seen[0]["keys"] and "stream" in _Stub.seen[1]["keys"]
@@ -234,3 +235,12 @@ def test_auth_headers_carry_the_key_only_in_credential_headers():
     assert replay.auth_headers("k") == {"x-api-key": "k", "authorization": "Bearer k"}
     assert replay.auth_headers("k", "x-api-key") == {"x-api-key": "k"}
     assert replay.auth_headers("k", "bearer") == {"authorization": "Bearer k"}
+
+
+def test_no_claude_code_beta_reaches_a_direct_request():
+    # Intake (2026-10-16): no Claude Code client marker on any direct harness send; other betas stay.
+    assert replay.harness_betas(["b1", "claude-code-20250219", "claude-code-x", 3]) == ["b1"]
+    req = replay.build_request(_records(), PROBE, 1_000)
+    assert req["_betas"] == ["b1"]
+    assert replay.beta_headers({"_betas": ["claude-code-20250219"]}) == {}
+    assert replay.beta_headers({"_betas": ["claude-code-20250219", "b2"]}) == {"anthropic-beta": "b2"}

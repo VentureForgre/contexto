@@ -44,6 +44,21 @@ USER_AGENT = "contexto-acceptance-harness/0.1 (+VentureForgre/contexto)"
 AUTH_HEADER = "both"
 
 
+# Betas that mark the request as coming from Claude Code. Intake (2026-10-16): no direct harness send
+# presents a Claude Code client marker; the functional betas the request needs stay.
+CLIENT_MARKER_BETA_PREFIX = "claude-code-"
+
+
+def harness_betas(betas: Any) -> list[str]:
+    """The recorded betas a direct harness request may send: every string except claude-code-*."""
+    return [b for b in betas or [] if isinstance(b, str) and not b.startswith(CLIENT_MARKER_BETA_PREFIX)]
+
+
+def beta_headers(request: dict[str, Any]) -> dict[str, str]:
+    betas = harness_betas(request.get("_betas"))
+    return {"anthropic-beta": ",".join(betas)} if betas else {}
+
+
 def auth_headers(key: str, auth: str | None = None) -> dict[str, str]:
     """The credential headers only; the key goes nowhere else."""
     mode = auth or AUTH_HEADER
@@ -164,7 +179,7 @@ def build_request(cc_records: list[dict[str, Any]], probe_text: str, max_tokens:
     for key in ("thinking", "output_config"):
         if key in p:
             request[key] = p[key]
-    request["_betas"] = [b for b in p.get("betas") or [] if isinstance(b, str)]
+    request["_betas"] = harness_betas(p.get("betas"))
     return request
 
 
@@ -228,8 +243,7 @@ def send(request: dict[str, Any], upstream: str, key: str, timeout: float = 900.
     headers = {"content-type": "application/json", "anthropic-version": ANTHROPIC_VERSION, **auth_headers(key),
                "user-agent": USER_AGENT,
                "accept": "text/event-stream"}
-    if request.get("_betas"):
-        headers["anthropic-beta"] = ",".join(request["_betas"])
+    headers.update(beta_headers(request))  # never a claude-code-* beta, whatever the caller passed
     req = urllib.request.Request(upstream.rstrip("/") + "/v1/messages", data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -257,8 +271,7 @@ def count_tokens(request: dict[str, Any], upstream: str, key: str, timeout: floa
     body = json.dumps({k: request[k] for k in _COUNT_FIELDS if k in request}).encode("utf-8")
     headers = {"content-type": "application/json", "anthropic-version": ANTHROPIC_VERSION, **auth_headers(key),
                "user-agent": USER_AGENT}
-    if request.get("_betas"):
-        headers["anthropic-beta"] = ",".join(request["_betas"])
+    headers.update(beta_headers(request))  # never a claude-code-* beta, whatever the caller passed
     req = urllib.request.Request(upstream.rstrip("/") + "/v1/messages/count_tokens", data=body, headers=headers,
                                  method="POST")
     try:

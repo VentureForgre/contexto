@@ -402,6 +402,15 @@ It goes straight to the owner's proxy, bypassing Contexto.
   (+VentureForgre/contexto)`, and the key in both `x-api-key` and `Authorization: Bearer`. Nothing
   presents the harness as Claude Code. The first 401 or 403 stops the replay. Tests check that the key
   never reaches stdout, stderr, or any file the replay writes.
+- **Beta set (label for the baseline).** The replay sends the betas H1's probe-turn request recorded,
+  minus every `claude-code-*` beta (intake, 2026-10-16: no Claude Code client marker on a direct
+  harness send). For H1's run (Claude Code 2.1.301) that is these 10: interleaved-thinking-2025-05-14,
+  thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05,
+  per-turn-control-2026-07-01, mid-conversation-tool-changes-2026-07-01, effort-2025-11-24,
+  dangerous-tool-use-2026-09-03, thinking-display-updates-2026-08-18, afk-mode-2026-01-31. Dropped:
+  claude-code-20250219. `replay.harness_betas` applies the same filter to every direct send.
+  Caveat on record: the recall experiment's four sends (2026-10-16 03:24Z to 03:25Z) still carried
+  all 11, claude-code-20250219 included, as H1's own requests did.
 - **Output, private only.** `baseline-answers.txt` and `replay-result.json` (sizes, the token
   count, usage, stop reason, block counts). `run.py score --h1 ... --baseline ...` compares the two
   answer sets.
