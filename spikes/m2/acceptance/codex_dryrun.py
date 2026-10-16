@@ -78,6 +78,12 @@ def main(argv: list[str] | None = None) -> int:
         stub_requests = list(stub.requests)
     events = codex_driver.read_log(log)
     scored = l2f.score(s.probes, record.pop("answers"))
+    # The proxy's stream hold per reply kind: requests are sequential, so the stub's POSTs and the proxy's
+    # /responses entries pair up in order.
+    kinds = [r["kind"] for r in stub_requests if r["method"] == "POST"]
+    held: dict[str, list[int]] = {}
+    for kind, entry in zip(kinds, codex_driver.responses_requests(events)):
+        held.setdefault(kind, []).append((entry.get("stream_hold") or {}).get("held_events", 0))
     summary = {
         "ran": record, "turns": {"content": s.n_content, "probe": len(s.probe_turn_ids)},
         "stub": {"posts": sum(1 for r in stub_requests if r["method"] == "POST"),
@@ -85,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
                            for k in ("ok", "recall_call", "answers")},
                  "gets": sum(1 for r in stub_requests if r["method"] == "GET")},
         "analysis": codex_driver.analyze(events, a.bound),
+        "held_events": {k: {"requests": len(v), "min": min(v), "max": max(v)} for k, v in held.items()},
         "score": {"correct": scored["correct"], "total": scored["total"]},
         "budget": {"h1_worst": b.h1_worst, "baseline_worst": b.baseline_worst, "total_worst": b.total_worst,
                    "baseline_fits": b.baseline_fits, "formula": codex_budget.formula(b)},

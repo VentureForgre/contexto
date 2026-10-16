@@ -184,11 +184,12 @@ Measured run (bound 64,000, 20 KB turns, seed 20261016, main 031ca59 with B23 an
 | Requests through the proxy | 27 `POST /v1/responses` (15 `OK`, 6 tool calls, 6 answers); 22 `GET /v1/models` |
 | Rotations | 18 for size and 2 for room; largest real input 27,015 (stub tokens) |
 | Acceptance 1 | holds: no 4xx, no real `over_bound`, no failure event |
+| Stream hold | each of the 6 tool-call rounds held 3 events (the call's `output_item.added`, its input delta, and its `.done`) until `response.completed`; the 15 `OK` replies and the 6 answers held none. The stub streams `.added` before `.done`, as the Responses API does, so tool-call rounds start the proxy's hold (builder-1's A20 finding). |
 | Recall | 6 `contexto_search` calls (1 to 3 paged hits each) and 6 `contexto_recall` calls on the page search named, through Codex's `exec`, 0 failed |
 | Cache-hit rate | 1.0 (stub usage) |
 | Score | 54 of 54 (stub answers) |
 | Record | `codex-dry-run.json`: the run record, analysis, score, and the estimate |
 
-Tests: `spikes/m2/acceptance/tests/test_codex_acceptance.py` (21 tests).
-- They cover the turn command (resume by id, retries pinned), the fail-closed in-turn spend watcher, resume after a failed turn, the isolated environment, Responses spend, the analysis, the session runner's cap and stops, the stub's reply sequence, and the estimate's formula and baseline fit.
+Tests: `spikes/m2/acceptance/tests/test_codex_acceptance.py` (22 tests).
+- They cover the turn command (resume by id, retries pinned), the fail-closed in-turn spend watcher, resume after a failed turn, the isolated environment, Responses spend, the analysis, the session runner's cap and stops, the stub's reply sequence, the proxy's stream hold on a stub tool-call round (through a real proxy), and the estimate's formula and baseline fit.
 - They also include the full dry run, which is skipped where no codex CLI is installed.

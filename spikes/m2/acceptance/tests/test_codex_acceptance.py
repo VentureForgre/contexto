@@ -318,3 +318,39 @@ def test_resume_continues_from_the_first_turn_not_completed(tmp_path):
                                       start=first["turns_completed"])
     assert second["started_at"] == 2 and second["turns_completed"] == len(s.turns) and second["stopped"] is None
     assert all(c[-3:] == ["resume", "T1", "-"] for c in again.popen.calls)
+
+
+def test_a_stub_tool_call_round_is_held_by_the_real_proxy(tmp_path):
+    """builder-1's A20 finding: the stub must stream response.output_item.added before .done, as the
+    Responses API does, so a tool-call round starts the proxy's stream hold (PR #74). Through a real
+    proxy and engine, with no codex binary: the tool-call round holds its events, an OK reply holds none."""
+    import urllib.request
+
+    from acceptance.codex_stub import CodexStub
+    from contexto import proxy as proxy_mod
+    from contexto import rewrite
+    from contexto.store import SessionStore
+
+    def turn(port, text):
+        body = json.dumps({"model": "gpt-6-astra", "stream": True, "store": False, "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}]}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/responses", data=body, method="POST",
+                                     headers={"content-type": "application/json", "authorization": "Bearer not-real"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read().decode()
+
+    store = SessionStore(tmp_path, "hold")
+    engine = rewrite.RewriteEngine(store=store)
+    with CodexStub({"q_a_001": "alpha"}) as stub:
+        proxy = proxy_mod.ContextoProxy(stub.url + "/v1", store, engine, observe_usage=engine.observe_usage)
+        port = proxy.start()
+        try:
+            content = turn(port, "log\nReply with exactly: OK")
+            probe = turn(port, PROBE)
+        finally:
+            proxy.stop()
+    assert "response.output_item.added" in probe and probe.index("output_item.added") < probe.index("output_item.done")
+    entries = codex_driver.responses_requests(codex_driver.read_log(tmp_path / "sessions" / "hold" / "log.jsonl"))
+    held = [(e.get("stream_hold") or {}).get("held_events", 0) for e in entries]
+    assert [r["kind"] for r in stub.requests if r["method"] == "POST"] == ["ok", "recall_call"]
+    assert held[0] == 0 and held[1] > 0 and "custom_tool_call" in probe and '"OK"' in content

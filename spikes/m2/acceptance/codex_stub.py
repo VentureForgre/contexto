@@ -1,8 +1,12 @@
 """A zero-spend Responses API upstream for the Codex acceptance dry run (M2 A16).
 
 It serves ``POST /v1/responses`` (and ``/responses``) on 127.0.0.1 as a streamed Responses API
-reply, the events codex-cli 0.154.0 reads: ``response.created``, ``response.output_item.done`` for
-each output item, and ``response.completed`` with usage. ``GET .../models`` answers an empty list.
+reply, in the order the real API streams it (``stream_events``): ``response.created``, then for each
+output item ``response.output_item.added`` (the item still empty), its delta
+(``response.output_text.delta`` or ``response.custom_tool_call_input.delta``), and
+``response.output_item.done`` (the full item), then ``response.completed`` with usage. The
+``.added`` event of a tool call is what starts the proxy's stream hold (PR #74, builder-1's A20
+finding: without it the dry run never exercised the hold). ``GET .../models`` answers an empty list.
 Nothing leaves the machine and no credential is checked or stored.
 
 Replies follow the D27 protocol the harness drives:
@@ -72,6 +76,25 @@ def reply_items(items: list[dict[str, Any]], answers: dict[str, str], query: str
     return "answers", [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}]
 
 
+def stream_events(rid: str, output: list[dict[str, Any]], usage: dict[str, Any]) -> list[dict[str, Any]]:
+    """The Responses API events for ``output``, in the real stream's order (module docstring)."""
+    events: list[dict[str, Any]] = [{"type": "response.created", "response": {"id": rid, "status": "in_progress"}}]
+    for i, item in enumerate(output):
+        if item["type"] == "message":
+            text = "".join(p.get("text", "") for p in item["content"])
+            events += [{"type": "response.output_item.added", "output_index": i,
+                        "item": {**item, "content": [], "status": "in_progress"}},
+                       {"type": "response.output_text.delta", "output_index": i, "content_index": 0, "delta": text}]
+        else:
+            events += [{"type": "response.output_item.added", "output_index": i,
+                        "item": {**item, "input": "", "status": "in_progress"}},
+                       {"type": "response.custom_tool_call_input.delta", "output_index": i, "delta": item["input"]}]
+        events.append({"type": "response.output_item.done", "output_index": i, "item": {**item, "status": "completed"}})
+    events.append({"type": "response.completed",
+                   "response": {"id": rid, "status": "completed", "output": output, "usage": usage}})
+    return events
+
+
 class CodexStub:
     """``with CodexStub(answers, query) as stub:`` serves on ``stub.url`` (no ``/v1``) until exit."""
 
@@ -121,12 +144,7 @@ class CodexStub:
                               "shape": [(it.get("type", "message"), it.get("role")) for it in body.get("input") or []],
                               "previous_response_id": bool(body.get("previous_response_id")),
                               "store": body.get("store")})
-                rid = f"resp_stub_{len(stub.requests)}"
-                events = [{"type": "response.created", "response": {"id": rid, "status": "in_progress"}}]
-                events += [{"type": "response.output_item.done", "output_index": i, "item": item}
-                           for i, item in enumerate(output)]
-                events.append({"type": "response.completed",
-                               "response": {"id": rid, "status": "completed", "output": output, "usage": usage}})
+                events = stream_events(f"resp_stub_{len(stub.requests)}", output, usage)
                 # Chunked, one event per chunk, as a real upstream streams (so the proxy's stream hold applies).
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
