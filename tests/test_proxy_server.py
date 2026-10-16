@@ -22,7 +22,7 @@ from contexto.proxy import (
     serialize_request,
 )
 
-SECRET = "sk-ant-test-SECRET-0123456789"
+SECRET = "test-key-not-real-0123456789"
 CONTENT = "PRIVATE-PROMPT-TEXT"
 
 # Request shape modeled on Claude Code's (block types, roles, cache_control, thinking with a fake
@@ -73,6 +73,31 @@ STREAM = [
 ]
 
 
+# OpenAI Responses API shapes as Codex sends them (instructions and tools as items, no content).
+RESPONSES_REQUEST = {
+    "model": "gpt-6-astra",
+    "instructions": "synthetic instructions",
+    "input": [
+        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "dev"}]},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": CONTENT}]},
+        {"type": "function_call", "name": "shell", "arguments": "{}", "call_id": "call_1"},
+        {"type": "function_call_output", "call_id": "call_1", "output": CONTENT},
+    ],
+    "tools": [{"type": "function", "name": "shell", "parameters": {"type": "object", "properties": {}}}],
+    "stream": True,
+    "store": False,
+}
+RESPONSES_BYTES = json.dumps(RESPONSES_REQUEST, ensure_ascii=False, separators=(",", ":")).encode()
+RESPONSES_USAGE = {"input_tokens": 5000, "input_tokens_details": {"cached_tokens": 4096}, "cache_write_tokens": 100,
+                   "output_tokens": 300, "output_tokens_details": {"reasoning_tokens": 120}, "total_tokens": 5300}
+RESPONSES_STREAM = [
+    {"type": "response.created", "response": {"id": "resp_1", "status": "in_progress"}},
+    {"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "role": "assistant"}},
+    {"type": "response.output_text.delta", "output_index": 0, "delta": CONTENT},
+    {"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "usage": RESPONSES_USAGE}},
+]
+
+
 class MemoryLog(MemoryStore):
     """Lane B's test double, checking that every event is JSON-serializable."""
 
@@ -116,7 +141,7 @@ class StubEngine:
         return request, headers, [{"epoch": {"k": 0}}]
 
     def observe_usage(self, endpoint, usage, request):
-        self.usage.append((endpoint, usage, len(request["messages"])))
+        self.usage.append((endpoint, usage, len(request.get("messages") or request.get("input") or [])))
 
 
 class Upstream(BaseHTTPRequestHandler):
@@ -145,6 +170,9 @@ class Upstream(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self._record()
+        if self.path.split("?")[0].endswith("/responses"):
+            self._responses(json.loads(body))
+            return
         if "/v1/messages/count_tokens" in self.path:
             self._json(200, {"input_tokens": 1234})
         elif Upstream.mode == "error":
@@ -174,6 +202,22 @@ class Upstream(BaseHTTPRequestHandler):
                 tail = compressor.flush()
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(tail), tail))
             self.wfile.write(b"0\r\n\r\n")
+
+    def _responses(self, request: dict) -> None:
+        if not request.get("stream"):
+            self._json(200, {"id": "resp_1", "object": "response", "status": "completed", "output": [],
+                             "usage": RESPONSES_USAGE})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for event in RESPONSES_STREAM:
+            chunk = b"event: " + event["type"].encode() + b"\ndata: " + json.dumps(event).encode() + b"\n\n"
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+            self.wfile.flush()
+            time.sleep(0.1)
+        self.wfile.write(b"0\r\n\r\n")
 
     def _json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -523,3 +567,114 @@ def test_internal_error_after_upstream_answers_502_without_resending(make_proxy,
     assert len(Upstream.received) == 1  # never sent twice
     errors = [e for e in log.events if e["event"] == "proxy_error"]
     assert [(e["error"], e["fallback"]) for e in errors] == [("RuntimeError", "local_502")]
+
+
+# OpenAI Responses API (lane A packet A1b, for the A5 Codex adapter)
+
+
+def test_responses_go_through_the_transform_with_their_endpoint(make_proxy):
+    engine = StubEngine()
+    proxy, log = make_proxy(transform=engine, observe_usage=engine.observe_usage)
+    for path in ("/responses", "/v1/responses"):
+        response, data = call(proxy, "POST", path, RESPONSES_BYTES, AUTH)
+        assert response.status == 200
+    assert [c[0] for c in engine.calls] == ["/responses", "/v1/responses"]
+    # Path mapping: the upstream base carries the version path; the request path is appended.
+    assert [r[1] for r in Upstream.received] == ["/base/responses", "/base/v1/responses"]
+    assert Upstream.received[0][3] == RESPONSES_BYTES
+
+
+def test_responses_sse_is_relayed_in_order_and_usage_parsed(make_proxy):
+    engine = StubEngine()
+    proxy, log = make_proxy(transform=engine, observe_usage=engine.observe_usage)
+    response, data = call(proxy, "POST", "/responses", RESPONSES_BYTES, AUTH)
+    types = [json.loads(line[6:])["type"] for line in data.decode().splitlines() if line.startswith("data: ")]
+    assert types == [e["type"] for e in RESPONSES_STREAM]
+    entry = log.requests()[0]
+    assert entry["api"] == "responses" and entry["usage"] == RESPONSES_USAGE  # kept as given
+    assert engine.usage == [("/responses", RESPONSES_USAGE, 4)]
+    assert CONTENT not in json.dumps(log.events)
+
+
+def test_non_streaming_responses_usage_is_parsed(make_proxy):
+    engine = StubEngine()
+    proxy, log = make_proxy(transform=engine, observe_usage=engine.observe_usage)
+    body = json.dumps(dict(RESPONSES_REQUEST, stream=False)).encode()
+    response, data = call(proxy, "POST", "/responses", body, AUTH)
+    assert response.status == 200 and log.requests()[0]["usage"] == RESPONSES_USAGE
+    assert engine.usage[0][1] == RESPONSES_USAGE
+
+
+def test_messages_entries_are_tagged_with_their_api(make_proxy):
+    Upstream.mode = "json"
+    proxy, log = make_proxy()
+    call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    assert log.requests()[0]["api"] == "messages"
+
+
+def test_models_and_other_paths_pass_through_for_codex(make_proxy):
+    engine = StubEngine("drop-first")
+    proxy, log = make_proxy(transform=engine)
+    response, data = call(proxy, "GET", "/models?client_version=0.154.0", headers={"chatgpt-account-id": "acct"})
+    assert response.status == 200 and json.loads(data)["path"] == "/base/models?client_version=0.154.0"
+    assert engine.calls == [] and "api" not in log.requests()[0]
+
+
+def test_websocket_upgrade_is_refused_and_logged(make_proxy):
+    proxy, log = make_proxy()
+    response, data = call(proxy, "GET", "/responses", headers={"Upgrade": "websocket", "Connection": "Upgrade",
+                                                                "Sec-WebSocket-Version": "13"})
+    assert response.status == 501 and b"WebSocket is not supported" in data
+    assert Upstream.received == []
+    assert [e["event"] for e in log.events if e["event"] == "websocket_rejected"] == ["websocket_rejected"]
+
+
+def test_encoded_request_body_is_forwarded_untouched_and_flagged(make_proxy):
+    Upstream.mode = "json"
+    engine = StubEngine("drop-first")
+    proxy, log = make_proxy(transform=engine)
+    opaque = b"\x28\xb5\x2f\xfd" + b"zstd-frame-bytes"  # zstd magic; not decodable on 3.12
+    conn = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=10)
+    conn.request("POST", "/responses", body=opaque, headers=dict(AUTH, **{"Content-Encoding": "zstd"}))
+    conn.getresponse().read()
+    conn.close()
+    assert Upstream.received[0][3] == opaque and engine.calls == []
+    entry = log.requests()[0]
+    assert entry["transform_skipped"] == "request content-encoding zstd" and entry["unbounded"] is True
+    assert any(e["event"] == "request_not_transformed" for e in log.events)
+
+
+def test_usage_reaches_the_engine_before_the_client_sees_the_end(make_proxy):
+    """Claude Code sends its next request as soon as a response completes; the engine must already
+    have that response's usage (rule 4 sizes the next request from it)."""
+    engine = StubEngine()
+    seen_at_completion = []
+
+    def observe(endpoint, usage, request):
+        time.sleep(0.3)  # a slow engine widens any window between completion and feedback
+        engine.observe_usage(endpoint, usage, request)
+
+    Upstream.mode = "json"
+    proxy, log = make_proxy(transform=engine, observe_usage=observe)
+    call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    seen_at_completion.append(len(engine.usage))
+    assert seen_at_completion == [1]
+
+
+def test_engine_exception_logs_transform_error_at_error_level(make_proxy):
+    """Contract rule 14, genuine bugs: forward the original request and log transform_error."""
+    Upstream.mode = "json"
+    engine = StubEngine("drop-first")
+    proxy, log = make_proxy(transform=engine)
+    call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)  # a good transform sets the known epoch
+    engine.mode = "raise"
+    response, _ = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    assert response.status == 200 and Upstream.received[1][3] == REQUEST_BYTES
+    errors = [e for e in log.events if e["event"] == "transform_error"]
+    assert errors == [dict(errors[0], level="error", error="RuntimeError", stage="transform",
+                           endpoint="/v1/messages", epoch={"k": 2})]
+    engine.mode = "unserializable"
+    call(proxy, "POST", "/responses", RESPONSES_BYTES, AUTH)
+    errors = [e for e in log.events if e["event"] == "transform_error"]
+    assert errors[-1]["stage"] == "serialize" and errors[-1]["endpoint"] == "/responses"
+    assert CONTENT not in json.dumps(log.events)

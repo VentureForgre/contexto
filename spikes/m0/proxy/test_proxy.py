@@ -24,7 +24,7 @@ from extract import (
 from proxy import SpikeProxy
 
 KEY = b"k" * 32
-SECRET = "sk-test-SECRET-VALUE-0123456789"
+SECRET = "test-key-not-real-VALUE-0123456789"
 CONTENT = "PRIVATE-PROMPT-TEXT"
 
 ANTHROPIC_REQUEST = {

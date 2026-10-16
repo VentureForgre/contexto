@@ -1,4 +1,4 @@
-"""``contexto run claude [claude args...]``: run Claude Code through the Contexto proxy.
+"""``contexto run claude|codex [args...]``: run Claude Code or Codex through the Contexto proxy.
 
 Contexto options go before ``claude``; everything after ``claude`` is passed to Claude Code
 unchanged. See ``contexto.launcher`` for what the launcher does, its limits, and exit codes.
@@ -7,8 +7,9 @@ unchanged. See ``contexto.launcher`` for what the launcher does, its limits, and
 from __future__ import annotations
 
 import argparse
+import sys
 
-from contexto.launcher import BOUND_GUARD, DEFAULT_BOUND, LaunchOptions, run_claude
+from contexto.launcher import BOUND_GUARD, DEFAULT_BOUND, options_from_args, run_claude
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -34,13 +35,23 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--observe-thinking", action="store_true",
                         help="add the thinking-binding beta so dropped thinking is reported and logged "
                              "(changes the request: one extra anthropic-beta flag)")
-    parser.add_argument("cli", choices=["claude"], help="the CLI to run (codex comes later)")
+    parser.add_argument("cli", choices=["claude", "codex"], help="the CLI to run")
     parser.add_argument("cli_args", nargs=argparse.REMAINDER, help="arguments passed to the CLI unchanged")
+    try:
+        from contexto.codex import add_arguments  # lane A packet A5 (builder-2)
+    except ImportError:
+        pass
+    else:
+        add_arguments(parser)
     parser.set_defaults(func=run)
 
 
 def run(args: argparse.Namespace) -> int:
-    return run_claude(LaunchOptions(
-        claude_args=list(args.cli_args), bound=args.bound, session_id=args.session, upstream=args.upstream,
-        observe_thinking=args.observe_thinking, allow_large_bound=args.allow_large_bound,
-        window_fraction=args.window_fraction, headroom_floor=args.headroom_floor))
+    if args.cli == "codex":
+        try:
+            from contexto.codex import run_codex
+        except ImportError:
+            print("contexto run: codex support is not installed in this build", file=sys.stderr)
+            return 2
+        return run_codex(args)
+    return run_claude(options_from_args(args))
