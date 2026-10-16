@@ -47,6 +47,14 @@ def test_cap_stops_before_a_request_that_would_pass_it(plan, tmp_path):
     with pytest.raises(replay.CapExceeded):
         replay.run(plan, runner, tmp_path)
     assert runner.spent <= 100_000
+    # Even if every call used max_tokens of output, the guard would not have let spend pass the cap.
+    assert all(r["cumulative_tokens"] + replay.MAX_TOKENS <= 100_000 + replay.MAX_TOKENS for r in runner.records)
+
+
+def test_guard_reserves_the_full_output_allowance(tmp_path):
+    runner = replay.Runner(_fake([]), cap=replay.MAX_TOKENS + 9_999, estimates={"X": 10_000}, margin=1.0)
+    with pytest.raises(replay.CapExceeded):
+        runner.call("X", "X", [replay.user("hi")])  # 10,000 context + 16,000 output reserve > cap
     assert "RF" not in [r["label"] for r in runner.records]
 
 

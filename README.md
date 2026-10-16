@@ -48,3 +48,27 @@ rig send 'intake-lead@contexto' 'Describe the next milestone and delegate it thr
 ```
 
 Do not commit proxy keys, tokens, local Claude settings, raw private transcripts, or generated runtime state. Contributions should go through pull requests targeting `main`. GitHub branch-rule enforcement depends on the account plan and is verified separately from this repository policy.
+
+## Install and use
+
+Contexto is a Python 3.12+ command-line tool with no runtime dependencies.
+
+```sh
+uv tool install .            # or: pip install .
+contexto --version
+```
+
+Planned commands for milestone M2 (`docs/milestones/M2-contexto-proxy.md`); full documentation,
+exit codes, and `--help` text come with the CLI packet:
+
+| Command | Purpose |
+|---|---|
+| `contexto run claude [args]` | Run Claude Code through the Contexto proxy |
+| `contexto run codex [args]` | Run Codex through the Contexto proxy |
+| `contexto proxy` | Run the proxy alone |
+| `contexto mcp --session S` | MCP server with recall, search, pin, close, and state tools |
+| `contexto sessions list`, `contexto sessions show <id>` | List and inspect sessions |
+| `contexto recall <page id>` | Print a paged-out turn |
+| `contexto state` | Print the session's pinned state |
+
+Session data lives under `$CONTEXTO_HOME` (default `~/.contexto`) and is never committed.
