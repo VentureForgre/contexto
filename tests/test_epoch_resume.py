@@ -279,3 +279,54 @@ def test_the_real_store_round_trips_the_record_and_the_engine_resumes(tmp_path, 
     expected, _ = send(steady, sequence[-1])
     got, events = send(after, sequence[-1])
     assert "epoch_resumed" in names(events) and got == expected
+
+
+class PrunedStore(EpochStore):
+    """Pages lost after the record was written (a pruned store or a partial copy)."""
+
+    def __init__(self, record: dict | None = None, keep: int = 0, **kwargs) -> None:
+        super().__init__(record, **kwargs)
+        self.keep = keep
+
+    def page_ids(self) -> list[str]:
+        return super().page_ids()[: self.keep]
+
+
+@pytest.mark.parametrize("endpoint, sequence", [(MESSAGES, turns(9)), ("/responses", codex_turns(9))])
+def test_a_resume_needs_every_paged_turn_in_the_store(endpoint, sequence):
+    # Packet A31: the resumed index and recall depend on the paged turns; with pages lost, no resume.
+    config = CONFIG if endpoint == MESSAGES else Config(bound=8_000, headroom_floor=1_000, pin_budget=200,
+                                                        index_budget=200, min_turn_room=500)
+    store = EpochStore()
+    before = RewriteEngine(store, config=config)
+    for messages in sequence[:-1]:
+        send(before, messages, endpoint)
+    paged = store.record["turns_paged"]
+    assert paged > 0 and len(store.page_ids()) >= paged
+
+    whole = PrunedStore(copy.deepcopy(store.record), keep=10**6)
+    whole.pages = copy.deepcopy(store.pages)
+    _, events = send(RewriteEngine(whole, config=config), sequence[-1], endpoint)
+    assert "epoch_resumed" in names(events)
+
+    pruned = PrunedStore(copy.deepcopy(store.record), keep=paged - 1)
+    pruned.pages = copy.deepcopy(store.pages)
+    engine = RewriteEngine(pruned, config=config)
+    _, events = send(engine, sequence[-1], endpoint)
+    assert by_name(events, "epoch_not_resumed") == {"event": "epoch_not_resumed", "epoch": 0, "reason": "pages_missing"}
+    assert "epoch_resumed" not in names(events)
+    assert all(e["epoch"] <= 1 for e in events if e["event"] == "rotation")  # from epoch 0, as without a record
+
+
+def test_a_store_that_cannot_list_pages_does_not_resume():
+    class Unlistable(EpochStore):
+        def page_ids(self):
+            raise OSError("unreadable")
+    store = EpochStore()
+    before = RewriteEngine(store, config=CONFIG)
+    sequence = turns(9)
+    for messages in sequence[:-1]:
+        send(before, messages)
+    broken = Unlistable(copy.deepcopy(store.record))
+    _, events = send(RewriteEngine(broken, config=CONFIG), sequence[-1])
+    assert by_name(events, "epoch_not_resumed")["reason"] == "pages_missing"

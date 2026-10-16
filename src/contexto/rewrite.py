@@ -1300,8 +1300,21 @@ class RewriteEngine:
             _DIALECT.reset(token)
         if state is None:
             return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": reason}]
+        if not self._pages_present(state.turns_paged):
+            return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": "pages_missing"}]
         self._main, self._resumed = key, True
         return state, [{"event": "epoch_resumed", "epoch": state.epoch, "k": state.k}]
+
+    def _pages_present(self, turns_paged: int) -> bool:
+        """Packet A31: the resumed epoch's index and recall need its paged turns, one page per turn, so
+        the store must hold at least ``turns_paged`` pages. A store that cannot list them does not resume."""
+        if turns_paged == 0:
+            return True
+        lister = getattr(self.store, "page_ids", None)
+        try:
+            return callable(lister) and len(lister()) >= turns_paged
+        except Exception:  # the pages cannot be counted: resuming would be a guess
+            return False
 
     def _may_write(self, turn_starts: int) -> bool:
         """Rule 16, who writes: after a restart nothing writes until a conversation has resumed from the
