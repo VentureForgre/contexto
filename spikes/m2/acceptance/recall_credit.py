@@ -83,8 +83,10 @@ def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
         qid, sep, value = line.partition(":")
         if sep:
             given[qid.strip()] = value.strip()
-    ranges = returned_ranges(session_log)
     cutoff = answer_index(session_log)
+    # Fail closed (B28): with no answer request to cut off at, nothing can be shown to precede the
+    # answer, so nothing is credited and acceptance 3 fails, with the reason in the result.
+    ranges = returned_ranges(session_log) if cutoff is not None else []
     spans = plant_spans(probes, pages)
     rows = []
     for probe in probes:
@@ -95,8 +97,8 @@ def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
             # B16 pages a recall over several calls, so a line may span adjacent returned ranges:
             # merge the page's ranges (overlapping or touching) before checking containment.
             merged: list[dict[str, Any]] = []
-            for r in sorted((r for r in ranges if (cutoff is None or r["at"] < cutoff)
-                             and r["page_id"] == span["page_id"]), key=lambda r: r["start"]):
+            for r in sorted((r for r in ranges if r["at"] < cutoff and r["page_id"] == span["page_id"]),
+                            key=lambda r: r["start"]):
                 if merged and r["start"] <= merged[-1]["end"]:
                     merged[-1]["end"] = max(merged[-1]["end"], r["end"])
                     merged[-1]["tools"].add(r["tool"])
@@ -112,4 +114,5 @@ def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
                      "credited": correct and via is not None, **({"via": via} if via else {})})
     return {"paged_only": rows, "credited": sum(r["credited"] for r in rows),
             "correct_not_credited": [r["id"] for r in rows if r["answered_correctly"] and not r["credited"]],
-            "acceptance_3": any(r["credited"] for r in rows), "in_view_spans": in_view_spans(session_log)}
+            "acceptance_3": any(r["credited"] for r in rows), "in_view_spans": in_view_spans(session_log),
+            **({"reason": "answer request not found"} if cutoff is None else {})}
