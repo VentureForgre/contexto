@@ -18,6 +18,7 @@ import pytest
 import contexto.proxy as proxy_module
 from contexto.store.memory import MemoryStore
 from contexto.proxy import (
+    END_ALLOWLISTS,
     THINKING_BINDING_BETA,
     ContextoProxy,
     UsageReader,
@@ -1140,10 +1141,35 @@ def test_non_streaming_bodies_record_the_same_fields():
     assert ending("messages", json.dumps(messages).encode(), "application/json") == {"stop_reason": "refusal"}
 
 
-@pytest.mark.parametrize("value", [SECRET_TEXT, "Content_Filter", "x" * 65, 42, None, ["content_filter"]])
-def test_only_enum_values_are_kept(value):
-    body = sse_body(responses_end("incomplete", status="incomplete", incomplete_details={"reason": value}))
-    assert ending("responses", body) == {"end_event": "incomplete", "response_status": "incomplete"}
+@pytest.mark.parametrize("field", sorted(END_ALLOWLISTS))
+def test_every_allowed_value_passes_through(field):
+    for value in END_ALLOWLISTS[field]:
+        reader = UsageReader("text/event-stream", "messages" if field in ("stop_reason", "error_type") else "responses")
+        reader._keep(field, value)
+        assert reader.ending == {field: value}
+
+
+@pytest.mark.parametrize("value", ["eu-west", "a" * 60, "content-filter", SECRET_TEXT, "Content_Filter", "CONTENT_FILTER",
+                                   "x" * 65, 42, True, ["content_filter"], {"reason": "content_filter"}])
+def test_any_other_value_logs_as_other(value):
+    # Packet A26: an unlisted lowercase token is no longer admitted; the field stays, so a stop rule
+    # keyed on "present and not completed" still stops.
+    body = sse_body(responses_end("incomplete", status=value, incomplete_details={"reason": value}))
+    assert ending("responses", body) == {"end_event": "incomplete", "response_status": "other",
+                                         "incomplete_reason": "other"}
+    body = sse_body({"type": "message_delta", "delta": {"stop_reason": value}},
+                    {"type": "error", "error": {"type": value, "message": SECRET_TEXT}})
+    assert ending("messages", body) == {"stop_reason": "other", "error_type": "other"}
+
+
+def test_a_null_value_is_skipped():
+    body = sse_body(responses_end("completed", status="completed", incomplete_details={"reason": None}, error=None))
+    assert ending("responses", body) == {"end_event": "completed", "response_status": "completed"}
+
+
+def test_an_unlisted_error_event_code_is_other():
+    body = sse_body({"type": "error", "code": "eu-west", "message": SECRET_TEXT})
+    assert ending("responses", body) == {"end_event": "none", "error_code": "other"}
 
 
 def serve_sse(body: bytes):

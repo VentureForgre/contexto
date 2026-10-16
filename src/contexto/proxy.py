@@ -256,8 +256,8 @@ class UsageReader:
     as given: ``input_tokens`` includes cached tokens, with ``input_tokens_details.cached_tokens``,
     ``cache_write_tokens``, ``output_tokens``, and ``output_tokens_details.reasoning_tokens``.
 
-    It also records how the response ended (packet A23), from enum fields only (``_enum``), never
-    text or error messages: for Responses, the end event (completed, incomplete, failed, or none when
+    It also records how the response ended (packet A23), from enum fields only, each checked against
+    its allowlist (``END_ALLOWLISTS``, packet A26), never text or error messages: for Responses, the end event (completed, incomplete, failed, or none when
     a stream ended without one), ``response.status``, ``incomplete_details.reason``, and
     ``error.code``; for Messages, ``stop_reason`` and an ``error`` event's ``error.type``.
     """
@@ -341,8 +341,10 @@ class UsageReader:
         return out
 
     def _keep(self, key: str, value: Any) -> None:
-        if (value := _enum(value)) is not None:
-            self.ending[key] = value
+        """Record ``value`` for ``key`` if it is on the field's allowlist, else the literal ``other``
+        (packet A26), so the field still shows a non-completed end. An absent or null value is skipped."""
+        if value is not None:
+            self.ending[key] = value if isinstance(value, str) and value in END_ALLOWLISTS[key] else "other"
 
     def _take_responses_end(self, response: dict[str, Any]) -> None:
         self._keep("response_status", response.get("status"))
@@ -373,13 +375,32 @@ class UsageReader:
 
 
 _SSE_EVENT_END = re.compile(rb"\r\n\r\n|\n\n|\r\r")
-_ENUM_VALUE = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
 
-
-def _enum(value: Any) -> str | None:
-    """An API enum value (``end_turn``, ``content_filter``, ``rate_limit_exceeded``), else None: free
-    text, which could quote content, never matches (lowercase identifier characters, 64 at most)."""
-    return value if isinstance(value, str) and _ENUM_VALUE.fullmatch(value) else None
+# Packet A26: the only values each end field can log; anything else is logged as "other". Sources,
+# read 2026-10-16:
+# - Responses: openai-python 3.31.0, generated from the OpenAPI spec: ResponseStatus
+#   (types/responses/response_status.py), Response.IncompleteDetails.reason (types/responses/response.py),
+#   ResponseError.code (types/responses/response_error.py). An ``error`` stream event's code is a free
+#   string there, so it shares ResponseError's list.
+# - Messages: anthropic-python 1.15.0 StopReason (types/stop_reason.py), and the error types on
+#   https://platform.claude.com/docs/en/api/errors ("HTTP errors"), which the SDK's ErrorObject union
+#   matches except for conflict_error and request_too_large.
+END_ALLOWLISTS: dict[str, frozenset[str]] = {
+    "response_status": frozenset({"completed", "failed", "in_progress", "cancelled", "queued", "incomplete"}),
+    "incomplete_reason": frozenset({"max_output_tokens", "max_messages", "content_filter", "steered"}),
+    "error_code": frozenset({
+        "server_error", "rate_limit_exceeded", "invalid_prompt", "data_residency_mismatch", "bio_policy",
+        "misalignment_policy_violation", "vector_store_timeout", "invalid_image", "invalid_image_format",
+        "invalid_base64_image", "invalid_image_url", "image_too_large", "image_too_small", "image_parse_error",
+        "image_content_policy_violation", "invalid_image_mode", "image_file_too_large",
+        "unsupported_image_media_type", "empty_image_file", "failed_to_download_image", "image_file_not_found"}),
+    "stop_reason": frozenset({"end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal",
+                              "model_context_window_exceeded"}),
+    "error_type": frozenset({
+        "invalid_request_error", "authentication_error", "billing_error", "permission_error", "not_found_error",
+        "conflict_error", "request_too_large", "rate_limit_error", "api_error", "timeout_error",
+        "overloaded_error"}),
+}
 
 
 def sse_event_type(raw: bytes) -> str | None:
