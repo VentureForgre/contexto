@@ -382,7 +382,14 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   were lost). Measured offline by builder-3 (numbers-only output under `spikes/m2/estimate/`):
   this format costs a median of about 138 tokens per hit instead of 359, and the 54 probes' total
   demand falls from 91,249 to 31,002 tokens. An answer more than one line away from its match is not shown in
-  the hit and needs a recall at the offset. Results are charged against the per-turn room. No embeddings, no
+  the hit and needs a recall at the offset. Every reply states its coverage: paged hits come only from paged-out turns, and the conversation
+  in view is newer than any of them. Search also matches the retained window: the engine publishes a
+  private snapshot of the retained window's rendered text to the session store at each room
+  publish (mode 0600, overwritten each time, bounded by the window, never logged), and matches in it
+  are listed first, labeled in view, as the matching line only. Measured basis (live run #2 chain
+  analysis, builder-3, zero spend): 4 of H1's 5 extra chain misses had a newer link in the retained
+  window, but the model answered from a search reply whose newest paged hit looked current.
+  Results are charged against the per-turn room. No embeddings, no
   similarity ranking (owner: not RAG).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
