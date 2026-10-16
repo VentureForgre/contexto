@@ -44,53 +44,84 @@ that limit.
 
 ## Rewrite engine (normative)
 
-Terms: the CLI sends its full local history `M[0..n)` on every request. The proxy keeps an epoch
-state `E = (k, pinned_text, index_text, head_fingerprint)`: messages `M[0..k)` are paged out.
+Terms. The CLI sends its full local history `M[0..n)` on every request. Claude Code 2.1.301
+measured (reviewer-2, zero-spend stub): `messages[0]` is a user message carrying context blocks
+(CLAUDE.md and similar) plus the first prompt, and `role: "system"` messages appear inside
+`messages` (session start, tool additions, effort changes), including as the last message of a
+new-turn request; they can carry `cache_control`.
 
-1. **Upstream request** = the CLI's `system` and `tools` byte for byte, plus messages:
-   `merge(preamble(E), M[k]) , M[k+1..n)`, where `preamble` is a text block holding the pinned
-   state and the page index, prepended to the first retained message (always a user message
-   that starts a turn, so no `tool_result` is displaced). In the first epoch `k = 0` and the
-   preamble is empty. All other request fields pass through unchanged, including
+- A **turn-start message** is a user message whose content includes user-authored text and no
+  `tool_result` block.
+- A **turn** is a turn-start message plus every following assistant, `tool_result` user, and
+  `role: "system"` message up to the next turn-start message.
+- **Carried content** is never paged: the context blocks of `messages[0]` other than the user's
+  prompt text, and every `role: "system"` message. Lane A pins down, with stub evidence, exactly
+  which blocks count as context blocks and where carried system messages may legally sit.
+- The proxy keeps an epoch state `E = (k, carried, pinned_text, index_text, head_fingerprint)`:
+  the turns before turn index `k` are paged out.
+
+1. **Upstream request** = the CLI's `system` and `tools` byte for byte, plus: the carried content
+   in its original order; a preamble text block (pinned state and page index) merged into the
+   first retained turn-start message ahead of its text (so no `tool_result` is displaced); then
+   the retained turns as sent. In the first epoch `k = 0`, nothing is carried separately, and the
+   preamble is empty. Every other request field passes through unchanged, including
    `cache_control`, `anthropic-beta`, `stream`, and `thinking`.
-2. **Thinking.** For every retained message that existed when `E` was created, strip all thinking
-   and redacted-thinking blocks, deterministically, on every request, so the transformed prefix is
-   byte-identical across requests. Messages added after the rotation pass through untouched.
-3. **Rotation** happens only when the last message in `M` is a user message that starts a new turn
-   (text, not a `tool_result`), and the estimated upstream input would exceed `bound - headroom`.
-   Estimate = last upstream `input_tokens + cache_read + cache_creation` for this session plus the
-   bytes added since, at 3.5 bytes per token, refined when real usage arrives. On rotation: choose
-   the largest `k` at a turn start such that the retained window is at most `window_target`
-   (default 50% of the bound) and the newest full turn is always retained; write `M[old k..k)` to
-   the page store as one page per turn; rebuild `pinned_text` and `index_text` from the store;
-   strip thinking per rule 2.
-4. **Never rotate inside a tool loop** (D17). A turn that grows past the bound is sent as is and
-   recorded as over-bound in the session log; the next turn boundary rotates.
-5. **Head change.** If the CLI's `system` or `tools` change (byte fingerprint), start a new epoch at
-   the next turn boundary; never rewrite them.
-6. **Usage.** Return the upstream `usage` unchanged. The CLI therefore sees the bounded prompt's
+2. **Thinking.** For every retained message that existed when `E` was created, strip thinking and
+   redacted-thinking blocks deterministically on every request, so the transformed prefix is
+   byte-identical across requests. An assistant message left with no content is given a single
+   text block `[thinking omitted]`. Messages added after the rotation pass through untouched.
+3. **Rotation trigger.** Rotate only at the start of a turn: the request's newest turn contains no
+   assistant message yet (only its turn-start message and any system messages). Rotate when the
+   estimated upstream input would exceed `bound - headroom`. Estimate = last upstream
+   `input_tokens + cache_read + cache_creation` for this session plus the bytes added since.
+   Until the first real usage arrives, count `tool_result` content at 2.0 bytes per token and
+   other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
+   character); after that, use the session's measured bytes-per-token ratio.
+4. **Rotation.** Choose the largest `k` such that the retained turns fit in `window_target`
+   (default 50% of the bound) and the newest turn is always retained; write the newly paged turns
+   to the page store, one page per turn, minus carried content; add any newly paged system
+   messages to `carried`; rebuild `pinned_text` and `index_text`; strip thinking per rule 2.
+5. **Never rotate inside a tool loop** (D17). A turn that grows past the bound is sent as is and
+   recorded as over-bound in the session log; the next turn start rotates.
+6. **Head change.** If the CLI's `system` or `tools` change (byte fingerprint), start a new epoch at
+   the next turn start; never rewrite them.
+7. **Usage.** Return the upstream `usage` unchanged. The CLI therefore sees the bounded prompt's
    real size.
-7. **Errors.** Forward upstream errors unchanged. Never retry by silently changing the request.
+8. **Errors.** Forward upstream errors unchanged. Never retry by silently changing the request.
    Log every 4xx with the epoch state for diagnosis.
-8. **Streaming.** Relay SSE events as they arrive; the proxy only reads `message_start` and
+9. **Streaming.** Relay SSE events as they arrive; the proxy only reads `message_start` and
    `message_delta` usage. No hold-back is needed because recall is an MCP tool (D19).
-9. **Matching history.** Identify `M[old k]` in later requests by a content hash of the canonical
-   message, so CLI-side reordering or an unexpected local compaction is detected; on mismatch,
-   start a fresh epoch at `k = 0` with a logged warning rather than guess.
+10. **Matching history.** Recognise each retained message in later requests by a hash of its
+    canonical JSON with every `cache_control` field removed (the CLI moves `cache_control` along
+    the tail). On a mismatch, resynchronise: find the longest prefix of the stored messages that
+    still matches and continue from there; if paged turns themselves changed (for example the CLI
+    compacted locally), start a new epoch at the current turn start with everything before it
+    paged. Never fall back to sending the full history unbounded.
+11. **Other endpoints.** `/v1/messages/count_tokens` is transformed exactly like `/v1/messages`, so
+    the CLI's own counts match what is sent. `HEAD /api/hello` and any other endpoint pass through
+    unchanged.
 
-Defaults (configurable flags and env): `bound` 200,000 tokens until L2f sets O3; `headroom`
-the online running max of per-turn growth plus 25%, floor 25,000; `window_target` 50% of the bound.
+Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
+online running max of per-turn growth plus 25%, floor 25,000; `window_target` 50% of the bound.
+Constraint: `bound` plus the largest expected over-bound turn must stay below both Claude Code's
+idle-compaction minimum (200,000 by default, `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`) and the model's
+compaction trigger, or the CLI may compact; the launcher refuses a `bound` above 170,000 unless
+`--allow-large-bound` is given.
 
 ## Store (normative)
 
 - **Pages:** `pages/<page id>.json`, one per paged-out turn, holding the exact message JSON of that
   turn (thinking included as received), its turn number, byte and token estimates, and a stub:
   first 200 characters of the user text, tool names used, and file paths mentioned.
-  Page id: `pg_` + first 16 hex of SHA-256 over the canonical JSON. Pages are immutable.
+  Page id: `pg_` + first 16 hex of HMAC-SHA256 over the canonical JSON, keyed with a random
+  per-store key kept in the store and never sent upstream (ids appear in prompts, and short turns
+  must not be guessable from their id). Pages are immutable.
 - **Ledger:** the M1 record model (kinds `event`, `decision`, `obligation`, `artifact`,
   `reference`, `closure`; epistemic `verified`, `reported`, `summary`, `hypothesis`; provenance;
-  supersession; open obligations) harvested from PRs #2 and #3, append-only JSONL with a hash
-  chain and crash-truncation repair. Records may cite pages as provenance (`type: page`).
+  supersession; open obligations) harvested from PR #2 (record model), PR #3 (state derivation),
+  and builder-2's unpushed ledger work at commit 1ab5f29 (readable from the shared object store),
+  append-only JSONL with a hash chain and crash-truncation repair. File sources require `sha256`;
+  a missing file counts as stale. Records may cite pages as provenance (`type: page`).
 - **Pinned text** = open obligations, active decisions, then verified facts, newest first, each
   with its id, capped at `pin_budget` (default 6,000 tokens). Over budget: list the newest, then a
   count of omitted items and a pointer to `contexto_state`. It always starts with one line telling
@@ -122,7 +153,7 @@ the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
 ## Lanes
 
 - **Lane A, management.manager-1 (builder-1, builder-2):** launcher, proxy server and SSE relay,
-  rewrite engine (rules 1 to 9), upstream resolution, session log; then the Codex adapter
+  rewrite engine (rules 1 to 11), upstream resolution, session log; then the Codex adapter
   (Responses API over HTTP through a temporary `CODEX_HOME` whose provider uses `auth.command`;
   force HTTP or handle WebSocket deltas, decided with evidence).
 - **Lane B, management.manager-2 (builder-3, builder-4):** package scaffolding first (harvest PR #2),
@@ -143,10 +174,13 @@ the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
 
 All through `contexto run claude` with `--model claude-haiku-5-5` pinned, synthetic tasks,
 throwaway processes in a non-git scratch directory, default Claude Code settings, the owner's
-proxy as upstream (D12). Token caps: each run states its budget first; intake approves.
+proxy as upstream (D12). Token caps: the harness reports its exact estimate for the H1 run and the
+full-context baseline before anything runs; intake approves it as its own budget line. On the
+owner's proxy replayed haiku thinking is dropped on some requests (O6), so the baseline is labeled
+a no-replayed-thinking baseline.
 
 1. **Long run:** a scripted session whose local history reaches at least 2.5 times the bound
-   (bound set to 100,000 for this run to keep spend down) shows zero compaction events, every
+   (bound set to 100,000 for this run to keep spend down and well under every compaction trigger) shows zero compaction events, every
    upstream request under the bound except logged over-bound turns, and zero 4xx responses.
 2. **Fidelity:** the L2f harder probes asked at the end of that run, scored against the
    full-context baseline at the same session content. Pass: within 2 probes of baseline overall

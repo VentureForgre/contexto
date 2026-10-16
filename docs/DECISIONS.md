@@ -88,15 +88,18 @@ the owner's delegation. Open decisions are listed at the end with the options an
 ## Build (M2)
 
 - **D18. Build H1, context virtual memory at the API boundary.** Intake under D0, 2026-10-16. It is
-  the only approach that holds a fixed working-context bound every turn without a lossy reset, and
-  the cheapest modeled ($87.95 against $382.10 for compaction, 300 turns, Opus 5.5). Evidence and
+  the only approach that bounds working context without a lossy reset (modeled: 0 of 20 seeds over
+  a 250k bound; at 100k with online headroom 4 of 20 seeds sent some requests over, logged as
+  over-bound), and the cheapest modeled ($87.95 against $382.10 for compaction, 300 turns, Opus 5.5). Evidence and
   ranking: `docs/research/M0-recommendation.md`. Contract: `docs/milestones/M2-contexto-proxy.md`.
 - **D19. Recall and pinning go through an MCP server, not a hidden proxy tool.** Intake, 2026-10-16.
-  Lane 1 measured that MCP recall avoids stream hold-back, stitching, and byte-exact reinsertion of
-  hidden exchanges; this resolves the conflict with lane 2's hidden-tool design.
+  Lane 1 judged (inferred) that MCP recall avoids stream hold-back, stitching, and byte-exact
+  reinsertion of hidden exchanges; this resolves the conflict with lane 2's hidden-tool design.
+  Cost: recalled pages enter the CLI's local history until the next rotation pages them out.
 - **D20. Strip all thinking at each rotation.** Intake, 2026-10-16. The only strategy measured to
   return 200 after a history edit. Its accuracy cost is measured by M2's acceptance run against the
-  full-context baseline, because the owner's proxy drops thinking and could not isolate it in M0.
+  full-context baseline, because the owner's proxy drops replayed thinking on some requests and M0
+  could not isolate it.
 - **D21. M1 is folded into M2 (resolves O1).** Intake under D0, 2026-10-16. The M1 record model
   becomes M2's pinned-state store. PRs #2 and #3 are harvested by lane B and then closed; PR #4 is
   closed as superseded; branches are kept.
@@ -150,9 +153,9 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   (`end_user_binding_mismatch`) through `cliproxy.sullylab.de`. Lane 1's black-box test (L1-e,
   81,319 tokens): over 10 haiku requests the keep/drop pattern falls into exactly 3 consistent
   classes, and a byte-identical series shows exactly 3 cache writes before steady reads (counts
-  measured). Inferred: the route spreads requests across at least 3 upstream identities, and each
-  byte-identical miss is the first request to reach an identity. Opus over 5 requests kept all
-  thinking (inconclusive). Fix is a per-session upstream affinity setting on the owner's
+  measured; reported by manager-1, doc pending in lane 1's L1-f PR). Inferred: the route spreads
+  requests across at least 3 upstream identities, and each byte-identical miss is the first request
+  to reach an identity. Opus over 5 requests kept all thinking (inconclusive). Fix is a per-session upstream affinity setting on the owner's
   infrastructure. Owner decision; intake does not touch the proxy (D11).
 - **O7. OpenRig context-usage clock bug.** Measured by lane 1: every seat's context usage reads
   `stale_generation` because tenure boot times are stored in UTC without `Z` and parsed as local
