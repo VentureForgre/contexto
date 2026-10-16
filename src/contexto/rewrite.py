@@ -124,7 +124,7 @@ class Config:
     index_budget: int = 4_000
     carried_budget: int = 4_000  # rule 13: carried growth above this is reported
     carried_text_budget: int = 8_000  # Terms fallback: carried growth above this pages old text messages
-    # Recall knobs (packet A7, H1 recall fix). Defaults keep today's request byte for byte.
+    # Recall knobs (packet A7, H1 recall fix). Defaults are intake's V2 (A7b): preamble_first on, the rest off.
     recall_rule: str = ""  # placed before the store's pinned and index text in the preamble
     recall_example: str = ""  # one line placed after the rule
     preamble_first: bool = True  # V2 (intake 03:26Z): the preamble block goes before carried context blocks
@@ -977,6 +977,13 @@ def dialect_for(endpoint: str) -> Dialect | None:
     return None
 
 
+def turn_id(messages: list[dict], dialect: Dialect) -> str:
+    """The current turn's id for the per-turn recall budget (contract PR #69): the number of
+    turn-start messages in the CLI's full history, as a string. Stable across rotation, tool loops,
+    retries, and proxy restarts; it changes at each new user turn start."""
+    return str(sum(1 for m in messages if dialect.is_turn_start(m)))
+
+
 def keyed(dialect: Dialect, request: dict) -> str:
     token = _DIALECT.set(dialect)
     try:
@@ -1048,9 +1055,37 @@ class RewriteEngine:
             epoch = state.epoch if state else 0
             return count_tokens_view(request, state), headers, [{"event": "count_tokens", "epoch": epoch}]
         upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator, dialect)
+        # Per-turn recall budget, request-time publish (contract PR #69): before forwarding, from the
+        # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
+        # to 128,000, which would leave no room at all; the response-time publish adds the real output.
+        state = self.states[key]
+        if state.last_estimate is not None and not state.degraded:
+            failures: list[dict] = []
+            self.states[key] = self._publish_room(state, turn_id(request.get(dialect.field) or [], dialect),
+                                                  state.last_estimate, failures)
+            events[-1:-1] = failures  # the engine's request event stays last
         return upstream, headers, events
 
+    def turn_room(self, used_tokens: int) -> int:
+        """room_tokens = max(0, bound - (input + output) - headroom_floor) (contract PR #69)."""
+        return max(0, self.config.bound - used_tokens - self.config.headroom_floor)
+
+    def _publish_room(self, state: EpochState, current: str, used_tokens: int, events: list[dict]) -> EpochState:
+        """set_turn_room through the rule 14 machinery: a store failure is the usual content-free
+        store_error (operation set_turn_room) and enters degraded mode; nothing is logged on success,
+        where the store itself records the room (lane B packet B11)."""
+        calls = StoreCalls(self.store)
+        try:
+            calls.set_turn_room(current, self.turn_room(used_tokens))
+        except STORE_FAILURES as error:
+            return enter_degraded(state, store_failure(error, calls, state), events)
+        return state
+
     def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
+        with recall_knobs(self.config):  # preamble() must see the same knobs as the request did
+            return self._observe_usage(endpoint, usage, request)
+
+    def _observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
         """Feed a response's real usage back (a transformed endpoint; never ``count_tokens``). Returns the
         content-free events it raised (packet A2b; contract rule 3 as amended by PR #44). The proxy writes
         them on that request's log entry (``usage_events``), the one place they are logged (A2e,
@@ -1100,6 +1135,13 @@ class RewriteEngine:
         calls = StoreCalls(self.store)
         try:
             if not state.degraded:  # a degraded store is retried at the next turn start, not here
+                # Per-turn recall budget, response-time publish (contract PR #69): the real input plus
+                # this response's output (thinking and tool_use are passed back in the loop). The proxy
+                # calls this at message_delta, inside the stream hold (PR #74), so the room lands before
+                # any held tool_use reaches the CLI.
+                output = usage.get("output_tokens") or 0
+                calls.set_turn_room(turn_id(request.get(dialect.field) or [], dialect),
+                                    self.turn_room(real + output))
                 state = publish_window(calls, state, self.estimator)
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;

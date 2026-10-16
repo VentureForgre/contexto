@@ -265,7 +265,7 @@ def call(proxy: ContextoProxy, method: str, path: str, body: bytes = b"", header
 
 
 AUTH = {"Content-Type": "application/json", "x-api-key": SECRET, "Authorization": f"Bearer {SECRET}",
-        "Cookie": f"s={SECRET}", "anthropic-version": "2023-06-01", "anthropic-beta": "claude-code-20250219"}
+        "Cookie": f"s={SECRET}", "anthropic-version": "2023-06-01", "anthropic-beta": "test-beta-2026-01-01"}
 
 
 # Byte stability
@@ -429,7 +429,7 @@ def test_auth_headers_forwarded_unchanged_and_never_logged(make_proxy):
     call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
     headers = Upstream.received[0][2]
     assert headers["x-api-key"] == SECRET and headers["Authorization"] == f"Bearer {SECRET}"
-    assert headers["Cookie"] == f"s={SECRET}" and headers["anthropic-beta"] == "claude-code-20250219"
+    assert headers["Cookie"] == f"s={SECRET}" and headers["anthropic-beta"] == "test-beta-2026-01-01"
     text = json.dumps(log.events)
     assert SECRET not in text and CONTENT not in text and "ZmFrZS1zaWduYXR1cmU" not in text
 
@@ -437,10 +437,10 @@ def test_auth_headers_forwarded_unchanged_and_never_logged(make_proxy):
 def test_observe_thinking_adds_the_binding_beta_only_when_enabled(make_proxy):
     proxy, _ = make_proxy()
     call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
-    assert Upstream.received[0][2]["anthropic-beta"] == "claude-code-20250219"
+    assert Upstream.received[0][2]["anthropic-beta"] == "test-beta-2026-01-01"
     proxy_on, log = make_proxy(observe_thinking=True)
     call(proxy_on, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
-    assert Upstream.received[1][2]["anthropic-beta"] == f"claude-code-20250219,{THINKING_BINDING_BETA}"
+    assert Upstream.received[1][2]["anthropic-beta"] == f"test-beta-2026-01-01,{THINKING_BINDING_BETA}"
     assert Upstream.received[1][3] == REQUEST_BYTES  # the body is untouched; only the header changes
     assert log.events[0] == dict(log.events[0], event="proxy_start", observe_thinking=True)
 
