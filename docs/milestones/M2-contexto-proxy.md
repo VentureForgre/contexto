@@ -420,7 +420,8 @@ a no-replayed-thinking baseline.
    example `upstream unreachable`) fails the run; an upstream 5xx passed through unchanged is
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
-   `fallback_failed`, `transform_error`, `turn_room_missing`, or `unclassified_system_message`.
+   `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, or
+   `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the
