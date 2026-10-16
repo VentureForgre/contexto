@@ -118,9 +118,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    assistant message yet (only its turn-start message and any system messages). Rotate when the
    estimated upstream input would exceed `bound - headroom`. Estimate = last upstream
    `input_tokens + cache_read + cache_creation` for this session plus the bytes added since.
-   Until the first real usage arrives, count `tool_result` content at 2.0 bytes per token and
+   Until the first real usage arrives, count `tool_result` content at 1.5 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
-   character); after that, use the session's measured bytes-per-token ratio.
+   character, and M0 saw log-heavy tool output near 1.8 bytes per token, so 1.5 errs high); after
+   that, use the session's measured bytes-per-token ratio. After every response, compare real
+   usage with the bound and the estimate: log `over_bound` from real usage when it exceeds the
+   bound, and `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
    index), in tokens, taken from measured usage once available (the first request's input is the
    head) and from the estimator before that. The window budget is `W = bound - headroom - F`, and
