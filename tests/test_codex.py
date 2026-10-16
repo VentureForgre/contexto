@@ -246,3 +246,99 @@ def test_config_never_contains_a_key(tmp_path):
         assert "sk-synthetic" not in text and "api_key" not in text.lower()
     finally:
         launch.cleanup()
+
+
+# run_codex with a fake launcher (builder-1's contexto.launcher API) ---------------------------------
+
+import argparse
+import io
+
+from contexto.codex import add_arguments, run_codex
+
+
+class FakeLaunchError(Exception):
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.code = code
+
+
+class FakeProxy:
+    url = "http://127.0.0.1:50505"
+
+    def __init__(self):
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+
+class FakeLauncher:
+    LaunchError = FakeLaunchError
+
+    def __init__(self, bound_error=None, child_code=0):
+        self.bound_error, self.child_code = bound_error, child_code
+        self.proxy = FakeProxy()
+        self.calls = {}
+
+    def check_bound(self, bound, allow):
+        if self.bound_error:
+            raise FakeLaunchError(self.bound_error, 2)
+
+    def options_from_args(self, args):
+        return {"bound": args.bound}
+
+    def engine_config(self, options):
+        return {"bound": options["bound"]}
+
+    def open_session(self, home, session_id, workdir):
+        self.calls["session"] = session_id
+        return "store"
+
+    def start_proxy(self, store, upstream_url, upstream_source, config, observe_thinking):
+        self.calls["upstream"] = upstream_url
+        return self.proxy, "rewrite"
+
+    def run_child(self, argv, env):
+        home = env.get("CODEX_HOME")
+        self.calls.update(argv=argv, home_existed=bool(home) and os.path.isdir(home), home=home)
+        return self.child_code
+
+
+def parse(*argv):
+    parser = argparse.ArgumentParser()
+    for name, kw in (("--bound", {"type": int, "default": 150_000}), ("--allow-large-bound", {"action": "store_true"}),
+                     ("--window-fraction", {"type": float, "default": None}), ("--headroom-floor", {"type": int, "default": None}),
+                     ("--session", {"default": None}), ("--upstream", {"default": None}),
+                     ("--observe-thinking", {"action": "store_true"})):
+        parser.add_argument(name, **kw)
+    add_arguments(parser)
+    parser.add_argument("cli")
+    parser.add_argument("cli_args", nargs=argparse.REMAINDER)
+    return parser.parse_args(list(argv))
+
+
+def test_run_codex_api_key_mode_runs_and_cleans_up(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    args = parse("--session", "S9", "--upstream", "https://owner-proxy.invalid",
+                 "--codex-key-helper", "/synthetic/helper", "codex", "exec", "hi")
+    fake = FakeLauncher(child_code=7)
+    err = io.StringIO()
+    assert run_codex(args, launcher=fake, stderr=err) == 7
+    assert fake.calls["upstream"] == "https://owner-proxy.invalid/v1" and fake.calls["session"] == "S9"
+    assert fake.calls["argv"] == ["codex", "exec", "hi"] and fake.calls["home_existed"]
+    assert not os.path.exists(fake.calls["home"]) and fake.proxy.stopped
+    assert "session S9" in err.getvalue()
+
+
+def test_run_codex_chatgpt_mode_and_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    args = parse("--codex-auth", "chatgpt", "--upstream", "https://u.invalid", "codex", "exec", "hi")
+    fake = FakeLauncher()
+    err = io.StringIO()
+    assert run_codex(args, launcher=fake, stderr=err) == 0
+    assert fake.calls["upstream"] == "https://chatgpt.com/backend-api/codex"
+    assert "requires_openai_auth=true" in " ".join(fake.calls["argv"])
+    assert fake.calls["home"] == os.environ.get("CODEX_HOME")  # the user's own CODEX_HOME, untouched
+    assert "O4" in err.getvalue()
+    refused = FakeLauncher(bound_error="bound too large")
+    assert run_codex(parse("codex"), launcher=refused, stderr=io.StringIO()) == 2

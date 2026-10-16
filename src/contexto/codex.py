@@ -248,6 +248,23 @@ def chatgpt_overrides(proxy_url: str, session_id: str, contexto_bin: str = "cont
             "-c", f"mcp_servers.{PROVIDER_ID}.args={_toml(_mcp_args(session_id))}"]
 
 
+def resolve_codex_upstream(auth_mode: str, explicit: str | None, env: dict[str, str],
+                           claude_upstream: str | None) -> str:
+    """The proxy's upstream for Codex, which carries the version path: ``--codex-upstream``, else
+    ``CONTEXTO_CODEX_UPSTREAM``, else the ChatGPT backend in ChatGPT mode, else the upstream Claude Code
+    would use (the owner's proxy) plus ``/v1`` in API-key mode."""
+    if auth_mode not in (API_KEY_MODE, CHATGPT_MODE):
+        raise CodexLaunchError(f"unknown Codex auth mode: {auth_mode}")
+    target = explicit or env.get(UPSTREAM_ENV)
+    if not target and auth_mode == CHATGPT_MODE:
+        target = CHATGPT_UPSTREAM
+    if not target and claude_upstream:
+        target = claude_upstream.rstrip("/") + "/v1"
+    if not target:
+        raise CodexLaunchError(f"no upstream for Codex: pass --codex-upstream or set {UPSTREAM_ENV}")
+    return target
+
+
 def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_mode: str = API_KEY_MODE,
                key_helper: str | None = None, upstream: str | None = None, contexto_bin: str = "contexto",
                codex_bin: str = "codex", env: dict[str, str] | None = None, cwd: Path | None = None,
@@ -258,19 +275,14 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     base_env = dict(os.environ if env is None else env)
     cwd = cwd or Path.cwd()
     home = home or Path.home()
+    target = resolve_codex_upstream(auth_mode, upstream, base_env, claude_upstream)
     if auth_mode == CHATGPT_MODE:
         return CodexLaunch(argv=[codex_bin, *chatgpt_overrides(proxy_url, session_id, contexto_bin), *codex_args],
-                           env=base_env, upstream=upstream or base_env.get(UPSTREAM_ENV) or CHATGPT_UPSTREAM,
-                           notes=[CHATGPT_MODE_HELP])
-    if auth_mode != API_KEY_MODE:
-        raise CodexLaunchError(f"unknown Codex auth mode: {auth_mode}")
+                           env=base_env, upstream=target, notes=[CHATGPT_MODE_HELP])
     helper = key_helper or base_env.get(KEY_HELPER_ENV) or claude_api_key_helper(cwd, home)
     if not helper:
         raise CodexLaunchError(f"no key helper: pass --codex-key-helper, set {KEY_HELPER_ENV}, "
                                "or configure apiKeyHelper in Claude Code settings")
-    target = upstream or base_env.get(UPSTREAM_ENV) or (claude_upstream.rstrip("/") + "/v1" if claude_upstream else None)
-    if not target:
-        raise CodexLaunchError(f"no upstream for Codex: pass --codex-upstream or set {UPSTREAM_ENV}")
     codex_home = Path(tempfile.mkdtemp(prefix="contexto-codex-"))
     try:
         codex_home.chmod(0o700)
@@ -283,3 +295,61 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
         raise
     return CodexLaunch(argv=[codex_bin, *codex_args], env={**base_env, "CODEX_HOME": str(codex_home)},
                        upstream=target, codex_home=codex_home)
+
+
+# The run command's codex branch (agreed with builder-1: commands/run.py calls add_arguments and
+# dispatches 'contexto run codex' to run_codex; the proxy and child-process helpers are his, in
+# contexto.launcher) ------------------------------------------------------------------------------
+
+def add_arguments(parser) -> None:
+    group = parser.add_argument_group("codex")
+    group.add_argument("--codex-auth", choices=[API_KEY_MODE, CHATGPT_MODE], default=API_KEY_MODE,
+                       help=f"how Codex authenticates (default {API_KEY_MODE}: a temporary CODEX_HOME whose provider "
+                            f"runs the key helper). {CHATGPT_MODE}: {CHATGPT_MODE_HELP}")
+    group.add_argument("--codex-key-helper", default=None,
+                       help=f"command that prints the API key (default ${KEY_HELPER_ENV}, else Claude Code's apiKeyHelper)")
+    group.add_argument("--codex-upstream", default=None,
+                       help=f"upstream for Codex requests, with its version path (default ${UPSTREAM_ENV}, else "
+                            "the ChatGPT backend in chatgpt mode, else Claude Code's upstream plus /v1)")
+
+
+def run_codex(args, *, launcher=None, stderr=None) -> int:
+    """Run ``codex`` behind a Contexto proxy; returns the exit code (codex's, or a launcher error)."""
+    import sys
+    import uuid
+
+    from contexto import paths, upstream as upstream_module
+
+    if launcher is None:
+        from contexto import launcher  # builder-1's module; imported lazily
+    stderr = stderr or sys.stderr
+    try:
+        launcher.check_bound(args.bound, args.allow_large_bound)
+        options = launcher.options_from_args(args)
+        claude = upstream_module.resolve_upstream(args.upstream)
+        target = resolve_codex_upstream(args.codex_auth, args.codex_upstream, dict(os.environ), claude.url)
+        session_id = args.session or uuid.uuid4().hex
+        store = launcher.open_session(paths.contexto_home(), session_id, Path.cwd())
+        proxy, engine_name = launcher.start_proxy(store, target, "codex", launcher.engine_config(options),
+                                                  args.observe_thinking)
+    except CodexLaunchError as exc:
+        print(f"contexto: {exc}", file=stderr)
+        return 2
+    except launcher.LaunchError as exc:
+        print(f"contexto: {exc}", file=stderr)
+        return exc.code
+    plan = None
+    try:
+        plan = plan_codex(list(args.cli_args), proxy.url, session_id, auth_mode=args.codex_auth,
+                          key_helper=args.codex_key_helper, upstream=target)
+        for note in plan.notes:
+            print(f"contexto: {note}", file=stderr)
+        print(f"contexto: session {session_id}, engine {engine_name}, codex auth {args.codex_auth}", file=stderr)
+        return launcher.run_child(plan.argv, plan.env)
+    except CodexLaunchError as exc:
+        print(f"contexto: {exc}", file=stderr)
+        return 2
+    finally:
+        if plan is not None:
+            plan.cleanup()
+        proxy.stop()
