@@ -137,15 +137,32 @@ class Upstream(BaseHTTPRequestHandler):
     stream: list[bytes] = []
     pause_before: int = -1
     pause_s = 0.0
+    gzip_anyway = False
+    accept_encodings: list[tuple[str, str | None]] = []
 
     def log_message(self, *args):
         pass
 
+    def do_GET(self):
+        Upstream.accept_encodings.append((self.path, self.headers.get("Accept-Encoding")))
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        Upstream.accept_encodings.append((self.path, self.headers.get("Accept-Encoding")))
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
+        if Upstream.gzip_anyway:
+            import gzip as _gzip
+            self.send_header("Content-Encoding", "gzip")
+            self.end_headers()
+            data = _gzip.compress(b"".join(Upstream.stream))
+            self.wfile.write(b"%x\r\n%s\r\n0\r\n\r\n" % (len(data), data))
+            return
         self.end_headers()
         for i, raw in enumerate(Upstream.stream):
             if i == Upstream.pause_before:
@@ -160,24 +177,27 @@ def proxied():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     published = []
+    Upstream.gzip_anyway, Upstream.accept_encodings = False, []
 
     def observe(endpoint, usage, request):
         published.append(time.monotonic())
-        return []
+        return [{"event": "over_bound", "source": "real", "over_bound": True, "real_tokens": 1}]
 
-    proxy = ContextoProxy(f"http://127.0.0.1:{server.server_address[1]}", MemoryStore(),
+    store = MemoryStore()
+    proxy = ContextoProxy(f"http://127.0.0.1:{server.server_address[1]}", store,
                           lambda r, h, e: (r, h, [{"epoch": 0}]), observe_usage=observe)
     proxy.start()
+    proxy.test_store = store
     yield proxy, published
     proxy.stop()
     server.shutdown()
     server.server_close()
 
 
-def read_with_times(proxy):
+def read_with_times(proxy, path="/v1/messages", accept="gzip, br"):
     conn = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=20)
     body = json.dumps({"model": "m", "stream": True, "messages": [{"role": "user", "content": "q"}]}).encode()
-    conn.request("POST", "/v1/messages", body=body, headers={"Content-Type": "application/json"})
+    conn.request("POST", path, body=body, headers={"Content-Type": "application/json", "Accept-Encoding": accept})
     response = conn.getresponse()
     chunks = []
     while chunk := response.read1(65536):
@@ -206,3 +226,50 @@ def test_upstream_ending_mid_hold_releases_everything_in_order(proxied):
     Upstream.pause_before = -1
     body = b"".join(c for _, c in read_with_times(proxy))
     assert body == b"".join(Upstream.stream)
+
+
+def wait_requests(store, count=1, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = [e for e in store.events if e["event"] == "request"]
+        if len(found) >= count:
+            return found
+        time.sleep(0.01)
+    return [e for e in store.events if e["event"] == "request"]
+
+
+def test_usage_events_are_recorded_once_on_the_entry_inside_the_hold(proxied):
+    proxy, published = proxied
+    Upstream.stream = [START, *tool_block(0), DELTA, STOP]
+    Upstream.pause_before = -1
+    read_with_times(proxy)
+    entry = wait_requests(proxy.test_store)[0]
+    assert entry["usage_events"] == [{"event": "over_bound", "source": "real", "over_bound": True, "real_tokens": 1}]
+    assert entry["over_bound"] is True and entry["stream_hold"]["held_events"] == 3
+    assert not [e for e in proxy.test_store.events if e["event"] == "over_bound"]  # logged once, on the entry
+
+
+@pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens", "/responses"])
+def test_identity_encoding_is_forced_upstream_on_transformed_endpoints(proxied, path):
+    proxy, _ = proxied
+    Upstream.stream = [START, DELTA, STOP]
+    read_with_times(proxy, path=path, accept="gzip, br")
+    assert Upstream.accept_encodings[-1] == (path, "identity")
+
+
+def test_other_paths_keep_the_clients_accept_encoding(proxied):
+    proxy, _ = proxied
+    conn = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=10)
+    conn.request("GET", "/v1/models", headers={"Accept-Encoding": "gzip"})
+    conn.getresponse().read()
+    conn.close()
+    assert Upstream.accept_encodings[-1] == ("/v1/models", "gzip")
+
+
+def test_an_encoded_stream_logs_hold_skipped_instead_of_skipping_silently(proxied):
+    proxy, _ = proxied
+    Upstream.stream, Upstream.gzip_anyway = [START, *tool_block(0), DELTA, STOP], True
+    read_with_times(proxy)
+    wait_requests(proxy.test_store)
+    skipped = [e for e in proxy.test_store.events if e["event"] == "hold_skipped"]
+    assert skipped and skipped[0]["encoding"] == "gzip"
