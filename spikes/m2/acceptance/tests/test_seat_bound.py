@@ -41,6 +41,9 @@ def test_the_engine_rotates_for_room_and_keeps_every_turn_start_above_min_turn_r
     assert all(rows[i]["cached"] == head for i in rotated)
     assert all(rows[i + 1]["cached"] == rows[i]["tokens"] for i in rotated if i + 1 < len(rows))
     assert s["window_budget"][0] == 150_000 - config.headroom_floor - s["fixed_overhead"][1]
+    assert s["one_turn_growth_under_idle_compaction"] == sb.IDLE_COMPACTION_MIN - max(r["tokens"] for r in rows
+                                                                                      if r["start"])
+    assert s["max_turn_start_input"] <= config.bound - config.headroom_floor
 
 
 def test_rule_16_resume_matches_no_restart_and_no_resume_rotates_again():

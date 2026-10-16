@@ -177,6 +177,10 @@ def summarize(rows: list[dict[str, Any]], config: Config) -> dict[str, Any]:
         "cached_share": round(cached / tokens, 4), "output": sum(r["output"] for r in rows),
         "peak_input": max(r["tokens"] for r in rows), "largest_in_turn_growth": growth,
         "margin_to_idle_compaction": IDLE_COMPACTION_MIN - max(r["tokens"] for r in rows),
+        # The largest single turn that stays under idle compaction: a turn's growth is added on top of
+        # its turn-start input, which rotation keeps under the bound.
+        "max_turn_start_input": max(r["tokens"] for r in rows if r["start"]),
+        "one_turn_growth_under_idle_compaction": IDLE_COMPACTION_MIN - max(r["tokens"] for r in rows if r["start"]),
         "usd": round(usd(rows), 4),
     }
 
