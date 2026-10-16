@@ -90,6 +90,12 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
 ## Known limitations (v0.1.0)
 
 - Acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's proxy.
+- Codex, open bugs in v0.1.0 and v0.1.1 (found during the Codex acceptance plan, zero spend):
+  search does not match text in Codex's message parts, tool calls, or tool outputs, so a Codex
+  session's paged-out turns are not found by search and their index entries are empty, because
+  the store extracts search text from Claude's message shape only (recall by page id works; fix
+  B23 in progress); and with a non-default `CONTEXTO_HOME`, Codex's MCP server opens
+  `~/.contexto` instead (fix A18, PR #148, in review). Claude Code is not affected by either.
 - Codex: runs end to end, but has no live acceptance run. HTTP is forced through a custom
   provider (no WebSocket). Contexto's tools sit behind Codex tool search and need
   `default_tools_approval_mode = approve`, which `contexto run codex` sets. Only API-key mode is
