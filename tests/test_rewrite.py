@@ -1576,3 +1576,23 @@ def test_main_switches_only_on_strictly_more_turn_starts_and_only_at_a_turn_star
     assert engine.publishes(key("other"), conversation("other", 3), ANTHROPIC)  # strictly more, at a turn start
     assert not engine.publishes(key("main"), conversation("main", 3), ANTHROPIC)  # now a tie: other stays main
     assert engine.publishes(key("main"), conversation("main", 4), ANTHROPIC)
+
+
+@pytest.mark.parametrize("kind", ["memory", "session"])
+def test_snapshot_and_both_room_publishes_share_the_request_sequence_in_the_real_stores(kind, tmp_path):
+    """Against lane B's store side (PR #128): set_retained bumps the persisted request sequence and
+    stamps the snapshot; the request-time and the real-usage room publishes that follow carry the same
+    stamp, so search trusts the snapshot for this request's tool calls; the next request moves it on."""
+    store = MemoryStore(key=b"k" * 32) if kind == "memory" else SessionStore(tmp_path, "a14")
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    req = request(history(2) + [tool_use(1), tool_result(1, "chain link 5"), user("new")])
+    engine(req, {}, MESSAGES)
+    epoch, k, stamp, entries = store.retained()
+    assert stamp == store.room_stamp() and (epoch, k) == (0, 0)
+    assert entries == retained_entries(req["messages"], 0, ANTHROPIC) and entries[-1]["text"] == "new"
+    engine.observe_usage(MESSAGES, {"input_tokens": 700, "output_tokens": 5}, req)
+    assert store.room_stamp() == stamp  # the real-usage publish keeps the request's stamp
+    engine(request(history(3) + [user("newer")]), {}, MESSAGES)
+    assert store.retained()[2] == store.room_stamp() == stamp + 1
+    if kind == "session":
+        assert oct((tmp_path / "sessions" / "a14" / "retained.json").stat().st_mode & 0o777) == "0o600"
