@@ -110,6 +110,14 @@ credentials this way under OpenAI's terms is an open question.
 | `--codex-key-helper CMD` | see Quickstart | Command that prints the API key (Codex, API-key mode). |
 | `--codex-upstream URL` | see Quickstart | Upstream for Codex requests, including its version path. |
 
+**Tip for Haiku 5.5:** on Haiku 5.5, `--bound 125000` keeps requests at turn start below the 100K price
+tier, above which every rate is 5x. Replaying live run #3 at that bound with the model's behavior held
+fixed, every request stayed under it, for a modeled 45.7% lower cost. Long tool loops can still cross
+it, and accuracy at that bound is not yet measured. See
+[docs/research/M2-haiku-100k-tier.md](docs/research/M2-haiku-100k-tier.md).
+The Quickstart's `--bound 120000` is also below the tier at turn start: with the default headroom floor
+(25,000) and minimum turn room (12,000), any bound up to 125000 is.
+
 `contexto proxy [--session ID] [--port N] [--upstream URL] [--observe-thinking]` runs the proxy alone,
 mainly for tests. `--port` defaults to 0 (a free port). It prints
 `listening on 127.0.0.1:<port> session <id> upstream <source>` and forwards requests unchanged.
