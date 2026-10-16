@@ -26,6 +26,12 @@ It stops (the turn's process group is killed, or the session ends after the turn
 Answer text is never read. One request whose output passes 32,000 tokens can overrun the approval by
 that request's excess output: the stop comes once the request is logged.
 
+The record says where Codex went in two ways, neither complete: the hosts named in Codex's own local
+logs (its ``*.log`` files, ``log`` directory and SQLite logs, with the files and rows scanned; not a
+network observation), and a best-effort sample of each turn's process group's remote addresses
+(``lsof`` every second, so short connections can be missed; it never stops the run, and the record
+says if it could not run).
+
 It writes ``<out>/codex-step1-record.json``: content-free numbers and event counts only."""
 
 from __future__ import annotations

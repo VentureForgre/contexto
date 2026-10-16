@@ -165,7 +165,8 @@ class Upstream:
     """A 127.0.0.1 Responses upstream for one stop rule: every POST answers ``status``, a normal reply
     whose usage is ``usage`` (to pass the output cap or the approval line), or a 200 refusal."""
 
-    def __init__(self, status: int = 200, usage: dict | None = None, refuse: list[dict] | None = None):
+    def __init__(self, status: int = 200, usage: dict | None = None, refuse: list[dict] | None = None,
+                 incomplete: str | None = None):
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -194,10 +195,14 @@ class Upstream:
                 use.update(outer.usage or {})
                 use["total_tokens"] = use["input_tokens"] + use["output_tokens"]
                 events = refusal_events(use, outer.refuse) if outer.refuse else stream_events("r", output, use)
+                if outer.incomplete:  # the stream ends response.incomplete with this reason
+                    end = events[-1]["response"]
+                    events[-1] = {"type": "response.incomplete", "response": {
+                        **end, "status": "incomplete", "incomplete_details": {"reason": outer.incomplete}}}
                 sse = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
                 self._send(200, sse.encode(), "text/event-stream")
 
-        self.status, self.usage, self.refuse = status, usage, refuse
+        self.status, self.usage, self.refuse, self.incomplete = status, usage, refuse, incomplete
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -305,3 +310,19 @@ def test_a_refusal_part_in_the_rollout_stops_the_turn(tmp_path):
     turns.codex_home = home
     with pytest.raises(codex_live.LiveStop, match="a refusal content part on turn 1"):
         turns.send(0, "synthetic")
+
+
+@needs_codex
+def test_a_response_that_ends_incomplete_through_the_real_proxy_stops_the_run(tmp_path):
+    # A23: the proxy logs end_event, response_status and incomplete_reason; codex_live stops on them.
+    upstream = Upstream(incomplete="content_filter")
+    try:
+        code, rec = run_live(tmp_path, upstream.url)
+    finally:
+        upstream.close()
+    assert code == 1 and rec["ran"]["turns_completed"] == 0 and KEY not in json.dumps(rec)
+    assert rec["ran"]["stopped"] == "turn 1: a response ended with end_event incomplete (content_filter)"
+    log = Path(rec["preflight"]["contexto_home"]) / "sessions" / "codex-step1" / "log.jsonl"
+    entries = [e for e in codex_driver.read_log(log) if e.get("path", "").endswith("responses") and "status" in e]
+    assert {(e["end_event"], e["response_status"], e["incomplete_reason"]) for e in entries} == {
+        ("incomplete", "incomplete", "content_filter")}
