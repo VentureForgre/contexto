@@ -60,3 +60,27 @@ def test_the_acceptance_script_has_terms_for_every_probe():
     s = script.build(turns=4, turn_bytes=8_000)
     assert all(reach.key_terms(p) for p in s.probes)
     assert all(reach.needed_statements(p, reach.key_terms(p)) for p in s.probes)
+
+
+def test_a_multihop_probe_with_one_unreachable_hop_is_unreachable():
+    hop = Probe("q4", "a", "multihop", "3-hop", "?", "west", subjects=("ledger-svc", "ash9", "team-x"),
+                statements=("Ownership note: the ledger-svc service is owned by ash9.",
+                            "Action item AI-1: rotate keys.",  # on pg_c, which none of the hop names returns
+                            "Coverage note: team-x covers region west."))
+    r = reach.reach([hop], PAGES, turn_texts=["", "", "", "Coverage note: team-x covers region west."])
+    needs = r["rows"][0]["needs"]
+    assert [n["hit"] for n in needs] == [True, False, True] and r["reachable"] == 0
+    assert needs[2]["in_window"] is True  # turn 3 is not paged and holds the last hop
+
+
+def test_a_statement_on_no_page_and_in_no_window_turn_is_unreachable():
+    p = Probe("q5", "a", "chain", "t", "?", "v9", subjects=("svc.key",), statements=("svc.key is now v9.",))
+    r = reach.reach([p], PAGES, turn_texts=["svc.key is now v9.", "", ""])  # only in turn 0, which is paged
+    assert r["rows"][0]["needs"][0] == {"page": None, "in_window": False, "hit": False} and r["reachable"] == 0
+
+
+def test_ranks_beyond_the_search_limit_do_not_count(monkeypatch):
+    monkeypatch.setattr(reach, "SEARCH_LIMIT", 1)  # contexto_search returns at most SEARCH_LIMIT ids
+    pages = [_page("pg_old", 0, "svc.key is v1"), _page("pg_new", 5, "svc.key mentioned again")]
+    p = Probe("q6", "a", "chain", "t", "?", "v1", subjects=("svc.key",), statements=("svc.key is v1",))
+    assert reach.reach([p], pages)["reachable"] == 0  # pg_old ranks 2nd, past the limit

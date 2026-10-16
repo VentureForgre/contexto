@@ -292,7 +292,7 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
     })
     pages = reach.load_pages(home / "sessions" / session)
     if pages:
-        r = reach.reach(list(s.probes), pages)
+        r = reach.reach(list(s.probes), pages, turn_texts=list(s.turns[:-1]))
         result["reach"] = {k: v for k, v in r.items() if k != "rows"}
     if messages and log:
         result.update(summarize(stub.records, log, len(s.turns) - 1, p, s.turn_bytes[-1], list(s.turn_bytes[:-1])))

@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         from acceptance import reach
 
         s, _ = plan(args.seed, 0, args.turn_kbytes * 1_000)
-        result = reach.reach(list(s.probes), reach.load_pages(args.session_dir))
+        result = reach.reach(list(s.probes), reach.load_pages(args.session_dir), turn_texts=list(s.turns[:-1]))
         print(json.dumps({k: v for k, v in result.items() if k != "rows"}, indent=2))
         return 0 if not result["unreachable"] else 1
 

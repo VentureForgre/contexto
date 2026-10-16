@@ -3,7 +3,8 @@
 For each probe, the store's own search (``contexto.store.pages.search_pages``, exact case-sensitive
 substring over page stubs and text) runs with the probe's key terms against a session's stored pages.
 A probe is reachable when every statement it needs is either still in the context window (on no
-page) or on a page that one of its terms returns. A miss in a live run on a reachable probe is then
+page, and, when the script's turns are given, in a turn the store did not page out) or on a page that
+one of its terms returns within contexto_search's first ``SEARCH_LIMIT`` ids. A miss in a live run on a reachable probe is then
 the model's, not the index's or the search's.
 
 Key terms, deterministically:
@@ -25,6 +26,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from contexto.mcp import SEARCH_LIMIT
 from contexto.store.pages import search_pages
 
 _IDENT = re.compile(r"(?<![\w.\-])[A-Za-z][A-Za-z0-9]*(?:[.\-_][A-Za-z0-9]+)+")
@@ -55,19 +57,25 @@ def _page_text(page: dict[str, Any]) -> str:
     return json.dumps(page.get("messages"), ensure_ascii=False)
 
 
-def reach(probes: list[Any], pages: list[dict[str, Any]]) -> dict[str, Any]:
+def reach(probes: list[Any], pages: list[dict[str, Any]], turn_texts: list[str] | None = None) -> dict[str, Any]:
+    """With ``turn_texts`` (the script's turns, in order), a statement on no page must sit in a turn
+    the store did not page out, or the probe is unreachable; without them it is assumed in the window."""
     texts = {p["id"]: _page_text(p) for p in pages}
+    paged_turns = {p.get("turn") for p in pages}
+    window = ([t for i, t in enumerate(turn_texts) if i not in paged_turns] if turn_texts is not None else None)
     rows = []
     for probe in probes:
         terms = key_terms(probe)
-        hits = {t: search_pages(pages, t) for t in terms}
+        # what contexto_search returns: at most SEARCH_LIMIT ids, newest first
+        hits = {t: search_pages(pages, t)[:SEARCH_LIMIT] for t in terms}
         needs = []
         for statement in needed_statements(probe, terms):
             # json.dumps escapes the statement the same way inside the page text
             quoted = json.dumps(statement, ensure_ascii=False)[1:-1]
             on = [pid for pid, text in texts.items() if quoted in text]
             if not on:
-                needs.append({"page": None, "in_window": True, "hit": True})
+                in_window = window is None or any(statement in t for t in window)
+                needs.append({"page": None, "in_window": in_window, "hit": in_window})
                 continue
             found = [(t, h.index(pid) + 1) for t in terms for pid in on for h in [hits[t]] if pid in h]
             best = min(found, key=lambda x: x[1]) if found else None
