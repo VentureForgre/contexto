@@ -1,10 +1,11 @@
-# M0 quality versus working-context size: probe design
+# M0 quality versus working-context size: probe design and results
 
-Status: phase 1 design (lane 2, packet L2d). Lane 1 runs it on `lab.subject`. Author:
+Status: designed, run, and scored (lane 2, packets L2d and L2e). Lane 1 ran it on `lab.subject`;
+builder-4 ran the replay arm and scored both. Author:
 build.builder-4. Date: 2026-10-15, regenerated for `lab.subject`'s measured head. Code:
 `spikes/m0/fidelity/l2d.py`, tests in `spikes/m0/fidelity/tests/test_l2d.py`. Claims are tagged
-**[measured]**, **[vendor-documented]**, or **[inferred]**. Nothing in this document has been run
-against a model yet.
+**[measured]**, **[vendor-documented]**, or **[inferred]**. Planning sections (design, budget,
+go/no-go) are kept as written before the runs. The results sections report what was measured.
 
 ## Why this probe
 
@@ -231,15 +232,16 @@ with conversation filler. Group 2's opening plants ride along unprobed, as on th
 | (1) + (2) + (3) RP1 stripped | 408,851 |
 
 - Both fit the 450,000 ceiling.
-- (1) and (2) together are 4,639 tokens over the 309,507 approval. Shrinking RP0 to about 38k would
-  bring them under. Manager-2 decides.
-- Thinking output is assumed at about 1,500 tokens per probe and 200 per build turn; these are not
-  yet measured.
+- Superseded: intake approved all three parts within 450,000 without shrinking RP0. The run spent
+  441,401 tokens (results below).
+- Thinking output was assumed at about 1,500 tokens per probe and 200 per build turn. Measured:
+  about 3,000 to 3,700 output tokens per probe fork and about 60 per build turn.
 
 **Gates.**
 - The conformance gate is met: a history with all thinking stripped returned 200 [measured,
   2026-10-15].
-- Run only after manager-2 says go.
+- Superseded: manager-2 said go after PR #7's fixes were handed back, and the arm was run on
+  2026-10-15.
 
 ### Lab run results on `lab.subject` [measured, 2026-10-15]
 
@@ -312,7 +314,8 @@ By probe point: RP0 cost 94,624 in both arms, and RP1 cost 206,125.
   `RP1_stripped`, which would have passed the cap.
 - That request was then sent from a reconstructed history. With every thinking block stripped, the
   history is just the user turns and each reply's text. The recorded replies matched the instructed
-  `OK`, `DONE` and `OK` exactly, in size and block layout.
+  `OK`, `DONE` and `OK` in size and block layout. Only those two properties were checked, not the
+  reply text.
 - The projection used `RP1_preserved`'s measured cost. It cost 103,117, against 103,008 for the
   preserved request.
 
@@ -345,9 +348,10 @@ By probe point: RP0 cost 94,624 in both arms, and RP1 cost 206,125.
 - E1 and E2 at about 30k: 13/13 and 37/37;
 - the replay at 41k and 92k: 96/96 in both arms.
 
-A probe that every condition passes cannot locate a slip point. Below 92k on these probe types,
-this design cannot say where quality starts to drop, or whether it does. The lab run's P2 at about
-243k may still separate, but a ceiling there would say the same.
+A probe that every condition passes cannot locate a slip point. On these probe types, this design
+cannot say where quality starts to drop, or whether it does. The lab run's P2 (256,783 measured) was
+the last chance to separate, and it also scored 96/96, so the ceiling holds from about 41k to
+257k.
 
 **Harder probe types**, targeting an 80% to 90% baseline so that drops are visible (packet L2f):
 - **Multi-hop recall.** The answer needs two or more planted facts combined: "the region of the
@@ -370,14 +374,18 @@ Same files and plants. The turn texts and two limits differ [inferred unless tag
 - **Tool-output cap.** Codex caps stored tool output (`tool_output_token_limit`,
   vendor-documented). A file over the cap is truncated, and any plant past the cut would score as a
   recall loss that is really truncation. Files must be smaller, which means more requests.
-- **Compaction.** Codex auto-compacts at about 90% of a 272k window, about 245k [measured, lane 1,
-  PR #9]. P2 at about 243k is at that edge, so a Codex run should keep P2 near 200k.
+- **Compaction.** Codex auto-compacts at about 90% of a 272k window, about 245k [sourced: lane 1,
+  PR #9, citing the vendor]. P2 at about 243k is at that edge, so a Codex run should keep P2 near 200k.
 - **Writing answers.** Codex writes the answer file with its own file-editing tool or a shell
   command.
 
 ## Open questions
 
-1. The Read tool's per-read size limit in this CLI version. If it is under 18k tokens, regenerate
-   with smaller files.
-2. The replay arm's scope: within 309,507 by shrinking RP0, or up to 408,851 with RP1 stripped.
+1. Answered for this CLI version: the lab run's 16k to 18k-token files were read whole. Builder-1
+   reported no read errors, and P2 landed at 256,783 tokens against 242,822 planned, which matches
+   the full files plus the measured estimate undercount [inferred from sizes].
+2. Answered: the replay arm ran all three parts within 450,000 (441,401).
 3. A second seed is worth running only where a result lands within 1 to 2 probes of a decision rule.
+   With every result at the ceiling, no rule is close, so the harder probe set (L2f) comes first.
+4. A route that verifiably keeps replayed thinking, needed before preserved versus stripped can be
+   compared (lane 1).
