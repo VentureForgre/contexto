@@ -66,7 +66,7 @@ def test_analyze_reads_the_responses_dialect_log():
     a = codex_driver.analyze(events, 64_000)
     assert a["requests"] == 6 and a["model_4xx"] == 1 and a["over_bound_real"] == 1 and a["max_input"] == 70_000
     assert a["rotations"] == {"bound": 1} and a["failure_events"] == ["turn_room_low"]
-    assert a["cache_hit_rate"] == round(1 / 4, 3)  # first request and the rotation are not eligible
+    assert a["cache_hit_rate"] == round(1 / 3, 3)  # eligible: 2nd, 4th, 5th (not the first, the rotation, the 401)
     assert a["mcp_calls"] == {"contexto_recall": 1, "contexto_search": 1} and a["mcp_failed"] == 1
     assert a["acceptance_1"] is False
 
@@ -103,7 +103,8 @@ def test_run_session_never_starts_a_turn_that_could_pass_the_cap(tmp_path):
     log = tmp_path / "log.jsonl"
     log.write_text(json.dumps(_entry(inp=900, out=100)) + "\n")  # 1,000 spent already
     runner = FakeCodex()
-    record = codex_driver.run_session(s, _turns(tmp_path, runner), log, 1_500, [400] * len(s.turns), reserve=100)
+    # 1,000 spent + 401 + 100 passes 1,500 (exactly 1,500 would be allowed).
+    record = codex_driver.run_session(s, _turns(tmp_path, runner), log, 1_500, [401] * len(s.turns), reserve=100)
     assert record["turns_completed"] == 0 and "could pass the approved 1,500" in record["stopped"]
     assert runner.calls == []
     with pytest.raises(ValueError):
