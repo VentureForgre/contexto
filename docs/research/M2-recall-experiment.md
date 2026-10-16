@@ -41,12 +41,25 @@ and the answers were not run.
 ## Caveat on record (intake, 2026-10-16 03:39Z)
 
 All four result sends carried `claude-code-20250219` among the 11 betas copied from H1's recorded
-request. Access did not depend on it: the diagnostic call that the proxy accepted had no betas. The
+request. Access did not depend on it: the diagnostic call the proxy accepted (2026-10-16 03:24Z,
+`count_tokens` with a minimal body, the honest user agent, and the key in both headers) carried no
+`anthropic-beta` header at all. The
 comparison with H1 is like-for-like, since H1's own requests carried the same 11. Its effect on tool
 use was not measured. The result was accepted without a repeat.
 
 Standing rule D23 followed: every request the team sends directly, not through the real CLI, uses an
 honest user agent naming the harness and never carries another product's client marker. In the
 harness, `replay.harness_betas` drops every `claude-code-*` beta from direct requests, with a test.
+
+## Code
+
+`spikes/m2/acceptance/experiment.py` is the sender. It sends each rebuilt body once and reads the
+first response. Before each send it checks the input size: count_tokens, or the builder's estimate,
+which these runs used because the proxy refused count_tokens before the headers were fixed. It
+refuses a send above the per-send limit or past the approval. It records tool calls, with their
+input, whether each reaches the turn-0 page, usage, and the paged-only answer lines.
+`diagnose_count_tokens` makes one call that records only the status, error type, and redacted
+message. The numbers above came from this code at `eaf95a3`, whose sends still carried the copied
+betas. This version differs only in passing every header through `replay.beta_headers` (D23).
 
 Evidence (local, not in Git): `.contexto/spikes/recall-experiment/`.
