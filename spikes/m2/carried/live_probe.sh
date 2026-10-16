@@ -3,7 +3,8 @@
 # fake_model_stub.py on loopback for six turns (turn 1 asks for a tool, so its turn has a tool
 # loop; turns 4 and 6 change --effort), resuming the CLI-written session each time; then a
 # four-turn session with a per-turn context hook, a two-turn session with UserPromptSubmit and
-# PostToolUse hooks (turn 1 runs a tool), and a four-turn session that adds and removes an
+# PostToolUse hooks (turn 1 runs a tool), a five-turn session with an output-style change and a plan-mode
+# toggle, a session on a model without an effort setting, and a four-turn session that adds and removes an
 # MCP server. Isolated config, dummy key, scrubbed env,
 # pinned model. Output: <repo>/.contexto/spikes/M2-A2/live-shapes.jsonl
 set -u
@@ -52,6 +53,16 @@ printf '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command"
 SID4=$(python3 -c "import uuid; print(uuid.uuid4())")
 turn posttool-turn1-tool --session-id "$SID4" --settings "$HOOKS2" "Synthetic tool prompt one. USE_TOOL"
 turn posttool-turn2 --resume "$SID4" --settings "$HOOKS2" "Synthetic tool prompt two."
+
+# Mode changes: an output-style change, a plan-mode toggle, and a model without an effort setting.
+SID5=$(python3 -c "import uuid; print(uuid.uuid4())")
+turn modes-turn1 --session-id "$SID5" "Synthetic modes prompt one."
+turn modes-turn2-output-style --resume "$SID5" --settings '{"outputStyle": "Explanatory"}' "Synthetic modes prompt two."
+turn modes-turn3-default --resume "$SID5" "Synthetic modes prompt three."
+turn modes-turn4-plan --resume "$SID5" --permission-mode plan "Synthetic modes prompt four."
+turn modes-turn5-default --resume "$SID5" "Synthetic modes prompt five."
+SID6=$(python3 -c "import uuid; print(uuid.uuid4())")
+turn noeffort-turn1 --session-id "$SID6" --model claude-haiku-4-5 "Synthetic no-effort prompt one."
 
 # Tool-addition case: a resume that adds an MCP server (its tools are sent upfront behind a
 # non-first-party base URL), then a resume that drops it again.

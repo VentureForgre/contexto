@@ -66,6 +66,20 @@ All throwaway CLI runs use an isolated `CLAUDE_CONFIG_DIR`, a dummy key that is 
    UserPromptSubmit context is folded into the session-start message itself (8,552 characters instead
    of 8,469). So text-only system messages can sit anywhere in a turn, including right after a
    `tool_result`.
+10. **Documented hook-output signatures** (Claude Code 2.1.301) [measured: `live_probe.sh` hook and
+    PostToolUse sessions; the stub logs short system messages with the probe's synthetic payload
+    masked]: `UserPromptSubmit hook additional context: <payload>` (after the turn's prompt) and
+    `PostToolUse:<tool> hook additional context: <payload>` (right after the `tool_result`, for
+    example `PostToolUse:Read`). Both are text-only with no settings fields. The engine pages a
+    text-only system message only when its text starts with one of these prefixes.
+11. **Output style, plan mode, no effort setting** [measured: `live_probe.sh` modes and no-effort
+    sessions]: an output-style change adds a text-only system message of 1,147 characters starting
+    `# Output Style: Explanatory`; resetting it adds `The output style was reset to the default.
+    Respond in your usual style.` Entering plan mode adds a text-only system message of about 4,930
+    characters starting `Plan mode is active.`; leaving it adds `## Exited Plan Mode` and one line.
+    None has settings fields, so each is carried (contract step 4) and stays in place. A session on
+    a model without an effort setting (`claude-haiku-4-5`) sends no system message in `messages` at
+    all on its first turn.
 8. **Tool-list changes** [measured: `live_probe.sh` MCP session]: adding an MCP server on a resume put
    `mcp__probe__contexto_probe` into `tools` (sent upfront behind a non-first-party base URL) and
    added no system message; dropping it removed the tool, again with no system message. A tool-list
@@ -74,13 +88,18 @@ All throwaway CLI runs use an isolated `CLAUDE_CONFIG_DIR`, a dummy key that is 
    own records, the context block rides in the new turn's user message and the full system text
    follows the new prompt as a trailing system message.
 
-## Classifier (contract PR #35)
+## Classifier (contract Terms, PR #38 merged)
 
-`classify_system` in `src/contexto/rewrite.py` sorts each role `system` message by shape alone
-(contract PR #38 at 10f1cfa): settings-only (empty content plus settings fields such as
-`output_config`), session-start (content plus settings fields), per-turn (any other text-only content,
-wherever it sits; paged with its turn), and unclassified (non-text content; carried and logged as
-`unclassified_system_message`).
+`classify_system` in `src/contexto/rewrite.py` sorts each role `system` message by shape alone, in
+order: session-start (content plus settings fields; carried), settings-only (empty content plus
+settings fields; carried, latest per key), hook output (text-only, starting with a documented
+signature from finding 10; paged with its turn), other text-only content (carried: output styles
+and plan mode from finding 11), and non-text content (carried, logged as
+`unclassified_system_message`). Bounded fallback: when carried content grows more than 8,000 tokens
+over its size at the first request, the oldest carried text messages are paged at the next rotation
+(superseded output-style or plan-mode messages first, never the latest of each kind), and
+`carried_paged` is logged. Carried text messages that grow at two consecutive turn starts log
+`carried_text_growing`.
 
 Not measured: MCP `tools/list_changed` notifications within a single running process, and other
 hook events that inject context (SessionStart, PostToolUse).

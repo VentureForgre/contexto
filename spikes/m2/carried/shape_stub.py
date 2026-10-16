@@ -27,6 +27,21 @@ def block_shape(b):
     return s
 
 
+PAYLOAD = re.compile(r"Synthetic \w+ context \d+")
+
+
+def template(text):
+    """CLI-generated wording of a short system message, with the probe's synthetic hook payload masked
+    as <payload>. Only used for system messages under 600 characters, whose text is CLI boilerplate
+    plus that synthetic payload; longer ones are logged by length only."""
+    if len(text) < 600:
+        return PAYLOAD.sub("<payload>", text)[:300]
+    # Long CLI-generated instructions (output styles, plan mode): first line and keyword flags only.
+    low = text.lower()
+    return {"first_line": text.strip().splitlines()[0][:100], "len": len(text),
+            "mentions_output_style": "output style" in low, "mentions_plan_mode": "plan mode" in low}
+
+
 def message_shape(m):
     c = m.get("content")
     s = {"role": m.get("role")}
@@ -40,6 +55,11 @@ def message_shape(m):
         s["blocks"] = [block_shape(b) for b in c or []]
     if "cache_control" in m:
         s["cache_control"] = True
+    if m.get("role") == "system":
+        texts = [c] if isinstance(c, str) else [b.get("text") for b in c or [] if isinstance(b, dict) and isinstance(b.get("text"), str)]
+        templates = [template(t) for t in texts]
+        if any(t is not None for t in templates):
+            s["templates"] = templates
     extra = sorted(set(m) - {"role", "content"})
     if extra:
         s["extra_keys"] = extra

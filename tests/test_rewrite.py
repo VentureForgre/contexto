@@ -560,9 +560,20 @@ def test_seat_sized_head_does_not_thrash():
 
 
 def hook_system(t):
-    # Measured shape (single three-turn probe, live_probe.sh hook case): about 70 characters of
-    # text, no output_config, right after a later turn's prompt; cache_control rides on the newest.
-    return {"role": "system", "content": [{"type": "text", "text": f"Synthetic hook context {t}"}]}
+    # Measured on Claude Code 2.1.301 (live_probe.sh hook case): text only, no output_config, right
+    # after the prompt, wrapped as "UserPromptSubmit hook additional context: <payload>".
+    return {"role": "system", "content": [{"type": "text",
+                                           "text": f"UserPromptSubmit hook additional context: Synthetic hook context {t}"}]}
+
+
+def post_tool_hook(t, tool="Read"):
+    # Measured: right after the tool_result, wrapped as "PostToolUse:<tool> hook additional context: ".
+    return {"role": "system", "content": f"PostToolUse:{tool} hook additional context: Synthetic hook context {t}"}
+
+
+def style_message(name="Explanatory"):
+    # Measured: an output-style change is a text-only system message starting "# Output Style: <name>".
+    return {"role": "system", "content": f"# Output Style: {name}\n" + "synthetic style instructions " * 60}
 
 
 def non_text_system():
@@ -571,12 +582,14 @@ def non_text_system():
 
 def test_system_message_classes_follow_contract_pr_38():
     msgs = [user("p0", context=True), system("session start text"), hook_system(0), assistant("a0"),
-            user("p1"), hook_system(1), tool_use(1), tool_result(1), hook_system(11), assistant("a1"),
+            user("p1"), hook_system(1), tool_use(1), tool_result(1), post_tool_hook(11), assistant("a1"),
             settings_only("high"), user("p2"), settings_only("low"), assistant("a2"),
-            system("resumed full system text"), non_text_system()]
+            system("resumed full system text"), non_text_system(), style_message(),
+            {"role": "system", "content": "Synthetic hook context without the documented wrapper"}]
     kinds = {i: classify_system(msgs, i) for i, m in enumerate(msgs) if m["role"] == "system"}
-    assert kinds == {1: "session_start", 2: "per_turn", 5: "per_turn", 8: "per_turn", 10: "settings",
-                     12: "settings", 14: "session_start", 15: "unclassified"}
+    assert kinds == {1: "session_start", 2: "hook_output", 5: "hook_output", 8: "hook_output", 10: "settings",
+                     12: "settings", 14: "session_start", 15: "unclassified", 16: "carried_text",
+                     17: "carried_text"}
 
 
 def test_session_start_with_text_and_output_config_is_not_settings_only():
@@ -656,9 +669,66 @@ def test_post_tool_use_hook_messages_are_paged_and_carried_stays_flat():
     for t in range(1, 20):
         msgs = msgs + [user(f"prompt {t} {FILL}")]
         engine(request(msgs), {}, MESSAGES)
-        msgs = msgs + [tool_use(t), tool_result(t, f"out {t} {FILL}"), hook_system(100 + t)]
+        msgs = msgs + [tool_use(t), tool_result(t, f"out {t} {FILL}"), post_tool_hook(100 + t)]
         _, _, ev = engine(request(msgs), {}, MESSAGES)
         assert "carried_over_budget" not in names(ev) and "unclassified_system_message" not in names(ev)
         msgs = msgs + [assistant(f"a{t} {FILL}")]
     paged = "".join(canonical_bytes(p).decode() for p in store.pages.values())
     assert paged.count("Synthetic hook context 1") >= 5  # PostToolUse context paged with its turns
+
+
+def test_documented_hook_signatures_and_version():
+    from contexto.rewrite import HOOK_SIGNATURES_CLAUDE_CODE_VERSION, is_hook_output
+    assert HOOK_SIGNATURES_CLAUDE_CODE_VERSION == "2.1.301"
+    assert is_hook_output(hook_system(1)) and is_hook_output(post_tool_hook(2, "Bash"))
+    assert not is_hook_output({"role": "system", "content": "Some hook additional context: x"})
+    assert not is_hook_output({"role": "system", "content": [{"type": "image", "source": {}}]})
+
+
+def test_output_style_and_plan_mode_messages_are_carried():
+    plan = {"role": "system", "content": "Plan mode is active. " + "synthetic plan instructions " * 40}
+    msgs = [user(f"prompt 0 {FILL}", context=True), system("sys A"), assistant(f"a0 {FILL}"),
+            user(f"prompt 1 {FILL}"), style_message(), assistant(f"a1 {FILL}"),
+            user(f"prompt 2 {FILL}"), plan, assistant(f"a2 {FILL}")]
+    for t in range(3, 8):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    up, st, _, store = run(msgs, config=Config(bound=8_000, headroom_floor=500))
+    assert st.k > 7 and msgs[4] in up["messages"] and plan in up["messages"]
+    assert all("Output Style" not in canonical_bytes(p).decode() for p in store.pages.values())
+
+
+def test_fallback_pages_superseded_carried_text_first_and_keeps_latest_of_each_kind():
+    store = MemoryStore(key=b"k" * 32)
+    cfg = Config(bound=30_000, headroom_floor=500, carried_text_budget=1_000, carried_budget=1_000_000)
+    engine = RewriteEngine(store, config=cfg)
+    msgs = [user(f"prompt 0 {FILL}", context=True), system("sys A")]
+    engine(request(msgs), {}, MESSAGES)
+    msgs.append(assistant(f"a0 {FILL}"))
+    styles = []
+    for t in range(1, 10):
+        style = style_message(f"Style{t}")
+        styles.append(style)
+        msgs += [user(f"prompt {t} {FILL}"), style, assistant(f"a{t} {FILL}")]
+    for t in range(10, 30):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    up, _, ev = engine(request(msgs), {}, MESSAGES)
+    paged = [e for e in ev if e["event"] == "carried_paged"]
+    assert "rotation" in names(ev) and paged and paged[0]["count"] >= 1
+    assert styles[-1] in up["messages"]  # the latest output style is never paged
+    assert styles[0] not in up["messages"]  # the oldest superseded one went first
+    pages = "".join(canonical_bytes(p).decode() for p in store.pages.values())
+    assert "Output Style: Style1" in pages
+
+
+def test_carried_text_growing_per_turn_is_reported_early():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=10_000_000, headroom_floor=500))
+    msgs = [user("p0"), system("sys A")]
+    engine(request(msgs), {}, MESSAGES)
+    seen = []
+    for t in range(1, 5):
+        msgs = msgs + [assistant(f"a{t}"), user(f"p{t}"), {"role": "system", "content": f"New standing note {t}"}]
+        _, _, ev = engine(request(msgs), {}, MESSAGES)
+        seen.append("carried_text_growing" in names(ev))
+    assert True in seen and seen.count(True) == 1  # reported once, when the growth starts per turn
