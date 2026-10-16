@@ -120,7 +120,13 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    would be published for the new turn (`bound - estimate - headroom_floor`) is below `min_turn_room`
    (default 20,000); without that second condition the room is smallest on the turn just before a
    rotation, because both shrink toward the same line (engine-driven estimate, PR #113: 5,219 at
-   the start of turn 4, 738 at its lowest). Estimate = last upstream
+   the start of turn 4, 738 at its lowest). A rotation fired by the room condition sizes its window
+   target as `0.5 * (W - min_turn_room)` instead of `0.5 * W` (rule 4), falling back to the minimal
+   window, so the room it publishes is at least `min_turn_room`. It fires only if that rotation
+   would actually restore a room of at least `min_turn_room`; otherwise the engine does not rotate
+   for the room and logs `turn_room_low` once per epoch. This keeps a small bound from rotating on
+   every turn (reviewer-2: a plain re-trigger would thrash at bounds of 42,000 to 100,000).
+   `budget.simulate` models both conditions. Estimate = last upstream
    `input_tokens + cache_read + cache_creation` for this session plus the bytes added since.
    Until the first real usage arrives, count `tool_result` content at 1.5 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
