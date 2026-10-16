@@ -450,8 +450,8 @@ def test_carried_settings_only_messages_keep_latest_per_key():
 
 def test_carried_growth_over_budget_is_reported_not_paged():
     # Rule 13: carried content that grows after the first request is reported, never paged; the initial
-    # size is normal. An unclassified system message (content after an assistant message in a later
-    # turn) is carried, so it is the way carried content can still grow.
+    # size is normal. A later message with content and settings fields (session_start, carried) is one
+    # way carried content can still grow.
     engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=14_000, headroom_floor=500, carried_budget=1_000))
     start = [user(f"prompt 0 {FILL}", context=True), system("sys A")]
     engine(request(start), {}, MESSAGES)
@@ -463,7 +463,7 @@ def test_carried_growth_over_budget_is_reported_not_paged():
     up, _, ev = engine(request(msgs), {}, MESSAGES)
     over = [e for e in ev if e["event"] == "carried_over_budget"]
     assert "rotation" in names(ev) and over and over[0]["carried_growth"] > 1_000
-    assert [e["count"] for e in ev if e["event"] == "unclassified_system_message"] == [1]
+    assert "unclassified_system_message" not in names(ev)  # content plus output_config: session_start
     assert big in up["messages"]  # still carried, never paged
     assert all(isinstance(v, (int, str)) and (not isinstance(v, str) or len(v) < 40) for v in over[0].values())
 
@@ -565,12 +565,18 @@ def hook_system(t):
     return {"role": "system", "content": [{"type": "text", "text": f"Synthetic hook context {t}"}]}
 
 
-def test_system_message_classes_follow_measured_shapes():
-    msgs = [user("p0", context=True), system("session start text"), assistant("a0"),
-            user("p1"), hook_system(1), assistant("a1"), settings_only("high"),
-            user("p2"), settings_only("low"), hook_system(2), assistant("a2"), system("after assistant")]
+def non_text_system():
+    return {"role": "system", "content": [{"type": "image", "source": {"type": "base64", "data": "AA=="}}]}
+
+
+def test_system_message_classes_follow_contract_pr_38():
+    msgs = [user("p0", context=True), system("session start text"), hook_system(0), assistant("a0"),
+            user("p1"), hook_system(1), tool_use(1), tool_result(1), hook_system(11), assistant("a1"),
+            settings_only("high"), user("p2"), settings_only("low"), assistant("a2"),
+            system("resumed full system text"), non_text_system()]
     kinds = {i: classify_system(msgs, i) for i, m in enumerate(msgs) if m["role"] == "system"}
-    assert kinds == {1: "session_start", 4: "per_turn", 6: "settings", 8: "settings", 9: "per_turn", 11: "unclassified"}
+    assert kinds == {1: "session_start", 2: "per_turn", 5: "per_turn", 8: "per_turn", 10: "settings",
+                     12: "settings", 14: "session_start", 15: "unclassified"}
 
 
 def test_session_start_with_text_and_output_config_is_not_settings_only():
@@ -613,3 +619,46 @@ def test_paged_change_resync_reports_kept_inflight_thinking():
     _, _, ev, _ = run(changed, state=st, store=store)
     resync = next(e for e in ev if e["event"] == "resync")
     assert resync["kind"] == "paged_changed" and resync["inflight_thinking_kept"] is True
+
+
+def test_unclassified_non_text_system_message_is_carried_and_logged():
+    msgs = [user(f"prompt 0 {FILL}", context=True), system("sys A"), assistant(f"a0 {FILL}"),
+            user(f"prompt 1 {FILL}"), assistant(f"a1 {FILL}"), non_text_system()]
+    for t in range(2, 7):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    up, st, ev, _ = run(msgs)
+    assert st.k > 5 and [e["count"] for e in ev if e["event"] == "unclassified_system_message"] == [1]
+    assert msgs[5] in up["messages"]  # carried, never paged
+
+
+def test_resumed_full_system_text_after_new_prompt_is_carried():
+    # Measured on a hand-written session-file resume: the full system text (with output_config)
+    # follows the new prompt; it is session_start and carried, not paged with its turn.
+    resumed = system("resumed full system text")
+    msgs = [user(f"prompt 0 {FILL}"), settings_only(), assistant(f"a0 {FILL}"),
+            user(f"prompt 1 {FILL}", context=True), resumed, assistant(f"a1 {FILL}")]
+    for t in range(2, 7):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    up, st, _, store = run(msgs)
+    assert st.k > 4 and resumed in up["messages"]
+    assert all("resumed full system text" not in canonical_bytes(p).decode() for p in store.pages.values())
+
+
+def test_post_tool_use_hook_messages_are_paged_and_carried_stays_flat():
+    # reviewer-2 measured (two real-CLI turns): PostToolUse additionalContext lands as a text-only
+    # system message right after the tool_result.
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=Config(bound=12_000, headroom_floor=500, pin_budget=200, index_budget=200))
+    msgs = [user(f"prompt 0 {FILL}", context=True), system("session start"), assistant(f"a0 {FILL}")]
+    engine(request(msgs[:2]), {}, MESSAGES)
+    for t in range(1, 20):
+        msgs = msgs + [user(f"prompt {t} {FILL}")]
+        engine(request(msgs), {}, MESSAGES)
+        msgs = msgs + [tool_use(t), tool_result(t, f"out {t} {FILL}"), hook_system(100 + t)]
+        _, _, ev = engine(request(msgs), {}, MESSAGES)
+        assert "carried_over_budget" not in names(ev) and "unclassified_system_message" not in names(ev)
+        msgs = msgs + [assistant(f"a{t} {FILL}")]
+    paged = "".join(canonical_bytes(p).decode() for p in store.pages.values())
+    assert paged.count("Synthetic hook context 1") >= 5  # PostToolUse context paged with its turns

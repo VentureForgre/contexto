@@ -20,9 +20,9 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   prompt belongs to the new turn.
 - Carried content is never paged: the context blocks of paged turn-start messages and the carried
   system messages of paged turns (contract PR #35), in the form the CLI sends now. ``classify_system``
-  sorts every system message deterministically: ``settings`` (empty content plus settings fields;
-  rule 12), ``session_start`` (content, first turn), ``per_turn`` (content, a later turn, before its
-  first assistant message; per-turn hook context lands there) and ``unclassified`` (anything else).
+  sorts every system message deterministically (contract PR #38): ``settings`` (empty content plus
+  settings fields; rule 12), ``session_start`` (content plus settings fields), ``per_turn`` (any other
+  text-only content, wherever it sits; per-turn hook context) and ``unclassified`` (non-text content).
   Session-start, settings-only (latest per key) and unclassified messages are carried, an unclassified
   one also logging ``unclassified_system_message``; per-turn ones are paged with their turn. Settings-only system messages accrue per settings
   change (measured), so only the latest per settings key is carried; the carried set is computed from
@@ -210,24 +210,33 @@ PER_TURN = "per_turn"
 UNCLASSIFIED = "unclassified"
 
 
-def classify_system(messages: list[dict], i: int) -> str:
-    """Deterministic class of the system message at ``messages[i]`` (contract PR #35, measured shapes in
-    spikes/m2/carried/README.md):
+def is_text_only(message: dict) -> bool:
+    content = message.get("content")
+    if isinstance(content, str):
+        return True
+    return isinstance(content, list) and all(isinstance(b, dict) and b.get("type") == "text" for b in content)
 
-    - ``settings``: empty content plus settings fields such as ``output_config`` (checked first; a
-      message with text content is never settings-only, even with ``output_config``).
-    - ``session_start``: a system message with content inside the first turn.
-    - ``per_turn``: a system message with content in a later turn, before that turn's first assistant
-      message (where per-turn hook context lands); paged with its turn.
-    - ``unclassified``: anything else (for example a content message after an assistant message in a
-      later turn); carried, and reported as ``unclassified_system_message``.
+
+def classify_system(messages: list[dict], i: int) -> str:
+    """Deterministic class of the system message at ``messages[i]`` (contract PR #38 at 10f1cfa, from
+    reviewer-2's and builder-2's zero-spend measurements in spikes/m2/carried/README.md):
+
+    - ``settings``: empty content plus settings fields such as ``output_config``.
+    - ``session_start``: content plus settings fields (the session-start message carries
+      ``output_config``; hook messages do not).
+    - ``per_turn``: any other text-only content, wherever it sits (UserPromptSubmit hook context after a
+      prompt, PostToolUse hook context after a ``tool_result``); paged with its turn.
+    - ``unclassified``: non-text content; carried, and reported as ``unclassified_system_message``.
+
+    ``messages`` is accepted for a uniform signature; the class depends on the message alone.
     """
-    if settings_key(messages[i]) is not None:
+    m = messages[i]
+    has_settings = any(k not in ("role", "content") for k in m)
+    if settings_key(m) is not None:
         return SETTINGS
-    starts = turn_starts(messages[: i + 1])
-    if len(starts) <= 1:
+    if has_settings and m.get("content") not in ([], "", None):
         return SESSION_START
-    if all(m.get("role") != "assistant" for m in messages[starts[-1]:i]):
+    if is_text_only(m):
         return PER_TURN
     return UNCLASSIFIED
 

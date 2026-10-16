@@ -2,7 +2,8 @@
 # Zero-token live multi-turn shape probe: a throwaway Claude Code session talks to
 # fake_model_stub.py on loopback for six turns (turn 1 asks for a tool, so its turn has a tool
 # loop; turns 4 and 6 change --effort), resuming the CLI-written session each time; then a
-# four-turn session with a per-turn context hook, and a four-turn session that adds and removes an
+# four-turn session with a per-turn context hook, a two-turn session with UserPromptSubmit and
+# PostToolUse hooks (turn 1 runs a tool), and a four-turn session that adds and removes an
 # MCP server. Isolated config, dummy key, scrubbed env,
 # pinned model. Output: <repo>/.contexto/spikes/M2-A2/live-shapes.jsonl
 set -u
@@ -43,6 +44,14 @@ turn hook-turn1 --session-id "$SID2" --settings "$HOOKS" "Synthetic hook prompt 
 turn hook-turn2 --resume "$SID2" --settings "$HOOKS" "Synthetic hook prompt two."
 turn hook-turn3 --resume "$SID2" --settings "$HOOKS" "Synthetic hook prompt three."
 turn hook-turn4 --resume "$SID2" --settings "$HOOKS" "Synthetic hook prompt four."
+
+# PostToolUse case: hooks on both UserPromptSubmit and PostToolUse; turn 1 runs a tool.
+HOOKS2="$TMP/hook-settings-2.json"
+printf '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 %s"}]}], "PostToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "python3 %s"}]}]}}\n' \
+  "$S/hook_context.py" "$S/hook_context.py" > "$HOOKS2"
+SID4=$(python3 -c "import uuid; print(uuid.uuid4())")
+turn posttool-turn1-tool --session-id "$SID4" --settings "$HOOKS2" "Synthetic tool prompt one. USE_TOOL"
+turn posttool-turn2 --resume "$SID4" --settings "$HOOKS2" "Synthetic tool prompt two."
 
 # Tool-addition case: a resume that adds an MCP server (its tools are sent upfront behind a
 # non-first-party base URL), then a resume that drops it again.
