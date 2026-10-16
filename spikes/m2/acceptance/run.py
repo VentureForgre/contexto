@@ -40,19 +40,23 @@ def compare(h1: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_replay(args: argparse.Namespace) -> int:
-    """Phase 2: the full-context baseline. Builds the request from the H1 run's own JSONL, checks the
-    exact token count against the context window and the approval, then sends it once."""
+    """The full-context baseline, D27's symmetric form (intake, 2026-10-16 05:42Z): one request per
+    probe turn, sent in order, request k carrying probe turns 1..k-1 with the baseline's own answers.
+    Each is built from the H1 run's own JSONL, checked with count_tokens against the context window and
+    what is left of the approval, then sent once; the first failure stops the rest."""
     from acceptance import credcheck, replay
 
     s, _ = plan(args.seed, 0, args.turn_kbytes * 1_000)
     try:
-        request = replay.build_request(detectors.read_jsonl(args.cc_jsonl), s.turns[-1], args.max_tokens)
-    except (replay.ReplayError, OSError) as exc:
-        print(f"refusing: {exc}", file=sys.stderr)
+        parts = replay.turn_requests(detectors.read_jsonl(args.cc_jsonl), list(s.probe_texts), args.max_tokens)
+        first = replay.baseline_request(parts, [], 1)
+    except (replay.ReplayError, OSError, StopIteration) as exc:
+        print(f"refusing: {exc or 'the first probe turn is not in the JSONL'}", file=sys.stderr)
         return 2
-    out: dict[str, Any] = {"request": replay.summary(request), "label": "no-replayed-thinking baseline",
-                           "changes_from_recorded": request.get("_changes") or {},
-                           "betas": replay.harness_betas(request.get("_betas"))}
+    out: dict[str, Any] = {"label": "no-replayed-thinking baseline, D27: one request per probe turn",
+                           "changes_from_recorded": first.get("_changes") or {},
+                           "betas": replay.harness_betas(first.get("_betas")), "first_request": replay.summary(first),
+                           "probe_turns": len(s.probe_texts), "turns": []}
     if args.dry:
         print(json.dumps(out, indent=2))
         return 0
@@ -69,35 +73,71 @@ def run_replay(args: argparse.Namespace) -> int:
     except (RuntimeError, OSError):
         print("refusing: the seat's apiKeyHelper did not produce a key; output not shown", file=sys.stderr)
         return 2
-    status = 0
+    if args.h1_record is not None:
+        try:
+            h1_spent = int(json.loads(args.h1_record.read_text(encoding="utf-8"))["spent"])
+        except (OSError, ValueError, KeyError, TypeError):
+            print("refusing: --h1-record is not a live run's H1 record", file=sys.stderr)
+            return 2
+        out["approval"] = {"combined": args.approved, "h1_spent": h1_spent, "replay": args.approved - h1_spent}
+        args.approved -= h1_spent
+    status, spent, answers = 0, 0, []
+    window = args.context_window or replay.CONTEXT_WINDOW
     try:
-        tokens = replay.count_tokens(request, upstream, key)
-        out["count_tokens"] = tokens
-        window = args.context_window or replay.CONTEXT_WINDOW
-        reason = replay.check_fits(tokens, args.max_tokens, window, args.approved)
-        if reason:
-            out["stopped"] = reason
-            status = 1
-        else:
+        for k in range(1, len(s.probe_texts) + 1):
+            request = replay.baseline_request(parts, answers, k)
+            turn: dict[str, Any] = {"turn": k, "messages": len(request["messages"])}
+            out["turns"].append(turn)
+            tokens = replay.count_tokens(request, upstream, key)
+            turn["count_tokens"] = tokens
+            reason = replay.check_fits(tokens, args.max_tokens, window, args.approved - spent)
+            if reason:
+                out["stopped"] = f"turn {k}: {reason}"
+                status = 1
+                break
             result = replay.send(request, upstream, key)
-            (args.out / "baseline-answers.txt").write_text(result["text"] + "\n", encoding="utf-8")
-            out.update({"status": result["status"], "usage": result["usage"], "stop_reason": result["stop_reason"],
-                        "blocks": result["blocks"], "answer_chars": len(result["text"])})
+            usage = result["usage"]
+            spent += sum(int(usage.get(f) or 0) for f in ("input_tokens", "cache_creation_input_tokens",
+                                                          "cache_read_input_tokens", "output_tokens"))
+            answers.append(result["text"])
+            turn.update({"status": result["status"], "usage": usage, "stop_reason": result["stop_reason"],
+                         "blocks": result["blocks"], "answer_chars": len(result["text"])})
     except (replay.ReplayError, driver.AuthFailure, OSError) as exc:
         out["stopped"] = str(exc)
         status = 1
     finally:
         del key
+    out["spent"] = spent
+    (args.out / "baseline-answers.txt").write_text("\n".join(answers) + "\n", encoding="utf-8")
     (args.out / "replay-result.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     print(json.dumps(out, indent=2))
     return status
+
+
+def h1_spend(results_spent: int, session_log: list[dict[str, Any]], abnormal: bool, reserve: int) -> dict[str, int]:
+    """What H1 cost, for the replay's approval (reviewer-2, PR #112). The driver's figure grows only
+    when a turn's result arrives, so a stop inside a turn (the spend watcher in a tool loop, a 401 or
+    403, Claude Code exiting) drops that turn's requests. The proxy logs every Messages response's
+    usage, which is what was billed: take the larger of the two. On an abnormal stop a request may also
+    have been in flight, unlogged: allow one more of the last logged input plus the output reserve."""
+    logged, last_input = 0, 0
+    for ev in session_log:
+        if ev.get("event") == "request" and str(ev.get("path") or "").split("?")[0] == "/v1/messages" and ev.get("usage"):
+            usage = ev["usage"]
+            inp = sum(int(usage.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
+                                                       "cache_read_input_tokens"))
+            logged += inp + int(usage.get("output_tokens") or 0)
+            last_input = inp
+    in_flight = last_input + reserve if abnormal else 0
+    return {"spent": max(results_spent, logged) + in_flight, "spent_results": results_spent,
+            "spent_logged": logged, "in_flight_allowance": in_flight}
 
 
 def plan(seed: int = script.DEFAULT_SEED, turns: int = 0, turn_bytes: int = 40_000,
          params: budget.Params = budget.Params()) -> tuple[script.Script, budget.Budget]:
     """The script and its simulated budget: the one figure dry-run prints, the doc shows, and live gates on."""
     s = build_script(seed, turns, turn_bytes, params)
-    return s, budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], params)
+    return s, budget.simulate(list(s.content_bytes), list(s.probe_bytes), params)
 
 
 def build_script(seed: int, turns: int, turn_bytes: int, params: budget.Params) -> script.Script:
@@ -107,7 +147,7 @@ def build_script(seed: int, turns: int, turn_bytes: int, params: budget.Params) 
     n = 4
     while True:
         s = script.build(seed, n, turn_bytes)
-        tokens = sum(budget.turn_tokens(x) + params.reply_tokens for x in s.turn_bytes[:-1])
+        tokens = sum(budget.turn_tokens(x) + params.reply_tokens for x in s.content_bytes)
         if tokens >= 2.5 * params.bound:
             return s
         n += 1
@@ -138,7 +178,11 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--cc-jsonl", type=Path, required=True, help="the H1 run's Claude Code session JSONL")
     rep.add_argument("--out", type=Path, required=True, help="private directory for the answers and counts")
     rep.add_argument("--dry", action="store_true", help="build the request and print its sizes; no calls")
-    rep.add_argument("--approved", type=int, default=0, help="tokens intake approved for the replay")
+    rep.add_argument("--approved", type=int, default=0,
+                     help="tokens the replay may spend; with --h1-record, the combined approval instead")
+    rep.add_argument("--h1-record", type=Path, default=None,
+                     help="the live run's <home>/acceptance-<session>-h1.json: the replay may then spend "
+                          "--approved (the combined approval) minus the H1 spend recorded there")
     rep.add_argument("--seat-settings", type=Path, default=None)
     rep.add_argument("--upstream", default=None, help="upstream base URL (default: $ANTHROPIC_BASE_URL)")
     rep.add_argument("--context-window", type=int, default=None)
@@ -176,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         from acceptance import reach
 
         s, _ = plan(args.seed, 0, args.turn_kbytes * 1_000)
-        result = reach.reach(list(s.probes), reach.load_pages(args.session_dir), turn_texts=list(s.turns[:-1]))
+        result = reach.reach(list(s.probes), reach.load_pages(args.session_dir), turn_texts=list(s.content_turns))
         print(json.dumps({k: v for k, v in result.items() if k != "rows"}, indent=2))
         return 0 if not result["unreachable"] and result.get("mapping_ok", True) else 1  # fails closed
 
@@ -208,13 +252,13 @@ def main(argv: list[str] | None = None) -> int:
         print(budget.approval_table(b))
         return 0
     if args.command == "dry-run":
-        print(f"Script: seed {s.seed}, {len(s.turns) - 1} content turns of about {args.turn_kbytes} KB, "
+        print(f"Script: seed {s.seed}, {s.n_content} content turns of about {args.turn_kbytes} KB, "
               f"{len(s.probes)} probes ({len(s.paged_only)} paged-only), restatements {len(script.restatements(s))}.")
         print()
         print(budget.table(b, params))
         print()
         print("Turn-size sweep (smallest turn count reaching 2.5x the bound):")
-        for row in budget.sweep(s.turn_bytes[-1], params):
+        for row in budget.sweep(list(s.probe_bytes), params):
             print(json.dumps(row))
         return 0
     if args.command == "score":
@@ -229,9 +273,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"refusing: planned history {b.history_tokens:,} is below 2.5x the bound ({int(2.5 * args.bound):,})",
               file=sys.stderr)
         return 2
-    if args.approved < b.h1_worst:
-        print(f"refusing: approved {args.approved:,} is below the worst-case H1 cost {b.h1_worst:,}", file=sys.stderr)
+    # D27 (intake 05:42Z): the approval covers H1 and the six-request baseline, and the gate is their
+    # combined worst case. H1's guards stop at the approval minus the baseline's worst, so the
+    # baseline always keeps its share.
+    combined_worst = b.h1_worst + b.baseline_replay_worst
+    if args.approved < combined_worst:
+        print(f"refusing: approved {args.approved:,} is below the combined worst case {combined_worst:,} "
+              f"(H1 {b.h1_worst:,} + baseline {b.baseline_replay_worst:,})", file=sys.stderr)
         return 2
+    h1_cap = args.approved - b.baseline_replay_worst
     upstream = args.upstream or os.environ.get("ANTHROPIC_BASE_URL")
     if not upstream:
         print("refusing: no upstream (pass --upstream or set ANTHROPIC_BASE_URL)", file=sys.stderr)
@@ -248,18 +298,27 @@ def main(argv: list[str] | None = None) -> int:
     session_log = args.home / "sessions" / args.session / "log.jsonl"
     transport = driver.StreamJsonTransport(driver.launcher_command(args.session, args.bound, upstream), args.scratch,
                                            driver.child_env(args.home, config), session_log,
-                                           approved=args.approved, reserve=params.max_tokens_reserve)
-    run = driver.Run(transport, args.approved, params.max_tokens_reserve, estimates)
+                                           approved=h1_cap, reserve=params.max_tokens_reserve)
+    run = driver.Run(transport, h1_cap, params.max_tokens_reserve, estimates)
     status = 0
     try:
-        answer = driver.run_session(list(s.turns), run)
-        (args.home / f"acceptance-{args.session}-answers.txt").write_text(answer + "\n", encoding="utf-8")
+        answers = driver.run_session_all(list(s.turns), run)
+        # D27: the answers of every probe turn, in order, so the scorer sees all 54 lines
+        probe_answers = answers[s.n_content:]
+        (args.home / f"acceptance-{args.session}-answers.txt").write_text("\n".join(probe_answers) + "\n",
+                                                                         encoding="utf-8")
     except (driver.BudgetExceeded, driver.AuthFailure, RuntimeError) as exc:
         print(f"stopped: {exc}", file=sys.stderr)
         status = 1
     finally:
         transport.close()
-    print(json.dumps({"spent": run.spent, "turns": run.turns, "stream_compactions": transport.compactions}, indent=2))
+    spend = h1_spend(run.spent, detectors.read_jsonl(session_log) if session_log.exists() else [],
+                     abnormal=status != 0, reserve=params.max_tokens_reserve)
+    record = {**spend, "turns": run.turns, "stream_compactions": transport.compactions,
+              "approved": args.approved, "h1_cap": h1_cap, "baseline_worst": b.baseline_replay_worst}
+    # The replay's approval is the combined approval minus this spend (run.py replay --h1-record).
+    (args.home / f"acceptance-{args.session}-h1.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    print(json.dumps(record, indent=2))
     return status
 
 

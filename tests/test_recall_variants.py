@@ -91,7 +91,7 @@ def test_no_answer_of_the_acceptance_script_reaches_the_index():
     script = acceptance.build(acceptance.DEFAULT_SEED)
     store = MemoryStore()
     store.page_out([[{"role": "user", "content": text}, {"role": "assistant", "content": "OK"}]
-                    for text in script.turns[:-1]], 0)
+                    for text in script.content_turns], 0)  # D27: the probe turns are not content
     index = store.index_text(1_000_000)
     assert "retention_days" in index
     answers = {a.strip() for p in script.probes for a in p.answer.split(",")} - {""}

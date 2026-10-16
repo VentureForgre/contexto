@@ -51,16 +51,16 @@ def test_paged_only_plants_sit_only_in_the_first_turn(s):
 
 
 def test_every_plant_statement_appears_once_and_the_probe_turn_holds_no_answer(s):
-    joined = "\n".join(s.turns[:-1])
+    joined = "\n".join(s.content_turns)
     for p in s.probes:
         for st in p.statements:
             assert joined.count(st) >= 1
         if p.kind == "value" and p.type != "obligations":
-            assert p.answer not in s.turns[-1]
+            assert not any(p.answer in text for text in s.probe_texts)
 
 
 def test_turns_reach_the_requested_size(s):
-    for size in s.turn_bytes[:-1]:
+    for size in s.content_bytes:
         assert abs(size - 30_000) <= 0.03 * 30_000
 
 
@@ -68,7 +68,7 @@ def test_turns_reach_the_requested_size(s):
 
 
 def test_rotation_always_retains_the_newest_complete_turn(s):
-    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], budget.Params())
+    b = budget.simulate(list(s.content_bytes), list(s.probe_bytes), budget.Params())
     for row in b.rows[1:]:
         if row.kind == "turn":
             assert row.retained_turns >= 1
@@ -80,7 +80,7 @@ def test_rotation_always_retains_the_newest_complete_turn(s):
 
 def test_budget_lines_and_worst_case(s):
     p = budget.Params(bound=100_000)
-    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], p)
+    b = budget.simulate(list(s.content_bytes), list(s.probe_bytes), p)
     assert b.h1_worst > b.h1_expected > 0
     assert b.baseline_cli > b.baseline_replay > b.history_tokens
     assert b.h1_worst - b.h1_expected == sum(p.max_tokens_reserve - r.output_expected for r in b.rows)
@@ -89,8 +89,9 @@ def test_budget_lines_and_worst_case(s):
 def test_bound_too_small_when_the_window_budget_cannot_hold_a_turn():
     # 44 KB turns at a 54.5k head and a 100k bound: W = 20,500 cannot hold a 22k-token turn (rule 4).
     big = script.build(turns=12, turn_bytes=44_000)
-    b = budget.simulate(list(big.turn_bytes[:-1]), big.turn_bytes[-1], budget.Params(bound=100_000, head=54_500))
-    assert b.bound_too_small > 0 and b.planned_over_bound > 0 and b.rotations == 0
+    b = budget.simulate(list(big.content_bytes), list(big.probe_bytes), budget.Params(bound=100_000, head=54_500))
+    assert b.bound_too_small > 0 and b.planned_over_bound > 0
+    assert not any(r.note == "rotation" for r in b.rows if r.kind == "turn")  # no content turn rotates
     assert b.window_budget_first == 100_000 - 25_000 - 54_500
 
 
@@ -308,7 +309,7 @@ def test_live_refuses_without_enough_approved_budget(tmp_path, capsys):
     seat.write_text("{}")
     code = run.main(["live", "--approved", "1000", "--scratch", str(tmp_path / "s"), "--home", str(tmp_path / "h"),
                      "--session", "x", "--seat-settings", str(seat)])
-    assert code == 2 and "worst-case" in capsys.readouterr().err
+    assert code == 2 and "combined worst case" in capsys.readouterr().err
 
 
 def test_dry_run_prints_the_budget(capsys):
@@ -321,11 +322,11 @@ def test_auto_turn_count_reaches_the_acceptance_history_at_150k():
     p = budget.Params()
     assert p.bound == 150_000
     s = run.build_script(script.DEFAULT_SEED, 0, 40_000, p)
-    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], p)
+    b = budget.simulate(list(s.content_bytes), list(s.probe_bytes), p)
     assert b.history_tokens >= 375_000 and b.planned_over_bound == 0 and b.bound_too_small == 0
-    shorter = script.build(script.DEFAULT_SEED, len(s.turns) - 2, 40_000)
-    assert sum(budget.turn_tokens(x) + p.reply_tokens for x in shorter.turn_bytes[:-1]) < 375_000
-    assert b.h1_worst + b.baseline_replay_worst < 4_000_000
+    shorter = script.build(script.DEFAULT_SEED, s.n_content - 1, 40_000)
+    assert sum(budget.turn_tokens(x) + p.reply_tokens for x in shorter.content_bytes) < 375_000
+    # D27 (6x9 plus a six-request baseline) is above the earlier 4,000,000 budget: a new approval, not a test.
 
 
 @pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
@@ -408,8 +409,9 @@ def test_window_must_hold_the_newest_complete_turn_and_the_new_one():
     # over the bound, because W (about 60,000) cannot hold two turns of about 39,000 tokens.
     p = budget.Params()
     s = run.build_script(script.DEFAULT_SEED, 0, 70_000, p)
-    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], p)
-    assert b.bound_too_small > 0 and b.planned_over_bound > 0 and b.rotations == 0
+    b = budget.simulate(list(s.content_bytes), list(s.probe_bytes), p)
+    assert b.bound_too_small > 0 and b.planned_over_bound > 0
+    assert not any(r.note == "rotation" for r in b.rows if r.kind == "turn")  # no content turn rotates
 
 
 def test_stub_dry_run_models_log_text_and_the_rest_separately():
@@ -425,9 +427,9 @@ def test_stub_dry_run_models_log_text_and_the_rest_separately():
 
 def test_probe_turn_is_tool_neutral_and_the_recall_budget_is_report_only():
     s4 = script.build(turns=4, turn_bytes=8_000)
-    probe = s4.turns[-1]
-    assert "contexto" not in probe and "recall" not in probe  # intake: product-realistic wording
-    assert "If the conversation does not contain it, say unknown." in probe
+    for probe in s4.probe_texts:
+        assert "contexto" not in probe and "recall" not in probe  # intake: product-realistic wording
+        assert "If the conversation does not contain it, say unknown." in probe
     assert detectors.MAX_RECALLS == script.MAX_RECALLS == budget.Params().recalls == 2
     calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * 3
     r = detectors.analyze(calls, [], bound=150_000)
@@ -441,12 +443,13 @@ def test_the_doc_carries_the_budget_live_gates_on():
     block = re.search(r"<!-- approval-table:begin -->\n(.*?)\n<!-- approval-table:end -->", doc, re.S)
     _, b = run.plan()
     assert block and block.group(1) == budget.approval_table(b)
-    assert f"{b.h1_worst:,}" in block.group(1)  # the figure run.py live refuses to go below
+    assert f"{b.h1_worst + b.baseline_replay_worst:,}" in block.group(1)  # the figure run.py live refuses to go below
 
 
 def test_live_refuses_a_missing_seat_settings_file_or_a_git_scratch(tmp_path, capsys):
     _, b = run.plan()
-    common = ["live", "--approved", str(b.h1_worst), "--home", str(tmp_path / "h"), "--session", "x",
+    common = ["live", "--approved", str(b.h1_worst + b.baseline_replay_worst), "--home", str(tmp_path / "h"),
+              "--session", "x",
               "--upstream", "http://127.0.0.1:9"]
     code = run.main([*common, "--scratch", str(tmp_path / "s"), "--seat-settings", str(tmp_path / "missing.json")])
     assert code == 2 and "refusing: the seat settings file" in capsys.readouterr().err
@@ -463,9 +466,9 @@ def test_recalls_are_priced_at_the_largest_b9_chunk_and_the_probe_turn_fits():
     assert b.recall_tokens == budget.recall_tokens(budget.Params()) == 17_778  # 32,000 chars at 1.8
     assert budget.b9_recall_tokens(84_303) <= b.recall_tokens  # B9 returns less at a smaller W
     assert budget.b9_recall_tokens(84_303) == math.ceil(int(84_303 / 4 * 1.5) / 1.8)
-    probe_turn = [r for r in b.rows if r.kind in ("probe", "recall")]
-    assert len(probe_turn) == 1 + script.MAX_RECALLS
-    assert max(r.input_tokens for r in probe_turn) < budget.Params().bound
+    probe_turns = [r for r in b.rows if r.kind in ("probe", "recall")]
+    assert sum(r.kind == "probe" for r in probe_turns) == script.PROBE_TURNS  # D27
+    assert max(r.input_tokens for r in probe_turns) < budget.Params().bound
 
 
 def test_non_model_4xx_are_counted_apart_from_acceptance_1():
@@ -691,3 +694,76 @@ def test_a_failed_forward_original_fallback_counts_as_one_local_502():
                  "response_bytes": 900, "usage": {"input_tokens": 10, "output_tokens": 1}}
     ok = detectors.analyze([first, forwarded], [], bound=150_000)
     assert ok.local_5xx == [] and ok.verdicts()["no_local_5xx"]
+
+
+# D27: six probe turns of nine (intake, 2026-10-16 05:37Z)
+
+D27_ASSIGNMENT = [
+    ["q_a_001", "q_a_020", "q_a_028", "q_p_03", "q_a_016", "q_a_038", "q_a_046", "q_a_002", "q_a_006"],
+    ["q_a_050", "q_a_041", "q_a_012", "q_a_035", "q_a_021", "q_a_049", "q_a_004", "q_a_013", "q_p_02"],
+    ["q_a_022", "q_a_044", "q_a_026", "q_a_031", "q_a_036", "q_a_009", "q_a_047", "q_a_045", "q_a_024"],
+    ["q_a_017", "q_a_018", "q_a_010", "q_a_042", "q_a_019", "q_a_027", "q_p_01", "q_a_033", "q_a_007"],
+    ["q_p_04", "q_a_014", "q_a_037", "q_a_011", "q_a_030", "q_a_034", "q_a_003", "q_a_008", "q_a_025"],
+    ["q_a_015", "q_a_048", "q_a_023", "q_a_040", "q_a_039", "q_a_029", "q_a_032", "q_a_043", "q_a_005"],
+]
+
+
+def test_d27_assignment_is_the_one_fixed_before_any_result():
+    s, _ = run.plan()
+    assert [list(t) for t in s.probe_turn_ids] == D27_ASSIGNMENT  # recorded 05:39Z, never tuned
+    assert [list(t) for t in run.plan()[0].probe_turn_ids] == D27_ASSIGNMENT  # deterministic
+
+
+def test_every_probe_is_asked_exactly_once_over_six_turns_of_nine():
+    s, _ = run.plan()
+    ids = [i for t in s.probe_turn_ids for i in t]
+    assert len(s.probe_turn_ids) == 6 and all(len(t) == 9 for t in s.probe_turn_ids)
+    assert sorted(ids) == sorted(p.id for p in s.probes) and len(set(ids)) == 54
+    for ids_k, text in zip(s.probe_turn_ids, s.probe_texts):
+        asked = [line.split(":", 1)[0] for line in text.splitlines()
+                 if line.startswith("q_") and not line.startswith("q_id")]
+        assert asked == list(ids_k)
+
+
+def test_the_scorer_maps_answers_from_all_six_turns_back_to_probe_ids():
+    s, _ = run.plan()
+    by_id = {p.id: p for p in s.probes}
+    turn_answers = ["\n".join(f"{i}: {by_id[i].answer}" for i in ids) for ids in s.probe_turn_ids]
+    collected = "\n".join(turn_answers)  # how live writes the answers file
+    assert run.score(list(s.probes), collected)["correct"] == 54
+
+
+def test_the_budget_gate_uses_the_six_turn_plan():
+    s, b = run.plan()
+    assert sum(r.kind == "probe" for r in b.rows) == 6
+    assert len(b.probe_rooms) == 6 and all(room >= 0 for room in b.probe_rooms)
+    single = budget.simulate(list(s.content_bytes), sum(s.probe_bytes), budget.Params())
+    assert b.h1_worst != single.h1_worst  # the gate is the six-turn figure, not a one-turn approximation
+
+
+
+def test_live_gates_on_the_combined_h1_and_baseline_worst_case(tmp_path, capsys):
+    # D27 (intake 05:42Z): the approval covers H1 and the six-request baseline.
+    _, b = run.plan()
+    combined = b.h1_worst + b.baseline_replay_worst
+    common = ["--home", str(tmp_path / "h"), "--session", "x", "--upstream", "http://127.0.0.1:9",
+              "--scratch", str(tmp_path / "s"), "--seat-settings", str(tmp_path / "missing.json")]
+    assert run.main(["live", "--approved", str(combined - 1), *common]) == 2
+    assert "below the combined worst case" in capsys.readouterr().err
+    assert run.main(["live", "--approved", str(combined), *common]) == 2  # passes the gate, stops at the seat file
+    assert "seat settings file" in capsys.readouterr().err
+
+
+
+def test_h1_spend_takes_the_proxy_logged_usage_after_a_mid_turn_stop():
+    # Reviewer-2 on PR #112: the driver's spend grows only per finished turn; a stop inside the probe
+    # turn's tool loop drops that turn's requests. The proxy-logged usage is what was billed.
+    log = [_req(0, 100_000)] + [_req(1, 105_000) for _ in range(4)]  # 5 requests, 10 output tokens each
+    logged = 100_000 + 4 * 105_000 + 5 * 10
+    spend = run.h1_spend(100_010, log, abnormal=True, reserve=32_000)  # results saw only the first turn
+    assert spend["spent_logged"] == logged and spend["spent_results"] == 100_010
+    assert spend["in_flight_allowance"] == 105_000 + 32_000  # one more request of the last size may be unlogged
+    assert spend["spent"] == logged + 137_000
+    clean = run.h1_spend(logged, log, abnormal=False, reserve=32_000)
+    assert clean["spent"] == logged and clean["in_flight_allowance"] == 0
+    assert run.h1_spend(500, [], abnormal=False, reserve=32_000)["spent"] == 500  # no log: the driver's figure

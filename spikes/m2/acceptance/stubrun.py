@@ -157,7 +157,7 @@ def _engine_request(record: dict) -> dict:
 
 
 def summarize(stub_records: list[dict], session_log: list[dict], script_turns: int, p: budget.Params,
-              probe_bytes: int, turn_bytes: list[int]) -> dict[str, Any]:
+              probe_bytes: int | list[int], turn_bytes: list[int]) -> dict[str, Any]:
     """Budget and estimate figures from the stub's records and the proxy's session log."""
     messages = [r for r in stub_records if r["path"] == "/v1/messages"]
     head = messages[0]
@@ -193,7 +193,7 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
     h1_expected = sum(all_inputs) + sum(outputs)
     h1_worst = sum(x + p.max_tokens_reserve for x in all_inputs)
     history = sum(budget.turn_tokens(x) + p.reply_tokens for x in turn_bytes)
-    probe = math.ceil(probe_bytes / budget.BYTES_PER_TOKEN_TEXT)
+    probe = sum(math.ceil(x / budget.BYTES_PER_TOKEN_TEXT) for x in (probe_bytes if isinstance(probe_bytes, list) else [probe_bytes]))
     replay = head_tokens + history + probe
     sim = budget.simulate(turn_bytes, probe_bytes, budget.Params(**{**p.__dict__, "head": head_tokens}))
     return {
@@ -292,10 +292,10 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
     })
     pages = reach.load_pages(home / "sessions" / session)
     if pages:
-        r = reach.reach(list(s.probes), pages, turn_texts=list(s.turns[:-1]))
+        r = reach.reach(list(s.probes), pages, turn_texts=list(s.content_turns))
         result["reach"] = {k: v for k, v in r.items() if k != "rows"}
     if messages and log:
-        result.update(summarize(stub.records, log, len(s.turns) - 1, p, s.turn_bytes[-1], list(s.turn_bytes[:-1])))
+        result.update(summarize(stub.records, log, s.n_content, p, list(s.probe_bytes), list(s.content_bytes)))
     out.mkdir(parents=True, exist_ok=True)
     (out / "stub-requests.json").write_text(json.dumps(stub.records, indent=1))
     (out / "dry-run.json").write_text(json.dumps(result, indent=1, default=str))

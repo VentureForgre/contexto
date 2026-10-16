@@ -74,6 +74,8 @@ class Budget:
     window_budget_probe: int = 0  # W at the probe turn, as simulated
     recall_tokens: int = 0  # tokens each recall is priced at
     b9_recall_tokens: int = 0  # what B9 would return at the simulated W (informational)
+    probe_rooms: list[int] = field(default_factory=list)  # A9 turn room at each probe turn's start
+    baseline_requests: list[int] = field(default_factory=list)  # D27 baseline: input of each request
 
 
 def recall_tokens(p: Params) -> int:
@@ -92,15 +94,28 @@ def turn_tokens(turn_bytes: int) -> int:
     return int(turn_bytes / BYTES_PER_TOKEN_LOG) + 1
 
 
-def simulate(turn_bytes: list[int], probe_bytes: int, p: Params = Params()) -> Budget:
-    """Simulate the proxy per contract rule 4 (window budget after fixed overhead) and rule 5."""
+def simulate(turn_bytes: list[int], probe_bytes: int | list[int], p: Params = Params()) -> Budget:
+    """Simulate the proxy per contract rule 4 (window budget after fixed overhead) and rule 5.
+
+    ``probe_bytes`` is one probe turn's size, or (D27) a list of probe turns asked in order. Each
+    probe turn starts like any turn (rotation rules apply), A9's turn room is set from its first
+    request (``max(0, bound - (input + output) - headroom floor)``), and its recalls, each priced at
+    ``recall_tokens(p)``, stop at that room. Its answers and recalled evidence stay in the history.
+    """
     b = Budget()
     sizes = [turn_tokens(x) for x in turn_bytes]
+    probes = [int(x / BYTES_PER_TOKEN_TEXT) + 1 for x in (probe_bytes if isinstance(probe_bytes, list) else [probe_bytes])]
+    output_per_probe_turn = max(200, p.probe_output // len(probes))
     retained: list[int] = []  # retained complete turns (user text + reply), oldest first
     paged = 0
     epoch = 1
     max_growth = 0
-    for t, u in enumerate(sizes, start=1):
+    b.recall_tokens = recall_tokens(p)
+
+    def start_turn(t: int, u: int, kind: str) -> tuple[int, int, int]:
+        """Apply the turn-start rotation rules for a new turn of ``u`` tokens; return its first input,
+        the preamble, and the window budget."""
+        nonlocal paged, epoch, max_growth
         max_growth = max(max_growth, u + p.reply_tokens)
         headroom = max(HEADROOM_FLOOR, int(1.25 * max_growth))
         preamble = 0 if paged == 0 else p.preamble_base + p.pinned_tokens + paged * p.index_tokens_per_page
@@ -126,25 +141,45 @@ def simulate(turn_bytes: list[int], probe_bytes: int, p: Params = Params()) -> B
                     note = "rotation no-op (newest complete turn already alone)"
         inp = p.head + preamble + sum(retained) + u
         over = inp > p.bound
-        b.rows.append(Row(t, "turn", inp, len(retained), paged, epoch, over, p.reply_tokens, note))
+        b.rows.append(Row(t, kind, inp, len(retained), paged, epoch, over,
+                          p.reply_tokens if kind == "turn" else 200, note))
         b.planned_over_bound += int(over)
+        return inp, preamble, window_budget
+
+    for t, u in enumerate(sizes, start=1):
+        start_turn(t, u, "turn")
         retained.append(u + p.reply_tokens)
     b.history_tokens = sum(sizes) + len(sizes) * p.reply_tokens
-    probe = int(probe_bytes / BYTES_PER_TOKEN_TEXT) + 1
-    preamble = p.preamble_base + p.pinned_tokens + paged * p.index_tokens_per_page
-    base = p.head + preamble + sum(retained) + probe
-    b.window_budget_probe = p.bound - max(HEADROOM_FLOOR, int(1.25 * max_growth)) - (p.head + preamble)
-    b.recall_tokens = recall_tokens(p)
-    b.b9_recall_tokens = b9_recall_tokens(b.window_budget_probe)
-    for r in range(p.recalls + 1):  # the probe request, then one request per recall round trip
-        inp = base + r * b.recall_tokens
-        b.rows.append(Row(len(sizes) + 1, "probe" if r == 0 else "recall", inp, len(retained), paged, epoch,
-                          inp > p.bound, p.probe_output if r == p.recalls else 200, "tool loop: never rotates" if r else ""))
+    for k, u in enumerate(probes, start=1):
+        inp, preamble, window_budget = start_turn(len(sizes) + k, u, "probe")
+        if k == 1:
+            b.window_budget_probe = window_budget
+            b.b9_recall_tokens = b9_recall_tokens(window_budget)
+        room = max(0, p.bound - (inp + 200) - HEADROOM_FLOOR)  # A9, from the turn's first request
+        b.probe_rooms.append(room)
+        added = 0
+        recalls = 0
+        while recalls < p.recalls and added + b.recall_tokens <= room:
+            recalls += 1
+            added += b.recall_tokens
+            last = recalls == p.recalls or added + b.recall_tokens > room
+            r_inp = inp + added
+            b.rows.append(Row(len(sizes) + k, "recall", r_inp, len(retained), paged, epoch, r_inp > p.bound,
+                              output_per_probe_turn if last else 200, "tool loop: never rotates"))
+        if recalls == 0:
+            b.rows[-1].output_expected = output_per_probe_turn
+        retained.append(u + added + output_per_probe_turn)
     b.h1_expected = sum(r.input_tokens + r.output_expected for r in b.rows)
     b.h1_worst = sum(r.input_tokens + p.max_tokens_reserve for r in b.rows)
-    full = p.head + b.history_tokens + probe
-    b.baseline_replay = full + p.probe_output
-    b.baseline_replay_worst = full + p.max_tokens_reserve
+    # D27's symmetric baseline (intake 05:42Z): one full-context request per probe turn, request k
+    # carrying probe turns 1..k-1 with the baseline's own answers. Every input token counts toward
+    # the approval whether cached or not: caching lowers the price, not the token count.
+    b.baseline_requests = []
+    for k in range(1, len(probes) + 1):
+        b.baseline_requests.append(p.head + b.history_tokens + sum(probes[:k]) + (k - 1) * output_per_probe_turn)
+    b.baseline_replay = sum(b.baseline_requests) + len(probes) * output_per_probe_turn
+    b.baseline_replay_worst = sum(x + p.max_tokens_reserve for x in b.baseline_requests)
+    full = p.head + b.history_tokens + sum(probes)
     b.baseline_cli = sum(p.head + sum(sizes[:t]) + t * p.reply_tokens for t in range(1, len(sizes) + 1)) + full + p.probe_output
     b.window_budget_first = p.bound - HEADROOM_FLOOR - p.head
     return b
@@ -169,19 +204,21 @@ def table(b: Budget, p: Params) -> str:
 
 
 def approval_table(b: Budget) -> str:
-    """The approval lines. ``run.py live`` gates on ``h1_worst`` from the same ``Budget``, and the
-    harness doc's table is this function's output (a test keeps them equal)."""
+    """The approval lines. ``run.py live`` gates on the combined worst case (H1 plus the D27 baseline)
+    from the same ``Budget``, and the harness doc's table is this function's output (a test keeps
+    them equal)."""
     return "\n".join([
         "| Line | Expected tokens | Worst case (guard reserve) |",
         "|---|---|---|",
-        f"| H1 acceptance run through the proxy (live refuses an approval below its worst case) | {b.h1_expected:,} | {b.h1_worst:,} |",
-        f"| Full-context baseline, one direct replay request (recommended) | {b.baseline_replay:,} | {b.baseline_replay_worst:,} |",
+        f"| H1 acceptance run through the proxy, {sum(r.kind == 'probe' for r in b.rows)} probe turns (D27) | {b.h1_expected:,} | {b.h1_worst:,} |",
+        f"| Full-context baseline, {len(b.baseline_requests)} direct requests, one per probe turn (D27) | {b.baseline_replay:,} | {b.baseline_replay_worst:,} |",
         f"| Full-context baseline through a plain CLI session (alternative) | {b.baseline_cli:,} | - |",
-        f"| **Total, H1 + replay baseline** | **{b.h1_expected + b.baseline_replay:,}** | **{b.h1_worst + b.baseline_replay_worst:,}** |",
+        f"| **Total, H1 + baseline (live refuses an approval below the worst case)** | **{b.h1_expected + b.baseline_replay:,}** | **{b.h1_worst + b.baseline_replay_worst:,}** |",
     ])
 
 
-def sweep(probe_bytes: int, p: Params, turn_kbytes: tuple[int, ...] = (20, 26, 30, 34, 38, 44)) -> list[dict[str, Any]]:
+def sweep(probe_bytes: int | list[int], p: Params,
+          turn_kbytes: tuple[int, ...] = (20, 26, 30, 34, 38, 44)) -> list[dict[str, Any]]:
     """Smallest content-turn count reaching 2.5x the bound, per turn size; reports cost and over-bound."""
     rows = []
     for kb in turn_kbytes:

@@ -31,6 +31,16 @@ PAGED_ONLY = 4  # probes whose only statement sits in turn 1
 # The budget prices this many recalls in the probe turn's tool loop, which cannot rotate (a full
 # recall adds about 17,800 tokens). Intake (2026-10-16): a cost guard only, not told to the model.
 MAX_RECALLS = 2
+# Intake D27 (2026-10-16 05:37Z): the probes are asked over PROBE_TURNS user turns of PROBES_PER_TURN,
+# by a fixed assignment (assign_probes), written down before any result and never tuned.
+PROBE_TURNS = 6
+PROBES_PER_TURN = 9
+PROBE_HEADER = (
+    "Answer the questions below about this conversation. Reply with one line per question, in the form",
+    "q_id: answer",
+    "with the answer only. For a list, give the ids separated by commas. If the conversation does not "
+    "contain it, say unknown.",
+)
 INSTRUCTIONS = (
     "This is a long working session. Each message pastes the next part of a working log. Read it, keep "
     "what matters, and reply with exactly: OK"
@@ -40,14 +50,47 @@ INSTRUCTIONS = (
 @dataclass(frozen=True)
 class Script:
     seed: int
-    turns: tuple[str, ...]  # user texts, in order; the last one is the probe turn
+    turns: tuple[str, ...]  # user texts, in order: the content turns, then the probe turns
     probes: tuple[Probe, ...]
     paged_only: tuple[str, ...]  # probe ids answerable only from turn 1
     turn_bytes: tuple[int, ...]
+    probe_turn_ids: tuple[tuple[str, ...], ...] = ()  # probe ids asked in each probe turn, in order
+
+    @property
+    def n_content(self) -> int:
+        return len(self.turns) - len(self.probe_turn_ids)
+
+    @property
+    def content_turns(self) -> tuple[str, ...]:
+        return self.turns[: self.n_content]
+
+    @property
+    def content_bytes(self) -> tuple[int, ...]:
+        return self.turn_bytes[: self.n_content]
+
+    @property
+    def probe_texts(self) -> tuple[str, ...]:
+        return self.turns[self.n_content:]
+
+    @property
+    def probe_bytes(self) -> tuple[int, ...]:
+        return self.turn_bytes[self.n_content:]
+
+
+def assign_probes(probes: list[Probe], seed: int = DEFAULT_SEED, turns: int = PROBE_TURNS,
+                  per_turn: int = PROBES_PER_TURN) -> list[list[Probe]]:
+    """D27's fixed assignment, written down before any result (2026-10-16 05:39Z): shuffle a copy of
+    the probes in script order with random.Random(seed).shuffle, then turn k asks positions
+    [per_turn * (k - 1), per_turn * k)."""
+    if len(probes) != turns * per_turn:
+        raise ValueError(f"{len(probes)} probes do not fill {turns} turns of {per_turn}")
+    order = list(probes)
+    random.Random(seed).shuffle(order)
+    return [order[per_turn * k: per_turn * (k + 1)] for k in range(turns)]
 
 
 def build(seed: int = DEFAULT_SEED, turns: int = 20, turn_bytes: int = 30_000, mix: Mix = CHAIN_HEAVY) -> Script:
-    """``turns`` content turns of about ``turn_bytes`` bytes each, then one probe turn.
+    """``turns`` content turns of about ``turn_bytes`` bytes each, then the D27 probe turns.
 
     Plants are merged in random order (each plant's statements stay in order) and spread across
     turns 2 to ``turns``; turn 1 carries only the paged-only plants and filler.
@@ -92,19 +135,14 @@ def build(seed: int = DEFAULT_SEED, turns: int = 20, turn_bytes: int = 30_000, m
         sizes.append(len(text.encode("utf-8")))
     all_probes = tuple(paged) + tuple(probes)
     # Product-realistic (intake, 2026-10-16): no mention of Contexto's tools or a recall cap; the
-    # preamble and page index must lead the model to recall.
-    probe_turn = "\n".join([
-        "Final step. Answer the questions below about this conversation. Reply with one line per question, "
-        "in the form",
-        "q_id: answer",
-        "with the answer only. For a list, give the ids separated by commas. If the conversation does not "
-        "contain it, say unknown.",
-        "",
-        *[f"{p.id}: {p.question}" for p in all_probes],
-    ])
-    texts.append(probe_turn)
-    sizes.append(len(probe_turn.encode("utf-8")))
-    return Script(seed, tuple(texts), all_probes, tuple(p.id for p in paged), tuple(sizes))
+    # preamble and page index must lead the model to recall. D27: six turns of nine probes.
+    blocks = assign_probes(list(all_probes), seed)
+    for block in blocks:
+        probe_turn = "\n".join([*PROBE_HEADER, "", *[f"{p.id}: {p.question}" for p in block]])
+        texts.append(probe_turn)
+        sizes.append(len(probe_turn.encode("utf-8")))
+    return Script(seed, tuple(texts), all_probes, tuple(p.id for p in paged), tuple(sizes),
+                  tuple(tuple(p.id for p in block) for block in blocks))
 
 
 def restatements(script: Script) -> list[str]:
@@ -115,7 +153,7 @@ def restatements(script: Script) -> list[str]:
             residue = text
             for st in p.statements:
                 residue = residue.replace(st, "")
-            if where == len(script.turns) - 1:
+            if where >= script.n_content:  # a probe turn asks the question itself
                 residue = residue.replace(p.question, "")
             for subject in p.subjects:
                 if subject in residue:

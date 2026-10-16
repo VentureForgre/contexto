@@ -258,6 +258,11 @@ class Run:
         return str(result.get("result") or "")
 
 
+def run_session_all(turns: list[str], run: Run) -> list[str]:
+    """Send every turn; return each turn's answer text, in order (D27: several probe turns)."""
+    return [run.turn(i, text) for i, text in enumerate(turns)]
+
+
 def run_session(turns: list[str], run: Run, on_turn: Callable[[int], None] | None = None) -> str:
     """Send every turn; return the probe turn's answer text (the last turn)."""
     answer = ""
