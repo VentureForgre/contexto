@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -404,3 +405,27 @@ def test_the_doc_carries_the_budget_live_gates_on():
     _, b = run.plan()
     assert block and block.group(1) == budget.approval_table(b)
     assert f"{b.h1_worst:,}" in block.group(1)  # the figure run.py live refuses to go below
+
+
+def test_live_refuses_a_missing_seat_settings_file_or_a_git_scratch(tmp_path, capsys):
+    _, b = run.plan()
+    common = ["live", "--approved", str(b.h1_worst), "--home", str(tmp_path / "h"), "--session", "x",
+              "--upstream", "http://127.0.0.1:9"]
+    code = run.main([*common, "--scratch", str(tmp_path / "s"), "--seat-settings", str(tmp_path / "missing.json")])
+    assert code == 2 and "refusing: the seat settings file" in capsys.readouterr().err
+    seat = tmp_path / "seat.json"
+    seat.write_text("{}")
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    code = run.main([*common, "--scratch", str(repo / "s"), "--seat-settings", str(seat)])
+    assert code == 2 and "inside a git work tree" in capsys.readouterr().err
+
+
+def test_recalls_are_priced_at_the_largest_b9_chunk_and_the_probe_turn_fits():
+    _, b = run.plan()
+    assert b.recall_tokens == budget.recall_tokens(budget.Params()) == 17_778  # 32,000 chars at 1.8
+    assert budget.b9_recall_tokens(84_303) <= b.recall_tokens  # B9 returns less at a smaller W
+    assert budget.b9_recall_tokens(84_303) == math.ceil(int(84_303 / 4 * 1.5) / 1.8)
+    probe_turn = [r for r in b.rows if r.kind in ("probe", "recall")]
+    assert len(probe_turn) == 1 + script.MAX_RECALLS
+    assert max(r.input_tokens for r in probe_turn) < budget.Params().bound

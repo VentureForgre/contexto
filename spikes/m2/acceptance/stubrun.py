@@ -175,7 +175,13 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
     # H1 from the run's own inputs, plus the probe turn's recall round trips the stub cannot cause.
     inputs = [r["real"] for r in rows]
     probe_input = inputs[-1] if inputs else 0
-    recall_inputs = [probe_input + k * p.recall_tokens for k in range(1, p.recalls + 1)]
+    # Each recall priced as the budget prices it (the largest B9 chunk); B9's size at the engine's last
+    # logged window budget W is reported beside it. The stub calls no tools.
+    budgets = [int(te["window_budget"]) for ev in requests for te in ev.get("transform_events") or []
+               if isinstance(te, dict) and isinstance(te.get("window_budget"), (int, float))]
+    window = budgets[-1] if budgets else 0
+    per_recall = budget.recall_tokens(p)
+    recall_inputs = [probe_input + k * per_recall for k in range(1, p.recalls + 1)]
     outputs = [p.reply_tokens] * (len(inputs) - 1) + [200] + [200] * (p.recalls - 1) + [p.probe_output]
     all_inputs = inputs + recall_inputs
     h1_expected = sum(all_inputs) + sum(outputs)
@@ -193,6 +199,10 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
         "pre_usage": rows[0] if rows else None,
         "largest_gap": worst_gap,
         "first_epoch": {"epoch": first_epoch, "max_input": first_epoch_max, "margin_to_bound": p.bound - first_epoch_max},
+        "probe_turn": {"start": probe_input, "window_budget": window, "recall_tokens": per_recall,
+                       "b9_recall_tokens_at_window": budget.b9_recall_tokens(window) if window else None,
+                       "with_recalls": recall_inputs[-1] if recall_inputs else probe_input,
+                       "margin_to_bound": p.bound - (recall_inputs[-1] if recall_inputs else probe_input)},
         "max_input": max(inputs, default=0),
         "budget": {"h1_expected": h1_expected, "h1_worst": h1_worst, "baseline_replay": replay + p.probe_output,
                    "baseline_replay_worst": replay + p.max_tokens_reserve,

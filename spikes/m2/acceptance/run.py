@@ -145,7 +145,13 @@ def main(argv: list[str] | None = None) -> int:
     if not upstream:
         print("refusing: no upstream (pass --upstream or set ANTHROPIC_BASE_URL)", file=sys.stderr)
         return 2
+    if not args.seat_settings.is_file():
+        print(f"refusing: the seat settings file {args.seat_settings} does not exist", file=sys.stderr)
+        return 2
     args.scratch.mkdir(parents=True, exist_ok=True)
+    if driver.inside_git(args.scratch):
+        print(f"refusing: the scratch directory {args.scratch} is inside a git work tree", file=sys.stderr)
+        return 2
     config = driver.isolated_config(args.scratch, args.seat_settings)
     estimates = [r.input_tokens for r in b.rows if r.kind == "turn"] + [max(r.input_tokens for r in b.rows if r.kind != "turn")]
     session_log = args.home / "sessions" / args.session / "log.jsonl"
