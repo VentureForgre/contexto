@@ -124,6 +124,21 @@ def test_reasoning_after_rotation_passes_untouched_and_prefix_is_stable():
     assert [canonical_bytes(i) for i in up2["input"][:n]] == [canonical_bytes(i) for i in up1["input"]]
 
 
+def test_store_failure_enters_degraded_mode_with_the_responses_dialect():
+    """Rule 14 on the Responses dialect (A2d after the #43 seam): the input list is extended append-only."""
+    class FailingStore(MemoryStore):
+        def page_out(self, turns, first_turn):
+            raise OSError("synthetic")
+
+    items = history(8) + [prompt("new prompt")]
+    up, st, ev, _ = run(items, store=FailingStore(key=b"k" * 32))
+    assert names(ev)[:2] == ["store_error", "degraded_enter"] and "rotation" not in names(ev)
+    assert st.degraded and up["input"] == items and ev[-1]["degraded"] is True
+    loop = items + [reasoning(99), call(99), output(99)]
+    up2, _, ev2, _ = run(loop, state=st, store=FailingStore(key=b"k" * 32))
+    assert up2["input"] == loop and ev2[-1]["degraded"] is True and "store_error" not in names(ev2)
+
+
 def test_no_rotation_inside_a_tool_loop():
     items = history(10) + [prompt("go"), call(50), output(50, FILL * 3)]
     up, st, ev, store = run(items)
