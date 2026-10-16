@@ -55,7 +55,7 @@ turns and measured from the baseline arm for the 6 probe turns.
 | | Input tokens | Cost at Haiku 5.5 prices |
 |---|---|---|
 | Contexto (measured; 2,677,349 cache read, 1,047,954 cache write, 88 uncached) | 3,725,391 | about $0.29 |
-| Plain Claude Code, same session shape (modeled, best-case caching) | 6,972,335 | about $0.58 |
+| Plain Claude Code, plain-run shape (18 content turns modeled, 6 probe turns measured; best-case caching) | 6,972,335 | about $0.58 |
 | Saving | 46.6 percent | 49.7 percent (73.0 percent with the baseline's measured cache misses) |
 
 By phase: content turns 69.0 percent fewer tokens; probe turns only 9.3 percent fewer, because
