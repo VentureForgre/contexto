@@ -68,8 +68,10 @@ def live(tmp_path, monkeypatch):
     def record():
         return json.loads((home / "acceptance-sess-h1.json").read_text(encoding="utf-8"))
 
-    def answers():
-        return (home / "acceptance-sess-answers.txt").read_text(encoding="utf-8").splitlines()
+    def answers(partial=False):
+        full, part = home / "acceptance-sess-answers.txt", home / "acceptance-sess-answers.partial.txt"
+        assert (part if partial else full).exists() and not (full if partial else part).exists()
+        return (part if partial else full).read_text(encoding="utf-8").splitlines()
 
     return s, b, p, go, record, answers
 
@@ -116,7 +118,9 @@ def test_a_harness_error_at_a_probe_turn_writes_the_record_then_reraises(live):
     assert r["spent_logged"] == (at + 1) * (INPUT + 5)
     assert r["in_flight_allowance"] == INPUT + p.max_tokens_reserve  # abnormal: one more of the last size
     assert r["spent"] == r["spent_logged"] + r["in_flight_allowance"]
-    assert answers() == [f"answer {s.n_content + 1}", f"answer {s.n_content + 2}"]  # finished probe turns kept
+    # The finished probe turns are kept, under the partial name only (reviewer-2 on PR #123)
+    assert answers(partial=True) == [f"answer {s.n_content + 1}", f"answer {s.n_content + 2}"]
+    assert r["answers_file"] == "acceptance-sess-answers.partial.txt"
 
 
 def test_a_guard_stop_is_handled_and_recorded(live):
@@ -129,6 +133,48 @@ def test_a_guard_stop_is_handled_and_recorded(live):
     assert go(inject=stop) == 1
     r = record()
     assert "stop_handled" in r["paths"] and "error_handled" not in r["paths"] and r["probe_turns_completed"] == 1
+    assert len(answers(partial=True)) == 1
+
+
+def test_the_inject_hook_runs_only_against_a_loopback_upstream(live, tmp_path):
+    s, b, p, go, record, answers = live
+    seat = tmp_path / "settings.json"
+    for upstream in ("https://owner-proxy.invalid", "http://10.0.0.5:8080"):
+        assert run.run_h1(s, b, p, b.h1_worst + b.baseline_replay_worst, tmp_path / "scratch", tmp_path / "home",
+                          "sess", seat, upstream, inject=lambda i: None) == 2
+    assert FakeTransport.made == []
+    assert go(inject=lambda i: None) == 0  # 127.0.0.1 is allowed
+
+
+def _score(tmp_path, record, *extra):
+    h1, base, rec = tmp_path / "h1.txt", tmp_path / "base.txt", tmp_path / "h1.json"
+    h1.write_text("q_c_01: unknown\n", encoding="utf-8")
+    base.write_text("q_c_01: unknown\n", encoding="utf-8")
+    rec.write_text(json.dumps(record), encoding="utf-8")
+    return run.main(["score", "--h1", str(h1), "--h1-record", str(rec), "--baseline", str(base), *extra])
+
+
+def test_score_refuses_a_stopped_run_and_labels_a_partial_score(tmp_path, capsys):
+    stopped = {"stopped": "IndexError: list index out of range", "probe_turns_completed": 1}
+    assert _score(tmp_path, stopped) == 2
+    assert "partial run" in capsys.readouterr().err
+    short = {"stopped": None, "probe_turns_completed": script.PROBE_TURNS - 1}
+    assert _score(tmp_path, short) == 2
+    capsys.readouterr()
+    assert _score(tmp_path, stopped, "--partial") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["label"].startswith("PARTIAL") and "compare" not in out  # never an acceptance 2 verdict
+    assert out["h1_record"]["probe_turns_completed"] == 1
+
+
+def test_score_compares_only_a_full_run(tmp_path, capsys):
+    full = {"stopped": None, "probe_turns_completed": script.PROBE_TURNS}
+    assert _score(tmp_path, full) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "label" not in out and "pass" in out["compare"]
+    (tmp_path / "bad.json").write_text("not json", encoding="utf-8")
+    assert run.main(["score", "--h1", str(tmp_path / "h1.txt"), "--h1-record", str(tmp_path / "bad.json"),
+                     "--baseline", str(tmp_path / "base.txt")]) == 2
 
 
 def test_short_estimates_refuse_before_anything_starts(live, monkeypatch):

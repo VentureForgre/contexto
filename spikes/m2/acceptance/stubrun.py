@@ -234,6 +234,8 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
 
     if shutil.which("claude") is None:
         return {"ran": False, "reason": "claude CLI not installed"}
+    if "/" in contexto:  # the launcher starts in the scratch directory, so a relative path would not resolve
+        contexto = str(Path(contexto).resolve())
     try:
         key = credcheck._helper_output(seat_settings)
     except (RuntimeError, OSError):
@@ -271,7 +273,7 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
     result["h1_record"] = {k: v for k, v in record.items() if k != "turns"}
     result["stream_compactions"] = record.get("stream_compactions", 0)
     result["exit"] = record.get("cli_exit")
-    log = detectors.read_jsonl(session_log)
+    log = detectors.read_jsonl(session_log) if session_log.exists() else []  # a launch failure logs nothing
     cc_jsonl = [rec for path in glob.glob(str(scratch / "claude-config" / "projects" / "*" / "*.jsonl"))
                 for rec in detectors.read_jsonl(Path(path))]
     report = detectors.analyze(log, cc_jsonl, bound=p.bound, stream_compactions=result.get("stream_compactions", 0))

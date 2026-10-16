@@ -3,7 +3,7 @@
 From the repository root:
     python3 spikes/m2/acceptance/run.py dry-run [--turns N --turn-kbytes K --head H]   # budget, no calls
     python3 spikes/m2/acceptance/run.py approval-table   # the approval lines the doc carries and live gates on
-    python3 spikes/m2/acceptance/run.py score --h1 ANSWERS --baseline ANSWERS [--seed N --turns N --turn-kbytes K]
+    python3 spikes/m2/acceptance/run.py score --h1 ANSWERS --h1-record H1JSON --baseline ANSWERS [--partial]
     python3 spikes/m2/acceptance/run.py check --session-log PATH --cc-jsonl PATH [--bound 100000]
     python3 spikes/m2/acceptance/run.py check-credential --seat-settings PATH        # zero spend
     python3 spikes/m2/acceptance/run.py live --approved TOKENS --scratch DIR --home DIR --session ID \
@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import traceback
+import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -167,6 +168,10 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--head", type=int, default=budget.Params.head)
     score_p = sub.choices["score"]
     score_p.add_argument("--h1", type=Path, required=True)
+    score_p.add_argument("--h1-record", type=Path, required=True,
+                         help="the H1 run's record (acceptance-<session>-h1.json); a stopped run is refused")
+    score_p.add_argument("--partial", action="store_true",
+                         help="score a stopped H1 run anyway, labeled PARTIAL, with no acceptance 2 verdict")
     score_p.add_argument("--baseline", type=Path, required=True)
     live = sub.choices["live"]
     live.add_argument("--approved", type=int, required=True, help="tokens intake approved for the H1 run")
@@ -264,11 +269,31 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(row))
         return 0
     if args.command == "score":
+        # Reviewer-2 on PR #123: a stopped run's answers are partial, and acceptance 2 compares full
+        # runs only. The H1 record decides, not the answers text.
+        try:
+            record = json.loads(args.h1_record.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            print("refusing: --h1-record is not a live run's H1 record", file=sys.stderr)
+            return 2
+        full = isinstance(record, dict) and record.get("stopped") is None \
+            and record.get("probe_turns_completed") == len(s.probe_texts)
+        if not full and not args.partial:
+            print(f"refusing: the H1 record shows a partial run (stopped {record.get('stopped')!r}, probe turns "
+                  f"{record.get('probe_turns_completed')} of {len(s.probe_texts)}); pass --partial for a PARTIAL "
+                  "score with no acceptance 2 verdict", file=sys.stderr)
+            return 2
         h1 = score(list(s.probes), args.h1.read_text(encoding="utf-8"))
         base = score(list(s.probes), args.baseline.read_text(encoding="utf-8"))
         paged = [p for p in s.probes if p.id in s.paged_only]
-        print(json.dumps({"h1": h1, "baseline": base, "compare": compare(h1, base),
-                          "paged_only": score(paged, args.h1.read_text(encoding="utf-8"))}, indent=2, default=str))
+        out = {"h1": h1, "baseline": base, "paged_only": score(paged, args.h1.read_text(encoding="utf-8")),
+               "h1_record": {"stopped": record.get("stopped"), "probe_turns_completed": record.get("probe_turns_completed"),
+                             "probe_turns": len(s.probe_texts)}}
+        if args.partial:
+            out = {"label": "PARTIAL: not an acceptance 2 verdict", **out}
+        else:
+            out["compare"] = compare(h1, base)
+        print(json.dumps(out, indent=2, default=str))
         return 0
     # live: gates on the same Budget that dry-run and approval-table print
     upstream = args.upstream or os.environ.get("ANTHROPIC_BASE_URL")
@@ -277,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
 
 # Every live-only branch run_h1 can take. The H1 record lists the ones a run took; a dry run fails
 # unless its runs, together, took all of them (live-path fix, intake 2026-10-16 07:11Z).
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
 LIVE_PATHS = ("gate_passed", "estimates_cover_turns", "watcher_started", "content_turn_sent", "probe_turn_sent",
               "every_turn_sent", "stop_handled", "error_handled", "answers_written", "record_written")
 
@@ -303,6 +329,9 @@ def run_h1(s: script.Script, b: budget.Budget, params: budget.Params, approved: 
     h1_cap = approved - b.baseline_replay_worst
     if not upstream:
         print("refusing: no upstream (pass --upstream or set ANTHROPIC_BASE_URL)", file=sys.stderr)
+        return 2
+    if inject is not None and urllib.parse.urlsplit(upstream).hostname not in LOOPBACK:
+        print("refusing: the inject hook is for dry runs against a local stub only", file=sys.stderr)
         return 2
     if not seat_settings.is_file():
         print(f"refusing: the seat settings file {seat_settings} does not exist", file=sys.stderr)
@@ -344,11 +373,12 @@ def run_h1(s: script.Script, b: budget.Budget, params: budget.Params, approved: 
         taken.add("error_handled")
     finally:
         cli_exit = transport.close()
-    # D27: the answers of every finished probe turn, in order (all 54 lines on a full run). On a stop
-    # the finished probe turns are kept; the record says how many.
+    # D27: the answers of every finished probe turn, in order (all 54 lines on a full run). A stopped
+    # run's go to a .partial.txt file, never the full-run name, so they cannot be scored as a full run.
     probe_answers = answers[s.n_content:]
     home.mkdir(parents=True, exist_ok=True)
-    (home / f"acceptance-{session}-answers.txt").write_text("\n".join(probe_answers) + "\n", encoding="utf-8")
+    answers_name = f"acceptance-{session}-answers{'.partial' if stopped else ''}.txt"
+    (home / answers_name).write_text("\n".join(probe_answers) + "\n", encoding="utf-8")
     taken.add("answers_written")
     spend = h1_spend(run.spent, detectors.read_jsonl(session_log) if session_log.exists() else [],
                      abnormal=status != 0, reserve=params.max_tokens_reserve)
@@ -356,7 +386,8 @@ def run_h1(s: script.Script, b: budget.Budget, params: budget.Params, approved: 
     record = {**spend, "turns": run.turns, "stream_compactions": transport.compactions, "cli_exit": cli_exit,
               "approved": approved, "h1_cap": h1_cap, "baseline_worst": b.baseline_replay_worst,
               "planned_turns": len(s.turns), "turns_completed": len(answers),
-              "probe_turns_completed": len(probe_answers), "stopped": stopped, "paths": sorted(taken)}
+              "probe_turns_completed": len(probe_answers), "stopped": stopped, "answers_file": answers_name,
+              "paths": sorted(taken)}
     # The replay's approval is the combined approval minus this spend (run.py replay --h1-record).
     (home / f"acceptance-{session}-h1.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     print(json.dumps(record, indent=2))

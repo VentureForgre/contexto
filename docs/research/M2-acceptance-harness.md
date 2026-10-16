@@ -275,7 +275,7 @@ runs, with the stub as upstream and the live gate's approval, so the guard, its 
 estimates, the spend watcher and the exception handling are the live ones (live-path fix, after
 the aborted 07:08Z run). `--fault auth:N` answers the N-th Messages request (0-based) with 401, so
 the watcher's auth stop fires; `--fault raise:N` raises a harness error after turn N, so the record
-is written on the error path. Each H1 record lists the live-only paths it took
+is written on the error path. `run_h1` refuses the fault hook unless the upstream is loopback. Each H1 record lists the live-only paths it took
 (`run.LIVE_PATHS`); `stubrun.py check-paths <dir>...` fails unless the runs together took all of
 them. A clean run alone leaves `stop_handled` and `error_handled` untaken, so an official dry run
 is the clean run plus one run of each fault. The stub answers `OK`, as SSE when the request
@@ -462,7 +462,9 @@ planned over-bound requests.
 - **Fix (live-path fix, intake 07:11Z):** one estimate per turn, the largest request of each
   turn (`budget.turn_estimates`), and `live` refuses when the count differs from the script's
   turns. The H1 function, `run.run_h1`, writes the record and the finished probe turns' answers
-  however the run ends and re-raises a harness error after that. The stub dry run calls the same
+  however the run ends and re-raises a harness error after that. A stopped run's answers go to
+  `acceptance-<session>-answers.partial.txt`, never the full-run name, and `score` refuses a
+  stopped run unless asked for a PARTIAL score. The stub dry run calls the same
   `run_h1` with the stub as upstream, and checks that its runs took every live-only path (see
   the dry-run section).
 - **Artifacts** (private, never in Git): `.contexto/runs/acceptance-20261016T070859Z/`.
@@ -590,8 +592,10 @@ It goes straight to the owner's proxy, bypassing Contexto.
   Caveat on record: the recall experiment's four sends (2026-10-16 03:24Z to 03:25Z) still carried
   all 11, claude-code-20250219 included, as H1's own requests did.
 - **Output, private only.** `baseline-answers.txt` and `replay-result.json` (sizes, the token
-  count, usage, stop reason, block counts). `run.py score --h1 ... --baseline ...` compares the two
-  answer sets.
+  count, usage, stop reason, block counts). `run.py score --h1 ... --h1-record ... --baseline ...` compares
+  the two answer sets. It refuses unless the H1 record shows a full run (`stopped` null and all six
+  probe turns completed); `--partial` scores a stopped run labeled PARTIAL, with no acceptance 2
+  verdict (reviewer-2 on PR #123).
 
 `--dry` builds the request and prints its sizes with no calls. On the H1 rerun's JSONL
 (`acceptance-20261016T024733Z`) it decodes all 56 messages of the probe-turn request (18 turns, each
