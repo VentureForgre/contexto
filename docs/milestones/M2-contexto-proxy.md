@@ -334,7 +334,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     minimal window had kept it under; the headroom is never below that of a session with no
     outlier.
 
-Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` 1.25 times the
+Defaults (configurable flags and env): `bound` 150,000 tokens (D31); `headroom` 1.25 times the
 largest per-turn growth, decaying and capped per rule 17, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
 Constraint: `bound` plus the largest expected over-bound turn must stay below both Claude Code's
 idle-compaction minimum (200,000 by default, `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`) and the model's
