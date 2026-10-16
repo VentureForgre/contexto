@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from contexto import launcher
+from contexto.paths import contexto_home
 from contexto.launcher import (
     ASSUMED_OVERHEAD_DEFAULT,
     ASSUMED_OVERHEAD_OPENRIG,
@@ -438,3 +439,15 @@ def test_run_codex_dispatches_to_contexto_codex(monkeypatch):
     monkeypatch.setitem(sys.modules, "contexto.codex", fake)
     assert cli.main(["run", "--bound", "120000", "--codex-auth", "chatgpt", "codex", "exec", "hi"]) == 9
     assert seen == {"cli": "codex", "cli_args": ["exec", "hi"], "auth": "chatgpt", "bound": 120_000}
+
+
+def test_relative_contexto_home_gives_the_store_and_claude_mcp_server_the_same_absolute_path(monkeypatch, tmp_path):
+    """Packet A18: the proxy's store and Claude's MCP server see one absolute home for a relative
+    CONTEXTO_HOME (Codex's MCP server is covered in test_codex.py)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CONTEXTO_HOME", "rel-home")
+    home = contexto_home()
+    store = open_session(home, "s-rel", tmp_path)
+    assert store.dir == tmp_path / "rel-home" / "sessions" / "s-rel"
+    env = mcp_payload("s-rel", home)["mcpServers"]["contexto"]["env"]
+    assert env == {"CONTEXTO_HOME": str(tmp_path / "rel-home")}
