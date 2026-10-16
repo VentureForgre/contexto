@@ -12,6 +12,9 @@ import pytest
 from contexto.canonical import canonical_bytes
 from contexto.rewrite import (
     COUNT_TOKENS,
+    EpochState,
+    StoreCalls,
+    store_failure,
     MESSAGES,
     THINKING_OMITTED,
     Config,
@@ -23,7 +26,7 @@ from contexto.rewrite import (
     rewrite,
     window_tokens,
 )
-from contexto.store import KeyFileError, PageNotFoundError, SessionNotFoundError, SessionStore
+from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, SessionStore
 from contexto.store.ledger import LedgerCorruptError, LedgerError
 from contexto.store.memory import MemoryStore
 from contexto.tokens import TokenEstimator
@@ -753,7 +756,7 @@ def test_real_usage_over_the_bound_is_flagged_even_when_the_estimate_was_low():
     over = [e for e in out if e["event"] == "over_bound"]
     assert over and over[0]["over_bound"] is True and over[0]["source"] == "real"
     assert over[0]["real_tokens"] == 101_500 and over[0]["estimate"] == estimate
-    assert [e.get("source") for e in store.events if e["event"] == "over_bound"] == ["real"]
+    assert not store.events  # the proxy logs the returned events on the request's entry (A2e)
 
 
 def test_estimate_error_is_reported_when_real_exceeds_the_estimate_by_more_than_ten_percent():
@@ -1089,16 +1092,16 @@ def test_unlisted_store_exception_is_a_genuine_bug_and_propagates():
         run(history(6) + [user("new prompt")], store=store)
 
 
-def test_store_log_failure_in_observe_usage_enters_degraded_mode_without_raising():
+def test_observe_usage_never_logs_itself_even_with_a_broken_log():
+    """A2e: observe_usage returns its events for the proxy's request entry and does not call store.log, so
+    a broken log cannot fail it and no event is written twice."""
     store = FaultyStore()
     engine = RewriteEngine(store, config=Config(bound=1_000))
     req = request(history(2) + [user("new")])
     engine(req, {}, MESSAGES)
     store.fail["log"] = OSError("synthetic")
     events = engine.observe_usage(MESSAGES, {"input_tokens": 5_000}, req)
-    assert names(events) == ["over_bound", "estimate_error", "store_error", "degraded_enter"]
-    assert events[2]["operation"] == "log"
-    assert engine.states[next(iter(engine.states))].degraded
+    assert names(events)[:2] == ["over_bound", "estimate_error"] and "log" not in store.calls
 
 
 def test_set_window_publishes_w_and_the_measured_ratio_only_when_they_change():
@@ -1290,3 +1293,27 @@ def test_first_usage_w_counts_the_recall_knobs_like_fixed_overhead():
         widths[knob] = (next(iter(engine.states.values())).window_budget, engine.estimator.estimate(rule))
     (plain, _), (with_rule, rule_tokens) = widths[""], widths[rule]
     assert plain - with_rule == rule_tokens > 0
+
+
+def test_page_conflict_id_comes_from_the_structured_attribute_only():
+    """A2e (reviewer-2 note 1 on PR #65): the page id is PageConflictError.page_id (lane B B11, PR #73);
+    the message is never parsed, so an id that appears only in the text is not reported."""
+    page, quoted = "pg_" + "a" * 16, "pg_" + "b" * 16
+    state = EpochState()
+    calls = StoreCalls(MemoryStore(key=b"k" * 32))
+    failure = store_failure(PageConflictError(f"page {quoted} exists", page_id=page), calls, state)
+    assert failure["page_id"] == page
+    assert "page_id" not in store_failure(PageConflictError(f"page {quoted} exists"), calls, state)
+
+
+@pytest.mark.parametrize("ratio", [0.4, 9.5])
+def test_a_restored_ratio_outside_the_sane_range_is_ignored(ratio):
+    """A2e (reviewer-2 on PR #72): a ratio outside 1.0 to 6.0 bytes per token keeps the seed and logs why."""
+    store = MemoryStore(key=b"k" * 32)
+    store.set_window(10_000, ratio)
+    engine = RewriteEngine(store, config=CONFIG)
+    assert engine.restored is None and engine.estimator.measured_bytes_per_token is None
+    assert [e["reason"] for e in store.events if e["event"] == "sizing_not_restored"] == ["ratio_out_of_range"]
+    store = MemoryStore(key=b"k" * 32)
+    store.set_window(10_000, 4.2)
+    assert RewriteEngine(store, config=CONFIG).restored["bytes_per_token"] == 4.2

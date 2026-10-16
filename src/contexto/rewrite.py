@@ -100,9 +100,9 @@ THINKING_OMITTED = "[thinking omitted]"
 CONTEXT_TAG = "<system-reminder>"
 STORE_ERRORS = (OSError, LedgerError, KeyFileError, SessionNotFoundError, PageNotFoundError)  # rule 14 store_error
 STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
-PAGE_ID = re.compile(r"\bpg_[0-9a-f]{16}\b")
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
+RESTORED_RATIO_RANGE = (1.0, 6.0)  # bytes per token a restore accepts; outside it the seed is safer (A2e)
 
 
 class Store(Protocol):
@@ -746,9 +746,8 @@ def store_failure(error: Exception, calls: StoreCalls, state: EpochState) -> dic
     failure = {"event": kind, "epoch": state.epoch, "operation": calls.last, "error": type(error).__name__}
     if state.degraded:
         failure["degraded"] = True
-    page = PAGE_ID.search(str(error)) if kind == "page_conflict" else None
-    if page:
-        failure["page_id"] = page.group(0)
+    if kind == "page_conflict" and error.page_id:  # set by both stores (lane B B11, PR #73)
+        failure["page_id"] = error.page_id
     return failure
 
 
@@ -819,7 +818,9 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
 
     # Rule 13's baseline is the carried content at the conversation's first request, so it is taken
     # before that request can rotate; set after, a first request that rotates (a resumed session, or a
-    # new engine on an existing one) measured its growth from zero (A6 smoke, PR #67).
+    # new engine on an existing one) measured its growth from zero (A6 smoke, PR #67). The baseline is
+    # per engine: after a proxy restart it is the carried content at the new engine's first request,
+    # so growth before the restart is not counted again (accepted by manager-1, 2026-10-16).
     if state.initial_carried is None:
         state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
     estimate = estimate_upstream(request, messages, previous_n, state, estimator)
@@ -990,7 +991,9 @@ def restore_ratio(store: Store, estimator: TokenEstimator) -> dict | None:
     published through ``set_window`` instead of the seed, which the A6 smoke measured 1.34 to 1.40 times
     high (F 21.3k estimated against 15.3k measured, so W 14.7k instead of about 20.7k). The ratio enters
     the estimator with the weight of one mid-sized request, so the session's own usage soon dominates.
-    Returns the content-free ``sizing_restored`` event (also logged), or None when there is nothing to
+    The ratio is not checked against the model: ``set_window`` records no model yet (asked of lane B,
+    A2e), so a session that changes model restores the previous model's ratio until its own usage
+    dominates. Returns the content-free ``sizing_restored`` event (also logged), or None when there is nothing to
     restore or the store cannot be read (the next turn start meets the store again under rule 14)."""
     if estimator.measured_bytes_per_token is not None:
         return None
@@ -1000,15 +1003,21 @@ def restore_ratio(store: Store, estimator: TokenEstimator) -> dict | None:
         return None
     if not ratio:
         return None
-    estimator.observe(round(ratio * RESTORED_RATIO_WEIGHT), RESTORED_RATIO_WEIGHT)
-    event = {"event": "sizing_restored", "bytes_per_token": round(ratio, 4), "weight_tokens": RESTORED_RATIO_WEIGHT}
+    low, high = RESTORED_RATIO_RANGE
+    if not low <= ratio <= high:
+        # Reviewer-2 on PR #72: a recorded ratio no real session produces (corrupt metadata, or a usage
+        # report that undercounted) must not size every request; the seed is the safer start.
+        event = {"event": "sizing_not_restored", "reason": "ratio_out_of_range", "bytes_per_token": round(ratio, 4)}
+    else:
+        estimator.observe(round(ratio * RESTORED_RATIO_WEIGHT), RESTORED_RATIO_WEIGHT)
+        event = {"event": "sizing_restored", "bytes_per_token": round(ratio, 4), "weight_tokens": RESTORED_RATIO_WEIGHT}
     log = getattr(store, "log", None)
     if callable(log):
         try:
             log(event)
         except STORE_FAILURES:
             pass  # the restore is an optimization; rule 14 handles a broken store at the next turn start
-    return event
+    return event if event["event"] == "sizing_restored" else None
 
 
 @dataclass
@@ -1043,8 +1052,9 @@ class RewriteEngine:
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
         """Feed a response's real usage back (a transformed endpoint; never ``count_tokens``). Returns the
-        content-free events it raised, which are also written to the session log through
-        ``store.log`` when the store has one (packet A2b; contract rule 3 as amended by PR #44):
+        content-free events it raised (packet A2b; contract rule 3 as amended by PR #44). The proxy writes
+        them on that request's log entry (``usage_events``), the one place they are logged (A2e,
+        agreed with builder-1); this method does not log them itself:
 
         - ``over_bound`` with ``source: "real"``: the real upstream input (input + cache read + cache
           write) exceeded the bound, whatever the pre-send estimate said, so acceptance 1 can rely on
@@ -1091,13 +1101,9 @@ class RewriteEngine:
         try:
             if not state.degraded:  # a degraded store is retried at the next turn start, not here
                 state = publish_window(calls, state, self.estimator)
-            log = getattr(calls, "log", None)
-            if callable(log):
-                for event in events:
-                    log(event)
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;
-            # the next turn start retries it. The events are still returned to the proxy.
+            # the next turn start retries it. The event reaches the log with the others, via the proxy.
             state = enter_degraded(state, store_failure(error, calls, state), events)
         self.states[key] = state
         return events

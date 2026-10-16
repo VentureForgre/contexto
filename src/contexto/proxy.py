@@ -26,7 +26,10 @@ complete, under the same lock, with the upstream usage dict
 dict, so a per-conversation engine can attribute
 it. It is not called for ``count_tokens``, errors, or responses without usage. The engine's
 estimator (rule 4) uses it. The launcher passes a ``contexto.rewrite.RewriteEngine`` instance as
-the transform (it is callable) and its ``observe_usage`` method (lane A packet A2). Calls to the
+the transform (it is callable) and its ``observe_usage`` method (lane A packet A2). The events the
+callable returns (real-usage ``over_bound``, ``estimate_error``, rule 14 store failures) are written,
+reduced to scalars, on that request's log entry as ``usage_events``, and a real ``over_bound`` sets the
+entry's ``over_bound``; this is the only place they are logged (packet A2e). Calls to the
 transform are serialized under a lock, so a stateful engine sees one request at a time.
 
 Byte stability: the transformed request is serialized deterministically (original key order,
@@ -635,7 +638,11 @@ class _Handler(BaseHTTPRequestHandler):
             entry["usage_unavailable"] = f"response content-encoding {decoder.encoding}"
         if (original is not None and entry["path"] in USAGE_FEEDBACK_PATHS and 200 <= response.status < 300
                 and reader.usage):
-            self._observe_usage(entry["path"], reader.usage, original)
+            usage_events = self._observe_usage(entry["path"], reader.usage, original)
+            if usage_events:
+                entry["usage_events"] = [_scalar_summary(e) for e in usage_events]
+                entry["over_bound"] = bool(entry.get("over_bound")) or any(bool(e.get("over_bound"))
+                                                                           for e in usage_events)
         owner.log(entry)
         if 400 <= response.status < 500:
             owner.log({"event": "upstream_4xx", "status": response.status, "path": entry["path"],
@@ -675,15 +682,18 @@ class _Handler(BaseHTTPRequestHandler):
         self.owner.log({"event": "transform_error", "level": "error", "error": error, "stage": stage,
                         "endpoint": endpoint, "epoch": self.owner.last_epoch})
 
-    def _observe_usage(self, endpoint: str, usage: dict[str, Any], original: dict[str, Any]) -> None:
+    def _observe_usage(self, endpoint: str, usage: dict[str, Any], original: dict[str, Any]) -> list[dict[str, Any]]:
+        """Run the usage callback; return the dict events it reports (anything else is ignored)."""
         callback = self.owner.observe_usage
         if callback is None:
-            return
+            return []
         try:
             with self.owner.transform_lock:
-                callback(endpoint, dict(usage), original)
+                events = callback(endpoint, dict(usage), original)
         except Exception as exc:
             self.owner.log({"event": "observe_usage_error", "error": type(exc).__name__})
+            return []
+        return [e for e in events if isinstance(e, dict)] if isinstance(events, list) else []
 
     def _send_local_error(self, status: int, message: str, error_type: str = "api_error") -> None:
         body = json.dumps({"type": "error", "error": {"type": error_type, "message": message}}).encode()
