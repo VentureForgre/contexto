@@ -157,6 +157,9 @@ def search_pages(pages: list[dict[str, Any]], query: str) -> list[str]:
     return [p["id"] for p in sorted(hits, key=lambda p: (p["turn"], p["id"]), reverse=True)]
 
 
+_TOKEN = re.compile(r"[\w.\-/]+")
+
+
 def index_line(page: dict[str, Any], salient: bool = False) -> str:
     stub = page["stub"]
     text = " ".join(stub["user_text"].split())
@@ -168,7 +171,8 @@ def index_line(page: dict[str, Any], salient: bool = False) -> str:
     if stub["paths"]:
         line += f" [files: {', '.join(stub['paths'])}]"
     if salient:
-        ids = [i for i in salient_identifiers(_texts(page["messages"])) if i not in stub["paths"]]
+        shown = set(_TOKEN.findall(line))  # an identifier already on the line adds nothing
+        ids = [i for i in salient_identifiers(_texts(page["messages"])) if i not in shown]
         if ids:
             line += f" [ids: {', '.join(ids)}]"
     return line

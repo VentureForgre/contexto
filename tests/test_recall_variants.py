@@ -152,3 +152,14 @@ def test_a_read_only_store_does_not_record_the_variant(tmp_path, monkeypatch):
     reader = SessionStore.open_existing(tmp_path, "s1")
     assert reader.recall_variant() == "legacy"
     assert not (reader.dir / "meta.json").exists()
+
+
+def test_the_index_does_not_repeat_identifiers_already_on_the_line(store):
+    turn = [{"role": "user", "content": "deploy billing-edge now, see conf/app.toml; then ledger-edge"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "read_file",
+                                                "input": {"path": "conf/app.toml"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                          "content": "owner=team-egret retry_policy=fast"}]}]
+    [pid] = store.page_out([turn], 2)
+    assert store.index_text(4000) == (f"{pid} turn 2: deploy billing-edge now, see conf/app.toml; then ledger-edge "
+                                      "[tools: read_file] [files: conf/app.toml] [ids: owner, retry_policy]")
