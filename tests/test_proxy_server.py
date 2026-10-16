@@ -760,3 +760,63 @@ def test_engine_exception_logs_transform_error_at_error_level(make_proxy):
     errors = [e for e in log.events if e["event"] == "transform_error"]
     assert errors[-1]["stage"] == "serialize" and errors[-1]["endpoint"] == "/responses"
     assert CONTENT not in json.dumps(log.events)
+
+
+# Multi-member gzip and trailing data (A1c, reviewer-1 on #57): never forward a partial body
+
+
+def test_every_gzip_member_is_decoded():
+    from contexto.proxy import decode_request_body
+
+    assert decode_request_body(gzip.compress(b"abc") + gzip.compress(b"def"), "gzip") == b"abcdef"
+
+
+
+@pytest.mark.parametrize("wire, encoding, reason", [
+    (gzip.compress(b"abc") + b"garbage", "gzip", "after the first compressed member"),
+    (gzip.compress(b"abc") + b"\0" * 16, "gzip", "after the first compressed member"),  # padding is data too
+    (_deflate(b"abc") + b"garbage", "deflate", "after the end of the compressed stream"),
+    (_deflate(b"abc", raw=True) + b"garbage", "deflate", "after the end of the compressed stream"),
+    (gzip.compress(b"abc") + gzip.compress(b"def")[:-4], "gzip", "truncated"),
+    (gzip.compress(b"abc")[:-4], "gzip", "truncated"),
+    (b"", "gzip", "empty"),
+])
+def test_trailing_or_truncated_data_is_refused(wire, encoding, reason):
+    from contexto.proxy import EncodedBodyError, decode_request_body
+
+    with pytest.raises(EncodedBodyError, match=reason):
+        decode_request_body(wire, encoding)
+
+
+def test_the_cap_applies_across_members():
+    from contexto.proxy import EncodedBodyError, decode_request_body
+
+    two = gzip.compress(b"x" * 600) + gzip.compress(b"y" * 600)
+    assert decode_request_body(two, "gzip", limit=1200) == b"x" * 600 + b"y" * 600
+    with pytest.raises(EncodedBodyError, match="more than 1,000 bytes"):
+        decode_request_body(two, "gzip", limit=1000)
+
+
+def test_zstd_frames_are_all_decoded_on_314():
+    from contexto.proxy import EncodedBodyError, decode_request_body
+
+    zstd = pytest.importorskip("compression.zstd")
+    assert decode_request_body(zstd.compress(b"abc") + zstd.compress(b"def"), "zstd") == b"abcdef"
+    with pytest.raises(EncodedBodyError):
+        decode_request_body(zstd.compress(b"abc") + b"garbage", "zstd")
+
+
+def test_proxy_forwards_the_whole_multi_member_body(make_proxy):
+    half = len(REQUEST_BYTES) // 2
+    wire = gzip.compress(REQUEST_BYTES[:half]) + gzip.compress(REQUEST_BYTES[half:])
+    proxy, log = make_proxy(transform=StubEngine())
+    response, _ = call(proxy, "POST", "/v1/messages", wire, dict(AUTH, **{"Content-Encoding": "gzip"}))
+    assert response.status == 200 and Upstream.received[0][3] == REQUEST_BYTES
+
+
+def test_proxy_refuses_trailing_garbage_with_415(make_proxy):
+    proxy, log = make_proxy(transform=StubEngine())
+    wire = gzip.compress(REQUEST_BYTES) + b"garbage"
+    response, data = call(proxy, "POST", "/v1/messages", wire, dict(AUTH, **{"Content-Encoding": "gzip"}))
+    assert response.status == 415 and Upstream.received == []
+    assert "after the first compressed member" in json.loads(data)["error"]["message"]
