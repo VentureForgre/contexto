@@ -901,6 +901,9 @@ class FaultyStore:
     def quarantine_page(self, page_id):
         return self._call("quarantine_page", page_id)
 
+    def window(self):
+        return self._call("window")
+
     def set_window(self, window_tokens, bytes_per_token):
         self._call("set_window", window_tokens, bytes_per_token)
         self.windows.append((window_tokens, bytes_per_token))
@@ -1182,14 +1185,16 @@ def test_failure_after_pages_were_written_rewrites_them_identically_on_the_retry
 def test_carried_text_paging_failure_enters_degraded_mode():
     store = FaultyStore()
     cfg = Config(bound=30_000, headroom_floor=500, carried_text_budget=1_000, carried_budget=1_000_000)
-    msgs = [user(f"prompt 0 {FILL}", context=True), system("sys A"), assistant(f"a0 {FILL}")]
+    msgs = [user(f"prompt 0 {FILL}", context=True), system("sys A")]
+    _, st0, _, _ = run(msgs, store=store, config=cfg)  # the carried baseline (rule 13) is this first request
+    msgs.append(assistant(f"a0 {FILL}"))
     for t in range(1, 10):
         msgs += [user(f"prompt {t} {FILL}"), style_message(f"Style{t}"), assistant(f"a{t} {FILL}")]
     for t in range(10, 30):
         msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
     msgs.append(user("new prompt"))
     store.fail_at = ("page_out", 2, OSError("synthetic"))  # the turns page, then the carried text fails
-    up, st, ev, _ = run(msgs, store=store, config=cfg)
+    up, st, ev, _ = run(msgs, state=st0, store=store, config=cfg)
     assert ev[0] == {"event": "store_error", "epoch": 0, "operation": "page_out", "error": "OSError"}
     assert "carried_paged" not in names(ev) and "rotation" not in names(ev) and up["messages"] == msgs
     store.fail_at = None
@@ -1203,9 +1208,9 @@ def test_set_window_failure_at_a_rotation_enters_degraded_mode():
     first = request(history(2) + [user("new")])
     engine(first, {}, MESSAGES)
     sent = next(iter(engine.states.values())).last_sent_bytes
-    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, first)  # the ratio is measured, W not yet known
-    assert "set_window" not in store.calls
-    store.fail["set_window"] = OSError("synthetic")
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, first)  # publishes W from the measured head
+    assert store.calls.count("set_window") == 1
+    store.fail["set_window"] = OSError("synthetic")  # the rotation's W differs (headroom grew), so it republishes
     _, _, events = engine(request(history(6) + [user("new prompt")]), {}, MESSAGES)
     assert [e["operation"] for e in events if e["event"] == "store_error"] == ["set_window"]
     assert "rotation" not in names(events) and next(iter(engine.states.values())).degraded
@@ -1224,3 +1229,48 @@ def test_repage_failure_after_quarantine_stays_degraded_with_the_page_moved_asid
     store.fail_at = None
     _, st3, ev3, _ = run(turn_start_after(turn_start_after(msgs, 6), 7), state=st2, store=store)
     assert names(ev3)[0] == "degraded_leave" and not st3.degraded and store.inner.pages[page_id] == good
+
+
+def test_first_request_that_rotates_does_not_report_carried_growth():
+    """Rule 13 baseline (A8 b): measured in the A6 smoke, a new engine's first request rotated and logged
+    carried_over_budget with growth equal to the whole carried content."""
+    cfg = Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=200, carried_budget=100)
+    msgs = history(6) + [user("new prompt")]
+    msgs.insert(1, system("synthetic session start " * 60))  # carried content far above carried_budget
+    _, st, ev, _ = run(msgs, config=cfg)
+    assert "rotation" in names(ev) and "carried_over_budget" not in names(ev)
+    assert st.initial_carried > cfg.carried_budget  # the baseline is the first request's carried size
+
+
+def test_a_second_engine_on_the_same_session_sizes_like_the_first():
+    """A8 (c): measured in the A6 smoke, each restarted engine began from the seed ratio. Now the first
+    response publishes W and the ratio, and a new engine on the same store starts from that ratio."""
+    store = MemoryStore(key=b"k" * 32)
+    cfg = Config(bound=20_000, headroom_floor=500, pin_budget=200, index_budget=200)
+    first = RewriteEngine(store, config=cfg)
+    assert first.restored is None  # a new session has nothing to restore
+    msgs = history(4) + [user("new prompt")]
+    req = request(msgs)
+    first(req, {}, MESSAGES)
+    sent = next(iter(first.states.values())).last_sent_bytes
+    first.observe_usage(MESSAGES, {"input_tokens": sent // 2}, req)  # real ratio 2.0, seed 3.5
+    ratio = first.estimator.measured_bytes_per_token
+    assert store.window()[1] == ratio and store.window()[0] > 0  # published after the first response
+    second = RewriteEngine(store, config=cfg)
+    assert second.restored == {"event": "sizing_restored", "bytes_per_token": round(ratio, 4),
+                               "weight_tokens": 10_000}
+    assert second.estimator.measured_bytes_per_token == pytest.approx(ratio, rel=1e-3)
+    assert [e for e in store.events if e["event"] == "sizing_restored"]
+    # The restarted engine's first estimate of the same request matches the measured one.
+    _, _, events = second(req, {}, MESSAGES)
+    assert events[-1]["estimate"] == pytest.approx(sent // 2, rel=0.05)
+    seeded = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)  # what a restart did before A8
+    _, _, events = seeded(req, {}, MESSAGES)
+    assert events[-1]["estimate"] < 0.75 * (sent // 2)
+
+
+def test_ratio_restore_is_skipped_when_the_store_cannot_be_read():
+    store = FaultyStore()
+    store.fail["window"] = OSError("synthetic")
+    engine = RewriteEngine(store, config=CONFIG)
+    assert engine.restored is None and engine.estimator.measured_bytes_per_token is None

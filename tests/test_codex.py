@@ -207,6 +207,8 @@ def test_api_key_mode_writes_a_private_temporary_codex_home(tmp_path):
         assert provider["auth"] == {"command": "/synthetic/bin/key-helper", "args": ["--profile", "synthetic"]}
         assert config["features"]["enable_request_compression"] is False
         assert config["mcp_servers"]["contexto"]["args"] == ["mcp", "--session", "S1"]
+        # A6 measured exec mode refusing MCP calls without this (approval policy "never").
+        assert config["mcp_servers"]["contexto"]["default_tools_approval_mode"] == "approve"
         assert launch.env["CODEX_HOME"] == str(root) and launch.argv == ["codex", "exec", "hi"]
         assert launch.upstream == "https://owner-proxy.invalid/v1"
     finally:
@@ -249,6 +251,9 @@ def test_chatgpt_mode_uses_overrides_only(tmp_path):
     assert "model_provider=contexto" in argv and "features.enable_request_compression=false" in argv
     assert launch.argv[-2:] == ["exec", "hi"] and launch.upstream == CHATGPT_UPSTREAM
     assert any("O4" in note for note in launch.notes)
+    overrides = dict(launch.argv[i + 1].split("=", 1) for i, a in enumerate(launch.argv) if a == "-c")
+    approval = overrides["mcp_servers.contexto.default_tools_approval_mode"]
+    assert tomllib.loads(f"v = {approval}")["v"] == "approve"  # a valid TOML value, as codex parses -c
     launch.cleanup()  # nothing to remove
 
 
