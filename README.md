@@ -1,185 +1,217 @@
 # Contexto
 
-Contexto is a private project for managing very long-running AI sessions and their context. The repository is the source of truth for the product; the OpenRig team is the persistent development team that will design and build it.
+Contexto keeps a Claude Code or Codex session going indefinitely without compaction.
 
-## Mission
+`contexto run claude` starts a small proxy on `127.0.0.1` and points Claude Code at it. Every model
+request passes through the proxy, which keeps the prompt sent upstream under a token bound (150,000
+by default). When a request gets within the headroom floor of the bound (25,000 tokens by default),
+the proxy moves the oldest turns out of the prompt and writes them, word for word, to a local store under `~/.contexto`. In their place the model sees a
+short index of those turns and a pinned state of the session's decisions and open obligations.
 
-Make long-running sessions recoverable and useful after context-window turnover, runtime restarts, and work handoffs. A future implementation should preserve decisions, active obligations, provenance, and enough verified state for a successor to continue without treating a summary as a complete transcript. Keep raw logs, credentials, and private user data out of Git.
+The model reads old turns back with MCP tools: `contexto_search` finds a turn by exact text and
+`contexto_recall` returns it in full. The bound stays below the point where Claude Code would
+compact the conversation itself, so nothing is summarized away. The full history stays on disk and
+can be inspected with `contexto sessions`, `contexto recall`, and `contexto state`.
 
-Initial design questions for the team:
+Contexto sends no extra model calls. It reads and rewrites the requests your CLI already makes.
 
-- How should events, decisions, tasks, artifacts, and references be captured with stable identities and provenance?
-- Which context should be retrieved for the next turn, and how is stale or conflicting context detected?
-- How are bounded checkpoints built, validated against source material, and handed to a new session?
-- How are handoff quality, retrieval precision, long-run continuity, and recovery after interruption tested?
+## Install
 
-These are product goals, not claims that the functionality is implemented yet.
-
-## MCP server (`contexto mcp`)
-
-`contexto run claude` gives Claude Code an MCP server for the session; you do not start it by hand.
-Claude Code spawns `contexto mcp --session <id>` from the launcher's `--mcp-config`, and the server
-talks MCP over stdio (one JSON-RPC message per line; only protocol messages on stdout, diagnostics
-on stderr; it exits when stdin closes). It accepts both the `initialize` handshake and the newer
-per-request `_meta` protocol version with `server/discover`.
-
-| Tool | What it does |
-|---|---|
-| `contexto_recall(page_id, offset?)` | a paged-out turn, word for word, thinking omitted; 32,000 characters per call, continue with `offset` |
-| `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | record a decision, obligation, fact, artifact, or reference in the session ledger |
-| `contexto_close(obligation_id, note)` | close an open obligation |
-| `contexto_state()` | the full pinned state, no size cap |
-| `contexto_search(query)` | page ids whose text contains the exact substring, newest first; no similarity search |
-
-Data lives under `$CONTEXTO_HOME` (default `~/.contexto`); `--home` overrides it. Every tool call is
-logged to the session log with names, ids, and sizes, never the text.
-
-## Development rig
-
-OpenRig rig: `contexto`. One native Claude Code intake lead (`intake.lead`), two middle-management seats (`management.manager-1`, `management.manager-2`), four builders (`build.builder-1` through `build.builder-4`), and two reviewers (`review.reviewer-1`, `review.reviewer-2`). All nine seats use `claude-opus-5-5` through the existing Claude proxy. Intake, managers, and reviewers use high reasoning; builders use medium. The proxy credential is held outside this repository.
-
-Work flows from intake to managers, from managers to builders, and from builders to independent reviewers. Intake coordinates integration and reports verified outcomes. Each specialist has a separate Git worktree. The durable OpenRig spec lives outside this repository at `~/.openrig/workspace/specs/contexto/rig.yaml`.
+Contexto needs Python 3.12 or later and has no runtime dependencies. Install the wheel from the
+[v0.1.0 GitHub Release](https://github.com/VentureForgre/contexto/releases/tag/v0.1.0). The release
+has two assets: `contexto-0.1.0-py3-none-any.whl` and `contexto-0.1.0.tar.gz`. The repository is
+private, so download with a `gh` login that can read it:
 
 ```sh
-rig ps --nodes --rig contexto --json
-rig send 'intake-lead@contexto' 'Describe the next milestone and delegate it through the managers.'
-# Attach to the existing OpenRig-owned intake session:
-# tmux attach -t 'intake-lead@contexto'
+gh release download v0.1.0 --repo VentureForgre/contexto --pattern 'contexto-0.1.0-py3-none-any.whl'
+uv tool install ./contexto-0.1.0-py3-none-any.whl     # or: pipx install ./contexto-0.1.0-py3-none-any.whl
+contexto --version                                    # contexto 0.1.0
 ```
 
-Do not commit proxy keys, tokens, local Claude settings, raw private transcripts, or generated runtime state. Contributions should go through pull requests targeting `main`. GitHub branch-rule enforcement depends on the account plan and is verified separately from this repository policy.
+`pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`. To
+install from a checkout instead, run `uv tool install .` in the repository root.
 
-## Install and use
+You also need `claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
 
-Contexto is a Python 3.12+ command-line tool with no runtime dependencies.
+## Quickstart
 
-```sh
-uv tool install .            # or: pip install .
-contexto --version
-```
-
-Commands for milestone M2 (`docs/milestones/M2-contexto-proxy.md`). `contexto run` and
-`contexto proxy` are documented with the proxy, `contexto mcp` in "MCP server" above, and the rest
-in "Inspecting sessions" below. Every command accepts `--help`.
-
-| Command | Purpose |
-|---|---|
-| `contexto run claude [args]` | Run Claude Code through the Contexto proxy |
-| `contexto run codex [args]` | Run Codex through the Contexto proxy |
-| `contexto proxy` | Run the proxy alone |
-| `contexto mcp --session S` | MCP server with recall, search, pin, close, and state tools |
-| `contexto sessions list`, `contexto sessions show <id>` | List and inspect sessions |
-| `contexto recall <page id>` | Print a paged-out turn |
-| `contexto state` | Print the session's pinned state |
-
-Session data lives under `$CONTEXTO_HOME` (default `~/.contexto`) and is never committed.
-
-## Inspecting sessions (`contexto sessions`, `contexto recall`, `contexto state`)
-
-These commands read a session's store under `$CONTEXTO_HOME/sessions/<id>/`. They never create a
-session or change its pages, ledger, or log, and `sessions list` skips symlinked entries rather than
-following them out of `sessions/`.
-
-**Session selection** for `recall` and `state`: `--session ID`, else the `CONTEXTO_SESSION`
-environment variable, else the session with the most recent activity. The chosen session and how
-it was chosen are printed to stderr, for example `session 7f3a (most recent)`, so stdout carries
-only the page or state text.
-
-### `contexto sessions list [--json]`
-
-One row per session, most recent activity first (ties broken by id): id, created time, page count,
-ledger record count (`?` if the ledger cannot be read), and last activity. Times are UTC. `--json`
-prints a list of objects with the keys `id`, `created`, `pages`, `records`, `last_activity`.
-
-### `contexto sessions show ID [--json]`
-
-A summary of one session:
-
-- created and last activity times;
-- page count, ledger record count, active records, and open obligations;
-- how many session-log events, over-bound turns, and upstream 4xx responses were recorded;
-- the last epoch state the proxy logged;
-- whether the ledger verifies.
-
-`--json` adds the event counts by type.
-
-### `contexto recall PAGE_ID [--session ID] [--offset N]`
-
-Prints a paged-out turn as plain text with thinking omitted, rendered exactly as the MCP
-`contexto_recall` tool renders it, 32,000 characters at a time. When more remains, stderr says
-`[N more characters: rerun with --offset M]`.
-
-### `contexto state [--session ID]`
-
-Prints the session's full pinned state without the budget cap: open obligations, active
-decisions, and verified facts with their record ids. This is the same text as the MCP
-`contexto_state` tool. By design it reads files: each file a record cites as provenance is hashed
-inside the session's recorded working directory to check whether it changed (`STALE`). It only
-reads paths that stay inside that directory, symlinks included, and never writes there. If no
-working directory is recorded, the output says staleness was not checked.
-
-### Exit codes
-
-| Code | Meaning |
-|---|---|
-| 0 | Success (an empty session list is a success) |
-| 1 | Unknown or invalid session id, unknown page id, an offset past the end of the page, or an unreadable ledger |
-| 2 | Usage error: unknown command or option, or a missing argument (`contexto` with no command prints help and exits 2) |
-
-## Run Claude Code through Contexto (`contexto run`)
+### Claude Code
 
 ```sh
-contexto run [contexto options] claude [claude args...]
+contexto run claude
 contexto run --bound 120000 claude --model claude-haiku-5-5
 ```
 
-Contexto options go before `claude`; everything after `claude` is passed to Claude Code unchanged.
-The launcher:
+Contexto options go before `claude`. Everything after `claude` is passed to Claude Code unchanged.
+The session id is printed on stderr at start. The launcher:
 
-1. resolves the upstream Claude Code would otherwise use: `--upstream`, else the first settings file
-   that sets `env.ANTHROPIC_BASE_URL` in Claude Code's precedence (in a git worktree the main
-   checkout's `.claude/settings.local.json` first), else `ANTHROPIC_BASE_URL`, else
-   `https://api.anthropic.com`;
-2. opens session S under `$CONTEXTO_HOME/sessions/<S>/` and starts the proxy on
+1. resolves the upstream Claude Code would otherwise use (see [Troubleshooting](#troubleshooting));
+2. opens the session under `$CONTEXTO_HOME/sessions/<id>/` and starts the proxy on
    `127.0.0.1:<free port>`;
-3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file holding only
-   `env.ANTHROPIC_BASE_URL` = the proxy, and an `--mcp-config` file that starts `contexto mcp --session S`;
+3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets only
+   `env.ANTHROPIC_BASE_URL` to the proxy, and an `--mcp-config` file that starts
+   `contexto mcp --session <id>`;
 4. runs `claude --settings <file> --mcp-config <file> [your args]` in your terminal and returns its
    exit code.
 
-Your own Claude Code settings, hooks, and MCP servers still load; nothing in your Claude
-configuration is edited. Limit: organization-managed settings outrank `--settings`, so if they set
-`ANTHROPIC_BASE_URL`, Claude Code bypasses the proxy.
+Your own Claude Code settings, hooks, and MCP servers still load, and nothing in your Claude
+configuration is edited. Ctrl+C reaches Claude Code as usual; SIGTERM and SIGHUP are forwarded to it.
 
-Passing your own `--settings` (or `--settings=...`) after `claude` is refused with exit code 2:
-Claude Code accepts a single `--settings`, and a second one could replace the launcher's and route
-requests around the proxy. Put those settings in your Claude settings files instead. Your own
-`--mcp-config` is allowed; Claude Code loads it alongside Contexto's.
+### Codex (API-key mode)
+
+```sh
+contexto run codex
+contexto run --codex-key-helper 'my-key-command' codex
+```
+
+Codex gets its key from a helper command that prints it: `--codex-key-helper`, else
+`$CONTEXTO_CODEX_KEY_HELPER`, else the `apiKeyHelper` from your Claude Code settings. Codex runs the
+helper itself; Contexto never reads or stores the key.
+
+`contexto run codex` sets `CODEX_HOME` to `$CONTEXTO_HOME/sessions/<id>/codex-home` (mode 0700) and
+writes a `config.toml` there (mode 0600) that:
+
+- adds a model provider `contexto` whose `base_url` is the proxy, with `wire_api = "responses"`,
+  `supports_websockets = false`, and the key helper as its auth command;
+- turns request compression off (`features.enable_request_compression = false`);
+- adds the MCP server `contexto` (`contexto mcp --session <id>`) with
+  `default_tools_approval_mode = "approve"`, so recall works in `codex exec` too.
+
+On exit the `config.toml` is deleted and the directory is kept, so Codex can resume its rollouts.
+Because `CODEX_HOME` is new, your own `~/.codex` configuration is not loaded in this mode.
+
+Codex requests go to `--codex-upstream`, else `$CONTEXTO_CODEX_UPSTREAM`, else the upstream Claude Code
+would use plus `/v1`.
+
+ChatGPT login mode (`--codex-auth chatgpt`) uses your own `CODEX_HOME` with `-c` overrides instead. It
+is tested only with synthetic credentials, never live, and whether end users may route ChatGPT
+credentials this way under OpenAI's terms is an open question.
+
+## Bound and configuration
+
+`contexto run` options (all go before `claude` or `codex`):
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--bound N` | 150,000 | Upstream prompt bound in tokens. Above 170,000 needs `--allow-large-bound`, because Claude Code may then compact on its own. |
-| `--allow-large-bound` | off | Allow `--bound` above 170,000. |
+| `--bound N` | 150,000 | Upstream prompt bound in tokens. Above 170,000 needs `--allow-large-bound`. |
+| `--allow-large-bound` | off | Allow `--bound` above 170,000 (Claude Code may then compact on its own). |
 | `--window-fraction F` | 0.5 | Share of the window budget kept as recent turns after a rotation. |
 | `--headroom-floor N` | 25,000 | Minimum headroom below the bound that triggers a rotation. |
-| `--session ID` | new id | Session id; the id is printed on stderr at start. |
-| `--upstream URL` | resolved | Upstream base URL. |
+| `--session ID` | a new id | Session id; reuse one to continue a session's store. |
+| `--upstream URL` | resolved | Upstream base URL for Claude Code requests. |
 | `--observe-thinking` | off | Adds the `thinking-binding-controls-2026-08-01` beta so dropped thinking is logged. This changes the request by one beta flag. |
+| `--codex-auth MODE` | `apikey` | `apikey` or `chatgpt` (see Quickstart). |
+| `--codex-key-helper CMD` | see Quickstart | Command that prints the API key (Codex, API-key mode). |
+| `--codex-upstream URL` | see Quickstart | Upstream for Codex requests, including its version path. |
 
-At start, the launcher warns on stderr if the bound leaves less than 25,000 tokens of working window
-after the fixed overhead (assumed 92,000 inside an OpenRig seat, 55,000 otherwise), and later once if
-the measured overhead does. Ctrl+C reaches Claude Code as usual; SIGTERM and SIGHUP are forwarded to it.
+`contexto proxy [--session ID] [--port N] [--upstream URL] [--observe-thinking]` runs the proxy alone,
+mainly for tests. `--port` defaults to 0 (a free port). It prints
+`listening on 127.0.0.1:<port> session <id> upstream <source>` and forwards requests unchanged.
 
-Exit codes: Claude Code's own exit code; 128 + N if Claude Code died from signal N; 2 for a usage
-error (for example `--bound` above the guard); 1 if the proxy cannot start; 127 if `claude` is not
-on `PATH`.
+Environment variables:
 
-## Run the proxy alone (`contexto proxy`)
+| Variable | Used by | Meaning |
+|---|---|---|
+| `CONTEXTO_HOME` | all commands | Data directory (default `~/.contexto`). `contexto mcp --home` overrides it. |
+| `CONTEXTO_SESSION` | `recall`, `state` | Session to read when `--session` is not given. |
+| `CONTEXTO_CODEX_KEY_HELPER` | `run codex` | Key helper command when `--codex-key-helper` is not given. |
+| `CONTEXTO_CODEX_UPSTREAM` | `run codex` | Codex upstream when `--codex-upstream` is not given. |
+| `CONTEXTO_RECALL_VARIANT` | new sessions | `default` or `legacy` recall guidance text. `legacy` is kept for diagnosis. A session keeps the variant it started with. |
+| `ANTHROPIC_BASE_URL` | `run`, `proxy` | Upstream, when no settings file sets one (see Troubleshooting). |
+| `OPENRIG_SESSION_NAME` | `run` | When set, the start-up window check assumes 92,000 tokens of fixed overhead instead of 55,000. |
 
-```sh
-contexto proxy [--session ID] [--port N] [--upstream URL] [--observe-thinking]
-```
+At start, `contexto run` warns on stderr when the bound leaves a window budget under 25,000 tokens
+(bound minus headroom floor minus the assumed fixed overhead) and suggests a larger `--bound`. It
+warns again, once, if the measured overhead does the same.
 
-Starts the proxy without a client, mainly for tests, and prints
-`listening on 127.0.0.1:<port> session <id> upstream <source>`. It forwards with the identity
-transform: requests pass through unchanged and are logged to the session log.
+## Inspecting sessions
+
+These commands read a session's store under `$CONTEXTO_HOME/sessions/<id>/` and never change it.
+`recall` and `state` pick the session from `--session ID`, else `CONTEXTO_SESSION`, else the session
+with the most recent activity, and print the choice to stderr (for example
+`session 7f3a (most recent)`), so stdout carries only the text.
+
+- `contexto sessions list [--json]`: one row per session, most recent activity first: id, created
+  time, page count, ledger record count (`?` if the ledger cannot be read), and last activity, in UTC.
+- `contexto sessions show ID [--json]`: created and last activity times; page, record, active
+  record, and open obligation counts; session-log event, over-bound turn, and upstream 4xx counts;
+  the last epoch the proxy logged; and whether the ledger verifies. `--json` adds event counts by type.
+- `contexto recall PAGE_ID [--session ID] [--offset N]`: a paged-out turn as plain text, thinking
+  omitted, exactly as the MCP `contexto_recall` tool renders it, at most 32,000 characters and about a
+  quarter of the session's window budget at a time. When more remains, stderr says `[N more characters: rerun with --offset M]`.
+- `contexto state [--session ID]`: the full pinned state with no size cap, the same text as the MCP
+  `contexto_state` tool. It hashes each file a record cites as provenance, inside the session's
+  recorded working directory, to mark changed files `STALE`. It never writes there.
+
+## MCP tools the model gets
+
+`contexto run` registers `contexto mcp --session <id>` with the CLI, which starts it over stdio. You do
+not start it by hand.
+
+| Tool | What it does |
+|---|---|
+| `contexto_search(query)` | Paged-out turns containing an exact, case-sensitive substring, newest first, with matching lines; also matching lines from the conversation still in view |
+| `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted; up to 32,000 characters per call and at most half of the turn's remaining recall budget |
+| `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record a decision, obligation, fact, artifact, or reference in the session ledger |
+| `contexto_close(obligation_id, note)` | Close an open obligation |
+| `contexto_state()` | The full pinned state, no size cap |
+
+Each turn has a recall budget: the bound minus the tokens the turn already uses minus the headroom
+floor. At a turn start the proxy rotates when needed to leave at least 12,000 tokens of it. Tool calls
+are logged with names, ids, and sizes, never the text.
+
+## Troubleshooting
+
+**Which upstream does `contexto run` use?** The first of: `--upstream`; `env.ANTHROPIC_BASE_URL` from
+the first Claude Code settings file that sets it (in a git worktree, the main checkout's
+`.claude/settings.local.json` first, then the project's `.claude/settings.local.json`, then
+`.claude/settings.json`, then `~/.claude/settings.json`); `ANTHROPIC_BASE_URL` in the environment;
+`https://api.anthropic.com`. The session log records which source won, never the URL.
+
+**Requests bypass the proxy.** Organization-managed Claude Code settings outrank the launcher's
+`--settings`. If they set `ANTHROPIC_BASE_URL`, Claude Code talks to that URL directly.
+
+**`--settings` is refused (exit 2).** Claude Code accepts one `--settings`, and the launcher uses it to
+route requests through the proxy. Put those settings in your Claude settings files instead. Your own
+`--mcp-config` is allowed and loads alongside Contexto's.
+
+**"window budget about N tokens ... is below 25,000".** The bound leaves little room for turns after
+the fixed overhead, so rotations page often. Start again with the suggested `--bound`.
+
+**502 "contexto proxy: upstream unreachable (...)".** The proxy could not reach the upstream. It opens
+a new connection per request and retries once when the connection, TLS handshake, or request send
+fails. A failure after the request was fully sent is returned as 502 without a retry, and the CLI's
+own retry takes over. The session log records which step failed. "contexto proxy: internal error"
+is a Contexto bug; please report it.
+
+**415 "cannot read a request body with Content-Encoding ...".** The proxy decodes gzip and deflate
+(and zstd on Python 3.14+) and refuses other encodings. Run the CLI through `contexto run`, which
+turns Codex's request compression off.
+
+**`count_tokens` returns 403.** Errors from the upstream pass through unchanged. Some proxies refuse
+`/v1/messages/count_tokens`; Claude Code calls it only around compaction.
+
+**Where are the logs?** `$CONTEXTO_HOME/sessions/<id>/log.jsonl`, one JSON object per event, with sizes,
+counts, and event names but no prompt or response text. Paged-out turns are in `pages/` and the
+pinned records in `ledger.jsonl` in the same directory.
+
+## Known limitations
+
+v0.1.0 was accepted on one model, one bound, and one upstream, Codex has no live acceptance run, and
+cache efficiency depends on the upstream route. The full list is in
+[STATUS.md, "Known limitations (v0.1.0)"](STATUS.md#known-limitations-v010).
+
+## Exit codes
+
+| Command | Code | Meaning |
+|---|---|---|
+| `run` | the CLI's | Claude Code's or Codex's own exit code |
+| `run` | 128 + N | The CLI died from signal N |
+| `run` | 1 | The proxy could not start |
+| `run` | 2 | Usage error, for example `--bound` above 170,000, a `--settings` after `claude`, or no Codex key helper or upstream |
+| `run` | 127 | `claude` or `codex` is not on `PATH` |
+| `sessions`, `recall`, `state` | 0 | Success (an empty session list is a success) |
+| `sessions`, `recall`, `state` | 1 | Unknown or invalid session id, unknown page id, an offset past the end of the page, or an unreadable ledger |
+| any | 2 | Unknown command or option, or a missing argument (`contexto` with no command prints help and exits 2) |
+
+Development, tests, and releases: see [CONTRIBUTING.md](CONTRIBUTING.md).
