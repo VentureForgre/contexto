@@ -146,6 +146,9 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   block rather than for a smaller window. M2 acceptance measures H1 against the full-context
   baseline; the deferred 852,610-token run can be revived if the bound needs more evidence.
   Heads: `lab.subject` 81,808 to 84,073 (plain Claude Code 45,925), Codex 32,331 after onboarding.
+  Large heads leave little room: an OpenRig seat (fixed overhead near 92k) gets a window budget
+  of about 33k at 150,000, so the bound for seat use should be weighed upward, toward the 170,000
+  launcher cap, once acceptance shows how the idle-compaction premise holds.
 - **O4. End-user authentication guidance.** API key only, or also subscription logins, for people
   who run Contexto themselves. Needs the terms question answered in the product docs. Owner
   decision, because it bears on what may be shared beyond this repository.
