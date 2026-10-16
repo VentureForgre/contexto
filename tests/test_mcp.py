@@ -171,11 +171,16 @@ def test_recall_argument_and_unknown_id_errors_are_tool_errors(server, stores, a
 
 
 def test_search_is_exact_substring_newest_first(server, stores):
-    _, a, b = stores
+    store, a, b = stores
     hit = tool(server, "contexto_search", {"query": "garnet-4821"})["result"]
     assert "structuredContent" not in hit
-    assert hit["content"][0]["text"].startswith(f"{a} (turn 3): Remember: the staging port is garnet-4821.")
-    assert "\n" not in hit["content"][0]["text"]  # one hit
+    text = hit["content"][0]["text"]
+    page_text = mcp.render_page(store.get_page(a))
+    offset = page_text.index("Remember: the staging port is garnet-4821.")
+    head, *lines = text.split("\n")
+    assert head.startswith(f"{a} (turn 3): Remember: the staging port is garnet-4821.")  # one hit
+    assert f"> {offset}: Remember: the staging port is garnet-4821." in lines  # the line, at its offset
+    assert all(line.startswith(("> ", "  ")) for line in lines)
     assert (tool(server, "contexto_search", {"query": "GARNET"})["result"]["content"][0]["text"]
             == "No paged-out turn contains that exact text.")
     assert tool(server, "contexto_search", {"query": "x"})["result"]["content"][0]["text"].startswith(b)
@@ -189,7 +194,7 @@ def test_search_says_when_results_are_cut():
                     for i in range(mcp.SEARCH_LIMIT + 5)], first_turn=1)
     result = tool(mcp.Server(store, io.StringIO(), io.StringIO()), "contexto_search", {"query": "needle"})["result"]
     lines = result["content"][0]["text"].split("\n")
-    assert len(lines) == mcp.SEARCH_LIMIT + 1
+    assert sum(line.startswith("pg_") for line in lines) == mcp.SEARCH_LIMIT
     assert lines[-1] == "[5 more matching pages not shown; use a longer or more specific query]"
 
 

@@ -314,19 +314,20 @@ def test_search_and_state_are_charged_too(store):
     assert "ship the blue build" in state
 
 
-def test_search_shows_whole_lines_that_fit_then_the_message(store):
+def test_search_shows_whole_hits_that_fit_then_the_message(store):
     store.set_window(200_000, 2.0)
     for i in range(30):
         page(store, chars=40, turn=i + 1)
     full = text_of(call(store, "contexto_search", {"query": "aaa"}))
-    store.set_turn_room("1", 400)  # 600 characters: some lines, not all 30
+    store.set_turn_room("1", 400)  # 600 characters: some hits, not all 30
     cut = text_of(call(store, "contexto_search", {"query": "aaa"}))
-    lines = cut.split("\n")
-    assert len(cut) <= 600 and 1 < len(lines) < 30
-    assert all(line in full.split("\n") for line in lines[:-1])
-    assert lines[-1] == f"[{31 - len(lines)} more matching pages not shown; the recall budget for this turn is used up]"
-    assert calls(store)[-1]["hits"] == len(lines) - 1
-    store.set_turn_room("1", 10)  # a republished room of 10 tokens: no whole line fits
+    body, trailer = cut.rsplit("\n", 1)
+    shown = body.count("\npg_") + 1
+    assert len(cut) <= 600 and 1 < shown < 30
+    assert full.startswith(body + "\n")  # whole hits, in order
+    assert trailer == f"[{30 - shown} more matching pages not shown; the recall budget for this turn is used up]"
+    assert calls(store)[-1]["hits"] == shown
+    store.set_turn_room("1", 10)  # a republished room of 10 tokens: no whole hit fits
     assert text_of(call(store, "contexto_search", {"query": "aaa"})) == SPENT
 
 
