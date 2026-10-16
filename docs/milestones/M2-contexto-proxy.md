@@ -118,7 +118,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    assistant message yet (only its turn-start message and any system messages). Rotate when the
    estimated upstream input would exceed `bound - headroom`, or when the per-turn recall room that
    would be published for the new turn (`bound - estimate - headroom_floor`) is below `min_turn_room`
-   (default 20,000); without that second condition the room is smallest on the turn just before a
+   (default 12,000, about 1.7 times the largest per-turn evidence measured in the engine-driven
+   6x9 estimate, 6,964 tokens; 20,000 made the engine rotate on 10 of 12 content turns at bound
+   150,000 with 40 KB turns, each a cache miss and a thinking strip); without that second condition the room is smallest on the turn just before a
    rotation, because both shrink toward the same line (engine-driven estimate, PR #113: 5,219 at
    the start of turn 4, 738 at its lowest). A rotation fired by the room condition sizes its window
    target as `0.5 * (W - min_turn_room)` instead of `0.5 * W` (rule 4), falling back to the minimal
