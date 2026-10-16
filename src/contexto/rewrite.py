@@ -122,7 +122,7 @@ class Config:
     # Recall knobs (packet A7, H1 recall fix). Defaults keep today's request byte for byte.
     recall_rule: str = ""  # placed before the store's pinned and index text in the preamble
     recall_example: str = ""  # one line placed after the rule
-    preamble_first: bool = False  # the preamble block goes before carried context blocks, not after
+    preamble_first: bool = True  # V2 (intake 03:26Z): the preamble block goes before carried context blocks
     turn_reminder: str = ""  # appended to each retained turn-start user message while turns are paged
 
 

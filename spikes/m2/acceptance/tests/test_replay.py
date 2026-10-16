@@ -36,7 +36,8 @@ def _records(probe: str = PROBE) -> list[dict[str, Any]]:
     u3 = {"role": "user", "content": [{"type": "text", "text": probe}]}
     shape = {"system": [{"type": "text", "text": "sys"}],
              "tools": [{"name": "Read", "input_schema": {}}, {"name": "mcp__contexto__contexto_recall", "input_schema": {}}]}
-    params = {"model": "claude-haiku-5-5", "betas": ["b1"], "max_tokens": 128000, "thinking": {"type": "adaptive"},
+    params = {"model": "claude-haiku-5-5", "betas": ["b1", "claude-code-20250219"], "max_tokens": 128000,
+              "thinking": {"type": "adaptive"},
               "context_management": {"edits": []}, "output_config": {"effort": "medium"}}
     return [
         {"type": "api-request-shape", "shapeHash": "sh", "shape": shape},
@@ -114,7 +115,8 @@ class _Stub(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)))
         _Stub.seen.append({"path": self.path, "key": self.headers.get("x-api-key"), "keys": sorted(body),
-                           "beta": self.headers.get("anthropic-beta")})
+                           "bearer": self.headers.get("authorization"),
+                           "beta": self.headers.get("anthropic-beta"), "ua": self.headers.get("user-agent")})
         if _Stub.status != 200:
             data = json.dumps({"type": "error", "error": {"type": "authentication_error"}}).encode()
             self.send_response(_Stub.status)
@@ -160,6 +162,16 @@ def _setup(tmp_path: Path) -> tuple[Path, Path]:
     return jsonl, seat
 
 
+def _assert_key_absent(tmp_path: Path, capsys) -> None:
+    """The key never reaches stdout, stderr, or any file the replay writes (only the seat settings
+    file, which names the helper command, is excluded)."""
+    captured = capsys.readouterr()
+    assert "test-key-not-real" not in captured.out + captured.err
+    for path in tmp_path.rglob("*"):
+        if path.is_file() and path.name != "seat.json":
+            assert "test-key-not-real" not in path.read_text(errors="replace"), path.name
+
+
 def test_replay_counts_then_sends_once_with_the_helper_key(tmp_path, stub, capsys):
     jsonl, seat = _setup(tmp_path)
     out = tmp_path / "out"
@@ -167,12 +179,14 @@ def test_replay_counts_then_sends_once_with_the_helper_key(tmp_path, stub, capsy
                      "--seat-settings", str(seat), "--upstream", stub])
     assert code == 0
     assert [x["path"] for x in _Stub.seen] == ["/v1/messages/count_tokens", "/v1/messages"]
-    assert all(x["key"] == "test-key-not-real" and x["beta"] == "b1" for x in _Stub.seen)
+    assert all(x["key"] == "test-key-not-real" and x["beta"] == "b1" for x in _Stub.seen)  # claude-code-* dropped
+    assert all(x["bearer"] == "Bearer test-key-not-real" for x in _Stub.seen)  # the approved header set
+    assert all(x["ua"] == replay.USER_AGENT and "claude" not in x["ua"].lower() for x in _Stub.seen)
     assert "max_tokens" not in _Stub.seen[0]["keys"] and "stream" in _Stub.seen[1]["keys"]
     result = json.loads((out / "replay-result.json").read_text())
     assert result["count_tokens"] == 1_000 and result["usage"]["output_tokens"] == 3
     assert (out / "baseline-answers.txt").read_text() == "q_1: x\n"
-    assert "test-key-not-real" not in (out / "replay-result.json").read_text() + capsys.readouterr().out
+    _assert_key_absent(tmp_path, capsys)
 
 
 def test_replay_stops_without_sending_when_the_count_does_not_fit(tmp_path, stub):
@@ -184,13 +198,14 @@ def test_replay_stops_without_sending_when_the_count_does_not_fit(tmp_path, stub
     assert "context window" in json.loads((tmp_path / "o" / "replay-result.json").read_text())["stopped"]
 
 
-def test_replay_stops_on_the_first_401(tmp_path, stub):
+def test_replay_stops_on_the_first_401(tmp_path, stub, capsys):
     jsonl, seat = _setup(tmp_path)
     _Stub.status = 401
     code = run.main(["replay", "--cc-jsonl", str(jsonl), "--out", str(tmp_path / "o"), "--approved", "477681",
                      "--seat-settings", str(seat), "--upstream", stub])
     assert code == 1 and len(_Stub.seen) == 1
     assert "401" in json.loads((tmp_path / "o" / "replay-result.json").read_text())["stopped"]
+    _assert_key_absent(tmp_path, capsys)
 
 
 def test_replay_dry_makes_no_calls(tmp_path, stub, capsys):
@@ -212,3 +227,20 @@ def test_parse_sse_collects_tool_calls_with_their_input():
     out = replay.parse_sse([f"data: {json.dumps(e)}" for e in events])
     assert out["tool_uses"] == [{"name": "mcp__contexto__contexto_search", "input": {"query": "checkout-api"}}]
     assert out["stop_reason"] == "tool_use" and out["text"] == ""
+
+
+def test_auth_headers_carry_the_key_only_in_credential_headers():
+    # The approved default (intake 03:24Z): the key in x-api-key and Authorization: Bearer.
+    assert replay.AUTH_HEADER == "both"
+    assert replay.auth_headers("k") == {"x-api-key": "k", "authorization": "Bearer k"}
+    assert replay.auth_headers("k", "x-api-key") == {"x-api-key": "k"}
+    assert replay.auth_headers("k", "bearer") == {"authorization": "Bearer k"}
+
+
+def test_no_claude_code_beta_reaches_a_direct_request():
+    # Intake (2026-10-16): no Claude Code client marker on any direct harness send; other betas stay.
+    assert replay.harness_betas(["b1", "claude-code-20250219", "claude-code-x", 3]) == ["b1"]
+    req = replay.build_request(_records(), PROBE, 1_000)
+    assert req["_betas"] == ["b1"]
+    assert replay.beta_headers({"_betas": ["claude-code-20250219"]}) == {}
+    assert replay.beta_headers({"_betas": ["claude-code-20250219", "b2"]}) == {"anthropic-beta": "b2"}

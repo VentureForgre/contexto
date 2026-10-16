@@ -21,11 +21,12 @@ validation failures, which become tool errors the model can act on.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
-from contexto.store.render import RECALL_LIMIT, recall_chunk, recall_limit
+from contexto.store.render import MAX_CHARS_PER_TOKEN, RECALL_LIMIT, recall_chunk, recall_limit
 from contexto.store.render import render_page as render_page  # re-exported: contexto.mcp.render_page
 
 SERVER_NAME = "contexto"
@@ -34,6 +35,10 @@ MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
 SEARCH_LIMIT = 50  # page ids per contexto_search result
+# Per-turn recall budget (M2 contract PR #69): what recall, search, and state return this turn.
+BUDGET_SPENT = ("Recall budget for this turn is used up; answer from what is in view, or say the detail is "
+                "unknown.")
+UNMEASURED_CHARS_PER_TOKEN = 1.0  # before the engine records bytes per token: charges more, never less
 # Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
 # rejects a tools/list result without them (reviewer-2, real client, 2026-10-16). The tool list is
 # per-session and never cached by the client.
@@ -67,6 +72,7 @@ class Store(Protocol):
     def state_text(self) -> str: ...
     def log(self, event: dict[str, Any]) -> None: ...
     def window(self) -> tuple[int | None, float | None]: ...
+    # Optional: charge_turn_room(charge) (contract PR #69); without it, calls are not budgeted per turn.
 
 
 class ToolError(Exception):
@@ -275,9 +281,10 @@ class Server:
             self._diag(f"store.log failed: {type(exc).__name__}")
         return result
 
-    # Tools: each returns (content blocks, structuredContent or None, log fields without text)
+    # Tools: each returns (content blocks, structuredContent or None, log fields without text). Recall,
+    # search, and state return text only, so the per-turn charge counts exactly what they return.
 
-    def _tool_recall(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    def _tool_recall(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], None, dict[str, Any]]:
         page_id = _require_str(args, "page_id")
         offset = args.get("offset", 0)
         if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
@@ -286,21 +293,31 @@ class Server:
         page = self.store.get_page(page_id)
         if page is None:
             raise ToolError(f"Unknown page id: {page_id}. Page ids appear in the paged-history index.")
-        window = getattr(self.store, "window", None)
-        limit, note = recall_limit(*(window() if callable(window) else (None, None)))
+        limit, note = recall_limit(*self._window())
         try:
             part = recall_chunk(page, offset, limit)
         except ValueError as exc:
             raise ToolError(str(exc)) from None
-        chunk, next_offset, total = part["text"], part["next_offset"], part["total_chars"]
-        end = offset + len(chunk)
-        content = [{"type": "text", "text": chunk}]
-        if next_offset is not None:
-            content.append({"type": "text", "text": f"[{total - end} more characters: call contexto_recall "
-                                                    f"with page_id {page_id} and offset {next_offset}; {note}]"})
-        structured = {"page_id": page_id, "turn": page.get("turn"), "offset": offset,
-                      "next_offset": next_offset, "total_chars": total}
-        return content, structured, {"page_id": page_id, "offset": offset, "chars": len(chunk), "total_chars": total}
+        full, total = part["text"], part["total_chars"]
+
+        def hint(end: int) -> str:
+            return (f"[{total - end} more characters: call contexto_recall with page_id {page_id} and offset {end}; "
+                    f"{note}]")
+
+        def build(room: int | None) -> list[str] | None:
+            texts = [full] + ([hint(offset + len(full))] if offset + len(full) < total else [])
+            if room is None or sum(map(len, texts)) <= room:
+                return texts
+            size = room - len(hint(offset))  # a later offset's hint is never shorter
+            while size > 0 and size + len(hint(offset + size)) > room:
+                size -= 1
+            return [full[:size], hint(offset + size)] if size > 0 else None
+
+        texts, budget = self._within_room(build, "contexto_recall")
+        texts = texts or [BUDGET_SPENT]
+        chunk = texts[0] if budget["turn_budget"] != "spent" else ""
+        return ([{"type": "text", "text": t} for t in texts], None,
+                {"page_id": page_id, "offset": offset, "chars": len(chunk), "total_chars": total, **budget})
 
     def _tool_pin(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         _reject_extra(args, {"kind", "text", "supersedes", "epistemic", "provenance"})
@@ -340,10 +357,27 @@ class Server:
 
     def _tool_state(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], None, dict[str, Any]]:
         _reject_extra(args, set())
-        text = self.store.state_text()
-        return [{"type": "text", "text": text}], None, {"chars": len(text)}
+        full = self.store.state_text()
 
-    def _tool_search(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        def build(room: int | None) -> list[str] | None:
+            if room is None or len(full) <= room:
+                return [full]
+            lines, kept = full.split("\n"), []
+            for line in lines:
+                shown = len("\n".join(kept + [line]))
+                rest = len(full) - shown - 1
+                if shown + len(_state_trailer(rest)) + 1 > room:
+                    break
+                kept.append(line)
+            if not kept:
+                return None
+            return ["\n".join(kept) + "\n" + _state_trailer(len(full) - len("\n".join(kept)) - 1)]
+
+        texts, budget = self._within_room(build, "contexto_state")
+        text = texts[0] if texts else BUDGET_SPENT
+        return [{"type": "text", "text": text}], None, {"chars": len(text) if texts else 0, **budget}
+
+    def _tool_search(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], None, dict[str, Any]]:
         _reject_extra(args, {"query"})
         query = _require_str(args, "query")
         hits: list[dict[str, Any]] = []
@@ -351,19 +385,92 @@ class Server:
         for page_id in found[:SEARCH_LIMIT]:
             page = self.store.get_page(page_id) or {}
             hits.append({"page_id": page_id, "turn": page.get("turn"), "stub": _stub_line(page.get("stub"))})
-        if hits:
-            text = "\n".join(f"{h['page_id']} (turn {h['turn']}): {h['stub']}" for h in hits)
-            if len(found) > len(hits):
-                text += (f"\n[{len(found) - len(hits)} more matching pages not shown; "
-                         "use a longer or more specific query]")
+        lines = [f"{h['page_id']} (turn {h['turn']}): {h['stub']}" for h in hits]
+
+        def render(shown: int, why: str = "use a longer or more specific query") -> str:
+            if not hits:
+                return "No paged-out turn contains that exact text."
+            text = "\n".join(lines[:shown])
+            if len(found) > shown:
+                text += f"\n[{len(found) - shown} more matching pages not shown; {why}]"
+            return text
+
+        picked = {"shown": len(hits)}
+
+        def build(room: int | None) -> list[str] | None:
+            full = render(len(hits))
+            if room is None or len(full) <= room:
+                picked["shown"] = len(hits)
+                return [full]
+            for count in range(len(hits) - 1, 0, -1):
+                text = render(count, "the recall budget for this turn is used up")
+                if len(text) <= room:
+                    picked["shown"] = count
+                    return [text]
+            return None
+
+        texts, budget = self._within_room(build, "contexto_search")
+        shown = hits[: picked["shown"]] if texts else []
+        text = texts[0] if texts else BUDGET_SPENT
+        return ([{"type": "text", "text": text}], None,
+                {"query_chars": len(query), "hits": len(shown), "total_matches": len(found), **budget})
+
+    # Per-turn recall budget (M2 contract PR #69)
+
+    def _window(self) -> tuple[int | None, float | None]:
+        window = getattr(self.store, "window", None)
+        return window() if callable(window) else (None, None)
+
+    def _within_room(self, build: Callable[[int | None], list[str] | None],
+                     tool: str) -> tuple[list[str] | None, dict[str, Any]]:
+        """Build a reply inside this turn's room and charge it, atomically.
+
+        ``build(room_chars)`` returns the reply's text blocks, at most ``room_chars`` characters in
+        all (None: no limit), or None when nothing useful fits. Tokens are the characters divided by
+        the per-call limit's ratio, the smaller of the measured bytes per token and 1.5.
+
+        When nothing useful fits, the tool replies ``BUDGET_SPENT``, charged at the room that is
+        left, up to its own size. That text is required, so a call with no room left still returns
+        it, uncharged: at most about 67 tokens per such call (100 characters at 1.5), about 1,000
+        for 15 parallel calls, well inside the engine's headroom floor (25,000 by default).
+
+        With no room published only the per-call limit applies. If the engine is present (it has
+        recorded the window) but published no room, a ``turn_room_missing`` event makes the missed
+        publish visible.
+        """
+        window_tokens, ratio = self._window()
+        ratio = min(ratio, MAX_CHARS_PER_TOKEN) if ratio else UNMEASURED_CHARS_PER_TOKEN
+        out: dict[str, Any] = {"texts": None, "budget": {"turn_budget": "unbudgeted"}}
+
+        def charge(remaining: int | None) -> int:
+            texts = build(None if remaining is None else int(remaining * ratio))
+            out["texts"] = texts
+            if remaining is None:
+                return 0
+            used = min(remaining, math.ceil(sum(map(len, texts or [BUDGET_SPENT])) / ratio))
+            out["budget"] = {"turn_budget": "spent" if texts is None else "charged", "charged_tokens": used,
+                             "room_left": remaining - used}
+            return used
+
+        charge_turn_room = getattr(self.store, "charge_turn_room", None)
+        if callable(charge_turn_room):
+            charge_turn_room(charge)
         else:
-            text = "No paged-out turn contains that exact text."
-        return ([{"type": "text", "text": text}], {"page_ids": [h["page_id"] for h in hits], "total_matches": len(found)},
-                {"query_chars": len(query), "hits": len(hits), "total_matches": len(found)})
+            charge(None)
+        if out["budget"]["turn_budget"] == "unbudgeted" and window_tokens is not None:
+            try:
+                self.store.log({"event": "turn_room_missing", "tool": tool})
+            except Exception as exc:  # logging must never break a call
+                self._diag(f"store.log failed: {type(exc).__name__}")
+        return out["texts"], out["budget"]
 
     def _diag(self, message: str) -> None:
         self.stderr.write(f"contexto mcp: {message}\n")
         self.stderr.flush()
+
+
+def _state_trailer(rest: int) -> str:
+    return f"[{rest} more characters of the pinned state not shown; the recall budget for this turn is used up]"
 
 
 def _stub_line(stub: Any) -> str:

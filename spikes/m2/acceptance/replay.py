@@ -35,6 +35,38 @@ from acceptance import driver  # noqa: E402
 
 CONTEXTO_TOOL_PREFIX = "mcp__contexto__"
 ANTHROPIC_VERSION = "2023-06-01"
+# An honest client name. urllib's default user agent is refused by some fronts (M0: Cloudflare 1010),
+# and this harness never presents itself as Claude Code.
+USER_AGENT = "contexto-acceptance-harness/0.1 (+VentureForgre/contexto)"
+# How the key is presented: "x-api-key", "bearer" (Authorization: Bearer), or "both". Intake approved
+# "both" with the honest user agent (2026-10-16 03:24Z): the owner's proxy refused direct requests
+# with urllib's user agent (403) and with x-api-key alone (401), and accepted this set (200).
+AUTH_HEADER = "both"
+
+
+# Betas that mark the request as coming from Claude Code. Intake (2026-10-16): no direct harness send
+# presents a Claude Code client marker; the functional betas the request needs stay.
+CLIENT_MARKER_BETA_PREFIX = "claude-code-"
+
+
+def harness_betas(betas: Any) -> list[str]:
+    """The recorded betas a direct harness request may send: every string except claude-code-*."""
+    return [b for b in betas or [] if isinstance(b, str) and not b.startswith(CLIENT_MARKER_BETA_PREFIX)]
+
+
+def beta_headers(request: dict[str, Any]) -> dict[str, str]:
+    betas = harness_betas(request.get("_betas"))
+    return {"anthropic-beta": ",".join(betas)} if betas else {}
+
+
+def auth_headers(key: str, auth: str | None = None) -> dict[str, str]:
+    """The credential headers only; the key goes nowhere else."""
+    mode = auth or AUTH_HEADER
+    if mode == "bearer":
+        return {"authorization": f"Bearer {key}"}
+    if mode == "both":
+        return {"x-api-key": key, "authorization": f"Bearer {key}"}
+    return {"x-api-key": key}
 
 
 class ReplayError(Exception):
@@ -147,7 +179,7 @@ def build_request(cc_records: list[dict[str, Any]], probe_text: str, max_tokens:
     for key in ("thinking", "output_config"):
         if key in p:
             request[key] = p[key]
-    request["_betas"] = [b for b in p.get("betas") or [] if isinstance(b, str)]
+    request["_betas"] = harness_betas(p.get("betas"))
     return request
 
 
@@ -208,10 +240,10 @@ def parse_sse(lines: Any) -> dict[str, Any]:
 def send(request: dict[str, Any], upstream: str, key: str, timeout: float = 900.0) -> dict[str, Any]:
     """POST the replay; the key goes only into the request header. Stops on 401 or 403."""
     body = json.dumps({k: v for k, v in request.items() if not k.startswith("_")}).encode("utf-8")
-    headers = {"content-type": "application/json", "anthropic-version": ANTHROPIC_VERSION, "x-api-key": key,
+    headers = {"content-type": "application/json", "anthropic-version": ANTHROPIC_VERSION, **auth_headers(key),
+               "user-agent": USER_AGENT,
                "accept": "text/event-stream"}
-    if request.get("_betas"):
-        headers["anthropic-beta"] = ",".join(request["_betas"])
+    headers.update(beta_headers(request))  # never a claude-code-* beta, whatever the caller passed
     req = urllib.request.Request(upstream.rstrip("/") + "/v1/messages", data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -237,21 +269,30 @@ def count_tokens(request: dict[str, Any], upstream: str, key: str, timeout: floa
     """Input tokens of the exact replay request, from ``/v1/messages/count_tokens`` (no output, no
     charge for tokens). Stops on 401 or 403 like ``send``."""
     body = json.dumps({k: request[k] for k in _COUNT_FIELDS if k in request}).encode("utf-8")
-    headers = {"content-type": "application/json", "anthropic-version": ANTHROPIC_VERSION, "x-api-key": key}
-    if request.get("_betas"):
-        headers["anthropic-beta"] = ",".join(request["_betas"])
+    headers = {"content-type": "application/json", "anthropic-version": ANTHROPIC_VERSION, **auth_headers(key),
+               "user-agent": USER_AGENT}
+    headers.update(beta_headers(request))  # never a claude-code-* beta, whatever the caller passed
     req = urllib.request.Request(upstream.rstrip("/") + "/v1/messages/count_tokens", data=body, headers=headers,
                                  method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             tokens = json.loads(resp.read() or b"{}").get("input_tokens")
     except urllib.error.HTTPError as exc:
+        kind = _error_type(exc)  # the error's type field only; never the message or headers
         if exc.code in (401, 403):
-            raise driver.AuthFailure(f"count_tokens returned {exc.code}; replay stopped at the first auth error") from None
-        raise ReplayError(f"count_tokens returned {exc.code}") from None
+            raise driver.AuthFailure(f"count_tokens returned {exc.code} ({kind}); replay stopped at the first "
+                                     "auth error") from None
+        raise ReplayError(f"count_tokens returned {exc.code} ({kind})") from None
     if not isinstance(tokens, int):
         raise ReplayError("count_tokens returned no input_tokens")
     return tokens
+
+
+def _error_type(exc: urllib.error.HTTPError) -> str | None:
+    try:
+        return (json.loads(exc.read() or b"{}").get("error") or {}).get("type")
+    except (json.JSONDecodeError, OSError, AttributeError):
+        return None
 
 
 def check_fits(input_tokens: int, max_tokens: int, context_window: int, approved: int) -> str | None:

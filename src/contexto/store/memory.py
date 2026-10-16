@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import secrets
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from contexto.store import PageConflictError, PageNotFoundError, check_page_id, check_window, redact
+from contexto.store import (PageConflictError, PageNotFoundError, apply_turn_room, charge_room, check_page_id,
+                             check_turn_room, check_window, redact)
 from contexto.store.ledger import MemoryLedger
 from contexto.store.pages import build_page, render_index, same_content, search_pages
 from contexto.store.records import LedgerOps
@@ -22,6 +25,8 @@ class MemoryStore(LedgerOps):
         self.ledger = MemoryLedger()
         self.quarantined: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
         self._workdir: Path | None = None
+        self._turn_room: tuple[str | None, int | None, int] = (None, None, 0)
+        self._room_lock = threading.Lock()
 
     def set_workdir(self, path: Path) -> None:
         self._workdir = Path(path).resolve()
@@ -36,6 +41,21 @@ class MemoryStore(LedgerOps):
     def window(self) -> tuple[int | None, float | None]:
         return getattr(self, "_window", (None, None))
 
+    def set_turn_room(self, turn_id: str, room_tokens: int) -> None:
+        turn_id = check_turn_room(turn_id, room_tokens)
+        with self._room_lock:
+            record = apply_turn_room(self._turn_room, turn_id, room_tokens)
+            self._turn_room = (record["turn_id"], record["room_tokens"], record["spent_tokens"])
+
+    def turn_room(self) -> tuple[str | None, int | None, int]:
+        return self._turn_room
+
+    def charge_turn_room(self, charge: Callable[[int | None], int]) -> None:
+        with self._room_lock:
+            record = charge_room(self._turn_room, charge)
+            if record is not None:
+                self._turn_room = (record["turn_id"], record["room_tokens"], record["spent_tokens"])
+
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]:
         ids = []
         for offset, turn in enumerate(turns):
@@ -44,7 +64,8 @@ class MemoryStore(LedgerOps):
             if existing is None:
                 self.pages[page["id"]] = page
             elif not same_content(existing, page):  # same id, different turn or messages
-                raise PageConflictError(f"page {page['id']} exists with different turn or messages")
+                raise PageConflictError(f"page {page['id']} exists with different turn or messages",
+                                        page_id=page["id"])
             ids.append(page["id"])
         return ids
 

@@ -12,7 +12,10 @@ Checks:
   R12  thinking enabled, binding beta with prefix_mismatch_behavior=error: turn 1 with a non-empty
        system message after the user prompt (Claude Code's shape), then turn 2 replaying turn 1's
        signed thinking with that system message emptied in place.
-Each case is retried once with Claude Code 2.1.301's beta list if the plain request is rejected.
+Each case is sent once, with only the feature betas it tests (R12: the thinking binding beta) and an
+honest User-Agent naming this harness (intake rule D23: never another product's client marker). The
+recorded A2 run (README finding 2) retried P-a once with Claude Code 2.1.301's beta list; that retry
+was removed under D23.
 
 Usage: live_check.py <out.jsonl> [--cap 20000] [--r12]
 """
@@ -29,9 +32,7 @@ probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
 
 MODEL = "claude-haiku-5-5"
-CLAUDE_CODE_BETAS = ["claude-code-20250219", "interleaved-thinking-2025-05-14", "context-management-2025-06-27",
-                     "prompt-caching-scope-2026-01-05", "per-turn-control-2026-07-01",
-                     "mid-conversation-tool-changes-2026-07-01", "inline-tools-2026-09-15", "effort-2025-11-24"]
+probe.UA = "contexto-test/live_check"  # D23: names this harness; probe.call reads it per request
 SYSTEM_TEXT = "Synthetic carried system note: answer briefly."
 spent = 0
 
@@ -40,7 +41,7 @@ def send(base, key, out, label, body, betas):
     global spent
     probe.BETAS[:] = betas
     status, headers, payload = probe.call(base, key, body)
-    rec = probe.record(0, status, headers, payload, {"case": label, "betas": "claude-code" if betas else "none"})
+    rec = probe.record(0, status, headers, payload, {"case": label, "betas": ",".join(betas) or "none"})
     u = payload.get("usage") or {}
     spent += sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"))
     rec["spent_total"] = spent
@@ -49,13 +50,11 @@ def send(base, key, out, label, body, betas):
     return status, payload
 
 
-def case(base, key, out, cap, label, body, extra_betas=()):
+def case(base, key, out, cap, label, body, feature_betas=()):
+    """Send one case once; ``feature_betas`` are only the betas the case itself tests."""
     if spent > cap - 2000:
         print(f"{label}: skipped, cap"); return None, {}
-    status, payload = send(base, key, out, label, body, list(extra_betas))
-    if status == 400 and spent <= cap - 2000:
-        status, payload = send(base, key, out, label + "+cc-betas", body, CLAUDE_CODE_BETAS + list(extra_betas))
-    return status, payload
+    return send(base, key, out, label, body, list(feature_betas))
 
 
 def main():
@@ -75,7 +74,7 @@ def main():
             {"role": "system", "content": SYSTEM_TEXT}]})
         if "--r12" not in sys.argv:
             return  # rule 12 check is opt-in: zero-spend evidence showed no client-side emptying
-        binding = ["thinking-binding-controls-2026-08-01"]
+        binding = ["thinking-binding-controls-2026-08-01"]  # the feature R12 tests
         thinking = {"type": "enabled", "budget_tokens": 1024,
                     "block_binding": {"prefix_mismatch_behavior": "error"}}
         q1 = {"role": "user", "content": "What is 37 times 43? Think it through, then answer with the number only."}

@@ -33,17 +33,21 @@ def test_defaults_leave_the_request_unchanged():
 
 def test_rule_and_example_lead_the_preamble_before_store_text():
     up, st, _, store = rotated(KNOBS)
-    text = up["messages"][0]["content"][1]["text"]
+    text = up["messages"][0]["content"][0]["text"]  # preamble_first is the default (A7b)
     pinned = store.pinned_text(KNOBS.pin_budget)
     assert text.startswith(RULE + "\n\n" + EXAMPLE + "\n\n") and pinned in text
     assert text.index(EXAMPLE) < text.index(pinned)
 
 
-def test_preamble_first_puts_the_preamble_ahead_of_carried_context():
-    knobs = Config(**{**KNOBS.__dict__, "preamble_first": True})
-    up, _, _, _ = rotated(knobs)
+def test_preamble_first_is_the_default_and_can_be_turned_off():
+    assert Config().preamble_first is True  # V2, intake 03:26Z (A7b)
+    up, _, _, _ = rotated(KNOBS)
     content = up["messages"][0]["content"]
     assert content[0]["text"].startswith(RULE) and content[1] == ctx_block()
+    off = Config(**{**KNOBS.__dict__, "preamble_first": False})
+    up, _, _, _ = rotated(off)
+    content = up["messages"][0]["content"]
+    assert content[0] == ctx_block() and content[1]["text"].startswith(RULE)  # the pre-A7b layout
 
 
 def test_turn_reminder_ends_every_retained_turn_start_and_nothing_else():
