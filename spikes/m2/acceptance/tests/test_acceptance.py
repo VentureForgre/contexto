@@ -65,11 +65,11 @@ def test_turns_reach_the_requested_size(s):
 
 
 def test_rotation_always_retains_the_newest_complete_turn(s):
-    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], budget.Params(bound=100_000))
+    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], budget.Params())
     for row in b.rows[1:]:
         if row.kind == "turn":
             assert row.retained_turns >= 1
-    assert b.rotations >= 1 and b.history_tokens >= 2.5 * 100_000
+    assert b.rotations >= 1 and b.bound_too_small == 0
     assert b.planned_over_bound == 0
     recall_rows = [r for r in b.rows if r.kind == "recall"]
     assert recall_rows and all(r.epoch == b.rows[-1].epoch for r in recall_rows)  # tool loop never rotates
@@ -86,7 +86,7 @@ def test_budget_lines_and_worst_case(s):
 def test_bound_too_small_when_the_window_budget_cannot_hold_a_turn():
     # 44 KB turns at a 54.5k head and a 100k bound: W = 20,500 cannot hold a 22k-token turn (rule 4).
     big = script.build(turns=12, turn_bytes=44_000)
-    b = budget.simulate(list(big.turn_bytes[:-1]), big.turn_bytes[-1], budget.Params(bound=100_000))
+    b = budget.simulate(list(big.turn_bytes[:-1]), big.turn_bytes[-1], budget.Params(bound=100_000, head=54_500))
     assert b.bound_too_small > 0 and b.planned_over_bound > 0 and b.rotations == 0
     assert b.window_budget_first == 100_000 - 25_000 - 54_500
 
@@ -121,7 +121,7 @@ def test_detectors_on_a_clean_synthetic_session():
     assert r.requests == 5 and r.epochs == 2 and r.rotations == 1  # rotation_noop is not counted
     assert r.requests_per_epoch == {"1": 2, "2": 3}
     assert r.cache_eligible == 3 and r.cache_hits == 3 and r.cache_hit_rate == 1.0
-    assert r.over_bound_requests == 1 and r.unlogged_over_bound == []
+    assert r.over_bound_requests == 1 and r.over_bound_tool_loop == [5] and r.over_bound_failures == []
     assert r.recall_ok == 1 and r.compaction_events == 0
     assert all(r.verdicts().values())
 
@@ -138,7 +138,7 @@ def test_detectors_flag_compaction_unlogged_over_bound_4xx_and_misses():
     r = detectors.analyze(log, cc, bound=100_000)
     v = r.verdicts()
     assert r.compaction_events == 2 and not v["zero_compaction"]
-    assert r.unlogged_over_bound == [2] and not v["over_bound_only_when_logged"]
+    assert r.over_bound_failures == [2] and not v["over_bound_only_in_tool_loop"]
     assert r.upstream_4xx == 1 and not v["zero_4xx"]
     assert r.cache_misses == [2, 3] and not v["recall_called"]
 
@@ -280,10 +280,10 @@ def test_dry_run_prints_the_budget(capsys):
 def test_auto_turn_count_reaches_the_acceptance_history_at_150k():
     p = budget.Params()
     assert p.bound == 150_000
-    s = run.build_script(script.DEFAULT_SEED, 0, 70_000, p)
+    s = run.build_script(script.DEFAULT_SEED, 0, 40_000, p)
     b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], p)
     assert b.history_tokens >= 375_000 and b.planned_over_bound == 0 and b.bound_too_small == 0
-    shorter = script.build(script.DEFAULT_SEED, len(s.turns) - 2, 70_000)
+    shorter = script.build(script.DEFAULT_SEED, len(s.turns) - 2, 40_000)
     assert sum(budget.turn_tokens(x) + p.reply_tokens for x in shorter.turn_bytes[:-1]) < 375_000
     assert b.h1_worst + b.baseline_replay_worst < 4_000_000
 
@@ -323,3 +323,59 @@ def test_credcheck_reports_a_broken_seat_settings_file_cleanly(tmp_path, content
         seat.write_text(content)
     result = credcheck.check(seat)
     assert result["ran"] is False and "pass" not in result and result["reason"]
+
+
+def test_requests_without_usage_are_unverified_and_fail_acceptance_1():
+    log = [_req(1, 50_000), {"event": "request", "path": "/v1/messages", "status": 200, "usage": None, "epoch": 1},
+           {"event": "request", "path": "/v1/messages", "status": 200, "epoch": 1}]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert r.unverified_requests == [2, 3]
+    assert r.verdicts()["every_request_has_usage"] is False
+    assert detectors.analyze([_req(1, 50_000)], [], bound=150_000).verdicts()["every_request_has_usage"] is True
+
+
+def test_over_bound_is_exempt_only_in_a_flagged_tool_loop():
+    real = {"event": "over_bound", "source": "real", "epoch": 1, "over_bound": True, "real_tokens": 151_000,
+            "estimate": 140_000, "bound": 150_000}
+    err = {"event": "estimate_error", "epoch": 1, "real_tokens": 151_000, "estimate": 120_000, "ratio": 0.795,
+           "mean_ratio": 0.9}
+    # The estimate missed: the engine did not flag the request, and A2b logged it from real usage.
+    r = detectors.analyze([_req(1, 50_000), _req(1, 151_000), real, err], [], bound=150_000)
+    v = r.verdicts()
+    assert r.over_bound_failures == [2] and not v["over_bound_only_in_tool_loop"]
+    assert r.over_bound_real == 1 and r.estimator_misses == 1 and r.estimator_miss_max_tokens == 151_000
+    assert not v["no_estimator_misses"]
+    assert r.estimate_errors == 1 and r.estimate_min_ratio == 0.795 and r.estimate_mean_ratio == 0.9
+    # A tool loop the engine flagged before sending is the one exemption, and explains its real event.
+    loop = detectors.analyze([_req(1, 151_000, over=True), {**real, "estimate": 152_000}], [], bound=150_000)
+    assert loop.over_bound_tool_loop == [1] and loop.over_bound_failures == [] and loop.estimator_misses == 0
+    assert all(loop.verdicts()[k] for k in ("over_bound_only_in_tool_loop", "no_estimator_misses"))
+    # A flagged turn start is not a tool loop: bound_too_small is a configuration failure.
+    bts = detectors.analyze([_req(1, 151_000, over=True, events=[{"event": "bound_too_small", "epoch": 1}])], [],
+                            bound=150_000)
+    assert bts.over_bound_failures == [1] and bts.bound_too_small == 1 and not bts.verdicts()["no_bound_too_small"]
+    # window_minimal is counted and is no exemption: over the bound there is an estimator miss.
+    wm = detectors.analyze([_req(1, 151_000, over=True, events=[{"event": "window_minimal", "epoch": 1}])], [],
+                           bound=150_000)
+    assert wm.window_minimal == 1 and wm.over_bound_failures == [1]
+
+
+
+def test_window_must_hold_the_newest_complete_turn_and_the_new_one():
+    # The stub dry run through the launcher: at 70 KB turns the engine logged bound_too_small and went
+    # over the bound, because W (about 60,000) cannot hold two turns of about 39,000 tokens.
+    p = budget.Params()
+    s = run.build_script(script.DEFAULT_SEED, 0, 70_000, p)
+    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], p)
+    assert b.bound_too_small > 0 and b.planned_over_bound > 0 and b.rotations == 0
+
+
+def test_stub_dry_run_models_log_text_and_the_rest_separately():
+    from acceptance import stubrun
+
+    log = "x" * 18_000
+    body = {"system": "s", "messages": [{"role": "user", "content": [{"type": "text", "text": log}]},
+                                         {"role": "user", "content": "short"}]}
+    m = stubrun.model_tokens(body)
+    assert m["log_bytes"] == 18_000 and m["tokens"] == 10_000 + -(-m["other_bytes"] // 3)
+    assert body["messages"][0]["content"][0]["text"] == log  # the caller's body is not changed

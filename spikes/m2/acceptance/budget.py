@@ -3,14 +3,16 @@
 H1 is simulated with the contract's rotation rules (M2 contract, rules 3 to 5): before each new
 turn, if the estimated upstream input would exceed ``bound - headroom``, page out the oldest turns
 until the retained turns fit half the window budget ``W = bound - headroom - F`` (``F`` = head plus
-preamble), always keeping the newest complete turn and the new one; if ``W`` cannot hold the newest
-complete turn, the request goes unrotated (``bound_too_small``). ``headroom`` is the running max of
+preamble), always keeping the newest complete turn and the new one; if ``W`` cannot hold those two
+turns, the request goes unrotated (``bound_too_small``), as the merged engine does. ``headroom`` is the running max of
 per-turn growth plus 25%, floor 25,000.
 
 Token estimates: this script's pasted log text counts at 1.8 bytes per token, the rate M0 measured
-for numeric log content (about 0.55 tokens per character in E1, E2, and L2f). The contract's
-estimator uses 2.0 for tool output and 3.5 for other text; 2.0 would undercount this content by
-about 10 percent and 3.5 by about half. Token counting replaces the estimate where available.
+for numeric log content (about 0.55 tokens per character in E1, E2, and L2f). Before the first real
+usage, the contract's estimator counts ``tool_result`` content at 1.5 bytes per token, which errs
+high for this content, and other text at 3.5, which undercounts it by about half (contract PR #44).
+The pasted logs are user text, so the run keeps them as such only under the 10 percent rule in the
+harness doc (option (a)). Token counting replaces the estimate where available.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ HEADROOM_FLOOR = 25_000
 @dataclass(frozen=True)
 class Params:
     bound: int = 150_000  # intake 00:40Z: the shipped default; history must reach 2.5x (375,000)
-    head: int = 54_500  # the contract's M0 figure for a throwaway head with pins (rule 4); lane 1 relayed 45,925 without
+    head: int = 47_600  # the engine's fixed overhead F in the stub dry run through the launcher (M0 figure: 54,500)
     window_fraction: float = 0.5  # rule 4: retained window targets this share of W
     reply_tokens: int = 20  # "OK" plus a little thinking per build turn
     preamble_base: int = 300  # the preamble's fixed lines
@@ -86,7 +88,7 @@ def simulate(turn_bytes: list[int], probe_bytes: int, p: Params = Params()) -> B
         window_budget = p.bound - headroom - fixed
         note = ""
         if retained and fixed + sum(retained) + u > p.bound - headroom:
-            if window_budget <= 0 or window_budget < retained[-1]:
+            if window_budget <= 0 or window_budget < retained[-1] + u:  # the engine's check: newest complete + new
                 b.bound_too_small += 1
                 note = "bound_too_small: sent unrotated"
             else:
