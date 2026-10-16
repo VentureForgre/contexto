@@ -28,6 +28,20 @@ BYTES_PER_TOKEN_TEXT = 3.5
 HEADROOM_FLOOR = 25_000
 
 
+# The contract's default (PR #116, a6bafa6), used only until lane A's engine Config carries the field.
+CONTRACT_MIN_TURN_ROOM = 12_000
+
+
+def engine_default(name: str, fallback: int) -> int:
+    """A rewrite-engine Config default, so the simulation follows the engine, not a copy."""
+    try:
+        from contexto.rewrite import Config
+    except ImportError:
+        return fallback
+    value = getattr(Config(), name, None)
+    return int(value) if isinstance(value, int) else fallback
+
+
 @dataclass(frozen=True)
 class Params:
     bound: int = 150_000  # intake 00:40Z: the shipped default; history must reach 2.5x (375,000)
@@ -43,6 +57,9 @@ class Params:
     # log text at 1.8 bytes per token. B9 returns less when W / 4 is smaller, so this errs high.
     recall_tokens: int | None = None
     max_tokens_reserve: int = 32_000  # the guard reserves this much output per request
+    # A12 (contract PR #115): a turn also rotates when the recall room it would publish,
+    # bound - estimate - headroom floor, would be under this. The engine's own default, when it has one.
+    min_turn_room: int = field(default_factory=lambda: engine_default("min_turn_room", CONTRACT_MIN_TURN_ROOM))
 
 
 @dataclass
@@ -76,6 +93,8 @@ class Budget:
     b9_recall_tokens: int = 0  # what B9 would return at the simulated W (informational)
     probe_rooms: list[int] = field(default_factory=list)  # A9 turn room at each probe turn's start
     baseline_requests: list[int] = field(default_factory=list)  # D27 baseline: input of each request
+    room_rotations: int = 0  # rotations fired by A12's room condition (contract PR #115)
+    turn_room_low_epochs: list[int] = field(default_factory=list)  # epochs where A12 logged turn_room_low
 
 
 def recall_tokens(p: Params) -> int:
@@ -122,7 +141,8 @@ def simulate(turn_bytes: list[int], probe_bytes: int | list[int], p: Params = Pa
         fixed = p.head + preamble  # rule 4: F = system + tools + carried + preamble
         window_budget = p.bound - headroom - fixed
         note = ""
-        if retained and fixed + sum(retained) + u > p.bound - headroom:
+        estimate = fixed + sum(retained) + u
+        if retained and estimate > p.bound - headroom:  # rule 4's bound trigger
             if window_budget <= 0 or window_budget < retained[-1] + u:  # the engine's check: newest complete + new
                 b.bound_too_small += 1
                 note = "bound_too_small: sent unrotated"
@@ -139,6 +159,29 @@ def simulate(turn_bytes: list[int], probe_bytes: int | list[int], p: Params = Pa
                     preamble = p.preamble_base + p.pinned_tokens + paged * p.index_tokens_per_page
                 else:
                     note = "rotation no-op (newest complete turn already alone)"
+        elif retained and p.bound - estimate - HEADROOM_FLOOR < p.min_turn_room:
+            # A12 (contract PR #115): the room this turn would publish is under min_turn_room. Rotate to
+            # 0.5 * (W - min_turn_room), falling back to the minimal window (the new turn alone), and
+            # only if that restores a room of at least min_turn_room; otherwise log turn_room_low
+            # once per epoch and do not rotate.
+            target = int(p.window_fraction * (window_budget - p.min_turn_room))
+            keep = list(retained)
+            while keep and sum(keep) + u > target:
+                keep.pop(0)
+            dropped = len(retained) - len(keep)
+            new_preamble = p.preamble_base + p.pinned_tokens + (paged + dropped) * p.index_tokens_per_page
+            restored = p.bound - (p.head + new_preamble + sum(keep) + u) - HEADROOM_FLOOR
+            if dropped and restored >= p.min_turn_room:
+                retained[:] = keep
+                paged += dropped
+                epoch += 1
+                b.rotations += 1
+                b.room_rotations += 1
+                preamble = new_preamble
+                note = "rotation (A12 room)"
+            elif epoch not in b.turn_room_low_epochs:
+                b.turn_room_low_epochs.append(epoch)
+                note = "turn_room_low: rotation would not restore the room"
         inp = p.head + preamble + sum(retained) + u
         over = inp > p.bound
         b.rows.append(Row(t, kind, inp, len(retained), paged, epoch, over,

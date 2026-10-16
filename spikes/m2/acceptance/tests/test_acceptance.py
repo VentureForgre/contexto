@@ -70,12 +70,13 @@ def test_turns_reach_the_requested_size(s):
 def test_rotation_always_retains_the_newest_complete_turn(s):
     b = budget.simulate(list(s.content_bytes), list(s.probe_bytes), budget.Params())
     for row in b.rows[1:]:
-        if row.kind == "turn":
+        if row.kind == "turn" and row.note == "rotation":  # rule 4's bound rotation; A12's falls back to minimal
             assert row.retained_turns >= 1
     assert b.rotations >= 1 and b.bound_too_small == 0
     assert b.planned_over_bound == 0
+    turn_epoch = {r.turn: r.epoch for r in b.rows if r.kind == "probe"}
     recall_rows = [r for r in b.rows if r.kind == "recall"]
-    assert recall_rows and all(r.epoch == b.rows[-1].epoch for r in recall_rows)  # tool loop never rotates
+    assert recall_rows and all(r.epoch == turn_epoch[r.turn] for r in recall_rows)  # tool loop never rotates
 
 
 def test_budget_lines_and_worst_case(s):
@@ -753,6 +754,49 @@ def test_live_gates_on_the_combined_h1_and_baseline_worst_case(tmp_path, capsys)
     assert run.main(["live", "--approved", str(combined), *common]) == 2  # passes the gate, stops at the seat file
     assert "seat settings file" in capsys.readouterr().err
 
+
+def test_a12_rotates_when_the_new_turns_room_would_fall_under_min_turn_room():
+    # Contract PR #115 (A12, 1ce122c): rotate also when bound - estimate - headroom floor < min_turn_room,
+    # to 0.5 * (W - min_turn_room), falling back to the minimal window, and only if that restores the room.
+    s, _ = run.plan()
+    p = budget.Params()
+    with_a12 = budget.simulate(list(s.content_bytes), list(s.probe_bytes), p)
+    without = budget.simulate(list(s.content_bytes), list(s.probe_bytes), budget.Params(min_turn_room=0))
+    assert with_a12.room_rotations > 0 and with_a12.rotations > without.rotations and without.room_rotations == 0
+    for r in with_a12.rows:
+        if r.note == "rotation (A12 room)":  # the room it publishes is at least min_turn_room
+            assert p.bound - r.input_tokens - budget.HEADROOM_FLOOR >= p.min_turn_room
+    assert with_a12.planned_over_bound == 0 and with_a12.bound_too_small == 0 and with_a12.turn_room_low_epochs == []
+
+
+def test_a12_logs_turn_room_low_once_per_epoch_instead_of_thrashing():
+    # A small bound where paging cannot restore the room: no room rotation, turn_room_low once per epoch.
+    b = budget.simulate([4_000] * 12, [1_200] * 2, budget.Params(bound=60_000, head=20_000, min_turn_room=12_000))
+    lows = [r for r in b.rows if r.note.startswith("turn_room_low")]
+    assert b.turn_room_low_epochs and len(lows) == len(b.turn_room_low_epochs)
+    assert len(set(b.turn_room_low_epochs)) == len(b.turn_room_low_epochs)  # once per epoch
+    assert b.room_rotations < len([r for r in b.rows if r.kind in ("turn", "probe")]) // 2  # no thrash
+
+
+def test_min_turn_room_follows_the_engine_default(monkeypatch):
+    # Read from the engine's Config when it has the field; the contract's 12,000 (PR #116) until then.
+    import contexto.rewrite as rewrite
+
+    class WithField(rewrite.Config):
+        min_turn_room: int = 9_999
+
+    monkeypatch.setattr(rewrite, "Config", WithField)
+    assert budget.Params().min_turn_room == 9_999
+    monkeypatch.undo()
+    expected = getattr(rewrite.Config(), "min_turn_room", budget.CONTRACT_MIN_TURN_ROOM)
+    assert budget.Params().min_turn_room == expected
+
+
+def test_turn_room_low_fails_acceptance_1():
+    # Decided a failure event (contract PR #115 at 1eb8a4c).
+    assert "turn_room_low" in detectors.FAILURE_EVENTS
+    r = detectors.analyze([_req(1, 90_000, events=[{"event": "turn_room_low", "epoch": 1}])], [], bound=150_000)
+    assert r.failure_events == {"turn_room_low": 1} and not r.verdicts()["no_failure_events"]
 
 
 def test_h1_spend_takes_the_proxy_logged_usage_after_a_mid_turn_stop():
