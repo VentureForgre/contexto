@@ -8,7 +8,7 @@ import threading
 import pytest
 
 from contexto import mcp
-from contexto.store import SessionStore
+from contexto.store import SessionStore, read_turn_room
 from contexto.store.memory import MemoryStore
 
 SPENT = "Recall budget for this turn is used up; answer from what is in view, or say the detail is unknown."
@@ -46,14 +46,18 @@ def calls(store):
 # The store side
 
 
-def test_spent_resets_only_when_the_turn_id_changes(store):
+def test_every_publish_replaces_the_room_and_resets_spent(store):
+    """Contract PR #89: a published room already counts the recall results in its measured input."""
     assert store.turn_room() == (None, None, 0)
     store.set_turn_room("7", 1_000)
     store.charge_turn_room(lambda remaining: 300)
-    store.set_turn_room("7", 800)  # the same turn's real usage arrives: room updated, spent kept
-    assert store.turn_room() == ("7", 800, 300)
-    store.set_turn_room("8", 900)
+    assert store.turn_room() == ("7", 1_000, 300)
+    store.set_turn_room("7", 800)  # the same turn's real usage arrives: a new room, nothing spent of it
+    assert store.turn_room() == ("7", 800, 0)
+    store.charge_turn_room(lambda remaining: 50)
+    store.set_turn_room("8", 900)  # a new turn resets too
     assert store.turn_room() == ("8", 900, 0)
+    store.charge_turn_room(lambda remaining: 10)
     store.set_turn_room(8, 500)  # an integer id is the same turn as its string
     assert store.turn_room() == ("8", 500, 0)
 
@@ -73,9 +77,9 @@ def test_a_charge_sees_what_remains_and_may_not_overspend(store):
     assert seen == [None, 100, 40]
     with pytest.raises(ValueError):
         store.charge_turn_room(lambda remaining: 41)
-    store.set_turn_room("1", 50)  # a room below what was spent leaves nothing, never a negative charge
+    store.set_turn_room("1", -5)  # a turn already over the bound leaves nothing, never a negative charge
     store.charge_turn_room(lambda remaining: seen.append(remaining) or 0)
-    assert seen[-1] == 0 and store.turn_room() == ("1", 50, 60)
+    assert seen[-1] == 0 and store.turn_room() == ("1", -5, 0)
 
 
 def test_the_turn_room_lives_in_private_meta_beside_the_window(tmp_path):
@@ -99,7 +103,7 @@ def test_a_malformed_record_reads_as_unpublished_or_unspent(tmp_path, bad):
     assert spent == 0 and (turn_id is None) == (room is None)
 
 
-def test_parallel_charges_and_engine_publishes_never_overspend(tmp_path):
+def test_fifteen_parallel_charges_spend_exactly_the_room(tmp_path):
     """Threads hold separate meta.lock descriptors, so flock serializes them as it does processes."""
     store = SessionStore(tmp_path, "s1")
     store.set_window(200_000, 2.0)
@@ -118,8 +122,7 @@ def test_parallel_charges_and_engine_publishes_never_overspend(tmp_path):
         for _ in range(25):
             s.charge_turn_room(charge)
             if i == 0:
-                s.set_turn_room("1", 1_000)  # the engine republishing the same turn keeps the counter
-                s.set_window(200_000, 2.0)
+                s.set_window(200_000, 2.0)  # a window write never drops a charge
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(15)]  # V2 fired 15 searches at once
     for t in threads:
@@ -128,6 +131,71 @@ def test_parallel_charges_and_engine_publishes_never_overspend(tmp_path):
         t.join()
     assert sum(granted) == 1_000 and store.turn_room() == ("1", 1_000, 1_000)
     assert store.window() == (200_000, 2.0)
+
+
+class CommitLog(SessionStore):
+    """Records each meta write's turn room before and after, inside meta.lock: the commit order."""
+
+    def __init__(self, home, session_id, commits):
+        super().__init__(home, session_id)
+        self.commits = commits
+
+    def _modify_meta(self, change):
+        def logged(meta):
+            before = read_turn_room(meta)
+            updates = change(meta)
+            self.commits.append((before, read_turn_room({**meta, **(updates or {})})))
+            return updates
+
+        super()._modify_meta(logged)
+
+
+def test_charges_racing_publishes_stay_consistent(tmp_path):
+    """15 chargers race an engine that republishes the same turn and starts new ones (PR #89).
+
+    Every write reads the state the previous one left (no charge lost, none against a torn record),
+    each publish leaves nothing spent, and each charge spends at most what its room had left.
+    """
+    commits: list = []
+    SessionStore(tmp_path, "s1").set_turn_room("1", 500)
+    start, stop = threading.Barrier(16), threading.Event()
+
+    def charger():
+        own = CommitLog(tmp_path, "s1", commits)
+        start.wait()
+        for _ in range(40):
+            own.charge_turn_room(lambda remaining: min(remaining, 7))
+
+    def engine():
+        own = CommitLog(tmp_path, "s1", commits)
+        start.wait()
+        n = 0
+        while not stop.is_set():
+            n += 1
+            own.set_turn_room(str(1 + n // 5), 300 + n % 7)  # same-turn republishes, then a new turn
+            own.set_window(200_000, 2.0)
+
+    threads = [threading.Thread(target=charger) for _ in range(15)]
+    publisher = threading.Thread(target=engine)
+    for t in threads + [publisher]:
+        t.start()
+    for t in threads:
+        t.join()
+    stop.set()
+    publisher.join()
+
+    publishes = 0
+    for (_, after), (next_before, _) in zip(commits, commits[1:]):
+        assert next_before == after  # linearizable: nothing written in between was lost
+    for before, after in commits:
+        turn_id, room, spent = after
+        assert 0 <= spent <= max(room, 0)
+        if after[0] != before[0] or after[1] != before[1] or spent < before[2]:
+            publishes += 1
+            assert spent == 0  # a publish resets what was spent
+        else:
+            assert spent - before[2] <= max(0, before[1] - before[2])  # a charge stays inside its room
+    assert publishes > 10 and commits[-1][1] == SessionStore(tmp_path, "s1").turn_room()
 
 
 class RecordingStore(SessionStore):
@@ -145,7 +213,8 @@ class RecordingStore(SessionStore):
 @pytest.mark.parametrize("room", [3_000, 20_000, 0])
 def test_fifteen_concurrent_tool_calls_charge_exactly_the_room(tmp_path, room):
     """Intake (03:26Z): V2 issued 15 parallel searches in one response. 15 servers, each with its own
-    store on one session directory, call recall and search at once while the engine republishes."""
+    store on one session directory, call recall and search at once while the engine writes the
+    window. (A republish resets the counter by design; charges racing it are covered above.)"""
     store = SessionStore(tmp_path, "s1")
     store.set_window(200_000, 2.0)
     pids = [store.page_out([[{"role": "user", "content": f"needle {i} " + "x" * 5_000}]], i + 1)[0]
@@ -165,7 +234,6 @@ def test_fifteen_concurrent_tool_calls_charge_exactly_the_room(tmp_path, room):
         own = SessionStore(tmp_path, "s1")
         start.wait()
         while not stop.is_set():
-            own.set_turn_room("7", room)  # the same turn: the counter is kept
             own.set_window(200_000, 2.0)
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(len(jobs))]
@@ -227,7 +295,7 @@ def test_recall_returns_the_message_once_the_room_is_spent_and_resets_next_turn(
         offset = int(reply.rsplit("and offset ", 1)[1].split(";")[0])
     assert reply == SPENT and replies and store.turn_room()[2] <= 1_000
     assert calls(store)[-1]["turn_budget"] == "spent" and calls(store)[-1]["chars"] == 0
-    store.set_turn_room("2", 1_000)  # a new turn: the counter resets
+    store.set_turn_room("2", 1_000)  # a new turn's room: nothing spent of it
     again = text_of(call(store, "contexto_recall", {"page_id": pid, "offset": offset}))
     assert again != SPENT and again.startswith("a")
 
@@ -258,7 +326,7 @@ def test_search_shows_whole_lines_that_fit_then_the_message(store):
     assert all(line in full.split("\n") for line in lines[:-1])
     assert lines[-1] == f"[{31 - len(lines)} more matching pages not shown; the recall budget for this turn is used up]"
     assert calls(store)[-1]["hits"] == len(lines) - 1
-    store.set_turn_room("1", 10)  # same turn, room cut below what was spent
+    store.set_turn_room("1", 10)  # a republished room of 10 tokens: no whole line fits
     assert text_of(call(store, "contexto_search", {"query": "aaa"})) == SPENT
 
 
@@ -307,3 +375,18 @@ def test_pin_and_close_are_not_charged(store):
     result = call(store, "contexto_pin", {"kind": "obligation", "text": "write the report"})
     assert result["isError"] is False and result["structuredContent"]["record_id"]
     assert store.turn_room()[2] == 0
+
+
+def test_a_reply_after_a_same_turn_republish_sees_the_whole_new_room(store):
+    """PR #89: the engine republishes from input that already holds this turn's recalls."""
+    store.set_window(200_000, 2.0)
+    pid = page(store)
+    store.set_turn_room("4", 1_000)
+    first = text_of(call(store, "contexto_recall", {"page_id": pid}))
+    offset = int(first.rsplit("and offset ", 1)[1].split(";")[0])
+    assert text_of(call(store, "contexto_recall", {"page_id": pid, "offset": offset})) == SPENT
+    store.set_turn_room("4", 2_000)  # real usage arrives for the same turn
+    assert store.turn_room() == ("4", 2_000, 0)
+    text = text_of(call(store, "contexto_recall", {"page_id": pid, "offset": offset}))
+    assert text.startswith("a") and 2_000 * RATIO - 200 < len(text) <= 2_000 * RATIO
+    assert calls(store)[-1]["room_left"] == 2_000 - math.ceil(len(text) / RATIO)

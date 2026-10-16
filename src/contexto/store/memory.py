@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from contexto.store import (PageConflictError, PageNotFoundError, apply_turn_room, charge_room, check_page_id,
+from contexto.store import (PageConflictError, PageNotFoundError, charge_room, check_page_id,
                              check_model, check_turn_room, check_window, redact)
 from contexto.store.ledger import MemoryLedger
 from contexto.store.recall import lists_identifiers
@@ -48,9 +48,8 @@ class MemoryStore(LedgerOps):
 
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None:
         turn_id = check_turn_room(turn_id, room_tokens)
-        with self._room_lock:
-            record = apply_turn_room(self._turn_room, turn_id, room_tokens)
-            self._turn_room = (record["turn_id"], record["room_tokens"], record["spent_tokens"])
+        with self._room_lock:  # every publish resets what was spent (see SessionStore.set_turn_room)
+            self._turn_room = (turn_id, room_tokens, 0)
 
     def turn_room(self) -> tuple[str | None, int | None, int]:
         return self._turn_room

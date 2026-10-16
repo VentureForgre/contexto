@@ -131,12 +131,6 @@ def read_turn_room(meta: dict[str, Any]) -> tuple[str | None, int | None, int]:
     return turn_id, tokens, spent
 
 
-def apply_turn_room(current: tuple[str | None, int | None, int], turn_id: str, room_tokens: int) -> dict[str, Any]:
-    """The new turn-room record: the spent counter resets only when the turn id changes."""
-    spent = current[2] if current[0] == turn_id else 0
-    return {"turn_id": turn_id, "room_tokens": room_tokens, "spent_tokens": spent}
-
-
 def charge_room(current: tuple[str | None, int | None, int], charge: Callable[[int | None], int]) -> dict[str, Any] | None:
     """Run ``charge(remaining)`` and return the updated record, or None when no room is published.
 
@@ -232,16 +226,17 @@ class SessionStore(LedgerOps):
         self._modify_meta(change)
 
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None:
-        """Publish the room left in the current turn (M2 contract PR #69, per-turn recall budget).
+        """Publish the room left in the current turn (M2 contract, per-turn recall budget; PR #89).
 
-        Lane A's engine calls this when a response's real usage arrives, and the proxy holds the
-        stream (its final event, and ``tool_use`` blocks if the client starts tool calls early)
-        until the publish, so a tool call sees the current room. The tokens spent this turn reset
-        only when ``turn_id`` changes; a repeated call with the same id updates the room and keeps
-        what was spent.
+        Lane A's engine calls this at request time, from the pre-send estimate, and again when the
+        response's real usage arrives; the proxy holds the stream until then, so a tool call sees
+        the current room. Every publish replaces the room and resets the tokens spent to 0, even
+        for the same ``turn_id``: the room was measured from input that already holds the recall
+        results returned so far, so keeping the counter would charge them twice. The write takes
+        meta.lock, so a racing charge lands either before the reset or against the new room.
         """
         turn_id = check_turn_room(turn_id, room_tokens)
-        self._modify_meta(lambda meta: {"turn_room": apply_turn_room(read_turn_room(meta), turn_id, room_tokens)})
+        self._update_meta({"turn_room": {"turn_id": turn_id, "room_tokens": room_tokens, "spent_tokens": 0}})
 
     def turn_room(self) -> tuple[str | None, int | None, int]:
         """(turn id, room tokens, tokens spent this turn); (None, None, 0) until the engine publishes."""
