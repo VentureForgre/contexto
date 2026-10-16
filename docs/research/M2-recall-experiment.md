@@ -41,9 +41,10 @@ and the answers were not run.
 ## Caveat on record (intake, 2026-10-16 03:39Z)
 
 All four result sends carried `claude-code-20250219` among the 11 betas copied from H1's recorded
-request. Access did not depend on it: the diagnostic call the proxy accepted (2026-10-16 03:24Z,
+request. Access did not depend on it: the diagnostic call the proxy accepted (2026-10-16 03:24:38Z,
 `count_tokens` with a minimal body, the honest user agent, and the key in both headers) carried no
-`anthropic-beta` header at all. The
+`anthropic-beta` header at all. That comes from the code that made the call, which passed an empty
+beta list; the stored diagnostic record holds only the status and error type, not the headers. The
 comparison with H1 is like-for-like, since H1's own requests carried the same 11. Its effect on tool
 use was not measured. The result was accepted without a repeat.
 
@@ -60,6 +61,8 @@ refuses a send above the per-send limit or past the approval. It records tool ca
 input, whether each reaches the turn-0 page, usage, and the paged-only answer lines.
 `diagnose_count_tokens` makes one call that records only the status, error type, and redacted
 message. The numbers above came from this code at `eaf95a3`, whose sends still carried the copied
-betas. This version differs only in passing every header through `replay.beta_headers` (D23).
+betas. At that commit `replay.AUTH_HEADER` defaulted to `x-api-key`; the local send script set it to
+`both` at run time for the diagnostic and the four sends. This version differs only in passing
+every header through `replay.beta_headers` (D23); `main`'s replay now defaults to `both`.
 
 Evidence (local, not in Git): `.contexto/spikes/recall-experiment/`.

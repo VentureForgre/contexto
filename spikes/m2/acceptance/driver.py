@@ -205,7 +205,11 @@ class StreamJsonTransport:
                 self.proc.stdin.close()
             except BrokenPipeError:
                 pass
-        return self.proc.wait(timeout=120)
+        code = self.proc.wait(timeout=120)
+        for pipe in (self.proc.stdout, self.proc.stderr):  # release the pipes, so nothing is left open
+            if pipe:
+                pipe.close()
+        return code
 
 
 def child_env(contexto_home: Path, config_dir: Path | None = None) -> dict[str, str]:
