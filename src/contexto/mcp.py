@@ -25,7 +25,7 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
-from contexto.store.render import RECALL_LIMIT, recall_chunk
+from contexto.store.render import RECALL_LIMIT, recall_chunk, recall_limit
 from contexto.store.render import render_page as render_page  # re-exported: contexto.mcp.render_page
 
 SERVER_NAME = "contexto"
@@ -66,6 +66,7 @@ class Store(Protocol):
     def close(self, obligation_id: str, note: str) -> str: ...
     def state_text(self) -> str: ...
     def log(self, event: dict[str, Any]) -> None: ...
+    def window(self) -> tuple[int | None, float | None]: ...
 
 
 class ToolError(Exception):
@@ -285,8 +286,10 @@ class Server:
         page = self.store.get_page(page_id)
         if page is None:
             raise ToolError(f"Unknown page id: {page_id}. Page ids appear in the paged-history index.")
+        window = getattr(self.store, "window", None)
+        limit, note = recall_limit(*(window() if callable(window) else (None, None)))
         try:
-            part = recall_chunk(page, offset)
+            part = recall_chunk(page, offset, limit)
         except ValueError as exc:
             raise ToolError(str(exc)) from None
         chunk, next_offset, total = part["text"], part["next_offset"], part["total_chars"]
@@ -294,7 +297,7 @@ class Server:
         content = [{"type": "text", "text": chunk}]
         if next_offset is not None:
             content.append({"type": "text", "text": f"[{total - end} more characters: call contexto_recall "
-                                                    f"with page_id {page_id} and offset {next_offset}]"})
+                                                    f"with page_id {page_id} and offset {next_offset}; {note}]"})
         structured = {"page_id": page_id, "turn": page.get("turn"), "offset": offset,
                       "next_offset": next_offset, "total_chars": total}
         return content, structured, {"page_id": page_id, "offset": offset, "chars": len(chunk), "total_chars": total}

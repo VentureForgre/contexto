@@ -122,11 +122,12 @@ def test_recall_renders_like_mcp_and_omits_thinking(home, capsys):
 
 def test_recall_offsets_and_continuation_hint(home, capsys):
     long = "x" * (RECALL_LIMIT + 500)
-    _, pid = make(home, "s1", 1_000_000, prompt=long)
+    store, pid = make(home, "s1", 1_000_000, prompt=long)
+    store.set_window(200_000, 2.0)  # a large window, so the 32,000-character cap applies (B9)
     code, out, err = run(capsys, "recall", pid)
     assert code == 0 and len(out.rstrip("\n")) == RECALL_LIMIT
     total = len(render_page(SessionStore(home, "s1").get_page(pid)))
-    assert f"[{total - RECALL_LIMIT} more characters: rerun with --offset {RECALL_LIMIT}]" in err
+    assert f"[{total - RECALL_LIMIT} more characters: rerun with --offset {RECALL_LIMIT}; " in err
     code, out, err = run(capsys, "recall", pid, "--offset", str(RECALL_LIMIT))
     assert code == 0 and "more characters" not in err
     assert len(out.rstrip("\n")) == total - RECALL_LIMIT
