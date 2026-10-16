@@ -623,3 +623,41 @@ def test_a_real_over_bound_without_a_pre_send_estimate_is_still_read():
     no_estimate = {**REAL, "estimate": None}  # PR #76: estimate is null after a fallback_failed forward
     r = detectors.analyze([_entry(1, 151_000, usage_events=[no_estimate], over=True)], [], bound=150_000)
     assert r.over_bound_real == 1 and r.over_bound_real_max_tokens == 151_000
+
+
+# Local versus upstream 5xx on model requests (contract PR #98).
+
+def test_a_local_upstream_unreachable_502_on_a_model_request_fails_acceptance_1():
+    local = {"event": "request", "method": "POST", "path": "/v1/messages", "status": 502,
+             "error": "upstream unreachable: TimeoutError", "duration_ms": 18187}
+    r = detectors.analyze([_req(1, 50_000), local], [], bound=150_000)
+    assert [x["mark"] for x in r.local_5xx] == ["upstream unreachable"] and not r.verdicts()["no_local_5xx"]
+
+
+def test_the_same_502_on_a_non_model_path_does_not_fail():
+    probe = {"event": "request", "method": "HEAD", "path": "/api/hello", "status": 502,
+             "error": "upstream unreachable: TimeoutError"}
+    r = detectors.analyze([probe], [], bound=150_000)
+    assert r.local_5xx == [] and r.verdicts()["no_local_5xx"]
+
+
+def test_an_upstream_5xx_passed_through_is_reported_and_does_not_fail():
+    for status in (500, 529):
+        passed = {"event": "request", "method": "POST", "path": "/v1/messages", "status": status,
+                  "response_bytes": 120, "usage": None}
+        r = detectors.analyze([passed], [], bound=150_000)
+        assert r.local_5xx == [] and r.upstream_5xx[0]["status"] == status and r.verdicts()["no_local_5xx"]
+
+
+def test_an_unmarked_model_path_5xx_fails_closed():
+    unmarked = {"event": "request", "method": "POST", "path": "/v1/messages/count_tokens", "status": 503}
+    r = detectors.analyze([unmarked], [], bound=150_000)
+    assert r.local_5xx[0]["mark"] == "unmarked" and not r.verdicts()["no_local_5xx"]
+
+
+def test_last_resort_and_websocket_local_errors_fail():
+    last = {"event": "proxy_error", "method": "POST", "path": "/v1/messages", "error": "KeyError", "fallback": "local_502"}
+    forwarded = {**last, "fallback": "forward_original"}  # forwarded the CLI's bytes: not a local error
+    ws = {"event": "websocket_rejected", "path": "/responses"}
+    r = detectors.analyze([last, forwarded, ws], [], bound=150_000)
+    assert [(x["status"], x["mark"]) for x in r.local_5xx] == [(502, "proxy_error local_502"), (501, "websocket_rejected")]

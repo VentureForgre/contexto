@@ -73,6 +73,10 @@ class Report:
     # from the owner's proxy. Reported on their own; no verdict uses them (how acceptance 1 reads them
     # is pending intake).
     non_model_4xx: dict[str, int] = field(default_factory=dict)
+    # Contract PR #98: a 5xx Contexto's own proxy generates on a model request fails acceptance 1; an
+    # upstream 5xx passed through is reported only. See five_xx() for how each is told apart.
+    local_5xx: list[dict[str, Any]] = field(default_factory=list)
+    upstream_5xx: list[dict[str, Any]] = field(default_factory=list)
     over_bound_requests: int = 0  # usage above the bound
     # Intake's strict rule for the acceptance run (2026-10-16): any request over the bound fails
     # acceptance 1. Indexes of every such request.
@@ -131,6 +135,7 @@ class Report:
             "no_bound_too_small": self.bound_too_small == 0,
             "every_request_has_usage": not self.unverified_requests,
             "zero_4xx": self.upstream_4xx == 0 and not any(400 <= s < 500 for s in self.statuses),
+            "no_local_5xx": not self.local_5xx,
             "recall_called": self.recall_ok > 0,
         }
 
@@ -214,12 +219,50 @@ def failure_events(session_log: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def five_xx(session_log: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Model-path 5xx split into LOCAL (the proxy answered it) and UPSTREAM (passed through).
+
+    From the proxy at main (src/contexto/proxy.py, read-only; lane A owns it), every local 5xx on a
+    model path leaves a mark in the session log:
+    - ``_forward`` when upstream cannot be reached: the request entry gets status 502 and
+      ``error: "upstream unreachable: <class>"``, and no ``response_bytes``;
+    - ``_handle``'s last resort: no request entry, but ``{event: proxy_error, fallback: "local_502"}``
+      with the path (a ``fallback: "forward_original"`` record forwards the CLI's bytes instead);
+    - a WebSocket upgrade: ``{event: websocket_rejected, path}``, answered 501.
+    A passed-through upstream 5xx is a request entry with ``response_bytes`` and no such error. A
+    model-path 5xx entry with neither mark fails closed: it counts as LOCAL, flagged ``unmarked``.
+    """
+    local, upstream = [], []
+    for i, ev in enumerate(session_log):
+        name = ev.get("event")
+        path = str(ev.get("path") or "").split("?")[0]
+        path = path.rstrip("/") or path
+        if path not in MODEL_PATHS:
+            continue
+        if name == "proxy_error" and ev.get("fallback") == "local_502":
+            local.append({"line": i + 1, "path": path, "status": 502, "mark": "proxy_error local_502",
+                          "error": ev.get("error")})
+        elif name == "websocket_rejected":
+            local.append({"line": i + 1, "path": path, "status": 501, "mark": "websocket_rejected"})
+        elif name == "request" and int(ev.get("status") or 0) >= 500:
+            status, error = int(ev["status"]), str(ev.get("error") or "")
+            if error.startswith("upstream unreachable"):
+                local.append({"line": i + 1, "path": path, "status": status, "mark": "upstream unreachable",
+                              "error": error})
+            elif "response_bytes" in ev:
+                upstream.append({"line": i + 1, "path": path, "status": status})
+            else:
+                local.append({"line": i + 1, "path": path, "status": status, "mark": "unmarked", "error": error or None})
+    return local, upstream
+
+
 def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, Any]], bound: int,
             stream_compactions: int = 0) -> Report:
     r = Report(stream_compactions=stream_compactions)
     session_log = list(session_log)
     for name, count in failure_events(session_log).items():
         r.failure_events[name] = count
+    r.local_5xx, r.upstream_5xx = five_xx(session_log)
     for ev in usage_events(session_log):
         if ev.get("event") == "over_bound" and ev.get("source") == "real":
             r.over_bound_real += 1
