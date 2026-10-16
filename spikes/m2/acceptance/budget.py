@@ -28,18 +28,12 @@ BYTES_PER_TOKEN_TEXT = 3.5
 HEADROOM_FLOOR = 25_000
 
 
-# The contract's default (PR #116, a6bafa6), used only until lane A's engine Config carries the field.
-CONTRACT_MIN_TURN_ROOM = 12_000
+def engine_default(name: str) -> int:
+    """A rewrite-engine Config default, so the simulation follows the engine, not a copy (A12 is on
+    main; there is no fallback: a missing field is an error the guard test catches)."""
+    from contexto.rewrite import Config
 
-
-def engine_default(name: str, fallback: int) -> int:
-    """A rewrite-engine Config default, so the simulation follows the engine, not a copy."""
-    try:
-        from contexto.rewrite import Config
-    except ImportError:
-        return fallback
-    value = getattr(Config(), name, None)
-    return int(value) if isinstance(value, int) else fallback
+    return int(getattr(Config(), name))
 
 
 @dataclass(frozen=True)
@@ -59,7 +53,7 @@ class Params:
     max_tokens_reserve: int = 32_000  # the guard reserves this much output per request
     # A12 (contract PR #115): a turn also rotates when the recall room it would publish,
     # bound - estimate - headroom floor, would be under this. The engine's own default, when it has one.
-    min_turn_room: int = field(default_factory=lambda: engine_default("min_turn_room", CONTRACT_MIN_TURN_ROOM))
+    min_turn_room: int = field(default_factory=lambda: engine_default("min_turn_room"))
 
 
 @dataclass
@@ -94,6 +88,7 @@ class Budget:
     probe_rooms: list[int] = field(default_factory=list)  # A9 turn room at each probe turn's start
     baseline_requests: list[int] = field(default_factory=list)  # D27 baseline: input of each request
     room_rotations: int = 0  # rotations fired by A12's room condition (contract PR #115)
+    window_minimal: int = 0  # rule 4 rotations to the minimal window (contract PR #50)
     turn_room_low_epochs: list[int] = field(default_factory=list)  # epochs where A12 logged turn_room_low
 
 
@@ -141,47 +136,69 @@ def simulate(turn_bytes: list[int], probe_bytes: int | list[int], p: Params = Pa
         fixed = p.head + preamble  # rule 4: F = system + tools + carried + preamble
         window_budget = p.bound - headroom - fixed
         note = ""
+        # The engine's order (contexto.rewrite.rotate_at_turn_start, A12; the contract follows it,
+        # intake 9ed1b32): the size trigger and A12's room condition are both read from the estimate.
         estimate = fixed + sum(retained) + u
-        if retained and estimate > p.bound - headroom:  # rule 4's bound trigger
-            if window_budget <= 0 or window_budget < retained[-1] + u:  # the engine's check: newest complete + new
-                b.bound_too_small += 1
-                note = "bound_too_small: sent unrotated"
+        trigger = estimate > p.bound - headroom
+        room_low = p.bound - estimate - HEADROOM_FLOOR < p.min_turn_room
+        epoch_before = epoch
+        room_keep: list[int] | None = None
+        restores = False
+        if room_low and retained:
+            room_target = int(p.window_fraction * (window_budget - p.min_turn_room))
+            if room_target > 0 and retained[-1] + u <= room_target:
+                room_keep = list(retained)  # choose_k: page oldest first, keep the newest complete turn
+                while len(room_keep) > 1 and sum(room_keep) + u > room_target:
+                    room_keep.pop(0)
+            else:
+                room_keep = []  # the minimal window: only the new turn
+            room = p.bound - HEADROOM_FLOOR - fixed - (sum(room_keep) + u)
+            restores = len(room_keep) < len(retained) and room >= p.min_turn_room
+
+        def page_to(keep: list[int], label: str) -> None:
+            nonlocal paged, epoch, preamble
+            paged += len(retained) - len(keep)
+            retained[:] = keep
+            epoch += 1
+            b.rotations += 1
+            preamble = p.preamble_base + p.pinned_tokens + paged * p.index_tokens_per_page
+
+        if retained and room_low and not trigger:
+            if restores:  # a rotation for the room alone
+                page_to(room_keep, "room")
+                b.room_rotations += 1
+                note = "rotation (A12 room)"
+        elif retained and trigger:
+            if window_budget <= 0 or retained[-1] + u > window_budget:
+                # Rule 4 window_minimal (contract PR #50): keep only the new turn; bound_too_small
+                # as well if even the new turn exceeds W.
+                page_to([], "window_minimal")
+                b.window_minimal += 1
+                note = "window_minimal"
+                if window_budget <= 0 or u > window_budget:
+                    b.bound_too_small += 1
+                    note = "window_minimal + bound_too_small"
             else:
                 target = int(p.window_fraction * window_budget)
-                before = paged
-                while len(retained) > 1 and sum(retained) + u > target:
-                    retained.pop(0)
-                    paged += 1
-                if paged > before:
-                    epoch += 1
-                    b.rotations += 1
-                    note = "rotation"
-                    preamble = p.preamble_base + p.pinned_tokens + paged * p.index_tokens_per_page
+                keep = list(retained)
+                while len(keep) > 1 and sum(keep) + u > target:
+                    keep.pop(0)
+                if restores and room_keep is not None and len(room_keep) < len(keep):
+                    keep = room_keep  # both conditions: the room-sized target (no back-to-back rotations)
+                    b.room_rotations += 1
+                    note = "rotation (bound + A12 room)"
+                if len(keep) < len(retained):
+                    page_to(keep, "bound")
+                    note = note or "rotation"
                 else:
                     note = "rotation no-op (newest complete turn already alone)"
-        elif retained and p.bound - estimate - HEADROOM_FLOOR < p.min_turn_room:
-            # A12 (contract PR #115): the room this turn would publish is under min_turn_room. Rotate to
-            # 0.5 * (W - min_turn_room), falling back to the minimal window (the new turn alone), and
-            # only if that restores a room of at least min_turn_room; otherwise log turn_room_low
-            # once per epoch and do not rotate.
-            target = int(p.window_fraction * (window_budget - p.min_turn_room))
-            keep = list(retained)
-            while keep and sum(keep) + u > target:
-                keep.pop(0)
-            dropped = len(retained) - len(keep)
-            new_preamble = p.preamble_base + p.pinned_tokens + (paged + dropped) * p.index_tokens_per_page
-            restored = p.bound - (p.head + new_preamble + sum(keep) + u) - HEADROOM_FLOOR
-            if dropped and restored >= p.min_turn_room:
-                retained[:] = keep
-                paged += dropped
-                epoch += 1
-                b.rotations += 1
-                b.room_rotations += 1
-                preamble = new_preamble
-                note = "rotation (A12 room)"
-            elif epoch not in b.turn_room_low_epochs:
+        if room_low and epoch not in b.turn_room_low_epochs:
+            # turn_room_low after ANY decision that leaves the room under min_turn_room, once per epoch.
+            sent_room = (p.bound - estimate - HEADROOM_FLOOR if epoch == epoch_before
+                         else p.bound - HEADROOM_FLOOR - fixed - (sum(retained) + u))
+            if sent_room < p.min_turn_room:
                 b.turn_room_low_epochs.append(epoch)
-                note = "turn_room_low: rotation would not restore the room"
+                note = (note + "; " if note else "") + "turn_room_low"
         inp = p.head + preamble + sum(retained) + u
         over = inp > p.bound
         b.rows.append(Row(t, kind, inp, len(retained), paged, epoch, over,

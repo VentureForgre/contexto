@@ -139,6 +139,20 @@ def test_store_failure_enters_degraded_mode_with_the_responses_dialect():
     assert up2["input"] == loop and ev2[-1]["degraded"] is True and "store_error" not in names(ev2)
 
 
+def test_room_condition_rotates_the_responses_dialect_too():
+    """A12 (contract PR #115) on the Responses dialect: the room alone fires a rotation, logged with
+    reason min_turn_room, and the lead items stay first."""
+    items = history(6) + [prompt("new prompt")]
+    quiet = Config(bound=10_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=0)
+    _, _, ev, _ = run(items, config=quiet)
+    assert "rotation" not in names(ev)  # the size trigger alone would not rotate here
+    roomy = Config(bound=10_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=2_000)
+    up, st, ev, _ = run(items, config=roomy)
+    assert [e["reason"] for e in ev if e["event"] == "rotation"] == ["min_turn_room"] and st.k > 4
+    assert up["input"][:4] == lead()
+    assert roomy.bound - ev[-1]["sent_estimate"] - roomy.headroom_floor >= roomy.min_turn_room
+
+
 def test_no_rotation_inside_a_tool_loop():
     items = history(10) + [prompt("go"), call(50), output(50, FILL * 3)]
     up, st, ev, store = run(items)

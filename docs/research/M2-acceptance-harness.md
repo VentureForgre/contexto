@@ -244,8 +244,13 @@ in-flight allowance of the last logged input and the output reserve. Run the bas
 --h1-record <that file> ...`: the replay then may spend the combined approval minus H1's recorded
 spend, and its count_tokens gate checks each request against what is left of that.
 A12 (contract PR #115 at 1ce122c) also rotates a turn whose published room, `bound - estimate -
-25,000`, would fall under `min_turn_room`, which the simulation reads from the engine's Config (the
-contract default 12,000, PR #116, until lane A's engine carries the field). Such a rotation targets
+25,000`, would fall under `min_turn_room`, which the simulation reads from the engine's Config (no
+fallback; a guard test fails if the field is missing or differs). The simulation follows the engine's
+turn-start order (`rotate_at_turn_start`) and contract PR #120: when the size trigger and the room
+condition both fire, the room-sized target is used if it restores the room, and `turn_room_low` is
+logged when the room is still low after whatever was decided. A size-triggered turn whose window
+cannot hold the newest complete turn and the new one rotates to the minimal window
+(`window_minimal`, contract PR #50), with `bound_too_small` as well if even the new turn exceeds `W`. Such a rotation targets
 `0.5 * (W - min_turn_room)`, falling back to the minimal window (the new turn alone), and fires only
 if it restores a room of at least `min_turn_room`; otherwise there is no room rotation and
 `turn_room_low` is logged once per epoch, which fails acceptance 1 (decided at 1eb8a4c). The
