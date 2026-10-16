@@ -146,12 +146,63 @@ def test_messages_logs_give_exactly_recall_credit_results():
                 [PROBE], answers, log, [PAGE])
 
 
-def test_the_log_view_keeps_indices_and_every_other_event():
-    log = turn(call("contexto_search", [WHOLE]))
-    view = codex_recall_credit.answer_view(log, len(log) - 1)
-    assert len(view) == len(log)
-    assert [e for e in view if e["event"] == "mcp_call"] == [e for e in log if e["event"] == "mcp_call"]
-    assert recall_credit.answer_index(view) == len(log) - 1
+PLANT_2 = "cfg billing-api.retry_limit=cobalt-8841"
+PAGE_2 = {"id": "pg_cccc000000000002", "turn": 1, "stub": {"user_text": "log", "tools": [], "paths": []},
+          "messages": [{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "log line 1\n" * 20 + PLANT_2 + "\nlog tail\n"}]},
+                       {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}]}
+PROBE_2 = Probe("q_p_02", "a", "paged_only", "turn-2", "What value did billing-api.retry_limit have?", "cobalt-8841",
+                subjects=("billing-api.retry_limit",), statements=(PLANT_2,))
+POS_2 = render_page(PAGE_2).find(PLANT_2)
+WHOLE_2 = {"page_id": PAGE_2["id"], "start": POS_2 - 5, "end": POS_2 + len(PLANT_2) + 1}
+BOTH = "q_p_01: juniper-2573\nq_p_02: cobalt-8841"
+TURNS = (("q_p_01",), ("q_p_02",))
+
+
+def test_turn_ends_are_the_successful_replies_without_a_tool_call():
+    log = [resp(0), resp(0), resp(3), call("contexto_search", [WHOLE]), resp(None, status=502), resp(0)]
+    assert codex_recall_credit.turn_ends(log) == [0, 1, 5]
+    assert codex_recall_credit.turn_ends([resp(None), resp(None), resp(None, status=500)]) == [1]  # no hold info
+    assert codex_recall_credit.turn_ends([call("contexto_search", [])]) == []
+
+
+def test_a_recall_in_a_later_probe_turn_does_not_credit_an_earlier_probe():
+    # Probe turn 1 answers q_p_01 with no recall of its plant; probe turn 2 recalls both plants.
+    log = ([resp(0), resp(0)]  # content turns
+           + [resp(3), call("contexto_search", []), resp(0)]  # probe turn 1: q_p_01 answered unaided
+           + [resp(3), call("contexto_recall", [WHOLE]), call("contexto_recall", [WHOLE_2]), resp(0)])
+    r = codex_recall_credit.credit([PROBE, PROBE_2], BOTH, log, [PAGE, PAGE_2], TURNS)
+    rows = {row["id"]: row for row in r["paged_only"]}
+    assert not rows["q_p_01"]["credited"] and rows["q_p_02"]["credited"] and r["credited"] == 1
+    # Session-wide (no probe_turn_ids) the later recall would have credited q_p_01 as well.
+    assert codex_recall_credit.credit([PROBE, PROBE_2], BOTH, log, [PAGE, PAGE_2])["credited"] == 2
+
+
+def test_a_tool_round_without_an_mcp_call_is_not_a_turn_end():
+    # A tool-search or exec round calls no MCP tool. B29's Messages fallback ("no mcp_call before the
+    # next request") would take it for a turn end and shift the probe turns; held_events does not.
+    log = ([resp(0)]
+           + [resp(2), resp(3), call("contexto_search", [WHOLE]), resp(0)]  # probe turn 1: tool search, search
+           + [resp(2), resp(3), call("contexto_recall", [WHOLE_2]), resp(0)])  # probe turn 2
+    assert codex_recall_credit.turn_ends(log) == [0, 4, 8]
+    r = codex_recall_credit.credit([PROBE, PROBE_2], BOTH, log, [PAGE, PAGE_2], TURNS)
+    assert r["credited"] == 2
+
+
+def test_too_few_turn_ends_fail_closed_per_turn():
+    log = [resp(None), call("contexto_recall", [WHOLE]), resp(None)]  # no hold info: one turn end only
+    r = codex_recall_credit.credit([PROBE, PROBE_2], BOTH, log, [PAGE, PAGE_2], TURNS)
+    assert r["credited"] == 0 and r["reason"] == "probe turn answers not found"
+
+
+def test_messages_logs_with_probe_turns_give_exactly_recall_credit_results():
+    def req(held=None):
+        ev = {"event": "request", "path": "/v1/messages", "status": 200}
+        return ev if held is None else {**ev, "stream_hold": {"held_events": held, "triggered": True}}
+    log = [req(0), req(3), call("contexto_search", [WHOLE]), req(0), req(3), call("contexto_recall", [WHOLE_2]), req(0)]
+    for turns in (None, TURNS):
+        assert codex_recall_credit.credit([PROBE, PROBE_2], BOTH, log, [PAGE, PAGE_2], turns) == recall_credit.credit(
+            [PROBE, PROBE_2], BOTH, log, [PAGE, PAGE_2], turns)
 
 
 def test_a_stub_shaped_log_without_held_events_takes_the_last_answer():

@@ -1,28 +1,36 @@
-"""Acceptance 3 for Codex: recall credit when the answer came through the Responses API (packet A20).
+"""Acceptance 3 for Codex: recall credit when the answers came through the Responses API (packet A20).
 
-``recall_credit.credit`` finds the answering request as the last ``/v1/messages`` request. A Codex
+``recall_credit.credit`` finds each user turn's answer among ``/v1/messages`` requests. A Codex
 session's model requests go through the proxy as ``POST /responses`` (or ``/v1/responses``), so it
-finds none and, since B28, credits nothing. Everything else carries over unchanged, because render and search read
-Responses pages (B20, B23): ranges come from the content-free ``mcp_call`` events, plants from
-``render_page``, only ``paged`` spans credit (B19), and a page's ranges are merged before the
-containment check (B16). This module therefore differs only in how it finds the answer:
+finds none and, since B28, credits nothing. Everything else carries over unchanged, because render and
+search read Responses pages (B20, B23): ranges come from the content-free ``mcp_call`` events, plants
+from ``render_page``, only ``paged`` spans credit (B19), a page's ranges are merged before the
+containment check (B16), and with ``probe_turn_ids`` each probe is cut off at its own probe turn's
+answer (B29). This module supplies only the Codex turn ends, through ``credit(..., turn_ends=...)``
+(agreed between lanes A and B, 2026-10-16 12:19Z), so the credit rule stays lane B's code.
 
-- the answer is the last Responses request that succeeded (2xx) and carried no tool call. A Codex
-  turn is several requests: tool rounds, including the tool-search rounds Contexto's tools sit
-  behind, each end in a ``*_call`` item, and the final request answers in text. The proxy's stream
-  hold (contract PR #74) starts at the first ``*_call`` item, so its ``held_events`` is above 0 for a
-  tool round and 0 for the answer. Failed attempts that Codex retries are not answers.
-- a log whose Responses requests carry no ``stream_hold`` (the hold was skipped, or a log from before
-  it) falls back to the last successful Responses request.
-- a log with no Responses request at all is a Messages session: ``recall_credit.credit`` decides it
+Codex turn ends, in log order:
+
+- A Codex turn is several requests. Tool rounds, including the tool-search rounds Contexto's tools sit
+  behind and exec or shell rounds that call no MCP tool, end in a ``*_call`` output item; the last
+  request answers in text. Codex sends every tool call's output back in a new request, so a reply that
+  holds a tool call ends a turn only when the turn is cut off (exit, error, or limit), and such a turn
+  has no answer.
+- The proxy's stream hold (contract PR #74, A9) starts at the first ``response.output_item.added``
+  whose item is a ``*_call``, so ``stream_hold.held_events`` is above 0 for a tool round and 0 for a
+  reply with no tool call. A turn end is a 2xx Responses request with ``held_events == 0``. Failed
+  attempts, which Codex retries, never end a turn. On the A16 stub dry run (#154 with its stub fix),
+  the 6 tool rounds log ``held_events`` 3 and the 21 turn ends (15 content replies, 6 probe answers)
+  log 0.
+- A request without ``stream_hold`` (the hold was skipped: an encoded or unchunked stream, or a log
+  from before A9) cannot be classified. If no Responses request carries it, the last successful one
+  is the only turn end, which is enough for the session-wide cutoff; per-turn credit then fails closed
+  (B29: too few turn ends). Otherwise unclassified requests are left out, which can only under-credit.
+- A log with no Responses request at all is a Messages session: ``recall_credit.credit`` decides it
   unchanged.
-- a Codex log with Responses requests but no answer among them (every one a tool round, or every one
-  failed) credits nothing: no call can be shown to precede an answer.
 
 Reading is content-free, as in ``recall_credit``: session-log events and stored pages only, never a
-transcript or tool output. The answer is located by index and handed to ``recall_credit.credit``
-through a view of the log in which that request is the only request event, so the credit rule itself
-is lane B's code, not a copy.
+transcript or tool output.
 """
 
 from __future__ import annotations
@@ -34,12 +42,8 @@ from acceptance import recall_credit
 RESPONSES_PATHS = ("/responses", "/v1/responses")  # the proxy's RESPONSES_PATHS
 
 
-def _path(event: dict[str, Any]) -> str:
-    return str(event.get("path") or "").split("?")[0]
-
-
 def _is_responses_request(event: dict[str, Any]) -> bool:
-    return event.get("event") == "request" and _path(event) in RESPONSES_PATHS
+    return event.get("event") == "request" and str(event.get("path") or "").split("?")[0] in RESPONSES_PATHS
 
 
 def _succeeded(event: dict[str, Any]) -> bool:
@@ -47,42 +51,29 @@ def _succeeded(event: dict[str, Any]) -> bool:
     return isinstance(status, int) and 200 <= status < 300
 
 
-def _tool_round(event: dict[str, Any]) -> bool | None:
-    """True for a response that held a tool call, False for one that did not, None when unknown."""
+def _held_events(event: dict[str, Any]) -> int | None:
     hold = event.get("stream_hold")
-    if not isinstance(hold, dict) or not isinstance(hold.get("held_events"), int):
-        return None
-    return hold["held_events"] > 0
+    return hold["held_events"] if isinstance(hold, dict) and isinstance(hold.get("held_events"), int) else None
+
+
+def turn_ends(session_log: list[dict[str, Any]]) -> list[int]:
+    """Log indices of the Responses requests that answered a user turn, in order."""
+    ok = [i for i, ev in enumerate(session_log) if _is_responses_request(ev) and _succeeded(ev)]
+    if not any(_held_events(session_log[i]) is not None for i in ok):
+        return ok[-1:]
+    return [i for i in ok if _held_events(session_log[i]) == 0]
 
 
 def answer_index(session_log: list[dict[str, Any]]) -> int | None:
-    """The log index of the Responses request that carried the final answer, or None."""
-    ok = [i for i, ev in enumerate(session_log) if _is_responses_request(ev) and _succeeded(ev)]
-    known = [i for i in ok if _tool_round(session_log[i]) is not None]
-    if known:
-        answers = [i for i in known if not _tool_round(session_log[i])]
-        return answers[-1] if answers else None
-    return ok[-1] if ok else None
+    """The log index of the request that carried the session's final answer, or None."""
+    ends = turn_ends(session_log)
+    return ends[-1] if ends else None
 
 
-def answer_view(session_log: list[dict[str, Any]], answer_at: int | None) -> list[dict[str, Any]]:
-    """The log with every request event neutralized except ``answer_at``, which reads as the Messages
-    request ``recall_credit.answer_index`` looks for. Indices, and every other event, are unchanged."""
-    view = []
-    for i, ev in enumerate(session_log):
-        if i == answer_at:
-            view.append({"event": "request", "path": "/v1/messages", "status": ev.get("status")})
-        elif ev.get("event") == "request":
-            view.append({"event": "request_not_answer"})
-        else:
-            view.append(ev)
-    return view
-
-
-def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
-           pages: list[dict[str, Any]]) -> dict[str, Any]:
+def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]], pages: list[dict[str, Any]],
+           probe_turn_ids: tuple[tuple[str, ...], ...] | None = None) -> dict[str, Any]:
     """``recall_credit.credit`` for a Codex session; same arguments and result shape."""
     if not any(_is_responses_request(ev) for ev in session_log):
-        return recall_credit.credit(probes, answers, session_log, pages)
-    # With no answer the view has no request event, and recall_credit fails closed (B28).
-    return recall_credit.credit(probes, answers, answer_view(session_log, answer_index(session_log)), pages)
+        return recall_credit.credit(probes, answers, session_log, pages, probe_turn_ids)
+    return recall_credit.credit(probes, answers, session_log, pages, probe_turn_ids,
+                                turn_ends=turn_ends(session_log))
