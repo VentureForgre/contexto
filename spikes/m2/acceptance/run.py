@@ -122,7 +122,7 @@ def h1_spend(results_spent: int, session_log: list[dict[str, Any]], abnormal: bo
     have been in flight, unlogged: allow one more of the last logged input plus the output reserve."""
     logged, last_input = 0, 0
     for ev in session_log:
-        if ev.get("event") == "request" and str(ev.get("path") or "").split("?")[0] == "/v1/messages" and ev.get("usage"):
+        if ev.get("event") == "request" and detectors.request_path(ev) in detectors.BILLED_PATHS and ev.get("usage"):
             usage = ev["usage"]
             inp = sum(int(usage.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
                                                        "cache_read_input_tokens"))

@@ -72,7 +72,9 @@ contexto run --bound 150000 --session <id> --upstream <url> claude -p --input-fo
   turn and checks real spend after it, so it cannot see the probe turn's tool loop, which runs
   inside one Claude Code turn. `SessionWatcher` tails the session log beside the auth stop: after
   each Messages API response it adds the real usage and terminates the run if two more requests of
-  the last input size plus the 32,000 output reserve could pass the approval. Two, because the proxy
+  the last input size plus the 32,000 output reserve could pass the approval. It counts responses on the billed
+  model paths (`/v1/messages` and `/responses`, not their token counts), with the same path helper
+  as the 4xx and auth checks, so a trailing slash is the same path. Two, because the proxy
   logs a request when its response ends, when Claude Code may already have sent the next one. The
   model never sees this limit. The run then reports `BudgetExceeded` with the spend so far.
 
