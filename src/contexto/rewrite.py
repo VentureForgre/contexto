@@ -61,6 +61,7 @@ import copy
 import hashlib
 import math
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -127,12 +128,12 @@ def _blocks(message: dict) -> list:
     return content if isinstance(content, list) else []
 
 
-def is_context_block(block: Any) -> bool:
+def _anthropic_is_context_block(block: Any) -> bool:
     return (isinstance(block, dict) and block.get("type") == "text"
             and isinstance(block.get("text"), str) and block["text"].lstrip().startswith(CONTEXT_TAG))
 
 
-def is_turn_start(message: dict) -> bool:
+def _anthropic_is_turn_start(message: dict) -> bool:
     if message.get("role") != "user":
         return False
     content = message.get("content")
@@ -153,7 +154,7 @@ def at_turn_start(messages: list[dict]) -> bool:
     starts = turn_starts(messages)
     if not starts:
         return False
-    return all(m.get("role") != "assistant" for m in messages[starts[-1]:])
+    return all(not is_assistant(m) for m in messages[starts[-1]:])
 
 
 # Normalisation and hashing (rule 10) ------------------------------------------------------------
@@ -166,7 +167,7 @@ def _drop_cache_control(obj: Any) -> Any:
     return obj
 
 
-def normalise(message: dict) -> dict:
+def _anthropic_normalise(message: dict) -> dict:
     m = _drop_cache_control(message)
     content = m.get("content")
     if (isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict)
@@ -179,20 +180,122 @@ def message_hash(message: dict) -> str:
     return hashlib.sha256(canonical_bytes(normalise(message))).hexdigest()
 
 
-def head_fingerprint(request: dict) -> str:
+def _anthropic_head_fingerprint(request: dict) -> str:
     return hashlib.sha256(canonical_bytes({"system": request.get("system"), "tools": request.get("tools")})).hexdigest()
 
 
 def conversation_key(request: dict) -> str:
     """Per-conversation key: the normalised first message, so subagent and other side requests keep
     their own state and a head change does not split the main conversation."""
-    messages = request.get("messages") or []
-    return message_hash(messages[0]) if messages else ""
+    items = request.get(_dialect().field) or []
+    starts = turn_starts(items) if _dialect().lead_count(items) else [0]
+    return message_hash(items[starts[0]]) if items and starts else ""
+
+
+# Dialects (A5): the same engine for the Anthropic Messages API and the OpenAI Responses API ---------
+
+class Dialect:
+    """Protocol-specific primitives the engine core uses. ``AnthropicDialect`` is the behavior above;
+    ``contexto.codex.ResponsesDialect`` implements the Responses API (Codex)."""
+
+    name = "anthropic"
+    field = "messages"
+
+    def is_context_block(self, block: Any) -> bool:
+        return _anthropic_is_context_block(block)
+
+    def is_turn_start(self, item: dict) -> bool:
+        return _anthropic_is_turn_start(item)
+
+    def is_assistant(self, item: dict) -> bool:
+        return item.get("role") == "assistant"
+
+    def is_system_like(self, item: dict) -> bool:
+        return item.get("role") == "system"
+
+    def classify_system(self, items: list[dict], i: int) -> str:
+        return _anthropic_classify_system(items, i)
+
+    def normalise(self, item: dict) -> dict:
+        return _anthropic_normalise(item)
+
+    def head_fingerprint(self, request: dict) -> str:
+        return _anthropic_head_fingerprint(request)
+
+    def head_estimate_source(self, request: dict) -> dict:
+        return {"system": request.get("system"), "tools": request.get("tools")}
+
+    def strip_thinking(self, item: dict) -> dict | None:
+        return _anthropic_strip_thinking(item)
+
+    def merge_first(self, first: dict, blocks: list, text: str) -> dict:
+        head = [*blocks]
+        if text:
+            head.append({"type": "text", "text": text})
+        own = first.get("content")
+        own_blocks = [{"type": "text", "text": own}] if isinstance(own, str) else list(own)
+        return {**first, "content": head + own_blocks}
+
+    def countable(self, item: dict) -> bool:
+        return bool(item.get("content"))
+
+    def estimate_items(self, estimator: TokenEstimator, items: list[dict]) -> int:
+        return estimator.estimate_messages(items)
+
+    def lead_count(self, items: list[dict]) -> int:
+        return 0
+
+    def usage_tokens(self, usage: dict) -> int:
+        return sum(usage.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
+ANTHROPIC = Dialect()
+_DIALECT: ContextVar[Dialect | None] = ContextVar("contexto_rewrite_dialect", default=None)
+
+
+def _dialect() -> Dialect:
+    return _DIALECT.get() or ANTHROPIC
+
+
+def is_context_block(block: Any) -> bool:
+    return _dialect().is_context_block(block)
+
+
+def is_turn_start(item: dict) -> bool:
+    return _dialect().is_turn_start(item)
+
+
+def is_assistant(item: dict) -> bool:
+    return _dialect().is_assistant(item)
+
+
+def is_system_like(item: dict) -> bool:
+    return _dialect().is_system_like(item)
+
+
+def classify_system(items: list[dict], i: int) -> str:
+    return _dialect().classify_system(items, i)
+
+
+def normalise(item: dict) -> dict:
+    return _dialect().normalise(item)
+
+
+def head_fingerprint(request: dict) -> str:
+    return _dialect().head_fingerprint(request)
+
+
+def strip_thinking(item: dict) -> dict | None:
+    return _dialect().strip_thinking(item)
+
+
+def estimate_items(estimator: TokenEstimator, items: list[dict]) -> int:
+    return _dialect().estimate_items(estimator, items)
 
 
 # Transform pieces ------------------------------------------------------------------------------
 
-def strip_thinking(message: dict) -> dict:
+def _anthropic_strip_thinking(message: dict) -> dict:
     blocks = _blocks(message)
     if not any(isinstance(b, dict) and b.get("type") in THINKING_TYPES for b in blocks):
         return message
@@ -258,7 +361,7 @@ def mode_kind(message: dict) -> str | None:
     return None
 
 
-def classify_system(messages: list[dict], i: int) -> str:
+def _anthropic_classify_system(messages: list[dict], i: int) -> str:
     """Deterministic class of the system message at ``messages[i]``, in the contract's order (Terms,
     PR #38, merged): session-start (content plus settings fields), settings-only (empty content plus
     settings fields), hook output (text-only, matching a documented signature; paged with its turn),
@@ -283,7 +386,7 @@ def carried_systems(messages: list[dict], k: int, paged: frozenset[str] = frozen
     unclassified ones among them."""
     carried, latest, unclassified = [], {}, 0
     for i in range(k):
-        if messages[i].get("role") != "system":
+        if not is_system_like(messages[i]):
             continue
         kind = classify_system(messages, i)
         if kind == HOOK_OUTPUT or (kind == CARRIED_TEXT and message_hash(messages[i]) in paged):
@@ -311,7 +414,7 @@ def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
     out = []
     for i in range(start, end):
         m = messages[i]
-        if m.get("role") == "system" and classify_system(messages, i) != HOOK_OUTPUT:
+        if is_system_like(m) and classify_system(messages, i) != HOOK_OUTPUT:
             continue
         if is_turn_start(m) and any(is_context_block(b) for b in _blocks(m)):
             m = {**m, "content": [b for b in _blocks(m) if not is_context_block(b)]}
@@ -324,23 +427,20 @@ def preamble(state: EpochState) -> str:
 
 
 def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
+    d = _dialect()
     out = []
     for i in range(state.k, len(messages)):
         m = messages[i]
         if i < state.strip_upto:
             m = strip_thinking(m)
-        out.append(m)
+        if m is not None:  # a dialect may drop an item entirely (Responses reasoning items)
+            out.append(m)
     if state.k == 0 or not out:
         return out
+    lead = list(messages[: d.lead_count(messages)])  # items before the first turn start stay first
     blocks, systems = carried_content(messages, state.k, state.paged_carried)
-    head = [*blocks]
-    text = preamble(state)
-    if text:
-        head.append({"type": "text", "text": text})
-    first = out[0]
-    own = first.get("content")
-    own_blocks = [{"type": "text", "text": own}] if isinstance(own, str) else list(own)
-    return [{**first, "content": head + own_blocks}, *systems, *out[1:]]
+    systems = [m for m in systems if not any(m is x for x in lead)]
+    return [*lead, d.merge_first(out[0], blocks, preamble(state)), *systems, *out[1:]]
 
 
 def headroom(state: EpochState, config: Config) -> int:
@@ -351,21 +451,22 @@ def estimate_upstream(request: dict, messages: list[dict], previous_n: int, stat
                       estimator: TokenEstimator) -> int:
     """Rule 3: last real input plus the messages added since, else an estimate of the whole request."""
     if state.last_input_tokens is not None and previous_n <= len(messages):
-        return state.last_input_tokens + estimator.estimate_messages(messages[previous_n:])
-    head = estimator.estimate(canonical_json({"system": request.get("system"), "tools": request.get("tools")}))
-    return head + estimator.estimate_messages(transform_messages(messages, state))
+        return state.last_input_tokens + estimate_items(estimator, messages[previous_n:])
+    head = estimator.estimate(canonical_json(_dialect().head_estimate_source(request)))
+    return head + estimate_items(estimator, transform_messages(messages, state))
 
 
 def window_tokens(messages: list[dict], estimator: TokenEstimator, start: int = 0) -> int:
     """Tokens of the non-carried part of M[start..) (no carried system messages, no context blocks)."""
     kept = strip_carried(messages, start, len(messages))
-    return estimator.estimate_messages([strip_thinking(m) for m in kept if m.get("content")])
+    d = _dialect()
+    return estimate_items(estimator, [x for x in (strip_thinking(m) for m in kept if d.countable(m)) if x is not None])
 
 
 def carried_tokens(messages: list[dict], estimator: TokenEstimator, paged: frozenset[str] = frozenset()) -> int:
     blocks, systems = carried_content(messages, len(messages), paged)
     parts = ([{"role": "user", "content": blocks}] if blocks else []) + systems
-    return estimator.estimate_messages(parts) if parts else 0
+    return estimate_items(estimator, parts) if parts else 0
 
 
 def fixed_overhead(request: dict, messages: list[dict], state: EpochState, store: Store, config: Config,
@@ -377,7 +478,7 @@ def fixed_overhead(request: dict, messages: list[dict], state: EpochState, store
     if state.head_tokens is not None:
         head = state.head_tokens + max(0, carried - (state.initial_carried or 0))
     else:
-        head = estimator.estimate(canonical_json({"system": request.get("system"), "tools": request.get("tools")})) + carried
+        head = estimator.estimate(canonical_json(_dialect().head_estimate_source(request))) + carried
     pre = "\n\n".join(t for t in (store.pinned_text(config.pin_budget), store.index_text(config.index_budget)) if t)
     return head + (estimator.estimate(pre) if pre else 0)
 
@@ -455,7 +556,7 @@ def page_carried_text(messages: list[dict], state: EpochState, store: Store, con
         if growth - freed <= config.carried_text_budget:
             break
         chosen.append(i)
-        freed += estimator.estimate_messages([messages[i]])
+        freed += estimate_items(estimator, [messages[i]])
     if not chosen:
         return state
     chosen.sort()
@@ -477,9 +578,20 @@ def matching_prefix(hashes: tuple[str, ...], messages: list[dict]) -> int:
 # The engine --------------------------------------------------------------------------------------
 
 def rewrite(request: dict, state: EpochState | None, store: Store, config: Config,
-            estimator: TokenEstimator) -> tuple[dict, EpochState, list[dict]]:
-    """Return (upstream_request, new_state, events) for one ``/v1/messages`` request."""
-    messages = request.get("messages") or []
+            estimator: TokenEstimator, dialect: Dialect | None = None) -> tuple[dict, EpochState, list[dict]]:
+    """Return (upstream_request, new_state, events) for one request (``/v1/messages`` by default;
+    pass ``dialect`` for another API)."""
+    token = _DIALECT.set(dialect or ANTHROPIC)
+    try:
+        return _rewrite(request, state, store, config, estimator)
+    finally:
+        _DIALECT.reset(token)
+
+
+def _rewrite(request: dict, state: EpochState | None, store: Store, config: Config,
+             estimator: TokenEstimator) -> tuple[dict, EpochState, list[dict]]:
+    field_name = _dialect().field
+    messages = request.get(field_name) or []
     n = len(messages)
     events: list[dict] = []
     fingerprint = head_fingerprint(request)
@@ -522,13 +634,13 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
         if state.last_turn_start_n is not None and count > state.last_turn_count and n > state.last_turn_start_n:
             # Per-turn growth: the messages added since the previous turn start, estimated at the current
             # ratio, averaged when several turns arrive at once (a resume or a missed request).
-            added = estimator.estimate_messages(messages[state.last_turn_start_n:])
+            added = estimate_items(estimator, messages[state.last_turn_start_n:])
             growth = added // (count - state.last_turn_count)
             state = replace(state, max_turn_growth=max(state.max_turn_growth, growth))
         state = replace(state, last_turn_start_n=n, last_turn_count=count)
         # Early warning (reviewers): carried text messages (contract step 4) growing at consecutive turn
         # starts means a new hook or mode is adding standing messages per turn.
-        texts = sum(1 for i, m in enumerate(messages) if m.get("role") == "system"
+        texts = sum(1 for i, m in enumerate(messages) if is_system_like(m)
                     and classify_system(messages, i) == CARRIED_TEXT and message_hash(m) not in state.paged_carried)
         if state.last_carried_text_count is not None and texts > state.last_carried_text_count:
             streak = state.carried_text_streak + 1
@@ -586,12 +698,12 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
 
     if state.initial_carried is None:
         state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
-    upstream = {**request, "messages": transform_messages(messages, state)}
+    upstream = {**request, field_name: transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
     state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent, last_estimate=sent_estimate,
-                    last_window_tokens=window_tokens(upstream["messages"], estimator))
+                    last_window_tokens=window_tokens(upstream[field_name], estimator))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
-             "upstream_messages": len(upstream["messages"]), "estimate": estimate, "sent_bytes": sent}
+             "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
     if rotated:
         event["sent_estimate"] = sent_estimate
     if over:
@@ -604,18 +716,41 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
     return upstream, state, events
 
 
-def count_tokens_view(request: dict, state: EpochState | None) -> dict:
+def count_tokens_view(request: dict, state: EpochState | None, dialect: Dialect | None = None) -> dict:
     """Rule 11: the current epoch's transform for ``count_tokens``; no rotation and no side effects."""
     if state is None:
         return request
-    messages = request.get("messages") or []
-    if state.k and (state.k >= len(messages) or matching_prefix(state.hashes, messages) < state.k):
-        return request  # history no longer matches the epoch; count what the CLI sent
-    return {**request, "messages": transform_messages(messages, state)}
+    token = _DIALECT.set(dialect or ANTHROPIC)
+    try:
+        field_name = _dialect().field
+        messages = request.get(field_name) or []
+        if state.k and (state.k >= len(messages) or matching_prefix(state.hashes, messages) < state.k):
+            return request  # history no longer matches the epoch; count what the CLI sent
+        return {**request, field_name: transform_messages(messages, state)}
+    finally:
+        _DIALECT.reset(token)
 
 
-def usage_tokens(usage: dict) -> int:
-    return sum(usage.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+def usage_tokens(usage: dict, dialect: Dialect | None = None) -> int:
+    return (dialect or ANTHROPIC).usage_tokens(usage)
+
+
+def dialect_for(endpoint: str) -> Dialect | None:
+    """The dialect for a proxied endpoint, or None when the endpoint is passed through unchanged."""
+    if endpoint in (MESSAGES, COUNT_TOKENS):
+        return ANTHROPIC
+    if endpoint.endswith("/responses"):
+        from contexto.codex import RESPONSES  # imported lazily: contexto.codex builds on this module
+        return RESPONSES
+    return None
+
+
+def keyed(dialect: Dialect, request: dict) -> str:
+    token = _DIALECT.set(dialect)
+    try:
+        return f"{dialect.name}:{conversation_key(request)}"
+    finally:
+        _DIALECT.reset(token)
 
 
 @dataclass
@@ -632,18 +767,19 @@ class RewriteEngine:
             self.estimator = TokenEstimator()
 
     def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
-        key = conversation_key(request)
+        dialect = dialect_for(endpoint)
+        if dialect is None:
+            return request, headers, []
+        key = keyed(dialect, request)
         state = self.states.get(key)
         if endpoint == COUNT_TOKENS:
             epoch = state.epoch if state else 0
             return count_tokens_view(request, state), headers, [{"event": "count_tokens", "epoch": epoch}]
-        if endpoint != MESSAGES:
-            return request, headers, []
-        upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator)
+        upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator, dialect)
         return upstream, headers, events
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
-        """Feed a response's real usage back (``/v1/messages`` only; never ``count_tokens``). Returns the
+        """Feed a response's real usage back (a transformed endpoint; never ``count_tokens``). Returns the
         content-free events it raised, which are also written to the session log through
         ``store.log`` when the store has one (packet A2b; contract rule 3 as amended by PR #44):
 
@@ -653,13 +789,14 @@ class RewriteEngine:
         - ``estimate_error``: the real input exceeded the pre-send estimate by more than 10%, with the
           running mean of estimate / real for the conversation.
         """
-        if endpoint != MESSAGES:
+        dialect = dialect_for(endpoint)
+        if dialect is None or endpoint == COUNT_TOKENS:
             return []
-        key = conversation_key(request)
+        key = keyed(dialect, request)
         state = self.states.get(key)
         if state is None:
             return []
-        real = usage_tokens(usage)
+        real = usage_tokens(usage, dialect)
         self.estimator.observe(state.last_sent_bytes, real)  # the session's measured ratio from now on
         state = replace(state, last_input_tokens=real)
         if state.head_tokens is None and state.k == 0:
