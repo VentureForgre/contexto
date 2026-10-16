@@ -303,7 +303,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     with an atomic, locked read-modify-write so parallel calls cannot overspend. The charge
     counter resets on every publish, because each published room already accounts for everything
     in the input it was measured from, including earlier recall results; charges after a publish
-    therefore count only results not yet in measured input. They never return more than remains; when it is
+    therefore count only results not yet in measured input. This is safe within one conversation
+    because of the stream hold: a tool call can only charge after its response's real-usage
+    publish, and the next request-time estimate includes its results. If a hold is released at end
+    of stream without usage, tool calls see the request-time room, which is off by at most one
+    response's output. `count_tokens` never publishes a room. They never return more than remains; when it is
     used up they return: "Recall budget for this turn is used up; answer from what is in view, or
     say the detail is unknown."
   - Charges convert at `min(bytes_per_token, 1.5)` characters per token, using 1.0 before
@@ -315,8 +319,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     published for the call's turn, the same applies and the store logs `turn_room_missing`, so a
     missed publish shows up in acceptance logs.
   - Known limitation for v0.1.0: subagents launched by the CLI share the session's room and
-    store; their requests are sized by the same engine, but a subagent's recalls draw on the same
-    per-turn budget.
+    store. When subagents run concurrently with each other or with the main conversation, each
+    one's publish replaces the shared room and resets its counter, so the per-turn recall budget is
+    not enforced across overlapping conversations and they can overspend it; keying the room by
+    conversation is the later fix.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
