@@ -479,11 +479,14 @@ planned over-bound requests.
 - **Fix:** a turn's plants take sorted random slots, each shifted by the plants already placed, so
   every plant's events keep the statement order `_merge` gives them. All other content stays
   deterministic from the seed. `tests/test_plant_order.py` checks every chain at 40 and 70 KB.
+- **The content is new, not only the plant positions.** The sorted slot draws consume the seeded
+  RNG differently, so the filler diverges from the first content turn on: no content turn is
+  byte-identical to the old script at 40 or 70 KB. Sizes move a few bytes: at 40 KB only turn 12
+  (1-based) by -1 byte; at 70 KB turns 3 to 10 by -3 to +5 bytes.
 - **Unchanged:** the D27 6x9 assignment (probe ids and order are seed-derived), reach (54/54 at 40
-  and 70 KB, mapping clean, stub runs) and the 40 KB approval table (turn sizes are unchanged). The
-  rendered content changes, so live run #2's scores (H1 44, baseline 45 of 54; acceptance 2 failed
-  on chain, 22 against 24) are not reusable. **The next acceptance run reruns both arms on the new
-  content.**
+  and 70 KB, mapping clean, stub runs) and the 40 KB approval table (the one-byte change moves no
+  token estimate). Live run #2's scores (H1 44, baseline 45 of 54; acceptance 2 failed on chain,
+  22 against 24) are not reusable. **The next acceptance run reruns both arms on the new content.**
 
 ## Acceptance 3 credit (contract PR #95)
 
