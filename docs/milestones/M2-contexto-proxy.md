@@ -288,9 +288,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     Code 2.1.301, three runs): Claude Code starts an MCP tool call 5 to 16 ms after a `tool_use`
     block's `content_block_stop`, 3.1 to 6.2 seconds before `message_delta`. So the proxy holds the
     stream from the first `tool_use` `content_block_start`: that event and all later events are
-    buffered in order until `message_delta`'s usage is observed and the room is published, then
-    released in order. Text and thinking before the first `tool_use` still stream live. A tool call
-    therefore always sees the current turn's room.
+    buffered in order and released in order at the first of: `message_delta` (after its usage is
+    observed and the room is published), an `error` event, or upstream end of stream, so an error
+    or disconnect is never swallowed. Text, thinking, and `message_start` before the first
+    `tool_use` still stream live. For the Responses dialect (Codex) the equivalent hold runs from
+    the first `response.output_item.added` whose item is a `function_call` until
+    `response.completed` (whose usage sets the room), an error event, or end of stream. A tool call
+    therefore always sees the current turn's room. Keepalive pings may be sent during a hold.
   - `contexto_recall`, `contexto_search`, and `contexto_state` charge the tokens they return
     against the room for the current turn id, converted with the same ratio as the per-call limit,
     with an atomic, locked read-modify-write so parallel calls cannot overspend; the charge
