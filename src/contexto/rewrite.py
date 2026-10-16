@@ -69,10 +69,13 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   the proxy as ``transform_error``.
 - The window budget ``W`` and the measured bytes-per-token ratio are published through
   ``set_window`` (lane B B9, PR #56, for ``contexto_recall``'s per-call cap) when ``W`` changes at a
-  rotation or head change, or when the ratio moves more than 1% after real usage; never before the
+  rotation or head change, when the first response measures the head, or when the ratio moves more
+  than 1% after real usage; never before the
   ratio is measured, never for a ``W`` that is not positive (``bound_too_small`` reports that case;
   the store accepts positive values only), never from ``observe_usage`` while degraded, and never
   from ``count_tokens``.
+- An engine started on an existing session seeds its estimator with the ratio the previous engine
+  published (``store.window()``, packet A8), so a proxy restart sizes like the process before it.
 """
 
 from __future__ import annotations
@@ -99,6 +102,7 @@ STORE_ERRORS = (OSError, LedgerError, KeyFileError, SessionNotFoundError, PageNo
 STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
 PAGE_ID = re.compile(r"\bpg_[0-9a-f]{16}\b")
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
+RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
 
 
 class Store(Protocol):
@@ -106,6 +110,7 @@ class Store(Protocol):
     def pinned_text(self, budget_tokens: int) -> str: ...
     def index_text(self, budget_tokens: int) -> str: ...
     def set_window(self, window_tokens: int, bytes_per_token: float) -> None: ...
+    def window(self) -> tuple[int | None, float | None]: ...
     def quarantine_page(self, page_id: str) -> Any: ...
 
 
@@ -477,10 +482,16 @@ def _knobs() -> Config:
     return _KNOBS.get() or _DEFAULT_CONFIG
 
 
-def preamble(state: EpochState) -> str:
-    knobs = _knobs()
-    parts = (knobs.recall_rule, knobs.recall_example, state.pinned_text, state.index_text)
+def compose_preamble(config: Config, pinned_text: str, index_text: str) -> str:
+    """The preamble text: the recall knobs (A7, off by default), then pinned and index text. The one
+    composition used for what is sent (``preamble``) and for every F estimate (``fixed_overhead``, and
+    ``observe_usage``'s first W), so the knobs are always counted (A8, after PR #70)."""
+    parts = (config.recall_rule, config.recall_example, pinned_text, index_text)
     return "\n\n".join(part for part in parts if part)
+
+
+def preamble(state: EpochState) -> str:
+    return compose_preamble(_knobs(), state.pinned_text, state.index_text)
 
 
 def _with_reminder(message: dict, reminder: str) -> dict:
@@ -555,8 +566,7 @@ def fixed_overhead(request: dict, messages: list[dict], state: EpochState, store
         head = state.head_tokens + max(0, carried - (state.initial_carried or 0))
     else:
         head = estimator.estimate(canonical_json(_dialect().head_estimate_source(request))) + carried
-    pre = "\n\n".join(t for t in (config.recall_rule, config.recall_example, store.pinned_text(config.pin_budget),
-                                  store.index_text(config.index_budget)) if t)
+    pre = compose_preamble(config, store.pinned_text(config.pin_budget), store.index_text(config.index_budget))
     return head + (estimator.estimate(pre) if pre else 0)
 
 
@@ -807,6 +817,11 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
         state = replace(state, head_changed=True)
         events.append({"event": "head_changed", "epoch": state.epoch})
 
+    # Rule 13's baseline is the carried content at the conversation's first request, so it is taken
+    # before that request can rotate; set after, a first request that rotates (a resumed session, or a
+    # new engine on an existing one) measured its growth from zero (A6 smoke, PR #67).
+    if state.initial_carried is None:
+        state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
     estimate = estimate_upstream(request, messages, previous_n, state, estimator)
     if n > previous_n and at_turn_start(messages):
         count = len(turn_starts(messages))
@@ -839,8 +854,6 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     # rotation that is the transformed request, not the history that triggered it (A2b review).
     sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
 
-    if state.initial_carried is None:
-        state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
     upstream = {**request, field_name: transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
     state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent, last_estimate=sent_estimate,
@@ -971,6 +984,33 @@ def keyed(dialect: Dialect, request: dict) -> str:
         _DIALECT.reset(token)
 
 
+def restore_ratio(store: Store, estimator: TokenEstimator) -> dict | None:
+    """Packet A8 (c): an engine started on an existing session (a proxy restart, ``codex exec resume``,
+    ``contexto run claude --session S``) begins from the bytes-per-token ratio the previous engine
+    published through ``set_window`` instead of the seed, which the A6 smoke measured 1.34 to 1.40 times
+    high (F 21.3k estimated against 15.3k measured, so W 14.7k instead of about 20.7k). The ratio enters
+    the estimator with the weight of one mid-sized request, so the session's own usage soon dominates.
+    Returns the content-free ``sizing_restored`` event (also logged), or None when there is nothing to
+    restore or the store cannot be read (the next turn start meets the store again under rule 14)."""
+    if estimator.measured_bytes_per_token is not None:
+        return None
+    try:
+        _, ratio = store.window()
+    except STORE_FAILURES:
+        return None
+    if not ratio:
+        return None
+    estimator.observe(round(ratio * RESTORED_RATIO_WEIGHT), RESTORED_RATIO_WEIGHT)
+    event = {"event": "sizing_restored", "bytes_per_token": round(ratio, 4), "weight_tokens": RESTORED_RATIO_WEIGHT}
+    log = getattr(store, "log", None)
+    if callable(log):
+        try:
+            log(event)
+        except STORE_FAILURES:
+            pass  # the restore is an optimization; rule 14 handles a broken store at the next turn start
+    return event
+
+
 @dataclass
 class RewriteEngine:
     """Per-session adapter for the proxy: one epoch state per conversation (see ``conversation_key``)."""
@@ -983,6 +1023,7 @@ class RewriteEngine:
     def __post_init__(self) -> None:
         if self.estimator is None:
             self.estimator = TokenEstimator()
+        self.restored = restore_ratio(self.store, self.estimator)
 
     def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
         with recall_knobs(self.config):
@@ -1025,6 +1066,15 @@ class RewriteEngine:
             # Rule 4: the first measured request gives the head (its input minus its non-carried
             # messages, which also covers a resumed first request with a long history).
             state = replace(state, head_tokens=max(0, real - state.last_window_tokens))
+        if state.window_budget is None and state.head_tokens is not None:
+            # A8 (c): W from the measured head, so set_window publishes W and the ratio after the first
+            # response rather than only after a rotation decision, and a restarted engine can restore
+            # the ratio even when the previous one never rotated. The epoch's in-memory pinned and index
+            # text stand in for the store's (no store read here), composed with this engine's recall
+            # knobs as sent; the next rotation decision recomputes W.
+            pre = compose_preamble(self.config, state.pinned_text, state.index_text)
+            f = state.head_tokens + (self.estimator.estimate(pre) if pre else 0)
+            state = replace(state, window_budget=self.config.bound - headroom(state, self.config) - f)
         events: list[dict] = []
         estimate = state.last_estimate
         if estimate is not None and real > 0:
