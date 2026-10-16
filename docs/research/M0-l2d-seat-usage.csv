@@ -1,0 +1,15 @@
+l2d_turn,session_turn,call,input_tokens,cache_creation_input_tokens,cache_read_input_tokens,output_tokens,context_tokens,model
+startup,1,1,2,84071,0,276,84073,claude-haiku-5-5
+startup,1,2,4,85241,0,568,85245,claude-haiku-5-5
+S0,2,1,4,1715,84071,469,85790,claude-haiku-5-5
+S0,2,2,2,528,85786,125,86316,claude-haiku-5-5
+O1,3,1,4,4039,86314,463,90357,claude-haiku-5-5
+O2,4,1,4,92193,0,170,92197,claude-haiku-5-5
+G1,5,1,4,3034,90353,260,93391,claude-haiku-5-5
+G1,5,2,2,2963,92193,5,95158,claude-haiku-5-5
+P1,6,1,4,5519,93387,4777,98910,claude-haiku-5-5
+P1,6,2,2,7728,92193,2297,99923,claude-haiku-5-5
+G2,7,1,4,3011,99921,795,102936,claude-haiku-5-5
+G2,7,2,2,149142,102932,128,252076,claude-haiku-5-5
+P2,8,1,4,157873,98906,3812,256783,claude-haiku-5-5
+P2,8,2,2,4885,252074,2688,256961,claude-haiku-5-5
