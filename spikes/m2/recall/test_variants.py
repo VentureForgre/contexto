@@ -56,7 +56,7 @@ def test_variants_replay_and_write_probe_requests(tmp_path):
     run = write_run(tmp_path / "run")
     spec = tmp_path / "v.json"
     spec.write_text(json.dumps({"reminded": {"engine": {"recall_rule": "RULE", "turn_reminder": "REMIND"},
-                                             "store_variant": "baseline", "bound": 6_000},
+                                             "bound": 6_000},
                                 "control": {"engine": {"turn_reminder": "REMIND"}, "bound": 6_000,
                                             "probe": "recorded"}}))
     probe = tmp_path / "probe.txt"
@@ -87,3 +87,16 @@ def test_unknown_engine_knob_is_refused(tmp_path):
         assert "unknown engine knobs" in str(exc)
     else:
         raise AssertionError("expected SystemExit")
+
+
+def test_strip_thinking_removes_every_thinking_block():
+    upstream = {"messages": [
+        {"role": "user", "content": [{"type": "text", "text": "q"}]},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "sig"},
+                                          {"type": "text", "text": "a"}]},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "sig2"}]},
+    ]}
+    out, count = variants.strip_all_thinking(upstream)
+    assert count == 2 and "signature" not in json.dumps(out)
+    assert out["messages"][1]["content"] == [{"type": "text", "text": "a"}]
+    assert out["messages"][2]["content"] and out["messages"][2]["content"][0]["type"] == "text"  # placeholder

@@ -85,3 +85,25 @@ def test_engine_applies_its_config_knobs_and_count_tokens_sees_the_same_view():
     assert RULE in str(up["messages"][0]) and REMINDER in str(up["messages"][0])
     # outside the engine call nothing leaks: a plain transform uses defaults again
     assert RULE not in str(run(msgs)[0])
+
+
+def test_a_reminded_turn_start_never_changes_bytes_later_in_the_epoch():
+    """Intake's condition for V3: the reminder is added once (at rotation for retained turns, and when
+    a new turn start is first sent) and never edited later, so the prefix stays byte-stable."""
+    from test_rewrite import assistant
+
+    store = MemoryStore(key=b"k" * 32)
+    msgs = history(6, think=True) + [user("new prompt"), system("trailing")]
+    with recall_knobs(KNOBS):
+        up1, st, _, _ = run(msgs, store=store, config=KNOBS)  # rotation: retained turn starts reminded
+    roomy = Config(**{**KNOBS.__dict__, "bound": 100_000})
+    req2 = msgs + [assistant("done", think="t9"), user("second prompt")]
+    req3 = req2 + [assistant("done again", think="t10"), user("third prompt")]
+    with recall_knobs(roomy):
+        up2, st2, ev2, _ = run(req2, state=st, store=store, config=roomy)  # new turn start, same epoch
+        up3, st3, ev3, _ = run(req3, state=st2, store=store, config=roomy)  # and the next one
+    assert "rotation" not in [e["event"] for e in ev2 + ev3] and st3.epoch == st.epoch
+    n2 = len(up2["messages"])
+    assert [canonical_bytes(m) for m in up3["messages"][:n2]] == [canonical_bytes(m) for m in up2["messages"]]
+    second = up2["messages"][-1]
+    assert second["content"][-1] == {"type": "text", "text": REMINDER}  # reminded when first sent

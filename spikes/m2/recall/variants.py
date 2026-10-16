@@ -22,8 +22,10 @@ recall fields) and the store variant (``CONTEXTO_RECALL_VARIANT``, lane B).
 
 variants.json: ``{"name": {"engine": {<Config recall fields>}, "store_variant": "baseline",
 "probe": "recorded" (optional: keep the recorded probe wording for this variant only)}}``. A
-``baseline`` variant (no knobs, store baseline) is always added and checked against the recorded
-run's per-request sent bytes.
+``baseline`` variant (no knobs, the store's default text) is always added and checked against the
+recorded run's per-request engine decisions (epoch, k, upstream message count). Omit
+``store_variant`` for the store default. ``--strip-thinking`` removes thinking from every written
+probe request, so all live sends are uniform.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from contexto.canonical import canonical_json
-from contexto.rewrite import MESSAGES, Config, RewriteEngine, is_turn_start
+from contexto.rewrite import ANTHROPIC, MESSAGES, Config, RewriteEngine, _DIALECT, is_turn_start, strip_thinking
 from contexto.store import SessionStore
 from contexto.tokens import TokenEstimator
 
@@ -115,13 +117,32 @@ def preamble_position(message: dict, knobs: Config, store_texts: tuple[str, ...]
     return {"block": None, "of": len(content), "chars": 0}
 
 
-def replay(requests: list[dict], recorded: list[dict], name: str, spec: dict, out: Path) -> dict[str, Any]:
+def strip_all_thinking(upstream: dict) -> tuple[dict, int]:
+    """Remove every thinking and redacted-thinking block (rule 2's strip, with its placeholder for a
+    thinking-only assistant message), so a rebuilt transcript signature that may not match the
+    original cannot cause a 400 or a silent thinking drop in a live send. Returns the count."""
+    count = sum(1 for m in upstream.get("messages") or [] if isinstance(m.get("content"), list)
+                for b in m["content"] if isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
+    token = _DIALECT.set(ANTHROPIC)
+    try:
+        messages = [x for x in (strip_thinking(m) for m in upstream.get("messages") or []) if x is not None]
+    finally:
+        _DIALECT.reset(token)
+    return {**upstream, "messages": messages}, count
+
+
+def replay(requests: list[dict], recorded: list[dict], name: str, spec: dict, out: Path,
+           strip: bool = False) -> dict[str, Any]:
     engine_knobs = {k: v for k, v in (spec.get("engine") or {}).items() if k in RECALL_FIELDS}
     unknown = set(spec.get("engine") or {}) - RECALL_FIELDS
     if unknown:
         raise SystemExit(f"variant {name}: unknown engine knobs {sorted(unknown)}")
     previous = os.environ.get(STORE_VARIANT_ENV)
-    os.environ[STORE_VARIANT_ENV] = spec.get("store_variant", "baseline")
+    store_variant = spec.get("store_variant")  # None: the store's own default
+    if store_variant is None:
+        os.environ.pop(STORE_VARIANT_ENV, None)
+    else:
+        os.environ[STORE_VARIANT_ENV] = store_variant
     try:
         home = Path(tempfile.mkdtemp(prefix=f"a7-{name}-"))
         store = SessionStore(home, "replay")
@@ -140,6 +161,9 @@ def replay(requests: list[dict], recorded: list[dict], name: str, spec: dict, ou
                 engine.observe_usage(MESSAGES, recorded[i]["usage"], request)
             last = (upstream, mine)
         upstream, event = last
+        stripped = 0
+        if strip:
+            upstream, stripped = strip_all_thinking(upstream)
         store_texts = (store.pinned_text(config.pin_budget), store.index_text(config.index_budget))
         directory = out / name
         directory.mkdir(parents=True, exist_ok=True)
@@ -151,7 +175,8 @@ def replay(requests: list[dict], recorded: list[dict], name: str, spec: dict, ou
         reminder = config.turn_reminder
         return {
             "variant": name,
-            "store_variant": os.environ[STORE_VARIANT_ENV],
+            "store_variant": store_variant or "store default",
+            "thinking_blocks_stripped": stripped,
             "engine_knobs": sorted(k for k, v in engine_knobs.items() if v),
             "requests_replayed": len(requests),
             "rotations": rotations,
@@ -182,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("run", type=Path)
     parser.add_argument("--variants", type=Path, default=None, help="variants JSON (baseline is always added)")
     parser.add_argument("--out", type=Path, required=True, help="output dir; keep it under a gitignored .contexto/")
+    parser.add_argument("--strip-thinking", action="store_true",
+                        help="remove thinking blocks from every written probe request (uniform live sends)")
     parser.add_argument("--probe-text", type=Path, default=None,
                         help="file whose text replaces the recorded probe turn's text in the final request, for "
                              "every variant (default: the probe exactly as recorded)")
@@ -198,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     for name, spec in variants.items():
         # "probe": "recorded" keeps the recorded probe wording for one variant (intake's control).
         use = requests if spec.get("probe") == "recorded" else neutral
-        row = replay(use, recorded, name, spec, args.out)
+        row = replay(use, recorded, name, spec, args.out, args.strip_thinking)
         row["probe_text"] = "recorded" if use is requests or not args.probe_text else "substituted"
         rows.append(row)
     summary = {"requests": len(requests), "recorded_requests": len(recorded),
