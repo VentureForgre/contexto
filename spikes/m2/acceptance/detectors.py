@@ -47,9 +47,11 @@ BILLED_PATHS = frozenset(p for p in MODEL_PATHS if not p.endswith(("count_tokens
 FAILURE_EVENTS = ("degraded_enter", "store_error", "page_conflict", "fallback_failed", "transform_error",
                   "turn_room_missing", "unclassified_system_message",
                   "turn_room_low")  # A12: decided a failure, contract PR #115 at 1eb8a4c
-# The recalls the budget prices (script.MAX_RECALLS). A cost guard only (intake, 2026-10-16): the
-# model is not told about it, and ``recalls_over_budget`` reports it without failing any verdict.
+# The recalls the budget prices per probe turn (script.MAX_RECALLS), over D27's probe turns
+# (script.PROBE_TURNS). A cost guard only (intake, 2026-10-16): the model is not told about it, and
+# ``recalls_over_budget`` reports it without failing any verdict.
 MAX_RECALLS = 2
+PROBE_TURNS = 6
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -138,8 +140,9 @@ class Report:
 
     @property
     def recalls_over_budget(self) -> int:
-        """Recall calls beyond the budget's priced count: reported, never a verdict."""
-        return max(0, self.recall_calls - MAX_RECALLS)
+        """Recall calls beyond the budget's priced count for the run, MAX_RECALLS per probe turn:
+        reported, never a verdict."""
+        return max(0, self.recall_calls - MAX_RECALLS * PROBE_TURNS)
 
     @property
     def cache_hit_rate(self) -> float | None:

@@ -354,8 +354,8 @@ so the preamble and page index must lead the model to recall. B9 (PR #56) sizes 
 session's measured bytes per token and 1.5, never above 32,000 characters, and at 12,000 characters
 until the engine records `W` with `set_window`. The budget prices each recall at the largest chunk,
 32,000 characters of log text, 17,778 tokens; at this run's `W` (62,000 to 85,000) B9 returns
-13,000 to 17,600 tokens. `recalls_over_budget` reports recall calls beyond the 2 priced, across the
-whole session; no verdict uses it.
+13,000 to 17,600 tokens. `recalls_over_budget` reports recall calls beyond the 2 priced per probe turn, 12
+over D27's six probe turns, across the whole session; no verdict uses it.
 
 Under option (a) the pre-usage request stays far below 135,000, so the logs stay pasted user
 text. `Params.head` is now 47,600 (the engine's `F` here) and the default turn size 40 KB.

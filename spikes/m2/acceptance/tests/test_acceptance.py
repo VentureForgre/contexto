@@ -427,15 +427,38 @@ def test_stub_dry_run_models_log_text_and_the_rest_separately():
     assert body["messages"][0]["content"][0]["text"] == log  # the caller's body is not changed
 
 
+def test_stub_budget_prices_six_probe_turns_and_six_baseline_requests():
+    # D27: the stub budget block follows budget.simulate, one baseline request per probe turn and each
+    # probe turn's recalls priced, not one of each (dry run #3 found it 6x low on the baseline).
+    from acceptance import stubrun
+
+    p = budget.Params()
+    head = {"path": "/v1/messages", "system_bytes": 9_000, "tools_bytes": 60_000, "tools": 26, "tokens": 40_000,
+            "max_tokens": 128_000}
+    inputs = [40_000, 60_000, 80_000] + [50_000 + 500 * k for k in range(script.PROBE_TURNS)]
+    log = [{"event": "request", "path": "/v1/messages", "epoch": 0,
+            "usage": {"input_tokens": x, "output_tokens": 2}} for x in inputs]
+    probes = [900] * script.PROBE_TURNS
+    out = stubrun.summarize([head], log, 3, p, probes, [40_000] * 3)["budget"]
+    assert len(out["baseline_requests"]) == script.PROBE_TURNS
+    assert out["baseline_replay_worst"] == sum(out["baseline_requests"]) + script.PROBE_TURNS * p.max_tokens_reserve
+    per_recall = budget.recall_tokens(p)
+    priced = inputs[:3] + [x + k * per_recall for x in inputs[3:] for k in range(p.recalls + 1)]
+    assert out["h1_worst"] == sum(priced) + len(priced) * p.max_tokens_reserve
+    assert out["total_worst"] == out["h1_worst"] + out["baseline_replay_worst"]
+
+
 def test_probe_turn_is_tool_neutral_and_the_recall_budget_is_report_only():
     s4 = script.build(turns=4, turn_bytes=8_000)
     for probe in s4.probe_texts:
         assert "contexto" not in probe and "recall" not in probe  # intake: product-realistic wording
         assert "If the conversation does not contain it, say unknown." in probe
     assert detectors.MAX_RECALLS == script.MAX_RECALLS == budget.Params().recalls == 2
-    calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * 3
+    assert detectors.PROBE_TURNS == script.PROBE_TURNS  # D27: the budget prices 2 recalls per probe turn
+    calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * (2 * script.PROBE_TURNS + 1)
     r = detectors.analyze(calls, [], bound=150_000)
     assert r.recalls_over_budget == 1 and "recalls_within_cap" not in r.verdicts()
+    assert detectors.analyze(calls[:-1], [], bound=150_000).recalls_over_budget == 0
 
 
 def test_the_doc_carries_the_budget_live_gates_on():
