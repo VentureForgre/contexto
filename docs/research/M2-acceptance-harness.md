@@ -212,30 +212,48 @@ request. Its 5 rotation requests are left out of the gaps above. With PR #48 the
 **The approval figure.** `run.py live` refuses an approval below `budget.simulate`'s worst-case H1,
 so that simulation is the budget to approve. `run.py approval-table` prints it, and the table
 between the markers below is that output; a test fails if they differ. Defaults: 18 turns of 40
-KB, head 47,600, bound 150,000, 2 recalls of 17,800 tokens.
+KB, head 47,600, bound 150,000, 2 recalls sized by B9 (below).
 
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy (live refuses an approval below its worst case) | 2,185,437 | 2,852,677 |
+| H1 acceptance run through the proxy (live refuses an approval below its worst case) | 2,185,371 | 2,852,611 |
 | Full-context baseline, one direct replay request (recommended) | 449,681 | 477,681 |
 | Full-context baseline through a plain CLI session (alternative) | 5,054,047 | - |
-| **Total, H1 + replay baseline** | **2,635,118** | **3,330,358** |
+| **Total, H1 + replay baseline** | **2,635,052** | **3,330,292** |
 <!-- approval-table:end -->
 
-**Cross-check against the stub run.** The same plan through the real engine cost less: 5
-rotations instead of the simulation's 8, an H1 of 1,962,025 expected and 2,629,265 worst, and a
-total of 2,387,202 and 3,082,442. The simulation prices every turn at 1.8 bytes per token and its
-head at 47,600, so it sits above the stub run by about 248,000 tokens; the guard therefore never
-stops a run the stub run predicts.
+**Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
+A2c's `window_minimal`, B9's recall size). Both runs went through the real launcher against the
+stub, with the credential checked on every request.
 
-**Recalls in the probe turn.** A full `contexto_recall` returns up to 32,000 characters
-(`RECALL_LIMIT`), which for this log text is about 17,800 tokens, not the 8,000 first assumed. The
-probe turn's tool loop cannot rotate, so intake capped it at 2 recalls (2026-10-16): 4 would reach
-about 169,500. The probe turn asks for at most 2. `recalls_within_cap` counts every
-`contexto_recall` in the session, not only the probe turn's: a recall during a build turn also adds
-an unplanned 17,800 tokens, so it counts against the cap too. Lane B's B9
-(window-aware recall size) will change the per-call size; the budget is recomputed when it lands.
+| Measure | 40 KB plan (18 turns) | 70 KB pair (10 turns) |
+|---|---|---|
+| Requests; rotations; epochs | 19; 5; 6 | 11; 4 (all `window_minimal`); 5 |
+| Over bound, real over_bound, pre-send outside a tool loop, `bound_too_small` | 0, 0, 0, 0 | 0, 0, 0, 0 |
+| Usage missing; 4xx; compaction | 0; 0; 0 | 0; 0; 0 |
+| Pre-usage request: modelled vs estimate | 48,799 vs 33,668 (31% low) | 65,153 vs 42,243 (35% low) |
+| Later requests: estimate gap | 7% low at most; rotation requests 2,700 high | 7% low at most; rotation requests 2,900 high |
+| First epoch's largest input; margin to 150,000 | 113,693; 36,307 | 102,719; 47,281 |
+| Probe turn: start; engine's `W` | 98,367; 84,303 | 107,301; 62,438 |
+| Probe turn with 2 recalls priced at 17,778; margin | 133,923; 16,077 | 142,857; 7,143 |
+| Same with B9's size at that `W` | 17,563 each: 133,493; 16,507 | 13,008 each: 133,317; 16,683 |
+| Credential | 19 of 19 helper key, no OAuth | 11 of 11 helper key, no OAuth |
+| Paged-only plants in pages | 4 of 4 | 4 of 4 |
+| H1 expected / worst (stub cross-check) | 1,962,037 / 2,629,277 | 1,220,746 / 1,632,146 |
+
+Every acceptance verdict passed in both runs except `recall_called`, since the stub calls no
+tools. The stub run's 40 KB total (2,387,214 / 3,082,454) sits about 248,000 tokens under the
+approval table, so the guard never stops a run the stub run predicts.
+
+**Recalls in the probe turn.** The probe turn's tool loop cannot rotate, so intake capped it at 2
+recalls (2026-10-16). B9 (PR #56) sizes each recall at `W / 4` tokens times the smaller of the
+session's measured bytes per token and 1.5, never above 32,000 characters, and at 12,000 characters
+until the engine records `W` with `set_window`. The budget prices each recall at the largest chunk,
+32,000 characters of log text, 17,778 tokens; at this run's `W` (62,000 to 85,000) B9 returns
+13,000 to 17,600 tokens. `recalls_within_cap` counts every `contexto_recall` in the session, not
+only the probe turn's: a recall during a build turn also adds unplanned tokens, so it counts
+against the cap too.
 
 Under option (a) the pre-usage request stays far below 135,000, so the logs stay pasted user
 text. `Params.head` is now 47,600 (the engine's `F` here) and the default turn size 40 KB.
@@ -304,7 +322,7 @@ planned over-bound requests.
 
 ## Tests
 
-`uv run --with pytest pytest spikes/m2` runs 41 tests with no live calls. Most use synthetic
+`uv run --with pytest pytest spikes/m2` runs 42 tests with no live calls. Most use synthetic
 fixtures; `test_engine_log.py` drives the real proxy and rewrite engine against a stub upstream,
 once with JSON replies and once with SSE replies, since the acceptance session streams.
 They cover:

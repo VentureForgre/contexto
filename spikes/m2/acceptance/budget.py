@@ -17,8 +17,11 @@ harness doc (option (a)). Token counting replaces the estimate where available.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
+
+from contexto.store.render import RECALL_LIMIT, recall_limit
 
 BYTES_PER_TOKEN_LOG = 1.8
 BYTES_PER_TOKEN_TEXT = 3.5
@@ -36,7 +39,9 @@ class Params:
     pinned_tokens: int = 1_500  # what the model pins over the run [inferred]
     probe_output: int = 4_000  # answers plus thinking on the probe turn [measured: 4,169 in L2f pilot 3]
     recalls: int = 2  # contexto_recall round trips on the probe turn: the script's cap (intake, 2026-10-16)
-    recall_tokens: int = 17_800  # a full recall: 32,000 characters (RECALL_LIMIT) of log text at 1.8 bytes per token
+    # Tokens one recall adds. None: the largest chunk B9 (PR #56) can return, RECALL_LIMIT characters of
+    # log text at 1.8 bytes per token. B9 returns less when W / 4 is smaller, so this errs high.
+    recall_tokens: int | None = None
     max_tokens_reserve: int = 32_000  # the guard reserves this much output per request
 
 
@@ -66,6 +71,21 @@ class Budget:
     planned_over_bound: int = 0
     bound_too_small: int = 0
     window_budget_first: int = 0
+    window_budget_probe: int = 0  # W at the probe turn, as simulated
+    recall_tokens: int = 0  # tokens each recall is priced at
+    b9_recall_tokens: int = 0  # what B9 would return at the simulated W (informational)
+
+
+def recall_tokens(p: Params) -> int:
+    """Tokens each ``contexto_recall`` is priced at: the largest chunk B9 can return, read as log text."""
+    return p.recall_tokens if p.recall_tokens is not None else math.ceil(RECALL_LIMIT / BYTES_PER_TOKEN_LOG)
+
+
+def b9_recall_tokens(window_budget: int) -> int:
+    """Tokens B9 returns per recall for window budget ``W``: ``W / 4`` at 1.5 characters per token (the
+    session's measured ratio runs near 2 for this content), capped at RECALL_LIMIT, read as log text."""
+    chars, _ = recall_limit(max(1, window_budget), 1.5)
+    return math.ceil(chars / BYTES_PER_TOKEN_LOG)
 
 
 def turn_tokens(turn_bytes: int) -> int:
@@ -113,8 +133,11 @@ def simulate(turn_bytes: list[int], probe_bytes: int, p: Params = Params()) -> B
     probe = int(probe_bytes / BYTES_PER_TOKEN_TEXT) + 1
     preamble = p.preamble_base + p.pinned_tokens + paged * p.index_tokens_per_page
     base = p.head + preamble + sum(retained) + probe
+    b.window_budget_probe = p.bound - max(HEADROOM_FLOOR, int(1.25 * max_growth)) - (p.head + preamble)
+    b.recall_tokens = recall_tokens(p)
+    b.b9_recall_tokens = b9_recall_tokens(b.window_budget_probe)
     for r in range(p.recalls + 1):  # the probe request, then one request per recall round trip
-        inp = base + r * p.recall_tokens
+        inp = base + r * b.recall_tokens
         b.rows.append(Row(len(sizes) + 1, "probe" if r == 0 else "recall", inp, len(retained), paged, epoch,
                           inp > p.bound, p.probe_output if r == p.recalls else 200, "tool loop: never rotates" if r else ""))
     b.h1_expected = sum(r.input_tokens + r.output_expected for r in b.rows)
