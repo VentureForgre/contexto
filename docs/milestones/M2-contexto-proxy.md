@@ -152,9 +152,18 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
 7. **Usage.** Return the upstream `usage` unchanged. The CLI therefore sees the bounded prompt's
    real size.
 8. **Errors.** Forward upstream errors unchanged. Never retry by silently changing the request.
-   Log every 4xx with the epoch state for diagnosis.
-9. **Streaming.** Relay SSE events as they arrive; the proxy only reads `message_start` and
-   `message_delta` usage. No hold-back is needed because recall is an MCP tool (D19).
+   Log every 4xx with the epoch state for diagnosis. Every locally generated upstream failure is
+   logged with its phase (`connect`, `tls`, `send`, `wait_headers`), elapsed milliseconds, and
+   errno, content-free. One exception to never retrying, from the second live H1 run (a locally
+   generated 502 after an 18.2 s OS-level timeout; the proxy opens a fresh upstream connection for
+   every request): if the failure happened before the request body was fully written (`connect`,
+   `tls`, or mid-`send`), upstream cannot have acted on the request, so the proxy resends the same
+   bytes once on a new connection and logs `upstream_retry` with the original phase and error. A
+   failure after the body was fully sent (`wait_headers`) or after any response byte is never
+   retried, because upstream may be running it; it returns the 502 as before, and the CLI may
+   retry on its own.
+9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
+   per-turn recall budget; the proxy reads `message_start` and `message_delta` usage.
 10. **Matching history.** Recognise each retained message in later requests by a hash of its
     canonical JSON with every `cache_control` field removed (the CLI moves `cache_control` along
     the tail), and with content normalised so that a plain string and a single text block holding
@@ -329,8 +338,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 - `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
-- `contexto_search(query)`: exact substring search over page stubs and text, returning page ids.
-  No embeddings, no similarity ranking (owner: not RAG).
+- `contexto_search(query)`: exact substring search over page stubs and text. For each hit it returns
+  the page id, the matching lines with a small bounded context, and their character offsets in the
+  rendered page, so the model can answer from the hit or recall exactly that offset instead of
+  reading a page from the top (measured in the second live H1 run: a full recall from offset 0
+  reached character 30,651 of a 39,405-character page within the turn's room, and the two facts
+  beyond it were lost). Results are charged against the per-turn room. No embeddings, no
+  similarity ranking (owner: not RAG).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
@@ -387,7 +401,10 @@ a no-replayed-thinking baseline.
    full-context baseline at the same session content. Pass: within 2 probes of baseline overall
    and no category more than 1 probe below.
 3. **Recall:** at least one probe answerable only from a paged-out turn is answered correctly,
-   and the session log shows the `contexto_recall` call.
+   and the session log shows that the answer reached the model through Contexto's tools: either a
+   `contexto_recall` of the page holding it, or a `contexto_search` hit whose returned lines contain
+   it. Either is retrieval of paged-out content; with search returning matching lines (B15),
+   answering from the hit is the intended path.
 4. **Cache:** within an epoch, requests read the head and window prefix from cache, except
    misses explained by the route (report the rate).
 5. **Tests:** unit tests for every rewrite rule, the store, and the MCP server; CI green.
