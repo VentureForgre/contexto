@@ -482,10 +482,16 @@ def _knobs() -> Config:
     return _KNOBS.get() or _DEFAULT_CONFIG
 
 
-def preamble(state: EpochState) -> str:
-    knobs = _knobs()
-    parts = (knobs.recall_rule, knobs.recall_example, state.pinned_text, state.index_text)
+def compose_preamble(config: Config, pinned_text: str, index_text: str) -> str:
+    """The preamble text: the recall knobs (A7, off by default), then pinned and index text. The one
+    composition used for what is sent (``preamble``) and for every F estimate (``fixed_overhead``, and
+    ``observe_usage``'s first W), so the knobs are always counted (A8, after PR #70)."""
+    parts = (config.recall_rule, config.recall_example, pinned_text, index_text)
     return "\n\n".join(part for part in parts if part)
+
+
+def preamble(state: EpochState) -> str:
+    return compose_preamble(_knobs(), state.pinned_text, state.index_text)
 
 
 def _with_reminder(message: dict, reminder: str) -> dict:
@@ -560,8 +566,7 @@ def fixed_overhead(request: dict, messages: list[dict], state: EpochState, store
         head = state.head_tokens + max(0, carried - (state.initial_carried or 0))
     else:
         head = estimator.estimate(canonical_json(_dialect().head_estimate_source(request))) + carried
-    pre = "\n\n".join(t for t in (config.recall_rule, config.recall_example, store.pinned_text(config.pin_budget),
-                                  store.index_text(config.index_budget)) if t)
+    pre = compose_preamble(config, store.pinned_text(config.pin_budget), store.index_text(config.index_budget))
     return head + (estimator.estimate(pre) if pre else 0)
 
 
@@ -1064,9 +1069,10 @@ class RewriteEngine:
         if state.window_budget is None and state.head_tokens is not None:
             # A8 (c): W from the measured head, so set_window publishes W and the ratio after the first
             # response rather than only after a rotation decision, and a restarted engine can restore
-            # the ratio even when the previous one never rotated. The epoch's in-memory preamble stands
-            # in for the store's (no store read here); the next rotation decision recomputes W.
-            pre = preamble(state)
+            # the ratio even when the previous one never rotated. The epoch's in-memory pinned and index
+            # text stand in for the store's (no store read here), composed with this engine's recall
+            # knobs as sent; the next rotation decision recomputes W.
+            pre = compose_preamble(self.config, state.pinned_text, state.index_text)
             f = state.head_tokens + (self.estimator.estimate(pre) if pre else 0)
             state = replace(state, window_budget=self.config.bound - headroom(state, self.config) - f)
         events: list[dict] = []

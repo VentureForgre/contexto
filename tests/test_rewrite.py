@@ -1274,3 +1274,19 @@ def test_ratio_restore_is_skipped_when_the_store_cannot_be_read():
     store.fail["window"] = OSError("synthetic")
     engine = RewriteEngine(store, config=CONFIG)
     assert engine.restored is None and engine.estimator.measured_bytes_per_token is None
+
+
+def test_first_usage_w_counts_the_recall_knobs_like_fixed_overhead():
+    """A8 after PR #70: observe_usage's first W uses the same preamble composition as what is sent, so a
+    recall rule (A7 knob) is part of F there too."""
+    rule = "Synthetic recall rule. " * 40
+    widths = {}
+    for knob in ("", rule):
+        cfg = Config(bound=20_000, headroom_floor=500, pin_budget=200, index_budget=200, recall_rule=knob)
+        engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
+        req = request(history(2) + [user("new")])
+        engine(req, {}, MESSAGES)
+        engine.observe_usage(MESSAGES, {"input_tokens": 3_000}, req)
+        widths[knob] = (next(iter(engine.states.values())).window_budget, engine.estimator.estimate(rule))
+    (plain, _), (with_rule, rule_tokens) = widths[""], widths[rule]
+    assert plain - with_rule == rule_tokens > 0
