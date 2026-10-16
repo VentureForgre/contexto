@@ -14,7 +14,7 @@ M2: build the Contexto proxy (context virtual memory at the API boundary). Contr
 
 M0 (study) is complete on main: interception, Codex measurements, rollover, proxy measurements,
 fidelity, paging policy, cost model, quality versus context, harder probes, and both lane
-syntheses (PRs #7 to #10, #13, #15, #16, #18, #19, #21, #22), plus the recommendation (PR #20).
+syntheses (lane 1 in PR #21, lane 2 in PR #19; PRs #7 to #10, #13, #15, #16, #18, #19, #21, #22), plus the recommendation (PR #20).
 M1 is folded into M2 (D21).
 
 ## Verified on main

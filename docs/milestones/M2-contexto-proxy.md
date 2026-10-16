@@ -56,7 +56,8 @@ reviewer-2 with zero-spend stubs on Claude Code 2.1.301 (PR #20 review comments)
 request, and can carry `cache_control` (their kinds, such as tool additions and effort changes,
 are vendor-documented); injected context blocks (CLAUDE.md and similar) ride in a turn-start user
 message, `messages[0]` in a fresh session but the resumed turn's user message after `--resume`;
-and a system message with empty `content` can appear. Lane A resolved that last item (rule 12):
+and a system message with empty `content` can appear. Lane A resolved that last item (rule 12; measured by builder-2, reported by manager-1, pending
+review, evidence to land in the A2 PR):
 it is a settings-only message, `{role: system, content: [], output_config: {effort: ...}}`, seen at
 `messages[1]` only when a session file lacking the CLI's own system record is resumed; with real
 CLI-written history, including a tool loop and two resumes, the original system message is never
@@ -78,7 +79,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    context blocks in their original order and then a preamble text block (pinned state and page
    index). Carried system messages from paged turns are placed immediately after that first
    retained turn-start message, in their original order, matching Claude Code's own
-   user-then-system shape. Measured by builder-2 (341 tokens, haiku via the owner's proxy): a
+   user-then-system shape. Measured by builder-2, reported by manager-1, pending review, evidence to land in the A2 PR
+   (341 tokens, haiku via the owner's proxy): a
    `role: "system"` message before the first retained turn-start message returns 400; after it,
    or merged into it as text, returns 200. No `tool_result` is displaced. In the first epoch `k = 0`, nothing is carried separately, and the
    preamble is empty. Every other request field passes through unchanged, including
@@ -123,7 +125,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
 12. **Settings-only system messages.** A system message with empty `content` and only settings
     fields (such as `output_config`) is carried like any other system message and forwarded as the
     CLI sends it. Lane A measured that Claude Code does not empty earlier system messages, so no
-    client-side edit precedes kept thinking (zero-spend stubs, spikes/m2/carried/). If a later CLI
+    client-side edit precedes kept thinking (zero-spend stubs; measured by builder-2, reported by
+    manager-1, pending review; evidence to land in the A2 PR under `spikes/m2/carried/`). If a later CLI
     version starts emptying them, re-run that check before relying on kept thinking after one.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
@@ -131,7 +134,8 @@ online running max of per-turn growth plus 25%, floor 25,000; `window_target` 50
 Constraint: `bound` plus the largest expected over-bound turn must stay below both Claude Code's
 idle-compaction minimum (200,000 by default, `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`) and the model's
 compaction trigger, or the CLI may compact; the launcher refuses a `bound` above 170,000 unless
-`--allow-large-bound` is given.
+`--allow-large-bound` is given. That this keeps idle compaction away assumes it counts the bounded reported
+usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 
 ## Store (normative)
 
