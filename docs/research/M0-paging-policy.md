@@ -132,6 +132,10 @@ OMITTED: decision=0 fact=2        <- only when something was left out
 - **Sizing rules.**
   - `H` must be at least the workload's p99 turn growth, after ingest paging if it is used (section
     4).
+  - A live proxy cannot know that figure in advance; it is an oracle. So `H` is set from an online
+    estimate: the running maximum of observed turn growth, plus 25%, as PR #8 does. In PR #8's
+    model, that rule left requests over the bound in 4 of 20 seeds at 100k without ingest paging,
+    and in 0 of 20 with it [measured in PR #8's model, reported by reviewer-1].
   - `window_high` must be at least pinned block + page index + the retained window + `H`.
   - The bound itself should come from L2d's measured quality-versus-size curve, well below any size
     where quality slips. PR #8 states the real `H` from builder-3's workload profile and tool-heavy
@@ -144,7 +148,7 @@ OMITTED: decision=0 fact=2        <- only when something was left out
     restarts near 12k against a 24k bound. That holds for this synthetic profile and seed only. An
     earlier version of this section said `H` covers every turn, which was wrong.
 - **Real turns are much larger.**
-  - Codex adds about 3k tokens per small tool turn [measured, lane 1, PR #9].
+  - Codex adds about 3k tokens per small tool turn [measured, lane 1, PR #10].
   - The L2d probe's file reads are 16k to 18k tokens each [inferred estimate].
   - Reviewer-1 found 11 requests over the bound at 12 tool calls per turn in PR #8's model [reported
     by reviewer-1].
@@ -423,7 +427,7 @@ What the probe shows:
 - **Only the two 400s are route-independent evidence** of the prefix check: changed `system`, and
   text added to an earlier user turn. The 200s for append-only, strip-all and the epoch rewrite
   show those requests are accepted, nothing more.
-- **Earlier thinking never reached the model on this route.** Thinking replayed through the rig
+- **Earlier thinking likely did not reach the model on this route.** Thinking replayed through the rig
   proxy was likely not seen in any of our requests.
 - **Preserved versus stripped thinking stays inconclusive until a route with stable identity
   exists.** That covers the L2e comparison (quality-vs-context doc) and strategy A's measured
