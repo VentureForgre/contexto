@@ -99,8 +99,8 @@ The Codex fit is close. Per request, the model is never below the measured read:
   read (9,088).
 
 On Claude the model is above the measured read by 499,088 tokens. By reviewer-1's breakdown, 17
-requests carry 497,405 of that gap, and in 9 of them the model reads an older request's whole prompt.
-This fits A13's finding that the owner's route spreads requests over at least 3 upstream cache
+requests carry 497,405 of that gap. In 9 of them the run's measured read equals the whole prompt of
+an older request (2 to 5 back) rather than the newest, while the model reads the newest. This fits A13's finding that the owner's route spreads requests over at least 3 upstream cache
 identities, but the link is inferred, not measured. The model assumes one cache, so candidates are
 compared with each other within the model, not with the measured run.
 
