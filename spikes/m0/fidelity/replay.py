@@ -118,7 +118,8 @@ class Runner:
         self.records: list[dict[str, Any]] = []
 
     def call(self, label: str, turn_id: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        projected = self.spent + int(self.margin * self.estimates.get(turn_id, 0)) + MAX_TOKENS // 4
+        # Reserve the full output allowance: a fork can think until max_tokens (L2f pilot 2 did).
+        projected = self.spent + int(self.margin * self.estimates.get(turn_id, 0)) + MAX_TOKENS
         if projected > self.cap:
             raise CapExceeded(f"{label}: projected {projected} would pass the cap {self.cap}")
         body = {
