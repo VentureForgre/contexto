@@ -529,7 +529,12 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     the content-free log that acceptance 3 reads (contract PR #95).
     """
     rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
-    shown, total = match_lines(render_page(page), query) if page.get("messages") is not None else ([], 0)
+    text = render_page(page) if page.get("messages") is not None else ""
+    shown, total = [], 0
+    for form in _rendered_forms(query):  # the query as typed, then as a tool input renders it
+        shown, total = match_lines(text, form)
+        if shown:
+            break
     rows += [(f"{'>' if is_match else ' '} {start}: {text}", (page_id, start, end)) for start, end, is_match, text in shown]
     if not shown:  # the match is in the stub only: show the stub line as the matching line
         rows.append((f"> stub: {_stub_line(page.get('stub'))}", None))
@@ -540,10 +545,20 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     return rows
 
 
+def _rendered_forms(query: str) -> list[str]:
+    """The query as typed, then JSON-escaped as render_page prints tool_use input (B18).
+
+    Search matches raw text, but a tool input renders as escaped JSON, so a query holding a quote,
+    a backslash, or a newline from a tool input appears in the page only in its escaped form.
+    """
+    escaped = json.dumps(query, ensure_ascii=False)[1:-1]
+    return [query] if escaped == query else [query, escaped]
+
+
 def _more_row(page_id: str, page: dict[str, Any], query: str) -> Row:
     """A further matching page, compactly: page id, turn, and where its first matching line starts."""
     text = render_page(page) if page.get("messages") is not None else ""
-    pos = text.find(query)
+    pos = next((p for p in (text.find(form) for form in _rendered_forms(query)) if p >= 0), -1)
     where = "stub" if pos < 0 else str(text.rfind("\n", 0, pos) + 1)
     return (f"{page_id} (turn {page.get('turn')}) @{where}", None)
 

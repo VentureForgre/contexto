@@ -331,17 +331,40 @@ def test_three_pages_in_detail_then_the_rest_compactly_with_their_offsets(store)
 
 
 def test_a_stub_only_match_shows_the_stub_line_and_lists_as_stub():
-    """A tool input value is searched raw but rendered JSON-escaped, so a Windows path matches only the stub."""
+    """An empty system message pages with a placeholder stub that the rendered page never shows."""
+    from contexto.store.pages import EMPTY_SYSTEM_STUB
+
     store = MemoryStore("s1")
-    path = "C:\\work\\app.toml"
-    turns = [[{"role": "user", "content": f"check config {i}"},
-              {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "read_file",
-                                                  "input": {"path": path}}]}] for i in range(5)]
-    store.page_out(turns, 1)
-    newest = store.search(path)
-    assert len(newest) == 5 and path not in render_page(store.get_page(newest[0]))
-    reply = search(store, path)
-    assert f"{newest[0]} (turn 5)\n> stub: check config 4 | tools: read_file | paths: {path}" in reply
+    newest = store.page_out([[{"role": "system", "content": ""}] for _ in range(5)], 1)[::-1]
+    assert store.search(EMPTY_SYSTEM_STUB) == newest
+    assert EMPTY_SYSTEM_STUB not in render_page(store.get_page(newest[0]))
+    reply = search(store, EMPTY_SYSTEM_STUB)
+    assert f"{newest[0]} (turn 5)\n> stub: " in reply  # the stub line is the matching line
     head, compact = reply.split("\n[more matching pages, newest first; recall one at its offset:]\n")
     assert compact.split("\n") == [f"{pid} (turn {store.get_page(pid)['turn']}) @stub" for pid in newest[3:]]
     assert events(store, "contexto_search")[-1]["returned"] == []  # no page text was returned
+
+
+# B18: a tool input renders as escaped JSON, so a query from it is matched in its escaped form
+
+
+@pytest.mark.parametrize("value", ['say "hi" twice', "first line\nsecond line", "C:\\work\\app.toml"])
+def test_a_query_from_a_tool_input_finds_its_rendered_line_and_offset(store, value):
+    turns = [[{"role": "user", "content": f"turn {i}"},
+              {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "run",
+                                                  "input": {"note": value}}]}] for i in range(5)]
+    store.page_out(turns, 1)
+    newest = store.search(value)
+    page = render_page(store.get_page(newest[0]))
+    escaped = json.dumps(value)[1:-1]
+    assert value not in page and escaped in page  # rendered only in escaped form
+    reply = search(store, value)
+    assert "> stub:" not in reply and "@stub" not in reply  # never labelled a stub match
+    [match] = [line for line in reply.split("\npg_", 1)[0].split("\n") if line.startswith("> ")]  # newest page
+    offset = int(re.match(r"> (\d+): ", match).group(1))
+    assert page[offset:].startswith('tool_use run {"note": "') and escaped in match
+    assert recall(store, newest[0], offset).startswith("tool_use run")  # recallable at that offset
+    compact = reply.split("recall one at its offset:]\n")[1].split("\n")
+    for entry, pid in zip(compact, newest[3:]):
+        other = render_page(store.get_page(pid))
+        assert entry == f"{pid} (turn {store.get_page(pid)['turn']}) @{other.index('tool_use run')}"
