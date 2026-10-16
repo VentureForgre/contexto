@@ -745,10 +745,10 @@ def test_real_usage_over_the_bound_is_flagged_even_when_the_estimate_was_low():
     assert estimate < 100_000 and not ev[-1].get("over_bound")  # the pre-send estimate was under the bound
     out = engine.observe_usage(MESSAGES, {"input_tokens": 1_000, "cache_read_input_tokens": 100_500,
                                           "cache_creation_input_tokens": 0, "output_tokens": 9}, req)
-    over = [e for e in out if e["event"] == "over_bound_actual"]
-    assert over and over[0]["over_bound"] is True and over[0]["real"] is True
+    over = [e for e in out if e["event"] == "over_bound"]
+    assert over and over[0]["over_bound"] is True and over[0]["source"] == "real"
     assert over[0]["real_tokens"] == 101_500 and over[0]["estimate"] == estimate
-    assert [e["event"] for e in store.events if e["event"] == "over_bound_actual"] == ["over_bound_actual"]
+    assert [e.get("source") for e in store.events if e["event"] == "over_bound"] == ["real"]
 
 
 def test_estimate_error_is_reported_when_real_exceeds_the_estimate_by_more_than_ten_percent():
@@ -764,7 +764,7 @@ def test_estimate_error_is_reported_when_real_exceeds_the_estimate_by_more_than_
     low = engine.observe_usage(MESSAGES, {"input_tokens": int(ev2[-1]["estimate"] * 1.5) + 10}, req2)
     err = [e for e in low if e["event"] == "estimate_error"]
     assert err and err[0]["ratio"] < 0.91 and 0 < err[0]["mean_ratio"] <= 1.0
-    assert not any(e["event"] == "over_bound_actual" for e in low)
+    assert not any(e["event"] == "over_bound" for e in low)
 
 
 def test_count_tokens_usage_raises_nothing():
@@ -773,4 +773,4 @@ def test_count_tokens_usage_raises_nothing():
     req = request([user("p0")])
     engine(req, {}, MESSAGES)
     assert engine.observe_usage(COUNT_TOKENS, {"input_tokens": 999_999}, req) == []
-    assert not any(e["event"] in ("over_bound_actual", "estimate_error") for e in store.events)
+    assert not any(e["event"] in ("over_bound", "estimate_error") for e in store.events)

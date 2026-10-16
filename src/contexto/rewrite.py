@@ -614,10 +614,11 @@ class RewriteEngine:
     def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
         """Feed a response's real usage back (``/v1/messages`` only; never ``count_tokens``). Returns the
         content-free events it raised, which are also written to the session log through
-        ``store.log`` when the store has one (packet A2b, intake's wording):
+        ``store.log`` when the store has one (packet A2b; contract rule 3 as amended by PR #44):
 
-        - ``over_bound_actual``: the real upstream input (input + cache read + cache write) exceeded the
-          bound, whatever the pre-send estimate said, so acceptance 1 can rely on the session log;
+        - ``over_bound`` with ``source: "real"``: the real upstream input (input + cache read + cache
+          write) exceeded the bound, whatever the pre-send estimate said, so acceptance 1 can rely on
+          the session log (the pre-send flag stays on the request event);
         - ``estimate_error``: the real input exceeded the pre-send estimate by more than 10%, with the
           running mean of estimate / real for the conversation.
         """
@@ -640,7 +641,7 @@ class RewriteEngine:
             state = replace(state, estimate_ratio_sum=state.estimate_ratio_sum + estimate / real,
                             estimate_ratio_count=state.estimate_ratio_count + 1)
         if real > self.config.bound:
-            events.append({"event": "over_bound_actual", "epoch": state.epoch, "over_bound": True, "real": True,
+            events.append({"event": "over_bound", "source": "real", "epoch": state.epoch, "over_bound": True,
                            "real_tokens": real, "estimate": estimate, "bound": self.config.bound})
         if estimate is not None and real > estimate * 1.1:
             events.append({"event": "estimate_error", "epoch": state.epoch, "real_tokens": real, "estimate": estimate,
