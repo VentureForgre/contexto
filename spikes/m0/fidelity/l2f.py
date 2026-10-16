@@ -45,12 +45,14 @@ DEFAULT_SEED = 20261018
 PILOT_CAP = 60_000
 TYPES = ("multihop", "chain", "obligations", "distractor", "reasoning")
 
-_SERVICES = (
+_SERVICE_ROOTS = (
     "billing", "search", "gateway", "ingest", "notifier", "scheduler", "ledger", "identity", "cache",
     "exporter", "importer", "metrics", "payroll", "catalog", "checkout", "inventory", "mailer", "router",
     "archive", "backup", "reporting", "pricing", "quota", "webhook", "auditor", "planner", "tracker",
     "uploader", "resolver", "relay",
 )
+# Two variants per root give 60 distinct, non-overlapping service names (no name is a prefix of another).
+_SERVICES = tuple(f"{root}-{suffix}" for root in _SERVICE_ROOTS for suffix in ("core", "edge"))
 _TEAMS = tuple(f"team-{w}" for w in ("orca", "lynx", "heron", "bison", "otter", "raven", "moose", "egret",
                                       "viper", "koala", "panda", "gecko", "yak", "ibis", "newt", "wren"))
 _REGIONS = tuple(f"{a}-{b}{n}" for a in ("north", "south", "east", "west") for b in ("ra", "lo") for n in (1, 2))
@@ -174,7 +176,7 @@ def build(seed: int = DEFAULT_SEED, groups: Sequence[str] = ("a", "b"), filler_l
             where = {0: [0], 1: [0, 1], 2: [0, 1, 2], 3: [0, 2]}[pattern]
             texts = {
                 "open": f"Action item {oid}: {rng.choice(('rotate', 'audit', 'migrate', 'document'))} the "
-                        f"{rng.choice(_SERVICES)} {rng.choice(('keys', 'jobs', 'configs', 'alerts'))}.",
+                        f"{rng.choice(('key', 'job', 'config', 'alert'))} backlog.",
                 "close": f"Action item {oid} is done.",
                 "reopen": f"Action item {oid} is reopened; it is not done after all.",
             }
