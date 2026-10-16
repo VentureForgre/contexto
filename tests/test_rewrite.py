@@ -31,6 +31,7 @@ from contexto.store.ledger import LedgerCorruptError, LedgerError
 from contexto.store.memory import MemoryStore
 from contexto.tokens import TokenEstimator
 
+MODEL = "claude-haiku-5-5"  # the model request() names
 FILL = "synthetic filler text " * 90  # about 2,000 bytes, about 570 tokens at 3.5 bytes per token
 CONFIG = Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=200)
 
@@ -881,13 +882,13 @@ class FaultyStore:
         self.calls: list[str] = []
         self.windows: list[tuple[int, float]] = []
 
-    def _call(self, name, *args):
+    def _call(self, name, *args, **kwargs):
         self.calls.append(name)
         if name in self.fail:
             raise self.fail[name]
         if self.fail_at and self.fail_at[:2] == (name, self.calls.count(name)):
             raise self.fail_at[2]
-        return getattr(self.inner, name)(*args)
+        return getattr(self.inner, name)(*args, **kwargs)
 
     def page_out(self, turns, first_turn):
         return self._call("page_out", turns, first_turn)
@@ -907,9 +908,12 @@ class FaultyStore:
     def window(self):
         return self._call("window")
 
-    def set_window(self, window_tokens, bytes_per_token):
-        self._call("set_window", window_tokens, bytes_per_token)
-        self.windows.append((window_tokens, bytes_per_token))
+    def window_model(self):
+        return self._call("window_model")
+
+    def set_window(self, window_tokens, bytes_per_token, *, model):  # strict: every call names the model (A2f)
+        self._call("set_window", window_tokens, bytes_per_token, model=model)
+        self.windows.append((window_tokens, bytes_per_token, model))
 
     def set_turn_room(self, turn_id, room_tokens):  # lane B B11; published by the engine (packet A9)
         return self._call("set_turn_room", turn_id, room_tokens)
@@ -1117,14 +1121,15 @@ def test_set_window_publishes_w_and_the_measured_ratio_only_when_they_change():
     state = next(iter(engine.states.values()))
     sent = state.last_sent_bytes
     engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, req)
-    assert store.windows == [(state.window_budget, engine.estimator.measured_bytes_per_token)]
+    assert store.windows == [(state.window_budget, engine.estimator.measured_bytes_per_token, MODEL)]
     engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, req)  # ratio unchanged
     assert len(store.windows) == 1
     engine(req, {}, COUNT_TOKENS)  # never from count_tokens
     assert len(store.windows) == 1
     engine.observe_usage(MESSAGES, {"input_tokens": sent // 2}, req)  # ratio moves well over 1%
     assert len(store.windows) == 2 and store.windows[-1][1] == engine.estimator.measured_bytes_per_token
-    assert store.inner.window() == store.windows[-1]  # the real MemoryStore accepted both
+    assert store.inner.window() == store.windows[-1][:2]  # the real MemoryStore accepted both
+    assert store.inner.window_model() == MODEL  # and kept the model (a call without it would clear it)
 
 
 def test_set_window_is_skipped_for_a_non_positive_w_and_failing_enters_degraded_mode():
@@ -1263,13 +1268,14 @@ def test_a_second_engine_on_the_same_session_sizes_like_the_first():
     ratio = first.estimator.measured_bytes_per_token
     assert store.window()[1] == ratio and store.window()[0] > 0  # published after the first response
     second = RewriteEngine(store, config=cfg)
-    assert second.restored == {"event": "sizing_restored", "bytes_per_token": round(ratio, 4),
-                               "weight_tokens": 10_000}
-    assert second.estimator.measured_bytes_per_token == pytest.approx(ratio, rel=1e-3)
-    assert [e for e in store.events if e["event"] == "sizing_restored"]
+    assert second.restored is None  # A2f: the restore waits for the first request, which names the model
     # The restarted engine's first estimate of the same request matches the measured one.
     _, _, events = second(req, {}, MESSAGES)
+    assert second.restored == events[0] == {"event": "sizing_restored", "bytes_per_token": round(ratio, 4),
+                                            "weight_tokens": 10_000}
+    assert second.estimator.measured_bytes_per_token == pytest.approx(ratio, rel=1e-3)
     assert events[-1]["estimate"] == pytest.approx(sent // 2, rel=0.05)
+    assert not store.events  # the event travels with the request's events, logged once by the proxy
     seeded = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)  # what a restart did before A8
     _, _, events = seeded(req, {}, MESSAGES)
     assert events[-1]["estimate"] < 0.75 * (sent // 2)
@@ -1279,6 +1285,7 @@ def test_ratio_restore_is_skipped_when_the_store_cannot_be_read():
     store = FaultyStore()
     store.fail["window"] = OSError("synthetic")
     engine = RewriteEngine(store, config=CONFIG)
+    engine(request([user("p0")]), {}, MESSAGES)
     assert engine.restored is None and engine.estimator.measured_bytes_per_token is None
 
 
@@ -1313,10 +1320,50 @@ def test_page_conflict_id_comes_from_the_structured_attribute_only():
 def test_a_restored_ratio_outside_the_sane_range_is_ignored(ratio):
     """A2e (reviewer-2 on PR #72): a ratio outside 1.0 to 6.0 bytes per token keeps the seed and logs why."""
     store = MemoryStore(key=b"k" * 32)
-    store.set_window(10_000, ratio)
+    store.set_window(10_000, ratio, model=MODEL)
     engine = RewriteEngine(store, config=CONFIG)
+    _, _, events = engine(request([user("p0")]), {}, MESSAGES)
     assert engine.restored is None and engine.estimator.measured_bytes_per_token is None
-    assert [e["reason"] for e in store.events if e["event"] == "sizing_not_restored"] == ["ratio_out_of_range"]
+    assert [e["reason"] for e in events if e["event"] == "sizing_not_restored"] == ["ratio_out_of_range"]
     store = MemoryStore(key=b"k" * 32)
-    store.set_window(10_000, 4.2)
-    assert RewriteEngine(store, config=CONFIG).restored["bytes_per_token"] == 4.2
+    store.set_window(10_000, 4.2, model=MODEL)
+    engine = RewriteEngine(store, config=CONFIG)
+    engine(request([user("p0")]), {}, MESSAGES)
+    assert engine.restored["bytes_per_token"] == 4.2
+
+
+def test_every_set_window_call_path_passes_the_request_model():
+    """A2f (reviewer-1 on PR #82): a set_window call without a model clears the recorded one, so both call
+    paths, observe_usage and the rotation decision, pass the request's model. FaultyStore.set_window takes
+    model as a required keyword, so a path that omitted it would raise here."""
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    small = request(history(2) + [user("new")])
+    engine(small, {}, MESSAGES)
+    sent = next(iter(engine.states.values())).last_sent_bytes
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, small)  # path 1: first response
+    _, _, events = engine(request(history(6) + [user("new prompt")]), {}, MESSAGES)  # path 2: rotation
+    assert "rotation" in names(events) and len(store.windows) == 2
+    assert [w[2] for w in store.windows] == [MODEL, MODEL] and store.inner.window_model() == MODEL
+    other = request(history(6) + [user("new prompt")], model="claude-opus-5-5")
+    engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, other)  # same W and ratio, new model
+    assert store.windows[-1][2] == "claude-opus-5-5"  # republished because the model changed
+
+
+@pytest.mark.parametrize("recorded,requested,restored", [
+    ("claude-haiku-5-5", "claude-haiku-5-5", True),
+    ("claude-opus-5-5", "claude-haiku-5-5", False),
+    (None, "claude-haiku-5-5", True),  # a record from before lane B B12: clamp only, as before
+])
+def test_restore_compares_the_recorded_model_with_the_first_request(recorded, requested, restored):
+    store = MemoryStore(key=b"k" * 32)
+    store.set_window(10_000, 3.0, model=recorded)
+    engine = RewriteEngine(store, config=CONFIG)
+    _, _, events = engine(request([user("p0")], model=requested), {}, MESSAGES)
+    if restored:
+        assert events[0]["event"] == "sizing_restored" and engine.estimator.measured_bytes_per_token == 3.0
+    else:
+        assert events[0] == {"event": "sizing_not_restored", "reason": "model_changed", "bytes_per_token": 3.0}
+        assert engine.restored is None and engine.estimator.measured_bytes_per_token is None
+    _, _, again = engine(request([user("p0")], model=requested), {}, MESSAGES)
+    assert not any(e["event"].startswith("sizing_") for e in again)  # decided once, at the first request
