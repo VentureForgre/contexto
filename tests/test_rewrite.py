@@ -1587,12 +1587,35 @@ def test_snapshot_and_both_room_publishes_share_the_request_sequence_in_the_real
     engine = RewriteEngine(store, config=Config(bound=1_000_000))
     req = request(history(2) + [tool_use(1), tool_result(1, "chain link 5"), user("new")])
     engine(req, {}, MESSAGES)
-    epoch, k, stamp, entries = store.retained()
+    epoch, k, stamp, entries = store.retained_current()  # what search reads: the current request's pair
     assert stamp == store.room_stamp() and (epoch, k) == (0, 0)
     assert entries == retained_entries(req["messages"], 0, ANTHROPIC) and entries[-1]["text"] == "new"
     engine.observe_usage(MESSAGES, {"input_tokens": 700, "output_tokens": 5}, req)
-    assert store.room_stamp() == stamp  # the real-usage publish keeps the request's stamp
+    assert store.retained_current()[2] == stamp  # the real-usage publish keeps the request's stamp
     engine(request(history(3) + [user("newer")]), {}, MESSAGES)
-    assert store.retained()[2] == store.room_stamp() == stamp + 1
+    assert store.retained_current()[2] == store.room_stamp() == stamp + 1
     if kind == "session":
         assert oct((tmp_path / "sessions" / "a14" / "retained.json").stat().st_mode & 0o777) == "0o600"
+
+
+
+def test_a_failed_snapshot_write_leaves_no_current_snapshot_in_the_real_store(tmp_path, monkeypatch):
+    """With lane B's PR #128: the snapshot write fails after the sequence moved on; the engine logs one
+    retained_stale, stays out of degraded mode, still publishes the room, and search finds no current
+    snapshot ('in view not checked'), never the previous request's."""
+    store = SessionStore(tmp_path, "a14-stale")
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    engine(request(history(2) + [user("new")]), {}, MESSAGES)
+    assert store.retained_current() is not None
+    real_write = store._write_atomic
+
+    def failing(path, data):
+        if path.name == "retained.json":
+            raise OSError("synthetic disk full")
+        return real_write(path, data)
+
+    monkeypatch.setattr(store, "_write_atomic", failing)
+    _, _, events = engine(request(history(3) + [user("newer")]), {}, MESSAGES)
+    assert [e["event"] for e in events if e["event"] in ("retained_stale", "store_error")] == ["retained_stale"]
+    assert not next(iter(engine.states.values())).degraded
+    assert store.turn_room()[0] == "4" and store.retained_current() is None
