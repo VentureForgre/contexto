@@ -35,7 +35,8 @@ def call(store, name, arguments=None):
 def text_of(result):
     """The reply text, without search's uncharged coverage note (B19 a)."""
     assert result["isError"] is False and "structuredContent" not in result
-    return "".join(block["text"] for block in result["content"] if block["text"] != mcp.SEARCH_COVERAGE)
+    notes = (mcp.SEARCH_COVERAGE, mcp.SEARCH_COVERAGE_UNCHECKED)
+    return "".join(block["text"] for block in result["content"] if block["text"] not in notes)
 
 
 def page(store, chars=6_000, turn=1):
