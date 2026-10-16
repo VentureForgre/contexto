@@ -323,3 +323,12 @@ def test_credcheck_reports_a_broken_seat_settings_file_cleanly(tmp_path, content
         seat.write_text(content)
     result = credcheck.check(seat)
     assert result["ran"] is False and "pass" not in result and result["reason"]
+
+
+def test_requests_without_usage_are_unverified_and_fail_acceptance_1():
+    log = [_req(1, 50_000), {"event": "request", "path": "/v1/messages", "status": 200, "usage": None, "epoch": 1},
+           {"event": "request", "path": "/v1/messages", "status": 200, "epoch": 1}]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert r.unverified_requests == [2, 3]
+    assert r.verdicts()["every_request_has_usage"] is False
+    assert detectors.analyze([_req(1, 50_000)], [], bound=150_000).verdicts()["every_request_has_usage"] is True

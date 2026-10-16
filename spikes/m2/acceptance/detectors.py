@@ -60,6 +60,9 @@ class Report:
     # the estimate ran low for that request: it fails acceptance 1 and points at the estimator.
     unlogged_over_bound: list[int] = field(default_factory=list)
     max_input: int = 0
+    # /v1/messages requests with no usage (null or missing): their size cannot be checked against
+    # the bound, so they must not count as passing acceptance 1.
+    unverified_requests: list[int] = field(default_factory=list)
     rotations: int = 0
     epochs: int = 0
     requests_per_epoch: dict[str, int] = field(default_factory=dict)
@@ -81,6 +84,7 @@ class Report:
         return {
             "zero_compaction": self.compaction_events == 0 and self.stream_compactions == 0,
             "over_bound_only_when_logged": not self.unlogged_over_bound,
+            "every_request_has_usage": not self.unverified_requests,
             "zero_4xx": self.upstream_4xx == 0 and not any(400 <= s < 500 for s in self.statuses),
             "recall_called": self.recall_ok > 0,
         }
@@ -130,7 +134,9 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
         epoch = ev.get("epoch")
         r.requests_per_epoch[str(epoch)] = r.requests_per_epoch.get(str(epoch), 0) + 1
         inp = _upstream_input(ev.get("usage"))
-        if inp is not None:
+        if inp is None:
+            r.unverified_requests.append(index)
+        else:
             r.max_input = max(r.max_input, inp)
             if inp > bound:
                 r.over_bound_requests += 1

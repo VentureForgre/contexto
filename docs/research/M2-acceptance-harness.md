@@ -55,12 +55,12 @@ type that failed at small contexts.
 throughout:
 
 ```
-contexto run --bound 100000 --session <id> claude -p --input-format stream-json \
+contexto run --bound 150000 --session <id> --upstream <url> claude -p --input-format stream-json \
     --output-format stream-json --verbose --model claude-haiku-5-5
 ```
 
-- This is the launcher shape builder-1 proposed for lane A packet A3. Contexto's options come
-  before `claude`, and everything after it passes through unchanged. It is confirmed when A3 lands.
+- This is lane A's launcher (PR #40). Contexto's options come before `claude`, and everything
+  after it passes through unchanged.
 - Each user turn is one stream-json line on stdin. A turn ends at the `result` event.
 - The scratch directory must not be inside any git work tree, checked with `git rev-parse
   --is-inside-work-tree`, so a nested directory is refused too.
@@ -109,6 +109,11 @@ measured this case, PR #9). So:
   cache_read_input_tokens + cache_creation_input_tokens`. Any request with input over the bound
   must carry `over_bound: true`. One that does not is reported in `unlogged_over_bound` and fails
   the check.
+- **Unverified requests (acceptance 1).** A `/v1/messages` request whose `usage` is null or
+  missing cannot be checked against the bound, so it must not hide an over-bound request. Their
+  indexes are reported in `unverified_requests`, and the `every_request_has_usage` verdict fails
+  unless the count is 0. The usage comes from the JSON body or, for streamed replies, the SSE
+  `message_start` and `message_delta` events.
 - **4xx.** `upstream_4xx` events, plus any 4xx status on a request record. Both must be zero.
 - **Epochs and cache (acceptance 4).**
   - The first request seen in each `epoch` starts that epoch.
@@ -140,6 +145,20 @@ the local part small.
   The two figures describe overlapping samples, not different behavior.
 - The misses are **likely** a route artifact, not something Contexto causes [inferred]. The
   harness reports the rate and the miss positions, so the analyst can set route misses apart.
+
+## Pre-usage estimates (decided 2026-10-16)
+
+The session's logs are pasted as user text, and the engine flags `over_bound` from its pre-send
+estimate until the first real usage arrives. Contract PR #44 counts `tool_result` content at 1.5
+bytes per token before that, but pasted user text still counts at the 3.5 text rate, while this
+content measures near 1.8. The first epoch's estimate can therefore run low.
+
+Manager-2 chose **option (a)**: keep the logs as pasted user text. The dry run reports the largest
+gap between the pre-usage estimate and the real token count, and the first epoch's margin to the
+bound. **The 10 percent rule:** if any pre-usage request reaches 135,000 tokens (within 10 percent
+of the 150,000 bound), the run switches to **option (b)**: the logs become files in the scratch
+directory that the model reads with the Read tool, so they arrive as `tool_result` content at the
+1.5 seed. The budget is then recomputed before asking for the go.
 
 ## Dry-run budget [inferred estimates]
 
@@ -235,22 +254,21 @@ planned over-bound requests.
 
 ## Tests
 
-`uv run --with pytest pytest spikes/m2` runs 19 tests on synthetic fixtures, with no live calls.
+`uv run --with pytest pytest spikes/m2` runs 35 tests with no live calls. Most use synthetic
+fixtures; `test_engine_log.py` drives the real proxy and rewrite engine against a stub upstream,
+once with JSON replies and once with SSE replies, since the acceptance session streams.
 They cover:
 - **Script:** determinism, mix, restatement, paged-only placement and sizes.
 - **Budget:** rule 4 retention, `bound_too_small`, the estimator, and the worst-case arithmetic.
-- **Detectors:** a clean session; compaction, unlogged over-bound, 4xx and cache misses all
-  flagged; a torn last line.
+- **Detectors:** a clean session; compaction, unlogged over-bound, requests without usage, 4xx
+  and cache misses all flagged; a torn last line.
 - **Driver:** turn sequencing, the guard stopping before the cap, the command shape, refusing a git
   scratch directory, and the environment.
 - **Run:** the pass rule, live refusal without budget, and the dry-run output.
 
 ## Open questions
 
-1. **Rotation names.** Builder-2's engine event names for rotation and resync, to replace the
-   "rotat" match.
-2. **Launcher flags.** The A3 flags (`--bound`, `--session`) are proposed, not landed.
-3. **Replay baseline.** It needs the CLI's request shape: either the JSONL's `api-request-shape`
+1. **Replay baseline.** It needs the CLI's request shape: either the JSONL's `api-request-shape`
    record, or an opt-in proxy dump of the last full request under the session directory.
-4. **Budget and bound.** Decided by intake: bound 150k, budget up to 4,000,000. Pending: the
+2. **Budget and bound.** Decided by intake: bound 150k, budget up to 4,000,000. Pending: the
    zero-spend dry run with lane A's real `contexto run` and the measured head.
