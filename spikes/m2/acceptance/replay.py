@@ -25,6 +25,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -115,10 +116,12 @@ def _known_messages(cc_records: list[dict[str, Any]]) -> dict[str, dict[str, Any
     return known
 
 
-def recorded_messages(cc_records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def recorded_messages(cc_records: list[dict[str, Any]],
+                      stop: Callable[[list[dict[str, Any]]], bool] | None = None) -> dict[str, list[dict[str, Any]]]:
     """Each api-request's messages, decoded from Claude Code's delta records (``base`` request id,
-    ``keep`` messages kept from it, ``tail`` message hashes). Raises ReplayError on a hash it cannot
-    resolve: no guessing."""
+    ``keep`` messages kept from it, ``tail`` message hashes), in order. With ``stop``, decoding ends
+    after the first request whose messages satisfy it, so later records are never read. Raises
+    ReplayError on a hash it cannot resolve in a request it decodes: no guessing."""
     known = _known_messages(cc_records)
     out: dict[str, list[dict[str, Any]]] = {}
     for r in cc_records:
@@ -133,6 +136,8 @@ def recorded_messages(cc_records: list[dict[str, Any]]) -> dict[str, list[dict[s
                 raise ReplayError("a request record names a message the JSONL does not hold")
             messages.append(known[h])
         out[r["id"]] = messages
+        if stop is not None and stop(messages):
+            break
     return out
 
 
@@ -152,7 +157,10 @@ def build_request(cc_records: list[dict[str, Any]], probe_text: str, max_tokens:
     requests = [r for r in cc_records if r.get("type") == "api-request" and isinstance(r.get("params"), dict)]
     if not shapes or not requests:
         raise ReplayError("the session JSONL has no api-request-shape or api-request record")
-    decoded = recorded_messages(cc_records)
+    # Only up to the probe turn's first request: the probe turn's own tool loop after it is not part
+    # of the baseline, and its assistant tool calls may not resolve (live H1 rerun, 2026-10-16).
+    decoded = recorded_messages(cc_records, stop=lambda msgs: any(
+        m.get("role") == "user" and _has_text(m, probe_text) for m in msgs))
     probe = next((r for r in requests if any(m.get("role") == "user" and _has_text(m, probe_text)
                                               for m in decoded.get(r["id"], []))), None)
     if probe is None:
@@ -179,6 +187,15 @@ def build_request(cc_records: list[dict[str, Any]], probe_text: str, max_tokens:
     for key in ("thinking", "output_config"):
         if key in p:
             request[key] = p[key]
+    # Claude Code may record thinking.display "updates" (a display beta). count_tokens accepts only
+    # "summarized" or "omitted"; the display setting affects only what the response returns, so the
+    # baseline uses "omitted" (intake, 2026-10-16 04:56Z) and labels the change.
+    changes = {}
+    thinking = request.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("display") not in (None, "summarized", "omitted"):
+        changes["thinking.display"] = [thinking["display"], "omitted"]
+        request["thinking"] = {**thinking, "display": "omitted"}
+    request["_changes"] = changes
     request["_betas"] = harness_betas(p.get("betas"))
     return request
 

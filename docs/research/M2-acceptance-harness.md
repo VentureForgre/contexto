@@ -488,6 +488,20 @@ It goes straight to the owner's proxy, bypassing Contexto.
 (`acceptance-20261016T024733Z`) it decodes all 56 messages of the probe-turn request (18 turns, each
 with its reminder, then the probe turn and its reminder), with 21 tools and about 814 KB.
 
+**Replay of the live H1 rerun (2026-10-16, main `7da8f78`).**
+- **JSONL-copy workaround (disclosed, accepted).** At that SHA the replay decoded every request record
+  first, and the probe turn's own tool-loop requests (21 and 22) named assistant messages the JSONL
+  did not hold, so it refused. The probe-turn request (20) decoded completely. The baseline ran from a
+  private copy of the JSONL without records 21 and 22, which builds the same probe-turn request. The
+  replay now stops decoding at the first request that holds the probe turn, so the original JSONL
+  builds it directly (verified: same 56 messages, 814,024 bytes).
+- **One field changed (intake 04:56Z).** Claude Code recorded `thinking.display: "updates"`, which
+  `count_tokens` rejects (`summarized` or `omitted` only). The baseline used `omitted`; display
+  controls only what the response returns, not the input or the reasoning. The replay now makes this
+  change itself and reports it in `changes_from_recorded`.
+- **Result.** count_tokens 437,447 input; spend 447,659; the baseline scored 44 of 54. The beta set
+  is the 10 listed above, labeled a no-replayed-thinking baseline.
+
 ## Open questions
 
 1. **Tokenizer.** The 1.8 bytes per token rate comes from M0's measurements. The replay's
