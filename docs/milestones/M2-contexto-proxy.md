@@ -152,9 +152,15 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
 7. **Usage.** Return the upstream `usage` unchanged. The CLI therefore sees the bounded prompt's
    real size.
 8. **Errors.** Forward upstream errors unchanged. Never retry by silently changing the request.
-   Log every 4xx with the epoch state for diagnosis.
-9. **Streaming.** Relay SSE events as they arrive; the proxy only reads `message_start` and
-   `message_delta` usage. No hold-back is needed because recall is an MCP tool (D19).
+   Log every 4xx with the epoch state for diagnosis. One exception, measured in the second live H1
+   run (an 18.2 s OS-level timeout on a reused upstream connection, no upstream bytes received; the
+   CLI's identical retry succeeded in 2.4 s): if a request fails on a reused upstream connection
+   before any upstream response byte arrived and before anything was relayed to the client, the
+   proxy resends the same bytes once on a fresh connection and logs `upstream_retry` with the
+   original error. A fresh-connection failure, or any failure after bytes flowed, returns the
+   error as before.
+9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
+   per-turn recall budget; the proxy reads `message_start` and `message_delta` usage.
 10. **Matching history.** Recognise each retained message in later requests by a hash of its
     canonical JSON with every `cache_control` field removed (the CLI moves `cache_control` along
     the tail), and with content normalised so that a plain string and a single text block holding
@@ -329,8 +335,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 - `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
-- `contexto_search(query)`: exact substring search over page stubs and text, returning page ids.
-  No embeddings, no similarity ranking (owner: not RAG).
+- `contexto_search(query)`: exact substring search over page stubs and text. For each hit it returns
+  the page id, the matching lines with a small bounded context, and their character offsets in the
+  rendered page, so the model can answer from the hit or recall exactly that offset instead of
+  reading a page from the top (measured in the second live H1 run: a full recall from offset 0
+  reached character 30,651 of a 39,405-character page within the turn's room, and the two facts
+  beyond it were lost). Results are charged against the per-turn room. No embeddings, no
+  similarity ranking (owner: not RAG).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
