@@ -50,6 +50,14 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   restores at least ``min_turn_room``; when the size trigger fires too, the room target is used when it
   restores the room, so the next turn does not rotate again. A turn that still starts below
   ``min_turn_room`` logs ``turn_room_low`` once per epoch.
+- The retained-window snapshot (packet A14, contract PR #125): after each request's transform, at the
+  request-time room publish and before its ``set_turn_room``, the main conversation writes
+  ``set_retained(epoch, k, entries)``, one ``{turn, message_index, role, text}`` per searchable block of
+  ``M[k:]`` rendered by ``render_page`` (no thinking, images, context blocks, or carried system
+  messages), so lane B's search can list in-view lines first. The store stamps it with the request
+  sequence that both of the request's room publishes carry. A failed write logs ``retained_stale``
+  (not degraded mode). Only the main conversation publishes the room and the snapshot: the first one
+  seen, replaced at a turn start only by a conversation with strictly more turn starts.
 - Thinking (rule 2): retained messages that existed when the epoch was created lose their thinking and
   redacted-thinking blocks on every request; an assistant message left empty gets one text block
   ``[thinking omitted]``; other blocks keep their order.
@@ -101,6 +109,7 @@ from typing import Any, Protocol
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError
 from contexto.store.ledger import LedgerError
+from contexto.store.render import render_page
 from contexto.tokens import TokenEstimator
 
 MESSAGES = "/v1/messages"
@@ -122,7 +131,9 @@ class Store(Protocol):
     def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None: ...
     def window(self) -> tuple[int | None, float | None]: ...
     def window_model(self) -> str | None: ...
+    def set_turn_room(self, turn_id: str, room_tokens: int) -> None: ...
     def quarantine_page(self, page_id: str) -> Any: ...
+    def set_retained(self, epoch: int, k: int, turns: list[dict]) -> None: ...  # lane B, contract PR #125
 
 
 @dataclass(frozen=True)
@@ -267,6 +278,16 @@ class Dialect:
 
     def is_system_like(self, item: dict) -> bool:
         return item.get("role") == "system"
+
+    def retained_blocks(self, item: dict) -> list[tuple[str, dict]]:
+        """A14: the item's searchable blocks as (role, Messages API block): text that is not an injected
+        context block, tool_use, and tool_result. Thinking and images are not searchable."""
+        role = item.get("role", "unknown")
+        content = item.get("content")
+        if isinstance(content, str):
+            return [(role, {"type": "text", "text": content})] if content else []
+        return [(role, b) for b in content or [] if isinstance(b, dict)
+                and b.get("type") in ("text", "tool_use", "tool_result") and not self.is_context_block(b)]
 
     def classify_system(self, items: list[dict], i: int) -> str:
         return _anthropic_classify_system(items, i)
@@ -1039,6 +1060,29 @@ def turn_id(messages: list[dict], dialect: Dialect) -> str:
     return str(sum(1 for m in messages if dialect.is_turn_start(m)))
 
 
+def retained_entries(messages: list[dict], k: int, dialect: Dialect) -> list[dict]:
+    """Packet A14 (contract PR #125): the retained window ``M[k:]`` as search entries, one per searchable
+    block, in history order: ``{turn, message_index, role, text}``. ``turn`` counts turn starts through
+    that message (the newest equals ``turn_id``); ``message_index`` is the position in the CLI's full
+    history; ``text`` is the block rendered by ``render_page``, the renderer recall uses, so a line
+    found in view reads like the same line in a page. Carried system messages and injected context
+    blocks are not turn text and are left out; thinking and images are never included. The entries
+    hold conversation text: they go to the store only, never to a log or an event."""
+    turn = sum(1 for m in messages[:k] if dialect.is_turn_start(m))
+    entries = []
+    for i in range(k, len(messages)):
+        item = messages[i]
+        if dialect.is_turn_start(item):
+            turn += 1
+        if dialect.is_system_like(item):
+            continue
+        for role, block in dialect.retained_blocks(item):
+            _, _, text = render_page({"turn": turn, "messages": [{"role": role, "content": [block]}]}).partition("\n")
+            if text:
+                entries.append({"turn": turn, "message_index": i, "role": role, "text": text})
+    return entries
+
+
 def keyed(dialect: Dialect, request: dict) -> str:
     token = _DIALECT.set(dialect)
     try:
@@ -1094,6 +1138,8 @@ class RewriteEngine:
         if self.estimator is None:
             self.estimator = TokenEstimator()
         self.restored: dict | None = None  # the sizing_restored event, once the first request restored it
+        self._turn_starts: dict[str, int] = {}  # A14: conversation key -> turn starts at its latest request
+        self._main: str | None = None  # A14: the conversation that publishes the room and the snapshot
         self._restore_pending = True  # A2f: the restore waits for the first request, which names the model
 
     def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
@@ -1121,10 +1167,15 @@ class RewriteEngine:
         # to 128,000, which would leave no room at all; the response-time publish adds the real output.
         state = self.states[key]
         if state.last_estimate is not None and not state.degraded:
-            failures: list[dict] = []
-            self.states[key] = self._publish_room(state, turn_id(request.get(dialect.field) or [], dialect),
-                                                  state.last_estimate, failures)
-            events[-1:-1] = failures  # the engine's request event stays last
+            messages = request.get(dialect.field) or []
+            if self.publishes(key, messages, dialect):
+                failures: list[dict] = []
+                # Contract PR #125: the snapshot first, so the store's request sequence stamps it and
+                # both of this request's room publishes alike.
+                self._publish_retained(state, messages, dialect, failures)
+                self.states[key] = self._publish_room(state, turn_id(messages, dialect), state.last_estimate,
+                                                      failures)
+                events[-1:-1] = failures  # the engine's request event stays last
         return upstream, headers, [restore, *events] if restore else events
 
     def turn_room(self, used_tokens: int) -> int:
@@ -1141,6 +1192,36 @@ class RewriteEngine:
         except STORE_FAILURES as error:
             return enter_degraded(state, store_failure(error, calls, state), events)
         return state
+
+    def publishes(self, key: str, messages: list[dict], dialect: Dialect) -> bool:
+        """Contract PR #125 (477151e): only the main conversation publishes the room and the retained
+        snapshot; the session store holds one of each and the MCP server cannot tell which conversation
+        called it. The first conversation seen is main. At each of a conversation's turn starts the
+        choice is re-evaluated: it becomes main only with strictly more turn starts than the current
+        main (a tie keeps the current one), so a subagent or side request, with about one turn start,
+        never takes over, and main never changes inside a tool loop."""
+        starts = [i for i, m in enumerate(messages) if dialect.is_turn_start(m)]
+        self._turn_starts[key] = len(starts)
+        if self._main is None:
+            self._main = key
+        at_start = bool(starts) and not any(dialect.is_assistant(m) for m in messages[starts[-1]:])
+        if at_start and key != self._main and len(starts) > self._turn_starts.get(self._main, 0):
+            self._main = key
+        return key == self._main
+
+    def _publish_retained(self, state: EpochState, messages: list[dict], dialect: Dialect,
+                          events: list[dict]) -> None:
+        """Contract PR #125: the retained window's snapshot, once per request after the transform, a full
+        overwrite each time. A failed write leaves the snapshot stale (search then says "in view not
+        checked"): it logs the content-free retained_stale, exactly once, and is not degraded mode.
+        Skipped while lane B's store lacks set_retained."""
+        set_retained = getattr(self.store, "set_retained", None)
+        if not callable(set_retained):
+            return
+        try:
+            set_retained(state.epoch, state.k, retained_entries(messages, state.k, dialect))
+        except STORE_FAILURES as error:
+            events.append({"event": "retained_stale", "epoch": state.epoch, "error": type(error).__name__})
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
         with recall_knobs(self.config):  # preamble() must see the same knobs as the request did
@@ -1201,8 +1282,9 @@ class RewriteEngine:
                 # calls this at message_delta, inside the stream hold (PR #74), so the room lands before
                 # any held tool_use reaches the CLI.
                 output = usage.get("output_tokens") or 0
-                calls.set_turn_room(turn_id(request.get(dialect.field) or [], dialect),
-                                    self.turn_room(real + output))
+                messages = request.get(dialect.field) or []
+                if self.publishes(key, messages, dialect):
+                    calls.set_turn_room(turn_id(messages, dialect), self.turn_room(real + output))
                 state = publish_window(calls, state, self.estimator, window_model_name(request))
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;

@@ -99,6 +99,32 @@ class ResponsesDialect(Dialect):
         parts = _parts(item)
         return item.get("role") == "user" and bool(parts) and all(is_context_part(p) for p in parts)
 
+    def retained_blocks(self, item: dict) -> list[tuple[str, dict]]:
+        """A14: Responses items as the Messages API blocks ``render_page`` renders, so an in-view line
+        reads like a paged one: message text parts (not context sections), calls as ``tool_use``, call
+        outputs as ``tool_result``. Reasoning, images, and other items are not searchable."""
+        kind = item.get("type", "message")
+        if kind == "message":
+            role = item.get("role", "unknown")
+            return [(role, {"type": "text", "text": p["text"]}) for p in _parts(item)
+                    if isinstance(p, dict) and p.get("type") in TEXT_PART_TYPES and isinstance(p.get("text"), str)
+                    and not is_context_part(p)]
+        if kind in ("function_call", "custom_tool_call"):
+            raw = item.get("arguments") if kind == "function_call" else item.get("input")
+            try:
+                args = json.loads(raw) if isinstance(raw, str) else raw
+            except ValueError:
+                args = raw  # not JSON: rendered as the string it is
+            return [("assistant", {"type": "tool_use", "name": item.get("name", ""),
+                                   "input": {} if args is None else args})]
+        if kind in ("function_call_output", "custom_tool_call_output"):
+            out = item.get("output")
+            content = out if isinstance(out, str) else [
+                {"type": "text", "text": p["text"]} for p in out or [] if isinstance(p, dict)
+                and p.get("type") in TEXT_PART_TYPES and isinstance(p.get("text"), str)]
+            return [("user", {"type": "tool_result", "content": content})]
+        return []
+
     def classify_system(self, items: list[dict], i: int) -> str:
         if i < self.lead_count(items):
             return SESSION_START
