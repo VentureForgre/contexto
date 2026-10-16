@@ -22,7 +22,9 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   message of a paged turn, both in the form the CLI sends now (rule 12: settings-only system messages
   with empty content are carried like any other). Settings-only system messages accrue per settings
   change (measured), so only the latest per settings key is carried; the carried set is computed from
-  the paged region, so it changes only at a rotation. Placement (rule 1, measured): carried context blocks
+  the paged region, so it changes only at a rotation. Rule 13 (PR #27): carried content is never
+  paged; when a rotation leaves it above ``carried_budget`` (4,000 tokens) a content-free
+  ``carried_over_budget`` event reports its estimate and system-message count. Placement (rule 1, measured): carried context blocks
   and then the preamble go ahead of the first retained turn-start message's own content; carried
   system messages go immediately after that message (a system message before it returns 400).
 - Rotation (rules 3 and 4) happens only when the newest turn has no assistant message yet and the
@@ -74,6 +76,7 @@ class Config:
     headroom_factor: float = 1.25
     pin_budget: int = 6_000
     index_budget: int = 4_000
+    carried_budget: int = 4_000  # rule 13: carried content above this is reported, never paged
 
     @property
     def target(self) -> int:
@@ -282,7 +285,7 @@ def choose_k(messages: list[dict], state: EpochState, config: Config, estimator:
 
 
 def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Store, config: Config,
-              k: int, strip_upto: int, events: list[dict], reason: str) -> EpochState:
+              estimator: TokenEstimator, k: int, strip_upto: int, events: list[dict], reason: str) -> EpochState:
     if k > state.k:
         turns = [page_turn(t) for t in split_turns(messages, state.k, k)]
         ids = store.page_out(turns, state.turns_paged)
@@ -296,6 +299,11 @@ def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Sto
                   strip_upto=strip_upto, turns_paged=turns_paged, head_changed=False, last_input_tokens=None)
     events.append({"event": "rotation", "epoch": new.epoch, "reason": reason, "k": k,
                    "retained_messages": len(messages) - k, "turns_paged": turns_paged})
+    blocks, systems = carried_content(messages, k)
+    carried = estimator.estimate_messages([{"role": "user", "content": blocks}, *systems]) if (blocks or systems) else 0
+    if carried > config.carried_budget:
+        events.append({"event": "carried_over_budget", "epoch": new.epoch, "carried_tokens": carried,
+                       "system_messages": len(systems), "budget": config.carried_budget})
     return new
 
 
@@ -332,7 +340,8 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
             events.append({"event": "resync", "epoch": state.epoch, "kind": "paged_changed",
                            "matched": match, "previous_messages": previous_n, "messages": n})
             fresh = replace(state, k=0, turns_paged=state.turns_paged)
-            state = new_epoch(messages, request, fresh, store, config, current, current, events, "paged_changed")
+            state = new_epoch(messages, request, fresh, store, config, estimator, current, current, events,
+                              "paged_changed")
         else:
             events.append({"event": "resync", "epoch": state.epoch, "kind": "window_changed",
                            "matched": match, "previous_messages": previous_n, "messages": n})
@@ -352,10 +361,10 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
             state = replace(state, max_turn_growth=max(state.max_turn_growth, growth))
         state = replace(state, last_turn_start_tokens=history)
         if state.head_changed:
-            state = new_epoch(messages, request, state, store, config,
+            state = new_epoch(messages, request, state, store, config, estimator,
                               choose_k(messages, state, config, estimator), n, events, "head_change")
         elif estimate > config.bound - headroom(state, config):
-            state = new_epoch(messages, request, state, store, config,
+            state = new_epoch(messages, request, state, store, config, estimator,
                               choose_k(messages, state, config, estimator), n, events, "bound")
     over = estimate > config.bound and not any(e["event"] == "rotation" for e in events)
 

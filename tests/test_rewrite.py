@@ -438,3 +438,21 @@ def test_carried_settings_only_messages_keep_latest_per_key():
     carried = [m for m in up["messages"] if m["role"] == "system"]
     assert carried == [msgs[1], msgs[10]]  # session-start system kept; only the latest effort (low)
     assert carried[1]["output_config"] == {"effort": "low"}
+
+
+def test_carried_over_budget_is_reported_not_paged():
+    # Rule 13: a large carried system message (for example an unmeasured tool-addition message).
+    big = system("synthetic carried tool list " * 800)
+    msgs = [user(f"prompt 0 {FILL}", context=True), big, assistant(f"a0 {FILL}")]
+    for t in range(1, 6):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    cfg = Config(bound=8_000, headroom_floor=500, window_target=1_500, carried_budget=1_000)
+    up, st, ev, store = run(msgs, config=cfg)
+    over = [e for e in ev if e["event"] == "carried_over_budget"]
+    assert st.k > 1 and over and over[0]["system_messages"] == 1 and over[0]["carried_tokens"] > 1_000
+    assert up["messages"][1] is big  # still carried, never paged
+    assert all(isinstance(v, (int, str)) and (not isinstance(v, str) or len(v) < 40) for v in over[0].values())
+    roomy = Config(bound=8_000, headroom_floor=500, window_target=1_500, carried_budget=100_000)
+    _, _, ev_roomy, _ = run(msgs, config=roomy)
+    assert "rotation" in names(ev_roomy) and "carried_over_budget" not in names(ev_roomy)
