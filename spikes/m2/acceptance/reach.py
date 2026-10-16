@@ -61,7 +61,11 @@ def reach(probes: list[Any], pages: list[dict[str, Any]], turn_texts: list[str] 
     """With ``turn_texts`` (the script's turns, in order), a statement on no page must sit in a turn
     the store did not page out, or the probe is unreachable; without them it is assumed in the window."""
     texts = {p["id"]: _page_text(p) for p in pages}
-    paged_turns = {p.get("turn") for p in pages}
+    mapping = map_pages(pages, turn_texts) if turn_texts is not None else None
+    if mapping is not None:
+        paged_turns = {m["script_turn"] for m in mapping["pages"] if m["script_turn"] is not None}
+    else:
+        paged_turns = {p.get("turn") for p in pages}
     window = ([t for i, t in enumerate(turn_texts) if i not in paged_turns] if turn_texts is not None else None)
     rows = []
     for probe in probes:
@@ -89,8 +93,27 @@ def reach(probes: list[Any], pages: list[dict[str, Any]], turn_texts: list[str] 
         cell["probes"] += 1
         cell["reachable"] += int(row["reachable"])
         cell["needs_paged"] += int(any(not n["in_window"] for n in row["needs"]))
-    return {"pages": len(pages), "probes": len(rows), "reachable": sum(r["reachable"] for r in rows),
-            "by_type": by_type, "unreachable": [r for r in rows if not r["reachable"]], "rows": rows}
+    out = {"pages": len(pages), "probes": len(rows), "reachable": sum(r["reachable"] for r in rows),
+           "by_type": by_type, "unreachable": [r for r in rows if not r["reachable"]], "rows": rows}
+    if mapping is not None:
+        out["turn_mapping"] = {k: v for k, v in mapping.items() if k != "pages"}
+    return out
+
+
+def map_pages(pages: list[dict[str, Any]], turn_texts: list[str], probe_chars: int = 120) -> dict[str, Any]:
+    """Each page's script turn, found by content (the turn's opening text inside the page), not by the
+    page's ``turn`` number, which can drift when carried text is paged (reviewer-2, PR #88). Reports
+    pages whose number disagrees, and pages that match no script turn (carried text, for example)."""
+    heads = [json.dumps(t[:probe_chars], ensure_ascii=False)[1:-1] for t in turn_texts]
+    rows = []
+    for page in pages:
+        text = _page_text(page)
+        matches = [i for i, head in enumerate(heads) if head and head in text]
+        rows.append({"id": page["id"], "page_turn": page.get("turn"), "script_turn": matches[0] if len(matches) == 1 else None,
+                     "candidates": matches})
+    return {"pages": rows,
+            "drift": [r for r in rows if r["script_turn"] is not None and r["script_turn"] != r["page_turn"]],
+            "unmatched": [r["id"] for r in rows if r["script_turn"] is None]}
 
 
 def load_pages(session_dir: Path) -> list[dict[str, Any]]:
