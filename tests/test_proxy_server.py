@@ -105,6 +105,8 @@ class StubEngine:
             raise RuntimeError("engine bug")
         if self.mode == "bad-return":
             return None, headers, []
+        if self.mode == "unserializable":
+            return dict(request, extra={1, 2}), headers, []
         if self.mode == "drop-first":
             new = dict(request)
             new["messages"] = request["messages"][2:]
@@ -417,3 +419,89 @@ def test_binds_loopback_only_with_a_free_port(make_proxy):
 def test_rejects_non_http_upstream():
     with pytest.raises(ValueError):
         ContextoProxy("ftp://example.invalid", MemoryLog(), identity_transform)
+
+
+# Lone surrogates and malformed input (reviewer-1, PR #26 B1)
+
+# JSON.stringify escapes a lone surrogate as a backslash-u escape; tool output cut mid-emoji does that.
+SURROGATE_REQUEST = {
+    "model": "claude-haiku-5-5",
+    "system": [{"type": "text", "text": "head \ude00 tail"}],
+    "tools": REQUEST["tools"],
+    "messages": [
+        {"role": "user", "content": [{"type": "text", "text": "first"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_02", "name": "Bash", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_02", "content": "cut \ud83d"}]},
+    ],
+    "stream": False,
+}
+SURROGATE_BYTES = json.dumps(SURROGATE_REQUEST, ensure_ascii=False, separators=(",", ":")).encode(
+    "utf-8", "backslashreplace")
+
+
+def test_serializer_writes_lone_surrogates_like_json_stringify():
+    assert b"\\ud83d" in SURROGATE_BYTES and b"\\ude00" in SURROGATE_BYTES
+    assert serialize_request(json.loads(SURROGATE_BYTES)) == SURROGATE_BYTES
+
+
+def test_lone_surrogates_are_forwarded_byte_identical_with_identity(make_proxy):
+    Upstream.mode = "json"
+    proxy, log = make_proxy(transform=StubEngine())
+    response, _ = call(proxy, "POST", "/v1/messages", SURROGATE_BYTES, AUTH)
+    assert response.status == 200 and Upstream.received[0][3] == SURROGATE_BYTES
+    assert "transform_error" not in log.requests()[0]
+
+
+def test_lone_surrogates_survive_a_rewrite(make_proxy):
+    Upstream.mode = "json"
+    proxy, _ = make_proxy(transform=StubEngine("drop-first"))
+    response, _ = call(proxy, "POST", "/v1/messages", SURROGATE_BYTES, AUTH)
+    sent = Upstream.received[0][3]
+    assert response.status == 200
+    assert json.loads(sent)["messages"] == SURROGATE_REQUEST["messages"][2:]
+    system = json.dumps(SURROGATE_REQUEST["system"], ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8", "backslashreplace")
+    assert system in sent
+
+
+def test_unserializable_transform_result_falls_back_to_original_bytes(make_proxy):
+    proxy, log = make_proxy(transform=StubEngine("unserializable"))
+    response, _ = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    assert response.status == 200 and Upstream.received[0][3] == REQUEST_BYTES
+    assert log.requests()[0]["transform_error"] == "serialize: TypeError"
+
+
+def test_deeply_nested_json_is_forwarded_untouched(make_proxy):
+    Upstream.mode = "json"
+    proxy, log = make_proxy(transform=StubEngine("drop-first"))
+    body = b'{"model":"m","stream":false,"messages":[],"x":' + b"[" * 100_000 + b"]" * 100_000 + b"}"
+    response, _ = call(proxy, "POST", "/v1/messages", body, AUTH)
+    assert response.status == 200 and Upstream.received[0][3] == body
+    # Whether parsing hits the recursion limit depends on the Python version; either way the
+    # body is forwarded untouched and nothing crashes.
+    assert log.requests()[0].get("transform_skipped") in (None, "request body is not JSON")
+    assert not [e for e in log.events if e["event"] == "proxy_error"]
+
+
+def test_malformed_framing_gets_a_400_not_a_dropped_connection(make_proxy):
+    proxy, log = make_proxy()
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n")
+        reply = b""
+        while chunk := sock.recv(65536):  # the proxy closes the connection after the error
+            reply += chunk
+    assert reply.startswith(b"HTTP/1.1 400") and b"malformed request framing" in reply
+    assert Upstream.received == []
+    assert log.requests()[0]["status"] == 400
+
+
+def test_unexpected_internal_error_answers_502_and_is_logged(make_proxy, monkeypatch):
+    def broken(headers, beta):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("contexto.proxy.add_beta", broken)
+    proxy, log = make_proxy(observe_thinking=True)
+    response, data = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    assert response.status == 502 and b"internal error" in data
+    errors = [e for e in log.events if e["event"] == "proxy_error"]
+    assert errors and errors[0]["error"] == "RuntimeError"

@@ -88,8 +88,12 @@ def serialize_request(request: Any) -> bytes:
     This is deliberately not ``contexto.canonical`` (sorted keys, for hashes and ids): keeping
     the CLI's own key order reproduces its ``system`` and ``tools`` bytes exactly, so the first
     rewritten request shares its cached prefix with the unrewritten requests before it.
+
+    A lone UTF-16 surrogate (for example tool output cut in the middle of an emoji) cannot be
+    encoded as UTF-8; ``backslashreplace`` writes it as a backslash-u escape, byte-identical to
+    what JSON.stringify emits for the same string.
     """
-    return json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "backslashreplace")
 
 
 def utc_now() -> str:
@@ -316,9 +320,28 @@ class _Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _handle(self) -> None:
+        self._response_started = False
+        try:
+            self._handle_request()
+        except Exception as exc:
+            # Last resort: never drop the client's connection without an answer.
+            self.owner.log({"event": "proxy_error", "method": self.command,
+                            "path": self.path.split("?", 1)[0], "error": type(exc).__name__})
+            if not self._response_started:
+                self._send_local_error(502, f"contexto proxy: internal error ({type(exc).__name__})")
+            self.close_connection = True
+
+    def _handle_request(self) -> None:
         started = time.monotonic()
         path_only = self.path.split("?", 1)[0]
-        body = self._read_body()
+        try:
+            body = self._read_body()
+        except ValueError:
+            self.owner.log({"event": "request", "method": self.command, "path": path_only, "status": 400,
+                            "error": "malformed request framing"})
+            self._send_local_error(400, "contexto proxy: malformed request framing", "invalid_request_error")
+            self.close_connection = True
+            return
         headers: Headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}
         entry: dict[str, Any] = {"event": "request", "method": self.command, "path": path_only,
                                  "original_request_bytes": len(body)}
@@ -336,7 +359,7 @@ class _Handler(BaseHTTPRequestHandler):
             return body, headers, None
         try:
             request = json.loads(body)
-        except ValueError:
+        except (ValueError, RecursionError):
             entry["transform_skipped"] = "request body is not JSON"
             return body, headers, None
         if not isinstance(request, dict):
@@ -345,8 +368,12 @@ class _Handler(BaseHTTPRequestHandler):
         entry["model"] = request.get("model")
         entry["stream"] = bool(request.get("stream"))
         entry["original_message_count"] = len(request.get("messages") or [])
-        before = serialize_request(request)
-        original = json.loads(before)  # an untouched copy; the transform may mutate its argument
+        try:
+            before = serialize_request(request)
+            original = json.loads(before)  # an untouched copy; the transform may mutate its argument
+        except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+            entry["transform_skipped"] = f"cannot serialize request: {type(exc).__name__}"
+            return body, headers, None
         try:
             with owner.transform_lock:
                 new_request, new_headers, events = owner.transform(request, dict(headers), endpoint)
@@ -368,7 +395,13 @@ class _Handler(BaseHTTPRequestHandler):
         if owner.observe_thinking:
             new_headers = add_beta(new_headers, THINKING_BINDING_BETA)
         entry["message_count"] = len(new_request.get("messages") or [])
-        after = serialize_request(new_request)
+        try:
+            after = serialize_request(new_request)
+        except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+            # The engine produced something that cannot be sent: forward the CLI's own bytes.
+            entry["transform_error"] = f"serialize: {type(exc).__name__}"
+            entry["message_count"] = entry["original_message_count"]
+            return body, headers, original
         return (body if after == before else after), new_headers, original
 
     def _forward(self, body: bytes, headers: Headers, entry: dict[str, Any], started: float,
@@ -396,6 +429,7 @@ class _Handler(BaseHTTPRequestHandler):
         decoder = _SideDecoder(response.getheader("Content-Encoding"))
         length = response.getheader("Content-Length")
         chunked = length is None and self.command != "HEAD"
+        self._response_started = True
         self.send_response_only(response.status, response.reason)
         for name, value in response.getheaders():
             if name.lower() not in HOP_BY_HOP:
@@ -452,8 +486,8 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.owner.log({"event": "observe_usage_error", "error": type(exc).__name__})
 
-    def _send_local_error(self, status: int, message: str) -> None:
-        body = json.dumps({"type": "error", "error": {"type": "api_error", "message": message}}).encode()
+    def _send_local_error(self, status: int, message: str, error_type: str = "api_error") -> None:
+        body = json.dumps({"type": "error", "error": {"type": error_type, "message": message}}).encode()
         try:
             self.send_response_only(status)
             self.send_header("Content-Type", "application/json")
