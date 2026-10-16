@@ -313,7 +313,10 @@ a no-replayed-thinking baseline.
    (bound 150,000, the shipped default, so the run tests the product as shipped and leaves each
    epoch room to show cache reads; at 100,000 the window budget `W` would be about 20,500 tokens
    (retained window about 10,000) and every turn would rotate, per lane B's dry run) shows zero compaction events, every
-   upstream request under the bound except logged over-bound turns, and zero 4xx responses.
+   upstream request under the bound except logged over-bound turns, and zero 4xx responses to
+   model requests (`/v1/messages`, `/responses`, and their `count_tokens`); 4xx answers to
+   non-model requests, such as Claude Code's unauthenticated `HEAD /api/hello` startup probe (the
+   owner's proxy answers it 401), are reported separately and do not fail the run.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the
