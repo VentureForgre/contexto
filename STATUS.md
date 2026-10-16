@@ -55,8 +55,10 @@ compaction never fires, and accuracy equals full context.
 
 ## Token spend on live model calls (owner's proxy unless noted)
 
-- M0 study: about 4.9M (lane 1, its spend table in `docs/research/M0-proxy-measurements.md`) and
-  about 1.0M (lane 2, summed from its research docs; approximate).
+- M0 study, lane 1: about 4.9M as reported by manager-1. Documented parts: about 3.9M in
+  `docs/research/M0-proxy-measurements.md` (about 2,100,000 plus the 1,796,949 quality run),
+  410,827 in `M0-codex-measurements.md`, 317,901 in `M0-rollover.md`, and 81,319 for the
+  route-identity test. Lane 2: about 1.0M, summed from its research docs (approximate).
 - Codex smoke: 161,549 (API-key mode). Earlier Codex seat measurement: 410,827 on the owner's
   ChatGPT plan.
 - Acceptance: H1 #1 1,783,815; aborted attempt up to about 65,000; recall experiment 415,413;
@@ -64,7 +66,7 @@ compaction never fires, and accuracy equals full context.
 
 ## Open decisions (details in DECISIONS.md)
 
-- O2: resolved by D20 and D25 (strip thinking at rotation; recall preamble V2).
+- O2: resolved by D20 (strip all thinking at rotation).
 - O3 (intake): the working-window bound, provisional at 150,000; acceptance reruns inform it.
 - O4 (owner): end-user auth guidance (API key only, or subscription logins too).
 - O5 (intake): first release v0.1.0, once acceptance passes.
