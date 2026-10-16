@@ -1,0 +1,625 @@
+"""Rewrite engine: rules 1 to 12 of docs/milestones/M2-contexto-proxy.md (rule text as aligned in
+PR #25; placement and system-message evidence in spikes/m2/carried/).
+
+The proxy calls one ``RewriteEngine`` per session: ``engine(request, headers, endpoint)`` returns the
+upstream request, the headers (unchanged), and content-free events; ``engine.observe_usage(endpoint,
+usage, request)`` feeds real usage back after each ``/v1/messages`` response. The work is done by
+the pure function ``rewrite(request, state, store, config, estimator)``, which never mutates its
+input, returns ``system`` and ``tools`` as the same objects, and is deterministic, so the proxy's
+deterministic serializer sends byte-identical prefixes within an epoch. The store is touched only on
+rotation (``page_out``, ``pinned_text``, ``index_text``); the estimator only through
+``estimate``, ``estimate_messages`` and ``observe``.
+
+Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
+
+- A turn-start message is a user message with user-authored content (a text block that is not an
+  injected context block, a plain string, an image, or a document) and no ``tool_result``. An
+  injected context block is a text block that starts with ``<system-reminder>``.
+- A turn is a turn-start message plus every following assistant, ``tool_result`` user, and
+  ``role: "system"`` message up to the next turn start; a trailing system message after the new
+  prompt belongs to the new turn.
+- Carried content is never paged: the context blocks of paged turn-start messages and the carried
+  system messages of paged turns (contract PR #35), in the form the CLI sends now. ``classify_system``
+  sorts every system message deterministically (contract PR #38): ``settings`` (empty content plus
+  settings fields; rule 12), ``session_start`` (content plus settings fields), ``per_turn`` (any other
+  text-only content, wherever it sits; per-turn hook context) and ``unclassified`` (non-text content).
+  Session-start, settings-only (latest per key) and unclassified messages are carried, an unclassified
+  one also logging ``unclassified_system_message``; per-turn ones are paged with their turn. Settings-only system messages accrue per settings
+  change (measured), so only the latest per settings key is carried; the carried set is computed from
+  the paged region, so it changes only at a rotation. Rule 13 (PR #27): carried content is never
+  paged; when a rotation finds it grown by more than ``carried_budget`` (4,000 tokens) over its size at
+  the conversation's first request, a content-free ``carried_over_budget`` event reports the estimate,
+  the growth, and the system-message count. Placement (rule 1, measured): carried context blocks
+  and then the preamble go ahead of the first retained turn-start message's own content; carried
+  system messages go immediately after that message (a system message before it returns 400).
+- Rotation (rules 3 and 4, PR #27) happens only when the newest turn has no assistant message yet and
+  the request adds messages (a resent request never rotates). The fixed overhead ``F`` (system, tools,
+  carried content, preamble) comes from the conversation's first measured usage (its input minus its
+  non-carried messages), else from the estimator; the window budget is ``W = bound - headroom - F``.
+  Rotation picks the smallest ``k`` at a turn start whose retained turns fit ``window_fraction * W``,
+  never below the current ``k``, always keeping the newest complete turn and the new turn. A ``k`` equal
+  to the current one is a no-op (``rotation_noop``: nothing paged, nothing stripped); a ``W`` that is
+  not positive or cannot hold the newest complete turn logs ``bound_too_small`` and sends the request
+  unrotated. ``F`` and ``W`` appear in these events.
+- Thinking (rule 2): retained messages that existed when the epoch was created lose their thinking and
+  redacted-thinking blocks on every request; an assistant message left empty gets one text block
+  ``[thinking omitted]``; other blocks keep their order.
+- Headroom is the running maximum of per-turn growth times 1.25, floor 25,000 tokens; per-turn growth
+  is the estimator's token count, at its current ratio, of the messages added between consecutive
+  turn starts, divided by the number of turns added when several arrive at once.
+- History matching (rule 10) hashes canonical JSON with every ``cache_control`` removed and a single
+  text block normalised to a plain string. A mismatch inside the retained window resynchronises from
+  the longest matching prefix; a mismatch in paged turns starts a new epoch at the current turn start
+  with everything before it paged. In that forced epoch an in-flight tool loop keeps its thinking
+  (only messages before the turn start count as existing), and the full history is never sent.
+- ``count_tokens`` (rule 11) gets the current epoch's transform with no side effects.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import math
+import re
+from dataclasses import dataclass, field, replace
+from typing import Any, Protocol
+
+from contexto.canonical import canonical_bytes, canonical_json
+from contexto.tokens import TokenEstimator
+
+MESSAGES = "/v1/messages"
+COUNT_TOKENS = "/v1/messages/count_tokens"
+THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
+THINKING_OMITTED = "[thinking omitted]"
+CONTEXT_TAG = "<system-reminder>"
+
+
+class Store(Protocol):
+    def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]: ...
+    def pinned_text(self, budget_tokens: int) -> str: ...
+    def index_text(self, budget_tokens: int) -> str: ...
+
+
+@dataclass(frozen=True)
+class Config:
+    bound: int = 150_000
+    window_fraction: float = 0.5  # rule 4: retained window target as a share of the window budget W
+    headroom_floor: int = 25_000
+    headroom_factor: float = 1.25
+    pin_budget: int = 6_000
+    index_budget: int = 4_000
+    carried_budget: int = 4_000  # rule 13: carried growth above this is reported
+    carried_text_budget: int = 8_000  # Terms fallback: carried growth above this pages old text messages
+
+
+@dataclass(frozen=True)
+class EpochState:
+    epoch: int = 0
+    k: int = 0  # message index of the first retained turn-start message; M[0..k) are paged
+    pinned_text: str = ""
+    index_text: str = ""
+    head_fingerprint: str = ""
+    strip_upto: int = 0  # M[0..strip_upto) existed when the epoch was created
+    turns_paged: int = 0  # number of turns written to the store
+    head_changed: bool = False  # a new epoch is due at the next turn start
+    hashes: tuple[str, ...] = ()  # normalised hashes of the previous request's messages
+    last_sent_bytes: int = 0
+    last_input_tokens: int | None = None  # real upstream input of the previous request
+    max_turn_growth: int = 0
+    last_turn_start_n: int | None = None  # history length at the previous turn start
+    last_turn_count: int = 0  # turn starts in the history at the previous turn start
+    head_tokens: int | None = None  # rule 4: measured head (system, tools, initial carried)
+    initial_carried: int | None = None  # carried content at the conversation's first request
+    last_window_tokens: int = 0  # estimate of the previous upstream request's non-carried messages
+    paged_carried: frozenset[str] = frozenset()  # hashes of carried text messages paged by the fallback
+    last_carried_text_count: int | None = None  # carried text messages at the previous turn start
+    carried_text_streak: int = 0  # consecutive turn starts at which that count grew
+
+
+# Message classification -------------------------------------------------------------------------
+
+def _blocks(message: dict) -> list:
+    content = message.get("content")
+    return content if isinstance(content, list) else []
+
+
+def is_context_block(block: Any) -> bool:
+    return (isinstance(block, dict) and block.get("type") == "text"
+            and isinstance(block.get("text"), str) and block["text"].lstrip().startswith(CONTEXT_TAG))
+
+
+def is_turn_start(message: dict) -> bool:
+    if message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    blocks = _blocks(message)
+    if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks):
+        return False
+    return any(isinstance(b, dict) and not is_context_block(b) for b in blocks)
+
+
+def turn_starts(messages: list[dict]) -> list[int]:
+    return [i for i, m in enumerate(messages) if is_turn_start(m)]
+
+
+def at_turn_start(messages: list[dict]) -> bool:
+    """The newest turn has no assistant message yet (only its turn start and system messages)."""
+    starts = turn_starts(messages)
+    if not starts:
+        return False
+    return all(m.get("role") != "assistant" for m in messages[starts[-1]:])
+
+
+# Normalisation and hashing (rule 10) ------------------------------------------------------------
+
+def _drop_cache_control(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: _drop_cache_control(v) for k, v in obj.items() if k != "cache_control"}
+    if isinstance(obj, list):
+        return [_drop_cache_control(v) for v in obj]
+    return obj
+
+
+def normalise(message: dict) -> dict:
+    m = _drop_cache_control(message)
+    content = m.get("content")
+    if (isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict)
+            and set(content[0]) == {"type", "text"} and content[0]["type"] == "text"):
+        m = {**m, "content": content[0]["text"]}
+    return m
+
+
+def message_hash(message: dict) -> str:
+    return hashlib.sha256(canonical_bytes(normalise(message))).hexdigest()
+
+
+def head_fingerprint(request: dict) -> str:
+    return hashlib.sha256(canonical_bytes({"system": request.get("system"), "tools": request.get("tools")})).hexdigest()
+
+
+def conversation_key(request: dict) -> str:
+    """Per-conversation key: the normalised first message, so subagent and other side requests keep
+    their own state and a head change does not split the main conversation."""
+    messages = request.get("messages") or []
+    return message_hash(messages[0]) if messages else ""
+
+
+# Transform pieces ------------------------------------------------------------------------------
+
+def strip_thinking(message: dict) -> dict:
+    blocks = _blocks(message)
+    if not any(isinstance(b, dict) and b.get("type") in THINKING_TYPES for b in blocks):
+        return message
+    kept = [b for b in blocks if not (isinstance(b, dict) and b.get("type") in THINKING_TYPES)]
+    if not kept:
+        kept = [{"type": "text", "text": THINKING_OMITTED}]
+    return {**message, "content": kept}
+
+
+def settings_key(message: dict) -> tuple | None:
+    """For a settings-only system message (empty content, settings fields such as output_config),
+    the names of its settings fields and their keys; None for any other message."""
+    if message.get("role") != "system" or message.get("content") not in ([], "", None):
+        return None
+    fields = sorted(k for k in message if k not in ("role", "content"))
+    if not fields:
+        return None
+    return tuple((f, tuple(sorted(message[f])) if isinstance(message[f], dict) else ()) for f in fields)
+
+
+SESSION_START = "session_start"
+SETTINGS = "settings"
+HOOK_OUTPUT = "hook_output"
+CARRIED_TEXT = "carried_text"
+UNCLASSIFIED = "unclassified"
+
+# Documented hook-output signatures (measured on Claude Code 2.1.301 with zero-spend stubs,
+# spikes/m2/carried/README.md findings 7 and 9): the CLI wraps a hook's additionalContext in a role
+# "system" message whose whole text starts with one of these prefixes.
+HOOK_SIGNATURES_CLAUDE_CODE_VERSION = "2.1.301"
+HOOK_SIGNATURES = (
+    re.compile(r"UserPromptSubmit hook additional context: "),
+    re.compile(r"PostToolUse:[^\s]+ hook additional context: "),
+)
+
+
+def is_text_only(message: dict) -> bool:
+    content = message.get("content")
+    if isinstance(content, str):
+        return True
+    return isinstance(content, list) and all(isinstance(b, dict) and b.get("type") == "text" for b in content)
+
+
+def message_text(message: dict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    return "".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
+
+
+def is_hook_output(message: dict) -> bool:
+    return is_text_only(message) and any(sig.match(message_text(message)) for sig in HOOK_SIGNATURES)
+
+
+def mode_kind(message: dict) -> str | None:
+    """Recognisable kind of a carried text message (measured on 2.1.301): output-style changes and
+    resets, and plan-mode entry and exit. None when not recognised."""
+    text = message_text(message).lower()
+    if "output style" in text:
+        return "output_style"
+    if "plan mode" in text:
+        return "plan_mode"
+    return None
+
+
+def classify_system(messages: list[dict], i: int) -> str:
+    """Deterministic class of the system message at ``messages[i]``, in the contract's order (Terms,
+    PR #38, merged): session-start (content plus settings fields), settings-only (empty content plus
+    settings fields), hook output (text-only, matching a documented signature; paged with its turn),
+    other text-only content (carried: output styles and plan mode are standing instructions), and
+    non-text content (carried, logged as ``unclassified_system_message``). Position is not used;
+    ``messages`` is accepted for a uniform signature."""
+    m = messages[i]
+    if settings_key(m) is not None:
+        return SETTINGS
+    if any(k not in ("role", "content") for k in m) and m.get("content") not in ([], "", None):
+        return SESSION_START
+    if is_hook_output(m):
+        return HOOK_OUTPUT
+    if is_text_only(m):
+        return CARRIED_TEXT
+    return UNCLASSIFIED
+
+
+def carried_systems(messages: list[dict], k: int, paged: frozenset[str] = frozenset()) -> tuple[list[int], int]:
+    """Indexes of the carried system messages in M[0..k), after deduplicating settings-only messages
+    (latest per settings key) and leaving out text messages the fallback has paged, and the number of
+    unclassified ones among them."""
+    carried, latest, unclassified = [], {}, 0
+    for i in range(k):
+        if messages[i].get("role") != "system":
+            continue
+        kind = classify_system(messages, i)
+        if kind == HOOK_OUTPUT or (kind == CARRIED_TEXT and message_hash(messages[i]) in paged):
+            continue
+        if kind == UNCLASSIFIED:
+            unclassified += 1
+        if kind == SETTINGS:
+            latest[settings_key(messages[i])] = i
+        carried.append(i)
+    keep = [i for i in carried if classify_system(messages, i) != SETTINGS or latest[settings_key(messages[i])] == i]
+    return keep, unclassified
+
+
+def carried_content(messages: list[dict], k: int, paged: frozenset[str] = frozenset()) -> tuple[list[dict], list[dict]]:
+    """(context blocks of paged turn starts, carried system messages of paged turns), in original order
+    and in the form the CLI sends now. Hook output is paged with its turn, not carried."""
+    blocks = [b for m in messages[:k] if is_turn_start(m) for b in _blocks(m) if is_context_block(b)]
+    indexes, _ = carried_systems(messages, k, paged)
+    return blocks, [messages[i] for i in indexes]
+
+
+def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
+    """M[start..end) as stored in a page: thinking kept as received; carried system messages and the
+    context blocks of turn starts removed; per-turn system messages kept."""
+    out = []
+    for i in range(start, end):
+        m = messages[i]
+        if m.get("role") == "system" and classify_system(messages, i) != HOOK_OUTPUT:
+            continue
+        if is_turn_start(m) and any(is_context_block(b) for b in _blocks(m)):
+            m = {**m, "content": [b for b in _blocks(m) if not is_context_block(b)]}
+        out.append(m)
+    return out
+
+
+def preamble(state: EpochState) -> str:
+    return "\n\n".join(part for part in (state.pinned_text, state.index_text) if part)
+
+
+def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
+    out = []
+    for i in range(state.k, len(messages)):
+        m = messages[i]
+        if i < state.strip_upto:
+            m = strip_thinking(m)
+        out.append(m)
+    if state.k == 0 or not out:
+        return out
+    blocks, systems = carried_content(messages, state.k, state.paged_carried)
+    head = [*blocks]
+    text = preamble(state)
+    if text:
+        head.append({"type": "text", "text": text})
+    first = out[0]
+    own = first.get("content")
+    own_blocks = [{"type": "text", "text": own}] if isinstance(own, str) else list(own)
+    return [{**first, "content": head + own_blocks}, *systems, *out[1:]]
+
+
+def headroom(state: EpochState, config: Config) -> int:
+    return max(config.headroom_floor, math.ceil(state.max_turn_growth * config.headroom_factor))
+
+
+def estimate_upstream(request: dict, messages: list[dict], previous_n: int, state: EpochState,
+                      estimator: TokenEstimator) -> int:
+    """Rule 3: last real input plus the messages added since, else an estimate of the whole request."""
+    if state.last_input_tokens is not None and previous_n <= len(messages):
+        return state.last_input_tokens + estimator.estimate_messages(messages[previous_n:])
+    head = estimator.estimate(canonical_json({"system": request.get("system"), "tools": request.get("tools")}))
+    return head + estimator.estimate_messages(transform_messages(messages, state))
+
+
+def window_tokens(messages: list[dict], estimator: TokenEstimator, start: int = 0) -> int:
+    """Tokens of the non-carried part of M[start..) (no carried system messages, no context blocks)."""
+    kept = strip_carried(messages, start, len(messages))
+    return estimator.estimate_messages([strip_thinking(m) for m in kept if m.get("content")])
+
+
+def carried_tokens(messages: list[dict], estimator: TokenEstimator, paged: frozenset[str] = frozenset()) -> int:
+    blocks, systems = carried_content(messages, len(messages), paged)
+    parts = ([{"role": "user", "content": blocks}] if blocks else []) + systems
+    return estimator.estimate_messages(parts) if parts else 0
+
+
+def fixed_overhead(request: dict, messages: list[dict], state: EpochState, store: Store, config: Config,
+                   estimator: TokenEstimator) -> int:
+    """Rule 4: F = system + tools + carried content + preamble. The head comes from measured usage once
+    available (the conversation's first request), else from the estimator; carried growth since the
+    first request and the current pinned and index text are estimated."""
+    carried = carried_tokens(messages, estimator, state.paged_carried)
+    if state.head_tokens is not None:
+        head = state.head_tokens + max(0, carried - (state.initial_carried or 0))
+    else:
+        head = estimator.estimate(canonical_json({"system": request.get("system"), "tools": request.get("tools")})) + carried
+    pre = "\n\n".join(t for t in (store.pinned_text(config.pin_budget), store.index_text(config.index_budget)) if t)
+    return head + (estimator.estimate(pre) if pre else 0)
+
+
+def choose_k(messages: list[dict], state: EpochState, target: int, estimator: TokenEstimator) -> int:
+    starts = [i for i in turn_starts(messages) if i >= state.k]
+    if len(starts) < 2:
+        return state.k
+    newest_complete = starts[-2]
+    for k in starts:
+        if k > newest_complete:
+            break
+        if window_tokens(messages, estimator, k) <= target:
+            return k
+    return newest_complete
+
+
+def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Store, config: Config,
+              estimator: TokenEstimator, k: int, strip_upto: int, events: list[dict], reason: str,
+              sizing: tuple[int, int] | None = None) -> EpochState:
+    if k > state.k:
+        bounds = [i for i in turn_starts(messages) if state.k <= i < k]
+        if not bounds or bounds[0] != state.k:
+            bounds = [state.k, *bounds]
+        edges = [*bounds, k]
+        turns = [strip_carried(messages, a, b) for a, b in zip(edges, edges[1:])]
+        ids = store.page_out(turns, state.turns_paged)
+        events.append({"event": "page_out", "epoch": state.epoch + 1, "turns": len(turns),
+                       "pages": len(ids), "first_turn": state.turns_paged})
+        turns_paged = state.turns_paged + len(turns)
+    else:
+        turns_paged = state.turns_paged
+    new = replace(state, epoch=state.epoch + 1, k=k, pinned_text=store.pinned_text(config.pin_budget),
+                  index_text=store.index_text(config.index_budget), head_fingerprint=head_fingerprint(request),
+                  strip_upto=strip_upto, turns_paged=turns_paged, head_changed=False, last_input_tokens=None)
+    rotation = {"event": "rotation", "epoch": new.epoch, "reason": reason, "k": k,
+                "retained_messages": len(messages) - k, "turns_paged": turns_paged}
+    if sizing is not None:
+        rotation.update({"fixed_overhead": sizing[0], "window_budget": sizing[1]})
+    events.append(rotation)
+    _, unclassified = carried_systems(messages, k, new.paged_carried)
+    if unclassified:
+        events.append({"event": "unclassified_system_message", "epoch": new.epoch, "count": unclassified})
+    new = page_carried_text(messages, new, store, config, estimator, events)
+    carried = carried_tokens(messages, estimator, new.paged_carried)
+    growth = carried - (state.initial_carried or 0)
+    if growth > config.carried_budget:
+        events.append({"event": "carried_over_budget", "epoch": new.epoch, "carried_tokens": carried,
+                       "carried_growth": growth,
+                       "system_messages": len(carried_systems(messages, k, new.paged_carried)[0]),
+                       "budget": config.carried_budget})
+    return new
+
+
+def page_carried_text(messages: list[dict], state: EpochState, store: Store, config: Config,
+                      estimator: TokenEstimator, events: list[dict]) -> EpochState:
+    """Terms fallback: when carried content has grown more than ``carried_text_budget`` over its size at
+    the first request, page carried text messages (step 4) of paged turns, superseded ones of a
+    recognisable kind first, then unrecognised ones, oldest first, never the latest of a recognisable
+    kind, until the growth is back under the budget. Each is its own page; logs ``carried_paged``."""
+    growth = carried_tokens(messages, estimator, state.paged_carried) - (state.initial_carried or 0)
+    if growth <= config.carried_text_budget:
+        return state
+    texts = [i for i in carried_systems(messages, state.k, state.paged_carried)[0]
+             if classify_system(messages, i) == CARRIED_TEXT]
+    latest = {}
+    for i in texts:
+        kind = mode_kind(messages[i])
+        if kind is not None:
+            latest[kind] = i
+    superseded = [i for i in texts if mode_kind(messages[i]) is not None and latest[mode_kind(messages[i])] != i]
+    unrecognised = [i for i in texts if mode_kind(messages[i]) is None]
+    chosen, freed = [], 0
+    for i in superseded + unrecognised:
+        if growth - freed <= config.carried_text_budget:
+            break
+        chosen.append(i)
+        freed += estimator.estimate_messages([messages[i]])
+    if not chosen:
+        return state
+    chosen.sort()
+    store.page_out([[messages[i]] for i in chosen], state.turns_paged)
+    events.append({"event": "carried_paged", "epoch": state.epoch, "count": len(chosen), "tokens": freed})
+    return replace(state, paged_carried=state.paged_carried | {message_hash(messages[i]) for i in chosen},
+                   turns_paged=state.turns_paged + len(chosen))
+
+
+def matching_prefix(hashes: tuple[str, ...], messages: list[dict]) -> int:
+    n = 0
+    for old, m in zip(hashes, messages):
+        if old != message_hash(m):
+            break
+        n += 1
+    return n
+
+
+# The engine --------------------------------------------------------------------------------------
+
+def rewrite(request: dict, state: EpochState | None, store: Store, config: Config,
+            estimator: TokenEstimator) -> tuple[dict, EpochState, list[dict]]:
+    """Return (upstream_request, new_state, events) for one ``/v1/messages`` request."""
+    messages = request.get("messages") or []
+    n = len(messages)
+    events: list[dict] = []
+    fingerprint = head_fingerprint(request)
+    if state is None:
+        state = EpochState(head_fingerprint=fingerprint)
+    previous_n = len(state.hashes)
+
+    # Rule 10: the stored messages must still match.
+    match = matching_prefix(state.hashes, messages)
+    if match < previous_n:
+        if match < state.k:
+            # Paged turns changed (for example a local compaction): page everything before the
+            # current turn start, keep an in-flight turn's thinking, never send the full history.
+            starts = turn_starts(messages)
+            current = starts[-1] if starts else 0
+            # Known limitation (reviewer-2): an in-flight tool loop keeps its thinking although the prefix
+            # before it changed; on an enforcing account those blocks are invalid.
+            inflight = any(isinstance(b, dict) and b.get("type") in THINKING_TYPES
+                           for m in messages[current:] for b in _blocks(m))
+            events.append({"event": "resync", "epoch": state.epoch, "kind": "paged_changed",
+                           "matched": match, "previous_messages": previous_n, "messages": n,
+                           "inflight_thinking_kept": inflight})
+            fresh = replace(state, k=0, turns_paged=state.turns_paged)
+            state = new_epoch(messages, request, fresh, store, config, estimator, current, current, events,
+                              "paged_changed")
+        else:
+            events.append({"event": "resync", "epoch": state.epoch, "kind": "window_changed",
+                           "matched": match, "previous_messages": previous_n, "messages": n})
+            state = replace(state, last_input_tokens=None)
+        previous_n = match
+
+    # Rule 6: a head change waits for the next turn start.
+    if fingerprint != state.head_fingerprint and not state.head_changed:
+        state = replace(state, head_changed=True)
+        events.append({"event": "head_changed", "epoch": state.epoch})
+
+    estimate = estimate_upstream(request, messages, previous_n, state, estimator)
+    if n > previous_n and at_turn_start(messages):
+        count = len(turn_starts(messages))
+        if state.last_turn_start_n is not None and count > state.last_turn_count and n > state.last_turn_start_n:
+            # Per-turn growth: the messages added since the previous turn start, estimated at the current
+            # ratio, averaged when several turns arrive at once (a resume or a missed request).
+            added = estimator.estimate_messages(messages[state.last_turn_start_n:])
+            growth = added // (count - state.last_turn_count)
+            state = replace(state, max_turn_growth=max(state.max_turn_growth, growth))
+        state = replace(state, last_turn_start_n=n, last_turn_count=count)
+        # Early warning (reviewers): carried text messages (contract step 4) growing at consecutive turn
+        # starts means a new hook or mode is adding standing messages per turn.
+        texts = sum(1 for i, m in enumerate(messages) if m.get("role") == "system"
+                    and classify_system(messages, i) == CARRIED_TEXT and message_hash(m) not in state.paged_carried)
+        if state.last_carried_text_count is not None and texts > state.last_carried_text_count:
+            streak = state.carried_text_streak + 1
+            if streak == 2:
+                events.append({"event": "carried_text_growing", "epoch": state.epoch, "messages": texts})
+        else:
+            streak = 0
+        state = replace(state, last_carried_text_count=texts, carried_text_streak=streak)
+        trigger = estimate > config.bound - headroom(state, config)
+        if state.head_changed or trigger:
+            f = fixed_overhead(request, messages, state, store, config, estimator)
+            w = config.bound - headroom(state, config) - f
+            starts = turn_starts(messages)
+            newest_start = starts[-2] if len(starts) >= 2 else starts[-1]
+            sizing = {"epoch": state.epoch, "fixed_overhead": f, "window_budget": w}
+            target = int(config.window_fraction * w)
+            if state.head_changed:  # rule 6: always a new epoch; page only if the budget allows
+                k = choose_k(messages, state, target, estimator) if w > 0 else state.k
+                state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "head_change",
+                                  sizing=(f, w))
+            elif w <= 0 or window_tokens(messages, estimator, newest_start) > w:
+                events.append({"event": "bound_too_small", **sizing, "bound": config.bound})
+            else:
+                k = choose_k(messages, state, target, estimator)
+                if k == state.k:  # rule 4: nothing to page, so no strip and no rebuild
+                    events.append({"event": "rotation_noop", **sizing, "k": k})
+                else:
+                    state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "bound",
+                                      sizing=(f, w))
+    over = estimate > config.bound and not any(e["event"] == "rotation" for e in events)
+
+    if state.initial_carried is None:
+        state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
+    upstream = {**request, "messages": transform_messages(messages, state)}
+    sent = len(canonical_bytes(upstream))
+    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
+                    last_window_tokens=window_tokens(upstream["messages"], estimator))
+    event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
+             "upstream_messages": len(upstream["messages"]), "estimate": estimate, "sent_bytes": sent}
+    if over:
+        event["over_bound"] = True
+    events.append(event)
+    return upstream, state, events
+
+
+def count_tokens_view(request: dict, state: EpochState | None) -> dict:
+    """Rule 11: the current epoch's transform for ``count_tokens``; no rotation and no side effects."""
+    if state is None:
+        return request
+    messages = request.get("messages") or []
+    if state.k and (state.k >= len(messages) or matching_prefix(state.hashes, messages) < state.k):
+        return request  # history no longer matches the epoch; count what the CLI sent
+    return {**request, "messages": transform_messages(messages, state)}
+
+
+def usage_tokens(usage: dict) -> int:
+    return sum(usage.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
+@dataclass
+class RewriteEngine:
+    """Per-session adapter for the proxy: one epoch state per conversation (see ``conversation_key``)."""
+
+    store: Store
+    config: Config = field(default_factory=Config)
+    estimator: TokenEstimator | None = None
+    states: dict[str, EpochState] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.estimator is None:
+            self.estimator = TokenEstimator()
+
+    def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
+        key = conversation_key(request)
+        state = self.states.get(key)
+        if endpoint == COUNT_TOKENS:
+            epoch = state.epoch if state else 0
+            return count_tokens_view(request, state), headers, [{"event": "count_tokens", "epoch": epoch}]
+        if endpoint != MESSAGES:
+            return request, headers, []
+        upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator)
+        return upstream, headers, events
+
+    def observe_usage(self, endpoint: str, usage: dict, request: dict) -> None:
+        if endpoint != MESSAGES:
+            return
+        key = conversation_key(request)
+        state = self.states.get(key)
+        if state is None:
+            return
+        real = usage_tokens(usage)
+        self.estimator.observe(state.last_sent_bytes, real)
+        state = replace(state, last_input_tokens=real)
+        if state.head_tokens is None and state.k == 0:
+            # Rule 4: the first measured request gives the head (its input minus its non-carried
+            # messages, which also covers a resumed first request with a long history).
+            state = replace(state, head_tokens=max(0, real - state.last_window_tokens))
+        self.states[key] = state
