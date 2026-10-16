@@ -217,13 +217,14 @@ def test_separate_matches_log_separate_spans_and_a_cut_line_only_its_part(store)
 def test_recall_logs_its_span_and_a_spent_reply_logs_none(store):
     store.set_window(200_000, 2.0)
     [pid] = store.page_out([[{"role": "user", "content": LOG}]], 1)
-    store.set_turn_room("1", 500)  # 750 characters
+    store.set_turn_room("1", 500)  # half of it: 375 characters
     reply = recall(store, pid, 1_000)
     [event] = events(store, "contexto_recall")
     [span] = event["returned"]
     page = render_page(store.get_page(pid))
     assert span == {"page_id": pid, "start": 1_000, "end": 1_000 + event["chars"]}
     assert reply.startswith(page[span["start"]:span["end"]])
+    store.set_turn_room("1", 0)
     assert recall(store, pid, 2_000) == SPENT
     assert events(store, "contexto_recall")[-1]["returned"] == []
 
@@ -239,3 +240,49 @@ def test_only_hits_actually_returned_are_logged(store):
     assert 0 < len(shown) < 30 and [span["page_id"] for span in event["returned"]] == shown
     store.set_turn_room("1", 0)
     assert search(store, "needle") == SPENT and events(store, "contexto_search")[-1]["returned"] == []
+
+
+# Reviewer-1's PR #97 findings, fixed in B16
+
+
+def test_a_long_query_stays_whole_in_its_matching_line():
+    query = "cfg." + "segment_" * 40 + "end"  # over 300 characters
+    text = "head\n" + "x" * 3_000 + query + "=value" + "y" * 3_000 + "\ntail"
+    shown, _ = match_lines(text, query)
+    [(start, end, is_match, line)] = [row for row in shown if row[2]]
+    assert query in line and query in text[start:end]
+    assert end - start >= len(query)
+    short = match_lines("x" * 3_000 + "NEEDLE" + "y" * 3_000, "NEEDLE")[0][0]
+    assert short[1] - short[0] == MATCH_LINE_CHARS  # a short query keeps the usual cut
+
+
+def test_a_hit_over_the_per_call_cap_returns_its_matching_lines_not_the_budget_message():
+    store = MemoryStore("s1")
+    store.set_window(2_000, 1.0)  # a 500-character per-call limit, and no room published
+    filler = "\n".join(f"context line {i} " + "z" * 120 for i in range(10))
+    [pid] = store.page_out([[{"role": "user", "content": filler + "\ncfg deploy.target=blue\n" + filler}]], 1)
+    reply = search(store, "deploy.target")
+    assert reply != SPENT and len(reply) <= 500
+    lines = reply.split("\n")
+    assert lines[0].startswith(f"{pid} (turn 1): ")
+    assert any(line.startswith("> ") and line.endswith("cfg deploy.target=blue") for line in lines)
+    assert lines[-1] == "  [the rest of this hit is not shown; use a longer or more specific query]"
+    [event] = events(store, "contexto_search")
+    page = render_page(store.get_page(pid))
+    [span] = event["returned"]
+    assert page[span["start"]:span["end"]] == "cfg deploy.target=blue"  # only the line actually shown
+
+
+def test_a_cap_too_small_for_even_the_page_line_says_so():
+    store = MemoryStore("s1")
+    store.set_window(400, 1.0)  # a 100-character per-call limit
+    store.page_out([[{"role": "user", "content": "a stub line long enough " * 10 + "\ncfg deploy.target=blue"}]], 1)
+    assert search(store, "deploy.target") == mcp.SEARCH_TOO_LONG
+    assert events(store, "contexto_search")[-1]["returned"] == []
+
+
+def test_a_room_too_small_for_a_hit_still_gets_the_budget_message(store):
+    store.set_window(200_000, 2.0)
+    store.page_out([[{"role": "user", "content": LOG}]], 1)
+    store.set_turn_room("1", 20)  # 30 characters: the room binds, not the per-call limit
+    assert search(store, "line 0123") == SPENT

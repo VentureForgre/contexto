@@ -111,8 +111,9 @@ def match_lines(text: str, query: str, context: int = MATCH_CONTEXT, per_page: i
     ``per_page`` matching lines and up to ``context`` lines either side, in page order, overlaps
     merged; ``total`` counts every matching line. ``text[start:end]`` is the part of the page a
     line shows, so ``contexto_recall`` can read on from ``start``. A line longer than
-    ``line_chars`` is cut to that many characters, marked with a trailing " ...", and a matching
-    line is cut around its first match so the match stays in view. Linear in the size of ``text``.
+    ``line_chars`` is cut to that many characters, marked with a trailing " ...". A matching line
+    is cut around its first match instead, widened when the query is long, so the whole match stays
+    in view. Linear in the size of ``text``.
     """
     starts, matching = [0], []
     newline = text.find("\n")
@@ -132,8 +133,10 @@ def match_lines(text: str, query: str, context: int = MATCH_CONTEXT, per_page: i
     wanted = sorted({n for m in first_match for n in range(max(0, m - context), min(len(starts), m + context + 1))})
     for n in wanted:
         start, end = starts[n], ends[n]
+        width = line_chars
         if n in first_match and first_match[n] + len(query) > start + line_chars:
             start = max(start, first_match[n] - line_chars // 3)
-        stop = min(end, start + line_chars)
+            width = max(line_chars, first_match[n] + len(query) - start)  # the whole match, however long
+        stop = min(end, start + width)
         shown.append((start, stop, n in first_match, text[start:stop] + (" ..." if stop < end else "")))
     return shown, len(matching)
