@@ -370,13 +370,17 @@ def test_only_the_first_turn_may_start_without_a_log_and_only_inside_the_window(
     missing log fails closed at once."""
     log = tmp_path / "log.jsonl"
     watch = codex_driver.SpendWatch(log, approved=10**9, inflight=1)
-    watch.begin_turn()
-    assert all(watch() is False for _ in range(10))  # inside the first turn's window
-    watch.begin_turn()  # a second turn: the window does not restart
+    watch.begin_turn(fresh=True)
+    assert all(watch() is False for _ in range(10))  # inside the session's first turn's window
+    watch.begin_turn()  # any other turn, a resume's first included: no window
     with pytest.raises(codex_driver.WatchFailed, match="past the first turn"):
         watch()
+    resume = codex_driver.SpendWatch(log, approved=10**9, inflight=1)
+    resume.begin_turn(fresh=False)
+    with pytest.raises(codex_driver.WatchFailed, match="past the first turn"):
+        resume()
     late = codex_driver.SpendWatch(log, approved=10**9, inflight=1, startup_seconds=0.05)
-    late.begin_turn()
+    late.begin_turn(fresh=True)
     time.sleep(0.1)
     with pytest.raises(codex_driver.WatchFailed, match="past the first turn"):  # the window ran out
         late()
@@ -403,9 +407,11 @@ def test_a_log_that_never_appears_stops_the_run_after_the_first_turn(tmp_path):
     record = codex_driver.run_session(s, turns, tmp_path / "never.jsonl", 10**9, [1] * len(s.turns), inflight=1)
     assert len(runner.calls) == 1 and record["stopped"] == "turn 1: the session log is missing after the turn"
     assert record["turns_completed"] == 0 and record["failed_turn"] == 0
-    resumed = codex_driver.run_session(s, _turns(tmp_path, FakeCodex()), tmp_path / "never.jsonl", 10**9,
-                                       [1] * len(s.turns), start=1)
-    assert resumed["stopped"] == "turn 2: the session log is missing after the turn"
+    resumer = FakeCodex()
+    resumed = codex_driver.run_session(s, _turns(tmp_path, resumer), tmp_path / "never.jsonl", 10**9,
+                                       [1] * len(s.turns), start=1, inflight=1)
+    # Reviewer-2 on #165: a resume that finds no log sends no turn (its spend so far is unknown).
+    assert resumer.calls == [] and resumed["stopped"] == "turn 2: not started, the session log is missing"
 
 
 def test_records_of_an_attempt_and_its_resume_join_into_one_scored_record(tmp_path):

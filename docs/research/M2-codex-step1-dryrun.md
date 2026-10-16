@@ -14,17 +14,17 @@ Numbers only; no transcripts.
 ## Reviewer-1's notes on PR #154
 
 - **(a) Startup window for a missing log** (reworked after reviewer-2 on PR #165).
-  - Only on an attempt's first turn, and only until the log has been seen once, may a missing session log be the session still starting, for at most 10 seconds (`SpendWatch.begin_turn`).
+  - Only on the session's very first turn (turn index 0), and only until the log has been seen once, may a missing session log be the session still starting, for at most 10 seconds (`SpendWatch.begin_turn(fresh=True)`).
   - **Why 10 seconds is enough:** the launcher logs `proxy_start` before it starts Codex, and every dry-run turn here started within a second.
   - After the log has been seen, on any later turn, or past the window, a missing log fails closed at once.
   - `run_session` also stops the run in two cases, and never reads a missing log as nothing spent:
     - when the log is missing after a turn returns;
-    - when the log is missing or unreadable before any turn but the attempt's first.
+    - when the log is missing or unreadable before any turn but the session's first. That includes a resume's first turn: a resume that finds no log sends no turn, since its spend so far, including what a failed attempt was billed, is unknown (reviewer-2's residual on PR #165).
   - The first version restarted the window every turn, so a log that never appeared went uncaught when turns ran under the window (reviewer-2's repro).
   - Tests:
     - `test_only_the_first_turn_may_start_without_a_log_and_only_inside_the_window` (both sides);
     - `test_a_log_deleted_mid_run_fails_closed_at_once`;
-    - `test_a_log_that_never_appears_stops_the_run_after_the_first_turn` (reviewer-2's case: it stops after turn 1, and a resume stops after its first turn).
+    - `test_a_log_that_never_appears_stops_the_run_after_the_first_turn` (reviewer-2's case: it stops after turn 1, and a resume that finds no log sends no turn).
 - **(b) Joining an attempt and its resume.**
   - Each record keeps its probe-turn answers by turn index (`answers_by_turn`) and the turn it failed on (`failed_turn`).
   - `join_records` merges the attempts by turn index; a later attempt replaces an earlier one's answer for the same turn.

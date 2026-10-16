@@ -116,25 +116,25 @@ class SpendWatch:
     _pending_since: float | None = None
     _pending_polls: int = 0
     _turn_started: float | None = None
-    _turns_begun: int = 0
+    _fresh: bool = False
     _seen_log: bool = False
 
-    def begin_turn(self) -> None:
-        """A new turn starts (run_session calls this before each turn). Only on an attempt's first turn,
-        and only until the log has been seen once, a missing log may be the session still starting
-        (reviewer-1 on PR #154): the launcher logs ``proxy_start`` before it starts Codex, and every
-        dry-run turn here started within a second, so 10 seconds is ample. Otherwise a missing log is a
-        failure at once (reviewer-2 on PR #165: a window restarted every turn let a log that never
-        appeared go uncaught)."""
+    def begin_turn(self, fresh: bool = False) -> None:
+        """A new turn starts (run_session calls this before each turn). Only on the session's very first
+        turn (``fresh``, turn index 0), and only until the log has been seen once, a missing log may be
+        the session still starting (reviewer-1 on PR #154): the launcher logs ``proxy_start`` before it
+        starts Codex, and every dry-run turn here started within a second, so 10 seconds is ample.
+        Otherwise, a resume's first turn included, a missing log is a failure at once (reviewer-2 on
+        PR #165)."""
         self._turn_started = time.monotonic()
-        self._turns_begun += 1
+        self._fresh = fresh
         self._pending_since, self._pending_polls = None, 0
 
     def __call__(self) -> bool:
         try:
             data = self.session_log.read_bytes()
         except FileNotFoundError:
-            starting = (self._turns_begun <= 1 and not self._seen_log and self._turn_started is not None
+            starting = (self._fresh and not self._seen_log and self._turn_started is not None
                         and time.monotonic() - self._turn_started < self.startup_seconds)
             if starting:
                 return False
@@ -269,9 +269,10 @@ def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved
     for i, text in enumerate(s.turns):
         if i < start:
             continue
-        # Only the attempt's first turn may find no log (a fresh session); after that a missing or
-        # unreadable log stops the run, never read as nothing spent (reviewer-2 on PR #165).
-        if i > start and not session_log.exists():
+        # Only the session's very first turn may find no log (a fresh session). Before any other turn, a
+        # resume's first included, a missing or unreadable log stops the run: it is never read as nothing
+        # spent, which would ignore what a failed attempt was billed (reviewer-2 on PR #165).
+        if i > 0 and not session_log.exists():
             stopped = f"turn {i + 1}: not started, the session log is missing"
             break
         try:
@@ -283,7 +284,7 @@ def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved
             stopped = f"turn {i + 1} could pass the approved {approved:,} (spent {spent:,})"
             break
         if isinstance(turns.watch, SpendWatch):
-            turns.watch.begin_turn()
+            turns.watch.begin_turn(fresh=(i == 0))
         try:
             answer = turns.send(i, text)
         except Exception as exc:  # noqa: BLE001 - fail closed: the turn was stopped, the session stops
