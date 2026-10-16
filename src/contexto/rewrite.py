@@ -134,7 +134,7 @@ class Store(Protocol):
     def window_model(self) -> str | None: ...
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None: ...
     def quarantine_page(self, page_id: str) -> Any: ...
-    def set_retained(self, epoch: int, k: int, turns: list[dict]) -> None: ...  # lane B, contract PR #125
+    def set_retained(self, epoch: int, k: int, turns: list[dict]) -> None: ...  # lane B PR #128, contract PR #125
 
 
 @dataclass(frozen=True)
@@ -1218,13 +1218,10 @@ class RewriteEngine:
                           events: list[dict]) -> None:
         """Contract PR #125: the retained window's snapshot, once per request after the transform, a full
         overwrite each time. A failed write leaves the snapshot stale (search then says "in view not
-        checked"): it logs the content-free retained_stale, exactly once, and is not degraded mode.
-        Skipped while lane B's store lacks set_retained."""
-        set_retained = getattr(self.store, "set_retained", None)
-        if not callable(set_retained):
-            return
+        checked"): it logs the content-free retained_stale, exactly once, and is not degraded mode
+        (lane B PR #128 removes the old snapshot, so ``retained_current()`` serves none)."""
         try:
-            set_retained(state.epoch, state.k, retained_entries(messages, state.k, dialect))
+            self.store.set_retained(state.epoch, state.k, retained_entries(messages, state.k, dialect))
         except STORE_FAILURES as error:
             events.append({"event": "retained_stale", "epoch": state.epoch, "error": type(error).__name__})
 
