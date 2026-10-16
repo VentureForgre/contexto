@@ -3,6 +3,11 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # Test main itself after every merge. release.yml also calls this workflow on pushes to main, but
+  # only when RELEASES_ENABLED is "true"; with releases on, a main push runs CI twice (about a
+  # minute). No concurrency group: one shared with Release's call would cancel its pending run.
+  push:
+    branches: [main]
   workflow_call:
 
 permissions:
