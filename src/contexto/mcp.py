@@ -38,6 +38,7 @@ SEARCH_LIMIT = 50  # page ids per contexto_search result
 # Per-turn recall budget (M2 contract PR #69): what recall, search, and state return this turn.
 BUDGET_SPENT = ("Recall budget for this turn is used up; answer from what is in view, or say the detail is "
                 "unknown.")
+SEARCH_TOO_LONG = "This search result is longer than one call can return; use a longer or more specific query."
 UNMEASURED_CHARS_PER_TOKEN = 1.0  # before the engine records bytes per token: charges more, never less
 # Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
 # rejects a tools/list result without them (reviewer-2, real client, 2026-10-16). The tool list is
@@ -387,41 +388,46 @@ class Server:
         _reject_extra(args, {"query"})
         query = _require_str(args, "query")
         found = self.store.search(query)
-        hits = [_hit_block(page_id, self.store.get_page(page_id) or {}, query) for page_id in found[:SEARCH_LIMIT]]
-        blocks = [text for text, _ in hits]
+        hits = [_hit_rows(page_id, self.store.get_page(page_id) or {}, query) for page_id in found[:SEARCH_LIMIT]]
         limit, _ = recall_limit(*self._window())  # one search reply is held to the per-call recall limit
+        specific = "use a longer or more specific query"
 
-        def render(shown: int, why: str = "use a longer or more specific query") -> str:
-            if not blocks:
-                return "No paged-out turn contains that exact text."
-            text = "\n".join(blocks[:shown])
-            if len(found) > shown:
-                text += f"\n[{len(found) - shown} more matching pages not shown; {why}]"
+        def render(rows: list[Row], pages: int, why: str) -> str:
+            text = "\n".join(t for t, _ in rows)
+            if len(found) > pages:
+                text += f"\n[{len(found) - pages} more matching pages not shown; {why}]"
             return text
 
-        picked = {"shown": len(blocks)}
+        picked: dict[str, Any] = {"rows": [], "pages": 0}
 
         def build(room: int | None) -> list[str] | None:
-            full = render(len(blocks))
+            if not hits:
+                return ["No paged-out turn contains that exact text."]
             cap = limit if room is None else min(room, limit)
-            if len(full) <= cap:
-                picked["shown"] = len(blocks)
-                return [full]
-            why = ("the recall budget for this turn is used up" if room is not None and room < limit
-                   and len(full) <= limit else "use a longer or more specific query")
-            for count in range(len(blocks) - 1, 0, -1):
-                text = render(count, why)
+            by_cap = room is None or limit <= room  # the per-call limit binds, not the turn's room
+            why = specific if by_cap else "the recall budget for this turn is used up"
+            for count in range(len(hits), 0, -1):  # as many whole hits as fit
+                rows = [row for hit in hits[:count] for row in hit]
+                text = render(rows, count, specific if count == len(hits) else why)
                 if len(text) <= cap:
-                    picked["shown"] = count
+                    picked.update(rows=rows, pages=count)
                     return [text]
-            return None
+            # Not even one whole hit: its page line and matching lines, without context, as far as they fit.
+            header, *lines = hits[0]
+            matches = [row for row in lines if row[0].startswith(">")]
+            for count in range(len(matches), 0, -1):
+                rows = [header, *matches[:count], (f"  [the rest of this hit is not shown; {why}]", None)]
+                text = render(rows, 1, why)
+                if len(text) <= cap:
+                    picked.update(rows=rows, pages=1)
+                    return [text]
+            return [SEARCH_TOO_LONG] if by_cap and len(SEARCH_TOO_LONG) <= cap else None
 
         texts, budget = self._within_room(build, "contexto_search")
-        shown = blocks[: picked["shown"]] if texts else []
         text = texts[0] if texts else BUDGET_SPENT
         return ([{"type": "text", "text": text}], None,
-                {"query_chars": len(query), "hits": len(shown), "total_matches": len(found),
-                 "returned": [span for _, spans in hits[: len(shown)] for span in spans], **budget})
+                {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": len(found),
+                 "returned": _spans(picked["rows"]) if texts else [], **budget})
 
     # Per-turn recall budget (M2 contract PR #69)
 
@@ -483,26 +489,38 @@ def _state_trailer(rest: int) -> str:
     return f"[{rest} more characters of the pinned state not shown; the recall budget for this turn is used up]"
 
 
-def _hit_block(page_id: str, page: dict[str, Any], query: str) -> tuple[str, list[dict[str, Any]]]:
+Row = tuple[str, "tuple[str, int, int] | None"]  # a line of a search reply, and the page span it shows
+
+
+def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     """One search hit: the page line, then its matching lines (>) and context, each with its offset.
 
-    Also returns the page spans the hit shows, ``{page_id, start, end}`` with ``end`` exclusive, for
-    the content-free log that acceptance 3 reads (contract PR #95); contiguous lines merge.
+    Each line carries the page span it shows, ``(page_id, start, end)`` with ``end`` exclusive, for
+    the content-free log that acceptance 3 reads (contract PR #95).
     """
-    lines = [f"{page_id} (turn {page.get('turn')}): {_stub_line(page.get('stub'))}"]
-    spans: list[dict[str, Any]] = []
+    rows: list[Row] = [(f"{page_id} (turn {page.get('turn')}): {_stub_line(page.get('stub'))}", None)]
     if page.get("messages") is not None:
         shown, total = match_lines(render_page(page), query)
-        lines += [f"{'>' if is_match else ' '} {start}: {text}" for start, _, is_match, text in shown]
-        for start, end, _, _ in shown:
-            if spans and spans[-1]["end"] + 1 == start:  # the next line: the newline between is shown too
-                spans[-1]["end"] = end
-            else:
-                spans.append({"page_id": page_id, "start": start, "end": end})
+        rows += [(f"{'>' if is_match else ' '} {start}: {text}", (page_id, start, end))
+                 for start, end, is_match, text in shown]
         if total > MATCHES_PER_PAGE:
-            lines.append(f"  [{total - MATCHES_PER_PAGE} more matching lines in this page; call contexto_recall "
-                         f"with page_id {page_id} and an offset to read further]")
-    return "\n".join(lines), spans
+            rows.append((f"  [{total - MATCHES_PER_PAGE} more matching lines in this page; call contexto_recall "
+                         f"with page_id {page_id} and an offset to read further]", None))
+    return rows
+
+
+def _spans(rows: list[Row]) -> list[dict[str, Any]]:
+    """The page spans a reply's rows show, ``{page_id, start, end}``; lines that follow each other merge."""
+    spans: list[dict[str, Any]] = []
+    for _, span in rows:
+        if span is None:
+            continue
+        page_id, start, end = span
+        if spans and spans[-1]["page_id"] == page_id and spans[-1]["end"] + 1 == start:  # the newline is shown too
+            spans[-1]["end"] = end
+        else:
+            spans.append({"page_id": page_id, "start": start, "end": end})
+    return spans
 
 
 def _stub_line(stub: Any) -> str:
