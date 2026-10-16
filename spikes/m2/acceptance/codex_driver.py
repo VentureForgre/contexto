@@ -288,7 +288,10 @@ def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved
         try:
             answer = turns.send(i, text)
         except Exception as exc:  # noqa: BLE001 - fail closed: the turn was stopped, the session stops
-            stopped = f"turn {i + 1}: stopped, the spend watcher failed closed ({type(exc).__name__}: {exc})"
+            # A stop rule (an exception with ``stop_rule`` set) records its own reason; anything else is the
+            # watcher failing closed.
+            stopped = (f"turn {i + 1}: {exc}" if getattr(exc, "stop_rule", False) else
+                       f"turn {i + 1}: stopped, the spend watcher failed closed ({type(exc).__name__}: {exc})")
             failed_turn = i
             break
         if turns.stopped_by_watcher and turns.stopped_by_watcher[-1] == i:

@@ -12,10 +12,19 @@ refuses to start when the working tree is dirty or not at a commit, or when ``--
 that worst case. The key helper command is passed to ``contexto run``, which hands it to Codex's
 provider config; the key itself is never in a file, an argument, a log, or the record.
 
-It stops at once (the turn's process group is killed) and records why on: any 401 or 403, any other
-4xx or 5xx, a request whose output exceeds 32,000 tokens, Codex reporting a failed turn or an error
-(``turn.failed`` or ``error`` in its ``--json`` events: how a refusal or an upstream error reaches
-the harness, read by event type only, never by answer text), the spend watcher, or any other failure.
+It stops (the turn's process group is killed, or the session ends after the turn) and records why on:
+- any 401 or 403, and any other 4xx or 5xx, in the proxy's log;
+- a request whose output exceeds 32,000 tokens;
+- a Responses request that ended other than ``completed`` (A23's ``end_event``: incomplete, failed, or
+  none for a stream cut off with no end event; or its ``response_status``), when the entry carries it;
+- a refusal reply that arrives as a 200. Codex 0.154.0 drops a message that has any ``refusal`` content
+  part (measured with a stub: no ``agent_message`` event and nothing in its rollout), so a turn that ends
+  with no ``agent_message`` item stops the run; a ``refusal`` part in the rollout's ``response_item``
+  payloads, for a Codex that keeps them, stops it too (both read by type only);
+- Codex's ``--json`` events reporting ``turn.failed`` or ``error``;
+- the spend watcher, or any other failure.
+Answer text is never read. One request whose output passes 32,000 tokens can overrun the approval by
+that request's excess output: the stop comes once the request is logged.
 
 It writes ``<out>/codex-step1-record.json``: content-free numbers and event counts only."""
 
@@ -24,10 +33,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -39,11 +51,18 @@ from acceptance import codex_budget, codex_driver, codex_recall_credit, script  
 REPO = Path(__file__).resolve().parents[3]
 OUTPUT_CAP = codex_budget.OUTPUT_ALLOWANCE  # 32,000 output tokens per request: more stops the run
 FAILED_TURN_EVENTS = ("turn.failed", "error")  # Codex --json event types for a failed turn or an error
+END_STATUS_KEYS = ("end_event", "response_status")  # A23: how a Responses request ended, as the proxy logs it
+SAMPLE_SECONDS = 1.0  # the network sampler's period
+OVERRUN = ("one request whose output passes 32,000 tokens can overrun the approval by that request's excess "
+           "output: the stop comes once the request is logged")
+_REMOTE = re.compile(r"->(\S+?)(?:\s|$)")
 _HOST = re.compile(rb"https?://([A-Za-z0-9.\-]+)")
 
 
 class LiveStop(RuntimeError):
     """A stop rule fired; the message is the content-free reason recorded."""
+
+    stop_rule = True
 
 
 def preflight(repo: Path) -> dict[str, Any]:
@@ -75,36 +94,119 @@ class LiveWatch(codex_driver.SpendWatch):
                 raise LiveStop(f"upstream answered {status}")
             if codex_driver.usage_tokens(e.get("usage"))[2] > OUTPUT_CAP:
                 raise LiveStop(f"a request's output passed {OUTPUT_CAP:,} tokens")
+            for key in END_STATUS_KEYS:
+                ended = e.get(key)
+                if ended is not None and ended != "completed":
+                    detail = e.get("incomplete_reason") or e.get("error_code")
+                    raise LiveStop(f"a response ended with {key} {ended}" + (f" ({detail})" if detail else ""))
         return stop
 
 
+def refusal_parts(codex_home: Path | None) -> int:
+    """Refusal content parts in Codex's rollout (``response_item`` payloads), counted by part type only."""
+    count = 0
+    for path in (codex_home.rglob("rollout-*.jsonl") if codex_home and codex_home.exists() else []):
+        for line in path.read_text().splitlines():
+            item = json.loads(line) if line.startswith("{") else {}
+            payload = item.get("payload") if item.get("type") == "response_item" else None
+            parts = payload.get("content") if isinstance(payload, dict) else None
+            count += sum(1 for p in parts or [] if isinstance(p, dict) and p.get("type") == "refusal")
+    return count
+
+
+def _loopback(address: str) -> bool:
+    return address.split()[-1].startswith(("127.", "[::1]", "localhost"))
+
+
+def remote_addresses(lsof_output: str) -> set[str]:
+    """``command host:port`` for each connection's remote end in ``lsof -nP -i`` output (the command name
+    lsof shows, so an outside connection says which program made it)."""
+    return {f"{line.split()[0]} {m.group(1)}" for line in lsof_output.splitlines()
+            for m in [_REMOTE.search(line)] if m}
+
+
+@dataclass
 class LiveTurns(codex_driver.CodexTurns):
-    """CodexTurns that also stops when Codex's own ``--json`` events report a failed turn or an error."""
+    """CodexTurns with the live checks after each turn (the spend watcher once more, a refusal part in the
+    rollout, Codex's failed-turn events) and a best-effort network sample during it."""
+
+    codex_home: Path | None = None
+    network: dict[str, Any] = field(default_factory=lambda: {"remote": set(), "samples": 0, "errors": []})
+    refusals_seen: int = 0
+
+    def _sample(self, proc: Any) -> None:
+        """Remote addresses of the turn's process group, every SAMPLE_SECONDS; it never stops the run."""
+        while proc.poll() is None:
+            try:
+                done = subprocess.run(["lsof", "-nP", "-i", "-a", "-g", str(proc.pid)], capture_output=True,
+                                      text=True, timeout=5)
+                self.network["remote"].update(remote_addresses(done.stdout))
+                self.network["samples"] += 1
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.network["errors"].append(type(exc).__name__)
+                return
+            time.sleep(SAMPLE_SECONDS)
 
     def send(self, index: int, text: str) -> str:
-        answer = super().send(index, text)
+        popen, sampler = self.popen, []
+
+        def started(cmd, **kwargs):
+            proc = popen(cmd, **kwargs)
+            sampler.append(threading.Thread(target=self._sample, args=(proc,), daemon=True))
+            sampler[-1].start()
+            return proc
+
+        self.popen = started
+        try:
+            answer = super().send(index, text)
+        finally:
+            self.popen = popen
+            for thread in sampler:
+                thread.join(timeout=SAMPLE_SECONDS + 5)
         if isinstance(self.watch, LiveWatch) and self.watch():
             # Checked once more after the turn: a 401, or a request that passed its estimate, can end Codex
             # before the next poll, and the log's reason is what is recorded, not Codex's exit.
             raise LiveStop(f"stopped by the spend watcher (approved {self.watch.approved:,})")
-        events = self.scratch / f"events-{index}.jsonl"
-        kinds = {json.loads(line).get("type") for line in events.read_text().splitlines() if line.startswith("{")}
+        refused = refusal_parts(self.codex_home)
+        if refused > self.refusals_seen:
+            self.refusals_seen = refused
+            raise LiveStop(f"a refusal content part on turn {index + 1}")
+        events = [json.loads(line) for line in (self.scratch / f"events-{index}.jsonl").read_text().splitlines()
+                  if line.startswith("{")]
+        kinds = {e.get("type") for e in events}
         failed = sorted(k for k in kinds if k in FAILED_TURN_EVENTS)
         if failed:
             raise LiveStop(f"codex reported {', '.join(failed)} on turn {index + 1}")
+        if not any(e.get("type") == "item.completed" and (e.get("item") or {}).get("type") == "agent_message"
+                   for e in events):
+            raise LiveStop(f"turn {index + 1} ended with no assistant message")
         return answer
 
 
-def outside_hosts(codex_home: Path, proxy_host: str) -> list[str]:
-    """Hosts named in Codex's own local logs other than the proxy (host names only; nothing is probed)."""
+def outside_hosts(codex_home: Path, proxy_host: str) -> dict[str, Any]:
+    """Hosts named in Codex's own local logs (``*.log``, its ``log`` directory, and its SQLite logs),
+    other than the proxy. Host names only, and what was scanned; this is not a network observation."""
     hosts: set[bytes] = set()
-    for path in codex_home.rglob("*"):
+    files = rows = 0
+    for path in codex_home.rglob("*") if codex_home.exists() else []:
         rel = path.relative_to(codex_home).parts
-        # Codex's own logs only (``*.log`` and its ``log`` directory), not cached plugin files.
         if path.is_file() and (path.suffix == ".log" or rel[:1] == ("log",)):
+            files += 1
             hosts.update(_HOST.findall(path.read_bytes()))
-    names = {h.decode() for h in hosts}
-    return sorted(n for n in names if n not in ("127.0.0.1", "localhost", proxy_host))
+        elif path.is_file() and path.suffix == ".sqlite":
+            try:
+                db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
+                    for row in db.execute(f'SELECT * FROM "{table}"'):
+                        rows += 1
+                        hosts.update(_HOST.findall(" ".join(str(v) for v in row).encode()))
+                db.close()
+            except sqlite3.Error:
+                pass
+    names = sorted({h.decode() for h in hosts} - {"127.0.0.1", "localhost", proxy_host})
+    return {"hosts": names, "files_scanned": files, "sqlite_rows_scanned": rows,
+            "label": f"hosts named in Codex's local logs: {names}, {files} files and {rows} rows scanned; "
+                     "not a network observation"}
 
 
 def record(s: script.Script, ran: dict[str, Any], events: list[dict[str, Any]], session_dir: Path,
@@ -167,7 +269,7 @@ def main(argv: list[str] | None = None, repo: Path = REPO) -> int:
                                          Path("<last message>"), codex_upstream=upstream + "/v1", model=a.model)
     pre = {"commit": code["commit"], "tree": code["tree"], "model": a.model, "reasoning_effort": a.reasoning_effort,
            "bound": a.bound, "approved": a.approved, "step1_worst_case": estimate, "turns": len(s.turns),
-           "codex_command": template, "scratch": str(root), "codex_home": str(store / "sessions" / "codex-step1" / "codex-home"),
+           "codex_command": template, "overrun_bound": OVERRUN, "scratch": str(root), "codex_home": str(store / "sessions" / "codex-step1" / "codex-home"),
            "contexto_home": str(store)}
     print(json.dumps({"preflight": pre}, indent=2))
     if a.approved < estimate:
@@ -177,6 +279,7 @@ def main(argv: list[str] | None = None, repo: Path = REPO) -> int:
     log = store / "sessions" / session / "log.jsonl"
     turns = LiveTurns(a.contexto, session, a.bound, upstream, a.key_helper, scratch, env,
                       codex_upstream=upstream + "/v1")
+    turns.codex_home = log.parent / "codex-home"
     turns.watch = LiveWatch(log, a.approved, a.bound + OUTPUT_CAP)
     per = a.bound + OUTPUT_CAP
     estimates = [per] * s.n_content + [(1 + codex_budget.TOOL_ROUNDS) * per] * len(s.probe_turn_ids)
@@ -184,7 +287,13 @@ def main(argv: list[str] | None = None, repo: Path = REPO) -> int:
     events = codex_driver.read_log(log)
     proxy_host = re.sub(r"^https?://", "", upstream).split("/")[0].split(":")[0]
     out = record(s, ran, events, log.parent, a.approved, a.bound,
-                 {"preflight": pre, "outside_hosts": outside_hosts(log.parent / "codex-home", proxy_host)})
+                 {"preflight": pre, "outside_hosts": outside_hosts(log.parent / "codex-home", proxy_host),
+                  "network_sample": {"remote": sorted(turns.network["remote"]),
+                                     "outside": sorted(r for r in turns.network["remote"] if not _loopback(r)),
+                                     "samples": turns.network["samples"],
+                                     "could_not_run": sorted(set(turns.network["errors"])),
+                                     "label": f"sampled every {SAMPLE_SECONDS:g}s; short connections can be missed"},
+                  "overrun_bound": OVERRUN})
     (a.out / "codex-step1-record.json").write_text(json.dumps(out, indent=2))
     print(json.dumps({k: out[k] for k in ("ran", "spent", "requests", "max_input", "max_output")}, indent=2))
     return 0 if ran["stopped"] is None and ran["turns_completed"] == ran["turns"] else 1
