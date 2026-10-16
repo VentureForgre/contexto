@@ -70,9 +70,7 @@ class Source:
                 raise ValidationError("file source requires sha256 as 64 lowercase hex chars")
             if PurePosixPath(self.locator).is_absolute():
                 raise ValidationError(f"file source locator must be a relative path: {self.locator!r}")
-            normalized = posixpath.normpath(self.locator)
-            if normalized == ".." or normalized.startswith("../") or "\\" in self.locator:
-                raise ValidationError(f"file source locator escapes the root: {self.locator!r}")
+
         if self.type == "page" and not _PAGE_ID.fullmatch(self.locator):
             raise ValidationError(f"page source locator must be a page id: {self.locator!r}")
 
@@ -166,6 +164,21 @@ class Record:
         if self.supersedes:
             d["supersedes"] = list(self.supersedes)
         return d
+
+
+def check_new_sources(record: "Record") -> None:
+    """Rules applied when a record is appended, not when an existing ledger is read.
+
+    Keeping them out of load-time validation means an older ledger that already holds such a record
+    still loads; staleness then treats those sources as stale instead of failing.
+    """
+    for source in record.provenance:
+        if any(ord(c) < 32 or ord(c) == 127 for c in source.locator):
+            raise ValidationError(f"source locator contains a control character: {source.locator!r}")
+        if source.type == "file":
+            normalized = posixpath.normpath(source.locator)
+            if normalized == ".." or normalized.startswith("../") or "\\" in source.locator:
+                raise ValidationError(f"file source locator escapes the root: {source.locator!r}")
 
 
 def compute_id(record_dict: dict) -> str:

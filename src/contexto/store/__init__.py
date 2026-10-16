@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -84,7 +85,10 @@ class SessionStore(LedgerOps):
         try:
             quarantined = self.ledger.repair()
         except LedgerCorruptError as e:
-            self.log({"event": "ledger_damaged", "error": str(e)})
+            # Class and position only: the message can quote stored values.
+            line = re.search(r"\bline (\d+)\b", str(e))
+            self.log({"event": "ledger_damaged", "error": type(e).__name__,
+                      "line": int(line.group(1)) if line else None})
             return
         if quarantined is not None:
             self.log({"event": "ledger_repaired", "quarantine": quarantined.name})
@@ -105,7 +109,7 @@ class SessionStore(LedgerOps):
     def _meta(self) -> dict[str, Any]:
         try:
             meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (OSError, ValueError):  # missing, unreadable, not UTF-8, or not JSON: treat as unrecorded
             return {}
         return meta if isinstance(meta, dict) else {}
 

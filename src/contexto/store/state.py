@@ -1,7 +1,9 @@
 """Derived state over a ledger: active records, open obligations, conflicts, staleness.
 
 Harvested from PR #3 (lane-b/state at 1913ca0). A file source is stale when its file is missing or
-unreadable, has no recorded sha256, or hashes differently (reviewer-1 on PR #20).
+unreadable, has no recorded sha256, or hashes differently (reviewer-1 on PR #20). A locator that
+cannot be opened at all (for example one holding NUL) or that resolves outside the root (for example
+through a symlink) is stale and is never read, so no single record can break pinned text.
 
 Rules come from docs/milestones/M1-ledger-and-recovery.md. Everything here is
 computed from ``list[Record]`` plus the working tree at read time. Nothing is
@@ -86,13 +88,26 @@ def _stale_sources(record: Record, root: Path, cache: dict[Path, str | None]) ->
         if source.type != "file":
             continue
         # Locators are root-relative POSIX paths and sha256 is required (contract M1).
-        path = Path(root) / source.locator
+        path = _inside(Path(root), source.locator)
+        if path is None:
+            stale.append(source)
+            continue
         if path not in cache:
             cache[path] = _file_sha256(path)
         current = cache[path]
         if current is None or source.sha256 is None or current != source.sha256:
             stale.append(source)
     return stale
+
+
+def _inside(root: Path, locator: str) -> Path | None:
+    """The resolved path for ``locator`` if it stays inside ``root``, else None."""
+    try:
+        base = root.resolve()
+        path = (base / locator).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return path if path == base or base in path.parents else None
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -103,5 +118,5 @@ def _file_sha256(path: Path) -> str | None:
             while chunk := f.read(_CHUNK):
                 digest.update(chunk)
         return digest.hexdigest()
-    except OSError:
+    except (OSError, ValueError):
         return None
