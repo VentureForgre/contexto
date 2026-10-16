@@ -126,7 +126,8 @@ measured this case, PR #9). So:
   `message_start` and `message_delta` events.
 - **4xx (acceptance 1).** Only model requests count (contract PR #61): `upstream_4xx` events and
   request records on the paths the proxy transforms (`contexto.proxy.TRANSFORMED_PATHS`:
-  `/v1/messages`, its `count_tokens`, and `/responses`). Both must be zero. 4xx on any other path, such as Claude Code's
+  `/v1/messages`, its `count_tokens`, and `/responses`; a trailing slash counts), including 4xx the
+  proxy answers itself, plus rule 15's `encoded_body_rejected` (415). All must be zero. 4xx on any other path, such as Claude Code's
   unauthenticated `HEAD /api/hello` startup probe, are reported in `non_model_4xx` by method and
   path, and no verdict uses them.
 - **Epochs and cache (acceptance 4).**
@@ -345,7 +346,7 @@ planned over-bound requests.
 
 ## Tests
 
-`uv run --with pytest pytest spikes/m2` runs 45 tests with no live calls. Most use synthetic
+`uv run --with pytest pytest spikes/m2` runs 46 tests with no live calls. Most use synthetic
 fixtures; `test_engine_log.py` drives the real proxy and rewrite engine against a stub upstream,
 once with JSON replies and once with SSE replies, since the acceptance session streams.
 They cover:

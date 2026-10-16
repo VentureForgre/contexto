@@ -79,12 +79,16 @@ AUTH_PATHS = TRANSFORMED_PATHS
 
 
 def is_auth_failure(event: dict) -> bool:
-    """A 401 or 403 on a POST to the Messages API, as a request record or an upstream_4xx event."""
+    """A 401 or 403 on a POST to a model path (Messages or Responses, with their token counts), as a
+    request record or an upstream_4xx event."""
     if event.get("event") not in ("upstream_4xx", "request") or event.get("status") not in (401, 403):
         return False
-    if str(event.get("path") or "").split("?")[0] not in AUTH_PATHS:
+    path = str(event.get("path") or "").split("?")[0]
+    if (path.rstrip("/") or path) not in AUTH_PATHS:
         return False
-    return event.get("method", "POST") == "POST"  # upstream_4xx events carry no method; only POSTs reach them
+    # The proxy logs upstream_4xx for any method but records none, so one on a model path is taken as
+    # a POST: the conservative reading, since it stops the run.
+    return event.get("method", "POST") == "POST"
 
 
 class AuthWatcher:

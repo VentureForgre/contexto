@@ -472,3 +472,17 @@ def test_non_model_4xx_are_counted_apart_from_acceptance_1():
     assert r.non_model_4xx == {"HEAD /api/hello": 1} and r.upstream_4xx == 0 and r.verdicts()["zero_4xx"]
     model_4xx = {"event": "upstream_4xx", "status": 400, "path": "/v1/messages/count_tokens"}
     assert not detectors.analyze([model_4xx], [], bound=150_000).verdicts()["zero_4xx"]
+
+
+def test_local_model_path_4xx_and_encoded_body_rejections_fail_zero_4xx():
+    # reviewer-2, PR #62: 4xx the proxy answers itself on a model path have no upstream_4xx event.
+    framing = {"event": "request", "method": "POST", "path": "/v1/messages/count_tokens", "status": 400,
+               "error": "malformed request framing"}
+    r = detectors.analyze([framing], [], bound=150_000)
+    assert r.model_request_4xx == 1 and r.non_model_4xx == {} and not r.verdicts()["zero_4xx"]
+    rejected = {"event": "encoded_body_rejected", "encoding": "gzip", "endpoint": "/v1/messages", "reason": "x"}
+    r = detectors.analyze([rejected], [], bound=150_000)
+    assert r.encoded_body_rejected == 1 and not r.verdicts()["zero_4xx"]
+    slash = {"event": "request", "method": "POST", "path": "/v1/messages/", "status": 400}
+    assert detectors.analyze([slash], [], bound=150_000).model_request_4xx == 1
+    assert driver.is_auth_failure({"event": "request", "method": "POST", "path": "/v1/messages/", "status": 401})
