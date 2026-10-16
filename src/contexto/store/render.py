@@ -106,15 +106,23 @@ def _responses_lines(turn: Any, item: dict[str, Any]) -> list[str]:
     ``function_call`` or ``custom_tool_call`` as ``tool_use <name> <sorted JSON input>``, and an output
     as ``tool_result:`` and its text. Reasoning, other item types, and system-like items (developer
     and system messages, context-only user messages, ``additional_tools``) render nothing."""
+    message = as_message(item)
+    return [] if message is None else render_page({"turn": turn, "messages": [message]}).split("\n")
+
+
+def as_message(message: Any) -> dict[str, Any] | None:
+    """A page message as a Messages API message: a Messages API message as it is (the same object),
+    a Responses item through ``ResponsesDialect.retained_blocks`` (B20), or None for an item that is
+    not searchable (system-like, reasoning, other types). Rendering, search, and the stub all read
+    pages through this one mapping (B23), so what search matches is what the page shows."""
+    if not isinstance(message, dict) or not _is_responses_item(message):
+        return message
     from contexto.codex import RESPONSES  # imported here: contexto.codex builds on the engine, which imports this
 
-    if RESPONSES.is_system_like(item):
-        return []
-    blocks = RESPONSES.retained_blocks(item)
-    if not blocks:
-        return []
-    message = {"role": blocks[0][0], "content": [block for _, block in blocks]}
-    return render_page({"turn": turn, "messages": [message]}).split("\n")
+    if RESPONSES.is_system_like(message):
+        return None
+    blocks = RESPONSES.retained_blocks(message)
+    return {"role": blocks[0][0], "content": [block for _, block in blocks]} if blocks else None
 
 
 def recall_chunk(page: dict[str, Any], offset: int = 0, limit: int = RECALL_LIMIT) -> dict[str, Any]:
