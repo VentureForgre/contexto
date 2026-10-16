@@ -89,8 +89,9 @@ run, one model.
 
 ## Usage against plain Codex (Codex acceptance run, zero-spend analysis)
 
-Record: `docs/research/M2-codex-usage-vs-plain.md`. Contexto's side is measured; plain Codex's
-side is modeled from the run's own rollout history. Specific to bound 64,000 and 20 KB turns.
+Record: `docs/research/M2-codex-usage-vs-plain.md` (with the cause correction, #177). Contexto's
+side is measured; plain Codex's side is modeled from the request sizes in the proxy log. One run,
+bound 64,000, 20 KB turns.
 
 | | Input tokens | Cost at gpt-6-astra prices |
 |---|---|---|
@@ -99,12 +100,15 @@ side is modeled from the run's own rollout history. Specific to bound 64,000 and
 | Difference | 45.0 percent fewer | **24.0 percent more** (15.5 percent more pricing uncached input at the input rate) |
 
 Content turns: 71.0 percent fewer tokens and 12.5 percent lower cost. Probe turns: 8.1 percent
-fewer tokens but 2.3 times the cost. The cause is Contexto's, not the model's: at bound 64,000
-every content request from turn 3 rotated, and a rotation changes the text right after Codex's
-9,088-token head, so each of those requests read only the head from cache; those requests carry
-82 percent of Contexto's uncached tokens. Codex's own compaction would not have fired (plain peak
-116,731, modeled). A cache-aware rotation design is being measured offline (A28); until then,
-Contexto on Codex saves tokens but, at small bounds, not money.
+fewer tokens but 2.3 times the cost. The main cause is Contexto's handling of restarts, not the
+bound: the acceptance harness started a new Contexto proxy for each of the 21 `codex exec` turns,
+and a new proxy kept no epoch state, so every one of the 19 rotations was the first request after
+a restart (verified from the run's log). Each rotation changes the text right after Codex's
+9,088-token head, so those requests read only the head from cache. A zero-spend replay (A28,
+`docs/research/M2-cache-aware-rotation.md`) models resuming the epoch after a restart at 9 rotations
+instead of 19 and 9.8 to 16.2 percent lower cost, depending on the bytes-per-token rate; that is
+rule 16, being built (A30, B31). Codex's own compaction would not have fired (plain peak 116,731,
+modeled). Users who keep one proxy for the whole session do not hit these restarts.
 
 ## Token spend on live model calls (owner's proxy unless noted)
 
