@@ -44,7 +44,7 @@ def test_page_id_is_keyed_hmac_over_canonical_json(store):
     [pid] = store.page_out([turn("a")], 1)
     key = bytes.fromhex((store.dir / "page.key").read_text())
     page = store.get_page(pid)
-    body = {k: v for k, v in page.items() if k != "id"}
+    body = {"turn": page["turn"], "messages": page["messages"]}  # content only (contract PR from intake/m2-pageid)
     assert pid == "pg_" + hmac.new(key, canonical_bytes(body), hashlib.sha256).hexdigest()[:16]
     # A plain SHA-256 of the same content would make short turns guessable; the id must differ.
     assert pid != "pg_" + hashlib.sha256(canonical_bytes(body)).hexdigest()[:16]

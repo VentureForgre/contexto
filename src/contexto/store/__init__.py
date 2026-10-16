@@ -33,7 +33,7 @@ from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
 from contexto.store.ledger import Ledger, LedgerCorruptError
-from contexto.store.pages import build_page, render_index, search_pages
+from contexto.store.pages import build_page, render_index, same_content, search_pages
 from contexto.store.records import LedgerOps
 
 __all__ = ["SessionStore", "PageConflictError", "KeyFileError", "SessionNotFoundError", "redact"]
@@ -162,15 +162,22 @@ class SessionStore(LedgerOps):
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]:
         """Write one page per turn (turn numbers from ``first_turn``); return their ids in order.
 
-        Re-writing a turn with identical content is a no-op that returns the same id.
+        Re-paging an existing id is a no-op that keeps the stored page, even if the stub or the
+        estimates were computed differently when it was written; ``PageConflictError`` only when the
+        stored ``{turn, messages}`` differ under the same id (contract PR #47).
         """
         ids = []
         for offset, turn in enumerate(turns):
             page = build_page(self._key, turn, first_turn + offset)
             path = self.pages_dir / f"{page['id']}.json"
             data = canonical_bytes(page)
-            if not write_new(path, data) and path.read_bytes() != data:
-                raise PageConflictError(f"{path} exists with different content")
+            if not write_new(path, data):
+                try:
+                    stored = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as e:
+                    raise PageConflictError(f"{path} exists but cannot be read: {e}") from e
+                if not same_content(stored, page):
+                    raise PageConflictError(f"{path} exists with different turn or messages")
             ids.append(page["id"])
         return ids
 
