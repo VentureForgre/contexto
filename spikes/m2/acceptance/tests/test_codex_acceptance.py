@@ -441,3 +441,17 @@ def test_every_acceptance_turn_carries_both_retry_pins(tmp_path):
     for argv in runner.calls:
         pins = [argv[i + 1] for i, a in enumerate(argv) if a == "-c" and "max_retries" in argv[i + 1]]
         assert pins == ["model_providers.contexto.request_max_retries=0", "model_providers.contexto.stream_max_retries=0"]
+
+
+def test_every_acceptance_turn_turns_off_codex_analytics_and_plugins(tmp_path):
+    """Intake (A22-prep): every acceptance turn carries both off switches for Codex's own outside connections,
+    on the turn's command only (the launcher is unchanged)."""
+    s = script.build(turns=4, turn_bytes=2_000)
+    runner = FakeCodex()
+    codex_driver.run_session(s, _turns(tmp_path, runner), _log(tmp_path), 10**9, [1] * len(s.turns))
+    assert len(runner.calls) == len(s.turns)
+    for argv in runner.calls:
+        pins = [argv[i + 1] for i, a in enumerate(argv) if a == "-c" and argv[i + 1].split("=")[0] in
+                ("analytics.enabled", "features.plugins")]
+        assert pins == ["analytics.enabled=false", "features.plugins=false"]
+        assert argv.index("analytics.enabled=false") > argv.index("exec")  # Codex's flags, not contexto's

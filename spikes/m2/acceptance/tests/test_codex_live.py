@@ -230,13 +230,16 @@ def test_full_step1_run_through_codex_live_against_the_stub(tmp_path):
     assert rec["spent"]["within_line"] and rec["max_output"] <= codex_live.OUTPUT_CAP
     assert rec["preflight"]["model"] == "gpt-6-astra" and rec["preflight"]["reasoning_effort"] == "low"
     assert "model_reasoning_effort=low" in rec["preflight"]["codex_command"]
+    for pin in ("analytics.enabled=false", "features.plugins=false"):
+        assert pin in rec["preflight"]["codex_command"] and pin in rec["preflight"]["codex_pins"]
+    assert rec["codex_pins"] == rec["preflight"]["codex_pins"]
     assert rec["preflight"]["overrun_bound"] == rec["overrun_bound"] == codex_live.OVERRUN
     hosts, net = rec["outside_hosts"], rec["network_sample"]
     assert hosts["hosts"] == [] and hosts["label"].endswith("not a network observation")
     assert net["label"] == "sampled every 1s; short connections can be missed" and net["could_not_run"] == []
-    # Codex itself may reach github.com (plugin sync) and chatgpt.com (analytics); the proxy and the engine
-    # (the contexto and Python processes) make no outside connection.
-    assert net["samples"] > 0 and not [r for r in net["outside"] if r.startswith(("contexto", "python", "Python"))]
+    # With QUIET_PIN, no process of the turn's group was seen reaching outside (without it, codex reached
+    # chatgpt.com and git-remote-https reached github.com). A sample can miss a connection, never invent one.
+    assert net["samples"] > 0 and net["outside"] == []
     # The key never reaches a record, a log, Codex's files, or a command line.
     root = Path(rec["preflight"]["scratch"])
     assert KEY not in json.dumps(rec) and KEY not in json.dumps(rec["preflight"]["codex_command"])

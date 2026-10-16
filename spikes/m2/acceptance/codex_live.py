@@ -275,7 +275,8 @@ def main(argv: list[str] | None = None, repo: Path = REPO) -> int:
                                          Path("<last message>"), codex_upstream=upstream + "/v1", model=a.model)
     pre = {"commit": code["commit"], "tree": code["tree"], "model": a.model, "reasoning_effort": a.reasoning_effort,
            "bound": a.bound, "approved": a.approved, "step1_worst_case": estimate, "turns": len(s.turns),
-           "codex_command": template, "overrun_bound": OVERRUN, "scratch": str(root), "codex_home": str(store / "sessions" / "codex-step1" / "codex-home"),
+           "codex_command": template, "codex_pins": [*codex_driver.RETRY_PIN, *codex_driver.QUIET_PIN],
+           "overrun_bound": OVERRUN, "scratch": str(root), "codex_home": str(store / "sessions" / "codex-step1" / "codex-home"),
            "contexto_home": str(store)}
     print(json.dumps({"preflight": pre}, indent=2))
     if a.approved < estimate:
@@ -299,7 +300,7 @@ def main(argv: list[str] | None = None, repo: Path = REPO) -> int:
                                      "samples": turns.network["samples"],
                                      "could_not_run": sorted(set(turns.network["errors"])),
                                      "label": f"sampled every {SAMPLE_SECONDS:g}s; short connections can be missed"},
-                  "overrun_bound": OVERRUN})
+                  "codex_pins": [*codex_driver.RETRY_PIN, *codex_driver.QUIET_PIN], "overrun_bound": OVERRUN})
     (a.out / "codex-step1-record.json").write_text(json.dumps(out, indent=2))
     print(json.dumps({k: out[k] for k in ("ran", "spent", "requests", "max_input", "max_output")}, indent=2))
     return 0 if ran["stopped"] is None and ran["turns_completed"] == ran["turns"] else 1
