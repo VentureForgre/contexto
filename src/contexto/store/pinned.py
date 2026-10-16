@@ -9,7 +9,7 @@ The full state is the same listing with no cap, plus any decision conflicts.
 from __future__ import annotations
 
 from contexto.store.model import Record
-from contexto.store.pages import PINNED_FIRST_LINE
+from contexto.store.recall import DEFAULT_LINES
 from contexto.store.state import State
 from contexto.tokens import estimate_tokens
 
@@ -59,10 +59,11 @@ def _omitted_line(n: int) -> str:
     return f"({n} more pinned items omitted; call contexto_state for the full list)"
 
 
-def render_pinned(state: State, budget_tokens: int, staleness_checked: bool = True) -> str:
-    """Pinned text within ``budget_tokens`` (the first line, and the unchecked marker, always included)."""
+def render_pinned(state: State, budget_tokens: int, staleness_checked: bool = True,
+                  opening: tuple[str, ...] = DEFAULT_LINES) -> str:
+    """Pinned text within ``budget_tokens``; the opening lines and the unchecked marker are always included."""
     items = pinned_items(state)
-    lines = [PINNED_FIRST_LINE]
+    lines = list(opening)
     if not staleness_checked and _has_file_sources(state):
         lines.append(UNCHECKED_LINE)
     used = sum(estimate_tokens(x + "\n") for x in lines)
@@ -81,9 +82,9 @@ def render_pinned(state: State, budget_tokens: int, staleness_checked: bool = Tr
     return "\n".join(lines)
 
 
-def render_state(state: State, staleness_checked: bool = True) -> str:
+def render_state(state: State, staleness_checked: bool = True, opening: tuple[str, ...] = DEFAULT_LINES) -> str:
     """The full pinned state with no cap, plus decision conflicts."""
-    lines = [PINNED_FIRST_LINE]
+    lines = list(opening)
     if not staleness_checked and _has_file_sources(state):
         lines.append(UNCHECKED_LINE)
     group = None

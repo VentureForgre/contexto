@@ -24,6 +24,7 @@ from typing import Any
 from contexto.store.ledger import LedgerCorruptError, LedgerError
 from contexto.store.model import Source, ValidationError
 from contexto.store.pinned import render_pinned, render_state
+from contexto.store.recall import VARIANTS, check_variant, env_variant, opening_lines
 from contexto.store.state import State, derive
 
 DEFAULT_OWNER = "assistant"
@@ -76,10 +77,24 @@ class LedgerOps:
     def state(self, root: Path | None = None) -> State:
         return derive(self.ledger.records(), root)
 
-    def state_text(self) -> str:
+    def state_text(self, variant: str | None = None) -> str:
         root = self.workdir()
-        return render_state(self.state(root), staleness_checked=root is not None)
+        return render_state(self.state(root), staleness_checked=root is not None,
+                            opening=opening_lines(self.recall_variant(variant)))
 
-    def pinned_text(self, budget_tokens: int) -> str:
+    def pinned_text(self, budget_tokens: int, variant: str | None = None) -> str:
         root = self.workdir()
-        return render_pinned(self.state(root), budget_tokens, staleness_checked=root is not None)
+        return render_pinned(self.state(root), budget_tokens, staleness_checked=root is not None,
+                             opening=opening_lines(self.recall_variant(variant)))
+
+    def recall_variant(self, variant: str | None = None) -> str:
+        """The recall-guidance variant: ``variant`` if given, else the one recorded for this session,
+        else ``CONTEXTO_RECALL_VARIANT`` (default ``default``), recorded on first use when writable."""
+        if variant is not None:
+            return check_variant(variant)
+        recorded = self._recorded_variant()
+        if recorded in VARIANTS:
+            return recorded
+        chosen = env_variant()
+        self._record_variant(chosen)
+        return chosen

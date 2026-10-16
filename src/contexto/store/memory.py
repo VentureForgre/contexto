@@ -12,6 +12,7 @@ from typing import Any
 from contexto.store import (PageConflictError, PageNotFoundError, apply_turn_room, charge_room, check_page_id,
                              check_model, check_turn_room, check_window, redact)
 from contexto.store.ledger import MemoryLedger
+from contexto.store.recall import lists_identifiers
 from contexto.store.pages import build_page, render_index, same_content, search_pages
 from contexto.store.records import LedgerOps
 
@@ -96,8 +97,15 @@ class MemoryStore(LedgerOps):
     def search(self, query: str) -> list[str]:
         return search_pages(list(self.pages.values()), query)
 
-    def index_text(self, budget_tokens: int) -> str:
-        return render_index(list(self.pages.values()), budget_tokens)
+    def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
+        return render_index(list(self.pages.values()), budget_tokens,
+                            salient=lists_identifiers(self.recall_variant(variant)))
+
+    def _recorded_variant(self) -> str | None:
+        return getattr(self, "_variant", None)
+
+    def _record_variant(self, variant: str) -> None:
+        self._variant = variant
 
     def log(self, event: dict) -> None:
         record = redact(dict(event))

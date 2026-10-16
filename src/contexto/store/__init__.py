@@ -38,6 +38,7 @@ from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
 from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, render_index, same_content, search_pages
+from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 
 __all__ = ["SessionStore", "PageConflictError", "PageNotFoundError", "KeyFileError", "SessionNotFoundError",
@@ -321,6 +322,7 @@ class SessionStore(LedgerOps):
         store.pages_dir = path / "pages"
         store._key_cache = None
         store.ledger = Ledger(path)
+        store._read_only = True
         return store
 
     @property
@@ -430,8 +432,20 @@ class SessionStore(LedgerOps):
         """Ids of pages whose stub or text contains ``query`` exactly, newest first."""
         return search_pages(self._pages(), query)
 
-    def index_text(self, budget_tokens: int) -> str:
-        return render_index(self._pages(), budget_tokens)
+    def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
+        return render_index(self._pages(), budget_tokens, salient=lists_identifiers(self.recall_variant(variant)))
+
+    def _recorded_variant(self) -> str | None:
+        value = self._meta().get("recall_variant")
+        return value if isinstance(value, str) else None
+
+    def _record_variant(self, variant: str) -> None:
+        if getattr(self, "_read_only", False):  # inspecting a session never writes to it
+            return
+        try:
+            self._update_meta({"recall_variant": variant})
+        except OSError:
+            pass  # recording is a convenience; an unwritable meta.json must not break rendering
 
     def log(self, event: dict) -> None:
         """Append ``event`` (credentials redacted, ``ts`` added if absent) to ``log.jsonl``."""
