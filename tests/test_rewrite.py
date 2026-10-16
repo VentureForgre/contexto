@@ -1,0 +1,440 @@
+"""Rewrite engine tests (M2 contract rules 1 to 12). Request shapes come from Claude Code 2.1.301 as
+measured with zero-spend stubs (spikes/m0/interception, spikes/m2/carried): a context block plus the
+prompt in a turn-start message, role "system" messages with output_config and cache_control, tool
+loops, signed and redacted thinking, settings-only system messages, and the CLI's conversion of a
+single text block to a plain string. All content is synthetic."""
+
+import copy
+
+import pytest
+
+from contexto.canonical import canonical_bytes
+from contexto.rewrite import (
+    COUNT_TOKENS,
+    MESSAGES,
+    THINKING_OMITTED,
+    Config,
+    RewriteEngine,
+    at_turn_start,
+    is_turn_start,
+    message_hash,
+    rewrite,
+)
+from contexto.store.memory import MemoryStore
+from contexto.tokens import TokenEstimator
+
+FILL = "synthetic filler text " * 90  # about 2,000 bytes, about 570 tokens at 3.5 bytes per token
+CONFIG = Config(bound=4_000, headroom_floor=500, window_target=1_500, pin_budget=200, index_budget=200)
+
+
+def ctx_block(tag="ctx"):
+    return {"type": "text", "text": f"<system-reminder>synthetic {tag} context</system-reminder>"}
+
+
+def user(text, context=False):
+    blocks = [ctx_block()] if context else []
+    return {"role": "user", "content": [*blocks, {"type": "text", "text": text}]}
+
+
+def system(text="synthetic system note", cache=True):
+    block = {"type": "text", "text": text}
+    if cache:
+        block["cache_control"] = {"type": "ephemeral"}
+    return {"role": "system", "content": [block], "output_config": {"effort": "medium"}}
+
+
+def settings_only(effort="medium"):
+    return {"role": "system", "content": [], "output_config": {"effort": effort}}
+
+
+def thinking(sig):
+    return {"type": "thinking", "thinking": "", "signature": f"sig-{sig}"}
+
+
+def assistant(text, think=None, redacted=False):
+    blocks = []
+    if think:
+        blocks.append(thinking(think))
+    if redacted:
+        blocks.append({"type": "redacted_thinking", "data": "opaque-synthetic"})
+    blocks.append({"type": "text", "text": text})
+    return {"role": "assistant", "content": blocks}
+
+
+def tool_use(i, think=None):
+    blocks = [thinking(think)] if think else []
+    blocks.append({"type": "tool_use", "id": f"toolu_{i}", "name": "Read", "input": {"file_path": f"f{i}.txt"}})
+    return {"role": "assistant", "content": blocks}
+
+
+def tool_result(i, text="synthetic tool output"):
+    return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"toolu_{i}", "content": text}]}
+
+
+def request(messages, **extra):
+    return {"model": "claude-haiku-5-5", "max_tokens": 64, "stream": True,
+            "system": [{"type": "text", "text": "synthetic head", "cache_control": {"type": "ephemeral"}}],
+            "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+            "messages": messages, **extra}
+
+
+def history(turns, think=False):
+    """Claude Code shape: messages[0] = context + prompt, messages[1] = system, then turns."""
+    msgs = [user(f"prompt 0 {FILL}", context=True), system()]
+    msgs.append(assistant(f"answer 0 {FILL}", think="a0" if think else None))
+    for t in range(1, turns):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"answer {t} {FILL}", think=f"a{t}" if think else None)]
+    return msgs
+
+
+def run(messages, state=None, store=None, config=CONFIG, estimator=None):
+    store = store if store is not None else MemoryStore(key=b"k" * 32)
+    estimator = estimator or TokenEstimator()
+    up, st, ev = rewrite(request(messages), state, store, config, estimator)
+    return up, st, ev, store
+
+
+def names(events):
+    return [e["event"] for e in events]
+
+
+# Classification ----------------------------------------------------------------------------------
+
+def test_turn_start_detection_on_claude_code_shapes():
+    assert is_turn_start(user("hi", context=True))
+    assert is_turn_start({"role": "user", "content": "plain string prompt"})
+    assert not is_turn_start({"role": "user", "content": [ctx_block()]})  # context only
+    assert not is_turn_start(tool_result(1))
+    assert not is_turn_start(system())
+    # The fresh-session shape ends with a system message after the prompt: still a turn start.
+    assert at_turn_start([user("p", context=True), system()])
+    assert at_turn_start(history(2) + [user("new"), system()])  # trailing system joins the new turn
+    assert not at_turn_start(history(2) + [user("new"), tool_use(1), tool_result(1)])
+
+
+# Rule 1: first epoch, pass-through, purity ------------------------------------------------------
+
+def test_first_epoch_passes_everything_through_unchanged():
+    msgs = history(2) + [user("new turn")]
+    req = request(msgs, thinking={"type": "adaptive"}, metadata={"user_id": "synthetic"})
+    before = copy.deepcopy(req)
+    up, st, ev = rewrite(req, None, MemoryStore(key=b"k" * 32), Config(), TokenEstimator())
+    assert req == before  # input never mutated
+    assert up["messages"] == msgs and up["messages"][0] is msgs[0]
+    assert up["system"] is req["system"] and up["tools"] is req["tools"]
+    for field in ("stream", "thinking", "metadata", "model", "max_tokens"):
+        assert up[field] == req[field]
+    assert st.k == 0 and names(ev) == ["request"]
+    assert all(isinstance(v, (int, float, bool)) or (isinstance(v, str) and len(v) < 40) for e in ev for v in e.values())
+
+
+# Rules 3 and 4: rotation ------------------------------------------------------------------------
+
+def test_rotation_at_turn_start_pages_turns_and_merges_preamble():
+    msgs = history(6) + [user("new prompt"), system("trailing system")]
+    up, st, ev, store = run(msgs)
+    assert "rotation" in names(ev) and "page_out" in names(ev)
+    first = up["messages"][0]
+    assert first["role"] == "user" and is_turn_start(msgs[st.k])
+    assert first["content"][0] == ctx_block()  # carried context first
+    expected = "\n\n".join(t for t in (store.pinned_text(CONFIG.pin_budget), store.index_text(CONFIG.index_budget)) if t)
+    assert first["content"][1] == {"type": "text", "text": expected} and expected  # the preamble block
+    assert first["content"][2:] == msgs[st.k]["content"]  # then its own content
+    assert all(b.get("type") != "tool_result" for b in first["content"])
+    assert len(store.pages) == sum(1 for i in range(0, st.k) if is_turn_start(msgs[i]))
+
+
+def test_smallest_k_keeps_as_many_turns_as_fit_and_never_less_than_newest_complete():
+    msgs = history(6) + [user("new prompt")]
+    _, st, _, _ = run(msgs)
+    starts = [i for i, m in enumerate(msgs) if is_turn_start(m)]
+    est = TokenEstimator()
+    fits = [k for k in starts[:-1] if est.estimate_messages([m for m in msgs[k:] if m["role"] != "system"]) <= CONFIG.target]
+    assert st.k == (min(fits) if fits else starts[-2])
+    tight = Config(bound=4_000, headroom_floor=500, window_target=10)  # nothing fits
+    _, st2, _, _ = run(msgs, config=tight)
+    assert st2.k == starts[-2]  # newest complete turn plus the new prompt are kept
+
+
+def test_second_rotation_never_unpages():
+    store = MemoryStore(key=b"k" * 32)
+    msgs = history(6) + [user("new prompt")]
+    _, st, _, _ = run(msgs, store=store)
+    more = msgs + [assistant(f"reply {FILL}")]
+    for t in range(4):
+        more += [user(f"later {t} {FILL}"), assistant(f"later answer {t} {FILL}")]
+    more.append(user("another new prompt"))
+    _, st2, ev2, _ = run(more, state=st, store=store)
+    assert "rotation" in names(ev2) and st2.k >= st.k and st2.turns_paged > st.turns_paged
+
+
+def test_no_rotation_inside_a_tool_loop_marks_over_bound():
+    msgs = history(8) + [user("go"), tool_use(1), tool_result(1, FILL * 3)]
+    up, st, ev, store = run(msgs)
+    assert "rotation" not in names(ev) and not store.pages
+    assert ev[-1]["over_bound"] is True and up["messages"] == msgs
+
+
+def test_resent_request_never_rotates_twice():
+    msgs = history(6) + [user("new prompt")]
+    store = MemoryStore(key=b"k" * 32)
+    up1, st, _, _ = run(msgs, store=store)
+    up2, st2, ev2, _ = run(msgs, state=st, store=store)
+    assert "rotation" not in names(ev2) and st2.epoch == st.epoch
+    assert canonical_bytes(up1) == canonical_bytes(up2)
+
+
+# Rule 2: thinking ----------------------------------------------------------------------------------
+
+def test_thinking_stripped_from_existing_messages_and_untouched_after_rotation():
+    msgs = history(6, think=True) + [user("new prompt")]
+    store = MemoryStore(key=b"k" * 32)
+    up, st, _, _ = run(msgs, store=store)
+    assert not any(b.get("type") in ("thinking", "redacted_thinking")
+                   for m in up["messages"] for b in (m["content"] if isinstance(m["content"], list) else []))
+    later = msgs + [tool_use(9, think="new"), tool_result(9)]
+    up2, _, ev2, _ = run(later, state=st, store=store)
+    assert up2["messages"][-2] is later[-2]  # added after the rotation: passes through untouched
+    assert up2["messages"][-2]["content"][0]["type"] == "thinking"
+    assert "rotation" not in names(ev2)
+
+
+def test_thinking_only_assistant_gets_placeholder_and_tool_use_keeps_order():
+    only = {"role": "assistant", "content": [thinking("x"), {"type": "redacted_thinking", "data": "d"}]}
+    mixed = {"role": "assistant", "content": [thinking("y"), {"type": "text", "text": "t"}, tool_use(3)["content"][0]]}
+    msgs = history(6) + [user(f"p {FILL}"), only, user(f"q {FILL}"), mixed, tool_result(3), assistant("done"), user("new")]
+    up, st, _, _ = run(msgs, config=Config(bound=4_000, headroom_floor=500, window_target=100_000))
+    by_id = {id(m): m for m in up["messages"]}
+    stripped = [m for m in up["messages"] if m.get("role") == "assistant"]
+    assert {"type": "text", "text": THINKING_OMITTED} in [b for m in stripped for b in m["content"]]
+    kept = next(m for m in stripped if any(b.get("type") == "tool_use" for b in m["content"]))
+    assert [b["type"] for b in kept["content"]] == ["text", "tool_use"]
+    assert by_id  # transform built new dicts only where needed
+
+
+# Rule 1 placement: carried content ----------------------------------------------------------------
+
+def test_carried_system_messages_follow_first_retained_turn_start_and_pages_exclude_carried():
+    msgs = [user(f"prompt 0 {FILL}", context=True), system("sys A"), assistant(f"a0 {FILL}")]
+    msgs += [user(f"prompt 1 {FILL}"), settings_only(), assistant(f"a1 {FILL}")]
+    for t in range(2, 6):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    up, st, _, store = run(msgs)
+    assert st.k >= 3  # turns 0 and 1 paged
+    out = up["messages"]
+    assert out[0]["role"] == "user" and out[1]["role"] == "system" and out[2]["role"] == "system"
+    assert out[1] is msgs[1] and out[2] is msgs[4]  # carried in current form, original order
+    for page in store.pages.values():
+        dumped = canonical_bytes(page).decode()
+        assert "sys A" not in dumped and "system-reminder" not in dumped and '"role":"system"' not in dumped
+
+
+def test_preamble_merges_into_string_content_turn_start():
+    msgs = history(6)
+    starts = [i for i, m in enumerate(msgs) if is_turn_start(m)]
+    msgs[starts[3]] = {"role": "user", "content": msgs[starts[3]]["content"][-1]["text"]}  # string form
+    msgs.append(user("new prompt"))
+    up, st, _, _ = run(msgs, config=Config(bound=4_000, headroom_floor=500, window_target=2_000))
+    first = up["messages"][0]
+    assert isinstance(first["content"], list) and first["content"][-1]["type"] == "text"
+    if isinstance(msgs[st.k]["content"], str):
+        assert first["content"][-1]["text"] == msgs[st.k]["content"]
+
+
+def test_cache_control_on_first_retained_message_stays_in_place():
+    msgs = history(6) + [user("new prompt")]
+    starts = [i for i, m in enumerate(msgs) if is_turn_start(m)]
+    for i in starts:
+        msgs[i] = {**msgs[i], "content": [{**msgs[i]["content"][-1], "cache_control": {"type": "ephemeral"}}]}
+    up, st, _, _ = run(msgs)
+    assert up["messages"][0]["content"][-1].get("cache_control") == {"type": "ephemeral"}
+
+
+# Byte-identical prefix within an epoch -------------------------------------------------------------
+
+def test_prefix_is_byte_identical_across_requests_in_an_epoch():
+    store = MemoryStore(key=b"k" * 32)
+    msgs = history(6, think=True) + [user("new prompt"), system("trailing")]
+    up1, st, _, _ = run(msgs, store=store)
+    req2 = msgs + [tool_use(5, think="t5"), tool_result(5)]
+    up2, st2, ev2, _ = run(req2, state=st, store=store)
+    req3 = req2 + [assistant("final", think="t6")]
+    req3 += [user("next turn")]
+    up3, _, _, _ = run(req3, state=st2, store=store,
+                       config=Config(bound=100_000, headroom_floor=500, window_target=50_000))
+    n1 = len(up1["messages"])
+    assert [canonical_bytes(m) for m in up2["messages"][:n1]] == [canonical_bytes(m) for m in up1["messages"]]
+    assert [canonical_bytes(m) for m in up3["messages"][:n1]] == [canonical_bytes(m) for m in up1["messages"]]
+    assert canonical_bytes(up2["system"]) == canonical_bytes(up1["system"])
+
+
+# Rule 10: history matching ------------------------------------------------------------------------
+
+def test_measured_form_change_and_moving_cache_control_are_not_mismatches():
+    store = MemoryStore(key=b"k" * 32)
+    msgs = history(6) + [user("new prompt")]
+    _, st, _, _ = run(msgs, store=store)
+    later = copy.deepcopy(msgs)
+    later[1] = {"role": "system", "content": later[1]["content"][0]["text"], "output_config": {"effort": "medium"}}
+    later[-1] = {"role": "user", "content": "new prompt"}  # single text block became a string
+    later.append({**assistant("reply"), "content": [{"type": "text", "text": "reply", "cache_control": {"type": "ephemeral"}}]})
+    _, st2, ev2, _ = run(later, state=st, store=store)
+    assert "resync" not in names(ev2) and st2.epoch == st.epoch
+    assert message_hash(msgs[1]) == message_hash(later[1])
+
+
+def test_change_in_retained_window_resyncs_without_new_epoch():
+    store = MemoryStore(key=b"k" * 32)
+    msgs = history(6) + [user("new prompt")]
+    _, st, _, _ = run(msgs, store=store)
+    later = copy.deepcopy(msgs)
+    later[-2] = assistant("edited synthetic answer")
+    later += [assistant("reply")]
+    _, st2, ev2, _ = run(later, state=st, store=store)
+    resync = [e for e in ev2 if e["event"] == "resync"]
+    assert resync and resync[0]["kind"] == "window_changed" and st2.epoch == st.epoch
+
+
+def test_change_in_paged_turns_starts_new_epoch_without_sending_full_history():
+    store = MemoryStore(key=b"k" * 32)
+    msgs = history(6) + [user("new prompt")]
+    _, st, _, _ = run(msgs, store=store)
+    compacted = [user(f"local compaction summary {FILL}", context=True), system()] + msgs[st.k:]
+    compacted += [assistant("reply"), user("after compaction")]
+    up, st2, ev2, _ = run(compacted, state=st, store=store)
+    resync = [e for e in ev2 if e["event"] == "resync"]
+    assert resync and resync[0]["kind"] == "paged_changed"
+    assert st2.epoch > st.epoch and st2.k > 0
+    assert len(up["messages"]) < len(compacted)
+
+
+def test_paged_change_mid_tool_loop_keeps_in_flight_thinking():
+    store = MemoryStore(key=b"k" * 32)
+    msgs = history(6) + [user("new prompt")]
+    _, st, _, _ = run(msgs, store=store)
+    changed = [user(f"replaced {FILL}", context=True), system()] + msgs[2:]
+    changed += [tool_use(7, think="live"), tool_result(7)]
+    up, st2, _, _ = run(changed, state=st, store=store)
+    assert up["messages"][-2]["content"][0]["type"] == "thinking"  # in-flight turn untouched
+
+
+def test_shorter_history_is_a_mismatch():
+    store = MemoryStore(key=b"k" * 32)
+    msgs = history(6) + [user("new prompt")]
+    _, st, _, _ = run(msgs, store=store)
+    _, _, ev, _ = run(msgs[:-3] + [user("again")], state=st, store=store)
+    assert "resync" in names(ev)
+
+
+# Rule 12: settings-only system messages ----------------------------------------------------------
+
+def test_settings_only_system_message_is_forwarded_as_sent():
+    msgs = [user(f"p0 {FILL}"), settings_only(), assistant("a0")] + history(2)[2:] + [user("new"), system()]
+    up, _, _, _ = run(msgs, config=Config())
+    assert up["messages"][1] is msgs[1] and up["messages"][1]["content"] == []
+
+
+# Rule 6: head change ------------------------------------------------------------------------------
+
+def test_head_change_waits_for_next_turn_start_and_never_rewrites_head():
+    store = MemoryStore(key=b"k" * 32)
+    big = Config(bound=1_000_000, headroom_floor=500, window_target=500_000)
+    msgs = history(3) + [user("p")]
+    req = request(msgs)
+    est = TokenEstimator()
+    _, st, _ = rewrite(req, None, store, big, est)
+    loop = request(msgs + [tool_use(1), tool_result(1)], tools=[*request([])["tools"], {"name": "mcp__contexto__recall", "input_schema": {"type": "object"}}])
+    up, st2, ev = rewrite(loop, st, store, big, est)
+    assert "head_changed" in names(ev) and "rotation" not in names(ev) and up["tools"] is loop["tools"]
+    nxt = request(loop["messages"] + [assistant("done"), user("next")], tools=loop["tools"])
+    up3, st3, ev3 = rewrite(nxt, st2, store, big, est)
+    assert any(e.get("reason") == "head_change" for e in ev3) and st3.epoch == st2.epoch + 1
+    assert st3.strip_upto == len(nxt["messages"]) and up3["tools"] is nxt["tools"]
+
+
+# Rule 3 estimate and headroom ---------------------------------------------------------------------
+
+def test_real_usage_refines_the_estimate_and_can_trigger_rotation():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=Config(bound=100_000, headroom_floor=500, window_target=50_000))
+    msgs = history(3) + [user("p")]
+    req = request(msgs)
+    _, _, ev = engine(req, {}, MESSAGES)
+    assert "rotation" not in names(ev)
+    engine.observe_usage(MESSAGES, {"input_tokens": 99_000, "cache_read_input_tokens": 0,
+                                    "cache_creation_input_tokens": 0, "output_tokens": 5}, req)
+    _, _, ev2 = engine(request(msgs + [assistant("a"), user("next")]), {}, MESSAGES)
+    assert "rotation" in names(ev2)
+
+
+def test_headroom_tracks_running_max_turn_growth():
+    store = MemoryStore(key=b"k" * 32)
+    big = Config(bound=10_000_000, headroom_floor=25_000)
+    est = TokenEstimator()
+    msgs = [user("p0")]
+    _, st, _ = rewrite(request(msgs), None, store, big, est)
+    msgs = msgs + [assistant(FILL * 20), user("p1")]
+    _, st, _ = rewrite(request(msgs), st, store, big, est)
+    assert st.max_turn_growth > 0
+    msgs = msgs + [assistant("x"), user("p2")]
+    _, st2, _ = rewrite(request(msgs), st, store, big, est)
+    assert st2.max_turn_growth == st.max_turn_growth  # running maximum, not the last value
+
+
+# The adapter: count_tokens, endpoints, conversations ------------------------------------------------
+
+def test_count_tokens_uses_current_epoch_with_no_side_effects():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    msgs = history(6) + [user("new prompt")]
+    up, _, _ = engine(request(msgs), {}, MESSAGES)
+    states, pages = copy.deepcopy(engine.states), dict(store.pages)
+    bigger = msgs + [assistant(FILL * 5)] + [user("x")]
+    counted, headers, ev = engine(request(bigger), {"h": "v"}, COUNT_TOKENS)
+    assert engine.states == states and store.pages == pages and headers == {"h": "v"}
+    assert counted["messages"][: len(up["messages"])] == up["messages"]
+    assert ev == [{"event": "count_tokens", "epoch": 1}]
+
+
+def test_other_endpoints_pass_through():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32))
+    req = request([user("p")])
+    assert engine(req, {}, "/api/hello") == (req, {}, [])
+
+
+def test_side_requests_keep_their_own_state():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    main = history(6) + [user("new prompt")]
+    engine(request(main), {}, MESSAGES)
+    epoch = next(iter(engine.states.values())).epoch
+    side = request([user("synthetic title request")], max_tokens=16)
+    up, _, ev = engine(side, {}, MESSAGES)
+    assert up["messages"] == side["messages"] and len(engine.states) == 2
+    assert max(s.epoch for s in engine.states.values()) == epoch
+    engine.observe_usage(COUNT_TOKENS, {"input_tokens": 5}, side)  # ignored
+    engine.observe_usage(MESSAGES, {"input_tokens": 7}, side)
+    assert engine.states[next(k for k in engine.states if engine.states[k].k == 0)].last_input_tokens == 7
+
+
+@pytest.mark.parametrize("bad", [None, "", []])
+def test_empty_or_missing_messages_do_not_crash(bad):
+    req = {"model": "m", "messages": bad} if bad is not None else {"model": "m"}
+    up, st, _ = rewrite(req, None, MemoryStore(key=b"k" * 32), Config(), TokenEstimator())
+    assert up["messages"] == [] and st.k == 0
+
+
+def test_carried_settings_only_messages_keep_latest_per_key():
+    # Measured accrual: one settings-only message per effort change, appended after the new prompt.
+    msgs = [user(f"prompt 0 {FILL}", context=True), system("sys A"), assistant(f"a0 {FILL}")]
+    for t, effort in ((1, "high"), (2, "medium"), (3, "low")):
+        msgs += [user(f"prompt {t} {FILL}"), settings_only(effort), assistant(f"a{t} {FILL}")]
+    for t in range(4, 8):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    up, st, _, _ = run(msgs)
+    assert st.k > msgs.index(msgs[10])  # all three settings changes are in paged turns
+    carried = [m for m in up["messages"] if m["role"] == "system"]
+    assert carried == [msgs[1], msgs[10]]  # session-start system kept; only the latest effort (low)
+    assert carried[1]["output_config"] == {"effort": "low"}
