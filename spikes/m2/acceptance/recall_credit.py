@@ -93,17 +93,27 @@ def _ok(status: Any) -> bool:
     return status is None or (isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 300)
 
 
+def _turn_order(page: dict[str, Any]) -> tuple[int, str]:
+    turn = page.get("turn")
+    return (turn if isinstance(turn, int) and not isinstance(turn, bool) else 1 << 62, str(page.get("id", "")))
+
+
 def plant_spans(probes: list[Any], pages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Where each probe's first statement sits: page id and [start, end) in that page's rendered text."""
-    rendered = [(p["id"], render_page(p)) for p in pages]
+    """Where each probe's first statement sits: page id and [start, end) in that page's rendered text.
+
+    The statement can appear on later pages too (a paged probe turn whose search results quoted it),
+    so the page with the EARLIEST turn (ties by page id) is the plant, whatever order the caller
+    passes the pages in (B30). ``pages_holding`` counts every page that holds it, for diagnostics.
+    """
+    rendered = [(p["id"], render_page(p)) for p in sorted(pages, key=_turn_order)]
     spans = {}
     for probe in probes:
         statement = probe.statements[0] if probe.statements else ""
-        for page_id, text in rendered:
-            pos = text.find(statement) if statement else -1
-            if pos >= 0:
-                spans[probe.id] = {"page_id": page_id, "start": pos, "end": pos + len(statement)}
-                break
+        holding = [(page_id, text.find(statement)) for page_id, text in rendered if statement and statement in text]
+        if holding:
+            page_id, pos = holding[0]
+            spans[probe.id] = {"page_id": page_id, "start": pos, "end": pos + len(statement),
+                               "pages_holding": len(holding)}
     return spans
 
 

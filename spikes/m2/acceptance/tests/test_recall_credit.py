@@ -196,3 +196,20 @@ def test_a_spurious_or_missing_turn_end_fails_closed_when_the_count_is_expected(
     supplied = recall_credit.credit([PROBE], ANSWERED, good, [PAGE], probe_turn_ids=TURNS, expected_turns=5,
                                     turn_ends=recall_credit.turn_answer_indices(good)[1:])  # a caller's list one short
     assert supplied["credited"] == 0 and supplied["reason"].startswith("turn answers do not match")
+
+
+# B30 (lane A's Codex live run): the original plant wins, whatever order the pages come in
+
+
+def test_the_earliest_turn_holding_the_plant_wins_whatever_the_page_order():
+    import itertools
+
+    quote = {"id": "pg_0000000000000000", "turn": 9, "stub": PAGE["stub"],  # a later probe turn quoting the plant;
+             "messages": [{"role": "user", "content": [{"type": "text", "text": "search said: " + PLANT}]}]}  # sorts first by id
+    other = {"id": "pg_ffff00000000000f", "turn": 3, "stub": PAGE["stub"],
+             "messages": [{"role": "user", "content": [{"type": "text", "text": "nothing here"}]}]}
+    log = [_req(), _call("contexto_search", HIT), _req()]  # the hit covers the ORIGINAL plant on PAGE (turn 0)
+    for order in itertools.permutations([PAGE, quote, other]):
+        span = recall_credit.plant_spans([PROBE], list(order))[PROBE.id]
+        assert span["page_id"] == PAGE["id"] and span["start"] == POS and span["pages_holding"] == 2
+        assert recall_credit.credit([PROBE], ANSWERED, log, list(order))["credited"] == 1
