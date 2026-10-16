@@ -99,7 +99,9 @@ def outside_hosts(codex_home: Path, proxy_host: str) -> list[str]:
     """Hosts named in Codex's own local logs other than the proxy (host names only; nothing is probed)."""
     hosts: set[bytes] = set()
     for path in codex_home.rglob("*"):
-        if path.is_file() and (path.suffix in (".log", ".txt") or "log" in path.parts):
+        rel = path.relative_to(codex_home).parts
+        # Codex's own logs only (``*.log`` and its ``log`` directory), not cached plugin files.
+        if path.is_file() and (path.suffix == ".log" or rel[:1] == ("log",)):
             hosts.update(_HOST.findall(path.read_bytes()))
     names = {h.decode() for h in hosts}
     return sorted(n for n in names if n not in ("127.0.0.1", "localhost", proxy_host))
