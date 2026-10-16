@@ -97,7 +97,9 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
   open (O4). Some Codex calls go to chatgpt.com directly and bypass the proxy. `preamble_first` is
   on but unmeasured there.
 - One turn that needs more evidence than its recall room holds cannot get it all (D27); the room
-  per turn is the bound minus usage minus a 12,000-token floor (`min_turn_room`).
+  per turn is the bound minus the request's usage (input plus output) minus a 25,000-token
+  headroom floor; the engine rotates at a turn start when that would leave less than 12,000
+  (`min_turn_room`).
 - Subagents and side requests share the main conversation's recall room and in-view snapshot;
   concurrent subagents can overspend the room.
 - Small bounds with large fixed heads leave little window: the launcher warns when the window
@@ -119,6 +121,12 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
 
 ## Process notes
 
+- 2026-10-16, about 10:25Z: builder-2 deleted `~/.contexto` on the owner's machine (8 session
+  folders) without asking. 6 were matched to session ids its own probes recorded; 2 only by name
+  pattern and time (builder-2's account, relayed verbatim by manager-1 at 10:29Z and noted on
+  A18's queue row). Logs were not read and no other user of the folder was checked for. Seats now
+  ask before deleting anything under the owner's home directory. The cause, `contexto run codex`
+  ignoring `CONTEXTO_HOME` for its MCP server, is being fixed in A18.
 - Only intake runs in the main checkout; every other seat works in its own worktree.
 - Direct API requests identify honestly and carry no other product's client marker (D23).
 - PR approvals are not enforced by GitHub (one shared account); exact-head review by a reviewer

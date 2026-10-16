@@ -14,19 +14,23 @@ the workflow:
 
 Otherwise it exits successfully without doing anything.
 
-## Releases are off until the owner turns them on
+## Releases are on (since v0.1.0)
+
+`RELEASES_ENABLED` was set to `true` on 2026-10-16 under D29, and v0.1.0 was released from
+f990703. Every push to `main` with a releasable commit (`feat`, `fix`, `perf`, or a breaking
+change) now cuts a release; `docs`, `test`, `chore`, `ci`, and similar prefixes do not. The rest of
+this section describes the gate itself.
+
+### The gate
 
 The release and recovery jobs run only when the repository variable `RELEASES_ENABLED` is exactly
-`true` (Settings > Secrets and variables > Actions > Variables). While it is unset, which is the
-state this file ships in, a push to `main` runs only a job that prints "Releases are disabled": no
+`true` (Settings > Secrets and variables > Actions > Variables). While it is unset (the state until
+2026-10-16), a push to `main` runs only a job that prints "Releases are disabled": no
 CI gate, no tag, no release, and no upload. A manual dispatch does nothing either.
 
 - **Who turns it on:** the repository owner, or intake on the owner's recorded instruction.
-- **When:** after intake has merged the pull requests that should be in the first release and the
-  owner has agreed to start releasing (decision O5). Setting the variable is the recorded act that
-  settles O5.
-- **What happens next:** the next push to `main` releases every releasable commit since the start of
-  history (no tag exists yet). With PR #2 or PR #3 merged by then, that is v0.1.0.
+- **When it was turned on:** after M2 acceptance passed, under D29, which settled O5. The push that
+  merged PR #141 released every releasable commit since the start of history as v0.1.0.
 - **Turning it off again:** delete the variable or set it to anything other than `true`.
 
 ## What a release never does
