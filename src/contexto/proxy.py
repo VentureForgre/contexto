@@ -81,6 +81,7 @@ USAGE_FEEDBACK_PATHS = frozenset({MESSAGES_PATH}) | RESPONSES_PATHS
 RESPONSE_END_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
 THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 UPSTREAM_TIMEOUT_S = 900
+STOP_DRAIN_S = 2.0  # how long stop() waits for in-flight requests to finish and log
 RETRYABLE_PHASES = frozenset({"connect", "tls", "send"})  # before the body is fully written (rule 8, PR #95)
 MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
 # Hop-by-hop headers (RFC 9110 7.6.1) plus Host and Content-Length, which the proxy sets itself.
@@ -464,6 +465,8 @@ class ContextoProxy:
         self.upstream_source = upstream_source
         self.transform_lock = threading.Lock()
         self.last_epoch: Any = None  # the engine's epoch from its last successful transform
+        self._in_flight = 0  # requests being handled; idle keep-alive connections are not counted
+        self._idle = threading.Condition()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -493,10 +496,19 @@ class ContextoProxy:
         return self.port
 
     def stop(self) -> None:
+        """Stop accepting connections, then wait up to STOP_DRAIN_S for in-flight requests to finish
+        and log their entries (handler threads are daemons, so a process exit would cut them off)."""
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
             self._server = None
+            deadline = time.monotonic() + STOP_DRAIN_S
+            with self._idle:
+                while self._in_flight and (left := deadline - time.monotonic()) > 0:
+                    self._idle.wait(left)
+                in_flight = self._in_flight
+            if in_flight:
+                self.log({"event": "proxy_stop_incomplete", "in_flight": in_flight})
             self.log({"event": "proxy_stop"})
 
     def serve_forever(self, port: int = 0) -> None:
@@ -555,6 +567,16 @@ class _Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _handle(self) -> None:
+        with self.owner._idle:
+            self.owner._in_flight += 1
+        try:
+            self._handle_counted()
+        finally:
+            with self.owner._idle:
+                self.owner._in_flight -= 1
+                self.owner._idle.notify_all()
+
+    def _handle_counted(self) -> None:
         self._response_started = False
         self._upstream_sent = False
         self._raw: tuple[bytes, Headers] | None = None
