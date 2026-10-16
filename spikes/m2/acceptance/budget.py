@@ -8,9 +8,11 @@ complete turn, the request goes unrotated (``bound_too_small``). ``headroom`` is
 per-turn growth plus 25%, floor 25,000.
 
 Token estimates: this script's pasted log text counts at 1.8 bytes per token, the rate M0 measured
-for numeric log content (about 0.55 tokens per character in E1, E2, and L2f). The contract's
-estimator uses 2.0 for tool output and 3.5 for other text; 2.0 would undercount this content by
-about 10 percent and 3.5 by about half. Token counting replaces the estimate where available.
+for numeric log content (about 0.55 tokens per character in E1, E2, and L2f). Before the first real
+usage, the contract's estimator counts ``tool_result`` content at 1.5 bytes per token, which errs
+high for this content, and other text at 3.5, which undercounts it by about half (contract PR #44).
+The pasted logs are user text, so the run keeps them as such only under the 10 percent rule in the
+harness doc (option (a)). Token counting replaces the estimate where available.
 """
 
 from __future__ import annotations
