@@ -57,7 +57,9 @@ def test_a_malformed_recorded_model_reads_as_unknown(tmp_path, bad):
 
 
 def test_window_writes_and_turn_room_charges_do_not_drop_each_other(tmp_path):
-    """15 workers on one session directory: the engine's window and room writes and the tools' charges."""
+    """15 workers on one session directory: the engine's window writes and the tools' charges.
+
+    (A room publish resets the charges by design; charges racing publishes are in test_turn_room.)"""
     SessionStore(tmp_path, "s1").set_turn_room("1", 10_000)
     start = threading.Barrier(15)
 
@@ -65,10 +67,8 @@ def test_window_writes_and_turn_room_charges_do_not_drop_each_other(tmp_path):
         own = SessionStore(tmp_path, "s1")
         start.wait()
         for n in range(20):
-            if i % 3 == 0:
+            if i % 2 == 0:
                 own.set_window(33_000 + n, 1.2, model=f"model-{i}")
-            elif i % 3 == 1:
-                own.set_turn_room("1", 10_000)
             else:
                 own.charge_turn_room(lambda remaining: min(remaining, 3))
 
@@ -78,6 +78,6 @@ def test_window_writes_and_turn_room_charges_do_not_drop_each_other(tmp_path):
     for t in threads:
         t.join()
     store = SessionStore(tmp_path, "s1")
-    assert store.turn_room() == ("1", 10_000, 5 * 20 * 3)  # every charge kept despite the window writes
+    assert store.turn_room() == ("1", 10_000, 7 * 20 * 3)  # every charge kept despite the window writes
     assert store.window() == (33_000 + 19, 1.2)
-    assert store.window_model() in {f"model-{i}" for i in range(0, 15, 3)}
+    assert store.window_model() in {f"model-{i}" for i in range(0, 15, 2)}
