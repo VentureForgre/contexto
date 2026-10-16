@@ -103,7 +103,7 @@ import math
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json
@@ -1130,9 +1130,86 @@ def restore_ratio(store: Store, estimator: TokenEstimator, model: str | None) ->
     return event
 
 
+# Rule 16 (contract PR #176): the main conversation's epoch record, so a new engine on the session resumes
+# the epoch instead of rotating again from epoch 0 ---------------------------------------------------------
+RECORD_INT = ("epoch", "k", "strip_upto", "turns_paged", "max_turn_growth", "last_turn_count",
+              "carried_text_streak", "window_minimal_count", "last_turn_start_n", "head_tokens",
+              "initial_carried", "last_carried_text_count", "turn_room_low_epoch", "window_budget")
+
+
+RECORD_NULLABLE = frozenset({"last_turn_start_n", "head_tokens", "initial_carried", "last_carried_text_count",
+                             "turn_room_low_epoch", "window_budget"})
+
+
+def anchor_hash(hashes: tuple[str, ...] | list[str]) -> str:
+    """The anchor over a request's first ``n`` normalised message hashes (rule 10)."""
+    return hashlib.sha256("\n".join(hashes).encode("utf-8")).hexdigest()
+
+
+def preamble_sha256(config: Config, pinned_text: str, index_text: str) -> str:
+    return hashlib.sha256(compose_preamble(config, pinned_text, index_text).encode("utf-8")).hexdigest()
+
+
+def epoch_record(state: EpochState, request: dict, messages: list[dict], key: str, dialect: Dialect,
+                 config: Config) -> dict:
+    """The record ``set_epoch`` writes: every field of ``state`` that decides later request bytes or
+    rotation decisions, the configuration, and the anchor. Per-request values (the previous request's
+    hashes, sizes, and estimates) are not in it."""
+    hashes = state.hashes if len(state.hashes) == len(messages) else tuple(message_hash(m) for m in messages)
+    return {**{name: getattr(state, name) for name in RECORD_INT},
+            "pinned_text": state.pinned_text, "index_text": state.index_text,
+            "preamble_sha256": preamble_sha256(config, state.pinned_text, state.index_text),
+            "head_fingerprint": state.head_fingerprint, "dialect": dialect.name, "conversation": key,
+            "model": request.get("model") if isinstance(request.get("model"), str) else None,
+            "paged_carried": sorted(state.paged_carried), "config": asdict(config),
+            "anchor": {"n": len(messages), "hash": anchor_hash(hashes)}}
+
+
+def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dialect,
+                 config: Config) -> tuple[EpochState | None, str]:
+    """Rule 16's checks, in order; the resumed state, or None and the ``epoch_not_resumed`` reason. Call
+    with the dialect set. The resumed state seeds rule 10's previous-request hashes with the first ``n``
+    messages, so the request is matched as an append."""
+    for name in RECORD_INT:  # the engine validates meaning; a value it cannot use is an unreadable record
+        value = record[name]
+        if isinstance(value, bool) or not (isinstance(value, int) or (value is None and name in RECORD_NULLABLE)):
+            raise ValueError(f"epoch record field {name}")
+    if not all(isinstance(record[name], str) for name in ("pinned_text", "index_text", "head_fingerprint")):
+        raise ValueError("epoch record text field")
+    if record.get("dialect") != dialect.name:
+        return None, "dialect_changed"
+    model = request.get("model") if isinstance(request.get("model"), str) else None
+    if record.get("model") != model:
+        return None, "model_changed"
+    if record.get("config") != asdict(config):
+        return None, "settings_changed"
+    if record.get("preamble_sha256") != preamble_sha256(config, record["pinned_text"], record["index_text"]):
+        return None, "preamble_changed"
+    if record.get("head_fingerprint") != head_fingerprint(request):
+        return None, "head_changed"
+    n = record["anchor"]["n"]
+    if len(messages) < n:
+        return None, "history_shorter"
+    hashes = tuple(message_hash(m) for m in messages[:n])
+    if anchor_hash(hashes) != record["anchor"]["hash"]:
+        return None, "history_diverged"
+    state = EpochState(pinned_text=record["pinned_text"], index_text=record["index_text"],
+                       head_fingerprint=record["head_fingerprint"], hashes=hashes,
+                       paged_carried=frozenset(record["paged_carried"]),
+                       **{name: record[name] for name in RECORD_INT})
+    return state, ""
+
+
 @dataclass
 class RewriteEngine:
-    """Per-session adapter for the proxy: one epoch state per conversation (see ``conversation_key``)."""
+    """Per-session adapter for the proxy: one epoch state per conversation (see ``conversation_key``).
+
+    Rule 16 (contract PR #176): the main conversation writes its epoch record at every turn start and
+    on leaving degraded mode, after the transform and before the request is sent; a new engine reads
+    the record once and, at the first request of the matching conversation, resumes the epoch when
+    every check holds. A resumed engine sends the same request bytes as the old one would have. Its
+    first rule 4 estimate is not the same: the previous request's real input (``last_input_tokens``)
+    is per-request and not recorded, so that first decision sizes from a full estimate."""
 
     store: Store
     config: Config = field(default_factory=Config)
@@ -1146,6 +1223,12 @@ class RewriteEngine:
         self._turn_starts: dict[str, int] = {}  # A14: conversation key -> turn starts at its latest request
         self._main: str | None = None  # A14: the conversation that publishes the room and the snapshot
         self._restore_pending = True  # A2f: the restore waits for the first request, which names the model
+        # Rule 16: the epoch record, read once at the engine's first request.
+        self._record_read = False
+        self._record: dict | None = None
+        self._record_reason = "no_record"  # why there is no record to resume from
+        self._record_consumed = False  # the matching conversation has been checked (resumed or not)
+        self._resumed = False
 
     def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
         with recall_knobs(self.config):
@@ -1166,7 +1249,11 @@ class RewriteEngine:
             restore = restore_ratio(self.store, self.estimator, window_model_name(request))
             if restore and restore["event"] == "sizing_restored":
                 self.restored = restore
+        resumed: list[dict] = []
+        if state is None and not self._record_consumed:
+            state, resumed = self._resume(key, request, dialect)
         upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator, dialect)
+        events[0:0] = resumed
         # Per-turn recall budget, request-time publish (contract PR #69, kept by 367916a): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
         # to 128,000, which would leave no room at all; the response-time publish adds the real output.
@@ -1181,7 +1268,67 @@ class RewriteEngine:
                 self.states[key] = self._publish_room(state, turn_id(messages, dialect), state.last_estimate,
                                                       failures)
                 events[-1:-1] = failures  # the engine's request event stays last
+        self._write_epoch(key, request, dialect, events)
         return upstream, headers, [restore, *events] if restore else events
+
+    def _resume(self, key: str, request: dict, dialect: Dialect) -> tuple[EpochState | None, list[dict]]:
+        """Rule 16: at the first request of a conversation new to this engine, resume the recorded epoch
+        if the record is this conversation's and every check holds. The store is read once."""
+        if not self._record_read:
+            self._record_read = True
+            reader = getattr(self.store, "epoch_record", None)
+            try:
+                self._record = reader() if callable(reader) else None
+            except Exception:  # the store could not read it; never a reason to fail the request
+                self._record, self._record_reason = None, "unreadable"
+        if self._record is None:
+            self._record_consumed = True
+            return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": self._record_reason}]
+        if self._record.get("conversation") != key:
+            return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": "other_conversation"}]
+        self._record_consumed = True
+        token = _DIALECT.set(dialect)
+        try:
+            state, reason = resume_state(self._record, request, request.get(dialect.field) or [], dialect,
+                                         self.config)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            state, reason = None, "unreadable"  # a field the store let through but the engine cannot use
+        finally:
+            _DIALECT.reset(token)
+        if state is None:
+            return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": reason}]
+        self._main, self._resumed = key, True
+        return state, [{"event": "epoch_resumed", "epoch": state.epoch, "k": state.k}]
+
+    def _may_write(self, turn_starts: int) -> bool:
+        """Rule 16, who writes: after a restart nothing writes until a conversation has resumed from the
+        record or has strictly more turn starts than the record's, so a side request cannot overwrite it."""
+        if self._record is None or self._resumed:
+            return True
+        count = self._record.get("last_turn_count")
+        return isinstance(count, int) and turn_starts > count
+
+    def _write_epoch(self, key: str, request: dict, dialect: Dialect, events: list[dict]) -> None:
+        """Rule 16, record: the main conversation, at every turn start and on leaving degraded mode,
+        after the transform and before the send. A degraded engine writes nothing; a failed write logs
+        ``epoch_record_stale`` and never blocks the request or degrades the engine."""
+        state = self.states[key]
+        writer = getattr(self.store, "set_epoch", None)
+        if state.degraded or not callable(writer):
+            return
+        messages = request.get(dialect.field) or []
+        token = _DIALECT.set(dialect)
+        try:
+            due = at_turn_start(messages) or "degraded_leave" in names_of(events)
+            if not (due and self.publishes(key, messages, dialect) and self._may_write(self._turn_starts.get(key, 0))):
+                return
+            record = epoch_record(state, request, messages, key, dialect, self.config)
+        finally:
+            _DIALECT.reset(token)
+        try:
+            writer(record)
+        except Exception as error:  # the record only saves cache; losing it costs one rotation
+            events[-1:-1] = [{"event": "epoch_record_stale", "epoch": state.epoch, "error": type(error).__name__}]
 
     def turn_room(self, used_tokens: int) -> int:
         """room_tokens = max(0, bound - (input + output) - headroom_floor) (contract PR #69)."""
