@@ -541,3 +541,81 @@ def test_transport_reports_an_in_turn_spend_stop_as_budget_exceeded(tmp_path):
     with pytest.raises(driver.BudgetExceeded, match="stopped inside the turn"):
         t.send("hello")
     t.watcher.stop()
+
+
+# Real-usage events in both log forms (lane A's A2e, PR #76: fixtures follow its code, read-only).
+
+def _entry(epoch, inp, usage_events=None, over=False, events=()):
+    e = _req(epoch, inp, events=events)
+    e["over_bound"] = over
+    if usage_events is not None:
+        e["usage_events"] = usage_events
+    return e
+
+
+REAL = {"event": "over_bound", "source": "real", "over_bound": True, "real_tokens": 151_000, "estimate": 140_000,
+        "bound": 150_000}
+ERR = {"event": "estimate_error", "real_tokens": 151_000, "estimate": 120_000, "ratio": 0.795, "mean_ratio": 0.9}
+
+
+def test_usage_events_on_request_entries_are_read():
+    log = [_entry(1, 50_000), _entry(1, 151_000, usage_events=[REAL, ERR], over=True)]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert r.over_bound_real == 1 and r.over_bound_real_max_tokens == 151_000 and not r.verdicts()["no_real_over_bound"]
+    assert r.estimate_errors == 1 and r.estimate_min_ratio == 0.795 and r.estimate_mean_ratio == 0.9
+
+
+def test_separate_usage_event_lines_are_still_read():
+    log = [_entry(1, 50_000), _entry(1, 151_000), {**REAL, "epoch": 1}, {**ERR, "epoch": 1}]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert r.over_bound_real == 1 and r.estimate_errors == 1 and not r.verdicts()["no_real_over_bound"]
+
+
+def test_a_mixed_log_counts_each_real_over_bound_once():
+    log = [
+        _entry(1, 151_000, usage_events=[REAL], over=True), {**REAL, "epoch": 1},  # both forms: one event
+        _entry(2, 152_000), {**REAL, "epoch": 2, "real_tokens": 152_000},  # old form only
+        _entry(3, 153_000, usage_events=[{**REAL, "real_tokens": 153_000}], over=True),  # new form only
+    ]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert r.over_bound_real == 3 and r.over_bound_real_max_tokens == 153_000
+
+
+def test_the_entry_over_bound_flag_is_not_a_real_over_bound_signal():
+    # Reviewer-2 on PR #76: the pre-send tool-loop exemption sets the entry's over_bound flag too, so
+    # only {event: over_bound, source: real} in usage_events (or an old separate line) counts.
+    pre_send = {"event": "over_bound", "source": "estimate", "in_tool_loop": True, "epoch": 1, "estimate": 151_000}
+    loop = _entry(1, 149_000, usage_events=[ERR], over=True, events=[pre_send])
+    r = detectors.analyze([loop], [], bound=150_000)
+    assert r.over_bound_real == 0 and r.pre_send_tool_loop == [1] and r.verdicts()["no_real_over_bound"]
+    flag_only = _entry(1, 149_000, over=True)  # no usage_events: the flag alone counts for nothing
+    assert detectors.analyze([flag_only], [], bound=150_000).over_bound_real == 0
+    # ...and a real event inside usage_events is never missed (no vacuous pass after #76)
+    real = _entry(1, 151_000, usage_events=[ERR, REAL], over=True, events=[pre_send])
+    assert not detectors.analyze([real], [], bound=150_000).verdicts()["no_real_over_bound"]
+
+
+def test_failure_events_fail_acceptance_1_wherever_they_appear():
+    # Intake 03:39Z (contract PR at 147b182). Shapes follow lane A's PR #76 (read-only).
+    store_error = {"event": "store_error", "epoch": 2, "operation": "set_window", "error": "OSError"}
+    degraded = {"event": "degraded_enter", "epoch": 2, "reason": "store_error"}
+    log = [
+        _entry(1, 90_000, events=[{"event": "unclassified_system_message", "epoch": 1}]),  # transform event
+        _entry(2, 95_000, usage_events=[store_error, degraded]),  # on the request entry
+        {**store_error, "ts": "x"}, degraded,  # the same two as separate lines too: counted once
+        {"event": "fallback_failed", "epoch": 2},  # a separate store.log line only
+        _entry(3, 96_000, events=[{"event": "page_conflict", "epoch": 3, "page_id": "pg_1"}]),
+    ]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert r.failure_events == {"unclassified_system_message": 1, "store_error": 1, "degraded_enter": 1,
+                                "fallback_failed": 1, "page_conflict": 1}
+    assert not r.verdicts()["no_failure_events"]
+    for name in detectors.FAILURE_EVENTS:  # each one alone fails
+        assert not detectors.analyze([{"event": name, "epoch": 0}], [], bound=150_000).verdicts()["no_failure_events"]
+    assert detectors.analyze([_entry(1, 90_000)], [], bound=150_000).verdicts()["no_failure_events"]
+
+
+def test_a_real_over_bound_without_a_pre_send_estimate_is_still_read():
+    no_estimate = {**REAL, "estimate": None}  # PR #76: estimate is null after a fallback_failed forward
+    r = detectors.analyze([_entry(1, 151_000, usage_events=[no_estimate], over=True)], [], bound=150_000)
+    assert r.over_bound_real == 1 and r.over_bound_real_max_tokens == 151_000

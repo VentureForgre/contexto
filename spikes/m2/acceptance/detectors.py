@@ -6,7 +6,9 @@ Session log (``$CONTEXTO_HOME/sessions/<id>/`` JSONL, lane A schema per builder-
 lane B's ``{"event": "mcp_call", "tool", "ok", ...}`` per MCP tool call. Rotation and resync details
 are engine events inside ``transform_events``; a rotation is an event named exactly ``rotation``
 (a ``rotation_noop`` pages nothing and is not counted). Lane A's A2b (PR #48) adds standalone
-``over_bound`` (``source: "real"``) and ``estimate_error`` events after each response.
+``over_bound`` (``source: "real"``) and ``estimate_error`` events after each response, as separate
+lines; A2e (PR #76) moves them onto the request's entry as ``usage_events``. ``usage_events()``
+reads both forms and counts each event once.
 
 Acceptance 1, under intake's strict rule for the acceptance run (2026-10-16), fails on any request
 over the bound, any real-source over_bound event, any ``bound_too_small``, and any pre-send
@@ -28,6 +30,10 @@ MESSAGES = "/v1/messages"
 # Model requests for acceptance 1's zero-4xx (contract PR #61): the paths the proxy transforms,
 # /v1/messages, its count_tokens, and /responses. 4xx on any other path are reported apart.
 MODEL_PATHS = TRANSFORMED_PATHS
+# Intake (2026-10-16 03:39Z, contract PR at 147b182): any of these, wherever it appears (a request's
+# transform events, its usage_events, or a separate session-log line), fails acceptance 1.
+FAILURE_EVENTS = ("degraded_enter", "store_error", "page_conflict", "fallback_failed", "transform_error",
+                  "turn_room_missing", "unclassified_system_message")
 # The recalls the budget prices (script.MAX_RECALLS). A cost guard only (intake, 2026-10-16): the
 # model is not told about it, and ``recalls_over_budget`` reports it without failing any verdict.
 MAX_RECALLS = 2
@@ -86,6 +92,8 @@ class Report:
     # ``over_bound`` events with ``source: "real"``: each fails acceptance 1.
     over_bound_real: int = 0
     over_bound_real_max_tokens: int = 0
+    # FAILURE_EVENTS seen, by name, each counted once; any fails acceptance 1.
+    failure_events: dict[str, int] = field(default_factory=dict)
     # Informational only: until lane A fixes PR #48's B1, a rotation request's estimate is the
     # pre-rotation one, which skews these. No verdict uses them.
     estimate_errors: int = 0  # ``estimate_error`` events: real input over the estimate by more than 10%
@@ -119,6 +127,7 @@ class Report:
             "no_request_over_bound": self.over_bound_requests == 0,
             "no_pre_send_over_bound_outside_tool_loop": not self.pre_send_other,
             "no_real_over_bound": self.over_bound_real == 0,
+            "no_failure_events": not self.failure_events,
             "no_bound_too_small": self.bound_too_small == 0,
             "every_request_has_usage": not self.unverified_requests,
             "zero_4xx": self.upstream_4xx == 0 and not any(400 <= s < 500 for s in self.statuses),
@@ -136,11 +145,82 @@ def paged_statements(session_dir: Path, statements: Iterable[str]) -> dict[str, 
     return out
 
 
+def _is_usage_event(ev: dict[str, Any]) -> bool:
+    return (ev.get("event") == "over_bound" and ev.get("source") == "real") or ev.get("event") == "estimate_error"
+
+
+def _usage_key(ev: dict[str, Any]) -> tuple[Any, ...]:
+    return (ev.get("event"), ev.get("epoch"), ev.get("real_tokens"), ev.get("estimate"))
+
+
+def usage_events(session_log: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The real-usage events (``over_bound`` with ``source: "real"``, ``estimate_error``), each once.
+
+    Two log forms carry them. Lane A's A2b wrote them as separate session-log lines (older runs,
+    including the recorded H1 rerun). A2e (PR #76) moves them onto the request's entry as a
+    ``usage_events`` list and ORs a real over_bound into the entry's ``over_bound`` flag. Both are
+    read; a separate line that repeats an entry's event (same event, epoch, real_tokens, estimate)
+    is counted once. The entry's ``over_bound`` flag is never read as a real over-bound: a pre-send
+    tool-loop record sets it too (reviewer-2, PR #76).
+    """
+    events: list[dict[str, Any]] = []
+    on_entries: dict[tuple[Any, ...], int] = {}
+    for ev in session_log:
+        if ev.get("event") != "request":
+            continue
+        listed = [u for u in ev.get("usage_events") or [] if isinstance(u, dict) and _is_usage_event(u)]
+        for u in listed:
+            u = {"epoch": ev.get("epoch"), **u}
+            events.append(u)
+            on_entries[_usage_key(u)] = on_entries.get(_usage_key(u), 0) + 1
+    for ev in session_log:
+        if ev.get("event") == "request" or not _is_usage_event(ev):
+            continue
+        key = _usage_key(ev)
+        if on_entries.get(key):
+            on_entries[key] -= 1  # the same event, already read from its request entry
+            continue
+        events.append(ev)
+    return events
+
+
+def _event_key(ev: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(sorted((k, v) for k, v in ev.items() if k != "ts" and isinstance(v, (str, int, float, bool, type(None)))))
+
+
+def failure_events(session_log: list[dict[str, Any]]) -> dict[str, int]:
+    """FAILURE_EVENTS by name, from request entries (transform events and usage_events) and separate
+    session-log lines. A separate line that repeats an event already on an entry counts once."""
+    counts: dict[str, int] = {}
+    on_entries: dict[tuple[Any, ...], int] = {}
+    for ev in session_log:
+        if ev.get("event") != "request":
+            continue
+        for item in [*(ev.get("transform_events") or []), *(ev.get("usage_events") or [])]:
+            if isinstance(item, dict) and _event_name(item) in FAILURE_EVENTS:
+                name = _event_name(item)
+                counts[name] = counts.get(name, 0) + 1
+                key = _event_key({"epoch": ev.get("epoch"), **item})
+                on_entries[key] = on_entries.get(key, 0) + 1
+    for ev in session_log:
+        name = _event_name(ev)
+        if ev.get("event") == "request" or name not in FAILURE_EVENTS:
+            continue
+        key = _event_key(ev)
+        if on_entries.get(key):
+            on_entries[key] -= 1
+            continue
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
 def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, Any]], bound: int,
             stream_compactions: int = 0) -> Report:
     r = Report(stream_compactions=stream_compactions)
     session_log = list(session_log)
-    for ev in session_log:
+    for name, count in failure_events(session_log).items():
+        r.failure_events[name] = count
+    for ev in usage_events(session_log):
         if ev.get("event") == "over_bound" and ev.get("source") == "real":
             r.over_bound_real += 1
             r.over_bound_real_max_tokens = max(r.over_bound_real_max_tokens, int(ev.get("real_tokens") or 0))
