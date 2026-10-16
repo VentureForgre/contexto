@@ -23,19 +23,26 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   with empty content are carried like any other). Settings-only system messages accrue per settings
   change (measured), so only the latest per settings key is carried; the carried set is computed from
   the paged region, so it changes only at a rotation. Rule 13 (PR #27): carried content is never
-  paged; when a rotation leaves it above ``carried_budget`` (4,000 tokens) a content-free
-  ``carried_over_budget`` event reports its estimate and system-message count. Placement (rule 1, measured): carried context blocks
+  paged; when a rotation finds it grown by more than ``carried_budget`` (4,000 tokens) over its size at
+  the conversation's first request, a content-free ``carried_over_budget`` event reports the estimate,
+  the growth, and the system-message count. Placement (rule 1, measured): carried context blocks
   and then the preamble go ahead of the first retained turn-start message's own content; carried
   system messages go immediately after that message (a system message before it returns 400).
-- Rotation (rules 3 and 4) happens only when the newest turn has no assistant message yet and the
-  request adds messages (a resent request never rotates). It picks the smallest ``k`` at a turn start
-  whose retained turns fit ``window_target``, never below the current ``k``, always keeping the newest
-  complete turn and the new turn.
+- Rotation (rules 3 and 4, PR #27) happens only when the newest turn has no assistant message yet and
+  the request adds messages (a resent request never rotates). The fixed overhead ``F`` (system, tools,
+  carried content, preamble) comes from the conversation's first measured usage (its input minus its
+  non-carried messages), else from the estimator; the window budget is ``W = bound - headroom - F``.
+  Rotation picks the smallest ``k`` at a turn start whose retained turns fit ``window_fraction * W``,
+  never below the current ``k``, always keeping the newest complete turn and the new turn. A ``k`` equal
+  to the current one is a no-op (``rotation_noop``: nothing paged, nothing stripped); a ``W`` that is
+  not positive or cannot hold the newest complete turn logs ``bound_too_small`` and sends the request
+  unrotated. ``F`` and ``W`` appear in these events.
 - Thinking (rule 2): retained messages that existed when the epoch was created lose their thinking and
   redacted-thinking blocks on every request; an assistant message left empty gets one text block
   ``[thinking omitted]``; other blocks keep their order.
 - Headroom is the running maximum of per-turn growth times 1.25, floor 25,000 tokens; per-turn growth
-  is the estimator's token count of the CLI history added between consecutive turn starts.
+  is the estimator's token count, at its current ratio, of the messages added between consecutive
+  turn starts, divided by the number of turns added when several arrive at once.
 - History matching (rule 10) hashes canonical JSON with every ``cache_control`` removed and a single
   text block normalised to a plain string. A mismatch inside the retained window resynchronises from
   the longest matching prefix; a mismatch in paged turns starts a new epoch at the current turn start
@@ -71,16 +78,12 @@ class Store(Protocol):
 @dataclass(frozen=True)
 class Config:
     bound: int = 150_000
-    window_target: int | None = None  # default: half the bound
+    window_fraction: float = 0.5  # rule 4: retained window target as a share of the window budget W
     headroom_floor: int = 25_000
     headroom_factor: float = 1.25
     pin_budget: int = 6_000
     index_budget: int = 4_000
-    carried_budget: int = 4_000  # rule 13: carried content above this is reported, never paged
-
-    @property
-    def target(self) -> int:
-        return self.window_target if self.window_target is not None else self.bound // 2
+    carried_budget: int = 4_000  # rule 13: carried growth above this is reported, never paged
 
 
 @dataclass(frozen=True)
@@ -97,7 +100,11 @@ class EpochState:
     last_sent_bytes: int = 0
     last_input_tokens: int | None = None  # real upstream input of the previous request
     max_turn_growth: int = 0
-    last_turn_start_tokens: int | None = None
+    last_turn_start_n: int | None = None  # history length at the previous turn start
+    last_turn_count: int = 0  # turn starts in the history at the previous turn start
+    head_tokens: int | None = None  # rule 4: measured head (system, tools, initial carried)
+    initial_carried: int | None = None  # carried content at the conversation's first request
+    last_window_tokens: int = 0  # estimate of the previous upstream request's non-carried messages
 
 
 # Message classification -------------------------------------------------------------------------
@@ -270,7 +277,32 @@ def estimate_upstream(request: dict, messages: list[dict], previous_n: int, stat
     return head + estimator.estimate_messages(transform_messages(messages, state))
 
 
-def choose_k(messages: list[dict], state: EpochState, config: Config, estimator: TokenEstimator) -> int:
+def window_tokens(messages: list[dict], estimator: TokenEstimator) -> int:
+    """Tokens of the non-carried part of messages (no system messages, no context blocks)."""
+    return estimator.estimate_messages([strip_thinking(m) for m in page_turn(messages) if m.get("content")])
+
+
+def carried_tokens(messages: list[dict], estimator: TokenEstimator) -> int:
+    blocks, systems = carried_content(messages, len(messages))
+    parts = ([{"role": "user", "content": blocks}] if blocks else []) + systems
+    return estimator.estimate_messages(parts) if parts else 0
+
+
+def fixed_overhead(request: dict, messages: list[dict], state: EpochState, store: Store, config: Config,
+                   estimator: TokenEstimator) -> int:
+    """Rule 4: F = system + tools + carried content + preamble. The head comes from measured usage once
+    available (the conversation's first request), else from the estimator; carried growth since the
+    first request and the current pinned and index text are estimated."""
+    carried = carried_tokens(messages, estimator)
+    if state.head_tokens is not None:
+        head = state.head_tokens + max(0, carried - (state.initial_carried or 0))
+    else:
+        head = estimator.estimate(canonical_json({"system": request.get("system"), "tools": request.get("tools")})) + carried
+    pre = "\n\n".join(t for t in (store.pinned_text(config.pin_budget), store.index_text(config.index_budget)) if t)
+    return head + (estimator.estimate(pre) if pre else 0)
+
+
+def choose_k(messages: list[dict], state: EpochState, target: int, estimator: TokenEstimator) -> int:
     starts = [i for i in turn_starts(messages) if i >= state.k]
     if len(starts) < 2:
         return state.k
@@ -278,14 +310,14 @@ def choose_k(messages: list[dict], state: EpochState, config: Config, estimator:
     for k in starts:
         if k > newest_complete:
             break
-        window = [strip_thinking(m) for m in messages[k:] if m.get("role") != "system"]
-        if estimator.estimate_messages(window) <= config.target:
+        if window_tokens(messages[k:], estimator) <= target:
             return k
     return newest_complete
 
 
 def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Store, config: Config,
-              estimator: TokenEstimator, k: int, strip_upto: int, events: list[dict], reason: str) -> EpochState:
+              estimator: TokenEstimator, k: int, strip_upto: int, events: list[dict], reason: str,
+              sizing: tuple[int, int] | None = None) -> EpochState:
     if k > state.k:
         turns = [page_turn(t) for t in split_turns(messages, state.k, k)]
         ids = store.page_out(turns, state.turns_paged)
@@ -297,13 +329,17 @@ def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Sto
     new = replace(state, epoch=state.epoch + 1, k=k, pinned_text=store.pinned_text(config.pin_budget),
                   index_text=store.index_text(config.index_budget), head_fingerprint=head_fingerprint(request),
                   strip_upto=strip_upto, turns_paged=turns_paged, head_changed=False, last_input_tokens=None)
-    events.append({"event": "rotation", "epoch": new.epoch, "reason": reason, "k": k,
-                   "retained_messages": len(messages) - k, "turns_paged": turns_paged})
-    blocks, systems = carried_content(messages, k)
-    carried = estimator.estimate_messages([{"role": "user", "content": blocks}, *systems]) if (blocks or systems) else 0
-    if carried > config.carried_budget:
+    rotation = {"event": "rotation", "epoch": new.epoch, "reason": reason, "k": k,
+                "retained_messages": len(messages) - k, "turns_paged": turns_paged}
+    if sizing is not None:
+        rotation.update({"fixed_overhead": sizing[0], "window_budget": sizing[1]})
+    events.append(rotation)
+    carried = carried_tokens(messages, estimator)
+    growth = carried - (state.initial_carried or 0)
+    if growth > config.carried_budget:
         events.append({"event": "carried_over_budget", "epoch": new.epoch, "carried_tokens": carried,
-                       "system_messages": len(systems), "budget": config.carried_budget})
+                       "carried_growth": growth, "system_messages": len(carried_content(messages, k)[1]),
+                       "budget": config.carried_budget})
     return new
 
 
@@ -355,22 +391,43 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
 
     estimate = estimate_upstream(request, messages, previous_n, state, estimator)
     if n > previous_n and at_turn_start(messages):
-        history = estimator.estimate_messages(messages)
-        if state.last_turn_start_tokens is not None:
-            growth = max(0, history - state.last_turn_start_tokens)
+        count = len(turn_starts(messages))
+        if state.last_turn_start_n is not None and count > state.last_turn_count and n > state.last_turn_start_n:
+            # Per-turn growth: the messages added since the previous turn start, estimated at the current
+            # ratio, averaged when several turns arrive at once (a resume or a missed request).
+            added = estimator.estimate_messages(messages[state.last_turn_start_n:])
+            growth = added // (count - state.last_turn_count)
             state = replace(state, max_turn_growth=max(state.max_turn_growth, growth))
-        state = replace(state, last_turn_start_tokens=history)
-        if state.head_changed:
-            state = new_epoch(messages, request, state, store, config, estimator,
-                              choose_k(messages, state, config, estimator), n, events, "head_change")
-        elif estimate > config.bound - headroom(state, config):
-            state = new_epoch(messages, request, state, store, config, estimator,
-                              choose_k(messages, state, config, estimator), n, events, "bound")
+        state = replace(state, last_turn_start_n=n, last_turn_count=count)
+        trigger = estimate > config.bound - headroom(state, config)
+        if state.head_changed or trigger:
+            f = fixed_overhead(request, messages, state, store, config, estimator)
+            w = config.bound - headroom(state, config) - f
+            starts = turn_starts(messages)
+            newest = messages[starts[-2]:] if len(starts) >= 2 else messages[starts[-1]:]
+            sizing = {"epoch": state.epoch, "fixed_overhead": f, "window_budget": w}
+            target = int(config.window_fraction * w)
+            if state.head_changed:  # rule 6: always a new epoch; page only if the budget allows
+                k = choose_k(messages, state, target, estimator) if w > 0 else state.k
+                state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "head_change",
+                                  sizing=(f, w))
+            elif w <= 0 or window_tokens(newest, estimator) > w:
+                events.append({"event": "bound_too_small", **sizing, "bound": config.bound})
+            else:
+                k = choose_k(messages, state, target, estimator)
+                if k == state.k:  # rule 4: nothing to page, so no strip and no rebuild
+                    events.append({"event": "rotation_noop", **sizing, "k": k})
+                else:
+                    state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "bound",
+                                      sizing=(f, w))
     over = estimate > config.bound and not any(e["event"] == "rotation" for e in events)
 
+    if state.initial_carried is None:
+        state = replace(state, initial_carried=carried_tokens(messages, estimator))
     upstream = {**request, "messages": transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
-    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent)
+    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
+                    last_window_tokens=window_tokens(upstream["messages"], estimator))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream["messages"]), "estimate": estimate, "sent_bytes": sent}
     if over:
@@ -426,4 +483,9 @@ class RewriteEngine:
             return
         real = usage_tokens(usage)
         self.estimator.observe(state.last_sent_bytes, real)
-        self.states[key] = replace(state, last_input_tokens=real)
+        state = replace(state, last_input_tokens=real)
+        if state.head_tokens is None and state.k == 0:
+            # Rule 4: the first measured request gives the head (its input minus its non-carried
+            # messages, which also covers a resumed first request with a long history).
+            state = replace(state, head_tokens=max(0, real - state.last_window_tokens))
+        self.states[key] = state

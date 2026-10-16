@@ -19,12 +19,13 @@ from contexto.rewrite import (
     is_turn_start,
     message_hash,
     rewrite,
+    window_tokens,
 )
 from contexto.store.memory import MemoryStore
 from contexto.tokens import TokenEstimator
 
 FILL = "synthetic filler text " * 90  # about 2,000 bytes, about 570 tokens at 3.5 bytes per token
-CONFIG = Config(bound=4_000, headroom_floor=500, window_target=1_500, pin_budget=200, index_budget=200)
+CONFIG = Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=200)
 
 
 def ctx_block(tag="ctx"):
@@ -146,12 +147,14 @@ def test_rotation_at_turn_start_pages_turns_and_merges_preamble():
 
 def test_smallest_k_keeps_as_many_turns_as_fit_and_never_less_than_newest_complete():
     msgs = history(6) + [user("new prompt")]
-    _, st, _, _ = run(msgs)
+    _, st, ev, _ = run(msgs)
+    rotation = next(e for e in ev if e["event"] == "rotation")
+    target = int(CONFIG.window_fraction * rotation["window_budget"])
     starts = [i for i, m in enumerate(msgs) if is_turn_start(m)]
     est = TokenEstimator()
-    fits = [k for k in starts[:-1] if est.estimate_messages([m for m in msgs[k:] if m["role"] != "system"]) <= CONFIG.target]
+    fits = [k for k in starts[:-1] if window_tokens(msgs[k:], est) <= target]
     assert st.k == (min(fits) if fits else starts[-2])
-    tight = Config(bound=4_000, headroom_floor=500, window_target=10)  # nothing fits
+    tight = Config(bound=4_000, headroom_floor=500, window_fraction=0.001)  # nothing fits the target
     _, st2, _, _ = run(msgs, config=tight)
     assert st2.k == starts[-2]  # newest complete turn plus the new prompt are kept
 
@@ -202,8 +205,9 @@ def test_thinking_stripped_from_existing_messages_and_untouched_after_rotation()
 def test_thinking_only_assistant_gets_placeholder_and_tool_use_keeps_order():
     only = {"role": "assistant", "content": [thinking("x"), {"type": "redacted_thinking", "data": "d"}]}
     mixed = {"role": "assistant", "content": [thinking("y"), {"type": "text", "text": "t"}, tool_use(3)["content"][0]]}
-    msgs = history(6) + [user(f"p {FILL}"), only, user(f"q {FILL}"), mixed, tool_result(3), assistant("done"), user("new")]
-    up, st, _, _ = run(msgs, config=Config(bound=4_000, headroom_floor=500, window_target=100_000))
+    msgs = history(6) + [user("p"), only, user("q"), mixed, tool_result(3), assistant("done"), user("new")]
+    up, st, ev, _ = run(msgs)
+    assert "rotation" in names(ev) and st.k <= msgs.index(only) - 1
     by_id = {id(m): m for m in up["messages"]}
     stripped = [m for m in up["messages"] if m.get("role") == "assistant"]
     assert {"type": "text", "text": THINKING_OMITTED} in [b for m in stripped for b in m["content"]]
@@ -235,7 +239,7 @@ def test_preamble_merges_into_string_content_turn_start():
     starts = [i for i, m in enumerate(msgs) if is_turn_start(m)]
     msgs[starts[3]] = {"role": "user", "content": msgs[starts[3]]["content"][-1]["text"]}  # string form
     msgs.append(user("new prompt"))
-    up, st, _, _ = run(msgs, config=Config(bound=4_000, headroom_floor=500, window_target=2_000))
+    up, st, _, _ = run(msgs)
     first = up["messages"][0]
     assert isinstance(first["content"], list) and first["content"][-1]["type"] == "text"
     if isinstance(msgs[st.k]["content"], str):
@@ -262,7 +266,7 @@ def test_prefix_is_byte_identical_across_requests_in_an_epoch():
     req3 = req2 + [assistant("final", think="t6")]
     req3 += [user("next turn")]
     up3, _, _, _ = run(req3, state=st2, store=store,
-                       config=Config(bound=100_000, headroom_floor=500, window_target=50_000))
+                       config=Config(bound=100_000, headroom_floor=500))
     n1 = len(up1["messages"])
     assert [canonical_bytes(m) for m in up2["messages"][:n1]] == [canonical_bytes(m) for m in up1["messages"]]
     assert [canonical_bytes(m) for m in up3["messages"][:n1]] == [canonical_bytes(m) for m in up1["messages"]]
@@ -339,7 +343,7 @@ def test_settings_only_system_message_is_forwarded_as_sent():
 
 def test_head_change_waits_for_next_turn_start_and_never_rewrites_head():
     store = MemoryStore(key=b"k" * 32)
-    big = Config(bound=1_000_000, headroom_floor=500, window_target=500_000)
+    big = Config(bound=1_000_000, headroom_floor=500)
     msgs = history(3) + [user("p")]
     req = request(msgs)
     est = TokenEstimator()
@@ -357,15 +361,18 @@ def test_head_change_waits_for_next_turn_start_and_never_rewrites_head():
 
 def test_real_usage_refines_the_estimate_and_can_trigger_rotation():
     store = MemoryStore(key=b"k" * 32)
-    engine = RewriteEngine(store, config=Config(bound=100_000, headroom_floor=500, window_target=50_000))
+    engine = RewriteEngine(store, config=Config(bound=100_000, headroom_floor=500))
     msgs = history(3) + [user("p")]
+    first = request(msgs[:2])  # the same conversation's first request
+    engine(first, {}, MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": 2_000}, first)  # the head, measured
     req = request(msgs)
     _, _, ev = engine(req, {}, MESSAGES)
-    assert "rotation" not in names(ev)
-    engine.observe_usage(MESSAGES, {"input_tokens": 99_000, "cache_read_input_tokens": 0,
+    assert "rotation" not in names(ev)  # the byte estimate is small
+    engine.observe_usage(MESSAGES, {"input_tokens": 1_000, "cache_read_input_tokens": 98_000,
                                     "cache_creation_input_tokens": 0, "output_tokens": 5}, req)
     _, _, ev2 = engine(request(msgs + [assistant("a"), user("next")]), {}, MESSAGES)
-    assert "rotation" in names(ev2)
+    assert "rotation" in names(ev2)  # real usage says the window is nearly full
 
 
 def test_headroom_tracks_running_max_turn_growth():
@@ -440,19 +447,110 @@ def test_carried_settings_only_messages_keep_latest_per_key():
     assert carried[1]["output_config"] == {"effort": "low"}
 
 
-def test_carried_over_budget_is_reported_not_paged():
-    # Rule 13: a large carried system message (for example an unmeasured tool-addition message).
+def test_carried_growth_over_budget_is_reported_not_paged():
+    # Rule 13: carried content that grows after the first request (for example an unmeasured
+    # tool-addition system message) is reported, never paged; the initial size is normal.
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=14_000, headroom_floor=500, carried_budget=1_000))
+    start = [user(f"prompt 0 {FILL}", context=True), system("sys A")]
+    engine(request(start), {}, MESSAGES)
     big = system("synthetic carried tool list " * 800)
+    msgs = start + [assistant(f"a0 {FILL}"), user(f"prompt 1 {FILL}"), big, assistant(f"a1 {FILL}")]
+    for t in range(2, 7):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    up, _, ev = engine(request(msgs), {}, MESSAGES)
+    over = [e for e in ev if e["event"] == "carried_over_budget"]
+    assert "rotation" in names(ev) and over and over[0]["carried_growth"] > 1_000
+    assert big in up["messages"]  # still carried, never paged
+    assert all(isinstance(v, (int, str)) and (not isinstance(v, str) or len(v) < 40) for v in over[0].values())
+
+
+def test_initial_carried_size_is_not_over_budget():
+    big = system("synthetic large CLAUDE.md-like system text " * 800)
     msgs = [user(f"prompt 0 {FILL}", context=True), big, assistant(f"a0 {FILL}")]
     for t in range(1, 6):
         msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
     msgs.append(user("new prompt"))
-    cfg = Config(bound=8_000, headroom_floor=500, window_target=1_500, carried_budget=1_000)
-    up, st, ev, store = run(msgs, config=cfg)
-    over = [e for e in ev if e["event"] == "carried_over_budget"]
-    assert st.k > 1 and over and over[0]["system_messages"] == 1 and over[0]["carried_tokens"] > 1_000
-    assert up["messages"][1] is big  # still carried, never paged
-    assert all(isinstance(v, (int, str)) and (not isinstance(v, str) or len(v) < 40) for v in over[0].values())
-    roomy = Config(bound=8_000, headroom_floor=500, window_target=1_500, carried_budget=100_000)
-    _, _, ev_roomy, _ = run(msgs, config=roomy)
-    assert "rotation" in names(ev_roomy) and "carried_over_budget" not in names(ev_roomy)
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=14_000, headroom_floor=500, carried_budget=1_000))
+    engine(request(msgs[:2]), {}, MESSAGES)
+    _, _, ev = engine(request(msgs), {}, MESSAGES)
+    assert "rotation" in names(ev) and "carried_over_budget" not in names(ev)
+
+
+# Rule 4 sizing (PR #27) ---------------------------------------------------------------------------
+
+def test_rotation_events_carry_fixed_overhead_and_window_budget():
+    _, _, ev, _ = run(history(6) + [user("new prompt")])
+    rotation = next(e for e in ev if e["event"] == "rotation")
+    assert rotation["fixed_overhead"] > 0 and rotation["window_budget"] == CONFIG.bound - CONFIG.headroom_floor - rotation["fixed_overhead"]
+
+
+def test_rotation_that_keeps_k_is_a_noop():
+    # Real usage puts the request over the trigger, but the estimated window still fits the target, so
+    # the smallest k is the current one: nothing is paged, nothing is stripped, no new epoch.
+    from dataclasses import replace
+    store = MemoryStore(key=b"k" * 32)
+    cfg = Config(bound=100_000, headroom_floor=500)
+    est = TokenEstimator()
+    msgs = history(3, think=True) + [user("p")]
+    _, st, _ = rewrite(request(msgs), None, store, cfg, est)
+    st = replace(st, last_input_tokens=99_900, head_tokens=1_000)
+    nxt = msgs + [assistant("a", think="z"), user("next")]
+    up, st2, ev = rewrite(request(nxt), st, store, cfg, est)
+    assert "rotation_noop" in names(ev) and "rotation" not in names(ev)
+    assert not store.pages and up["messages"] == nxt and st2.epoch == st.epoch
+    noop = next(e for e in ev if e["event"] == "rotation_noop")
+    assert {"fixed_overhead", "window_budget", "k"} <= set(noop) and noop["k"] == 0
+
+
+def test_estimator_recalibration_does_not_inflate_headroom():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=10_000_000, headroom_floor=500))
+    msgs = [user("p0")]
+    req = request(msgs)
+    engine(req, {}, MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": 50}, req)
+    msgs = msgs + [assistant("a0"), user("p1")]
+    req = request(msgs)
+    engine(req, {}, MESSAGES)
+    before = next(iter(engine.states.values())).max_turn_growth
+    engine.observe_usage(MESSAGES, {"input_tokens": 5_000}, req)  # ratio changes a lot
+    engine(request(msgs + [assistant("a1"), user("p2")]), {}, MESSAGES)
+    after = next(iter(engine.states.values())).max_turn_growth
+    assert after < 1_000 and before < 1_000  # growth reflects the small added turn, not the ratio change
+
+
+def test_bound_too_small_sends_unrotated():
+    msgs = history(6) + [user("new prompt")]
+    huge_head = request(msgs, system=[{"type": "text", "text": FILL * 8}])  # F above the bound
+    up, st, ev = rewrite(huge_head, None, MemoryStore(key=b"k" * 32), CONFIG, TokenEstimator())
+    small = [e for e in ev if e["event"] == "bound_too_small"]
+    assert small and small[0]["window_budget"] <= 0 and "rotation" not in names(ev)
+    assert st.k == 0 and up["messages"] == msgs
+
+
+def test_seat_sized_head_does_not_thrash():
+    # Scaled-down OpenRig seat: head about 61% of the bound (92k of 150k measured). Half the bound as
+    # the window (the old rule) would re-trigger every turn; half of W leaves room to grow.
+    cfg = Config(bound=15_000, headroom_floor=2_500)
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
+    head = [{"type": "text", "text": FILL * 16}]  # about 32 KB of system prompt, about 9,200 tokens
+    first = request([user("p0", context=True), system()], system=head)
+    engine(first, {}, MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": 9_200}, first)  # measured head
+    msgs = [user("p0", context=True), system(), assistant(f"a0 {FILL}")]
+    for t in range(1, 8):
+        msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
+    msgs.append(user("new prompt"))
+    req = request(msgs, system=head)
+    up, _, ev = engine(req, {}, MESSAGES)
+    rotation = next(e for e in ev if e["event"] == "rotation")
+    w = rotation["window_budget"]
+    assert 0 < w < cfg.bound // 2
+    assert window_tokens(up["messages"], TokenEstimator()) <= w  # the retained window fits W
+    # The next turn grows by one ordinary turn: no second rotation.
+    est = TokenEstimator()
+    sent = window_tokens(up["messages"], est)
+    engine.observe_usage(MESSAGES, {"input_tokens": 9_200 + sent}, req)
+    more = msgs + [assistant(f"reply {FILL}"), user("next prompt")]
+    _, _, ev2 = engine(request(more, system=head), {}, MESSAGES)
+    assert "rotation" not in names(ev2) and "rotation_noop" not in names(ev2)
