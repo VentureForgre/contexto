@@ -321,12 +321,29 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _handle(self) -> None:
         self._response_started = False
+        self._upstream_sent = False
+        self._raw: tuple[bytes, Headers] | None = None
         try:
             self._handle_request()
         except Exception as exc:
-            # Last resort: never drop the client's connection without an answer.
-            self.owner.log({"event": "proxy_error", "method": self.command,
-                            "path": self.path.split("?", 1)[0], "error": type(exc).__name__})
+            # Last resort, never drop the client's connection without an answer. If the CLI's
+            # request was read intact and nothing has reached upstream or the client yet, forward
+            # the CLI's own bytes unchanged: a local 502 would make Claude Code retry into the same
+            # error and stall the session. Otherwise answer a local 502.
+            path = self.path.split("?", 1)[0]
+            fallback = self._raw is not None and not self._upstream_sent and not self._response_started
+            self.owner.log({"event": "proxy_error", "method": self.command, "path": path,
+                            "error": type(exc).__name__, "fallback": "forward_original" if fallback else "local_502"})
+            if fallback:
+                body, headers = self._raw
+                entry = {"event": "request", "method": self.command, "path": path, "fallback": True,
+                         "original_request_bytes": len(body), "request_bytes": len(body)}
+                try:
+                    self._forward(body, headers, entry, time.monotonic(), None)
+                    return
+                except Exception as again:
+                    self.owner.log({"event": "proxy_error", "path": path, "error": type(again).__name__,
+                                    "fallback": "local_502"})
             if not self._response_started:
                 self._send_local_error(502, f"contexto proxy: internal error ({type(exc).__name__})")
             self.close_connection = True
@@ -343,6 +360,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         headers: Headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}
+        self._raw = (body, dict(headers))
         entry: dict[str, Any] = {"event": "request", "method": self.command, "path": path_only,
                                  "original_request_bytes": len(body)}
         original = None
@@ -415,6 +433,7 @@ class _Handler(BaseHTTPRequestHandler):
                 conn.putheader(name, value)
             if body or self.command in ("POST", "PUT", "PATCH"):
                 conn.putheader("Content-Length", str(len(body)))
+            self._upstream_sent = True
             conn.endheaders(body or None)
             response = conn.getresponse()
         except OSError as exc:

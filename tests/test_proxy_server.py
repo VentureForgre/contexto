@@ -495,13 +495,31 @@ def test_malformed_framing_gets_a_400_not_a_dropped_connection(make_proxy):
     assert log.requests()[0]["status"] == 400
 
 
-def test_unexpected_internal_error_answers_502_and_is_logged(make_proxy, monkeypatch):
+def test_internal_error_before_upstream_forwards_the_original_request(make_proxy, monkeypatch):
     def broken(headers, beta):
         raise RuntimeError("boom")
 
+    Upstream.mode = "json"
     monkeypatch.setattr("contexto.proxy.add_beta", broken)
-    proxy, log = make_proxy(observe_thinking=True)
+    proxy, log = make_proxy(transform=StubEngine("drop-first"), observe_thinking=True)
+    response, data = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    assert response.status == 200 and json.loads(data)["usage"]["input_tokens"] == 7
+    assert len(Upstream.received) == 1 and Upstream.received[0][3] == REQUEST_BYTES  # the CLI's own bytes
+    assert Upstream.received[0][2]["x-api-key"] == SECRET
+    errors = [e for e in log.events if e["event"] == "proxy_error"]
+    assert [(e["error"], e["fallback"]) for e in errors] == [("RuntimeError", "forward_original")]
+    assert log.requests()[0]["fallback"] is True and log.requests()[0]["status"] == 200
+
+
+def test_internal_error_after_upstream_answers_502_without_resending(make_proxy, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    Upstream.mode = "json"
+    monkeypatch.setattr("contexto.proxy.UsageReader", broken)  # fails after the request went upstream
+    proxy, log = make_proxy()
     response, data = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
     assert response.status == 502 and b"internal error" in data
+    assert len(Upstream.received) == 1  # never sent twice
     errors = [e for e in log.events if e["event"] == "proxy_error"]
-    assert errors and errors[0]["error"] == "RuntimeError"
+    assert [(e["error"], e["fallback"]) for e in errors] == [("RuntimeError", "local_502")]
