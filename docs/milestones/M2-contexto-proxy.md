@@ -69,8 +69,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   `role: "system"` message up to the next turn-start message.
 - **Carried content** is never paged: the injected context blocks of any turn-start message
   (everything but the user's own prompt text); the session-start `role: "system"` message; the
-  latest settings-only system message per settings key (rule 13); and tool-addition system
-  messages. All are carried in the CLI's current form, never restored from a stored copy. Any
+  latest settings-only system message per settings key (rule 13, where settings-only means empty
+  content plus settings fields); and tool-addition system messages, which are vendor-documented
+  but not observed on Claude Code 2.1.301 (builder-2 measured that adding or removing an MCP server
+  on resume changes `tools`, a head change under rule 6, and adds no system message). All are carried in the CLI's current form, never restored from a stored copy. Any
   other `role: "system"` message carries per-turn content (for example the output of a
   context-injecting `UserPromptSubmit` hook) and belongs to its turn: it is paged with that turn. A system message the proxy cannot classify is
   carried, and the proxy logs `unclassified_system_message`; carrying is the safe failure, since
@@ -146,7 +148,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     one fresh start and five resumes; reported by manager-1, pending review): system messages
     accrue per settings change; each effort change adds one settings-only message of about 66
     bytes after the new prompt. Measured by reviewer-2 with a context-injecting `UserPromptSubmit`
-    hook (zero spend, three real CLI-written turns, PR #30 review): one content system message per
+    hook (a single zero-spend probe of three real CLI-written turns, PR #30 review; builder-2's
+    later probe agrees: about 70 characters per later turn, no `output_config`): one content system message per
     turn, so OpenRig seats and other hook users add one every turn. Hence the split in the Terms:
     per-turn content system messages page with their turn, and only session-start,
     settings-only, and tool-addition messages are carried. At rotation only (deterministic, and
@@ -236,8 +239,8 @@ a no-replayed-thinking baseline.
 
 1. **Long run:** a scripted session whose local history reaches at least 2.5 times the bound
    (bound 150,000, the shipped default, so the run tests the product as shipped and leaves each
-   epoch room to show cache reads; at 100,000 the retained window would be about 20,500 tokens
-   and every turn would rotate, per lane B's dry run) shows zero compaction events, every
+   epoch room to show cache reads; at 100,000 the window budget `W` would be about 20,500 tokens
+   (retained window about 10,000) and every turn would rotate, per lane B's dry run) shows zero compaction events, every
    upstream request under the bound except logged over-bound turns, and zero 4xx responses.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
