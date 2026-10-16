@@ -104,11 +104,12 @@ MATCH_LINE_CHARS = 200  # characters shown of any one line
 
 
 def match_lines(text: str, query: str, context: int = MATCH_CONTEXT, per_page: int = MATCHES_PER_PAGE,
-                line_chars: int = MATCH_LINE_CHARS) -> tuple[list[tuple[int, int, bool, str]], int]:
+                line_chars: int = MATCH_LINE_CHARS, last: bool = False) -> tuple[list[tuple[int, int, bool, str]], int]:
     """The lines of rendered page ``text`` that contain ``query``, with bounded context (M2 B15).
 
     Returns ``(shown, total)``: ``shown`` holds ``(start, end, is_match, line)`` for the first
-    ``per_page`` matching lines and up to ``context`` lines either side, in page order, overlaps
+    ``per_page`` matching lines (the last ``per_page`` with ``last``, as search shows them: a turn's
+    latest statements, B21) and up to ``context`` lines either side, in page order, overlaps
     merged; ``total`` counts every matching line. ``text[start:end]`` is the part of the page a
     line shows, so ``contexto_recall`` can read on from ``start``. A line longer than
     ``line_chars`` is cut to that many characters, marked with a trailing " ...". A matching line
@@ -129,7 +130,7 @@ def match_lines(text: str, query: str, context: int = MATCH_CONTEXT, per_page: i
             matching.append((line, pos))
         pos = text.find(query, pos + 1)
     shown: list[tuple[int, int, bool, str]] = []
-    first_match = dict(matching[:per_page])
+    first_match = dict(matching[-per_page:] if last else matching[:per_page])
     wanted = sorted({n for m in first_match for n in range(max(0, m - context), min(len(starts), m + context + 1))})
     for n in wanted:
         start, end = starts[n], ends[n]
