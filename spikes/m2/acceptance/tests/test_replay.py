@@ -244,3 +244,26 @@ def test_no_claude_code_beta_reaches_a_direct_request():
     assert req["_betas"] == ["b1"]
     assert replay.beta_headers({"_betas": ["claude-code-20250219"]}) == {}
     assert replay.beta_headers({"_betas": ["claude-code-20250219", "b2"]}) == {"anthropic-beta": "b2"}
+
+
+def test_decoding_stops_at_the_probe_request_so_a_later_unresolvable_record_is_harmless():
+    # Live H1 rerun (2026-10-16): the probe turn's own tool-loop requests named assistant messages
+    # the JSONL did not hold; the baseline only needs the first request holding the probe.
+    later = {"type": "api-request", "id": "r4", "shapeHash": "sh", "params": _records()[4]["params"], "base": "r3",
+             "keep": 8, "tail": ["not-a-known-hash"]}
+    req = replay.build_request(_records() + [later], PROBE, 32_000)
+    assert req["messages"][-2]["content"] == [{"type": "text", "text": PROBE}]
+    early = [r for r in _records() if r.get("id") != "r3"] + [later]  # no probe before the broken record
+    with pytest.raises(replay.ReplayError):
+        replay.build_request(early, PROBE, 32_000)
+
+
+def test_a_display_count_tokens_rejects_becomes_omitted_and_is_labeled():
+    recs = _records()
+    for r in recs:
+        if r.get("type") == "api-request":
+            r["params"]["thinking"] = {"type": "adaptive", "display": "updates"}
+    req = replay.build_request(recs, PROBE, 32_000)
+    assert req["thinking"] == {"type": "adaptive", "display": "omitted"}
+    assert req["_changes"] == {"thinking.display": ["updates", "omitted"]}
+    assert replay.build_request(_records(), PROBE, 32_000)["_changes"] == {}  # nothing to change

@@ -50,7 +50,9 @@ def run_replay(args: argparse.Namespace) -> int:
     except (replay.ReplayError, OSError) as exc:
         print(f"refusing: {exc}", file=sys.stderr)
         return 2
-    out: dict[str, Any] = {"request": replay.summary(request)}
+    out: dict[str, Any] = {"request": replay.summary(request), "label": "no-replayed-thinking baseline",
+                           "changes_from_recorded": request.get("_changes") or {},
+                           "betas": replay.harness_betas(request.get("_betas"))}
     if args.dry:
         print(json.dumps(out, indent=2))
         return 0
