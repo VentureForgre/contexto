@@ -178,7 +178,7 @@ def test_search_is_exact_substring_newest_first(server, stores):
     page_text = mcp.render_page(store.get_page(a))
     offset = page_text.index("Remember: the staging port is garnet-4821.")
     head, *lines = text.split("\n")
-    assert head.startswith(f"{a} (turn 3): Remember: the staging port is garnet-4821.")  # one hit
+    assert head == f"{a} (turn 3)"  # one hit: page id and turn, no stub (B17)
     assert f"> {offset}: Remember: the staging port is garnet-4821." in lines  # the line, at its offset
     assert all(line.startswith(("> ", "  ")) for line in lines)
     assert (tool(server, "contexto_search", {"query": "GARNET"})["result"]["content"][0]["text"]
@@ -191,10 +191,10 @@ def test_search_says_when_results_are_cut():
     store = MemoryStore("s3")
     store.set_window(200_000, 2.0)  # a large window, so the 32,000-character cap applies (B9)
     store.page_out([[{"role": "user", "content": [{"type": "text", "text": f"needle {i}"}]}]
-                    for i in range(mcp.SEARCH_LIMIT + 5)], first_turn=1)
+                    for i in range(mcp.SEARCH_LIMIT + mcp.SEARCH_MORE_LIMIT + 5)], first_turn=1)
     result = tool(mcp.Server(store, io.StringIO(), io.StringIO()), "contexto_search", {"query": "needle"})["result"]
     lines = result["content"][0]["text"].split("\n")
-    assert sum(line.startswith("pg_") for line in lines) == mcp.SEARCH_LIMIT
+    assert sum(line.startswith("pg_") for line in lines) == mcp.SEARCH_LIMIT + mcp.SEARCH_MORE_LIMIT
     assert lines[-1] == "[5 more matching pages not shown; use a longer or more specific query]"
 
 

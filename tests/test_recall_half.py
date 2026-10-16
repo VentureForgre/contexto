@@ -123,7 +123,7 @@ def test_a_small_room_gets_the_nearly_used_up_reply_uncharged_and_search_still_f
     server = mcp.Server(store, io.StringIO(), io.StringIO())
     reply = server.handle_line(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
         "name": "contexto_search", "arguments": {"query": "line 00500 "}}}))["result"]["content"][0]["text"]
-    assert reply.startswith(f"{pid} (turn 1): ") and "> " in reply  # a search hit that fits still returns
+    assert reply.startswith(f"{pid} (turn 1)\n") and "> " in reply  # a search hit that fits still returns
     assert 0 < store.turn_room()[2] <= 300
     left = 300 - store.turn_room()[2]
     assert recall(store, pid) == [NEARLY.format(left)]  # N is the room that remains
