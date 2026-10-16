@@ -47,15 +47,25 @@ def item_line(record: Record, state: State) -> str:
     return f"- {head}: {_one_line(record.body)}"
 
 
+UNCHECKED_LINE = ("(File sources were not checked for staleness: this session's working directory "
+                  "is not recorded.)")
+
+
+def _has_file_sources(state: State) -> bool:
+    return any(s.type == "file" for r in state.active for s in r.provenance)
+
+
 def _omitted_line(n: int) -> str:
     return f"({n} more pinned items omitted; call contexto_state for the full list)"
 
 
-def render_pinned(state: State, budget_tokens: int) -> str:
-    """Pinned text within ``budget_tokens`` (the first line is always included)."""
+def render_pinned(state: State, budget_tokens: int, staleness_checked: bool = True) -> str:
+    """Pinned text within ``budget_tokens`` (the first line, and the unchecked marker, always included)."""
     items = pinned_items(state)
     lines = [PINNED_FIRST_LINE]
-    used = estimate_tokens(PINNED_FIRST_LINE + "\n")
+    if not staleness_checked and _has_file_sources(state):
+        lines.append(UNCHECKED_LINE)
+    used = sum(estimate_tokens(x + "\n") for x in lines)
     group = None
     for i, (heading, record) in enumerate(items):
         new = ([heading] if heading != group else []) + [item_line(record, state)]
@@ -71,9 +81,11 @@ def render_pinned(state: State, budget_tokens: int) -> str:
     return "\n".join(lines)
 
 
-def render_state(state: State) -> str:
+def render_state(state: State, staleness_checked: bool = True) -> str:
     """The full pinned state with no cap, plus decision conflicts."""
     lines = [PINNED_FIRST_LINE]
+    if not staleness_checked and _has_file_sources(state):
+        lines.append(UNCHECKED_LINE)
     group = None
     for heading, record in pinned_items(state):
         if heading != group:

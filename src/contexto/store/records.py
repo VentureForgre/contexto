@@ -10,6 +10,10 @@
 - ``state(root=None) -> State``: derived state; staleness is checked against ``root`` when given.
 - ``state_text() -> str``: the full pinned state with no budget cap.
 - ``pinned_text(budget_tokens) -> str``: the capped pinned text for the preamble.
+
+``state_text`` and ``pinned_text`` check file sources against the session's working directory
+(``workdir()``, recorded by the launcher with ``set_workdir``). Without one they say that file
+staleness was not checked, rather than presenting file-backed records as fresh.
 """
 
 from __future__ import annotations
@@ -28,9 +32,9 @@ DEFAULT_OWNER = "assistant"
 class LedgerOps:
     """Mixin; the store provides ``ledger``, ``session_id``, and ``get_page``."""
 
-    def _append(self, draft: dict[str, Any]) -> str:
+    def _append(self, draft: dict[str, Any], precondition=None) -> str:
         try:
-            return self.ledger.append(draft).id
+            return self.ledger.append(draft, precondition=precondition).id
         except LedgerCorruptError:
             raise
         except (ValidationError, LedgerError) as e:
@@ -60,16 +64,22 @@ class LedgerOps:
         return self._append(draft)
 
     def close(self, obligation_id: str, note: str, *, author: str = "model") -> str:
-        if obligation_id not in {r.id for r in self.state().open_obligations}:
-            raise ValueError(f"not an open obligation: {obligation_id}")
+        def still_open(existing):
+            # Runs inside the ledger lock, so two concurrent closes cannot both pass.
+            if obligation_id not in {r.id for r in derive(existing).open_obligations}:
+                raise ValueError(f"not an open obligation: {obligation_id}")
+
         return self._append({"kind": "closure", "epistemic": "reported", "author": author, "body": note,
-                             "provenance": [], "session": self.session_id, "target": obligation_id})
+                             "provenance": [], "session": self.session_id, "target": obligation_id},
+                            precondition=still_open)
 
     def state(self, root: Path | None = None) -> State:
         return derive(self.ledger.records(), root)
 
     def state_text(self) -> str:
-        return render_state(self.state())
+        root = self.workdir()
+        return render_state(self.state(root), staleness_checked=root is not None)
 
     def pinned_text(self, budget_tokens: int) -> str:
-        return render_pinned(self.state(), budget_tokens)
+        root = self.workdir()
+        return render_pinned(self.state(root), budget_tokens, staleness_checked=root is not None)

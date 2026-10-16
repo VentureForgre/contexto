@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 
 from contexto.canonical import canonical_bytes
@@ -20,6 +21,13 @@ class MemoryStore(LedgerOps):
         self.pages: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.ledger = MemoryLedger()
+        self._workdir: Path | None = None
+
+    def set_workdir(self, path: Path) -> None:
+        self._workdir = Path(path).resolve()
+
+    def workdir(self) -> Path | None:
+        return self._workdir
 
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]:
         ids = []
