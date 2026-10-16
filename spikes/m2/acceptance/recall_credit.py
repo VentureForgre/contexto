@@ -69,10 +69,12 @@ def turn_answer_indices(session_log: list[dict[str, Any]]) -> list[int]:
     probe turn's final answer. The proxy's stream hold (A9) holds a response from its first
     ``tool_use`` block, any tool, so ``stream_hold.held_events == 0`` marks a response with no tool
     call. A log without ``stream_hold`` falls back to "no ``mcp_call`` before the next request",
-    which misses non-MCP tools (Bash, Read). Codex logs need their own rule: pass ``turn_ends``.
+    which misses non-MCP tools (Bash, Read). Only 2xx responses count, so a failed request the CLI
+    retried (a local 502, say) is not a turn end. Codex logs need their own rule: pass ``turn_ends``.
     """
     requests = [i for i, ev in enumerate(session_log)
-                if ev.get("event") == "request" and str(ev.get("path") or "").split("?")[0] == "/v1/messages"]
+                if ev.get("event") == "request" and str(ev.get("path") or "").split("?")[0] == "/v1/messages"
+                and _ok(ev.get("status"))]
     ends = []
     for n, i in enumerate(requests):
         hold = session_log[i].get("stream_hold")
@@ -84,6 +86,11 @@ def turn_answer_indices(session_log: list[dict[str, Any]]) -> list[int]:
         if not any(session_log[j].get("event") == "mcp_call" for j in range(i + 1, nxt)):
             ends.append(i)
     return ends
+
+
+def _ok(status: Any) -> bool:
+    """A 2xx response; a request logged without a status (older logs) counts as answered."""
+    return status is None or (isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 300)
 
 
 def plant_spans(probes: list[Any], pages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

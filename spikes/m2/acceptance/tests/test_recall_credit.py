@@ -175,3 +175,12 @@ def test_caller_supplied_turn_ends_replace_the_messages_rules():
     assert (recall_credit.credit([PROBE], ANSWERED, log, [PAGE], probe_turn_ids=TURNS)
             == recall_credit.credit([PROBE], ANSWERED, log, [PAGE], probe_turn_ids=TURNS,
                                     turn_ends=recall_credit.turn_answer_indices(log)))  # omitted = today's result
+
+
+def test_a_failed_request_and_its_retry_are_one_turn_end():
+    """A local 502 (no stream_hold) followed by its retried 200 is one turn end, under either rule."""
+    failed = {"event": "request", "path": "/v1/messages", "status": 502}
+    held = {**_req(), "stream_hold": {"triggered": False, "held_events": 0}}
+    assert recall_credit.turn_answer_indices([_req(), failed, _req()]) == [0, 2]  # the mcp_call fallback
+    assert recall_credit.turn_answer_indices([held, failed, held]) == [0, 2]  # the stream-hold rule
+    assert recall_credit.turn_answer_indices([{**_req(), "status": None}]) == [0]  # no status: counted
