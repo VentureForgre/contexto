@@ -39,6 +39,10 @@ from acceptance import cache_rotation as cr  # noqa: E402
 from contexto import rewrite  # noqa: E402
 from contexto.rewrite import Config  # noqa: E402
 
+# The engine's headroom before rule 17 (contract PR #186): no cap, no decay. Every candidate is replayed
+# on top of it, so "today" is the rule A33 measured.
+BEFORE_RULE_17 = {"headroom_cap": 1_000_000.0, "headroom_decay": 1.0}
+
 CANDIDATES: dict[str, dict[str, Any]] = {
     "today": {},
     "cap_25": {"cap": 0.25},
@@ -147,7 +151,7 @@ def evaluate_run(run: dict[str, Any], bound: int, rate: float | None = None) -> 
     """A recorded run (A28's loader), each candidate, at the run's own config otherwise."""
     model = run["model"] if run["model"] in cr.PRICES else ("gpt-6-astra" if run["api"] == "responses"
                                                             else "claude-haiku-5-5")
-    config = Config(bound=bound)
+    config = Config(bound=bound, **BEFORE_RULE_17)
     base_bytes = None
     out = {}
     for name, rule in CANDIDATES.items():
@@ -166,7 +170,7 @@ def evaluate_seat(bounds: tuple[int, ...] = (150_000, 170_000), head: int = 92_0
     big = seat_bound.session(head, turns, big_read_at=turns // 2)
     out: dict[str, Any] = {}
     for bound in bounds:
-        config = Config(bound=bound)
+        config = Config(bound=bound, **BEFORE_RULE_17)
         for name, rule in CANDIDATES.items():
             with headroom_rule(**rule), capture() as calls:
                 rows = seat_bound.replay(big, config)

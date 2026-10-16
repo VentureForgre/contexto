@@ -59,7 +59,8 @@ def test_rule_16_resume_matches_no_restart_and_no_resume_rotates_again():
 
 
 def test_one_large_read_keeps_the_window_budget_negative_afterwards():
-    config = Config(bound=150_000)
+    # A32's finding, under the headroom rule before rule 17 (no cap, no decay); rule 17 fixes it.
+    config = Config(bound=150_000, headroom_cap=1_000_000.0, headroom_decay=1.0)
     s = sb.summarize(sb.replay(sb.session(84_000, 8, big_read_at=3), config), config)
     assert s["window_budget"][0] < 0 and s["window_minimal"] >= 3 and s["bound_too_small"] >= 3
     assert s["margin_to_idle_compaction"] < 0
