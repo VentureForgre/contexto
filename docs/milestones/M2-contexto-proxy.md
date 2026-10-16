@@ -391,7 +391,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   `count_tokens`) the engine calls `SessionStore.set_retained(epoch, k, turns)` with entries
   `{turn, message_index, role, text}` (text blocks of the retained messages, including
   `tool_result` text; `role` is `user`, `assistant`, or `tool_result`, the last for every tool
-  result, including a Responses function call's output; no thinking or images), a full atomic overwrite at mode 0600, bounded by the
+  result, including a Responses `function_call_output` or
+  `custom_tool_call_output`; no thinking or images), a full atomic overwrite at mode 0600, bounded by the
   window, never logged, stamped with that request's sequence number. Both room publishes of the
   same request (request time and real usage) carry the same request sequence, so a tool call
   inside the stream hold sees a snapshot that matches its room. Search refuses a snapshot whose
@@ -410,9 +411,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   per reply (the newest 3 across the window, the rest counted in one line), charged,
   skipping the current turn's own question: entries with role `user` in the snapshot's newest
   turn are never matched, since that text is what is being asked, not a
-  statement about it (B22; in reviewer-2's zero-spend reach re-check on main 8571095, a probe turn's
-  search returned the probe's own question as an in-view line, taking one of the 3 slots); the
-  turn's `tool_result` text is still matched;
+  statement about it (B22; inferred from reviewer-2's zero-spend reach re-check on main 8571095: an offline
+  search against a stub run's final snapshot returned probe q_a_045's own question, from an
+  earlier turn, as an in-view line. In D27's plan, 64 of the 84 probe key terms appear in their
+  own probe's question and none in another probe's, so during a probe turn the only question a
+  search can match is the current turn's); the turn's `tool_result` text is still matched;
   with their returned spans logged content-free under a distinct source marker and no page id. In-view hits do not count toward acceptance 3,
   which measures retrieval of paged-out content. Measured basis (live run #2 chain
   analysis, builder-3, zero spend): 4 of H1's 5 extra chain misses had a newer link in the retained
