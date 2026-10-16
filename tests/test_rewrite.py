@@ -774,3 +774,27 @@ def test_count_tokens_usage_raises_nothing():
     engine(req, {}, MESSAGES)
     assert engine.observe_usage(COUNT_TOKENS, {"input_tokens": 999_999}, req) == []
     assert not any(e["event"] in ("over_bound", "estimate_error") for e in store.events)
+
+
+def test_estimate_after_a_rotation_is_of_the_transformed_request():
+    for factor, expect_error in ((1.0, False), (1.2, True)):
+        store = MemoryStore(key=b"k" * 32)
+        engine = RewriteEngine(store, config=CONFIG)
+        req = request(history(6) + [user("new prompt")])
+        _, _, ev = engine(req, {}, MESSAGES)
+        rotation = [e for e in ev if e["event"] == "rotation"]
+        sent = ev[-1]["sent_estimate"]
+        assert rotation and sent < ev[-1]["estimate"]  # the transformed request is smaller than the history
+        out = engine.observe_usage(MESSAGES, {"input_tokens": int(sent * factor)}, req)
+        assert ("estimate_error" in [e["event"] for e in out]) is expect_error, factor
+
+
+def test_pre_send_and_real_over_bound_records_are_distinct():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    loop = request(history(8) + [user("go"), tool_use(1), tool_result(1, FILL * 3)])
+    _, _, ev = engine(loop, {}, MESSAGES)
+    pre = [e for e in ev if e["event"] == "over_bound"]
+    assert [e["source"] for e in pre] == ["estimate"] and ev[-1]["over_bound"] is True  # rule 5, allowed
+    out = engine.observe_usage(MESSAGES, {"input_tokens": CONFIG.bound + 1}, loop)
+    assert [e["source"] for e in out if e["event"] == "over_bound"] == ["real"]  # acceptance 1 failure

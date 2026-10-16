@@ -557,18 +557,28 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
                 else:
                     state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "bound",
                                       sizing=(f, w))
-    over = estimate > config.bound and not any(e["event"] == "rotation" for e in events)
+    rotated = any(e["event"] == "rotation" for e in events)
+    over = estimate > config.bound and not rotated
+    # The estimate observe_usage compares with real usage must describe what is actually sent: after a
+    # rotation that is the transformed request, not the history that triggered it (A2b review).
+    sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
 
     if state.initial_carried is None:
         state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
     upstream = {**request, "messages": transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
-    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent, last_estimate=estimate,
+    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent, last_estimate=sent_estimate,
                     last_window_tokens=window_tokens(upstream["messages"], estimator))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream["messages"]), "estimate": estimate, "sent_bytes": sent}
+    if rotated:
+        event["sent_estimate"] = sent_estimate
     if over:
+        # Pre-send over-bound (rule 5: a turn that grows past the bound inside a tool loop): the allowed,
+        # logged exception for acceptance 1, kept distinct from observe_usage's source "real" record.
         event["over_bound"] = True
+        events.append({"event": "over_bound", "source": "estimate", "epoch": state.epoch, "estimate": estimate,
+                       "bound": config.bound})
     events.append(event)
     return upstream, state, events
 
