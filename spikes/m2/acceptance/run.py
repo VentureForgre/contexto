@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         s, _ = plan(args.seed, 0, args.turn_kbytes * 1_000)
         result = reach.reach(list(s.probes), reach.load_pages(args.session_dir), turn_texts=list(s.turns[:-1]))
         print(json.dumps({k: v for k, v in result.items() if k != "rows"}, indent=2))
-        return 0 if not result["unreachable"] else 1
+        return 0 if not result["unreachable"] and result.get("mapping_ok", True) else 1  # fails closed
 
     if args.command == "check":
         report = detectors.analyze(detectors.read_jsonl(args.session_log), detectors.read_jsonl(args.cc_jsonl), args.bound)

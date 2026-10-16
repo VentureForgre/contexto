@@ -96,8 +96,22 @@ def test_pages_map_to_script_turns_by_content_and_drift_is_reported():
              _page("pg_z", 3, "carried system text only")]
     m = reach.map_pages(pages, turns)
     assert [r["script_turn"] for r in m["pages"]] == [0, 1, None]
-    assert [r["id"] for r in m["drift"]] == ["pg_y"] and m["unmatched"] == ["pg_z"]
+    assert [r["id"] for r in m["drift"]] == ["pg_y"] and m["unmatched"] == ["pg_z"] and m["ambiguous"] == []
     # the window follows content: turn 2 is not paged, so a statement there is in the window
     p = Probe("q7", "a", "chain", "t", "?", "two", subjects=("part two",), statements=("Next part two",))
     r = reach.reach([p], pages, turn_texts=turns)
     assert r["rows"][0]["needs"][0]["in_window"] is True and r["turn_mapping"]["drift"][0]["id"] == "pg_y"
+
+
+def test_reach_fails_closed_on_an_unmatched_or_ambiguous_page():
+    # Reviewer-2 on PR #91: such a page may hold any turn, so nothing it could hold counts as in view.
+    turns = ["Opening turn zero text " * 8, "svc.key is now v9. " + "Next part one " * 10]
+    unmatched = [_page("pg_u", 1, "carried system text only")]  # its number points at turn 1
+    p = Probe("q8", "a", "chain", "t", "?", "v9", subjects=("svc.key",), statements=("svc.key is now v9.",))
+    r = reach.reach([p], unmatched, turn_texts=turns)
+    assert r["mapping_ok"] is False and r["turn_mapping"]["unmatched"] == ["pg_u"]
+    assert r["rows"][0]["needs"][0]["in_window"] is False and r["reachable"] == 0
+    twin = "Same opening for both turns " * 6
+    ambiguous = [_page("pg_a2", 0, twin)]
+    r = reach.reach([p], ambiguous, turn_texts=[twin + "x", twin + "svc.key is now v9."])
+    assert r["turn_mapping"]["ambiguous"] == ["pg_a2"] and r["mapping_ok"] is False and r["reachable"] == 0
