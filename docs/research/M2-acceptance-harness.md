@@ -106,9 +106,22 @@ measured this case, PR #9). So:
 - An upstream call is an `event: "request"` record with `path: "/v1/messages"`. `count_tokens`
   and other paths are ignored.
 - **Over-bound (acceptance 1, contract rule 5).** A request's input is `input_tokens +
-  cache_read_input_tokens + cache_creation_input_tokens`. Any request with input over the bound
-  must carry `over_bound: true`. One that does not is reported in `unlogged_over_bound` and fails
-  the check.
+  cache_read_input_tokens + cache_creation_input_tokens`.
+  - The one exemption (D17) is a tool loop that grew past the bound, which the engine flagged
+    before sending: a pre-send `over_bound` flag on a request with no turn-start event
+    (`rotation`, `rotation_noop`, `bound_too_small`, `window_minimal`). These go to
+    `over_bound_tool_loop`. Once lane A tags the pre-send record `source: "estimate"` (PR #48
+    fix), the detector keys on that tag.
+  - Every other request over the bound goes to `over_bound_failures` and fails
+    `over_bound_only_in_tool_loop`. That includes a flagged turn start: `bound_too_small` is a
+    configuration failure, counted and failing `no_bound_too_small`. A `window_minimal` request
+    (contract PR #50) is under the bound by construction, so over the bound it is an estimator
+    miss, not an exemption.
+  - A2b's `over_bound` events with `source: "real"` mean the estimate missed, unless they belong
+    to an exempt tool loop (same `real_tokens`). The rest are counted in `estimator_misses`, with
+    the largest real input, and fail `no_estimator_misses`.
+  - `estimate_error` events are reported (count, lowest ratio, last `mean_ratio`) but no verdict
+    uses them: in PR #48 as reviewed, a rotation request's estimate is the pre-rotation one.
 - **Unverified requests (acceptance 1).** A `/v1/messages` request whose `usage` is null or
   missing cannot be checked against the bound, so it must not hide an over-bound request. Their
   indexes are reported in `unverified_requests`, and the `every_request_has_usage` verdict fails
@@ -160,42 +173,57 @@ of the 150,000 bound), the run switches to **option (b)**: the logs become files
 directory that the model reads with the Read tool, so they arrive as `tool_result` content at the
 1.5 seed. The budget is then recomputed before asking for the go.
 
-## Dry-run budget [inferred estimates]
+## Zero-spend dry run through the launcher (2026-10-16)
 
 ```
-python3 spikes/m2/acceptance/run.py dry-run   # bound 150,000, 70 KB turns, turn count chosen to reach 375,000
+uv run python spikes/m2/acceptance/stubrun.py <seat settings> .venv/bin/contexto .contexto/spikes/<dir> [turn KB]
 ```
 
-**Intake's parameters** (2026-10-16 00:40Z):
-- bound 150,000, the shipped default, and local history of at least 375,000;
-- the replay baseline, labeled no-replayed-thinking;
-- up to 4,000,000 tokens with the guard at the worst case.
+`stubrun.py` runs the whole acceptance script through lane A's real `contexto run claude` (PR #40)
+against a local stub upstream that never forwards. The stub answers `OK`, as SSE when the request
+streams, and reports a **modelled** usage: pasted log text at 1.8 bytes per token and every other
+byte at 3.0 [assumed; it errs high against the contract's 3.5]. The real head's token count is
+not measured, since that needs the API. Everything else is the real launcher, engine, MCP server
+and Claude Code 2.1.301. The stub checks the credential on every request, keeping booleans only.
 
-That approval is conditional on a zero-spend dry run with lane A's real `contexto run` and the
-measured head. With the default head:
+**Finding: 70 KB turns fail.** At 70 KB the engine logged `bound_too_small` on 8 of 11 requests
+and sent 7 over the bound, up to 408,704 modelled tokens, rotating only on the probe turn. The
+engine's check needs `W` to hold the newest complete turn **and** the new turn (`window_tokens`
+from `starts[-2]`); `W` was about 58,000 to 63,000 and two 70 KB turns are more than 66,000. The
+earlier budget simulation checked one turn only. It now matches the engine and reproduces this.
+
+**At 40 KB turns** (18 content turns, 375,000+ tokens of history):
+
+| Measure | Value |
+|---|---|
+| Requests; rotations; epochs | 19; 5; 6 (4 requests in the first epoch, 3 in each later one) |
+| Over-bound requests; `bound_too_small`; usage missing | 0; 0; 0 |
+| Head: system bytes, tools, tool bytes | 8,982; 26; 60,306 (about 23,100 tokens at 3.0) |
+| Engine's fixed overhead `F` (estimated) | 47,600 at most |
+| Pre-usage request: modelled real vs estimate | 48,799 vs 33,668 (31% low), far below 135,000 |
+| Later requests: largest estimate gap | 7% low (69,948 vs 65,059) |
+| First epoch's largest input; margin to 150,000 | 113,693; 36,307 |
+| Largest input overall | 116,662, plus 6 modelled recalls on the probe turn up to 146,341 |
+| Paged-only plants inside stored pages | 4 of 4 |
+| Credential | 19 of 19 requests carried the seat helper's key; no OAuth beta header |
+
+Rotation requests log the estimate of the unrotated request, so their gap is negative by design.
 
 | Line | Expected tokens | Worst case (full output reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy (10 turns of 70 KB + probe turn) | 2,406,326 | 2,944,926 |
-| Full-context baseline, one direct replay request | 442,457 | 470,457 |
-| **Total** | **2,848,783** | **3,415,383** |
+| H1 through the proxy (18 turns of 40 KB + probe turn with 6 recalls) | 2,470,789 | 3,265,229 |
+| Full-context baseline, one direct replay request | 425,164 | 453,164 |
+| **Total** | **2,895,953** | **3,718,393** |
 
-- The plan reaches 382,096 tokens of local history, 2.55 times the bound, with 8 rotations.
-- No requests are planned over the bound.
-- The harness picks the fewest content turns whose actual sizes reach 2.5 times the bound. Live
-  mode refuses a plan below that, and an approval below the worst case.
+Under option (a) the pre-usage request stays far below 135,000, so the logs stay pasted user
+text. `Params.head` is now 47,600 (the engine's `F` here) and the default turn size 40 KB.
 
-**Reconciling the 150k rows in the scan below** (3,944,995 at 30 KB, 3,234,226 at 44 KB):
-- Those rows came from the same model with smaller turns, at the older 2.0 bytes-per-token rate.
-- At a fixed history target, every content turn is one request carrying the head plus the retained
-  window. So total cost scales with the number of turns:
-  - 25 turns at 30 KB;
-  - 18 turns at 44 KB;
-  - 10 turns at 70 KB.
-- Larger turns are cheaper as long as the window budget `W` can hold one. With 70 KB turns `W` is
-  about 45,000 after the turn-size headroom, enough for one turn of about 39,000 tokens.
+**Intake's parameters** (2026-10-16 00:40Z): bound 150,000 with at least 375,000 tokens of
+history; the replay baseline, labeled no-replayed-thinking; up to 4,000,000 tokens with the guard
+at the worst case.
 
-The figures below are the earlier 100k-bound analysis that led to that decision.
+The rows below are the earlier analysis. Its simulation checked only the newest complete turn
+against `W`, so its rows with turns above about 40 KB at 150k understate `bound_too_small`.
 
 **Method**
 - The proxy is simulated with contract rules 3 to 5. The window budget is `W = bound - headroom -
@@ -254,7 +282,7 @@ planned over-bound requests.
 
 ## Tests
 
-`uv run --with pytest pytest spikes/m2` runs 35 tests with no live calls. Most use synthetic
+`uv run --with pytest pytest spikes/m2` runs 38 tests with no live calls. Most use synthetic
 fixtures; `test_engine_log.py` drives the real proxy and rewrite engine against a stub upstream,
 once with JSON replies and once with SSE replies, since the acceptance session streams.
 They cover:

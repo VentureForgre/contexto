@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         sp = sub.add_parser(name)
         sp.add_argument("--seed", type=int, default=script.DEFAULT_SEED)
         sp.add_argument("--turns", type=int, default=0, help="content turns; 0 = the fewest reaching 2.5x the bound")
-        sp.add_argument("--turn-kbytes", type=int, default=70)
+        sp.add_argument("--turn-kbytes", type=int, default=40)
         sp.add_argument("--bound", type=int, default=150_000)
         sp.add_argument("--head", type=int, default=budget.Params.head)
     score_p = sub.choices["score"]
