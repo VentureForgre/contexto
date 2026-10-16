@@ -263,6 +263,16 @@ def table(b: Budget, p: Params) -> str:
     return "\n".join(out)
 
 
+def turn_estimates(b: Budget) -> list[int]:
+    """One spend estimate per turn the driver sends, in order: the largest request of each turn, a
+    probe turn's recall round trips included. driver.Run checks estimates[i] before sending turn i,
+    so D27's six probe turns need six entries, not one."""
+    largest: dict[int, int] = {}
+    for r in b.rows:
+        largest[r.turn] = max(largest.get(r.turn, 0), r.input_tokens)
+    return [largest[t] for t in sorted(largest)]
+
+
 def approval_table(b: Budget) -> str:
     """The approval lines. ``run.py live`` gates on the combined worst case (H1 plus the D27 baseline)
     from the same ``Budget``, and the harness doc's table is this function's output (a test keeps

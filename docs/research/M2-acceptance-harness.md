@@ -64,7 +64,8 @@ contexto run --bound 150000 --session <id> --upstream <url> claude -p --input-fo
 - Each user turn is one stream-json line on stdin. A turn ends at the `result` event.
 - The scratch directory must not be inside any git work tree, checked with `git rev-parse
   --is-inside-work-tree`, so a nested directory is refused too.
-- The child environment drops OpenRig and parent-session variables and sets `CONTEXTO_HOME`.
+- The child environment drops OpenRig and parent-session variables and `ANTHROPIC_BASE_URL`, and
+  sets `CONTEXTO_HOME`. The launcher points Claude Code at its own proxy, so nothing goes around it.
 - No `--settings` or `--mcp-config` of the harness's own is passed; the launcher supplies both.
 - `--upstream` is passed explicitly: the owner's proxy (D12), from `$ANTHROPIC_BASE_URL` unless
   given.
@@ -269,7 +270,15 @@ uv run python spikes/m2/acceptance/stubrun.py <seat settings> .venv/bin/contexto
 ```
 
 `stubrun.py` runs the whole acceptance script through lane A's real `contexto run claude` (PR #40)
-against a local stub upstream that never forwards. The stub answers `OK`, as SSE when the request
+against a local stub upstream that never forwards. It calls `run.run_h1`, the function `live`
+runs, with the stub as upstream and the live gate's approval, so the guard, its per-turn
+estimates, the spend watcher and the exception handling are the live ones (live-path fix, after
+the aborted 07:08Z run). `--fault auth:N` answers the N-th Messages request (0-based) with 401, so
+the watcher's auth stop fires; `--fault raise:N` raises a harness error after turn N, so the record
+is written on the error path. `run_h1` refuses the fault hook unless the upstream is loopback. Each H1 record lists the live-only paths it took
+(`run.LIVE_PATHS`); `stubrun.py check-paths <dir>...` fails unless the runs together took all of
+them. A clean run alone leaves `stop_handled` and `error_handled` untaken, so an official dry run
+is the clean run plus one run of each fault. The stub answers `OK`, as SSE when the request
 streams, and reports a **modelled** usage: pasted log text at 1.8 bytes per token and every other
 byte at 3.0 [assumed; it errs high against the contract's 3.5]. The real head's token count is
 not measured, since that needs the API. Everything else is the real launcher, engine, MCP server
@@ -432,6 +441,34 @@ planned over-bound requests.
   zero-4xx counts model requests only, and other 4xx are reported apart (see Detectors).
 - **Artifacts** (private, never in Git): `.contexto/runs/acceptance-20261016T022918Z/`.
 
+## Live H1 6x9, 07:08Z: aborted by a harness error (2026-10-16). NOT A VERDICT
+
+- **What ran:** main `7a9fa16` (PR #119's merge), Claude Code 2.1.301, `claude-haiku-5-5`, bound
+  150,000, D27 6x9, approval 6,873,612 (the gate accepted it; H1 cap 4,001,059). Start 07:08:59Z,
+  stop 07:10:20Z.
+- **What stopped it:** `run.py live` built `driver.Run`'s per-turn spend estimates as the content
+  turns plus one probe entry, the single-probe-turn shape from before D27: 19 entries for 24 turns.
+  `Run.turn` reads `estimates[i]` before sending turn `i`, so probe turn 2 raised `IndexError` before
+  it was sent. `live` caught only the guard's own stops, so the error escaped and neither the H1
+  record nor the answers file was written. Dry run #3 could not see it: `stubrun.py` sent the turns
+  with `transport.send` and never used `driver.Run`.
+- **Spend:** logged 1,973,105 (24 `POST /v1/messages`, all 200); 2,110,172 with the in-flight
+  allowance `run.h1_spend` adds on an abnormal stop. Nothing was in flight, since the error fires
+  before the send. Intake closed this approval line at 2,110,172.
+- **Turns done:** the 18 content turns and probe turn 1. Probe turns 2 to 6 were never sent.
+- **Partial acceptance 1** (`run.py check` on the partial log): every verdict true; 5 rotations,
+  6 epochs, max input 105,076; the one 4xx was `HEAD /api/hello` 401, a non-model path.
+  Acceptance 3 was not reached (probe turn 1 searched and did not recall). Cache 17 of 18.
+- **Fix (live-path fix, intake 07:11Z):** one estimate per turn, the largest request of each
+  turn (`budget.turn_estimates`), and `live` refuses when the count differs from the script's
+  turns. The H1 function, `run.run_h1`, writes the record and the finished probe turns' answers
+  however the run ends and re-raises a harness error after that. A stopped run's answers go to
+  `acceptance-<session>-answers.partial.txt`, never the full-run name, and `score` refuses a
+  stopped run unless asked for a PARTIAL score. The stub dry run calls the same
+  `run_h1` with the stub as upstream, and checks that its runs took every live-only path (see
+  the dry-run section).
+- **Artifacts** (private, never in Git): `.contexto/runs/acceptance-20261016T070859Z/`.
+
 ## Acceptance 3 credit (contract PR #95)
 
 ```
@@ -555,8 +592,15 @@ It goes straight to the owner's proxy, bypassing Contexto.
   Caveat on record: the recall experiment's four sends (2026-10-16 03:24Z to 03:25Z) still carried
   all 11, claude-code-20250219 included, as H1's own requests did.
 - **Output, private only.** `baseline-answers.txt` and `replay-result.json` (sizes, the token
-  count, usage, stop reason, block counts). `run.py score --h1 ... --baseline ...` compares the two
-  answer sets.
+  count, usage, stop reason, block counts). `run.py score --h1 ... --h1-record ... --baseline ...
+  --baseline-result ...` compares the two answer sets. It refuses unless both sides are full runs:
+  the H1 record shows `stopped` null and all six probe turns completed, and the replay result shows
+  no stop and six requests answered 200. A stopped replay writes `baseline-answers.partial.txt`,
+  never the full-run name. It also refuses unless each answers file is the one its record names
+  (`answers_file`, beside the record), the H1 record's `session` matches its file name, and the
+  replay result's `h1_session` (from `--h1-record`) is that session, so no record can vouch for
+  another run's or a partial answers file. `--partial` scores a stopped run anyway, labeled
+  PARTIAL, with no acceptance 2 verdict; it never loosens the ties (reviewer-2 on PR #123).
 
 `--dry` builds the request and prints its sizes with no calls. On the H1 rerun's JSONL
 (`acceptance-20261016T024733Z`) it decodes all 56 messages of the probe-turn request (18 turns, each

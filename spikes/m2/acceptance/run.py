@@ -3,7 +3,8 @@
 From the repository root:
     python3 spikes/m2/acceptance/run.py dry-run [--turns N --turn-kbytes K --head H]   # budget, no calls
     python3 spikes/m2/acceptance/run.py approval-table   # the approval lines the doc carries and live gates on
-    python3 spikes/m2/acceptance/run.py score --h1 ANSWERS --baseline ANSWERS [--seed N --turns N --turn-kbytes K]
+    python3 spikes/m2/acceptance/run.py score --h1 ANSWERS --h1-record H1JSON --baseline ANSWERS \
+        --baseline-result REPLAYJSON [--partial]
     python3 spikes/m2/acceptance/run.py check --session-log PATH --cc-jsonl PATH [--bound 100000]
     python3 spikes/m2/acceptance/run.py check-credential --seat-settings PATH        # zero spend
     python3 spikes/m2/acceptance/run.py live --approved TOKENS --scratch DIR --home DIR --session ID \
@@ -19,6 +20,9 @@ import argparse
 import json
 import os
 import sys
+import traceback
+import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -75,11 +79,13 @@ def run_replay(args: argparse.Namespace) -> int:
         return 2
     if args.h1_record is not None:
         try:
-            h1_spent = int(json.loads(args.h1_record.read_text(encoding="utf-8"))["spent"])
+            h1 = json.loads(args.h1_record.read_text(encoding="utf-8"))
+            h1_spent = int(h1["spent"])
         except (OSError, ValueError, KeyError, TypeError):
             print("refusing: --h1-record is not a live run's H1 record", file=sys.stderr)
             return 2
         out["approval"] = {"combined": args.approved, "h1_spent": h1_spent, "replay": args.approved - h1_spent}
+        out["h1_session"] = h1.get("session")  # score ties this baseline to that H1 run
         args.approved -= h1_spent
     status, spent, answers = 0, 0, []
     window = args.context_window or replay.CONTEXT_WINDOW
@@ -108,7 +114,10 @@ def run_replay(args: argparse.Namespace) -> int:
     finally:
         del key
     out["spent"] = spent
-    (args.out / "baseline-answers.txt").write_text("\n".join(answers) + "\n", encoding="utf-8")
+    out["completed"] = len(answers)
+    # A stopped replay's answers go to a .partial name, never the full-run name (reviewer-2 on PR #123).
+    out["answers_file"] = "baseline-answers.partial.txt" if out.get("stopped") else "baseline-answers.txt"
+    (args.out / out["answers_file"]).write_text("\n".join(answers) + "\n", encoding="utf-8")
     (args.out / "replay-result.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     print(json.dumps(out, indent=2))
     return status
@@ -165,7 +174,13 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--head", type=int, default=budget.Params.head)
     score_p = sub.choices["score"]
     score_p.add_argument("--h1", type=Path, required=True)
+    score_p.add_argument("--h1-record", type=Path, required=True,
+                         help="the H1 run's record (acceptance-<session>-h1.json); a stopped run is refused")
+    score_p.add_argument("--partial", action="store_true",
+                         help="score a stopped H1 run or baseline anyway, labeled PARTIAL, with no acceptance 2 verdict")
     score_p.add_argument("--baseline", type=Path, required=True)
+    score_p.add_argument("--baseline-result", type=Path, required=True,
+                         help="the replay's replay-result.json; a stopped or short baseline is refused")
     live = sub.choices["live"]
     live.add_argument("--approved", type=int, required=True, help="tokens intake approved for the H1 run")
     live.add_argument("--scratch", type=Path, required=True)
@@ -262,65 +277,156 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(row))
         return 0
     if args.command == "score":
+        # Reviewer-2 on PR #123: a stopped run's answers are partial, and acceptance 2 compares full
+        # runs only, on both sides (D27 is symmetric). The H1 record and the replay result decide, not
+        # the answers text.
+        try:
+            record = json.loads(args.h1_record.read_text(encoding="utf-8"))
+            replayed = json.loads(args.baseline_result.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or not isinstance(replayed, dict):
+                raise ValueError
+        except (OSError, ValueError):
+            print("refusing: --h1-record or --baseline-result is not readable as a run record", file=sys.stderr)
+            return 2
+        # Reviewer-2 on PR #123: each answers file must be the one its record names, and the baseline
+        # must have replayed this H1 run, so no record can vouch for another run's (or partial) answers.
+        session = record.get("session")
+        ties = {
+            "the H1 record's session matches its file name":
+                bool(session) and args.h1_record.name == f"acceptance-{session}-h1.json",
+            "--h1 is the answers file the H1 record names": bool(record.get("answers_file"))
+                and args.h1.resolve() == (args.h1_record.parent / str(record["answers_file"])).resolve(),
+            "--baseline is the answers file the replay result names": bool(replayed.get("answers_file"))
+                and args.baseline.resolve() == (args.baseline_result.parent / str(replayed["answers_file"])).resolve(),
+            "the baseline replayed this H1 session": bool(session) and replayed.get("h1_session") == session,
+        }
+        broken = [name for name, ok in ties.items() if not ok]
+        if broken:
+            print(f"refusing: the answers and records are not one run's (failed: {'; '.join(broken)})", file=sys.stderr)
+            return 2
+        n = len(s.probe_texts)
+        h1_full = record.get("stopped") is None and record.get("probe_turns_completed") == n
+        turns = replayed.get("turns") or []
+        base_done = sum(1 for t in turns if t.get("status") == 200)
+        base_full = not replayed.get("stopped") and len(turns) == n and base_done == n
+        if not (h1_full and base_full) and not args.partial:
+            print(f"refusing: a partial run (H1 stopped {record.get('stopped')!r}, probe turns "
+                  f"{record.get('probe_turns_completed')} of {n}; baseline stopped {replayed.get('stopped')!r}, "
+                  f"requests {base_done} of {n}); pass --partial for a PARTIAL score with no acceptance 2 verdict",
+                  file=sys.stderr)
+            return 2
         h1 = score(list(s.probes), args.h1.read_text(encoding="utf-8"))
         base = score(list(s.probes), args.baseline.read_text(encoding="utf-8"))
         paged = [p for p in s.probes if p.id in s.paged_only]
-        print(json.dumps({"h1": h1, "baseline": base, "compare": compare(h1, base),
-                          "paged_only": score(paged, args.h1.read_text(encoding="utf-8"))}, indent=2, default=str))
+        out = {"h1": h1, "baseline": base, "paged_only": score(paged, args.h1.read_text(encoding="utf-8")),
+               "h1_record": {"stopped": record.get("stopped"), "probe_turns_completed": record.get("probe_turns_completed"),
+                             "probe_turns": n},
+               "baseline_result": {"stopped": replayed.get("stopped"), "requests_completed": base_done, "requests": n}}
+        if args.partial:
+            out = {"label": "PARTIAL: not an acceptance 2 verdict", **out}
+        else:
+            out["compare"] = compare(h1, base)
+        print(json.dumps(out, indent=2, default=str))
         return 0
     # live: gates on the same Budget that dry-run and approval-table print
-    if b.history_tokens < 2.5 * args.bound:
-        print(f"refusing: planned history {b.history_tokens:,} is below 2.5x the bound ({int(2.5 * args.bound):,})",
+    upstream = args.upstream or os.environ.get("ANTHROPIC_BASE_URL")
+    return run_h1(s, b, params, args.approved, args.scratch, args.home, args.session, args.seat_settings, upstream)
+
+
+# Every live-only branch run_h1 can take. The H1 record lists the ones a run took; a dry run fails
+# unless its runs, together, took all of them (live-path fix, intake 2026-10-16 07:11Z).
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+LIVE_PATHS = ("gate_passed", "estimates_cover_turns", "watcher_started", "content_turn_sent", "probe_turn_sent",
+              "every_turn_sent", "stop_handled", "error_handled", "answers_written", "record_written")
+
+
+def run_h1(s: script.Script, b: budget.Budget, params: budget.Params, approved: int, scratch: Path, home: Path,
+           session: str, seat_settings: Path, upstream: str | None, contexto: str = "contexto",
+           inject: Callable[[int], None] | None = None) -> int:
+    """H1 through the real launcher. Live calls this with the owner's upstream; the stub dry run calls
+    it with a local, non-forwarding one, and nothing else differs. ``inject`` (dry runs only) is
+    called after each finished turn with its index and may raise, to drive the stop and error
+    branches. The H1 record is written however the run ends; a harness error is re-raised after it."""
+    if b.history_tokens < 2.5 * params.bound:
+        print(f"refusing: planned history {b.history_tokens:,} is below 2.5x the bound ({int(2.5 * params.bound):,})",
               file=sys.stderr)
         return 2
     # D27 (intake 05:42Z): the approval covers H1 and the six-request baseline, and the gate is their
     # combined worst case. H1's guards stop at the approval minus the baseline's worst, so the
     # baseline always keeps its share.
     combined_worst = b.h1_worst + b.baseline_replay_worst
-    if args.approved < combined_worst:
-        print(f"refusing: approved {args.approved:,} is below the combined worst case {combined_worst:,} "
+    if approved < combined_worst:
+        print(f"refusing: approved {approved:,} is below the combined worst case {combined_worst:,} "
               f"(H1 {b.h1_worst:,} + baseline {b.baseline_replay_worst:,})", file=sys.stderr)
         return 2
-    h1_cap = args.approved - b.baseline_replay_worst
-    upstream = args.upstream or os.environ.get("ANTHROPIC_BASE_URL")
+    h1_cap = approved - b.baseline_replay_worst
     if not upstream:
         print("refusing: no upstream (pass --upstream or set ANTHROPIC_BASE_URL)", file=sys.stderr)
         return 2
-    if not args.seat_settings.is_file():
-        print(f"refusing: the seat settings file {args.seat_settings} does not exist", file=sys.stderr)
+    if inject is not None and urllib.parse.urlsplit(upstream).hostname not in LOOPBACK:
+        print("refusing: the inject hook is for dry runs against a local stub only", file=sys.stderr)
         return 2
-    args.scratch.mkdir(parents=True, exist_ok=True)
-    if driver.inside_git(args.scratch):
-        print(f"refusing: the scratch directory {args.scratch} is inside a git work tree", file=sys.stderr)
+    if not seat_settings.is_file():
+        print(f"refusing: the seat settings file {seat_settings} does not exist", file=sys.stderr)
         return 2
-    config = driver.isolated_config(args.scratch, args.seat_settings)
-    estimates = [r.input_tokens for r in b.rows if r.kind == "turn"] + [max(r.input_tokens for r in b.rows if r.kind != "turn")]
-    session_log = args.home / "sessions" / args.session / "log.jsonl"
-    transport = driver.StreamJsonTransport(driver.launcher_command(args.session, args.bound, upstream), args.scratch,
-                                           driver.child_env(args.home, config), session_log,
-                                           approved=h1_cap, reserve=params.max_tokens_reserve)
+    scratch.mkdir(parents=True, exist_ok=True)
+    if driver.inside_git(scratch):
+        print(f"refusing: the scratch directory {scratch} is inside a git work tree", file=sys.stderr)
+        return 2
+    estimates = budget.turn_estimates(b)
+    if len(estimates) != len(s.turns):
+        print(f"refusing: {len(estimates)} spend estimates for {len(s.turns)} turns", file=sys.stderr)
+        return 2
+    taken = {"gate_passed", "estimates_cover_turns"}
+    config = driver.isolated_config(scratch, seat_settings)
+    env = driver.child_env(home, config)
+    env.pop("ANTHROPIC_BASE_URL", None)  # the launcher points Claude Code at its proxy; nothing goes around it
+    session_log = home / "sessions" / session / "log.jsonl"
+    transport = driver.StreamJsonTransport(driver.launcher_command(session, params.bound, upstream, contexto), scratch,
+                                           env, session_log, approved=h1_cap, reserve=params.max_tokens_reserve)
+    if transport.watcher is not None:
+        taken.add("watcher_started")
     run = driver.Run(transport, h1_cap, params.max_tokens_reserve, estimates)
-    status = 0
+    status, stopped, error, cli_exit = 0, None, None, None
+    answers: list[str] = []
     try:
-        answers = driver.run_session_all(list(s.turns), run)
-        # D27: the answers of every probe turn, in order, so the scorer sees all 54 lines
-        probe_answers = answers[s.n_content:]
-        (args.home / f"acceptance-{args.session}-answers.txt").write_text("\n".join(probe_answers) + "\n",
-                                                                         encoding="utf-8")
+        for i, text in enumerate(s.turns):
+            answers.append(run.turn(i, text))
+            taken.add("probe_turn_sent" if i >= s.n_content else "content_turn_sent")
+            if inject is not None:
+                inject(i)
+        taken.add("every_turn_sent")
     except (driver.BudgetExceeded, driver.AuthFailure, RuntimeError) as exc:
         print(f"stopped: {exc}", file=sys.stderr)
-        status = 1
+        status, stopped = 1, f"{type(exc).__name__}: {exc}"
+        taken.add("stop_handled")
+    except Exception as exc:  # noqa: BLE001  a harness error: record the spend first, then re-raise
+        traceback.print_exc()
+        status, stopped, error = 1, f"{type(exc).__name__}: {exc}", exc
+        taken.add("error_handled")
     finally:
-        transport.close()
+        cli_exit = transport.close()
+    # D27: the answers of every finished probe turn, in order (all 54 lines on a full run). A stopped
+    # run's go to a .partial.txt file, never the full-run name, so they cannot be scored as a full run.
+    probe_answers = answers[s.n_content:]
+    home.mkdir(parents=True, exist_ok=True)
+    answers_name = f"acceptance-{session}-answers{'.partial' if stopped else ''}.txt"
+    (home / answers_name).write_text("\n".join(probe_answers) + "\n", encoding="utf-8")
+    taken.add("answers_written")
     spend = h1_spend(run.spent, detectors.read_jsonl(session_log) if session_log.exists() else [],
                      abnormal=status != 0, reserve=params.max_tokens_reserve)
-    record = {**spend, "turns": run.turns, "stream_compactions": transport.compactions,
-              "approved": args.approved, "h1_cap": h1_cap, "baseline_worst": b.baseline_replay_worst}
+    taken.add("record_written")
+    record = {**spend, "session": session, "turns": run.turns, "stream_compactions": transport.compactions, "cli_exit": cli_exit,
+              "approved": approved, "h1_cap": h1_cap, "baseline_worst": b.baseline_replay_worst,
+              "planned_turns": len(s.turns), "turns_completed": len(answers),
+              "probe_turns_completed": len(probe_answers), "stopped": stopped, "answers_file": answers_name,
+              "paths": sorted(taken)}
     # The replay's approval is the combined approval minus this spend (run.py replay --h1-record).
-    (args.home / f"acceptance-{args.session}-h1.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    (home / f"acceptance-{session}-h1.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     print(json.dumps(record, indent=2))
+    if error is not None:
+        raise error
     return status
-
 
 if __name__ == "__main__":
     sys.exit(main())
