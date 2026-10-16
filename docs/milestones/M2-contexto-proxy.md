@@ -74,9 +74,16 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   but not observed on Claude Code 2.1.301 (builder-2 measured that adding or removing an MCP server
   on resume changes `tools`, a head change under rule 6, and adds no system message). All are carried in the CLI's current form, never restored from a stored copy. Any
   other `role: "system"` message carries per-turn content (for example the output of a
-  context-injecting `UserPromptSubmit` hook) and belongs to its turn: it is paged with that turn. A system message the proxy cannot classify is
-  carried, and the proxy logs `unclassified_system_message`; carrying is the safe failure, since
-  paging a message that must persist would lose state. Lane A pins down, with stub evidence, exactly which blocks count as injected context.
+  context-injecting `UserPromptSubmit` hook) and belongs to its turn: it is paged with that turn. Classification, deterministic and in this order: (1) the
+  session-start message is the first `role: "system"` message of the session, or any system
+  message carrying both content and settings fields (this covers resumes of hand-written session
+  files); (2) a settings-only message has empty content plus settings fields; (3) any other system
+  message whose content is text only is per-turn content and is paged with the turn it sits in,
+  wherever it sits in that turn (measured by reviewer-2 at zero spend in the PR #30 review: a
+  `PostToolUse` hook's `additionalContext` arrives as a system message right after the
+  `tool_result`); (4) a system message with non-text blocks is unclassified: it is carried, and the
+  proxy logs `unclassified_system_message`. Carrying is the safe failure, since paging a message
+  that must persist would lose state. Lane A pins down, with stub evidence, exactly which blocks count as injected context.
 - The proxy keeps an epoch state `E = (k, carried, pinned_text, index_text, head_fingerprint)`:
   the turns before turn index `k` are paged out.
 
