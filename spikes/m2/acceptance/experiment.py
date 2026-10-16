@@ -140,6 +140,30 @@ def run(bodies: list[tuple[str, dict[str, Any]]], upstream: str, key: str, betas
     return {"sends": sends, "spent": spent, "stopped": stopped}
 
 
+def diagnose_count_tokens(body: dict[str, Any], upstream: str, key: str, betas: list[str],
+                          auth: str | None = None) -> dict[str, Any]:
+    """One count_tokens call that records only its status, error type, and error message (the key,
+    if the message ever echoed it, is redacted). For the owner's proxy's 403 (2026-10-16)."""
+    request = {**body, "_betas": betas}
+    data = json.dumps({k: request[k] for k in replay._COUNT_FIELDS if k in request}).encode("utf-8")
+    headers = {"content-type": "application/json", "anthropic-version": replay.ANTHROPIC_VERSION,
+               **replay.auth_headers(key, auth), "user-agent": replay.USER_AGENT,
+               **replay.beta_headers(request)}  # D23: never a claude-code-* beta
+    req = urllib.request.Request(upstream.rstrip("/") + "/v1/messages/count_tokens", data=data, headers=headers,
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return {"status": resp.status, "input_tokens": json.loads(resp.read() or b"{}").get("input_tokens")}
+    except urllib.error.HTTPError as exc:
+        try:
+            error = json.loads(exc.read() or b"{}").get("error") or {}
+        except (json.JSONDecodeError, OSError):
+            error = {}
+        message = str(error.get("message") or "")
+        message = (message.replace(key, "[redacted]") if key else message)[:500]  # redact first, then truncate
+        return {"status": exc.code, "error_type": error.get("type"), "message": message}
+
+
 def main(argv: list[str]) -> int:
     """experiment.py [--strip-thinking] [--estimates SUMMARY] <seat settings> <upstream> <H1 run dir> <out json>
     <variant.json>...   (--estimates: the variant builder's summary.json; its probe.estimate_tokens gates each
@@ -184,25 +208,3 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 
-
-def diagnose_count_tokens(body: dict[str, Any], upstream: str, key: str, betas: list[str],
-                          auth: str | None = None) -> dict[str, Any]:
-    """One count_tokens call that records only its status, error type, and error message (the key,
-    if the message ever echoed it, is redacted). For the owner's proxy's 403 (2026-10-16)."""
-    request = {**body, "_betas": betas}
-    data = json.dumps({k: request[k] for k in replay._COUNT_FIELDS if k in request}).encode("utf-8")
-    headers = {"content-type": "application/json", "anthropic-version": replay.ANTHROPIC_VERSION,
-               **replay.auth_headers(key, auth), "user-agent": replay.USER_AGENT,
-               **replay.beta_headers(request)}  # D23: never a claude-code-* beta
-    req = urllib.request.Request(upstream.rstrip("/") + "/v1/messages/count_tokens", data=data, headers=headers,
-                                 method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return {"status": resp.status, "input_tokens": json.loads(resp.read() or b"{}").get("input_tokens")}
-    except urllib.error.HTTPError as exc:
-        try:
-            error = json.loads(exc.read() or b"{}").get("error") or {}
-        except (json.JSONDecodeError, OSError):
-            error = {}
-        message = str(error.get("message") or "")[:500].replace(key, "[redacted]") if key else ""
-        return {"status": exc.code, "error_type": error.get("type"), "message": message}

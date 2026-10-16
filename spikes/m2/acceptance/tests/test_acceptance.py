@@ -518,6 +518,7 @@ def test_spend_watcher_ignores_spend_without_an_approval_and_other_paths(tmp_pat
     finally:
         watcher.stop()
         proc.kill()
+        proc.wait(timeout=10)
     log = tmp_path / "log2.jsonl"
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     watcher = driver.SessionWatcher(log, proc, approved=100)
@@ -529,6 +530,7 @@ def test_spend_watcher_ignores_spend_without_an_approval_and_other_paths(tmp_pat
     finally:
         watcher.stop()
         proc.kill()
+        proc.wait(timeout=10)
 
 
 def test_transport_reports_an_in_turn_spend_stop_as_budget_exceeded(tmp_path):
@@ -538,9 +540,11 @@ def test_transport_reports_an_in_turn_spend_stop_as_budget_exceeded(tmp_path):
                                "usage": {"input_tokens": 90_000, "output_tokens": 100}}) + "\n")
     t = driver.StreamJsonTransport([sys.executable, "-c", "import sys, time; sys.stdin.readline(); time.sleep(30)"],
                                    tmp_path, dict(os.environ), log, approved=100_000, reserve=1_000)
-    with pytest.raises(driver.BudgetExceeded, match="stopped inside the turn"):
-        t.send("hello")
-    t.watcher.stop()
+    try:
+        with pytest.raises(driver.BudgetExceeded, match="stopped inside the turn"):
+            t.send("hello")
+    finally:
+        t.close()  # reaps the stopped process and its pipes (no ResourceWarning or BrokenPipe noise)
 
 
 # Real-usage events in both log forms (lane A's A2e, PR #76: fixtures follow its code, read-only).

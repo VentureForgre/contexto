@@ -184,3 +184,53 @@ def test_no_claude_code_beta_on_any_experiment_request(stub):
     finally:
         httpd.shutdown()
     assert _Echo.seen == [{"beta": "b1", "ua": replay.USER_AGENT}]
+
+
+def test_main_never_writes_or_prints_the_key(tmp_path, stub, capsys):
+    # Reviewer-2 on PR #83: the key-absent check for the CLI path, end to end against the stub.
+    run_dir = tmp_path / "run"
+    cc = run_dir / "claude-config" / "projects" / "p"
+    cc.mkdir(parents=True)
+    (cc / "s.jsonl").write_text(json.dumps({"type": "api-request", "params": {"betas": ["b1", "claude-code-20250219"]}}) + "\n")
+    pages = run_dir / "home" / "sessions" / "s" / "pages"
+    pages.mkdir(parents=True)
+    (pages / "pg_bbbb2222.json").write_text(json.dumps({"turn": 0, "messages": [{"role": "user", "content": PAGE}]}))
+    seat = tmp_path / "seat.json"
+    seat.write_text(json.dumps({"apiKeyHelper": "echo test-key-not-real"}))
+    variant = tmp_path / "V1.json"
+    variant.write_text(json.dumps(_body()))
+    out = tmp_path / "out.json"
+    _Stub.tool = {"name": "mcp__contexto__contexto_search", "input": {"query": "checkout-api.retention_days"}}
+    assert experiment.main([str(seat), stub, str(run_dir), str(out), str(variant)]) == 0
+    assert json.loads(out.read_text())["sends"][0]["tool_uses"][0]["targets_plant_page"] is True
+    assert all(x["key"] == "test-key-not-real" and x["beta"] == "b1" for x in _Stub.seen)  # sent, never kept
+    captured = capsys.readouterr()
+    assert "test-key-not-real" not in captured.out + captured.err
+    for path in tmp_path.rglob("*"):
+        if path.is_file() and path != seat:
+            assert "test-key-not-real" not in path.read_text(errors="replace"), path.name
+
+
+class _LongError(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        message = "x" * 490 + "k-secret-straddles-the-cut"  # the key crosses character 500
+        data = json.dumps({"type": "error", "error": {"type": "permission_error", "message": message}}).encode()
+        self.send_response(403)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args: Any) -> None:
+        pass
+
+
+def test_diagnose_redacts_before_truncating():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _LongError)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        out = experiment.diagnose_count_tokens(_body(), f"http://127.0.0.1:{httpd.server_port}",
+                                               "k-secret-straddles-the-cut", [])
+    finally:
+        httpd.shutdown()
+    assert "k-secret" not in out["message"] and out["message"].endswith("[redacted]")
