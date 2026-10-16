@@ -217,13 +217,14 @@ def test_separate_matches_log_separate_spans_and_a_cut_line_only_its_part(store)
 def test_recall_logs_its_span_and_a_spent_reply_logs_none(store):
     store.set_window(200_000, 2.0)
     [pid] = store.page_out([[{"role": "user", "content": LOG}]], 1)
-    store.set_turn_room("1", 500)  # 750 characters
+    store.set_turn_room("1", 500)  # half of it: 375 characters
     reply = recall(store, pid, 1_000)
     [event] = events(store, "contexto_recall")
     [span] = event["returned"]
     page = render_page(store.get_page(pid))
     assert span == {"page_id": pid, "start": 1_000, "end": 1_000 + event["chars"]}
     assert reply.startswith(page[span["start"]:span["end"]])
+    store.set_turn_room("1", 0)
     assert recall(store, pid, 2_000) == SPENT
     assert events(store, "contexto_recall")[-1]["returned"] == []
 

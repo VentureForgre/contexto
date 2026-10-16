@@ -84,8 +84,9 @@ TOOLS: list[dict[str, Any]] = [
         "name": "contexto_recall",
         "description": (
             "Read a paged-out turn of this session word for word, by its page id (pg_...) from the "
-            f"paged-history index. Returns at most {RECALL_LIMIT} characters per call; when more "
-            "remain, call again with the offset given at the end of the result. Thinking is omitted."
+            f"paged-history index. Returns at most {RECALL_LIMIT} characters per call, and at most half "
+            "of this turn's remaining recall budget; when more remain, call again with the offset given "
+            "at the end of the result. Thinking is omitted."
         ),
         "inputSchema": {
             "type": "object",
@@ -316,7 +317,7 @@ class Server:
                 size -= 1
             return [full[:size], hint(offset + size)] if size > 0 else None
 
-        texts, budget = self._within_room(build, "contexto_recall")
+        texts, budget = self._within_room(build, "contexto_recall", half=True)
         texts = texts or [BUDGET_SPENT]
         chunk = texts[0] if budget["turn_budget"] != "spent" else ""
         return ([{"type": "text", "text": t} for t in texts], None,
@@ -428,13 +429,15 @@ class Server:
         window = getattr(self.store, "window", None)
         return window() if callable(window) else (None, None)
 
-    def _within_room(self, build: Callable[[int | None], list[str] | None],
-                     tool: str) -> tuple[list[str] | None, dict[str, Any]]:
+    def _within_room(self, build: Callable[[int | None], list[str] | None], tool: str,
+                     half: bool = False) -> tuple[list[str] | None, dict[str, Any]]:
         """Build a reply inside this turn's room and charge it, atomically.
 
         ``build(room_chars)`` returns the reply's text blocks, at most ``room_chars`` characters in
         all (None: no limit), or None when nothing useful fits. Tokens are the characters divided by
-        the per-call limit's ratio, the smaller of the measured bytes per token and 1.5.
+        the per-call limit's ratio, the smaller of the measured bytes per token and 1.5. With
+        ``half``, ``room_chars`` is half the room that remains (``floor(remaining / 2)`` tokens), so
+        one recall cannot consume the turn (contract PR #96); the rest is read by offset.
 
         When nothing useful fits, the tool replies ``BUDGET_SPENT``, charged at the room that is
         left, up to its own size. That text is required, so a call with no room left still returns
@@ -450,7 +453,7 @@ class Server:
         out: dict[str, Any] = {"texts": None, "budget": {"turn_budget": "unbudgeted"}}
 
         def charge(remaining: int | None) -> int:
-            texts = build(None if remaining is None else int(remaining * ratio))
+            texts = build(None if remaining is None else int((remaining // 2 if half else remaining) * ratio))
             out["texts"] = texts
             if remaining is None:
                 return 0

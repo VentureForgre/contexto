@@ -273,10 +273,10 @@ def test_message_text_is_exact():
 def test_recall_is_cut_to_the_room_with_the_usual_offset_hint(store):
     store.set_window(200_000, 2.0)
     pid = page(store)
-    store.set_turn_room("1", 1_000)  # 1,500 characters
+    store.set_turn_room("1", 1_000)  # half of it is 500 tokens: 750 characters (contract PR #96)
     result = call(store, "contexto_recall", {"page_id": pid})
     chunk, hint = (block["text"] for block in result["content"])
-    assert len(chunk) + len(hint) <= 1_500 and len(chunk) > 1_000
+    assert len(chunk) + len(hint) <= 750 and len(chunk) > 500
     assert f"call contexto_recall with page_id {pid} and offset {len(chunk)};" in hint
     assert store.turn_room()[2] == math.ceil((len(chunk) + len(hint)) / RATIO)
     assert calls(store)[-1]["turn_budget"] == "charged"
@@ -383,11 +383,15 @@ def test_a_reply_after_a_same_turn_republish_sees_the_whole_new_room(store):
     store.set_window(200_000, 2.0)
     pid = page(store)
     store.set_turn_room("4", 1_000)
-    first = text_of(call(store, "contexto_recall", {"page_id": pid}))
-    offset = int(first.rsplit("and offset ", 1)[1].split(";")[0])
-    assert text_of(call(store, "contexto_recall", {"page_id": pid, "offset": offset})) == SPENT
+    offset = 0
+    for _ in range(20):  # read on until the room is spent
+        reply = text_of(call(store, "contexto_recall", {"page_id": pid, "offset": offset}))
+        if reply == SPENT:
+            break
+        offset = int(reply.rsplit("and offset ", 1)[1].split(";")[0])
+    assert reply == SPENT
     store.set_turn_room("4", 2_000)  # real usage arrives for the same turn
     assert store.turn_room() == ("4", 2_000, 0)
     text = text_of(call(store, "contexto_recall", {"page_id": pid, "offset": offset}))
-    assert text.startswith("a") and 2_000 * RATIO - 200 < len(text) <= 2_000 * RATIO
+    assert text.startswith("a") and 1_000 * RATIO - 200 < len(text) <= 1_000 * RATIO  # half the new room
     assert calls(store)[-1]["room_left"] == 2_000 - math.ceil(len(text) / RATIO)
