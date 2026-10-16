@@ -478,3 +478,44 @@ def test_block_hmacs_locate_first_changed_block():
     moved["system"][1].pop("cache_control")
     assert first_changed_block(a, block_hmacs(moved, KEY)) is None  # moving a marker is not a content change
     assert CONTENT not in json.dumps(a)
+
+
+def test_cap_holds_when_accounting_is_slow(upstream, tmp_path, monkeypatch):
+    """Regression for the flaky cap test: the spend from a response must be counted before the
+    client can see that response complete, or a request sent right after it slips past the cap.
+    Slowing the record write widens that window to make the race deterministic."""
+    original = SpikeProxy.write
+
+    def slow_write(self, record):
+        time.sleep(0.3)
+        original(self, record)
+
+    monkeypatch.setattr(SpikeProxy, "write", slow_write)
+    proxy = SpikeProxy(upstream, tmp_path, "test", cap_tokens=20)
+    url = proxy.start()
+    try:
+        assert post(url, "/v1/messages", as_bytes(ANTHROPIC_REQUEST))[0] == 200  # 24 tokens: crosses the cap
+        status, data = post(url, "/v1/messages", as_bytes(ANTHROPIC_REQUEST))
+    finally:
+        proxy.stop()
+    assert status == 400 and b"token cap reached" in data
+    assert len(FakeUpstream.received) == 1
+
+
+def test_unreachable_upstream_is_logged_before_the_502(tmp_path, monkeypatch):
+    """Regression for reviewer-2's flake: the record must be on disk before the client gets the 502."""
+    original = SpikeProxy.write
+
+    def slow_write(self, record):
+        time.sleep(0.3)
+        original(self, record)
+
+    monkeypatch.setattr(SpikeProxy, "write", slow_write)
+    proxy = SpikeProxy("http://127.0.0.1:9", tmp_path, "test")
+    url = proxy.start()
+    try:
+        assert post(url, "/v1/messages")[0] == 502
+        record = json.loads((tmp_path / "requests.jsonl").read_text())  # read at once, no waiting
+    finally:
+        proxy.stop()
+    assert record["status"] == 502

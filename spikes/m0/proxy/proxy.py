@@ -274,8 +274,8 @@ class _Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             record.update(status=502, error=f"upstream: {type(exc).__name__}", duration_ms=_ms(started))
             conn.close()
+            spike.write(record)  # record first, so a client that reads the log after the 502 sees it
             self._reply_error(502)
-            spike.write(record)
             return
 
         content_type = response.getheader("Content-Type")
@@ -298,6 +298,11 @@ class _Handler(BaseHTTPRequestHandler):
 
         response_bytes = 0
         first_byte_ms = None
+        # The client must not see the response complete before its tokens are counted, or a request
+        # it sends right away can slip past the cap (the PR #36 CI flake). So the chunk terminator,
+        # or for a Content-Length response its last chunk, is written only after spike.write().
+        held = b""
+        relay_ok = True
         try:
             while True:
                 chunk = response.read1(65536)
@@ -306,21 +311,22 @@ class _Handler(BaseHTTPRequestHandler):
                 if first_byte_ms is None:
                     first_byte_ms = _ms(started)
                 response_bytes += len(chunk)
+                collector.feed(decoder.decode(chunk))
                 if chunked_out:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 else:
-                    self.wfile.write(chunk)
-                self.wfile.flush()
-                collector.feed(decoder.decode(chunk))
-            if chunked_out:
-                self.wfile.write(b"0\r\n\r\n")
+                    if held:
+                        self.wfile.write(held)
+                    held = chunk
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             record["client_aborted"] = True
             self.close_connection = True
+            relay_ok = False
         except OSError as exc:
             record["error"] = f"relay: {type(exc).__name__}"
             self.close_connection = True
+            relay_ok = False
         finally:
             conn.close()
 
@@ -337,6 +343,12 @@ class _Handler(BaseHTTPRequestHandler):
         if not decoder.supported:
             record["usage_unavailable"] = f"response content-encoding {decoder.encoding}"
         spike.write(record)
+        if relay_ok:
+            try:
+                self.wfile.write(b"0\r\n\r\n" if chunked_out else held)
+                self.wfile.flush()
+            except OSError:
+                self.close_connection = True
 
     def _websocket(self) -> None:
         """Tunnel a WebSocket upgrade: the handshake and every frame are relayed byte for byte,
@@ -353,8 +365,8 @@ class _Handler(BaseHTTPRequestHandler):
                 upstream = ssl.create_default_context().wrap_socket(upstream, server_hostname=spike.upstream_host)
         except OSError as exc:
             handshake.update(status=502, error=f"upstream: {type(exc).__name__}", duration_ms=_ms(started))
-            self._reply_error(502)
             spike.write(handshake)
+            self._reply_error(502)
             return
         lines = [f"{self.command} {spike.base_path}{self.path} HTTP/1.1", f"Host: {spike.upstream_netloc}"]
         lines += [f"{name}: {value}" for name, value in self.headers.items() if name.lower() != "host"]
@@ -369,8 +381,8 @@ class _Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             handshake.update(status=502, error=f"handshake: {type(exc).__name__}", duration_ms=_ms(started))
             upstream.close()
-            self._reply_error(502)
             spike.write(handshake)
+            self._reply_error(502)
             return
         response_head, _, rest = bytes(head).partition(b"\r\n\r\n")
         status_line, _, header_block = response_head.partition(b"\r\n")
@@ -526,8 +538,8 @@ def _relay(client: socket.socket, upstream: socket.socket, session: _WsSession) 
                     _send_all(upstream, data)
                     session.from_client(data)
                 else:
+                    session.from_server(data)  # account a finished response before the client sees it
                     _send_all(client, data)
-                    session.from_server(data)
     finally:
         selector.close()
 
