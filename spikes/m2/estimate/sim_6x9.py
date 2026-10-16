@@ -496,6 +496,10 @@ def main() -> int:
     say(f"  min room seen per turn {[min(r['rooms']) if r['rooms'] else None for r in res_b['turns']]};"
         f" budget-spent replies per turn {[r['ran_out'] for r in res_b['turns']]}; not answerable (turn, id) {lost};"
         f" rotations at probe turns {[i for i, r in enumerate(res_b['turns'], 1) if any(e['event'] == 'rotation' and n == r['first_request'] for n, e in res_b['events'])]}")
+    reasons = [(i, e["reason"]) for i, r in enumerate(res_b["turns"], 1) for n, e in res_b["events"]
+               if e["event"] == "rotation" and n == r["first_request"]]
+    say(f"  rotation reasons at probe turns {reasons}; engine events:",
+        dict(sorted(Counter(e["event"] for _, e in res_b["events"]).items())))
 
     out = Path(__file__).with_name("sim_6x9.out.txt")
     try:
