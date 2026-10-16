@@ -311,7 +311,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     start where the engine measures the turn's growth g (as before: a previous turn start is
     recorded and the turn count has grown), and before the rotation decision, `max_turn_growth` =
     max(floor(previous `max_turn_growth` x `headroom_decay`), g), where g is the tokens of the
-    messages added since the previous turn start, and `headroom_decay` = 0.5. A turn start sent
+    messages added since the previous turn start, per turn start (averaged when several turns
+    arrive at once), as before, and `headroom_decay` = 0.5. A turn start sent
     again with no new turn (a retry) measures no growth and does not decay. So one outlier turn
     raises headroom by at most a quarter of the bound, and its weight halves at every later turn
     start that measures growth. Both are configuration settings (`headroom_cap`,
@@ -331,8 +332,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     run are unchanged. The cost: in synthetic sessions with two large reads, a band of second-read
     sizes (about 6,000 tokens wide three turns later, up to about 36,000 eight turns later with a
     30,000-token head) now goes over the bound inside its tool loop where the stuck session's
-    minimal window had kept it under; the headroom is never below that of a session with no
-    outlier.
+    minimal window had kept it under; the largest later read kept under the bound is never below
+    that of a session with no outlier at the same turn.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens (D31); `headroom` 1.25 times the
 largest per-turn growth, decaying and capped per rule 17, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
