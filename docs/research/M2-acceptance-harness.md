@@ -361,6 +361,38 @@ planned over-bound requests.
   zero-4xx counts model requests only, and other 4xx are reported apart (see Detectors).
 - **Artifacts** (private, never in Git): `.contexto/runs/acceptance-20261016T022918Z/`.
 
+## Search reachability (offline, zero spend)
+
+```
+uv run python spikes/m2/acceptance/run.py reach --session-dir <CONTEXTO_HOME>/sessions/<id>
+```
+
+Intake (2026-10-16): before a live rerun, show that `contexto_search` can reach every probe's answer,
+so a miss can be attributed to the model and not to the index or the search. `reach.py` runs the
+store's own search (`search_pages`, exact case-sensitive substring) on a session's stored pages with
+each probe's key terms:
+- the probe's `subjects` (its config key, chain subject, or action item id; for a multi-hop probe,
+  every hop's name, which the model learns hop by hop);
+- for a probe with none (an obligation set), the identifiers its question names.
+
+A probe is reachable when every statement it needs is in the context window (on no page) or on a
+page one of its terms returns:
+- multi-hop: every statement;
+- obligation set: each id's last statement;
+- otherwise: the statements holding the answer, or the last one.
+
+It reports the rate per category with counts, the rank of each hit (search lists newest first), and
+every unreachable probe. On the H1 rerun's store (`acceptance-20261016T024733Z`, 15 pages): 54 of 54
+reachable.
+
+| Category | Probes | Reachable | Needing a paged statement |
+|---|---|---|---|
+| chain | 30 | 30 | 13 |
+| obligations | 6 | 6 | 6 |
+| multihop | 8 | 8 | 8 |
+| distractor | 6 | 6 | 6 |
+| paged_only | 4 | 4 | 4 |
+
 ## Tests
 
 `uv run --with pytest pytest spikes/m2` runs the harness tests with no live calls (the count changes

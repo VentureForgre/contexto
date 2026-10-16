@@ -145,6 +145,10 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--turn-kbytes", type=int, default=40)
     cred = sub.add_parser("check-credential")
     cred.add_argument("--seat-settings", type=Path, required=True)
+    rc = sub.add_parser("reach", help="offline: can contexto_search reach every probe's answer page")
+    rc.add_argument("--session-dir", type=Path, required=True, help="a run's sessions/<id> directory (pages/)")
+    rc.add_argument("--seed", type=int, default=script.DEFAULT_SEED)
+    rc.add_argument("--turn-kbytes", type=int, default=40)
     chk = sub.add_parser("check")
     chk.add_argument("--session-log", type=Path, required=True)
     chk.add_argument("--cc-jsonl", type=Path, required=True)
@@ -162,6 +166,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "replay":
         return run_replay(args)
+
+    if args.command == "reach":
+        from acceptance import reach
+
+        s, _ = plan(args.seed, 0, args.turn_kbytes * 1_000)
+        result = reach.reach(list(s.probes), reach.load_pages(args.session_dir))
+        print(json.dumps({k: v for k, v in result.items() if k != "rows"}, indent=2))
+        return 0 if not result["unreachable"] else 1
 
     if args.command == "check":
         report = detectors.analyze(detectors.read_jsonl(args.session_log), detectors.read_jsonl(args.cc_jsonl), args.bound)
