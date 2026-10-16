@@ -7,10 +7,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from contexto.canonical import canonical_bytes
 from contexto.store import PageConflictError, redact
 from contexto.store.ledger import MemoryLedger
-from contexto.store.pages import build_page, render_index, search_pages
+from contexto.store.pages import build_page, render_index, same_content, search_pages
 from contexto.store.records import LedgerOps
 
 
@@ -34,9 +33,10 @@ class MemoryStore(LedgerOps):
         for offset, turn in enumerate(turns):
             page = build_page(self._key, turn, first_turn + offset)
             existing = self.pages.get(page["id"])
-            if existing is not None and canonical_bytes(existing) != canonical_bytes(page):
-                raise PageConflictError(f"page {page['id']} exists with different content")
-            self.pages[page["id"]] = page
+            if existing is None:
+                self.pages[page["id"]] = page
+            elif not same_content(existing, page):  # same id, different turn or messages
+                raise PageConflictError(f"page {page['id']} exists with different turn or messages")
             ids.append(page["id"])
         return ids
 

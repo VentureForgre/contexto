@@ -15,10 +15,9 @@ NORMAL = [
 MIXED = [{"role": "system", "content": "Effort changed to high"}, {"role": "user", "content": "carry on"}]
 
 
-def test_pages_with_user_text_keep_their_ids():
-    # Golden ids computed with the pre-change pages.py on main (1b2b262) and the same key.
-    assert build_page(KEY, NORMAL, 3)["id"] == "pg_4fd02b9dd10fc4da"
-    assert build_page(KEY, MIXED, 3)["id"] == "pg_54695d1e9037b3d1"
+def test_the_stub_rule_does_not_reach_page_ids():
+    # B6 added system_text to the stub; ids hash only {turn, messages} (B8), so stubs never move ids.
+    assert build_page(KEY, NORMAL, 3)["id"] == "pg_ddfe6e1db2f05ad6"
     assert "system_text" not in build_page(KEY, NORMAL, 3)["stub"]
     assert "system_text" not in build_page(KEY, MIXED, 3)["stub"]
 
@@ -55,3 +54,11 @@ def test_an_empty_system_message_gets_a_clear_placeholder(store, content):
 def test_search_finds_system_only_pages(store):
     [pid] = store.page_out([[{"role": "system", "content": "Context window note: grep_files"}]], 1)
     assert store.search("grep_files") == [pid]
+
+
+def test_a_tool_result_page_records_the_seed_estimate_without_it_reaching_the_id():
+    from contexto.tokens import estimate_message_tokens
+
+    page = build_page(KEY, NORMAL, 3)
+    assert page["tokens"] == estimate_message_tokens(NORMAL)
+    assert page["id"] == "pg_ddfe6e1db2f05ad6"

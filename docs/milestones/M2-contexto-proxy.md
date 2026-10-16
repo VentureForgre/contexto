@@ -134,7 +134,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    equals `E.k`, the rotation is a no-op: nothing is paged and no thinking is stripped. Write the
    newly paged turns to the page store, one page per turn, minus carried content; add any newly
    paged system messages to `carried`; rebuild `pinned_text` and `index_text`; strip thinking per
-   rule 2. If `W` is not positive or cannot hold the newest complete turn, log
+   rule 2. If `W` cannot hold the newest complete turn and the new turn together, retain
+   only the new turn (the newest complete turn is paged like any other and stays recallable) and
+   log `window_minimal`; this keeps the request under the bound at the cost of the previous turn's
+   verbatim text. Only if `W` is not positive or cannot hold even the new turn, log
    `bound_too_small` and send the request unrotated; the launcher warns at start when the measured
    head leaves less than 25,000 tokens of window budget and suggests a larger `--bound`. Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
@@ -178,6 +181,27 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     safe for thinking because rotation strips it), keep the latest settings-only message per
     settings key. If carried content grows by more than 4,000 tokens over its size at the
     session's first request, log `carried_over_budget` in the session log.
+14. **Transform failures.** Expected failures never reuse the component that failed and never
+    forward the history unbounded:
+    - **Degraded mode** is entered on `page_conflict` (a stored page differs in
+      `{turn, messages}` under its id, which can only mean corruption) or `store_error` (the store
+      cannot be read or written). In degraded mode the engine pages nothing and never rotates: it
+      sends the last good transform (the current `E`, with its in-memory `pinned_text` and
+      `index_text`) extended append-only with the new messages. That is always protocol-valid,
+      keeps thinking and the cache intact, and loses nothing, because no turn is paged while the
+      store is broken. Requests may then exceed the bound; each is logged `over_bound` and fails
+      acceptance. At each new turn start the engine tries the store once; if it is healthy and the
+      conflicting page is not needed, it leaves degraded mode and rotates normally. Mid tool loop
+      nothing changes, because degraded mode only appends.
+    - **Terminal step.** A failure inside degraded mode, or a resync (rule 10) that cannot be
+      completed without paging while the store is broken, is final for that request: the proxy
+      forwards the CLI's original request and logs `fallback_failed`. Each request enters each
+      fallback at most once; there is no retry loop.
+    - **Genuine bugs.** An exception on a path not listed by lane A is handled the same way: the
+      original request is forwarded so the user is never blocked by a Contexto defect, logged as
+      `transform_error` at error level, and reported prominently by `contexto sessions show`.
+    Acceptance counts any `over_bound`, `fallback_failed`, or `transform_error` as a failure. Lane
+    A lists every engine path that can raise and covers each with a fault-injection test.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
@@ -193,9 +217,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   turn (thinking included as received), its turn number, byte size (canonical JSON, summed per
   content block) and token estimate, and a stub: first 200 characters of the user text, tool names
   used, and at most 20 file paths mentioned.
-  Page id: `pg_` + first 16 hex of HMAC-SHA256 over the canonical JSON, keyed with a random
-  per-store key kept in the store and never sent upstream (ids appear in prompts, and short turns
-  must not be guessable from their id). Pages are immutable.
+  Page id: `pg_` + first 16 hex of HMAC-SHA256 over the canonical JSON of `{turn, messages}`
+  only (not the stub or token estimate, so ids stay stable when those rules change), keyed with a
+  random per-store key kept in the store and never sent upstream (ids appear in prompts, and short turns
+  must not be guessable from their id). Pages are immutable: paging a turn whose id
+  already exists is a no-op that keeps the stored page, and only a differing `{turn, messages}`
+  under the same id is a conflict. No migration is needed, because no real stores existed before
+  this rule.
 - **Ledger:** the M1 record model (kinds `event`, `decision`, `obligation`, `artifact`,
   `reference`, `closure`; epistemic `verified`, `reported`, `summary`, `hypothesis`; provenance;
   supersession; open obligations) harvested from PR #2 (record model), PR #3 (state derivation),
@@ -214,7 +242,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 `contexto mcp --session S`, stdio JSON-RPC per the MCP spec, tools:
 
 - `contexto_recall(page_id)` returns the page's messages rendered as plain text (thinking omitted),
-  exactly, up to 32,000 characters per call with `offset` for more.
+  exactly, up to a per-call limit with `offset` for more. The limit is the smaller of 32,000
+  characters and about one quarter of the session's window budget `W` in tokens, converted with the
+  session's measured bytes-per-token ratio; the engine publishes `W` and the ratio through the
+  session store (`SessionStore.set_window(window_tokens, bytes_per_token)`, kept in the private
+  session metadata). Reason: a 32,000-character recall of numeric log text is about 17,800 tokens,
+  more than half of an OpenRig seat's `W` near 33,000, and recall results arrive inside a tool
+  loop where the engine cannot rotate (D17).
 - `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
@@ -233,7 +267,7 @@ the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
 ## Lanes
 
 - **Lane A, management.manager-1 (builder-1, builder-2):** launcher, proxy server and SSE relay,
-  rewrite engine (rules 1 to 13), upstream resolution, session log; then the Codex adapter
+  rewrite engine (rules 1 to 14), upstream resolution, session log; then the Codex adapter
   (Responses API over HTTP through a temporary `CODEX_HOME` whose provider uses `auth.command`;
   force HTTP or handle WebSocket deltas, decided with evidence).
 - **Lane B, management.manager-2 (builder-3, builder-4):** package scaffolding first (harvest PR #2),
