@@ -28,8 +28,8 @@ MESSAGES = "/v1/messages"
 # Model requests for acceptance 1's zero-4xx (contract PR #61): the paths the proxy transforms,
 # /v1/messages, its count_tokens, and /responses. 4xx on any other path are reported apart.
 MODEL_PATHS = TRANSFORMED_PATHS
-# The probe turn's cap on contexto_recall calls (script.MAX_RECALLS). The verdict counts every recall
-# in the session: a build-turn recall adds unplanned tokens too, so it counts against the cap.
+# The recalls the budget prices (script.MAX_RECALLS). A cost guard only (intake, 2026-10-16): the
+# model is not told about it, and ``recalls_over_budget`` reports it without failing any verdict.
 MAX_RECALLS = 2
 
 
@@ -105,6 +105,11 @@ class Report:
     mcp_calls: dict[str, int] = field(default_factory=dict)
 
     @property
+    def recalls_over_budget(self) -> int:
+        """Recall calls beyond the budget's priced count: reported, never a verdict."""
+        return max(0, self.recall_calls - MAX_RECALLS)
+
+    @property
     def cache_hit_rate(self) -> float | None:
         return self.cache_hits / self.cache_eligible if self.cache_eligible else None
 
@@ -118,7 +123,6 @@ class Report:
             "every_request_has_usage": not self.unverified_requests,
             "zero_4xx": self.upstream_4xx == 0 and not any(400 <= s < 500 for s in self.statuses),
             "recall_called": self.recall_ok > 0,
-            "recalls_within_cap": self.recall_calls <= MAX_RECALLS,
         }
 
 

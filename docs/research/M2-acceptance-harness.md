@@ -68,6 +68,13 @@ contexto run --bound 150000 --session <id> --upstream <url> claude -p --input-fo
 - No `--settings` or `--mcp-config` of the harness's own is passed; the launcher supplies both.
 - `--upstream` is passed explicitly: the owner's proxy (D12), from `$ANTHROPIC_BASE_URL` unless
   given.
+- **A hard spend stop inside a turn** (PR #68 review). The guard in `Run` projects spend before each
+  turn and checks real spend after it, so it cannot see the probe turn's tool loop, which runs
+  inside one Claude Code turn. `SessionWatcher` tails the session log beside the auth stop: after
+  each Messages API response it adds the real usage and terminates the run if two more requests of
+  the last input size plus the 32,000 output reserve could pass the approval. Two, because the proxy
+  logs a request when its response ends, when Claude Code may already have sent the next one. The
+  model never sees this limit. The run then reports `BudgetExceeded` with the spend so far.
 
 **Credential** (intake-approved, D12). If the scratch run inherits `HOME`, Claude Code falls back
 to the owner's claude.ai subscription login, which the rig proxy rejects with a 401 (lane 1
@@ -221,10 +228,10 @@ KB, head 47,600, bound 150,000, 2 recalls sized by B9 (below).
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy (live refuses an approval below its worst case) | 2,185,371 | 2,852,611 |
-| Full-context baseline, one direct replay request (recommended) | 449,681 | 477,681 |
-| Full-context baseline through a plain CLI session (alternative) | 5,054,047 | - |
-| **Total, H1 + replay baseline** | **2,635,052** | **3,330,292** |
+| H1 acceptance run through the proxy (live refuses an approval below its worst case) | 2,185,257 | 2,852,497 |
+| Full-context baseline, one direct replay request (recommended) | 449,643 | 477,643 |
+| Full-context baseline through a plain CLI session (alternative) | 5,054,009 | - |
+| **Total, H1 + replay baseline** | **2,634,900** | **3,330,140** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
@@ -250,14 +257,15 @@ Every acceptance verdict passed in both runs except `recall_called`, since the s
 tools. The stub run's 40 KB total (2,387,214 / 3,082,454) sits about 248,000 tokens under the
 approval table, so the guard never stops a run the stub run predicts.
 
-**Recalls in the probe turn.** The probe turn's tool loop cannot rotate, so intake capped it at 2
-recalls (2026-10-16). B9 (PR #56) sizes each recall at `W / 4` tokens times the smaller of the
+**Recalls in the probe turn.** The probe turn's tool loop cannot rotate, so the budget prices 2
+recalls. Intake made this a cost guard only (2026-10-16): the probe turn is product-realistic and
+names neither Contexto's tools nor a cap ("If the conversation does not contain it, say unknown."),
+so the preamble and page index must lead the model to recall. B9 (PR #56) sizes each recall at `W / 4` tokens times the smaller of the
 session's measured bytes per token and 1.5, never above 32,000 characters, and at 12,000 characters
 until the engine records `W` with `set_window`. The budget prices each recall at the largest chunk,
 32,000 characters of log text, 17,778 tokens; at this run's `W` (62,000 to 85,000) B9 returns
-13,000 to 17,600 tokens. `recalls_within_cap` counts every `contexto_recall` in the session, not
-only the probe turn's: a recall during a build turn also adds unplanned tokens, so it counts
-against the cap too.
+13,000 to 17,600 tokens. `recalls_over_budget` reports recall calls beyond the 2 priced, across the
+whole session; no verdict uses it.
 
 Under option (a) the pre-usage request stays far below 135,000, so the logs stay pasted user
 text. `Params.head` is now 47,600 (the engine's `F` here) and the default turn size 40 KB.
@@ -345,7 +353,7 @@ planned over-bound requests.
 
 ## Tests
 
-`uv run --with pytest pytest spikes/m2` runs 54 tests with no live calls. Most use synthetic
+`uv run --with pytest pytest spikes/m2` runs 61 tests with no live calls. Most use synthetic
 fixtures; `test_engine_log.py` drives the real proxy and rewrite engine against a stub upstream,
 once with JSON replies and once with SSE replies, since the acceptance session streams.
 They cover:
