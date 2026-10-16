@@ -558,7 +558,10 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
                     state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "bound",
                                       sizing=(f, w))
     rotated = any(e["event"] == "rotation" for e in events)
-    over = estimate > config.bound and not rotated
+    # Pre-send over-bound is the allowed exception only inside a tool loop (rule 5): the newest turn
+    # already has model output. At a turn start an over-bound request is bound_too_small instead.
+    in_tool_loop = bool(turn_starts(messages)) and not at_turn_start(messages)
+    over = estimate > config.bound and not rotated and in_tool_loop
     # The estimate observe_usage compares with real usage must describe what is actually sent: after a
     # rotation that is the transformed request, not the history that triggered it (A2b review).
     sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
@@ -577,8 +580,8 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
         # Pre-send over-bound (rule 5: a turn that grows past the bound inside a tool loop): the allowed,
         # logged exception for acceptance 1, kept distinct from observe_usage's source "real" record.
         event["over_bound"] = True
-        events.append({"event": "over_bound", "source": "estimate", "epoch": state.epoch, "estimate": estimate,
-                       "bound": config.bound})
+        events.append({"event": "over_bound", "source": "estimate", "in_tool_loop": True, "epoch": state.epoch,
+                       "estimate": estimate, "bound": config.bound})
     events.append(event)
     return upstream, state, events
 

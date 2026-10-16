@@ -796,5 +796,22 @@ def test_pre_send_and_real_over_bound_records_are_distinct():
     _, _, ev = engine(loop, {}, MESSAGES)
     pre = [e for e in ev if e["event"] == "over_bound"]
     assert [e["source"] for e in pre] == ["estimate"] and ev[-1]["over_bound"] is True  # rule 5, allowed
+    assert pre[0]["in_tool_loop"] is True
     out = engine.observe_usage(MESSAGES, {"input_tokens": CONFIG.bound + 1}, loop)
     assert [e["source"] for e in out if e["event"] == "over_bound"] == ["real"]  # acceptance 1 failure
+
+
+
+def test_over_bound_at_a_turn_start_is_never_the_tool_loop_exemption():
+    # A turn-start request whose estimate is over the bound but which cannot rotate (rotation_noop or
+    # bound_too_small) must not emit the source "estimate" exemption.
+    from dataclasses import replace
+    store = MemoryStore(key=b"k" * 32)
+    cfg = Config(bound=100_000, headroom_floor=500)
+    est = TokenEstimator()
+    msgs = history(3) + [user("p")]
+    _, st, _ = rewrite(request(msgs), None, store, cfg, est)
+    st = replace(st, last_input_tokens=150_000, head_tokens=1_000)
+    up, _, ev = rewrite(request(msgs + [assistant("a"), user("next")]), st, store, cfg, est)
+    assert ev[-1]["estimate"] > cfg.bound
+    assert not any(e["event"] == "over_bound" for e in ev) and not ev[-1].get("over_bound")
