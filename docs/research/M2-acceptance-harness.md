@@ -381,8 +381,10 @@ page one of its terms returns:
 - obligation set: each id's last statement;
 - otherwise: the statements holding the answer, or the last one.
 
-A statement on no page counts as in the window only if it sits in a script turn the store did not
-page out, and hits are cut at `contexto_search`'s limit (`SEARCH_LIMIT`, 50 ids). It reports the rate
+Pages are mapped to script turns by content (the turn's opening text inside the page), not by the
+page's turn number, which can drift when carried text is paged; drift and unmatched pages are
+reported (H1 rerun store: none). A statement on no page counts as in the window only if it sits in a
+script turn the store did not page out, and hits are cut at `contexto_search`'s limit (`SEARCH_LIMIT`, 50 ids). It reports the rate
 per category with counts, the rank of each hit (search lists newest first), and every unreachable
 probe. `stubrun.py` also reports it on the dry run's own store, and `--inflate N:FACTOR` makes the
 stub report inflated usage from the n-th request so a real over_bound is logged; on main with PR #76

@@ -75,7 +75,10 @@ def test_a_multihop_probe_with_one_unreachable_hop_is_unreachable():
 
 def test_a_statement_on_no_page_and_in_no_window_turn_is_unreachable():
     p = Probe("q5", "a", "chain", "t", "?", "v9", subjects=("svc.key",), statements=("svc.key is now v9.",))
-    r = reach.reach([p], PAGES, turn_texts=["svc.key is now v9.", "", ""])  # only in turn 0, which is paged
+    # turn 0's opening is on pg_t (so turn 0 is paged), but the statement later in it is not
+    opening = "Next part of the working log: s0 line 0000 level=INFO " * 4
+    pages = [_page("pg_t", 0, opening)]
+    r = reach.reach([p], pages, turn_texts=[opening + "\nsvc.key is now v9.", ""])
     assert r["rows"][0]["needs"][0] == {"page": None, "in_window": False, "hit": False} and r["reachable"] == 0
 
 
@@ -84,3 +87,17 @@ def test_ranks_beyond_the_search_limit_do_not_count(monkeypatch):
     pages = [_page("pg_old", 0, "svc.key is v1"), _page("pg_new", 5, "svc.key mentioned again")]
     p = Probe("q6", "a", "chain", "t", "?", "v1", subjects=("svc.key",), statements=("svc.key is v1",))
     assert reach.reach([p], pages)["reachable"] == 0  # pg_old ranks 2nd, past the limit
+
+
+def test_pages_map_to_script_turns_by_content_and_drift_is_reported():
+    # Reviewer-2 on PR #88: page turn numbers can drift (for example when carried text is paged).
+    turns = ["Opening turn zero text " * 8, "Next part one " * 10, "Next part two " * 10]
+    pages = [_page("pg_x", 0, turns[0]), _page("pg_y", 2, turns[1]),  # page says 2, content is turn 1
+             _page("pg_z", 3, "carried system text only")]
+    m = reach.map_pages(pages, turns)
+    assert [r["script_turn"] for r in m["pages"]] == [0, 1, None]
+    assert [r["id"] for r in m["drift"]] == ["pg_y"] and m["unmatched"] == ["pg_z"]
+    # the window follows content: turn 2 is not paged, so a statement there is in the window
+    p = Probe("q7", "a", "chain", "t", "?", "two", subjects=("part two",), statements=("Next part two",))
+    r = reach.reach([p], pages, turn_texts=turns)
+    assert r["rows"][0]["needs"][0]["in_window"] is True and r["turn_mapping"]["drift"][0]["id"] == "pg_y"
