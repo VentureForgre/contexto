@@ -316,7 +316,12 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     because of the stream hold: a tool call can only charge after its response's real-usage
     publish, and the next request-time estimate includes its results. If a hold is released at end
     of stream without usage, tool calls see the request-time room, which is off by at most one
-    response's output. `count_tokens` never publishes a room. They never return more than remains; when it is
+    response's output. `count_tokens` never publishes a room. A single `contexto_recall` call
+    returns at most half of the room that remains when it is made, with offset paging for the
+    rest, so one recall cannot consume the turn (measured in the second live H1 run: one full-page
+    recall used about 89 percent of a 23,000-token room and every later call found the room
+    spent). `contexto_recall`, `contexto_search`, and `contexto_state` never return more than
+    remains; when it is
     used up they return: "Recall budget for this turn is used up; answer from what is in view, or
     say the detail is unknown."
   - Charges convert at `min(bytes_per_token, 1.5)` characters per token, using 1.0 before
