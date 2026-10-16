@@ -38,7 +38,8 @@ def search(store, query):
                        "params": {"name": "contexto_search", "arguments": {"query": query}}})
     result = server.handle_line(line)["result"]
     assert result["isError"] is False and "structuredContent" not in result
-    [block] = result["content"]
+    block, coverage = result["content"]  # B19 (a): every reply ends with its uncharged coverage note
+    assert coverage == {"type": "text", "text": mcp.SEARCH_COVERAGE}
     return block["text"]
 
 
@@ -368,3 +369,24 @@ def test_a_query_from_a_tool_input_finds_its_rendered_line_and_offset(store, val
     for entry, pid in zip(compact, newest[3:]):
         other = render_page(store.get_page(pid))
         assert entry == f"{pid} (turn {store.get_page(pid)['turn']}) @{other.index('tool_use run')}"
+
+
+# B19 (a): every search reply states its coverage (contract PR #125)
+
+
+def test_every_search_reply_ends_with_its_uncharged_coverage_note(store):
+    store.set_window(200_000, 2.0)
+    store.page_out([[{"role": "user", "content": LOG}]], 1)
+    store.set_turn_room("1", 5_000)
+    hit = search(store, "line 0123")  # the helper asserts the note follows as its own block
+    assert store.turn_room()[2] == math.ceil(len(hit) / 1.5)  # the note itself is not charged
+    assert search(store, "absent-key") == mcp.NO_HIT
+    store.set_turn_room("1", 0)
+    assert search(store, "line 0123") == SPENT
+    assert "paged-out turns" in mcp.SEARCH_COVERAGE and "newer" in mcp.SEARCH_COVERAGE
+
+
+def test_the_tool_description_and_worked_example_state_the_coverage():
+    [tool] = [t for t in mcp.TOOLS if t["name"] == "contexto_search"]
+    assert "covers only paged-out turns" in tool["description"]
+    assert "covers only paged-out turns" in EXAMPLE_LINE

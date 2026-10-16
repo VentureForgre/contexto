@@ -50,6 +50,11 @@ NO_HIT = "No paged-out turn contains that exact text."
 # Fixed control replies are protocol text, never charged, and returned even when the room is smaller than they
 # are (contract PR #103); the longest is about 225 characters. RECALL_NEARLY_SPENT is a template, checked apart.
 CONTROL_REPLIES = frozenset({BUDGET_SPENT, SEARCH_TOO_LONG, NO_HIT})
+# B19 (a): every search reply ends with this, as its own text block. Like the control replies it is fixed
+# protocol text and not charged. The live run showed answers taken from the newest search hit while a newer
+# statement sat in the conversation in view, which search cannot see.
+SEARCH_COVERAGE = ("[Paged hits come only from paged-out turns; the conversation in view is newer than any of "
+                   "them.]")  # contract PR #125
 UNMEASURED_CHARS_PER_TOKEN = 1.0  # before the engine records bytes per token: charges more, never less
 # Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
 # rejects a tools/list result without them (reviewer-2, real client, 2026-10-16). The tool list is
@@ -173,7 +178,8 @@ TOOLS: list[dict[str, Any]] = [
             f"(marked >) with {_lines(MATCH_CONTEXT)} of context either side, every line prefixed with its "
             f"character offset in the page; up to {SEARCH_MORE_LIMIT} further matching pages are listed as page "
             "id, turn, and @offset of their first match. Answer from a matching line, or call contexto_recall "
-            "with a page id and offset to read on. No fuzzy or similarity matching."
+            "with a page id and offset to read on. Search covers only paged-out turns: the conversation in "
+            "view is newer than any hit. No fuzzy or similarity matching."
         ),
         "inputSchema": {
             "type": "object",
@@ -450,7 +456,7 @@ class Server:
 
         texts, budget = self._within_room(build, "contexto_search")
         text = texts[0] if texts else BUDGET_SPENT
-        return ([{"type": "text", "text": text}], None,
+        return ([{"type": "text", "text": text}, {"type": "text", "text": SEARCH_COVERAGE}], None,
                 {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": len(found),
                  "returned": _spans(picked["rows"]) if texts else [], **budget})
 
