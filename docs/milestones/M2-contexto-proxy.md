@@ -110,7 +110,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    `bound_too_small` and send the request unrotated; the launcher warns at start when the measured
    head leaves less than 25,000 tokens of window budget and suggests a larger `--bound`. Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
-   OpenRig seat head near 92k leaves about 33k.
+   OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
+   thinking strips will be frequent at 150k for large heads (see O3).
 5. **Never rotate inside a tool loop** (D17). A turn that grows past the bound is sent as is and
    recorded as over-bound in the session log; the next turn start rotates.
 6. **Head change.** If the CLI's `system` or `tools` change (byte fingerprint), start a new epoch at
@@ -229,7 +230,9 @@ owner's proxy replayed haiku thinking is dropped on some requests (O6), so the b
 a no-replayed-thinking baseline.
 
 1. **Long run:** a scripted session whose local history reaches at least 2.5 times the bound
-   (bound set to 100,000 for this run to keep spend down and well under every compaction trigger) shows zero compaction events, every
+   (bound 150,000, the shipped default, so the run tests the product as shipped and leaves each
+   epoch room to show cache reads; at 100,000 the retained window would be about 20,500 tokens
+   and every turn would rotate, per lane B's dry run) shows zero compaction events, every
    upstream request under the bound except logged over-bound turns, and zero 4xx responses.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
