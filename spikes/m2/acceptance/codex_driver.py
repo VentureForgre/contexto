@@ -80,10 +80,67 @@ def usage_tokens(usage: dict[str, Any] | None) -> tuple[int, int, int]:
     return usage.get("input_tokens") or 0, cached, usage.get("output_tokens") or 0
 
 
+def complete_lines(data: bytes) -> tuple[list[dict[str, Any]], bool]:
+    """The events of every newline-terminated line, and whether an unterminated last line was left out
+    (a write in progress: re-read later, never parsed). A malformed complete line raises ValueError."""
+    *complete, rest = data.split(b"\n")
+    return [json.loads(line) for line in complete if line.strip()], bool(rest.strip())
+
+
 def read_log(session_log: Path) -> list[dict[str, Any]]:
+    """The session log's complete events; none before the proxy has created it (before a first turn)."""
     if not session_log.exists():
         return []
-    return [json.loads(line) for line in session_log.read_text().splitlines() if line.strip()]
+    return complete_lines(session_log.read_bytes())[0]
+
+
+class WatchFailed(RuntimeError):
+    """The spend watcher could not read the session log; the turn is stopped (fail closed)."""
+
+
+@dataclass
+class SpendWatch:
+    """The in-turn spend watcher (intake and reviewer-1 on PR #154): called each poll while a turn runs,
+    True when the turn must stop because ``spent + 2 x inflight`` would pass ``approved``. It fails
+    closed: a malformed complete line or an unreadable log raises at once, and a log that stays missing
+    or keeps an unterminated last line raises once the grace is over: at most ``grace_polls`` polls and
+    at most ``grace_seconds``, whichever comes first (intake, 2026-10-16 11:48Z). CodexTurns then stops
+    the turn. An unterminated line is a write in progress: it is never parsed, only re-read."""
+
+    session_log: Path
+    approved: int
+    inflight: int
+    grace_polls: int = 2
+    grace_seconds: float = 5.0
+    _pending_since: float | None = None
+    _pending_polls: int = 0
+
+    def __call__(self) -> bool:
+        try:
+            data = self.session_log.read_bytes()
+        except FileNotFoundError:
+            self._pending("the session log is missing")
+            return False
+        except OSError as exc:
+            raise WatchFailed(f"the session log cannot be read: {type(exc).__name__}") from exc
+        try:
+            events, partial = complete_lines(data)
+        except ValueError as exc:
+            raise WatchFailed("the session log has a malformed line") from exc
+        if partial:
+            self._pending("the session log's last line stays unterminated")
+        else:
+            self._pending_since, self._pending_polls = None, 0
+        return spend(events) + 2 * self.inflight > self.approved
+
+    def _pending(self, why: str) -> None:
+        """One more poll in the pending state; past the grace (polls or seconds), fail closed."""
+        now = time.monotonic()
+        if self._pending_since is None:
+            self._pending_since = now
+        self._pending_polls += 1
+        if self._pending_polls > self.grace_polls or now - self._pending_since > self.grace_seconds:
+            raise WatchFailed(f"{why} past the grace ({self.grace_polls} polls, {self.grace_seconds:g} s)")
 
 
 def responses_requests(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -126,19 +183,27 @@ class CodexTurns:
         with events.open("w") as out, (self.scratch / f"stderr-{index}.txt").open("w") as err:
             proc = self.popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err, cwd=self.scratch, env=self.env,
                               text=True, start_new_session=True)
-            proc.stdin.write(text)
-            proc.stdin.close()
-            deadline = time.monotonic() + self.timeout
-            while proc.poll() is None:
-                if self.watch is not None and self.watch():
-                    self.stopped_by_watcher.append(index)
-                    self._stop(proc)
-                    break
-                if time.monotonic() > deadline:
-                    self._stop(proc)
-                    break
-                time.sleep(self.poll)
-            code = proc.wait()
+            try:
+                proc.stdin.write(text)
+                proc.stdin.close()
+                deadline = time.monotonic() + self.timeout
+                while proc.poll() is None:
+                    if self.watch is not None and self.watch():
+                        self.stopped_by_watcher.append(index)
+                        self._stop(proc)
+                        break
+                    if time.monotonic() > deadline:
+                        self._stop(proc)
+                        break
+                    time.sleep(self.poll)
+                code = proc.wait()
+            except BaseException:
+                # Fail closed: whatever went wrong (a watcher that cannot read the log, an interrupt),
+                # the turn's whole process group is stopped before the error goes on.
+                self.stopped_by_watcher.append(index)
+                self._stop(proc)
+                self.exits.append(proc.wait())
+                raise
         self.exits.append(code)
         if self.thread is None:
             for line in events.read_text().splitlines():
@@ -163,36 +228,55 @@ class CodexTurns:
 
 
 def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved: int, estimates: list[int],
-                reserve: int = 0, inflight: int = 0) -> dict[str, Any]:
+                reserve: int = 0, inflight: int = 0, start: int = 0) -> dict[str, Any]:
     """Every turn of ``s`` in order; returns the record (spend, turns completed, why it stopped, and
     the probe-turn answers). Two stops keep spend at or under ``approved``: a turn is never started
     when ``spent + estimate + reserve`` could pass it, and inside a turn the spend watcher stops the
     turn's processes once ``spent + 2 x inflight`` would (``inflight`` is one request's worst case,
-    bound plus output; twice it covers a request that started before the last one was logged)."""
+    bound plus output; twice it covers a request that started before the last one was logged).
+
+    Resume: with retries pinned, a failed request ends the turn and the session. ``start`` (the first
+    turn not completed) and ``turns.thread`` (the record's ``thread_id``) continue the same Contexto
+    session and Codex thread; spend is read from the same session log, so the cap counts what the
+    failed attempt was billed."""
     if inflight:
-        turns.watch = lambda: spend(read_log(session_log)) + 2 * inflight > approved
+        turns.watch = SpendWatch(session_log, approved, inflight)
     if len(estimates) != len(s.turns):
         raise ValueError("one estimate per turn")
     answers: list[str] = []
-    stopped, completed = None, 0
+    stopped, completed = None, start
     for i, text in enumerate(s.turns):
-        spent = spend(read_log(session_log))
+        if i < start:
+            continue
+        try:
+            spent = spend(read_log(session_log))
+        except ValueError:
+            stopped = f"turn {i + 1}: not started, the session log has a malformed line"
+            break
         if spent + estimates[i] + reserve > approved:
             stopped = f"turn {i + 1} could pass the approved {approved:,} (spent {spent:,})"
             break
-        answer = turns.send(i, text)
+        try:
+            answer = turns.send(i, text)
+        except Exception as exc:  # noqa: BLE001 - fail closed: the turn was stopped, the session stops
+            stopped = f"turn {i + 1}: stopped, the spend watcher failed closed ({type(exc).__name__}: {exc})"
+            break
         if turns.stopped_by_watcher and turns.stopped_by_watcher[-1] == i:
             stopped = f"turn {i + 1}: stopped by the spend watcher (approved {approved:,})"
+            break
+        if turns.exits[-1] != 0:  # not completed: a resume starts again at this turn
+            stopped = f"turn {i + 1}: codex exited {turns.exits[-1]}"
             break
         completed += 1
         if i >= s.n_content:
             answers.append(answer)
-        if turns.exits[-1] != 0:
-            stopped = f"turn {i + 1}: codex exited {turns.exits[-1]}"
-            break
-    return {"spent": spend(read_log(session_log)), "approved": approved, "turns": len(s.turns),
+    try:
+        spent_total = spend(read_log(session_log))
+    except ValueError:
+        spent_total = None
+    return {"spent": spent_total, "approved": approved, "turns": len(s.turns), "started_at": start,
             "turns_completed": completed, "probe_turns_completed": len(answers), "stopped": stopped,
-            "thread": bool(turns.thread), "codex_exits": turns.exits,
+            "thread_id": turns.thread, "codex_exits": turns.exits,
             "stopped_by_watcher": list(turns.stopped_by_watcher), "answers": "\n".join(answers)}
 
 

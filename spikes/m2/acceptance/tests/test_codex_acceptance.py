@@ -119,7 +119,7 @@ def test_run_session_resumes_the_thread_and_keeps_only_probe_answers(tmp_path):
     s = script.build(turns=4, turn_bytes=2_000)
     runner = FakeCodex()
     record = codex_driver.run_session(s, _turns(tmp_path, runner), tmp_path / "log.jsonl", 10**9, [1] * len(s.turns))
-    assert record["turns_completed"] == len(s.turns) and record["stopped"] is None and record["thread"]
+    assert record["turns_completed"] == len(s.turns) and record["stopped"] is None and record["thread_id"] == "T1"
     assert "resume" not in runner.calls[0] and all(c[-3:] == ["resume", "T1", "-"] for c in runner.calls[1:])
     assert all("model_providers.contexto.request_max_retries=0" in c for c in runner.calls)  # retries pinned
     assert record["answers"].count("q_a_001: x") == len(s.probe_turn_ids)
@@ -142,7 +142,7 @@ def test_run_session_stops_when_codex_fails(tmp_path):
     s = script.build(turns=4, turn_bytes=2_000)
     record = codex_driver.run_session(s, _turns(tmp_path, FakeCodex(exit_at=2)), tmp_path / "log.jsonl", 10**9,
                                       [1] * len(s.turns))
-    assert record["turns_completed"] == 2 and record["stopped"] == "turn 2: codex exited 7"
+    assert record["turns_completed"] == 1 and record["stopped"] == "turn 2: codex exited 7"  # turn 2 did not complete
 
 
 def test_stub_replies_ok_then_calls_the_tools_then_answers():
@@ -229,3 +229,92 @@ def test_spend_watcher_leaves_a_turn_alone_under_the_line(tmp_path):
     turns = _turns(tmp_path, FakeCodex())
     turns.watch = lambda: False
     assert turns.send(0, "log\nReply with exactly: OK") == "OK" and turns.stopped_by_watcher == []
+
+
+# Fail-closed spend watcher (reviewer-1 and intake on PR #154, 11:47Z and 11:48Z) ---------------------
+
+def _watch(tmp_path, data, **kw):
+    log = tmp_path / "log.jsonl"
+    if data is not None:
+        log.write_bytes(data)
+    return log, codex_driver.SpendWatch(log, approved=10**9, inflight=1, **kw)
+
+
+def test_a_half_written_last_line_completed_within_the_grace_continues_the_turn(tmp_path):
+    line = json.dumps(_entry(inp=900, out=100)).encode()
+    log, watch = _watch(tmp_path, line + b"\n" + line[:20])
+    assert watch() is False  # the partial line is not parsed; the complete one is counted
+    log.write_bytes(line + b"\n" + line + b"\n")  # the write finished before the grace ran out
+    assert watch() is False and watch._pending_polls == 0
+    assert codex_driver.spend(codex_driver.read_log(log)) == 2_000
+
+
+def test_a_last_line_still_open_after_the_grace_stops_the_turn(tmp_path):
+    line = json.dumps(_entry()).encode()
+    _, watch = _watch(tmp_path, line + b"\n" + line[:20])
+    assert watch() is False and watch() is False  # two polls of grace
+    with pytest.raises(codex_driver.WatchFailed, match="unterminated"):
+        watch()
+    _, slow = _watch(tmp_path, line[:20], grace_polls=100, grace_seconds=0.05)
+    assert slow() is False
+    time.sleep(0.1)
+    with pytest.raises(codex_driver.WatchFailed):  # or the seconds run out first
+        slow()
+
+
+def test_a_malformed_complete_line_or_a_missing_log_fails_closed(tmp_path):
+    _, watch = _watch(tmp_path, b"{not json}\n")
+    with pytest.raises(codex_driver.WatchFailed, match="malformed"):
+        watch()
+    _, missing = _watch(tmp_path / "none", None)
+    (tmp_path / "none").mkdir()
+    assert missing() is False and missing() is False
+    with pytest.raises(codex_driver.WatchFailed, match="missing"):
+        missing()
+
+
+@pytest.mark.parametrize("problem", ["open line", "malformed line", "exception"])
+def test_the_turn_process_group_is_killed_when_the_watcher_fails(tmp_path, problem):
+    """Whatever breaks inside the watcher, the running turn (a real process group) is stopped and the
+    session ends with the reason recorded."""
+    s = script.build(turns=4, turn_bytes=2_000)
+    log = tmp_path / "log.jsonl"
+    log.write_text(json.dumps(_entry()) + "\n")
+    turns = _turns(tmp_path, sleeper)
+    started = time.monotonic()
+    if problem == "exception":
+        def broken():
+            raise RuntimeError("synthetic watcher bug")
+        turns.watch = broken
+        record = codex_driver.run_session(s, turns, log, 10**9, [1] * len(s.turns))
+    else:
+        record = None
+
+        def corrupt_after_start():
+            with log.open("ab") as f:
+                f.write(b"{partial" if problem == "open line" else b"{not json}\n")
+
+        def watch_after_write(inner=codex_driver.SpendWatch(log, 10**9, 1)):
+            if not hasattr(watch_after_write, "done"):
+                corrupt_after_start()
+                watch_after_write.done = True
+            return inner()
+
+        turns.watch = watch_after_write
+        record = codex_driver.run_session(s, turns, log, 10**9, [1] * len(s.turns))
+    assert time.monotonic() - started < 15  # stopped, not left to sleep 60 seconds
+    assert "failed closed" in record["stopped"] and record["turns_completed"] == 0
+    assert turns.exits == [-signal.SIGTERM] and turns.stopped_by_watcher == [0]
+
+
+def test_resume_continues_from_the_first_turn_not_completed(tmp_path):
+    s = script.build(turns=4, turn_bytes=2_000)
+    runner = FakeCodex(exit_at=3)
+    first = codex_driver.run_session(s, _turns(tmp_path, runner), tmp_path / "log.jsonl", 10**9, [1] * len(s.turns))
+    assert first["turns_completed"] == 2 and first["thread_id"] == "T1"
+    again = _turns(tmp_path, FakeCodex())
+    again.thread = first["thread_id"]
+    second = codex_driver.run_session(s, again, tmp_path / "log.jsonl", 10**9, [1] * len(s.turns),
+                                      start=first["turns_completed"])
+    assert second["started_at"] == 2 and second["turns_completed"] == len(s.turns) and second["stopped"] is None
+    assert all(c[-3:] == ["resume", "T1", "-"] for c in again.popen.calls)

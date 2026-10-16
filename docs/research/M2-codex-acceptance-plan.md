@@ -69,9 +69,16 @@ The shared detectors read only `/v1/messages` and Anthropic usage keys. `codex_d
 
 ## 4. Baseline (full context, same content)
 
-[proposed] **A replay of the 6 probe requests, built as Claude's** (`run.py replay`):
-- Each probe request is sent once to the upstream with the whole history before it, taken from Codex's rollout (the session's `codex-home` holds it in full), with tools off.
-- The H1 arm's content turns are not repeated.
+[proposed] **A replay of the 6 probe requests, built as Claude's D27 baseline** (`run.py replay`):
+- **What each request carries.** Each of the 6 requests carries the full content history: every content turn and its `OK` reply, taken from Codex's rollout (the session's `codex-home` holds it in full).
+- **Earlier probe turns.** It also carries the earlier probe turns as the baseline itself asked and answered them. The probes are sent in order and each answer is appended before the next request, so these are the baseline's own answers.
+- **Dropped from the rollout:**
+  - H1's tool calls and their results (the `exec` calls and outputs, and with them every search and recall);
+  - H1's reasoning items;
+  - H1's answers to the probe turns.
+- **Why:** the arms must be independent. The baseline measures what the model answers from the full context alone. Had it seen H1's retrievals or answers, its score would include H1's work, and the fidelity gap (acceptance 2) would shrink toward zero whatever H1 did.
+- **No tools.** No tool definitions are sent, so there is no MCP server and there are no tool rounds.
+- **Content turns are not repeated** as separate requests; they are only carried as history.
 - Requests go straight to the upstream, so Codex's own compaction does not apply. Each must fit the 272,000-token window with its output allowance: 210,370 + 32,000 at 64,000.
 - It sends no Codex client marker; D23 applies.
 - It is not built yet (section 6).
@@ -85,7 +92,7 @@ The shared detectors read only `/v1/messages` and Anthropic usage keys. `codex_d
 | Term | Value | Source |
 |---|---|---|
 | H1 request input | at most the bound, 64,000 | the engine's bound (acceptance 1) |
-| Output per request | 32,000, reasoning included | `budget.Params.max_tokens_reserve`. Codex sends no `max_output_tokens` (measured: its request has no such field), and codex-cli 0.154.0 has no client-side cap. The Responses `output_tokens` include reasoning. The allowance is enforced by the spend watcher. |
+| Output per request | 32,000, reasoning included | `budget.Params.max_tokens_reserve`, the reserve the Claude runs used. `gpt-6-astra`'s maximum output is not documented in what this plan can read: no limit appears in codex-cli 0.154.0's binary strings, and the A5 and A6 notes do not record one. Codex sends no `max_output_tokens` (measured: its request has no such field) and has no client-side cap. The Responses `output_tokens` include reasoning. **Open:** the owner or the proxy's model list gives the real maximum. Until then the watcher bounds the risk: a request that outputs more than 32,000 is logged, and the next poll stops the turn once spent + 2 x 96,000 would pass the approval. |
 | Tool rounds per H1 probe turn | 5 | run #3 measured up to 5, and its record proposes 5 (reviewer-1); Codex makes one `exec` call per round |
 | Retries | 0 billed | `codex_driver.RETRY_PIN` sets the provider's `request_max_retries` and `stream_max_retries` to 0. Measured against a 500-ing stub: 30 POSTs for one turn by default, 1 when pinned. A failure ends the turn and the session. |
 | Content turns | 15 | D27: history at least 2.5 times the bound, at 20 KB per turn (1.8 bytes per token) |
@@ -115,13 +122,29 @@ The shared detectors read only `/v1/messages` and Anthropic usage keys. `codex_d
 
 **The stops in each step** (`codex_driver.run_session`):
 - A turn is never started when spent + its estimate + reserve would pass the step's approval.
-- Inside a turn, the spend watcher terminates the turn's process group (contexto, codex, the MCP server) once spent + 2 × 96,000 would pass it. Twice one request's worst case covers a request that started before the last one was logged.
+- Inside a turn, the spend watcher (`SpendWatch`, polled every 0.25 s) terminates the turn's process group (contexto, codex, the MCP server) once spent + 2 × 96,000 would pass it. Twice one request's worst case covers a request that started before the last one was logged.
+- **The watcher fails closed** (intake 11:47Z and 11:48Z). The turn is stopped on any of:
+  - a malformed complete (newline-terminated) line in the session log;
+  - an unreadable log;
+  - any exception inside the watcher;
+  - a log that stays missing;
+  - an unterminated last line still open past the grace, which is at most 2 polls and at most 5 seconds, whichever comes first.
+  - An unterminated last line is a write in progress: it is never parsed, only re-read. The session then ends with the reason recorded.
+- **Resume after a failure.** With retries pinned, a failed request ends the turn and the session (the turn does not count as completed). To resume:
+  - rerun the driver with `start` = the record's `turns_completed` and the record's `thread_id` (`run_session(..., start=...)`, `CodexTurns.thread`);
+  - it continues the same Contexto session and Codex thread from the turn that failed;
+  - spend is read from the same session log, so the step's cap counts what the failed attempt was billed;
+  - the new record shows `started_at`.
+  - If Codex recorded the failed turn's prompt in its rollout, the resumed turn sends it again. That one-turn duplicate is noted in the run record.
 - So spend stays at or under the approval as long as no single request passes its 96,000 worst case. A request that does is still logged and fails acceptance 1.
 
 ## 6. Risks and open questions
 
 **Must be in place before any live step:**
-1. **In-turn spend watcher.** Implemented: `CodexTurns` runs each turn in its own process group and polls the session log. Tests: `test_spend_watcher_stops_a_running_turn_and_the_session` and `test_spend_watcher_leaves_a_turn_alone_under_the_line`.
+1. **In-turn spend watcher, fail closed.** Implemented: `CodexTurns` runs each turn in its own process group, and `SpendWatch` polls the session log.
+   - Tests cover the spend stop and the quiet case.
+   - They cover a half-written line completed within the grace, a line still open after it (by polls and by seconds), a malformed complete line, and a missing log.
+   - A parametrized test kills a real process group for an open line, a malformed line, and an exception inside the watcher.
 2. **Retries pinned.** Implemented (`RETRY_PIN`) and measured: 1 POST per failing turn, where the default sent 30.
 3. **Recall credit for the Responses paths.**
    - Step 1's acceptance 3 verdict needs it: `recall_credit.answer_index` reads `/v1/messages`.
@@ -166,6 +189,6 @@ Measured run (bound 64,000, 20 KB turns, seed 20261016, main 031ca59 with B23 an
 | Score | 54 of 54 (stub answers) |
 | Record | `codex-dry-run.json`: the run record, analysis, score, and the estimate |
 
-Tests: `spikes/m2/acceptance/tests/test_codex_acceptance.py` (14 tests).
-- They cover the turn command (resume by id, retries pinned), the in-turn spend watcher, the isolated environment, Responses spend, the analysis, the session runner's cap and stops, the stub's reply sequence, and the estimate's formula and baseline fit.
+Tests: `spikes/m2/acceptance/tests/test_codex_acceptance.py` (21 tests).
+- They cover the turn command (resume by id, retries pinned), the fail-closed in-turn spend watcher, resume after a failed turn, the isolated environment, Responses spend, the analysis, the session runner's cap and stops, the stub's reply sequence, and the estimate's formula and baseline fit.
 - They also include the full dry run, which is skipped where no codex CLI is installed.
