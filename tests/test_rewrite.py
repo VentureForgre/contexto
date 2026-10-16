@@ -756,7 +756,7 @@ def test_real_usage_over_the_bound_is_flagged_even_when_the_estimate_was_low():
     over = [e for e in out if e["event"] == "over_bound"]
     assert over and over[0]["over_bound"] is True and over[0]["source"] == "real"
     assert over[0]["real_tokens"] == 101_500 and over[0]["estimate"] == estimate
-    assert [e.get("source") for e in store.events if e["event"] == "over_bound"] == ["real"]
+    assert not store.events  # the proxy logs the returned events on the request's entry (A2e)
 
 
 def test_estimate_error_is_reported_when_real_exceeds_the_estimate_by_more_than_ten_percent():
@@ -1092,16 +1092,16 @@ def test_unlisted_store_exception_is_a_genuine_bug_and_propagates():
         run(history(6) + [user("new prompt")], store=store)
 
 
-def test_store_log_failure_in_observe_usage_enters_degraded_mode_without_raising():
+def test_observe_usage_never_logs_itself_even_with_a_broken_log():
+    """A2e: observe_usage returns its events for the proxy's request entry and does not call store.log, so
+    a broken log cannot fail it and no event is written twice."""
     store = FaultyStore()
     engine = RewriteEngine(store, config=Config(bound=1_000))
     req = request(history(2) + [user("new")])
     engine(req, {}, MESSAGES)
     store.fail["log"] = OSError("synthetic")
     events = engine.observe_usage(MESSAGES, {"input_tokens": 5_000}, req)
-    assert names(events) == ["over_bound", "estimate_error", "store_error", "degraded_enter"]
-    assert events[2]["operation"] == "log"
-    assert engine.states[next(iter(engine.states))].degraded
+    assert names(events)[:2] == ["over_bound", "estimate_error"] and "log" not in store.calls
 
 
 def test_set_window_publishes_w_and_the_measured_ratio_only_when_they_change():

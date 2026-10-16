@@ -1049,8 +1049,9 @@ class RewriteEngine:
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
         """Feed a response's real usage back (a transformed endpoint; never ``count_tokens``). Returns the
-        content-free events it raised, which are also written to the session log through
-        ``store.log`` when the store has one (packet A2b; contract rule 3 as amended by PR #44):
+        content-free events it raised (packet A2b; contract rule 3 as amended by PR #44). The proxy writes
+        them on that request's log entry (``usage_events``), the one place they are logged (A2e,
+        agreed with builder-1); this method does not log them itself:
 
         - ``over_bound`` with ``source: "real"``: the real upstream input (input + cache read + cache
           write) exceeded the bound, whatever the pre-send estimate said, so acceptance 1 can rely on
@@ -1097,13 +1098,9 @@ class RewriteEngine:
         try:
             if not state.degraded:  # a degraded store is retried at the next turn start, not here
                 state = publish_window(calls, state, self.estimator)
-            log = getattr(calls, "log", None)
-            if callable(log):
-                for event in events:
-                    log(event)
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;
-            # the next turn start retries it. The events are still returned to the proxy.
+            # the next turn start retries it. The event reaches the log with the others, via the proxy.
             state = enter_degraded(state, store_failure(error, calls, state), events)
         self.states[key] = state
         return events

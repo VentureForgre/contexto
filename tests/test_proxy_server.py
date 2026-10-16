@@ -743,6 +743,28 @@ def test_usage_reaches_the_engine_before_the_client_sees_the_end(make_proxy):
     assert seen_at_completion == [1]
 
 
+def test_usage_events_are_logged_once_on_their_request_entry(make_proxy):
+    """Packet A2e: the events observe_usage returns are written on that request's log entry, and a real
+    over_bound sets the entry's over_bound; the proxy writes them nowhere else."""
+    engine = StubEngine()
+    returned = [{"event": "over_bound", "source": "real", "over_bound": True, "real_tokens": 101_500},
+                {"event": "estimate_error", "ratio": 0.8}, "not-an-event"]
+
+    def observe(endpoint, usage, request):
+        engine.observe_usage(endpoint, usage, request)
+        return returned
+
+    Upstream.mode = "json"
+    proxy, log = make_proxy(transform=engine, observe_usage=observe)
+    call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    entry = log.requests()[0]
+    assert entry["usage_events"] == returned[:2] and entry["over_bound"] is True
+    assert not [e for e in log.events if e.get("event") in ("over_bound", "estimate_error")]
+    returned[:] = []  # nothing returned: no field, and the pre-send over_bound stands
+    call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    assert "usage_events" not in log.requests()[1] and log.requests()[1]["over_bound"] is False
+
+
 def test_engine_exception_logs_transform_error_at_error_level(make_proxy):
     """Contract rule 14, genuine bugs: forward the original request and log transform_error."""
     Upstream.mode = "json"
