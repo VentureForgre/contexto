@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from acceptance.detectors import BILLED_PATHS, request_path
 from contexto.proxy import TRANSFORMED_PATHS
 
 MODEL = "claude-haiku-5-5"
@@ -83,8 +84,7 @@ def is_auth_failure(event: dict) -> bool:
     request record or an upstream_4xx event."""
     if event.get("event") not in ("upstream_4xx", "request") or event.get("status") not in (401, 403):
         return False
-    path = str(event.get("path") or "").split("?")[0]
-    if (path.rstrip("/") or path) not in AUTH_PATHS:
+    if request_path(event) not in AUTH_PATHS:
         return False
     # The proxy logs upstream_4xx for any method but records none, so one on a model path is taken as
     # a POST: the conservative reading, since it stops the run.
@@ -128,8 +128,8 @@ class SessionWatcher:
             self.status = int(event["status"])
             return True
         if (self.approved is None or event.get("event") != "request"
-                or str(event.get("path") or "").split("?")[0] != "/v1/messages" or not event.get("usage")):
-            return False
+                or request_path(event) not in BILLED_PATHS or not event.get("usage")):
+            return False  # count_tokens and other paths bill nothing; a trailing slash is the same path
         last_input, total = _usage_tokens(event["usage"])
         self.spent += total
         projected = self.spent + 2 * (last_input + self.reserve)

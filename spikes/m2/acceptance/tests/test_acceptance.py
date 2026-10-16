@@ -809,6 +809,29 @@ def test_h1_spend_takes_the_proxy_logged_usage_after_a_mid_turn_stop():
     assert run.h1_spend(500, [], abnormal=False, reserve=32_000)["spent"] == 500  # no log: the driver's figure
 
 
+def test_a_trailing_slash_model_request_counts_toward_spend_exactly_once(tmp_path):
+    # Reviewer-2 on PR #66: the spend paths use the same path helper as the 4xx and auth checks.
+    slash = {"event": "request", "method": "POST", "path": "/v1/messages/", "status": 200,
+             "usage": {"input_tokens": 1_000, "output_tokens": 10}}
+    count = {"event": "request", "method": "POST", "path": "/v1/messages/count_tokens/", "status": 200,
+             "usage": {"input_tokens": 999}}  # token counts bill nothing
+    responses = {"event": "request", "method": "POST", "path": "/responses/", "status": 200,
+                 "usage": {"input_tokens": 500, "output_tokens": 5}}
+    spend = run.h1_spend(0, [slash, count, responses], abnormal=False, reserve=0)
+    assert spend["spent_logged"] == 1_010 + 505
+    log = tmp_path / "log.jsonl"
+    log.write_text("\n".join(json.dumps(e) for e in (slash, count, responses)) + "\n")
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    watcher = driver.SessionWatcher(log, proc, approved=10**9, reserve=0)
+    try:
+        time.sleep(0.6)
+        assert watcher.spent == 1_010 + 505  # each counted once; count_tokens not at all
+    finally:
+        watcher.stop()
+        proc.kill()
+        proc.wait(timeout=10)
+    assert detectors.BILLED_PATHS <= detectors.MODEL_PATHS and not any("count_tokens" in p for p in detectors.BILLED_PATHS)
+
 
 def test_a12_both_triggers_use_the_room_target_when_it_restores_the_room():
     # Engine order (rewrite.rotate_at_turn_start) and contract PR #120 (9eb191b): when the size trigger

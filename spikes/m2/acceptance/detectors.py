@@ -38,6 +38,10 @@ def request_path(event: dict[str, Any]) -> str:
     return path.rstrip("/") or path
 
 
+# Model paths whose responses are billed: Messages and Responses, not their token counts.
+BILLED_PATHS = frozenset(p for p in MODEL_PATHS if not p.endswith(("count_tokens", "input_tokens")))
+
+
 # Intake (2026-10-16 03:39Z, contract PR at 147b182): any of these, wherever it appears (a request's
 # transform events, its usage_events, or a separate session-log line), fails acceptance 1.
 FAILURE_EVENTS = ("degraded_enter", "store_error", "page_conflict", "fallback_failed", "transform_error",
@@ -78,9 +82,11 @@ class Report:
     requests: int = 0
     statuses: dict[int, int] = field(default_factory=dict)
     upstream_4xx: int = 0  # model-path 4xx the upstream returned (``upstream_4xx`` events)
-    # Model-path 4xx the proxy answered itself (reviewer-2, PR #62): request records with a 4xx status
-    # on any model path (for example 400 "malformed request framing", which has no upstream_4xx event),
-    # and rule 15's ``encoded_body_rejected`` (a 415 with no request record).
+    # Request records with a 4xx status on any model path, whether the proxy answered it itself (for
+    # example 400 "malformed request framing", which has no upstream_4xx event) or passed upstream's
+    # 4xx through (that one is also counted in upstream_4xx). Both fail zero_4xx, so counting a
+    # passed-through 4xx twice changes no verdict (reviewer-2, PR #66). Plus rule 15's
+    # ``encoded_body_rejected`` below (a 415 with no request record).
     model_request_4xx: int = 0
     encoded_body_rejected: int = 0
     # 4xx on other paths, by "METHOD path": Claude Code's unauthenticated HEAD /api/hello probe gets 401
