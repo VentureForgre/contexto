@@ -302,4 +302,5 @@ def test_module_imports_only_the_standard_library():
     source = open(mcp.__file__, encoding="utf-8").read()
     imports = [line.split()[1].split(".")[0] for line in source.splitlines()
                if line.startswith(("import ", "from ")) and not line.startswith("from __future__")]
-    assert set(imports) <= {"json", "sys", "collections", "typing"}
+    # Standard library plus the contexto package itself (the shared page rendering in contexto.store.render).
+    assert set(imports) <= {"json", "sys", "collections", "typing", "contexto"}

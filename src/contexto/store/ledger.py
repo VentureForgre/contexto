@@ -194,8 +194,9 @@ class Ledger:
 
     @contextmanager
     def _locked(self, exclusive: bool) -> Iterator[bool]:
-        """Hold the ledger lock. Yields False, without locking, for reads of a ledger never created."""
-        if not exclusive and not self.data_dir.exists():
+        """Hold the ledger lock. Yields False, without locking or creating anything, for reads of a
+        ledger that was never written, so inspecting a session never changes it."""
+        if not exclusive and not self.path.exists():
             yield False
             return
         private_dir(self.data_dir)
