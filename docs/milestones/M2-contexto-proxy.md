@@ -265,6 +265,15 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   session metadata). Reason: a 32,000-character recall of numeric log text is about 17,800 tokens,
   more than half of an OpenRig seat's `W` near 33,000, and recall results arrive inside a tool
   loop where the engine cannot rotate (D17).
+  **Per-turn recall budget.** Recall results stay in the window until the turn ends, so a turn
+  that recalls too much would push its own requests over the bound. The engine publishes, after
+  every response, the turn id and the room left in the current turn (`bound` minus the last real
+  input, minus `headroom_floor`) through the session store (`SessionStore.set_turn_room(turn_id,
+  room_tokens)`). `contexto_recall` and `contexto_search` count the tokens they return against
+  that room, converted with the same ratio as the per-call limit, and never return more than
+  remains; when the room is used up they return a plain message: "Recall budget for this turn is
+  used up; answer from what is in view, or say the detail is unknown." The room resets at the next
+  turn start. So heavy recall cannot exceed the bound inside a tool loop.
 - `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
