@@ -74,8 +74,11 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   ratio is measured, never for a ``W`` that is not positive (``bound_too_small`` reports that case;
   the store accepts positive values only), never from ``observe_usage`` while degraded, and never
   from ``count_tokens``.
-- An engine started on an existing session seeds its estimator with the ratio the previous engine
-  published (``store.window()``, packet A8), so a proxy restart sizes like the process before it.
+- An engine started on an existing session seeds its estimator, at its first request, with the ratio
+  the previous engine published (``store.window()``, packet A8), so a proxy restart sizes like the
+  process before it; it skips the restore when the recorded model differs from the request's
+  (``window_model()``, lane B B12, packet A2f). Every ``set_window`` call passes the request's model,
+  because a call without one clears the recorded model.
 """
 
 from __future__ import annotations
@@ -109,8 +112,9 @@ class Store(Protocol):
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]: ...
     def pinned_text(self, budget_tokens: int) -> str: ...
     def index_text(self, budget_tokens: int) -> str: ...
-    def set_window(self, window_tokens: int, bytes_per_token: float) -> None: ...
+    def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None: ...
     def window(self) -> tuple[int | None, float | None]: ...
+    def window_model(self) -> str | None: ...
     def quarantine_page(self, page_id: str) -> Any: ...
 
 
@@ -160,7 +164,7 @@ class EpochState:
     degraded: bool = False  # rule 14: the store failed; no paging and no rotation until a retry succeeds
     conflict_page: str | None = None  # page id of the page_conflict that entered degraded mode
     window_budget: int | None = None  # W at the latest rotation decision
-    published_window: tuple[int, float] | None = None  # (W, bytes per token) last given to set_window
+    published_window: tuple[int, float, str | None] | None = None  # (W, bytes per token, model) last given to set_window
 
 
 # Message classification -------------------------------------------------------------------------
@@ -706,7 +710,7 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
             else:
                 state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "bound",
                                   sizing=(f, w))
-        state = publish_window(store, replace(state, window_budget=w), estimator)
+        state = publish_window(store, replace(state, window_budget=w), estimator, window_model_name(request))
     return state
 
 
@@ -725,19 +729,26 @@ class StoreCalls:
         return value
 
 
-def publish_window(store: Store, state: EpochState, estimator: TokenEstimator) -> EpochState:
-    """Lane B B9: give ``W`` and the measured ratio to ``set_window`` when ``W`` changed or the ratio moved
-    more than ``WINDOW_RATIO_CHANGE``. Skipped before the ratio is measured and for a ``W`` that is not
-    positive, which ``set_window`` rejects."""
+def window_model_name(request: dict) -> str | None:
+    """The request's model as ``set_window`` accepts it (1 to 200 printable characters), else None."""
+    model = request.get("model")
+    return model if isinstance(model, str) and 0 < len(model) <= 200 and model.isprintable() else None
+
+
+def publish_window(store: Store, state: EpochState, estimator: TokenEstimator, model: str | None) -> EpochState:
+    """Lane B B9 and B12: give ``W``, the measured ratio, and the request's model to ``set_window`` when
+    ``W`` or the model changed or the ratio moved more than ``WINDOW_RATIO_CHANGE``. Every call passes
+    the model, since a call without one clears the recorded model (reviewer-1 on PR #82). Skipped
+    before the ratio is measured and for a ``W`` that is not positive, which ``set_window`` rejects."""
     ratio = estimator.measured_bytes_per_token
     if state.window_budget is None or state.window_budget <= 0 or ratio is None:
         return state
     published = state.published_window
-    if (published is not None and published[0] == state.window_budget
+    if (published is not None and published[0] == state.window_budget and published[2] == model
             and abs(ratio - published[1]) <= WINDOW_RATIO_CHANGE * published[1]):
         return state
-    store.set_window(state.window_budget, ratio)
-    return replace(state, published_window=(state.window_budget, ratio))
+    store.set_window(state.window_budget, ratio, model=model)
+    return replace(state, published_window=(state.window_budget, ratio, model))
 
 
 def store_failure(error: Exception, calls: StoreCalls, state: EpochState) -> dict:
@@ -992,25 +1003,30 @@ def keyed(dialect: Dialect, request: dict) -> str:
         _DIALECT.reset(token)
 
 
-def restore_ratio(store: Store, estimator: TokenEstimator) -> dict | None:
+def restore_ratio(store: Store, estimator: TokenEstimator, model: str | None) -> dict | None:
     """Packet A8 (c): an engine started on an existing session (a proxy restart, ``codex exec resume``,
     ``contexto run claude --session S``) begins from the bytes-per-token ratio the previous engine
     published through ``set_window`` instead of the seed, which the A6 smoke measured 1.34 to 1.40 times
     high (F 21.3k estimated against 15.3k measured, so W 14.7k instead of about 20.7k). The ratio enters
     the estimator with the weight of one mid-sized request, so the session's own usage soon dominates.
-    The ratio is not checked against the model: ``set_window`` records no model yet (asked of lane B,
-    A2e), so a session that changes model restores the previous model's ratio until its own usage
-    dominates. Returns the content-free ``sizing_restored`` event (also logged), or None when there is nothing to
-    restore or the store cannot be read (the next turn start meets the store again under rule 14)."""
+    It runs at the engine's first request, so the ratio is skipped when the recorded model differs from
+    that request's (packet A2f; a ratio measured on another model's tokenizer would mis-size every
+    request); a record with no model (written before lane B B12) is restored as before. Returns the
+    content-free ``sizing_restored`` or ``sizing_not_restored`` event for that request's events, or
+    None when there is nothing to restore or the store cannot be read (the next turn start meets the
+    store again under rule 14)."""
     if estimator.measured_bytes_per_token is not None:
         return None
     try:
         _, ratio = store.window()
+        recorded_model = store.window_model() if ratio else None
     except STORE_FAILURES:
         return None
     if not ratio:
         return None
     low, high = RESTORED_RATIO_RANGE
+    if recorded_model is not None and model is not None and recorded_model != model:
+        return {"event": "sizing_not_restored", "reason": "model_changed", "bytes_per_token": round(ratio, 4)}
     if not low <= ratio <= high:
         # Reviewer-2 on PR #72: a recorded ratio no real session produces (corrupt metadata, or a usage
         # report that undercounted) must not size every request; the seed is the safer start.
@@ -1018,13 +1034,7 @@ def restore_ratio(store: Store, estimator: TokenEstimator) -> dict | None:
     else:
         estimator.observe(round(ratio * RESTORED_RATIO_WEIGHT), RESTORED_RATIO_WEIGHT)
         event = {"event": "sizing_restored", "bytes_per_token": round(ratio, 4), "weight_tokens": RESTORED_RATIO_WEIGHT}
-    log = getattr(store, "log", None)
-    if callable(log):
-        try:
-            log(event)
-        except STORE_FAILURES:
-            pass  # the restore is an optimization; rule 14 handles a broken store at the next turn start
-    return event if event["event"] == "sizing_restored" else None
+    return event
 
 
 @dataclass
@@ -1039,7 +1049,8 @@ class RewriteEngine:
     def __post_init__(self) -> None:
         if self.estimator is None:
             self.estimator = TokenEstimator()
-        self.restored = restore_ratio(self.store, self.estimator)
+        self.restored: dict | None = None  # the sizing_restored event, once the first request restored it
+        self._restore_pending = True  # A2f: the restore waits for the first request, which names the model
 
     def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
         with recall_knobs(self.config):
@@ -1054,6 +1065,12 @@ class RewriteEngine:
         if endpoint == COUNT_TOKENS:
             epoch = state.epoch if state else 0
             return count_tokens_view(request, state), headers, [{"event": "count_tokens", "epoch": epoch}]
+        restore = None
+        if self._restore_pending:
+            self._restore_pending = False
+            restore = restore_ratio(self.store, self.estimator, window_model_name(request))
+            if restore and restore["event"] == "sizing_restored":
+                self.restored = restore
         upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator, dialect)
         # Per-turn recall budget, request-time publish (contract PR #69): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
@@ -1064,7 +1081,7 @@ class RewriteEngine:
             self.states[key] = self._publish_room(state, turn_id(request.get(dialect.field) or [], dialect),
                                                   state.last_estimate, failures)
             events[-1:-1] = failures  # the engine's request event stays last
-        return upstream, headers, events
+        return upstream, headers, [restore, *events] if restore else events
 
     def turn_room(self, used_tokens: int) -> int:
         """room_tokens = max(0, bound - (input + output) - headroom_floor) (contract PR #69)."""
@@ -1142,7 +1159,7 @@ class RewriteEngine:
                 output = usage.get("output_tokens") or 0
                 calls.set_turn_room(turn_id(request.get(dialect.field) or [], dialect),
                                     self.turn_room(real + output))
-                state = publish_window(calls, state, self.estimator)
+                state = publish_window(calls, state, self.estimator, window_model_name(request))
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;
             # the next turn start retries it. The event reaches the log with the others, via the proxy.
