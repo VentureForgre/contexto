@@ -422,13 +422,15 @@ def test_stub_dry_run_models_log_text_and_the_rest_separately():
     assert body["messages"][0]["content"][0]["text"] == log  # the caller's body is not changed
 
 
-def test_probe_turn_caps_recalls_and_the_detector_checks_the_cap():
+def test_probe_turn_is_tool_neutral_and_the_recall_budget_is_report_only():
     s4 = script.build(turns=4, turn_bytes=8_000)
-    assert f"at most {script.MAX_RECALLS} contexto_recall calls" in s4.turns[-1]
+    probe = s4.turns[-1]
+    assert "contexto" not in probe and "recall" not in probe  # intake: product-realistic wording
+    assert "If the conversation does not contain it, say unknown." in probe
     assert detectors.MAX_RECALLS == script.MAX_RECALLS == budget.Params().recalls == 2
     calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * 3
-    assert detectors.analyze(calls[:2], [], bound=150_000).verdicts()["recalls_within_cap"]
-    assert not detectors.analyze(calls, [], bound=150_000).verdicts()["recalls_within_cap"]
+    r = detectors.analyze(calls, [], bound=150_000)
+    assert r.recalls_over_budget == 1 and "recalls_within_cap" not in r.verdicts()
 
 
 def test_the_doc_carries_the_budget_live_gates_on():
