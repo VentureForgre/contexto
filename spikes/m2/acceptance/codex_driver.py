@@ -39,6 +39,11 @@ MODEL = "gpt-6-astra"
 # stream_max_retries (codex-cli 0.154.0 config schema).
 RETRY_PIN = ("-c", "model_providers.contexto.request_max_retries=0",
              "-c", "model_providers.contexto.stream_max_retries=0")
+# Codex's own outside connections, off for acceptance turns only (intake, A22-prep; the launcher and users'
+# settings are unchanged). With a scratch CODEX_HOME, API-key mode and a 127.0.0.1 stub as the only
+# provider, codex reached chatgpt.com (analytics) and git-remote-https reached github.com (plugin sync)
+# [measured, lsof samples]; neither was seen with these set.
+QUIET_PIN = ("-c", "analytics.enabled=false", "-c", "features.plugins=false")
 RESPONSES_PATHS = ("/responses", "/v1/responses")
 _DROP_PREFIXES = ("OPENRIG_", "CLAUDE", "ANTHROPIC_", "OPENAI_", "CODEX_", "RIGGED_", "CONTEXTO_")
 
@@ -53,7 +58,7 @@ def turn_command(contexto: str, session: str, bound: int, upstream: str, key_hel
     if codex_upstream:
         cmd += ["--codex-upstream", codex_upstream]
     cmd += ["codex", "exec", "--skip-git-repo-check", "--json", "-c", f"model={model}",
-            "-c", "model_reasoning_effort=low", *RETRY_PIN, "-o", str(last_message), *extra]
+            "-c", "model_reasoning_effort=low", *RETRY_PIN, *QUIET_PIN, "-o", str(last_message), *extra]
     return cmd + (["resume", thread, "-"] if thread else ["-"])
 
 
@@ -288,7 +293,10 @@ def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved
         try:
             answer = turns.send(i, text)
         except Exception as exc:  # noqa: BLE001 - fail closed: the turn was stopped, the session stops
-            stopped = f"turn {i + 1}: stopped, the spend watcher failed closed ({type(exc).__name__}: {exc})"
+            # A stop rule (an exception with ``stop_rule`` set) records its own reason; anything else is the
+            # watcher failing closed.
+            stopped = (f"turn {i + 1}: {exc}" if getattr(exc, "stop_rule", False) else
+                       f"turn {i + 1}: stopped, the spend watcher failed closed ({type(exc).__name__}: {exc})")
             failed_turn = i
             break
         if turns.stopped_by_watcher and turns.stopped_by_watcher[-1] == i:
