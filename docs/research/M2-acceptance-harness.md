@@ -126,6 +126,16 @@ measured this case, PR #9). So:
   PR #48) is reported in `pre_send_tool_loop` only. `window_minimal` requests (contract PR #50,
   lane A's A2c) are counted. `estimate_error` events are reported (count, lowest ratio, last
   `mean_ratio`); no verdict uses them.
+- **Where the real-usage events live.** Lane A's A2b wrote `over_bound` (`source: "real"`) and
+  `estimate_error` as separate session-log lines; A2e (PR #76) moves them onto the request's entry as
+  `usage_events`. The detectors read both forms and count an event that appears in both once (same
+  event, epoch, `real_tokens`, `estimate`); `estimate` may be null. The entry's `over_bound` flag is
+  never read as a real over-bound, because a pre-send tool-loop record sets it too.
+- **Failure events (acceptance 1).** Intake (2026-10-16, contract PR at `147b182`): any of
+  `degraded_enter`, `store_error`, `page_conflict`, `fallback_failed`, `transform_error`,
+  `turn_room_missing`, or `unclassified_system_message` fails it, wherever it appears (a request's
+  transform events, its `usage_events`, or a separate session-log line). `failure_events` counts each
+  by name, once, and `no_failure_events` fails unless it is empty.
 - **Unverified requests (acceptance 1).** A `/v1/messages` request whose `usage` is null or
   missing cannot be checked against the bound, so it must not hide an over-bound request. Their
   indexes are reported in `unverified_requests`, and the `every_request_has_usage` verdict fails
