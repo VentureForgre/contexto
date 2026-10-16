@@ -14,7 +14,7 @@ compaction never fires, and accuracy equals full context.
   `contexto run codex ...`. Contract: `docs/milestones/M2-contexto-proxy.md`.
 - Acceptance: **all four live criteria passed in one run on Claude Code** (live run #3, main
   fbb1303), and **Codex passed criteria 1 to 3** (D30), below.
-  Contexto answered 51 of 54 probes against 48 for the full-context baseline, with zero
+  On Claude Code, Contexto answered 51 of 54 probes against 48 for the full-context baseline, with zero
   compaction and every request under the bound.
 
 ## Acceptance, live run #3 (main fbb1303, claude-haiku-5-5, bound 150,000, owner's proxy)
@@ -55,9 +55,10 @@ Record: `docs/research/M2-codex-step1-live.md`; decision D30.
 |---|---|
 | 1. Long run | PASS: 21 of 21 turns, history 164,844 (at least 160,000 needed), 0 compaction, 44 requests all under the bound (max input 26,066), all 200 and completed, 0 failure events |
 | 2. Fidelity | PASS by arithmetic: Contexto answered 54 of 54 (rescored independently by reviewer-1), so no baseline can be above it; the baseline was not run (D30) |
-| 3. Recall | PASS: 4 of 4 paged-only probes reached the model through `contexto_search` (as scored after B30, #169). The run's harness scored 1 of 4 because it located 3 plants on later pages that quoted them; B30 fixed that, and the Claude runs were unaffected |
+| 3. Recall | PASS: 4 of 4 paged-only probes reached the model through `contexto_search` (as scored after B30, #169). The run's harness scored 1 of 4 because it located 3 plants on later pages that also held them; B30 fixed that, and the Claude runs were unaffected |
 
-Spend 922,201 of a 5,385,600 line (74.0 percent of input cached). The model searched 84 times,
+Spend 922,201 of a 5,385,600 line (74.0 percent of input cached). Criterion 4 (cache): the
+record's cache hit rate is 1.0. The model searched 84 times,
 pinned 9 records, and never called recall. Network samples saw no connection outside the proxy
 with analytics and plugin sync off.
 
@@ -138,7 +139,8 @@ run, one model.
   provider (no WebSocket). Contexto's tools sit behind Codex tool search and need
   `default_tools_approval_mode = approve`, which `contexto run codex` sets. Only API-key mode is
   live-tested; ChatGPT login mode is tested with synthetic credentials and its terms question is
-  open (O4). By default Codex also connects to chatgpt.com (analytics) and github.com (plugin
+  open (O4). In ChatGPT login mode some Codex calls (rate limits, usage, a remote MCP
+  connection) go to chatgpt.com directly and bypass the proxy by design. By default Codex also connects to chatgpt.com (analytics) and github.com (plugin
   sync) outside the proxy; `-c analytics.enabled=false` and `-c features.plugins=false` stop them
   in network samples, and `contexto run codex` leaves both to the user. `preamble_first` is
   on but unmeasured there.
