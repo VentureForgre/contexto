@@ -247,7 +247,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     still holds. Measured basis (A28, builder-1, zero-spend replay of the Codex acceptance run,
     PR #174; reviewer-1 confirmed the cause from the run's log and its own replay): the harness started a new proxy for each of 21 `codex exec` turns, every
     restart rotated from epoch 0, and replaying with epoch state resumed cut rotations from 19 to 9
-    and modeled cost by 16.2 percent. Any user whose proxy restarts mid-session hits the same gap.
+    and modeled cost by 9.8 to 16.2 percent, depending on the bytes-per-token rate used for the
+    changed content. Any user whose proxy restarts mid-session hits the same gap.
     - **Record.** At every turn start of the main conversation (rotations happen only there)
       and whenever the engine leaves degraded mode, the engine writes the main conversation's
       epoch record, after that request's transform and before it is sent (as for
