@@ -13,12 +13,18 @@ Numbers only; no transcripts.
 
 ## Reviewer-1's notes on PR #154
 
-- **(a) Startup window for a missing log.**
-  - `SpendWatch.begin_turn()` starts each turn, and for 30 seconds after it a missing session log is the turn still starting, not a failure.
-  - **Why a startup window is safe:** the launcher writes `proxy_start` to the log before it starts Codex, so no request can be billed while the log is missing.
-  - **Why 30 seconds:** every dry-run turn here started within a second.
-  - Past the window, a missing log counts toward the fail-closed grace (at most 2 polls and 5 seconds).
-  - Test: `test_a_fresh_turn_may_start_without_a_log_within_the_startup_window` (both sides).
+- **(a) Startup window for a missing log** (reworked after reviewer-2 on PR #165).
+  - Only on an attempt's first turn, and only until the log has been seen once, may a missing session log be the session still starting, for at most 10 seconds (`SpendWatch.begin_turn`).
+  - **Why 10 seconds is enough:** the launcher logs `proxy_start` before it starts Codex, and every dry-run turn here started within a second.
+  - After the log has been seen, on any later turn, or past the window, a missing log fails closed at once.
+  - `run_session` also stops the run in two cases, and never reads a missing log as nothing spent:
+    - when the log is missing after a turn returns;
+    - when the log is missing or unreadable before any turn but the attempt's first.
+  - The first version restarted the window every turn, so a log that never appeared went uncaught when turns ran under the window (reviewer-2's repro).
+  - Tests:
+    - `test_only_the_first_turn_may_start_without_a_log_and_only_inside_the_window` (both sides);
+    - `test_a_log_deleted_mid_run_fails_closed_at_once`;
+    - `test_a_log_that_never_appears_stops_the_run_after_the_first_turn` (reviewer-2's case: it stops after turn 1, and a resume stops after its first turn).
 - **(b) Joining an attempt and its resume.**
   - Each record keeps its probe-turn answers by turn index (`answers_by_turn`) and the turn it failed on (`failed_turn`).
   - `join_records` merges the attempts by turn index; a later attempt replaces an earlier one's answer for the same turn.
@@ -46,7 +52,7 @@ Numbers only; no transcripts.
 The dry run with an approval line of 200,000:
 `uv run python spikes/m2/acceptance/codex_dryrun.py "$PWD/.venv/bin/contexto" /tmp/a21-trip --approved 200000`.
 
-Turn 1's pre-turn check passes, since 0 + 96,000 is within 200,000. Once its request is logged, spent + 2 × 96,000 passes the line, so the watcher stops the turn.
+Turn 1's pre-turn check (spent + the turn's estimate + reserve = 0 + 96,000 + 0) is within 200,000, so the turn starts. While its request is in flight, the in-turn condition is spent + 2 × 96,000 = 192,000, which is within the line. Once the request is logged (25,448), spent + 2 × 96,000 = 217,448 passes it, and the watcher stops the turn.
 
 | | |
 |---|---|
@@ -62,4 +68,4 @@ Pending A20 (PR #159, builder-1: `codex_recall_credit.py`). Once it is on main, 
 
 ## Tests
 
-`spikes/m2/acceptance/tests/test_codex_acceptance.py` has 25 tests. The full suites results are in the PR.
+`spikes/m2/acceptance/tests/test_codex_acceptance.py` has 27 tests. The full suites results are in the PR.

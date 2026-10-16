@@ -112,30 +112,37 @@ class SpendWatch:
     inflight: int
     grace_polls: int = 2
     grace_seconds: float = 5.0
-    startup_seconds: float = 30.0
+    startup_seconds: float = 10.0
     _pending_since: float | None = None
     _pending_polls: int = 0
     _turn_started: float | None = None
+    _turns_begun: int = 0
+    _seen_log: bool = False
 
     def begin_turn(self) -> None:
-        """A new turn starts (run_session calls this before each turn). For ``startup_seconds`` a missing
-        log is the turn's process still starting (reviewer-1 on PR #154): the launcher writes
-        ``proxy_start`` to the log before it starts Codex, so no request can be billed while the log is
-        missing, and the dry run's turns start well within a second. Past the window a missing log
-        counts toward the fail-closed grace as before."""
+        """A new turn starts (run_session calls this before each turn). Only on an attempt's first turn,
+        and only until the log has been seen once, a missing log may be the session still starting
+        (reviewer-1 on PR #154): the launcher logs ``proxy_start`` before it starts Codex, and every
+        dry-run turn here started within a second, so 10 seconds is ample. Otherwise a missing log is a
+        failure at once (reviewer-2 on PR #165: a window restarted every turn let a log that never
+        appeared go uncaught)."""
         self._turn_started = time.monotonic()
+        self._turns_begun += 1
         self._pending_since, self._pending_polls = None, 0
 
     def __call__(self) -> bool:
         try:
             data = self.session_log.read_bytes()
         except FileNotFoundError:
-            starting = self._turn_started is not None and time.monotonic() - self._turn_started < self.startup_seconds
-            if not starting:
-                self._pending("the session log is missing")
-            return False
+            starting = (self._turns_begun <= 1 and not self._seen_log and self._turn_started is not None
+                        and time.monotonic() - self._turn_started < self.startup_seconds)
+            if starting:
+                return False
+            raise WatchFailed("the session log is missing" + (" after it was seen" if self._seen_log else
+                                                              " past the first turn's startup window"))
         except OSError as exc:
             raise WatchFailed(f"the session log cannot be read: {type(exc).__name__}") from exc
+        self._seen_log = True
         try:
             events, partial = complete_lines(data)
         except ValueError as exc:
@@ -262,10 +269,15 @@ def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved
     for i, text in enumerate(s.turns):
         if i < start:
             continue
+        # Only the attempt's first turn may find no log (a fresh session); after that a missing or
+        # unreadable log stops the run, never read as nothing spent (reviewer-2 on PR #165).
+        if i > start and not session_log.exists():
+            stopped = f"turn {i + 1}: not started, the session log is missing"
+            break
         try:
             spent = spend(read_log(session_log))
-        except ValueError:
-            stopped = f"turn {i + 1}: not started, the session log has a malformed line"
+        except (ValueError, OSError) as exc:
+            stopped = f"turn {i + 1}: not started, the session log cannot be read ({type(exc).__name__})"
             break
         if spent + estimates[i] + reserve > approved:
             stopped = f"turn {i + 1} could pass the approved {approved:,} (spent {spent:,})"
@@ -284,6 +296,10 @@ def run_session(s: script.Script, turns: CodexTurns, session_log: Path, approved
             break
         if turns.exits[-1] != 0:  # not completed: a resume starts again at this turn
             stopped = f"turn {i + 1}: codex exited {turns.exits[-1]}"
+            failed_turn = i
+            break
+        if not session_log.exists():  # the turn ran, but its spend cannot be accounted for
+            stopped = f"turn {i + 1}: the session log is missing after the turn"
             failed_turn = i
             break
         completed += 1

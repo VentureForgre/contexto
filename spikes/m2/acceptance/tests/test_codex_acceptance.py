@@ -106,6 +106,14 @@ class FakeCodex:
         return FakeProc(self, cmd, **kwargs)
 
 
+def _log(tmp_path):
+    """The session log as the launcher leaves it before Codex starts: proxy_start logged."""
+    log = tmp_path / "log.jsonl"
+    if not log.exists():
+        log.write_text(json.dumps({"event": "proxy_start"}) + "\n")
+    return log
+
+
 def _turns(tmp_path, popen):
     return codex_driver.CodexTurns("contexto", "S", 64_000, "http://u", "/h", tmp_path, {}, popen=popen, poll=0.05)
 
@@ -118,7 +126,7 @@ def sleeper(cmd, **kwargs):
 def test_run_session_resumes_the_thread_and_keeps_only_probe_answers(tmp_path):
     s = script.build(turns=4, turn_bytes=2_000)
     runner = FakeCodex()
-    record = codex_driver.run_session(s, _turns(tmp_path, runner), tmp_path / "log.jsonl", 10**9, [1] * len(s.turns))
+    record = codex_driver.run_session(s, _turns(tmp_path, runner), _log(tmp_path), 10**9, [1] * len(s.turns))
     assert record["turns_completed"] == len(s.turns) and record["stopped"] is None and record["thread_id"] == "T1"
     assert "resume" not in runner.calls[0] and all(c[-3:] == ["resume", "T1", "-"] for c in runner.calls[1:])
     assert all("model_providers.contexto.request_max_retries=0" in c for c in runner.calls)  # retries pinned
@@ -140,7 +148,7 @@ def test_run_session_never_starts_a_turn_that_could_pass_the_cap(tmp_path):
 
 def test_run_session_stops_when_codex_fails(tmp_path):
     s = script.build(turns=4, turn_bytes=2_000)
-    record = codex_driver.run_session(s, _turns(tmp_path, FakeCodex(exit_at=2)), tmp_path / "log.jsonl", 10**9,
+    record = codex_driver.run_session(s, _turns(tmp_path, FakeCodex(exit_at=2)), _log(tmp_path), 10**9,
                                       [1] * len(s.turns))
     assert record["turns_completed"] == 1 and record["stopped"] == "turn 2: codex exited 7"  # turn 2 did not complete
 
@@ -266,10 +274,8 @@ def test_a_malformed_complete_line_or_a_missing_log_fails_closed(tmp_path):
     _, watch = _watch(tmp_path, b"{not json}\n")
     with pytest.raises(codex_driver.WatchFailed, match="malformed"):
         watch()
-    _, missing = _watch(tmp_path / "none", None)
-    (tmp_path / "none").mkdir()
-    assert missing() is False and missing() is False
-    with pytest.raises(codex_driver.WatchFailed, match="missing"):
+    missing = codex_driver.SpendWatch(tmp_path / "absent.jsonl", approved=10**9, inflight=1)
+    with pytest.raises(codex_driver.WatchFailed, match="missing"):  # no turn's startup window: at once
         missing()
 
 
@@ -310,11 +316,11 @@ def test_the_turn_process_group_is_killed_when_the_watcher_fails(tmp_path, probl
 def test_resume_continues_from_the_first_turn_not_completed(tmp_path):
     s = script.build(turns=4, turn_bytes=2_000)
     runner = FakeCodex(exit_at=3)
-    first = codex_driver.run_session(s, _turns(tmp_path, runner), tmp_path / "log.jsonl", 10**9, [1] * len(s.turns))
+    first = codex_driver.run_session(s, _turns(tmp_path, runner), _log(tmp_path), 10**9, [1] * len(s.turns))
     assert first["turns_completed"] == 2 and first["thread_id"] == "T1"
     again = _turns(tmp_path, FakeCodex())
     again.thread = first["thread_id"]
-    second = codex_driver.run_session(s, again, tmp_path / "log.jsonl", 10**9, [1] * len(s.turns),
+    second = codex_driver.run_session(s, again, _log(tmp_path), 10**9, [1] * len(s.turns),
                                       start=first["turns_completed"])
     assert second["started_at"] == 2 and second["turns_completed"] == len(s.turns) and second["stopped"] is None
     assert all(c[-3:] == ["resume", "T1", "-"] for c in again.popen.calls)
@@ -358,29 +364,58 @@ def test_a_stub_tool_call_round_is_held_by_the_real_proxy(tmp_path):
 
 # A21: reviewer-1's #154 notes and intake's step-1 conditions ---------------------------------------
 
-def test_a_fresh_turn_may_start_without_a_log_within_the_startup_window(tmp_path):
-    """Reviewer-1 on #154: on a fresh session's first turn the log appears only once the launcher has
-    started the proxy. Inside the startup window a missing log is not a failure; past it, it is."""
+def test_only_the_first_turn_may_start_without_a_log_and_only_inside_the_window(tmp_path):
+    """Reviewer-1 on #154 and reviewer-2 on #165: an attempt's first turn may find no log for up to 10
+    seconds (the session is starting); after that, on any later turn, or once the log has been seen, a
+    missing log fails closed at once."""
     log = tmp_path / "log.jsonl"
     watch = codex_driver.SpendWatch(log, approved=10**9, inflight=1)
     watch.begin_turn()
-    assert all(watch() is False for _ in range(10))  # well past 2 polls, still inside 30 seconds
+    assert all(watch() is False for _ in range(10))  # inside the first turn's window
+    watch.begin_turn()  # a second turn: the window does not restart
+    with pytest.raises(codex_driver.WatchFailed, match="past the first turn"):
+        watch()
     late = codex_driver.SpendWatch(log, approved=10**9, inflight=1, startup_seconds=0.05)
     late.begin_turn()
     time.sleep(0.1)
-    assert late() is False and late() is False  # past the window: the grace now counts
-    with pytest.raises(codex_driver.WatchFailed, match="missing"):
+    with pytest.raises(codex_driver.WatchFailed, match="past the first turn"):  # the window ran out
         late()
+
+
+def test_a_log_deleted_mid_run_fails_closed_at_once(tmp_path):
+    log = _log(tmp_path)
+    watch = codex_driver.SpendWatch(log, approved=10**9, inflight=1)
+    watch.begin_turn()
+    assert watch() is False  # seen once
+    log.unlink()
+    with pytest.raises(codex_driver.WatchFailed, match="after it was seen"):
+        watch()
+    s = script.build(turns=4, turn_bytes=2_000)
+    record = codex_driver.run_session(s, _turns(tmp_path, FakeCodex()), log, 10**9, [1] * len(s.turns))
+    assert record["stopped"] == "turn 1: the session log is missing after the turn" and record["turns_completed"] == 0
+
+
+def test_a_log_that_never_appears_stops_the_run_after_the_first_turn(tmp_path):
+    """Reviewer-2's repro on #165: short turns and a log that never exists must not run on with spent 0."""
+    s = script.build(turns=4, turn_bytes=2_000)
+    runner = FakeCodex()
+    turns = _turns(tmp_path, runner)
+    record = codex_driver.run_session(s, turns, tmp_path / "never.jsonl", 10**9, [1] * len(s.turns), inflight=1)
+    assert len(runner.calls) == 1 and record["stopped"] == "turn 1: the session log is missing after the turn"
+    assert record["turns_completed"] == 0 and record["failed_turn"] == 0
+    resumed = codex_driver.run_session(s, _turns(tmp_path, FakeCodex()), tmp_path / "never.jsonl", 10**9,
+                                       [1] * len(s.turns), start=1)
+    assert resumed["stopped"] == "turn 2: the session log is missing after the turn"
 
 
 def test_records_of_an_attempt_and_its_resume_join_into_one_scored_record(tmp_path):
     s = script.build(turns=4, turn_bytes=2_000)
-    first = codex_driver.run_session(s, _turns(tmp_path, FakeCodex(exit_at=s.n_content + 2)), tmp_path / "log.jsonl",
+    first = codex_driver.run_session(s, _turns(tmp_path, FakeCodex(exit_at=s.n_content + 2)), _log(tmp_path),
                                      10**9, [1] * len(s.turns))
     assert first["failed_turn"] == s.n_content + 1 and len(first["answers_by_turn"]) == 1
     again = _turns(tmp_path, FakeCodex())
     again.thread = first["thread_id"]
-    second = codex_driver.run_session(s, again, tmp_path / "log.jsonl", 10**9, [1] * len(s.turns),
+    second = codex_driver.run_session(s, again, _log(tmp_path), 10**9, [1] * len(s.turns),
                                       start=first["turns_completed"])
     joined = codex_driver.join_records(s, [first, second])
     probe_turns = [str(i) for i in range(s.n_content, len(s.turns))]
@@ -395,7 +430,7 @@ def test_every_acceptance_turn_carries_both_retry_pins(tmp_path):
     Codex's own retries: run_codex is unchanged)."""
     s = script.build(turns=4, turn_bytes=2_000)
     runner = FakeCodex()
-    codex_driver.run_session(s, _turns(tmp_path, runner), tmp_path / "log.jsonl", 10**9, [1] * len(s.turns))
+    codex_driver.run_session(s, _turns(tmp_path, runner), _log(tmp_path), 10**9, [1] * len(s.turns))
     assert len(runner.calls) == len(s.turns)
     for argv in runner.calls:
         pins = [argv[i + 1] for i, a in enumerate(argv) if a == "-c" and "max_retries" in argv[i + 1]]
