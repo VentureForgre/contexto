@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-16 15:05Z by intake.lead. Decisions taken and still open, with reasons:
+Updated 2026-10-16 16:00Z by intake.lead. Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -86,6 +86,25 @@ cost, with 9 rotations instead of 6; accuracy at that bound is unmeasured and lo
 still cross it. Decision: no default change and no live run (the owner's seats run Opus 5.5,
 which has no price step); the README gives `--bound 125000` as a Haiku tip with those caveats. Limits: one synthetic session, one
 run, one model.
+
+## Usage against plain Codex (Codex acceptance run, zero-spend analysis)
+
+Record: `docs/research/M2-codex-usage-vs-plain.md`. Contexto's side is measured; plain Codex's
+side is modeled from the run's own rollout history. Specific to bound 64,000 and 20 KB turns.
+
+| | Input tokens | Cost at gpt-6-astra prices |
+|---|---|---|
+| Contexto (measured; 680,832 cached) | 919,998 | about $3.78 |
+| Plain Codex, plain-run shape (modeled, best-case caching) | 1,672,525 | about $3.05 |
+| Difference | 45.0 percent fewer | **24.0 percent more** (15.5 percent more pricing uncached input at the input rate) |
+
+Content turns: 71.0 percent fewer tokens and 12.5 percent lower cost. Probe turns: 8.1 percent
+fewer tokens but 2.3 times the cost. The cause is Contexto's, not the model's: at bound 64,000
+every content request from turn 3 rotated, and a rotation changes the text right after Codex's
+9,088-token head, so each of those requests read only the head from cache; those requests carry
+82 percent of Contexto's uncached tokens. Codex's own compaction would not have fired (plain peak
+116,731, modeled). A cache-aware rotation design is being measured offline (A28); until then,
+Contexto on Codex saves tokens but, at small bounds, not money.
 
 ## Token spend on live model calls (owner's proxy unless noted)
 
@@ -177,6 +196,7 @@ run, one model.
 | v0.1.3 | 031ca59 | B23: search and index lines read Codex message parts, tool calls, and tool outputs (Codex search found nothing before; recall already worked, B20 in v0.1.0) |
 | v0.1.4 | 314d575 | B24: standalone `contexto mcp` resolves `CONTEXTO_HOME` and `--home` to an expanded absolute path |
 | v0.1.5 | 5ef9370 | A23: the proxy logs how each response ended (status, incomplete reason, stop reason), content-free |
+| v0.1.6 | db472a9 | A26: the proxy's end-status log fields accept only documented values; anything else logs as `other` |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
