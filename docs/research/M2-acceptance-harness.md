@@ -304,7 +304,7 @@ planned over-bound requests.
 
 ## Tests
 
-`uv run --with pytest pytest spikes/m2` runs 40 tests with no live calls. Most use synthetic
+`uv run --with pytest pytest spikes/m2` runs 41 tests with no live calls. Most use synthetic
 fixtures; `test_engine_log.py` drives the real proxy and rewrite engine against a stub upstream,
 once with JSON replies and once with SSE replies, since the acceptance session streams.
 They cover:
