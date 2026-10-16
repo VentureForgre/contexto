@@ -97,6 +97,10 @@ for r in rows:
     if ev == "over_bound" and r.get("source") == "real":
         print("stop over_bound_real"); sys.exit()
     if ev == "request":
+        # Since A2e (PR #76) the proxy logs observe_usage's events on the request entry, not top level.
+        if any(isinstance(e, dict) and e.get("event") == "over_bound" and e.get("source") == "real"
+               for e in r.get("usage_events") or []):
+            print("stop over_bound_real"); sys.exit()
         if r.get("status") == 501 or (isinstance(r.get("status"), int) and 400 <= r["status"] < 500 and "/models" not in str(r.get("path"))):
             print(f"stop status_{r.get('status')}"); sys.exit()
         u = r.get("usage") or {}
