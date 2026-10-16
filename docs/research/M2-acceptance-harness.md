@@ -68,6 +68,13 @@ contexto run --bound 150000 --session <id> --upstream <url> claude -p --input-fo
 - No `--settings` or `--mcp-config` of the harness's own is passed; the launcher supplies both.
 - `--upstream` is passed explicitly: the owner's proxy (D12), from `$ANTHROPIC_BASE_URL` unless
   given.
+- **A hard spend stop inside a turn** (PR #68 review). The guard in `Run` projects spend before each
+  turn and checks real spend after it, so it cannot see the probe turn's tool loop, which runs
+  inside one Claude Code turn. `SessionWatcher` tails the session log beside the auth stop: after
+  each Messages API response it adds the real usage and terminates the run if two more requests of
+  the last input size plus the 32,000 output reserve could pass the approval. Two, because the proxy
+  logs a request when its response ends, when Claude Code may already have sent the next one. The
+  model never sees this limit. The run then reports `BudgetExceeded` with the spend so far.
 
 **Credential** (intake-approved, D12). If the scratch run inherits `HOME`, Claude Code falls back
 to the owner's claude.ai subscription login, which the rig proxy rejects with a 401 (lane 1
@@ -346,7 +353,7 @@ planned over-bound requests.
 
 ## Tests
 
-`uv run --with pytest pytest spikes/m2` runs 45 tests with no live calls. Most use synthetic
+`uv run --with pytest pytest spikes/m2` runs 48 tests with no live calls. Most use synthetic
 fixtures; `test_engine_log.py` drives the real proxy and rewrite engine against a stub upstream,
 once with JSON replies and once with SSE replies, since the acceptance session streams.
 They cover:
