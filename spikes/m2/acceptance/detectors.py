@@ -30,6 +30,14 @@ MESSAGES = "/v1/messages"
 # Model requests for acceptance 1's zero-4xx (contract PR #61): the paths the proxy transforms,
 # /v1/messages, its count_tokens, and /responses. 4xx on any other path are reported apart.
 MODEL_PATHS = TRANSFORMED_PATHS
+
+
+def request_path(event: dict[str, Any]) -> str:
+    """The event's path without its query string or a trailing slash ("/v1/messages/" is a model path)."""
+    path = str(event.get("path") or "").split("?")[0]
+    return path.rstrip("/") or path
+
+
 # Intake (2026-10-16 03:39Z, contract PR at 147b182): any of these, wherever it appears (a request's
 # transform events, its usage_events, or a separate session-log line), fails acceptance 1.
 FAILURE_EVENTS = ("degraded_enter", "store_error", "page_conflict", "fallback_failed", "transform_error",
@@ -68,7 +76,12 @@ def _event_name(ev: dict[str, Any]) -> str:
 class Report:
     requests: int = 0
     statuses: dict[int, int] = field(default_factory=dict)
-    upstream_4xx: int = 0  # Messages API 4xx (``upstream_4xx`` events on /v1/messages or count_tokens)
+    upstream_4xx: int = 0  # model-path 4xx the upstream returned (``upstream_4xx`` events)
+    # Model-path 4xx the proxy answered itself (reviewer-2, PR #62): request records with a 4xx status
+    # on any model path (for example 400 "malformed request framing", which has no upstream_4xx event),
+    # and rule 15's ``encoded_body_rejected`` (a 415 with no request record).
+    model_request_4xx: int = 0
+    encoded_body_rejected: int = 0
     # 4xx on other paths, by "METHOD path": Claude Code's unauthenticated HEAD /api/hello probe gets 401
     # from the owner's proxy. Reported on their own; no verdict uses them (how acceptance 1 reads them
     # is pending intake).
@@ -134,7 +147,8 @@ class Report:
             "no_failure_events": not self.failure_events,
             "no_bound_too_small": self.bound_too_small == 0,
             "every_request_has_usage": not self.unverified_requests,
-            "zero_4xx": self.upstream_4xx == 0 and not any(400 <= s < 500 for s in self.statuses),
+            "zero_4xx": (self.upstream_4xx == 0 and self.model_request_4xx == 0 and self.encoded_body_rejected == 0
+                         and not any(400 <= s < 500 for s in self.statuses)),
             "no_local_5xx": not self.local_5xx,
             "recall_called": self.recall_ok > 0,
         }
@@ -279,7 +293,10 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
     index = 0
     for ev in session_log:
         name = ev.get("event")
-        path = str(ev.get("path") or "").split("?")[0]
+        path = request_path(ev)
+        if name == "encoded_body_rejected":
+            r.encoded_body_rejected += 1
+            continue
         if name == "upstream_4xx":
             if path in MODEL_PATHS:
                 r.upstream_4xx += 1
@@ -291,9 +308,12 @@ def analyze(session_log: Iterable[dict[str, Any]], cc_jsonl: Iterable[dict[str, 
                 r.recall_calls += 1
                 r.recall_ok += int(bool(ev.get("ok")))
             continue
-        if name == "request" and path not in MODEL_PATHS and 400 <= int(ev.get("status") or 0) < 500:
-            label = f"{ev.get('method') or '?'} {path}"
-            r.non_model_4xx[label] = r.non_model_4xx.get(label, 0) + 1
+        if name == "request" and 400 <= int(ev.get("status") or 0) < 500:
+            if path in MODEL_PATHS:
+                r.model_request_4xx += 1
+            else:
+                label = f"{ev.get('method') or '?'} {path}"
+                r.non_model_4xx[label] = r.non_model_4xx.get(label, 0) + 1
         if name != "request" or ev.get("path") != MESSAGES:
             continue  # count_tokens and other paths have no turn effect
         index += 1
