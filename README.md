@@ -49,8 +49,9 @@ The session id is printed on stderr at start. The launcher:
 2. opens the session under `$CONTEXTO_HOME/sessions/<id>/` and starts the proxy on
    `127.0.0.1:<free port>`;
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets only
-   `env.ANTHROPIC_BASE_URL` to the proxy, and an `--mcp-config` file that starts
-   `contexto mcp --session <id>`;
+   `env.ANTHROPIC_BASE_URL` to the proxy, and an `--mcp-config` file that starts Contexto's MCP
+   server (`python -m contexto mcp --session <id>` with the same Python, and the same
+   `CONTEXTO_HOME`);
 4. runs `claude --settings <file> --mcp-config <file> [your args]` in your terminal and returns its
    exit code.
 
@@ -80,8 +81,12 @@ writes a `config.toml` there (mode 0600) that:
 On exit the `config.toml` is deleted and the directory is kept, so Codex can resume its rollouts.
 Because `CODEX_HOME` is new, your own `~/.codex` configuration is not loaded in this mode.
 
-Codex requests go to `--codex-upstream`, else `$CONTEXTO_CODEX_UPSTREAM`, else the upstream Claude Code
-would use plus `/v1`.
+In v0.1.0, `contexto run codex` needs the default `CONTEXTO_HOME` (`~/.contexto`). The Codex MCP
+server entry does not pass `CONTEXTO_HOME`, so with a non-default home the proxy writes the session to
+your home while the MCP tools look in `~/.contexto` and do not find it.
+
+Codex requests go to `--codex-upstream`, else `$CONTEXTO_CODEX_UPSTREAM`, else (API-key mode) the
+upstream Claude Code would use plus `/v1`, or (ChatGPT mode) the ChatGPT Codex backend.
 
 ChatGPT login mode (`--codex-auth chatgpt`) uses your own `CODEX_HOME` with `-c` overrides instead. It
 is tested only with synthetic credentials, never live, and whether end users may route ChatGPT
@@ -112,7 +117,7 @@ Environment variables:
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `CONTEXTO_HOME` | all commands | Data directory (default `~/.contexto`). `contexto mcp --home` overrides it. |
+| `CONTEXTO_HOME` | all commands | Data directory (default `~/.contexto`). `contexto mcp --home` overrides it. In v0.1.0, `run codex` needs the default (see Quickstart). |
 | `CONTEXTO_SESSION` | `recall`, `state` | Session to read when `--session` is not given. |
 | `CONTEXTO_CODEX_KEY_HELPER` | `run codex` | Key helper command when `--codex-key-helper` is not given. |
 | `CONTEXTO_CODEX_UPSTREAM` | `run codex` | Codex upstream when `--codex-upstream` is not given. |
@@ -137,10 +142,12 @@ with the most recent activity, and print the choice to stderr (for example
   record, and open obligation counts; session-log event, over-bound turn, and upstream 4xx counts;
   the last epoch the proxy logged; and whether the ledger verifies. `--json` adds event counts by type.
 - `contexto recall PAGE_ID [--session ID] [--offset N]`: a paged-out turn as plain text, thinking
-  omitted, exactly as the MCP `contexto_recall` tool renders it, at most 32,000 characters and about a
-  quarter of the session's window budget at a time. When more remains, stderr says `[N more characters: rerun with --offset M]`.
-- `contexto state [--session ID]`: the full pinned state with no size cap, the same text as the MCP
-  `contexto_state` tool. It hashes each file a record cites as provenance, inside the session's
+  omitted, exactly as the MCP `contexto_recall` tool renders it. Each chunk is at most 32,000
+  characters and about a quarter of the session's window budget, or 12,000 characters until the proxy
+  has recorded the window. When more remains, stderr says
+  `[N more characters: rerun with --offset M; <how the chunk size was chosen>]`.
+- `contexto state [--session ID]`: the full pinned state, the same text as the MCP `contexto_state`
+  tool but never cut by a recall budget. It hashes each file a record cites as provenance, inside the session's
   recorded working directory, to mark changed files `STALE`. It never writes there.
 
 ## MCP tools the model gets
@@ -150,15 +157,16 @@ not start it by hand.
 
 | Tool | What it does |
 |---|---|
-| `contexto_search(query)` | Paged-out turns containing an exact, case-sensitive substring, newest first, with matching lines; also matching lines from the conversation still in view |
-| `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted; up to 32,000 characters per call and at most half of the turn's remaining recall budget |
-| `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record a decision, obligation, fact, artifact, or reference in the session ledger |
+| `contexto_search(query)` | Exact, case-sensitive substring search. Matching lines from the conversation still in view come first (at most 3, newest first). Then the 3 newest matching paged-out turns, each with its matching lines and their offsets, then up to 50 more matching turns as page id and offset. Each reply ends with a note on what was searched |
+| `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
+| `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`; a verified record shows as a fact in the pinned state |
 | `contexto_close(obligation_id, note)` | Close an open obligation |
-| `contexto_state()` | The full pinned state, no size cap |
+| `contexto_state()` | The full pinned state, with no pin-budget cap. It is charged against the turn's recall budget and cut at a whole line, with a trailer, when the budget runs out |
 
 Each turn has a recall budget: the bound minus the tokens the turn already uses minus the headroom
-floor. At a turn start the proxy rotates when needed to leave at least 12,000 tokens of it. Tool calls
-are logged with names, ids, and sizes, never the text.
+floor. At a turn start the proxy rotates when needed to leave at least 12,000 tokens of it. Search,
+recall, and state replies are charged against it. Tool calls are logged with names, ids, sizes, and
+character ranges, never the text.
 
 ## Troubleshooting
 
@@ -190,6 +198,9 @@ turns Codex's request compression off.
 
 **`count_tokens` returns 403.** Errors from the upstream pass through unchanged. Some proxies refuse
 `/v1/messages/count_tokens`; Claude Code calls it only around compaction.
+
+**Codex recall finds no session.** In v0.1.0, `contexto run codex` works only with the default
+`CONTEXTO_HOME`; unset it, or set it to `~/.contexto`, for Codex sessions.
 
 **Where are the logs?** `$CONTEXTO_HOME/sessions/<id>/log.jsonl`, one JSON object per event, with sizes,
 counts, and event names but no prompt or response text. Paged-out turns are in `pages/` and the
