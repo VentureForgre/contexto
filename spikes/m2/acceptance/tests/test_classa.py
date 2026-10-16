@@ -100,7 +100,10 @@ def test_score_targets_tells_the_asked_link_from_an_older_one():
 def test_main_refuses_over_the_ceiling_and_without_an_upstream(tmp_path):
     base = ["--run-dir", str(tmp_path), "--session", "s", "--run-code", str(tmp_path), "--out", str(tmp_path / "o"),
             "--seat-settings", str(tmp_path / "seat.json")]
-    assert classa.main([*base, "--stub", "--approved", "600001"]) == 2
+    assert classa.main([*base, "--stub", "--approved", "600001"]) == 2  # the default ceiling
+    assert classa.main([*base, "--stub", "--ceiling", "740000", "--approved", "740001"]) == 2
+    assert classa.main([*base, "--stub", "--ceiling", "7400000", "--approved", "1000"]) == 2  # over 1,000,000
+    assert classa.CEILING_MAX == 1_000_000
     assert classa.main(base) == 2  # neither --stub nor --upstream
 
 
@@ -124,3 +127,44 @@ def test_identical_reminders_are_marked_only_where_the_record_says():
     msgs = bodies[1]["messages"]
     assert msgs[1]["content"] == "reminder"  # unmarked system message: the wire's string form
     assert msgs[4]["content"] == [{"type": "text", "text": "reminder", "cache_control": {"type": "ephemeral"}}]
+
+
+def test_tool_results_logged_one_per_record_decode_as_the_one_message_sent():
+    # Claude Code writes each tool result as its own user record but sends them as one user message;
+    # the probe turns behind a tool loop decode only with the merged message (live run #2, request 20).
+    from acceptance import replay
+
+    u1 = {"role": "user", "content": [{"type": "text", "text": "PROBE 1"}]}
+    a1 = {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "x", "input": {}},
+                                           {"type": "tool_use", "id": "t2", "name": "x", "input": {}}]}
+    r1 = {"type": "tool_result", "tool_use_id": "t1", "content": "one"}
+    r2 = {"type": "tool_result", "tool_use_id": "t2", "content": "two"}
+    merged = {"role": "user", "content": [r1, r2]}
+    params = {"model": "m", "max_tokens": 10, "betas": []}
+    cc = [{"type": "api-request-shape", "shapeHash": "s", "shape": {"system": [], "tools": []}},
+          {"type": "api-request-blob", "hash": replay.message_hash(u1), "message": u1},
+          {"type": "api-request-blob", "hash": replay.message_hash(a1), "message": a1},
+          {"type": "user", "message": {"role": "user", "content": [r1]}},
+          {"type": "user", "message": {"role": "user", "content": [r2]}},
+          {"type": "api-request", "id": "q1", "shapeHash": "s", "params": params, "keep": 0, "tail": [replay.message_hash(u1)]},
+          {"type": "api-request", "id": "q2", "shapeHash": "s", "params": params, "base": "q1", "keep": 1,
+           "tail": [replay.message_hash(a1), replay.message_hash(merged)]}]
+    with pytest.raises(replay.ReplayError):
+        replay.recorded_messages(cc)  # one record per result: the merged hash is unknown
+    decoded = classa.decode_requests(cc, stop=lambda msgs: False)
+    assert decoded["q2"][2] == merged
+
+
+def test_out_inside_a_git_work_tree_is_refused(tmp_path):
+    # Reviewer-2 on #133: experiment output never lands in a repo, even a not-yet-created subdirectory.
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    outside = tmp_path / "outside"
+    assert classa.out_in_git_tree(repo / "new" / "out") and classa.out_in_git_tree(repo)
+    assert not classa.out_in_git_tree(outside / "new") and not classa.out_in_git_tree(tmp_path)
+    base = ["--run-dir", str(tmp_path), "--session", "s", "--run-code", str(tmp_path), "--seat-settings",
+            str(tmp_path / "seat.json"), "--stub"]
+    assert classa.main([*base, "--out", str(repo / "o")]) == 2
