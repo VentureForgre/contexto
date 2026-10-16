@@ -9,8 +9,10 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
 - ``ledger.jsonl`` (with ``ledger.lock`` and ``quarantine/``): the hash-chained session ledger.
   Opening a store repairs a crash-truncated tail and logs ``ledger_repaired``; other damage is
   left for a human and logged as ``ledger_damaged`` (pins and closes then fail).
-- ``meta.json``: session metadata, today ``{"workdir": ...}``, the directory file sources are
-  checked against. Lane A's launcher records it with ``set_workdir`` at session start.
+- ``meta.json``: session metadata. ``workdir`` (the directory file sources are checked against,
+  recorded by lane A's launcher with ``set_workdir``) and ``window_tokens`` and ``bytes_per_token``
+  (recorded by lane A's engine with ``set_window``; recall sizes chunks from them). Writers
+  serialize on ``meta.lock``; the file is replaced atomically, so readers never see a partial file.
 - ``log.jsonl``: the session log, one canonical JSON event per line.
 
 Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``) come from
@@ -21,6 +23,7 @@ Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``) 
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -45,6 +48,22 @@ _SECRET_KEYS = {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-aut
 
 class PageConflictError(RuntimeError):
     """A page file exists under an id with different content; pages are immutable."""
+
+
+def check_window(window_tokens: Any, bytes_per_token: Any) -> None:
+    if not isinstance(window_tokens, int) or isinstance(window_tokens, bool) or window_tokens <= 0:
+        raise ValueError(f"window_tokens must be a positive integer, not {window_tokens!r}")
+    if (not isinstance(bytes_per_token, (int, float)) or isinstance(bytes_per_token, bool)
+            or not bytes_per_token > 0 or bytes_per_token == float("inf")):
+        raise ValueError(f"bytes_per_token must be a positive number, not {bytes_per_token!r}")
+
+
+def read_window(meta: dict[str, Any]) -> tuple[int | None, float | None]:
+    """Valid recorded window values from session metadata; anything malformed reads as unknown."""
+    w, r = meta.get("window_tokens"), meta.get("bytes_per_token")
+    w = w if isinstance(w, int) and not isinstance(w, bool) and w > 0 else None
+    r = float(r) if isinstance(r, (int, float)) and not isinstance(r, bool) and 0 < r < float("inf") else None
+    return w, r
 
 
 class SessionNotFoundError(LookupError):
@@ -99,16 +118,37 @@ class SessionStore(LedgerOps):
 
     def set_workdir(self, path: Path) -> None:
         """Record the session's working directory (absolute), which file sources are checked against."""
-        meta = self._meta()
-        meta["workdir"] = str(Path(path).resolve())
-        tmp = self.dir / f".meta.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-        fd = open_private(tmp, os.O_WRONLY | os.O_EXCL)
+        self._update_meta({"workdir": str(Path(path).resolve())})
+
+    def set_window(self, window_tokens: int, bytes_per_token: float) -> None:
+        """Record the engine's window budget W (tokens) and the session's measured bytes per token.
+
+        Lane A's engine calls this when either value changes; recall sizes its chunks from it.
+        """
+        check_window(window_tokens, bytes_per_token)
+        self._update_meta({"window_tokens": window_tokens, "bytes_per_token": float(bytes_per_token)})
+
+    def _update_meta(self, updates: dict[str, Any]) -> None:
+        """Merge ``updates`` into meta.json: writers serialize on meta.lock; readers never block.
+
+        The new file is written privately, fsynced, and renamed into place, so a concurrent reader
+        sees either the old or the new complete file, and no writer drops another writer's field.
+        """
+        lock = open_private(self.dir / "meta.lock", os.O_RDWR)
         try:
-            os.write(fd, canonical_bytes(meta))
-            os.fsync(fd)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            meta = self._meta()
+            meta.update(updates)
+            tmp = self.dir / f".meta.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+            fd = open_private(tmp, os.O_WRONLY | os.O_EXCL)
+            try:
+                os.write(fd, canonical_bytes(meta))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, self.dir / "meta.json")
         finally:
-            os.close(fd)
-        os.replace(tmp, self.dir / "meta.json")
+            os.close(lock)  # releases the flock
 
     def _meta(self) -> dict[str, Any]:
         try:
@@ -120,6 +160,10 @@ class SessionStore(LedgerOps):
     def workdir(self) -> Path | None:
         value = self._meta().get("workdir")
         return Path(value) if isinstance(value, str) and value else None
+
+    def window(self) -> tuple[int | None, float | None]:
+        """(window budget W in tokens, measured bytes per token), each None until the engine records it."""
+        return read_window(self._meta())
 
     @classmethod
     def open_existing(cls, home: Path, session_id: str) -> SessionStore:
