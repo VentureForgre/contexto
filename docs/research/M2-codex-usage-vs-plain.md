@@ -31,7 +31,8 @@ Reproduce them with `uv run --with tiktoken python spikes/m2/acceptance/codex_us
   - The plain side assumes a best-case prefix cache.
   - With uncached input priced at the input rate instead of the cache-write rate, it is still 15% more
     (3.18 against 2.76).
-  - This holds for this run's bound of 64,000 with 20 KB turns (see Limits).
+  - This holds for this run's setup: a new proxy for every turn, which made each content request from
+    turn 3 rotate, and bound 64,000 (see "Why every content request rotated" and Limits).
 - **Content turns: Contexto saves.** 284,788 tokens against 981,040 plain (**modeled**), or −71.0%. The
   cost is 2.00 USD against 2.29 (−12.5%). Per content request, plain is cheaper up to turn 5 and Contexto
   from turn 6 on.
@@ -230,9 +231,33 @@ million tokens:
   - In this run every content request from turn 3 on rotated, so it re-sent its window uncached (about
     9,100 to 10,000 tokens) where plain pays only the new turn (about 6,800).
   - At OpenAI's cache pricing, that decides the cost.
-  - Fewer rotations, or a preamble that does not change the prefix, is the lever.
+  - The rotations came mainly from a new proxy for every turn (next section). Resuming epoch state
+    across restarts is the main lever; a preamble that does not change the prefix is another.
 - **Tool-loop rounds**, as B25 found. Contexto's probe turns cost 2.3 times the plain-run shape's,
   because every search round re-sends the window (29 requests against 6).
+
+## Why every content request rotated (A29)
+
+The main cause was a new Contexto proxy for every `codex exec` turn, not bound 64,000 alone.
+
+- **A new proxy per turn** (**measured**). The session log has 21 `proxy_start` events for 21 turns and
+  44 requests.
+- **A new engine kept only the sizing ratio** (**measured**).
+  - Its `sizing_restored` event, on 20 requests, carries `bytes_per_token` and `weight_tokens` only.
+  - It had no epoch state, so each engine started again at epoch 0 and rotated on its first request.
+  - Every request's logged epoch is 0 (requests 1 and 2, the pass-through) or 1.
+  - All 19 rotations are on the first request after a restart: requests 3 to 16, 22, 26, 29, 34 and
+    39. Their `k` runs 10, 12, ..., 34, 34, 36, 49, 58, 66, 77.
+- **Reproduced offline.** A28's baseline replay (`docs/research/M2-cache-aware-rotation.md`, PR #174)
+  reproduces every logged rotation: 19, at the same requests, with bytes within 597 of the log.
+- **Bound 64,000 is a secondary factor.** In A28's model (**modeled**), bound 100,000 still rotates 11
+  times on restarts and costs 65.7% more. Bound 150,000 never rotates, which is plain Codex at the same
+  request points, and costs 40.0% more than Contexto at 64,000.
+- **Resuming epoch state across restarts** (A28, **modeled**: one engine kept across restarts):
+  - rotations fall from 19 to 9;
+  - the cached share rises from 75.5% to 83.5% (A28's cache model, whose baseline gives 75.5% against
+    the measured 74.0%);
+  - cost falls 16.2%.
 
 ## Limits
 
@@ -249,10 +274,13 @@ million tokens:
 - **Compaction model.** Not needed here, because the trigger is never reached. Beyond about 19 more such
   turns it would be an assumption.
 - **Cache assumption.** Plain gets the best case. The sensitivity table shows the range.
-- **The cost result is specific to this configuration.** Bound 64,000 with 20 KB turns made every
-  content request from turn 3 on rotate, and each cached only the 9,088-token head. At a larger bound,
-  rotations are rarer and the window's prefix stays cached between them. Contexto's uncached share, and
-  with it the cost comparison, would then differ. A28 will measure this.
+- **The cost result is specific to this configuration.**
+  - Main cause: a new proxy for every turn, whose engine had no epoch state. Every content request from
+    turn 3 on rotated, and each cached only the 9,088-token head.
+  - Secondary factor: bound 64,000 with 20 KB turns.
+  - With epoch state resumed across restarts, A28 models 9 rotations instead of 19 and 16.2% lower cost.
+    A larger bound alone does not remove the restart rotations: at 100,000, A28 models 11 of them and a
+    higher cost. See "Why every content request rotated" above.
 - **Price assumption.** Uncached input is priced at the cache-write rate. The input-rate variant is given
   above.
 - **Single run, probe protocol.** One run of 21 turns: 15 synthetic 20 KB content turns, then 6 probe
