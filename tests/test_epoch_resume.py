@@ -159,6 +159,8 @@ def record_after(sequence: list[dict], config: Config = CONFIG) -> dict:
     (lambda r, m: ({**r, "anchor": {**r["anchor"], "hash": "f" * 64}}, m, CONFIG, {}), "history_diverged"),
     (lambda r, m: ({**r, "conversation": "anthropic:" + "a" * 64}, m, CONFIG, {}), "other_conversation"),
     (lambda r, m: ({**r, "k": "seven"}, m, CONFIG, {}), "unreadable"),
+    (lambda r, m: ({k: v for k, v in r.items() if k != "conversation"}, m, CONFIG, {}), "unreadable"),
+    (lambda r, m: ({**r, "conversation": 7}, m, CONFIG, {}), "unreadable"),
 ])
 def test_each_failed_check_starts_from_epoch_zero_with_its_reason(change, reason):
     sequence = turns(7)

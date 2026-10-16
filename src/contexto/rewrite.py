@@ -1284,6 +1284,9 @@ class RewriteEngine:
         if self._record is None:
             self._record_consumed = True
             return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": self._record_reason}]
+        if not isinstance(self._record.get("conversation"), str):  # unusable for every conversation
+            self._record_consumed = True
+            return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": "unreadable"}]
         if self._record.get("conversation") != key:
             return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": "other_conversation"}]
         self._record_consumed = True
