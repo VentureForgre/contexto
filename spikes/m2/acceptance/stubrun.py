@@ -66,6 +66,7 @@ class Stub:
     # (n, factor): from the n-th Messages request on (0-based), report usage times factor, so real
     # usage outruns the engine's estimate and a real over_bound is logged (a detector proof run).
     inflate: tuple[int, float] | None = None
+    auth_fail_at: int | None = None  # answer this Messages request (0-based) with 401: an auth-stop run
     records: list[dict[str, Any]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -100,6 +101,8 @@ class Stub:
                     })
                 if path == "/v1/messages/count_tokens":
                     self._send_json({"input_tokens": model["tokens"]})
+                elif path == "/v1/messages" and nth == stub.auth_fail_at:
+                    self._send_json({"type": "error", "error": {"type": "authentication_error", "message": "stub"}}, 401)
                 elif path == "/v1/messages":
                     self._reply(index, model["tokens"], bool(body.get("stream")))
                 else:
@@ -222,8 +225,12 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
 
 def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = budget.Params(),
             seed: int = 20261016, turn_bytes: int = 40_000, timeout: float = 1_800.0,
-            inflate: tuple[int, float] | None = None) -> dict[str, Any]:
-    from acceptance.run import build_script
+            inflate: tuple[int, float] | None = None, fault: tuple[str, int] | None = None) -> dict[str, Any]:
+    """H1 through run.run_h1, live's own function, with the stub as its upstream and the live gate's
+    approval. ``fault`` drives a stop branch: ("auth", n) answers the n-th Messages request (0-based)
+    with 401, so the spend watcher's model-path auth stop fires; ("raise", n) raises a harness error
+    after turn n (0-based), so the H1 record is written on the error path and the error re-raised."""
+    from acceptance import run
 
     if shutil.which("claude") is None:
         return {"ran": False, "reason": "claude CLI not installed"}
@@ -231,41 +238,39 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
         key = credcheck._helper_output(seat_settings)
     except (RuntimeError, OSError):
         return {"ran": False, "reason": "the seat's apiKeyHelper did not produce a key; output not shown"}
-    stub = Stub(key, inflate=inflate)
+    stub = Stub(key, inflate=inflate, auth_fail_at=fault[1] if fault and fault[0] == "auth" else None)
     del key
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), stub.handler())
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     scratch = Path(tempfile.mkdtemp(prefix="contexto-dry-"))
-    s = build_script(seed, 0, turn_bytes, p)
+    s, b = run.plan(seed, 0, turn_bytes, p)
     session = f"dry{int(time.time())}"
     home = scratch / "contexto-home"
     session_log = home / "sessions" / session / "log.jsonl"
-    result: dict[str, Any] = {"ran": True, "scratch": str(scratch), "session": session, "turn_bytes": turn_bytes}
-    transport = None
+    result: dict[str, Any] = {"ran": True, "scratch": str(scratch), "session": session, "turn_bytes": turn_bytes,
+                              "fault": list(fault) if fault else None}
+    deadline = time.monotonic() + timeout
+
+    def inject(index: int) -> None:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"dry run passed {timeout:.0f}s at turn {index + 1}")
+        if fault and fault[0] == "raise" and index == fault[1]:
+            raise ValueError(f"dry run: injected harness error after turn {index + 1}")
+
     try:
-        if driver.inside_git(scratch):
-            return {"ran": False, "reason": "scratch directory is inside a git work tree"}
-        config = driver.isolated_config(scratch, seat_settings)
-        env = driver.child_env(home, config)
-        env.pop("ANTHROPIC_BASE_URL", None)
-        command = driver.launcher_command(session, p.bound, f"http://127.0.0.1:{httpd.server_port}", contexto)
-        transport = driver.StreamJsonTransport(command, scratch, env, session_log)
-        deadline = time.monotonic() + timeout
-        for i, text in enumerate(s.turns):
-            if time.monotonic() > deadline:
-                raise TimeoutError(f"dry run passed {timeout:.0f}s at turn {i + 1}")
-            event = transport.send(text)
-            if event.get("is_error"):
-                raise RuntimeError(f"turn {i + 1}: claude reported an error")
-        result["stream_compactions"] = transport.compactions
-        result["exit"] = transport.close()
-        transport = None
-    except (RuntimeError, TimeoutError, driver.AuthFailure, ValueError) as exc:
-        result.update({"ran": False, "reason": str(exc)})
+        status = run.run_h1(s, b, p, b.h1_worst + b.baseline_replay_worst, scratch, home, session, seat_settings,
+                            f"http://127.0.0.1:{httpd.server_port}", contexto, inject=inject)
+        if status != 0:
+            result.update({"ran": False, "reason": f"run_h1 returned {status}"})
+    except Exception as exc:  # noqa: BLE001  run_h1 re-raises a harness error after writing the H1 record
+        result.update({"ran": False, "reason": f"{type(exc).__name__}: {exc}"})
     finally:
-        if transport is not None:
-            transport.proc.kill()
         httpd.shutdown()
+    record_path = home / f"acceptance-{session}-h1.json"
+    record = json.loads(record_path.read_text(encoding="utf-8")) if record_path.exists() else {}
+    result["h1_record"] = {k: v for k, v in record.items() if k != "turns"}
+    result["stream_compactions"] = record.get("stream_compactions", 0)
+    result["exit"] = record.get("cli_exit")
     log = detectors.read_jsonl(session_log)
     cc_jsonl = [rec for path in glob.glob(str(scratch / "claude-config" / "projects" / "*" / "*.jsonl"))
                 for rec in detectors.read_jsonl(Path(path))]
@@ -302,7 +307,33 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
     return result
 
 
+def unexercised(results: list[dict[str, Any]]) -> list[str]:
+    """The live-only paths (run.LIVE_PATHS) that none of these dry runs took, from each H1 record's
+    "paths". Intake's requirement 4: a dry run is clean only when this is empty."""
+    from acceptance import run
+
+    taken = {name for r in results for name in (r.get("h1_record") or {}).get("paths") or []}
+    return [name for name in run.LIVE_PATHS if name not in taken]
+
+
+EXPECTED_STOP = {"auth": "stop_handled", "raise": "error_handled"}
+
+
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["check-paths"]:  # check-paths <dry run output dir>...
+        results = [json.loads((Path(d) / "dry-run.json").read_text(encoding="utf-8")) for d in argv[1:]]
+        missing = unexercised(results)
+        print(json.dumps({"runs": len(results), "unexercised": missing}))
+        return 1 if missing or not results else 0
+    fault = None
+    if "--fault" in argv:  # --fault auth:N or raise:N, a stop-path run
+        i = argv.index("--fault")
+        kind, n = argv[i + 1].split(":")
+        if kind not in EXPECTED_STOP:
+            print("--fault takes auth:N or raise:N", file=sys.stderr)
+            return 2
+        fault = (kind, int(n))
+        argv = argv[:i] + argv[i + 2:]
     inflate = None
     if "--inflate" in argv:  # --inflate N:FACTOR, a detector proof run
         i = argv.index("--inflate")
@@ -311,11 +342,15 @@ def main(argv: list[str]) -> int:
         argv = argv[:i] + argv[i + 2:]
     if len(argv) not in (3, 4):
         print("usage: stubrun.py <seat settings file> <contexto executable> <output dir> [turn kbytes, default 40]"
-              " [--inflate N:FACTOR]", file=sys.stderr)
+              " [--inflate N:FACTOR] [--fault auth:N|raise:N]\n       stubrun.py check-paths <output dir>...",
+              file=sys.stderr)
         return 2
     turn_bytes = int(argv[3]) * 1_000 if len(argv) == 4 else 40_000
-    result = dry_run(Path(argv[0]), argv[1], Path(argv[2]), turn_bytes=turn_bytes, inflate=inflate)
+    result = dry_run(Path(argv[0]), argv[1], Path(argv[2]), turn_bytes=turn_bytes, inflate=inflate, fault=fault)
     print(json.dumps({k: v for k, v in result.items() if k != "rows"}, indent=1, default=str), flush=True)
+    if fault:  # a stop-path run passes when it stopped on the branch it drove and wrote the record
+        record = result.get("h1_record") or {}
+        return 0 if record.get("stopped") and EXPECTED_STOP[fault[0]] in (record.get("paths") or []) else 1
     return 0 if result.get("ran") else 1
 
 

@@ -19,6 +19,8 @@ import argparse
 import json
 import os
 import sys
+import traceback
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -269,58 +271,98 @@ def main(argv: list[str] | None = None) -> int:
                           "paged_only": score(paged, args.h1.read_text(encoding="utf-8"))}, indent=2, default=str))
         return 0
     # live: gates on the same Budget that dry-run and approval-table print
-    if b.history_tokens < 2.5 * args.bound:
-        print(f"refusing: planned history {b.history_tokens:,} is below 2.5x the bound ({int(2.5 * args.bound):,})",
+    upstream = args.upstream or os.environ.get("ANTHROPIC_BASE_URL")
+    return run_h1(s, b, params, args.approved, args.scratch, args.home, args.session, args.seat_settings, upstream)
+
+
+# Every live-only branch run_h1 can take. The H1 record lists the ones a run took; a dry run fails
+# unless its runs, together, took all of them (live-path fix, intake 2026-10-16 07:11Z).
+LIVE_PATHS = ("gate_passed", "estimates_cover_turns", "watcher_started", "content_turn_sent", "probe_turn_sent",
+              "every_turn_sent", "stop_handled", "error_handled", "answers_written", "record_written")
+
+
+def run_h1(s: script.Script, b: budget.Budget, params: budget.Params, approved: int, scratch: Path, home: Path,
+           session: str, seat_settings: Path, upstream: str | None, contexto: str = "contexto",
+           inject: Callable[[int], None] | None = None) -> int:
+    """H1 through the real launcher. Live calls this with the owner's upstream; the stub dry run calls
+    it with a local, non-forwarding one, and nothing else differs. ``inject`` (dry runs only) is
+    called after each finished turn with its index and may raise, to drive the stop and error
+    branches. The H1 record is written however the run ends; a harness error is re-raised after it."""
+    if b.history_tokens < 2.5 * params.bound:
+        print(f"refusing: planned history {b.history_tokens:,} is below 2.5x the bound ({int(2.5 * params.bound):,})",
               file=sys.stderr)
         return 2
     # D27 (intake 05:42Z): the approval covers H1 and the six-request baseline, and the gate is their
     # combined worst case. H1's guards stop at the approval minus the baseline's worst, so the
     # baseline always keeps its share.
     combined_worst = b.h1_worst + b.baseline_replay_worst
-    if args.approved < combined_worst:
-        print(f"refusing: approved {args.approved:,} is below the combined worst case {combined_worst:,} "
+    if approved < combined_worst:
+        print(f"refusing: approved {approved:,} is below the combined worst case {combined_worst:,} "
               f"(H1 {b.h1_worst:,} + baseline {b.baseline_replay_worst:,})", file=sys.stderr)
         return 2
-    h1_cap = args.approved - b.baseline_replay_worst
-    upstream = args.upstream or os.environ.get("ANTHROPIC_BASE_URL")
+    h1_cap = approved - b.baseline_replay_worst
     if not upstream:
         print("refusing: no upstream (pass --upstream or set ANTHROPIC_BASE_URL)", file=sys.stderr)
         return 2
-    if not args.seat_settings.is_file():
-        print(f"refusing: the seat settings file {args.seat_settings} does not exist", file=sys.stderr)
+    if not seat_settings.is_file():
+        print(f"refusing: the seat settings file {seat_settings} does not exist", file=sys.stderr)
         return 2
-    args.scratch.mkdir(parents=True, exist_ok=True)
-    if driver.inside_git(args.scratch):
-        print(f"refusing: the scratch directory {args.scratch} is inside a git work tree", file=sys.stderr)
+    scratch.mkdir(parents=True, exist_ok=True)
+    if driver.inside_git(scratch):
+        print(f"refusing: the scratch directory {scratch} is inside a git work tree", file=sys.stderr)
         return 2
-    config = driver.isolated_config(args.scratch, args.seat_settings)
-    estimates = [r.input_tokens for r in b.rows if r.kind == "turn"] + [max(r.input_tokens for r in b.rows if r.kind != "turn")]
-    session_log = args.home / "sessions" / args.session / "log.jsonl"
-    transport = driver.StreamJsonTransport(driver.launcher_command(args.session, args.bound, upstream), args.scratch,
-                                           driver.child_env(args.home, config), session_log,
-                                           approved=h1_cap, reserve=params.max_tokens_reserve)
+    estimates = budget.turn_estimates(b)
+    if len(estimates) != len(s.turns):
+        print(f"refusing: {len(estimates)} spend estimates for {len(s.turns)} turns", file=sys.stderr)
+        return 2
+    taken = {"gate_passed", "estimates_cover_turns"}
+    config = driver.isolated_config(scratch, seat_settings)
+    env = driver.child_env(home, config)
+    env.pop("ANTHROPIC_BASE_URL", None)  # the launcher points Claude Code at its proxy; nothing goes around it
+    session_log = home / "sessions" / session / "log.jsonl"
+    transport = driver.StreamJsonTransport(driver.launcher_command(session, params.bound, upstream, contexto), scratch,
+                                           env, session_log, approved=h1_cap, reserve=params.max_tokens_reserve)
+    if transport.watcher is not None:
+        taken.add("watcher_started")
     run = driver.Run(transport, h1_cap, params.max_tokens_reserve, estimates)
-    status = 0
+    status, stopped, error, cli_exit = 0, None, None, None
+    answers: list[str] = []
     try:
-        answers = driver.run_session_all(list(s.turns), run)
-        # D27: the answers of every probe turn, in order, so the scorer sees all 54 lines
-        probe_answers = answers[s.n_content:]
-        (args.home / f"acceptance-{args.session}-answers.txt").write_text("\n".join(probe_answers) + "\n",
-                                                                         encoding="utf-8")
+        for i, text in enumerate(s.turns):
+            answers.append(run.turn(i, text))
+            taken.add("probe_turn_sent" if i >= s.n_content else "content_turn_sent")
+            if inject is not None:
+                inject(i)
+        taken.add("every_turn_sent")
     except (driver.BudgetExceeded, driver.AuthFailure, RuntimeError) as exc:
         print(f"stopped: {exc}", file=sys.stderr)
-        status = 1
+        status, stopped = 1, f"{type(exc).__name__}: {exc}"
+        taken.add("stop_handled")
+    except Exception as exc:  # noqa: BLE001  a harness error: record the spend first, then re-raise
+        traceback.print_exc()
+        status, stopped, error = 1, f"{type(exc).__name__}: {exc}", exc
+        taken.add("error_handled")
     finally:
-        transport.close()
+        cli_exit = transport.close()
+    # D27: the answers of every finished probe turn, in order (all 54 lines on a full run). On a stop
+    # the finished probe turns are kept; the record says how many.
+    probe_answers = answers[s.n_content:]
+    home.mkdir(parents=True, exist_ok=True)
+    (home / f"acceptance-{session}-answers.txt").write_text("\n".join(probe_answers) + "\n", encoding="utf-8")
+    taken.add("answers_written")
     spend = h1_spend(run.spent, detectors.read_jsonl(session_log) if session_log.exists() else [],
                      abnormal=status != 0, reserve=params.max_tokens_reserve)
-    record = {**spend, "turns": run.turns, "stream_compactions": transport.compactions,
-              "approved": args.approved, "h1_cap": h1_cap, "baseline_worst": b.baseline_replay_worst}
+    taken.add("record_written")
+    record = {**spend, "turns": run.turns, "stream_compactions": transport.compactions, "cli_exit": cli_exit,
+              "approved": approved, "h1_cap": h1_cap, "baseline_worst": b.baseline_replay_worst,
+              "planned_turns": len(s.turns), "turns_completed": len(answers),
+              "probe_turns_completed": len(probe_answers), "stopped": stopped, "paths": sorted(taken)}
     # The replay's approval is the combined approval minus this spend (run.py replay --h1-record).
-    (args.home / f"acceptance-{args.session}-h1.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    (home / f"acceptance-{session}-h1.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     print(json.dumps(record, indent=2))
+    if error is not None:
+        raise error
     return status
-
 
 if __name__ == "__main__":
     sys.exit(main())
