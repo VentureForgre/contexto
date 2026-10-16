@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from acceptance import codex_budget, codex_driver, script  # noqa: E402
+from acceptance import codex_budget, codex_driver, codex_recall_credit, script  # noqa: E402
 from acceptance.codex_stub import CodexStub  # noqa: E402
 from fidelity import l2f  # noqa: E402
 
@@ -47,16 +47,12 @@ def acceptance_3(s: script.Script, answers: str, events: list[dict], session_dir
     """Acceptance 3 through the harness path (A21 item 3): codex_recall_credit.credit (A20) over the
     session log and the stored pages, with D27's probe turns and the expected turn count, plus the
     in-view spans search returned (content-free: turn, message index, offsets)."""
-    try:
-        from acceptance import codex_recall_credit
-    except ImportError:  # A20 (PR #159) not on this main yet
-        return {"available": False}
     pages = [json.loads(p.read_text()) for p in sorted((session_dir / "pages").glob("pg_*.json"))]
     result = codex_recall_credit.credit(list(s.probes), answers, events, pages, probe_turn_ids=s.probe_turn_ids,
                                         expected_turns=len(s.turns))
     in_view = [r for e in events if e.get("event") == "mcp_call" for r in e.get("returned") or []
                if r.get("source") == "in_view"]
-    return {"available": True, "credit": result, "in_view_spans": len(in_view), "in_view": in_view}
+    return {"credit": result, "in_view_spans": len(in_view), "in_view": in_view}
 
 
 def turn_estimates(s: script.Script, b: codex_budget.CodexBudget) -> list[int]:

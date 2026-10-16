@@ -64,7 +64,38 @@ Turn 1's pre-turn check (spent + the turn's estimate + reserve = 0 + 96,000 + 0)
 
 ## Condition 3: acceptance 1 and 3 on a full step-1 dry run
 
-Pending A20 (PR #159, builder-1: `codex_recall_credit.py`). Once it is on main, the full step-1 dry run runs on that main SHA, and acceptance 3 is credited through `codex_recall_credit` from the session log.
+On main **e07a963** (with A20, `codex_recall_credit`, PR #159) merged into this PR's branch:
+`uv run python spikes/m2/acceptance/codex_dryrun.py "$PWD/.venv/bin/contexto" /tmp/a21-full`.
+
+The run uses `CONTEXTO_HOME`, Codex retries pinned, and the spend watcher at the H1 worst case.
+
+**Acceptance 1:**
+
+| | |
+|---|---|
+| History | 164,844 tokens of content at least 2.5 times the bound (160,000); 15 content and 6 probe turns, all 21 completed |
+| Requests | 27 POST `/v1/responses`, all 200: 0 4xx |
+| Bound | largest real input 27,015 (stub tokens) against 64,000; 0 `over_bound` of either source; no failure events |
+| Rotations | 18 for size and 2 for room |
+| Compaction | none: Codex's rollout holds no `compacted` record, and Codex compacts only at 244,800 tokens |
+| Stream hold | each of the 6 tool-call rounds held 3 events; the 15 `OK` replies and the 6 answers held none |
+| Verdict | `acceptance_1` true |
+
+**Acceptance 3** (`codex_recall_credit.credit(probes, answers, session_log, pages, probe_turn_ids=..., expected_turns=21)`, called from `codex_dryrun.acceptance_3`):
+
+| | |
+|---|---|
+| Verdict | `acceptance_3` true |
+| Credited | 4 of the 4 paged-only probes; their plants are in turn 1, paged out by the first rotation |
+| Per probe turn | turn 1: `q_p_03` (via `contexto_search`); turn 2: `q_p_02` (search); turn 4: `q_p_01` (`contexto_recall`, 4 calls); turn 5: `q_p_04` (search); turns 3 and 6: none |
+| Expected turns | 21, content plus probe turns (B29) |
+| In-view spans | 14 returned by search from the retained window (A14), logged content-free |
+| Answered correctly, not credited | 50 (the stub is given every answer; credit needs a returned span covering the plant before the answer) |
+| Recall calls | 6 `contexto_search` and 6 `contexto_recall` through Codex's `exec`, 0 failed |
+
+**Conditions 1 and 2 re-run on the same tree** (main e07a963 merged, branch head 2ad66fe):
+- `--fail-post 3`: 3 POSTs (2 `OK`, 1 failed). The failing turn made exactly 1 POST, Codex exited 1, and the run stopped at turn 3 with `failed_turn` 2.
+- `--approved 200000`: the watcher stopped turn 1 with exit 143 and 25,448 spent. Both unchanged.
 
 ## Tests
 
