@@ -89,10 +89,11 @@ def test_budget_lines_and_worst_case(s):
 
 def test_bound_too_small_when_the_window_budget_cannot_hold_a_turn():
     # 44 KB turns at a 54.5k head and a 100k bound: W = 20,500 cannot hold a 22k-token turn (rule 4).
+    # As the engine does (contract PR #50), the turn still rotates to the minimal window (the new turn
+    # alone), which is smaller than sending unrotated, and logs bound_too_small as well.
     big = script.build(turns=12, turn_bytes=44_000)
     b = budget.simulate(list(big.content_bytes), list(big.probe_bytes), budget.Params(bound=100_000, head=54_500))
-    assert b.bound_too_small > 0 and b.planned_over_bound > 0
-    assert not any(r.note == "rotation" for r in b.rows if r.kind == "turn")  # no content turn rotates
+    assert b.bound_too_small > 0 and b.window_minimal > 0
     assert b.window_budget_first == 100_000 - 25_000 - 54_500
 
 
@@ -406,13 +407,13 @@ def test_any_over_bound_fails_acceptance_1_under_the_strict_rule():
 
 
 def test_window_must_hold_the_newest_complete_turn_and_the_new_one():
-    # The stub dry run through the launcher: at 70 KB turns the engine logged bound_too_small and went
-    # over the bound, because W (about 60,000) cannot hold two turns of about 39,000 tokens.
+    # The stub dry runs: at 70 KB turns W (about 60,000) cannot hold two turns of about 39,000 tokens,
+    # so the engine keeps only the new turn (window_minimal, contract PR #50) and nothing goes over the
+    # bound; the simulation now does the same (dry runs 1 and 2: window_minimal 4, over bound 0).
     p = budget.Params()
     s = run.build_script(script.DEFAULT_SEED, 0, 70_000, p)
     b = budget.simulate(list(s.content_bytes), list(s.probe_bytes), p)
-    assert b.bound_too_small > 0 and b.planned_over_bound > 0
-    assert not any(r.note == "rotation" for r in b.rows if r.kind == "turn")  # no content turn rotates
+    assert b.window_minimal > 0 and b.bound_too_small == 0 and b.planned_over_bound == 0
 
 
 def test_stub_dry_run_models_log_text_and_the_rest_separately():
@@ -762,7 +763,7 @@ def test_a12_rotates_when_the_new_turns_room_would_fall_under_min_turn_room():
     p = budget.Params()
     with_a12 = budget.simulate(list(s.content_bytes), list(s.probe_bytes), p)
     without = budget.simulate(list(s.content_bytes), list(s.probe_bytes), budget.Params(min_turn_room=0))
-    assert with_a12.room_rotations > 0 and with_a12.rotations > without.rotations and without.room_rotations == 0
+    assert with_a12.room_rotations > without.room_rotations and with_a12.rotations > without.rotations
     for r in with_a12.rows:
         if r.note == "rotation (A12 room)":  # the room it publishes is at least min_turn_room
             assert p.bound - r.input_tokens - budget.HEADROOM_FLOOR >= p.min_turn_room
@@ -772,24 +773,19 @@ def test_a12_rotates_when_the_new_turns_room_would_fall_under_min_turn_room():
 def test_a12_logs_turn_room_low_once_per_epoch_instead_of_thrashing():
     # A small bound where paging cannot restore the room: no room rotation, turn_room_low once per epoch.
     b = budget.simulate([4_000] * 12, [1_200] * 2, budget.Params(bound=60_000, head=20_000, min_turn_room=12_000))
-    lows = [r for r in b.rows if r.note.startswith("turn_room_low")]
+    lows = [r for r in b.rows if "turn_room_low" in r.note]
     assert b.turn_room_low_epochs and len(lows) == len(b.turn_room_low_epochs)
     assert len(set(b.turn_room_low_epochs)) == len(b.turn_room_low_epochs)  # once per epoch
     assert b.room_rotations < len([r for r in b.rows if r.kind in ("turn", "probe")]) // 2  # no thrash
 
 
-def test_min_turn_room_follows_the_engine_default(monkeypatch):
-    # Read from the engine's Config when it has the field; the contract's 12,000 (PR #116) until then.
-    import contexto.rewrite as rewrite
+def test_min_turn_room_is_the_engines_own_default():
+    # Guard (reviewer-2, PR #117): the simulation reads min_turn_room from the engine's Config, with no
+    # fallback, so it cannot drift from the engine on main.
+    from contexto.rewrite import Config
 
-    class WithField(rewrite.Config):
-        min_turn_room: int = 9_999
-
-    monkeypatch.setattr(rewrite, "Config", WithField)
-    assert budget.Params().min_turn_room == 9_999
-    monkeypatch.undo()
-    expected = getattr(rewrite.Config(), "min_turn_room", budget.CONTRACT_MIN_TURN_ROOM)
-    assert budget.Params().min_turn_room == expected
+    assert hasattr(Config(), "min_turn_room")
+    assert budget.Params().min_turn_room == Config().min_turn_room
 
 
 def test_turn_room_low_fails_acceptance_1():
@@ -811,3 +807,26 @@ def test_h1_spend_takes_the_proxy_logged_usage_after_a_mid_turn_stop():
     clean = run.h1_spend(logged, log, abnormal=False, reserve=32_000)
     assert clean["spent"] == logged and clean["in_flight_allowance"] == 0
     assert run.h1_spend(500, [], abnormal=False, reserve=32_000)["spent"] == 500  # no log: the driver's figure
+
+
+
+def test_a12_both_triggers_use_the_room_target_when_it_restores_the_room():
+    # Engine order (rewrite.rotate_at_turn_start) and contract PR #120 (9eb191b): when the size trigger
+    # and the room condition both fire, the room-sized target is used if it restores the room.
+    p = budget.Params(bound=80_000, head=20_000, min_turn_room=12_000)
+    b = budget.simulate([24_000] * 14, [1_200] * 2, p)
+    both = [r for r in b.rows if r.note.startswith("rotation (bound + A12 room)")]
+    assert both
+    for r in both:
+        assert p.bound - r.input_tokens - budget.HEADROOM_FLOOR >= p.min_turn_room
+
+
+def test_a12_logs_turn_room_low_after_a_rotation_that_leaves_the_room_low():
+    # Contract PR #120 (71b6cf8): turn_room_low only when the room is still low after the decision,
+    # whatever the decision was (here, a rotation), once per epoch.
+    p = budget.Params(bound=60_000, head=20_000, min_turn_room=12_000)
+    b = budget.simulate([6_000] * 14, [1_200] * 2, p)
+    after = [r for r in b.rows if r.note.startswith("rotation") and "turn_room_low" in r.note]
+    assert after
+    for r in after:
+        assert p.bound - r.input_tokens - budget.HEADROOM_FLOOR < p.min_turn_room  # still low after it
