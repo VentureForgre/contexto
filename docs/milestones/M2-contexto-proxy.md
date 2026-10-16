@@ -181,6 +181,27 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     safe for thinking because rotation strips it), keep the latest settings-only message per
     settings key. If carried content grows by more than 4,000 tokens over its size at the
     session's first request, log `carried_over_budget` in the session log.
+14. **Transform failures.** Expected failures never reuse the component that failed and never
+    forward the history unbounded:
+    - **Degraded mode** is entered on `page_conflict` (a stored page differs in
+      `{turn, messages}` under its id, which can only mean corruption) or `store_error` (the store
+      cannot be read or written). In degraded mode the engine pages nothing and never rotates: it
+      sends the last good transform (the current `E`, with its in-memory `pinned_text` and
+      `index_text`) extended append-only with the new messages. That is always protocol-valid,
+      keeps thinking and the cache intact, and loses nothing, because no turn is paged while the
+      store is broken. Requests may then exceed the bound; each is logged `over_bound` and fails
+      acceptance. At each new turn start the engine tries the store once; if it is healthy and the
+      conflicting page is not needed, it leaves degraded mode and rotates normally. Mid tool loop
+      nothing changes, because degraded mode only appends.
+    - **Terminal step.** A failure inside degraded mode, or a resync (rule 10) that cannot be
+      completed without paging while the store is broken, is final for that request: the proxy
+      forwards the CLI's original request and logs `fallback_failed`. Each request enters each
+      fallback at most once; there is no retry loop.
+    - **Genuine bugs.** An exception on a path not listed by lane A is handled the same way: the
+      original request is forwarded so the user is never blocked by a Contexto defect, logged as
+      `transform_error` at error level, and reported prominently by `contexto sessions show`.
+    Acceptance counts any `over_bound`, `fallback_failed`, or `transform_error` as a failure. Lane
+    A lists every engine path that can raise and covers each with a fault-injection test.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
@@ -246,7 +267,7 @@ the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
 ## Lanes
 
 - **Lane A, management.manager-1 (builder-1, builder-2):** launcher, proxy server and SSE relay,
-  rewrite engine (rules 1 to 13), upstream resolution, session log; then the Codex adapter
+  rewrite engine (rules 1 to 14), upstream resolution, session log; then the Codex adapter
   (Responses API over HTTP through a temporary `CODEX_HOME` whose provider uses `auth.command`;
   force HTTP or handle WebSocket deltas, decided with evidence).
 - **Lane B, management.manager-2 (builder-3, builder-4):** package scaffolding first (harvest PR #2),
