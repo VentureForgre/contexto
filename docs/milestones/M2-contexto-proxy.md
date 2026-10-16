@@ -84,7 +84,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      `tool_result`).
   4. **Other text-only content**: carried, because it may be a standing instruction (the vendor
      documents output-style changes and plan mode as instructions delivered as a message that
-     keep applying; lane A measures how both arrive before A2 merges).
+     keep applying). Before A2 merges, lane A measures with zero-spend stubs how an output-style
+     change, a plan-mode toggle, and a session start with no effort setting arrive; any of them
+     that lacks a settings field falls here and is carried.
   5. **Tool-addition messages and anything with non-text blocks**: carried; non-text ones are
      logged as `unclassified_system_message`. Tool-addition messages are vendor-documented but
      not observed on Claude Code 2.1.301 (builder-2 measured that adding or removing an MCP
@@ -167,9 +169,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     bytes after the new prompt. Measured by reviewer-2 with a context-injecting `UserPromptSubmit`
     hook (a single zero-spend probe of three real CLI-written turns, PR #30 review; builder-2's
     later probe agrees: about 70 characters per later turn, no `output_config`): one content system message per
-    turn, so OpenRig seats and other hook users add one every turn. Hence the split in the Terms:
-    per-turn content system messages page with their turn, and only session-start,
-    settings-only, and tool-addition messages are carried. At rotation only (deterministic, and
+    turn, so OpenRig seats and other hook users add one every turn. Hence the classification in the
+    Terms: identified hook output pages with its turn, and everything else is carried, with the
+    bounded 8,000-token fallback. At rotation only (deterministic, and
     safe for thinking because rotation strips it), keep the latest settings-only message per
     settings key. If carried content grows by more than 4,000 tokens over its size at the
     session's first request, log `carried_over_budget` in the session log.
