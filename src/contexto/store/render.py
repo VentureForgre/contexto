@@ -34,12 +34,18 @@ def recall_limit(window_tokens: int | None, bytes_per_token: float | None) -> tu
 
 
 def render_page(page: dict[str, Any]) -> str:
-    """Render a page's messages as plain text, thinking omitted. Deterministic for a given page."""
+    """Render a page's messages as plain text, thinking omitted. Deterministic for a given page.
+
+    A page from a Codex session holds Responses API items (M2 B20); each is rendered by
+    ``_responses_lines``, the same way the engine's retained-window snapshot renders it (A14)."""
     lines: list[str] = []
     turn = page.get("turn")
     for message in page.get("messages") or []:
         if not isinstance(message, dict):
             lines.append("[malformed message omitted]")
+            continue
+        if "type" in message:  # a Responses API item: a Messages API message has no top-level type
+            lines.extend(_responses_lines(turn, message))
             continue
         role = message.get("role", "unknown")
         lines.append(f"[turn {turn}] {role}:")
@@ -78,6 +84,25 @@ def render_page(page: dict[str, Any]) -> str:
             else:
                 lines.append(f"[{kind} omitted]")
     return "\n".join(lines)
+
+
+def _responses_lines(turn: Any, item: dict[str, Any]) -> list[str]:
+    """One Responses item's lines (M2 B20). The item is mapped to Messages API blocks by lane A's
+    ``ResponsesDialect.retained_blocks`` (A14), the mapping the retained-window snapshot uses, and those
+    blocks are rendered by ``render_page`` itself, so a page line and an in-view line read the same:
+    message text parts as the text (Codex context sections, images, and files left out), a
+    ``function_call`` or ``custom_tool_call`` as ``tool_use <name> <sorted JSON input>``, and an output
+    as ``tool_result:`` and its text. Reasoning, other item types, and system-like items (developer
+    and system messages, context-only user messages, ``additional_tools``) render nothing."""
+    from contexto.codex import RESPONSES  # imported here: contexto.codex builds on the engine, which imports this
+
+    if RESPONSES.is_system_like(item):
+        return []
+    blocks = RESPONSES.retained_blocks(item)
+    if not blocks:
+        return []
+    message = {"role": blocks[0][0], "content": [block for _, block in blocks]}
+    return render_page({"turn": turn, "messages": [message]}).split("\n")
 
 
 def recall_chunk(page: dict[str, Any], offset: int = 0, limit: int = RECALL_LIMIT) -> dict[str, Any]:
