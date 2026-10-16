@@ -28,12 +28,20 @@ Mapping onto the contract's rules (``contexto.rewrite``):
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
+import shlex
+import shutil
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.rewrite import CARRIED_TEXT, SESSION_START, UNCLASSIFIED, Dialect
 from contexto.tokens import TokenEstimator
+from contexto.upstream import claude_settings_order
 
 MODEL_OUTPUT_TYPES = frozenset({"reasoning", "function_call", "custom_tool_call", "local_shell_call",
                                 "web_search_call", "image_generation_call", "tool_search_call"})
@@ -135,3 +143,143 @@ def item_is_text_only(item: dict) -> bool:
 
 
 RESPONSES = ResponsesDialect()
+
+
+# Launch planning (intake decision D22) -----------------------------------------------------------
+#
+# API-key mode, the default and the only mode run live: a temporary CODEX_HOME (directory 0700,
+# config 0600, removed on exit) whose custom provider points at the proxy and gets its bearer token
+# from ``auth.command`` running the existing key helper. The config names the helper command only,
+# never a key. ChatGPT mode (``--codex-auth chatgpt``): the user's own CODEX_HOME with ``-c`` overrides
+# only and ``requires_openai_auth``; its end-user terms question is open as O4. Both keep Codex on
+# HTTP (custom providers have no WebSocket transport) and turn request compression off, because the
+# proxy cannot transform compressed bodies. Some Codex calls (rate limits, usage, a remote MCP
+# connection) go to chatgpt.com directly and bypass the proxy by design.
+
+API_KEY_MODE = "apikey"
+CHATGPT_MODE = "chatgpt"
+KEY_HELPER_ENV = "CONTEXTO_CODEX_KEY_HELPER"
+UPSTREAM_ENV = "CONTEXTO_CODEX_UPSTREAM"
+CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
+PROVIDER_ID = "contexto"
+CHATGPT_MODE_HELP = ("ChatGPT login: route the user's own Codex ChatGPT credentials through the local proxy. "
+                     "Whether end users may do this under OpenAI's terms is an open owner question (O4).")
+
+
+class CodexLaunchError(RuntimeError):
+    pass
+
+
+@dataclass
+class CodexLaunch:
+    argv: list[str]
+    env: dict[str, str]
+    upstream: str
+    codex_home: Path | None = None  # temporary CODEX_HOME to remove with cleanup()
+    notes: list[str] = field(default_factory=list)
+
+    def cleanup(self) -> None:
+        if self.codex_home is not None:
+            shutil.rmtree(self.codex_home, ignore_errors=True)
+            self.codex_home = None
+
+
+def claude_api_key_helper(cwd: Path, home: Path) -> str | None:
+    """The ``apiKeyHelper`` Claude Code would use, from the same settings files and order as the
+    upstream resolution (the main checkout's local settings first in a linked worktree)."""
+    for _kind, path in claude_settings_order(cwd, home):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        value = data.get("apiKeyHelper") if isinstance(data, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _toml(value: object) -> str:
+    """TOML literal for strings, booleans, and lists of strings (JSON escapes are valid TOML)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml(v) for v in value) + "]"
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _mcp_args(session_id: str) -> list[str]:
+    return ["mcp", "--session", session_id]
+
+
+def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_bin: str = "contexto") -> str:
+    parts = shlex.split(helper)
+    if not parts:
+        raise CodexLaunchError("the key helper command is empty")
+    lines = [
+        f"model_provider = {_toml(PROVIDER_ID)}",
+        "",
+        f"[model_providers.{PROVIDER_ID}]",
+        f"name = {_toml('Contexto')}",
+        f"base_url = {_toml(proxy_url)}",
+        f"wire_api = {_toml('responses')}",
+        f"supports_websockets = {_toml(False)}",
+        "",
+        f"[model_providers.{PROVIDER_ID}.auth]",
+        f"command = {_toml(parts[0])}",
+        f"args = {_toml(parts[1:])}",
+        "",
+        "[features]",
+        f"enable_request_compression = {_toml(False)}",
+        "",
+        f"[mcp_servers.{PROVIDER_ID}]",
+        f"command = {_toml(contexto_bin)}",
+        f"args = {_toml(_mcp_args(session_id))}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def chatgpt_overrides(proxy_url: str, session_id: str, contexto_bin: str = "contexto") -> list[str]:
+    provider = (f"{{name={_toml('Contexto')}, base_url={_toml(proxy_url)}, wire_api={_toml('responses')}, "
+                f"requires_openai_auth=true, supports_websockets=false}}")
+    return ["-c", f"model_providers.{PROVIDER_ID}={provider}", "-c", f"model_provider={PROVIDER_ID}",
+            "-c", "features.enable_request_compression=false",
+            "-c", f"mcp_servers.{PROVIDER_ID}.command={_toml(contexto_bin)}",
+            "-c", f"mcp_servers.{PROVIDER_ID}.args={_toml(_mcp_args(session_id))}"]
+
+
+def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_mode: str = API_KEY_MODE,
+               key_helper: str | None = None, upstream: str | None = None, contexto_bin: str = "contexto",
+               codex_bin: str = "codex", env: dict[str, str] | None = None, cwd: Path | None = None,
+               home: Path | None = None, claude_upstream: str | None = None) -> CodexLaunch:
+    """Plan a ``codex`` launch behind the proxy at ``proxy_url`` (no ``/v1``: the upstream carries the
+    version path). The caller starts the proxy with ``launch.upstream``, runs ``launch.argv`` with
+    ``launch.env``, and calls ``launch.cleanup()`` on exit. Nothing here reads or writes a credential."""
+    base_env = dict(os.environ if env is None else env)
+    cwd = cwd or Path.cwd()
+    home = home or Path.home()
+    if auth_mode == CHATGPT_MODE:
+        return CodexLaunch(argv=[codex_bin, *chatgpt_overrides(proxy_url, session_id, contexto_bin), *codex_args],
+                           env=base_env, upstream=upstream or base_env.get(UPSTREAM_ENV) or CHATGPT_UPSTREAM,
+                           notes=[CHATGPT_MODE_HELP])
+    if auth_mode != API_KEY_MODE:
+        raise CodexLaunchError(f"unknown Codex auth mode: {auth_mode}")
+    helper = key_helper or base_env.get(KEY_HELPER_ENV) or claude_api_key_helper(cwd, home)
+    if not helper:
+        raise CodexLaunchError(f"no key helper: pass --codex-key-helper, set {KEY_HELPER_ENV}, "
+                               "or configure apiKeyHelper in Claude Code settings")
+    target = upstream or base_env.get(UPSTREAM_ENV) or (claude_upstream.rstrip("/") + "/v1" if claude_upstream else None)
+    if not target:
+        raise CodexLaunchError(f"no upstream for Codex: pass --codex-upstream or set {UPSTREAM_ENV}")
+    codex_home = Path(tempfile.mkdtemp(prefix="contexto-codex-"))
+    try:
+        codex_home.chmod(0o700)
+        config = codex_home / "config.toml"
+        fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(api_key_config(proxy_url, helper, session_id, contexto_bin))
+    except BaseException:
+        shutil.rmtree(codex_home, ignore_errors=True)
+        raise
+    return CodexLaunch(argv=[codex_bin, *codex_args], env={**base_env, "CODEX_HOME": str(codex_home)},
+                       upstream=target, codex_home=codex_home)

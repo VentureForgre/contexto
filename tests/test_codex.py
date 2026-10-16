@@ -151,3 +151,98 @@ def test_engine_dispatches_responses_paths_with_separate_state():
     responses_state = next(v for k, v in engine.states.items() if k.startswith("responses:"))
     assert responses_state.last_input_tokens == 777
     assert engine(request(items), {}, "/models") == (request(items), {}, [])
+
+
+# Launch planning (D22) ------------------------------------------------------------------------------
+
+import json
+import os
+import stat
+import tomllib
+
+import pytest
+
+from contexto.codex import (CHATGPT_MODE, CHATGPT_UPSTREAM, KEY_HELPER_ENV, CodexLaunchError,
+                            claude_api_key_helper, plan_codex)
+
+PROXY = "http://127.0.0.1:43210"
+
+
+def claude_home(tmp_path, helper="/synthetic/bin/key-helper --profile synthetic"):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({"apiKeyHelper": helper}))
+    return home
+
+
+def test_api_key_mode_writes_a_private_temporary_codex_home(tmp_path):
+    home = claude_home(tmp_path)
+    launch = plan_codex(["exec", "hi"], PROXY, "S1", env={}, cwd=tmp_path, home=home,
+                        claude_upstream="https://owner-proxy.invalid")
+    try:
+        root = launch.codex_home
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        config_path = root / "config.toml"
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+        config = tomllib.loads(config_path.read_text())
+        provider = config["model_providers"]["contexto"]
+        assert config["model_provider"] == "contexto"
+        assert provider["base_url"] == PROXY and provider["wire_api"] == "responses"
+        assert provider["supports_websockets"] is False
+        assert provider["auth"] == {"command": "/synthetic/bin/key-helper", "args": ["--profile", "synthetic"]}
+        assert config["features"]["enable_request_compression"] is False
+        assert config["mcp_servers"]["contexto"]["args"] == ["mcp", "--session", "S1"]
+        assert launch.env["CODEX_HOME"] == str(root) and launch.argv == ["codex", "exec", "hi"]
+        assert launch.upstream == "https://owner-proxy.invalid/v1"
+    finally:
+        launch.cleanup()
+    assert not root.exists()
+
+
+def test_key_helper_resolution_order(tmp_path):
+    home = claude_home(tmp_path, helper="/from/claude/settings")
+    assert claude_api_key_helper(tmp_path, home) == "/from/claude/settings"
+    env = {KEY_HELPER_ENV: "/from/env"}
+    launch = plan_codex([], PROXY, "S", env=env, cwd=tmp_path, home=home, upstream="https://u.invalid/v1")
+    try:
+        assert tomllib.loads((launch.codex_home / "config.toml").read_text())["model_providers"]["contexto"]["auth"]["command"] == "/from/env"
+    finally:
+        launch.cleanup()
+    explicit = plan_codex([], PROXY, "S", env=env, cwd=tmp_path, home=home, upstream="https://u.invalid/v1",
+                          key_helper="/from/flag")
+    try:
+        assert "/from/flag" in (explicit.codex_home / "config.toml").read_text()
+    finally:
+        explicit.cleanup()
+
+
+def test_api_key_mode_without_a_helper_or_upstream_fails_cleanly(tmp_path):
+    empty = tmp_path / "empty-home"
+    empty.mkdir()
+    with pytest.raises(CodexLaunchError, match="key helper"):
+        plan_codex([], PROXY, "S", env={}, cwd=tmp_path, home=empty, upstream="https://u.invalid/v1")
+    with pytest.raises(CodexLaunchError, match="upstream"):
+        plan_codex([], PROXY, "S", env={}, cwd=tmp_path, home=claude_home(tmp_path))
+
+
+def test_chatgpt_mode_uses_overrides_only(tmp_path):
+    launch = plan_codex(["exec", "hi"], PROXY, "S2", auth_mode=CHATGPT_MODE, env={"PATH": "/bin"},
+                        cwd=tmp_path, home=tmp_path)
+    assert launch.codex_home is None and "CODEX_HOME" not in launch.env
+    argv = " ".join(launch.argv)
+    assert "requires_openai_auth=true" in argv and "supports_websockets=false" in argv
+    assert "model_provider=contexto" in argv and "features.enable_request_compression=false" in argv
+    assert launch.argv[-2:] == ["exec", "hi"] and launch.upstream == CHATGPT_UPSTREAM
+    assert any("O4" in note for note in launch.notes)
+    launch.cleanup()  # nothing to remove
+
+
+def test_config_never_contains_a_key(tmp_path):
+    os.environ.pop("OPENAI_API_KEY", None)
+    launch = plan_codex([], PROXY, "S", env={"OPENAI_API_KEY": "sk-synthetic-not-a-key"}, cwd=tmp_path,
+                        home=claude_home(tmp_path), upstream="https://u.invalid/v1")
+    try:
+        text = (launch.codex_home / "config.toml").read_text()
+        assert "sk-synthetic" not in text and "api_key" not in text.lower()
+    finally:
+        launch.cleanup()
