@@ -280,7 +280,7 @@ class FakeLauncher:
         self.proxy = FakeProxy()
         self.calls = {}
 
-    def check_bound(self, bound, allow):
+    def check_options(self, options):
         if self.bound_error:
             raise FakeLaunchError(self.bound_error, 2)
 
@@ -294,11 +294,11 @@ class FakeLauncher:
         self.calls["session"] = session_id
         return "store"
 
-    def start_proxy(self, store, upstream_url, upstream_source, config, observe_thinking):
+    def start_proxy(self, store, upstream_url, upstream_source, config, observe_thinking, *, stderr=None):
         self.calls["upstream"] = upstream_url
         return self.proxy, "rewrite"
 
-    def run_child(self, argv, env):
+    def run_child(self, argv, env, *, stderr=None):
         home = env.get("CODEX_HOME")
         self.calls.update(argv=argv, home_existed=bool(home) and os.path.isdir(home), home=home)
         return self.child_code
@@ -345,6 +345,29 @@ def test_run_codex_chatgpt_mode_and_errors(tmp_path, monkeypatch):
     assert "O4" in err.getvalue()
     refused = FakeLauncher(bound_error="bound too large")
     assert run_codex(parse("codex"), launcher=refused, stderr=io.StringIO()) == 2
+
+
+def test_run_codex_with_the_real_launcher_helpers(tmp_path, monkeypatch):
+    """PR #57's launcher: real option checks, session, and proxy on 127.0.0.1; only the child is faked."""
+    from contexto import launcher
+
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    seen = {}
+
+    def fake_child(argv, env=None, *, stderr=None):
+        seen.update(argv=argv, home=env.get("CODEX_HOME"), stderr=stderr)
+        return 5
+
+    monkeypatch.setattr(launcher, "run_child", fake_child)
+    err = io.StringIO()
+    args = parse("--session", "S7", "--upstream", "https://owner-proxy.invalid",
+                 "--codex-key-helper", "/synthetic/helper", "codex", "exec", "hi")
+    assert run_codex(args, stderr=err) == 5
+    assert seen["argv"][0] == "codex" and seen["home"].endswith(os.path.join("S7", "codex-home"))
+    assert seen["stderr"] is err and "session S7" in err.getvalue()
+    bad = parse("--window-fraction", "1.5", "codex")
+    err = io.StringIO()
+    assert run_codex(bad, stderr=err) == 2 and "--window-fraction" in err.getvalue()
 
 
 

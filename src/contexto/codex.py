@@ -350,14 +350,14 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         from contexto import launcher  # builder-1's module; imported lazily
     stderr = stderr or sys.stderr
     try:
-        launcher.check_bound(args.bound, args.allow_large_bound)
         options = launcher.options_from_args(args)
+        launcher.check_options(options)
         claude = upstream_module.resolve_upstream(args.upstream)
         target = resolve_codex_upstream(args.codex_auth, args.codex_upstream, dict(os.environ), claude.url)
         session_id = args.session or uuid.uuid4().hex
         store = launcher.open_session(paths.contexto_home(), session_id, Path.cwd())
         proxy, engine_name = launcher.start_proxy(store, target, "codex", launcher.engine_config(options),
-                                                  args.observe_thinking)
+                                                  args.observe_thinking, stderr=stderr)
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)
         return 2
@@ -372,7 +372,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         for note in plan.notes:
             print(f"contexto: {note}", file=stderr)
         print(f"contexto: session {session_id}, engine {engine_name}, codex auth {args.codex_auth}", file=stderr)
-        return launcher.run_child(plan.argv, plan.env)
+        return launcher.run_child(plan.argv, plan.env, stderr=stderr)
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)
         return 2
