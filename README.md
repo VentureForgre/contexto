@@ -126,3 +126,60 @@ working directory is recorded, the output says staleness was not checked.
 | 1 | Unknown or invalid session id, unknown page id, an offset past the end of the page, or an unreadable ledger |
 | 2 | Usage error: unknown command or option, or a missing argument (`contexto` with no command prints help and exits 2) |
 
+## Run Claude Code through Contexto (`contexto run`)
+
+```sh
+contexto run [contexto options] claude [claude args...]
+contexto run --bound 120000 claude --model claude-haiku-5-5
+```
+
+Contexto options go before `claude`; everything after `claude` is passed to Claude Code unchanged.
+The launcher:
+
+1. resolves the upstream Claude Code would otherwise use: `--upstream`, else the first settings file
+   that sets `env.ANTHROPIC_BASE_URL` in Claude Code's precedence (in a git worktree the main
+   checkout's `.claude/settings.local.json` first), else `ANTHROPIC_BASE_URL`, else
+   `https://api.anthropic.com`;
+2. opens session S under `$CONTEXTO_HOME/sessions/<S>/` and starts the proxy on
+   `127.0.0.1:<free port>`;
+3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file holding only
+   `env.ANTHROPIC_BASE_URL` = the proxy, and an `--mcp-config` file that starts `contexto mcp --session S`;
+4. runs `claude --settings <file> --mcp-config <file> [your args]` in your terminal and returns its
+   exit code.
+
+Your own Claude Code settings, hooks, and MCP servers still load; nothing in your Claude
+configuration is edited. Limit: organization-managed settings outrank `--settings`, so if they set
+`ANTHROPIC_BASE_URL`, Claude Code bypasses the proxy.
+
+Passing your own `--settings` (or `--settings=...`) after `claude` is refused with exit code 2:
+Claude Code accepts a single `--settings`, and a second one could replace the launcher's and route
+requests around the proxy. Put those settings in your Claude settings files instead. Your own
+`--mcp-config` is allowed; Claude Code loads it alongside Contexto's.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--bound N` | 150,000 | Upstream prompt bound in tokens. Above 170,000 needs `--allow-large-bound`, because Claude Code may then compact on its own. |
+| `--allow-large-bound` | off | Allow `--bound` above 170,000. |
+| `--window-fraction F` | 0.5 | Share of the window budget kept as recent turns after a rotation. |
+| `--headroom-floor N` | 25,000 | Minimum headroom below the bound that triggers a rotation. |
+| `--session ID` | new id | Session id; the id is printed on stderr at start. |
+| `--upstream URL` | resolved | Upstream base URL. |
+| `--observe-thinking` | off | Adds the `thinking-binding-controls-2026-08-01` beta so dropped thinking is logged. This changes the request by one beta flag. |
+
+At start, the launcher warns on stderr if the bound leaves less than 25,000 tokens of working window
+after the fixed overhead (assumed 92,000 inside an OpenRig seat, 55,000 otherwise), and later once if
+the measured overhead does. Ctrl+C reaches Claude Code as usual; SIGTERM and SIGHUP are forwarded to it.
+
+Exit codes: Claude Code's own exit code; 128 + N if Claude Code died from signal N; 2 for a usage
+error (for example `--bound` above the guard); 1 if the proxy cannot start; 127 if `claude` is not
+on `PATH`.
+
+## Run the proxy alone (`contexto proxy`)
+
+```sh
+contexto proxy [--session ID] [--port N] [--upstream URL] [--observe-thinking]
+```
+
+Starts the proxy without a client, mainly for tests, and prints
+`listening on 127.0.0.1:<port> session <id> upstream <source>`. It forwards with the identity
+transform: requests pass through unchanged and are logged to the session log.
