@@ -136,6 +136,15 @@ measured this case, PR #9). So:
   `turn_room_missing`, or `unclassified_system_message` fails it, wherever it appears (a request's
   transform events, its `usage_events`, or a separate session-log line). `failure_events` counts each
   by name, once, and `no_failure_events` fails unless it is empty.
+- **Local 5xx (acceptance 1, contract PR #98).** A 5xx Contexto's own proxy generates on a model
+  request fails the run; an upstream 5xx passed through is reported (`upstream_5xx`). The proxy at
+  main marks every local model-path 5xx in the session log: `_forward`'s unreachable upstream (a
+  request entry with status 502 and `error: "upstream unreachable: ..."`, no `response_bytes`),
+  `_handle`'s last resort (`proxy_error` with `fallback: "local_502"`, no request entry), and a
+  WebSocket upgrade (`websocket_rejected`, answered 501). A passed-through 5xx has `response_bytes`
+  and no such error. A model-path 5xx with neither mark fails closed as local. `local_5xx` lists each,
+  and `no_local_5xx` is the verdict. The second live H1 run's request 6 (502, upstream unreachable,
+  TimeoutError) re-scores as a local 5xx.
 - **Unverified requests (acceptance 1).** A `/v1/messages` request whose `usage` is null or
   missing cannot be checked against the bound, so it must not hide an over-bound request. Their
   indexes are reported in `unverified_requests`, and the `every_request_has_usage` verdict fails
