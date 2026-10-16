@@ -67,16 +67,35 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   `tool_result` block.
 - A **turn** is a turn-start message plus every following assistant, `tool_result` user, and
   `role: "system"` message up to the next turn-start message.
-- **Carried content** is never paged: the injected context blocks of any turn-start message
-  (everything but the user's own prompt text); the session-start `role: "system"` message; the
-  latest settings-only system message per settings key (rule 13, where settings-only means empty
-  content plus settings fields); and tool-addition system messages, which are vendor-documented
-  but not observed on Claude Code 2.1.301 (builder-2 measured that adding or removing an MCP server
-  on resume changes `tools`, a head change under rule 6, and adds no system message). All are carried in the CLI's current form, never restored from a stored copy. Any
-  other `role: "system"` message carries per-turn content (for example the output of a
-  context-injecting `UserPromptSubmit` hook) and belongs to its turn: it is paged with that turn. A system message the proxy cannot classify is
-  carried, and the proxy logs `unclassified_system_message`; carrying is the safe failure, since
-  paging a message that must persist would lose state. Lane A pins down, with stub evidence, exactly which blocks count as injected context.
+- **Carried content** is never paged, except under the bounded fallback below: the injected
+  context blocks of any turn-start message (everything but the user's own prompt text), and the
+  `role: "system"` messages that the classification below marks as carried. All carried content is
+  forwarded in the CLI's current form, never restored from a stored copy.
+- **Classification of `role: "system"` messages**, deterministic and in this order:
+  1. **Session-start**: content and settings fields such as `output_config` together (measured:
+     the session-start message has `output_config`, hook messages do not; position is not used,
+     so resumes of hand-written session files classify correctly). Carried.
+  2. **Settings-only**: empty content plus settings fields. Carried, latest per settings key
+     (rule 13).
+  3. **Hook output**: text-only content matching the hook-output signature that lane A documents
+     with stub evidence in the A2 PR. Per-turn: paged with the turn it sits in, wherever it sits
+     in that turn (measured by reviewer-2 at zero spend in the PR #30 review: `UserPromptSubmit`
+     output arrives after the new prompt, and `PostToolUse` `additionalContext` right after the
+     `tool_result`).
+  4. **Other text-only content**: carried, because it may be a standing instruction (the vendor
+     documents output-style changes and plan mode as instructions delivered as a message that
+     keep applying). Before A2 merges, lane A measures with zero-spend stubs how an output-style
+     change, a plan-mode toggle, and a session start with no effort setting arrive; any of them
+     that lacks a settings field falls here and is carried.
+  5. **Tool-addition messages and anything with non-text blocks**: carried; non-text ones are
+     logged as `unclassified_system_message`. Tool-addition messages are vendor-documented but
+     not observed on Claude Code 2.1.301 (builder-2 measured that adding or removing an MCP
+     server on resume changes `tools`, a head change under rule 6, and adds no system message).
+  Carrying is the safe failure, since paging a message that must persist would lose state.
+  Bounded fallback: if carried content grows more than 8,000 tokens over its size at the
+  session's first request, the oldest step 4 messages are paged at the next rotation, each listed
+  in the index with its first line and recallable, and the proxy logs `carried_paged`. Lane A
+  pins down, with stub evidence, exactly which blocks count as injected context.
 - The proxy keeps an epoch state `E = (k, carried, pinned_text, index_text, head_fingerprint)`:
   the turns before turn index `k` are paged out.
 
@@ -150,9 +169,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     bytes after the new prompt. Measured by reviewer-2 with a context-injecting `UserPromptSubmit`
     hook (a single zero-spend probe of three real CLI-written turns, PR #30 review; builder-2's
     later probe agrees: about 70 characters per later turn, no `output_config`): one content system message per
-    turn, so OpenRig seats and other hook users add one every turn. Hence the split in the Terms:
-    per-turn content system messages page with their turn, and only session-start,
-    settings-only, and tool-addition messages are carried. At rotation only (deterministic, and
+    turn, so OpenRig seats and other hook users add one every turn. Hence the classification in the
+    Terms: identified hook output pages with its turn, and everything else is carried, with the
+    bounded 8,000-token fallback. At rotation only (deterministic, and
     safe for thinking because rotation strips it), keep the latest settings-only message per
     settings key. If carried content grows by more than 4,000 tokens over its size at the
     session's first request, log `carried_over_budget` in the session log.
