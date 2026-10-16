@@ -3,7 +3,8 @@
 empty JSON object to GETs, refusing WebSocket upgrades with 401), and logs structure only: method,
 path, header names, whether the request asked for a WebSocket upgrade, top-level body keys,
 store / previous_response_id / prompt_cache_key presence, input item (type, role) pairs, a leading
-tag name of text parts, and tool names. No text, no header values.
+tag name of text parts, tool names, and (M2 A6) the input indexes and top-level keys whose JSON
+mentions each Contexto MCP tool name. No text, no header values.
 
 Usage: responses_stub.py <port> <log.jsonl>
 """
@@ -11,6 +12,9 @@ import json
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+MCP_TOOLS = ("contexto_recall", "contexto_pin", "contexto_close", "contexto_state", "contexto_search")
+MENTION_WORDS = ("contexto", "mcp", "tool_search", "deferred")
 
 TAG = re.compile(r"\s*<([A-Za-z][A-Za-z0-9_-]{0,40})[\s>]")
 
@@ -39,6 +43,12 @@ def item_shape(i):
                     own += names(x, depth + 1)
             return own
         s["tool_tree"] = [{"type": t.get("type"), "keys": sorted(t), "names": names(t)} for t in tools if isinstance(t, dict)] if isinstance(tools, list) else None
+        # M2 A6: sizes and where MCP-related words occur, by namespace and tool name (no text).
+        s["tool_sizes"] = [{"namespace": t.get("name"), "description_len": len(str(t.get("description") or "")),
+                            "tools": [(u.get("name"), len(json.dumps(u)), [w for w in MENTION_WORDS if w in json.dumps(u).lower()])
+                                      for u in t.get("tools") or [] if isinstance(u, dict)],
+                            "description_mentions": [w for w in MENTION_WORDS if w in str(t.get("description") or "").lower()]}
+                           for t in tools if isinstance(t, dict)] if isinstance(tools, list) else None
     if i.get("type") == "reasoning":
         s["encrypted"] = bool(i.get("encrypted_content"))
     return s
@@ -76,6 +86,11 @@ class H(BaseHTTPRequestHandler):
                         "instructions_len": len(body.get("instructions") or ""),
                         "tool_names": [t.get("name") or t.get("type") for t in body.get("tools") or []],
                         "input": [item_shape(i) for i in body.get("input") or [] if isinstance(i, dict)]})
+            items = body.get("input") or []
+            rec["mcp_mentions"] = {
+                name: {"input_indexes": [n for n, i in enumerate(items) if name in json.dumps(i)],
+                       "top_keys": sorted(k for k, v in body.items() if k != "input" and name in json.dumps(v))}
+                for name in MCP_TOOLS}
         except Exception:
             rec["unparsed"] = True
         self._log(rec)
