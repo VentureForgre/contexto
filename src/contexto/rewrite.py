@@ -100,7 +100,6 @@ THINKING_OMITTED = "[thinking omitted]"
 CONTEXT_TAG = "<system-reminder>"
 STORE_ERRORS = (OSError, LedgerError, KeyFileError, SessionNotFoundError, PageNotFoundError)  # rule 14 store_error
 STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
-PAGE_ID = re.compile(r"\bpg_[0-9a-f]{16}\b")
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
 RESTORED_RATIO_RANGE = (1.0, 6.0)  # bytes per token a restore accepts; outside it the seed is safer (A2e)
@@ -747,15 +746,8 @@ def store_failure(error: Exception, calls: StoreCalls, state: EpochState) -> dic
     failure = {"event": kind, "epoch": state.epoch, "operation": calls.last, "error": type(error).__name__}
     if state.degraded:
         failure["degraded"] = True
-    if kind == "page_conflict":
-        page = getattr(error, "page_id", None)  # structured id (asked of lane B, A2e)
-        if not isinstance(page, str) or not PAGE_ID.fullmatch(page):
-            # Fallback until PageConflictError carries page_id: both stores put the id in the message
-            # ("page <id> exists ..." or the page file's path), never the page content.
-            found = PAGE_ID.search(str(error))
-            page = found.group(0) if found else None
-        if page:
-            failure["page_id"] = page
+    if kind == "page_conflict" and error.page_id:  # set by both stores (lane B B11, PR #73)
+        failure["page_id"] = error.page_id
     return failure
 
 

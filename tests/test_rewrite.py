@@ -1295,20 +1295,15 @@ def test_first_usage_w_counts_the_recall_knobs_like_fixed_overhead():
     assert plain - with_rule == rule_tokens > 0
 
 
-def test_page_conflict_id_prefers_the_structured_attribute_and_falls_back_to_the_message():
-    """A2e (reviewer-2 note 1 on PR #65): the page id comes from PageConflictError.page_id when the store
-    sets it; until lane B adds it, from the message both stores write."""
-    structured, quoted = "pg_" + "a" * 16, "pg_" + "b" * 16
-    error = PageConflictError(f"page {quoted} exists with different turn or messages")
-    error.page_id = structured
+def test_page_conflict_id_comes_from_the_structured_attribute_only():
+    """A2e (reviewer-2 note 1 on PR #65): the page id is PageConflictError.page_id (lane B B11, PR #73);
+    the message is never parsed, so an id that appears only in the text is not reported."""
+    page, quoted = "pg_" + "a" * 16, "pg_" + "b" * 16
     state = EpochState()
     calls = StoreCalls(MemoryStore(key=b"k" * 32))
-    assert store_failure(error, calls, state)["page_id"] == structured
-    assert store_failure(PageConflictError(f"page {quoted} exists"), calls, state)["page_id"] == quoted
-    assert "page_id" not in store_failure(PageConflictError("no id here"), calls, state)
-    malformed = PageConflictError(f"page {quoted} exists")
-    malformed.page_id = "not-a-page-id"
-    assert store_failure(malformed, calls, state)["page_id"] == quoted
+    failure = store_failure(PageConflictError(f"page {quoted} exists", page_id=page), calls, state)
+    assert failure["page_id"] == page
+    assert "page_id" not in store_failure(PageConflictError(f"page {quoted} exists"), calls, state)
 
 
 @pytest.mark.parametrize("ratio", [0.4, 9.5])
