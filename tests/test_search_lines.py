@@ -156,7 +156,7 @@ def acceptance_pages():
     script, _ = run.plan()
     turns = [[{"role": "user", "content": [{"type": "text", "text": text}]},
               {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}, {"type": "text", "text": "OK"}]}]
-             for text in script.turns[:-1]]
+             for text in script.content_turns]  # D27: the probe turns are not content
     return script, turns
 
 
