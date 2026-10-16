@@ -3,7 +3,8 @@
 From the repository root:
     python3 spikes/m2/acceptance/run.py dry-run [--turns N --turn-kbytes K --head H]   # budget, no calls
     python3 spikes/m2/acceptance/run.py approval-table   # the approval lines the doc carries and live gates on
-    python3 spikes/m2/acceptance/run.py score --h1 ANSWERS --h1-record H1JSON --baseline ANSWERS [--partial]
+    python3 spikes/m2/acceptance/run.py score --h1 ANSWERS --h1-record H1JSON --baseline ANSWERS \
+        --baseline-result REPLAYJSON [--partial]
     python3 spikes/m2/acceptance/run.py check --session-log PATH --cc-jsonl PATH [--bound 100000]
     python3 spikes/m2/acceptance/run.py check-credential --seat-settings PATH        # zero spend
     python3 spikes/m2/acceptance/run.py live --approved TOKENS --scratch DIR --home DIR --session ID \
@@ -78,11 +79,13 @@ def run_replay(args: argparse.Namespace) -> int:
         return 2
     if args.h1_record is not None:
         try:
-            h1_spent = int(json.loads(args.h1_record.read_text(encoding="utf-8"))["spent"])
+            h1 = json.loads(args.h1_record.read_text(encoding="utf-8"))
+            h1_spent = int(h1["spent"])
         except (OSError, ValueError, KeyError, TypeError):
             print("refusing: --h1-record is not a live run's H1 record", file=sys.stderr)
             return 2
         out["approval"] = {"combined": args.approved, "h1_spent": h1_spent, "replay": args.approved - h1_spent}
+        out["h1_session"] = h1.get("session")  # score ties this baseline to that H1 run
         args.approved -= h1_spent
     status, spent, answers = 0, 0, []
     window = args.context_window or replay.CONTEXT_WINDOW
@@ -111,7 +114,10 @@ def run_replay(args: argparse.Namespace) -> int:
     finally:
         del key
     out["spent"] = spent
-    (args.out / "baseline-answers.txt").write_text("\n".join(answers) + "\n", encoding="utf-8")
+    out["completed"] = len(answers)
+    # A stopped replay's answers go to a .partial name, never the full-run name (reviewer-2 on PR #123).
+    out["answers_file"] = "baseline-answers.partial.txt" if out.get("stopped") else "baseline-answers.txt"
+    (args.out / out["answers_file"]).write_text("\n".join(answers) + "\n", encoding="utf-8")
     (args.out / "replay-result.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     print(json.dumps(out, indent=2))
     return status
@@ -171,8 +177,10 @@ def main(argv: list[str] | None = None) -> int:
     score_p.add_argument("--h1-record", type=Path, required=True,
                          help="the H1 run's record (acceptance-<session>-h1.json); a stopped run is refused")
     score_p.add_argument("--partial", action="store_true",
-                         help="score a stopped H1 run anyway, labeled PARTIAL, with no acceptance 2 verdict")
+                         help="score a stopped H1 run or baseline anyway, labeled PARTIAL, with no acceptance 2 verdict")
     score_p.add_argument("--baseline", type=Path, required=True)
+    score_p.add_argument("--baseline-result", type=Path, required=True,
+                         help="the replay's replay-result.json; a stopped or short baseline is refused")
     live = sub.choices["live"]
     live.add_argument("--approved", type=int, required=True, help="tokens intake approved for the H1 run")
     live.add_argument("--scratch", type=Path, required=True)
@@ -270,25 +278,50 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "score":
         # Reviewer-2 on PR #123: a stopped run's answers are partial, and acceptance 2 compares full
-        # runs only. The H1 record decides, not the answers text.
+        # runs only, on both sides (D27 is symmetric). The H1 record and the replay result decide, not
+        # the answers text.
         try:
             record = json.loads(args.h1_record.read_text(encoding="utf-8"))
+            replayed = json.loads(args.baseline_result.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or not isinstance(replayed, dict):
+                raise ValueError
         except (OSError, ValueError):
-            print("refusing: --h1-record is not a live run's H1 record", file=sys.stderr)
+            print("refusing: --h1-record or --baseline-result is not readable as a run record", file=sys.stderr)
             return 2
-        full = isinstance(record, dict) and record.get("stopped") is None \
-            and record.get("probe_turns_completed") == len(s.probe_texts)
-        if not full and not args.partial:
-            print(f"refusing: the H1 record shows a partial run (stopped {record.get('stopped')!r}, probe turns "
-                  f"{record.get('probe_turns_completed')} of {len(s.probe_texts)}); pass --partial for a PARTIAL "
-                  "score with no acceptance 2 verdict", file=sys.stderr)
+        # Reviewer-2 on PR #123: each answers file must be the one its record names, and the baseline
+        # must have replayed this H1 run, so no record can vouch for another run's (or partial) answers.
+        session = record.get("session")
+        ties = {
+            "the H1 record's session matches its file name":
+                bool(session) and args.h1_record.name == f"acceptance-{session}-h1.json",
+            "--h1 is the answers file the H1 record names": bool(record.get("answers_file"))
+                and args.h1.resolve() == (args.h1_record.parent / str(record["answers_file"])).resolve(),
+            "--baseline is the answers file the replay result names": bool(replayed.get("answers_file"))
+                and args.baseline.resolve() == (args.baseline_result.parent / str(replayed["answers_file"])).resolve(),
+            "the baseline replayed this H1 session": bool(session) and replayed.get("h1_session") == session,
+        }
+        broken = [name for name, ok in ties.items() if not ok]
+        if broken:
+            print(f"refusing: the answers and records are not one run's (failed: {'; '.join(broken)})", file=sys.stderr)
+            return 2
+        n = len(s.probe_texts)
+        h1_full = record.get("stopped") is None and record.get("probe_turns_completed") == n
+        turns = replayed.get("turns") or []
+        base_done = sum(1 for t in turns if t.get("status") == 200)
+        base_full = not replayed.get("stopped") and len(turns) == n and base_done == n
+        if not (h1_full and base_full) and not args.partial:
+            print(f"refusing: a partial run (H1 stopped {record.get('stopped')!r}, probe turns "
+                  f"{record.get('probe_turns_completed')} of {n}; baseline stopped {replayed.get('stopped')!r}, "
+                  f"requests {base_done} of {n}); pass --partial for a PARTIAL score with no acceptance 2 verdict",
+                  file=sys.stderr)
             return 2
         h1 = score(list(s.probes), args.h1.read_text(encoding="utf-8"))
         base = score(list(s.probes), args.baseline.read_text(encoding="utf-8"))
         paged = [p for p in s.probes if p.id in s.paged_only]
         out = {"h1": h1, "baseline": base, "paged_only": score(paged, args.h1.read_text(encoding="utf-8")),
                "h1_record": {"stopped": record.get("stopped"), "probe_turns_completed": record.get("probe_turns_completed"),
-                             "probe_turns": len(s.probe_texts)}}
+                             "probe_turns": n},
+               "baseline_result": {"stopped": replayed.get("stopped"), "requests_completed": base_done, "requests": n}}
         if args.partial:
             out = {"label": "PARTIAL: not an acceptance 2 verdict", **out}
         else:
@@ -383,7 +416,7 @@ def run_h1(s: script.Script, b: budget.Budget, params: budget.Params, approved: 
     spend = h1_spend(run.spent, detectors.read_jsonl(session_log) if session_log.exists() else [],
                      abnormal=status != 0, reserve=params.max_tokens_reserve)
     taken.add("record_written")
-    record = {**spend, "turns": run.turns, "stream_compactions": transport.compactions, "cli_exit": cli_exit,
+    record = {**spend, "session": session, "turns": run.turns, "stream_compactions": transport.compactions, "cli_exit": cli_exit,
               "approved": approved, "h1_cap": h1_cap, "baseline_worst": b.baseline_replay_worst,
               "planned_turns": len(s.turns), "turns_completed": len(answers),
               "probe_turns_completed": len(probe_answers), "stopped": stopped, "answers_file": answers_name,

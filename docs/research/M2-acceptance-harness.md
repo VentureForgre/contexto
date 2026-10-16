@@ -592,10 +592,15 @@ It goes straight to the owner's proxy, bypassing Contexto.
   Caveat on record: the recall experiment's four sends (2026-10-16 03:24Z to 03:25Z) still carried
   all 11, claude-code-20250219 included, as H1's own requests did.
 - **Output, private only.** `baseline-answers.txt` and `replay-result.json` (sizes, the token
-  count, usage, stop reason, block counts). `run.py score --h1 ... --h1-record ... --baseline ...` compares
-  the two answer sets. It refuses unless the H1 record shows a full run (`stopped` null and all six
-  probe turns completed); `--partial` scores a stopped run labeled PARTIAL, with no acceptance 2
-  verdict (reviewer-2 on PR #123).
+  count, usage, stop reason, block counts). `run.py score --h1 ... --h1-record ... --baseline ...
+  --baseline-result ...` compares the two answer sets. It refuses unless both sides are full runs:
+  the H1 record shows `stopped` null and all six probe turns completed, and the replay result shows
+  no stop and six requests answered 200. A stopped replay writes `baseline-answers.partial.txt`,
+  never the full-run name. It also refuses unless each answers file is the one its record names
+  (`answers_file`, beside the record), the H1 record's `session` matches its file name, and the
+  replay result's `h1_session` (from `--h1-record`) is that session, so no record can vouch for
+  another run's or a partial answers file. `--partial` scores a stopped run anyway, labeled
+  PARTIAL, with no acceptance 2 verdict; it never loosens the ties (reviewer-2 on PR #123).
 
 `--dry` builds the request and prints its sizes with no calls. On the H1 rerun's JSONL
 (`acceptance-20261016T024733Z`) it decodes all 56 messages of the probe-turn request (18 turns, each

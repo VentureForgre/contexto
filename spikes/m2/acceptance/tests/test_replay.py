@@ -186,6 +186,8 @@ def test_replay_counts_then_sends_once_with_the_helper_key(tmp_path, stub, capsy
     result = json.loads((out / "replay-result.json").read_text())
     assert [t["count_tokens"] for t in result["turns"]] == [1_000] * 6 and result["spent"] == 6 * 1_003
     assert (out / "baseline-answers.txt").read_text() == "q_1: x\n" * 6
+    assert result["completed"] == 6 and result["answers_file"] == "baseline-answers.txt"
+    assert not (out / "baseline-answers.partial.txt").exists()
     _assert_key_absent(tmp_path, capsys)
 
 
@@ -195,7 +197,12 @@ def test_replay_stops_without_sending_when_the_count_does_not_fit(tmp_path, stub
     code = run.main(["replay", "--cc-jsonl", str(jsonl), "--out", str(tmp_path / "o"), "--approved", "5000000",
                      "--seat-settings", str(seat), "--upstream", stub])
     assert code == 1 and [x["path"] for x in _Stub.seen] == ["/v1/messages/count_tokens"]
-    assert "context window" in json.loads((tmp_path / "o" / "replay-result.json").read_text())["stopped"]
+    result = json.loads((tmp_path / "o" / "replay-result.json").read_text())
+    assert "context window" in result["stopped"] and result["completed"] == 0
+    # A stopped replay never writes the full-run name (reviewer-2 on PR #123)
+    assert result["answers_file"] == "baseline-answers.partial.txt"
+    assert (tmp_path / "o" / "baseline-answers.partial.txt").exists()
+    assert not (tmp_path / "o" / "baseline-answers.txt").exists()
 
 
 def test_replay_stops_on_the_first_401(tmp_path, stub, capsys):
@@ -301,11 +308,12 @@ def test_the_replay_approval_is_the_combined_approval_minus_the_recorded_h1_spen
     # Reviewer-2 on PR #112: tie the replay's --approved to the live run's own record.
     jsonl, seat = _setup(tmp_path)
     record = tmp_path / "acceptance-x-h1.json"
-    record.write_text(json.dumps({"spent": 4_990_000}))
+    record.write_text(json.dumps({"spent": 4_990_000, "session": "x"}))
     code = run.main(["replay", "--cc-jsonl", str(jsonl), "--out", str(tmp_path / "o"), "--approved", "5000000",
                      "--h1-record", str(record), "--seat-settings", str(seat), "--upstream", stub])
     result = json.loads((tmp_path / "o" / "replay-result.json").read_text())
     assert result["approval"] == {"combined": 5_000_000, "h1_spent": 4_990_000, "replay": 10_000}
+    assert result["h1_session"] == "x"  # score ties this baseline to that H1 run
     assert code == 1 and "approved 10,000" in result["stopped"]  # 1,000 + 32,000 output does not fit 10,000
     assert [x["path"] for x in _Stub.seen] == ["/v1/messages/count_tokens"]
     bad = tmp_path / "bad.json"
