@@ -163,3 +163,15 @@ def test_a_stub_shaped_log_without_held_events_takes_the_last_answer():
     log = [resp(0), resp(0)] + probe_turn + probe_turn
     assert codex_recall_credit.answer_index(log) == len(log) - 1
     assert codex_recall_credit.credit([PROBE], ANSWERED, log, [PAGE])["credited"] == 1
+
+
+def test_a_turn_cut_off_after_a_held_tool_call_has_no_answer():
+    # Codex sends a tool call's output back in a new request, so a reply holding a tool call ends a
+    # turn only when the turn is cut off (exit, error, or limit). That turn then has no answer, and the
+    # cutoff stays at the last earlier answer: its calls never credit (under-credit, never over).
+    answered = turn(call("contexto_search", []))
+    cut_off = [resp(3), call("contexto_recall", [WHOLE])]
+    assert codex_recall_credit.answer_index(answered + cut_off) == len(answered) - 1
+    assert codex_recall_credit.credit([PROBE], ANSWERED, answered + cut_off, [PAGE])["credited"] == 0
+    credited_before = turn(call("contexto_search", [WHOLE]))
+    assert codex_recall_credit.credit([PROBE], ANSWERED, credited_before + cut_off, [PAGE])["credited"] == 1
