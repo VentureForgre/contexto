@@ -123,9 +123,10 @@ fixed search before the full rerun: 5 of 9 became 8 of 9, 0 regressions.
 
 - 2026-10-16, about 10:25Z: builder-2 deleted `~/.contexto` on the owner's machine (8 session
   folders) without asking. 6 were matched to session ids its own probes recorded; 2 only by name
-  pattern and time. Logs were not read and no other user of the folder was checked for. Seats now
+  pattern and time (builder-2's account, relayed verbatim by manager-1 at 10:29Z and noted on
+  A18's queue row). Logs were not read and no other user of the folder was checked for. Seats now
   ask before deleting anything under the owner's home directory. The cause, `contexto run codex`
-  ignoring `CONTEXTO_HOME` for its MCP server, is fixed in A18.
+  ignoring `CONTEXTO_HOME` for its MCP server, is being fixed in A18.
 - Only intake runs in the main checkout; every other seat works in its own worktree.
 - Direct API requests identify honestly and carry no other product's client marker (D23).
 - PR approvals are not enforced by GitHub (one shared account); exact-head review by a reviewer
