@@ -108,7 +108,7 @@ a restart (verified from the run's log). Each rotation changes the text right af
 `docs/research/M2-cache-aware-rotation.md`) models resuming the epoch after a restart at 9 rotations
 instead of 19 and 9.8 to 16.2 percent lower cost, depending on the bytes-per-token rate; that is
 rule 16, released in v0.2.0 (A30, B31; replaying the run through the released engine gives
-the same 9 rotations). Codex's own compaction would not have fired (plain peak 116,731,
+the same number of rotations, 9). Codex's own compaction would not have fired (plain peak 116,731,
 modeled). Users who keep one proxy for the whole session do not hit these restarts.
 
 ## Token spend on live model calls (owner's proxy unless noted)
