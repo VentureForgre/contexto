@@ -35,8 +35,8 @@ class Params:
     index_tokens_per_page: int = 60
     pinned_tokens: int = 1_500  # what the model pins over the run [inferred]
     probe_output: int = 4_000  # answers plus thinking on the probe turn [measured: 4,169 in L2f pilot 3]
-    recalls: int = 6  # contexto_recall round trips on the probe turn [inferred]
-    recall_tokens: int = 8_000  # tokens a recall result adds, up to 32,000 characters
+    recalls: int = 2  # contexto_recall round trips on the probe turn: the script's cap (intake, 2026-10-16)
+    recall_tokens: int = 17_800  # a full recall: 32,000 characters (RECALL_LIMIT) of log text at 1.8 bytes per token
     max_tokens_reserve: int = 32_000  # the guard reserves this much output per request
 
 
@@ -140,14 +140,22 @@ def table(b: Budget, p: Params) -> str:
         f"{b.planned_over_bound}; bound_too_small {b.bound_too_small}; window budget W at the floor headroom "
         f"{b.window_budget_first:,} (the launcher warns below 25,000).",
         "",
+        approval_table(b),
+    ]
+    return "\n".join(out)
+
+
+def approval_table(b: Budget) -> str:
+    """The approval lines. ``run.py live`` gates on ``h1_worst`` from the same ``Budget``, and the
+    harness doc's table is this function's output (a test keeps them equal)."""
+    return "\n".join([
         "| Line | Expected tokens | Worst case (guard reserve) |",
         "|---|---|---|",
-        f"| H1 acceptance run through the proxy | {b.h1_expected:,} | {b.h1_worst:,} |",
+        f"| H1 acceptance run through the proxy (live refuses an approval below its worst case) | {b.h1_expected:,} | {b.h1_worst:,} |",
         f"| Full-context baseline, one direct replay request (recommended) | {b.baseline_replay:,} | {b.baseline_replay_worst:,} |",
         f"| Full-context baseline through a plain CLI session (alternative) | {b.baseline_cli:,} | - |",
         f"| **Total, H1 + replay baseline** | **{b.h1_expected + b.baseline_replay:,}** | **{b.h1_worst + b.baseline_replay_worst:,}** |",
-    ]
-    return "\n".join(out)
+    ])
 
 
 def sweep(probe_bytes: int, p: Params, turn_kbytes: tuple[int, ...] = (20, 26, 30, 34, 38, 44)) -> list[dict[str, Any]]:

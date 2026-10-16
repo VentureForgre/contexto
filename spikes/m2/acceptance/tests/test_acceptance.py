@@ -101,8 +101,10 @@ def test_conservative_estimator_for_log_text():
 def _req(epoch, inp, cache_read=0, over=False, status=200, events=()):
     usage = {"input_tokens": inp - cache_read, "cache_creation_input_tokens": 0, "cache_read_input_tokens": cache_read,
              "output_tokens": 10}
+    pre_send = [{"event": "over_bound", "source": "estimate", "in_tool_loop": True, "epoch": epoch, "estimate": inp,
+                 "bound": 0}] if over else []
     return {"event": "request", "path": "/v1/messages", "status": status, "usage": usage, "over_bound": over,
-            "epoch": epoch, "transform_events": list(events)}
+            "epoch": epoch, "transform_events": [*events, *pre_send]}
 
 
 def test_detectors_on_a_clean_synthetic_session():
@@ -121,9 +123,11 @@ def test_detectors_on_a_clean_synthetic_session():
     assert r.requests == 5 and r.epochs == 2 and r.rotations == 1  # rotation_noop is not counted
     assert r.requests_per_epoch == {"1": 2, "2": 3}
     assert r.cache_eligible == 3 and r.cache_hits == 3 and r.cache_hit_rate == 1.0
-    assert r.over_bound_requests == 1 and r.over_bound_tool_loop == [5] and r.over_bound_failures == []
+    assert r.over_bound_requests == 1 and r.pre_send_tool_loop == [5] and r.over_bound_indexes == [5]
     assert r.recall_ok == 1 and r.compaction_events == 0
-    assert all(r.verdicts().values())
+    v = r.verdicts()
+    assert not v["no_request_over_bound"]  # strict rule: even a flagged tool loop fails acceptance 1
+    assert all(ok for name, ok in v.items() if name != "no_request_over_bound")
 
 
 def test_detectors_flag_compaction_unlogged_over_bound_4xx_and_misses():
@@ -138,7 +142,7 @@ def test_detectors_flag_compaction_unlogged_over_bound_4xx_and_misses():
     r = detectors.analyze(log, cc, bound=100_000)
     v = r.verdicts()
     assert r.compaction_events == 2 and not v["zero_compaction"]
-    assert r.over_bound_failures == [2] and not v["over_bound_only_in_tool_loop"]
+    assert r.over_bound_indexes == [2] and r.pre_send_tool_loop == [] and not v["no_request_over_bound"]
     assert r.upstream_4xx == 1 and not v["zero_4xx"]
     assert r.cache_misses == [2, 3] and not v["recall_called"]
 
@@ -334,31 +338,33 @@ def test_requests_without_usage_are_unverified_and_fail_acceptance_1():
     assert detectors.analyze([_req(1, 50_000)], [], bound=150_000).verdicts()["every_request_has_usage"] is True
 
 
-def test_over_bound_is_exempt_only_in_a_flagged_tool_loop():
+def test_any_over_bound_fails_acceptance_1_under_the_strict_rule():
     real = {"event": "over_bound", "source": "real", "epoch": 1, "over_bound": True, "real_tokens": 151_000,
             "estimate": 140_000, "bound": 150_000}
     err = {"event": "estimate_error", "epoch": 1, "real_tokens": 151_000, "estimate": 120_000, "ratio": 0.795,
            "mean_ratio": 0.9}
-    # The estimate missed: the engine did not flag the request, and A2b logged it from real usage.
+    # The estimate missed: no pre-send record, and A2b logged it from real usage.
     r = detectors.analyze([_req(1, 50_000), _req(1, 151_000), real, err], [], bound=150_000)
     v = r.verdicts()
-    assert r.over_bound_failures == [2] and not v["over_bound_only_in_tool_loop"]
-    assert r.over_bound_real == 1 and r.estimator_misses == 1 and r.estimator_miss_max_tokens == 151_000
-    assert not v["no_estimator_misses"]
+    assert r.over_bound_indexes == [2] and not v["no_request_over_bound"]
+    assert r.over_bound_real == 1 and r.over_bound_real_max_tokens == 151_000 and not v["no_real_over_bound"]
     assert r.estimate_errors == 1 and r.estimate_min_ratio == 0.795 and r.estimate_mean_ratio == 0.9
-    # A tool loop the engine flagged before sending is the one exemption, and explains its real event.
+    # A tool-loop pre-send record (source "estimate", in_tool_loop true) is reported only; the real
+    # over-bound it led to still fails.
     loop = detectors.analyze([_req(1, 151_000, over=True), {**real, "estimate": 152_000}], [], bound=150_000)
-    assert loop.over_bound_tool_loop == [1] and loop.over_bound_failures == [] and loop.estimator_misses == 0
-    assert all(loop.verdicts()[k] for k in ("over_bound_only_in_tool_loop", "no_estimator_misses"))
-    # A flagged turn start is not a tool loop: bound_too_small is a configuration failure.
-    bts = detectors.analyze([_req(1, 151_000, over=True, events=[{"event": "bound_too_small", "epoch": 1}])], [],
-                            bound=150_000)
-    assert bts.over_bound_failures == [1] and bts.bound_too_small == 1 and not bts.verdicts()["no_bound_too_small"]
-    # window_minimal is counted and is no exemption: over the bound there is an estimator miss.
-    wm = detectors.analyze([_req(1, 151_000, over=True, events=[{"event": "window_minimal", "epoch": 1}])], [],
-                           bound=150_000)
-    assert wm.window_minimal == 1 and wm.over_bound_failures == [1]
-
+    lv = loop.verdicts()
+    assert loop.pre_send_tool_loop == [1] and lv["no_pre_send_over_bound_outside_tool_loop"]
+    assert not lv["no_real_over_bound"] and not lv["no_request_over_bound"]
+    # A pre-send record that is not marked as a tool loop fails, even if real usage stayed under.
+    untagged = {"event": "over_bound", "source": "estimate", "epoch": 1, "estimate": 151_000, "bound": 150_000}
+    u = detectors.analyze([_req(1, 140_000, events=[untagged])], [], bound=150_000)
+    assert u.pre_send_other == [1] and not u.verdicts()["no_pre_send_over_bound_outside_tool_loop"]
+    # bound_too_small is a configuration failure.
+    bts = detectors.analyze([_req(1, 151_000, events=[{"event": "bound_too_small", "epoch": 1}])], [], bound=150_000)
+    assert bts.bound_too_small == 1 and not bts.verdicts()["no_bound_too_small"]
+    # window_minimal is counted.
+    wm = detectors.analyze([_req(1, 120_000, events=[{"event": "window_minimal", "epoch": 1}])], [], bound=150_000)
+    assert wm.window_minimal == 1 and wm.verdicts()["no_request_over_bound"]
 
 
 def test_window_must_hold_the_newest_complete_turn_and_the_new_one():
@@ -379,3 +385,22 @@ def test_stub_dry_run_models_log_text_and_the_rest_separately():
     m = stubrun.model_tokens(body)
     assert m["log_bytes"] == 18_000 and m["tokens"] == 10_000 + -(-m["other_bytes"] // 3)
     assert body["messages"][0]["content"][0]["text"] == log  # the caller's body is not changed
+
+
+def test_probe_turn_caps_recalls_and_the_detector_checks_the_cap():
+    s4 = script.build(turns=4, turn_bytes=8_000)
+    assert f"at most {script.MAX_RECALLS} contexto_recall calls" in s4.turns[-1]
+    assert detectors.MAX_RECALLS == script.MAX_RECALLS == budget.Params().recalls == 2
+    calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * 3
+    assert detectors.analyze(calls[:2], [], bound=150_000).verdicts()["recalls_within_cap"]
+    assert not detectors.analyze(calls, [], bound=150_000).verdicts()["recalls_within_cap"]
+
+
+def test_the_doc_carries_the_budget_live_gates_on():
+    import re
+
+    doc = (Path(__file__).resolve().parents[4] / "docs" / "research" / "M2-acceptance-harness.md").read_text()
+    block = re.search(r"<!-- approval-table:begin -->\n(.*?)\n<!-- approval-table:end -->", doc, re.S)
+    _, b = run.plan()
+    assert block and block.group(1) == budget.approval_table(b)
+    assert f"{b.h1_worst:,}" in block.group(1)  # the figure run.py live refuses to go below

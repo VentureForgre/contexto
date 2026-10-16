@@ -1,4 +1,5 @@
-"""Plain-text rendering of a page, shared by the MCP ``contexto_recall`` tool and ``contexto recall``.
+"""Plain-text rendering of a page and the per-call recall size, shared by the MCP ``contexto_recall``
+tool and ``contexto recall``.
 
 ``render_page`` is builder-4's function from PR #24 (head 6cda187), moved here so the MCP server and
 the CLI render a page identically. ``recall_chunk`` is the offset and limit rule of ``contexto_recall``.
@@ -9,7 +10,27 @@ from __future__ import annotations
 import json
 from typing import Any
 
-RECALL_LIMIT = 32_000  # characters per contexto_recall call
+RECALL_LIMIT = 32_000  # characters per contexto_recall call, at most
+DEFAULT_RECALL_LIMIT = 12_000  # characters per call before the engine has recorded the window
+MAX_CHARS_PER_TOKEN = 1.5  # W converts to characters at no more than this many per token
+
+
+def recall_limit(window_tokens: int | None, bytes_per_token: float | None) -> tuple[int, str]:
+    """Characters per recall call and a note saying how the limit was set (M2 contract PR #53).
+
+    Recall results arrive inside a tool loop, where the engine cannot rotate, so one call is kept to
+    about a quarter of the session's window budget ``W``: ``W / 4`` tokens at the smaller of the
+    measured bytes per token and 1.5, and never more than 32,000 characters. Before the engine has
+    recorded ``W`` (``SessionStore.set_window``), the limit is 12,000 characters.
+    """
+    if not window_tokens or not bytes_per_token:
+        return DEFAULT_RECALL_LIMIT, (f"chunks use the {DEFAULT_RECALL_LIMIT:,}-character default because this "
+                                      "session's window budget is not recorded yet")
+    chars = int(window_tokens / 4 * min(bytes_per_token, MAX_CHARS_PER_TOKEN))
+    limit = max(1, min(RECALL_LIMIT, chars))
+    if limit == RECALL_LIMIT:
+        return limit, f"chunks are at most {RECALL_LIMIT:,} characters"
+    return limit, f"chunks are {limit:,} characters, about a quarter of this session's window budget"
 
 
 def render_page(page: dict[str, Any]) -> str:

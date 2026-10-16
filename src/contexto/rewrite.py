@@ -114,6 +114,7 @@ class EpochState:
     paged_carried: frozenset[str] = frozenset()  # hashes of carried text messages paged by the fallback
     last_carried_text_count: int | None = None  # carried text messages at the previous turn start
     carried_text_streak: int = 0  # consecutive turn starts at which that count grew
+    window_minimal_count: int = 0  # rotations that kept only the new turn (A2c, contract PR #50)
     last_estimate: int | None = None  # pre-send estimate of the previous request (A2b)
     estimate_ratio_sum: float = 0.0  # running sum of estimate / real over observed requests
     estimate_ratio_count: int = 0
@@ -541,7 +542,8 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
             f = fixed_overhead(request, messages, state, store, config, estimator)
             w = config.bound - headroom(state, config) - f
             starts = turn_starts(messages)
-            newest_start = starts[-2] if len(starts) >= 2 else starts[-1]
+            new_start = starts[-1]
+            newest_start = starts[-2] if len(starts) >= 2 else new_start
             sizing = {"epoch": state.epoch, "fixed_overhead": f, "window_budget": w}
             target = int(config.window_fraction * w)
             if state.head_changed:  # rule 6: always a new epoch; page only if the budget allows
@@ -549,7 +551,23 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
                 state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "head_change",
                                   sizing=(f, w))
             elif w <= 0 or window_tokens(messages, estimator, newest_start) > w:
-                events.append({"event": "bound_too_small", **sizing, "bound": config.bound})
+                # Rule 4 window_minimal (contract PR #50, intake 2026-10-16): W cannot hold the newest
+                # complete turn plus the new turn, so retain only the new turn; the previous turn is paged
+                # and recallable. If even the new turn exceeds W, still rotate to this minimal window (it
+                # is smaller than sending unrotated) and log bound_too_small as well.
+                new_tokens = window_tokens(messages, estimator, new_start)
+                previous_tokens = (window_tokens(messages, estimator, newest_start) - new_tokens
+                                   if newest_start < new_start else 0)
+                if new_start > state.k:
+                    state = new_epoch(messages, request, state, store, config, estimator, new_start, n, events,
+                                      "window_minimal", sizing=(f, w))
+                    state = replace(state, window_minimal_count=state.window_minimal_count + 1)
+                    events.append({"event": "window_minimal", "epoch": state.epoch, "window_budget": w,
+                                   "new_turn_tokens": new_tokens, "previous_turn_tokens": previous_tokens,
+                                   "k": new_start, "count": state.window_minimal_count})
+                if w <= 0 or new_tokens > w:
+                    events.append({"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
+                                   "new_turn_tokens": new_tokens})
             else:
                 k = choose_k(messages, state, target, estimator)
                 if k == state.k:  # rule 4: nothing to page, so no strip and no rebuild

@@ -139,6 +139,7 @@ def test_recall_renders_the_page_without_thinking(server, stores):
 
 def test_recall_pages_at_the_32000_boundary(server, stores):
     store, _, b = stores
+    store.set_window(200_000, 2.0)  # a large window, so the 32,000-character cap applies (B9)
     first = tool(server, "contexto_recall", {"page_id": b})["result"]
     total = first["structuredContent"]["total_chars"]
     assert len(first["content"][0]["text"]) == mcp.RECALL_LIMIT
@@ -153,6 +154,7 @@ def test_recall_pages_at_the_32000_boundary(server, stores):
 
 def test_recall_exactly_at_the_limit_has_no_continuation():
     store = MemoryStore("s2")
+    store.set_window(200_000, 2.0)  # a large window, so the 32,000-character cap applies (B9)
     exact = mcp.RECALL_LIMIT - len("[turn 1] user:\n")
     (pid,) = store.page_out([[{"role": "user", "content": [{"type": "text", "text": "y" * exact}]}]], first_turn=1)
     result = tool(mcp.Server(store, io.StringIO(), io.StringIO()), "contexto_recall", {"page_id": pid})["result"]
@@ -181,6 +183,7 @@ def test_search_is_exact_substring_newest_first(server, stores):
 
 def test_search_says_when_results_are_cut():
     store = MemoryStore("s3")
+    store.set_window(200_000, 2.0)  # a large window, so the 32,000-character cap applies (B9)
     store.page_out([[{"role": "user", "content": [{"type": "text", "text": f"needle {i}"}]}]
                     for i in range(mcp.SEARCH_LIMIT + 5)], first_turn=1)
     result = tool(mcp.Server(store, io.StringIO(), io.StringIO()), "contexto_search", {"query": "needle"})["result"]

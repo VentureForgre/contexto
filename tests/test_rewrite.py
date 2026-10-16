@@ -522,14 +522,16 @@ def test_estimator_recalibration_does_not_inflate_headroom():
     assert after < 1_000 and before < 1_000  # growth reflects the small added turn, not the ratio change
 
 
-def test_bound_too_small_sends_unrotated():
+def test_bound_too_small_still_rotates_to_the_minimal_window():
+    # Intake 2026-10-16 (folded into A2c): when even the new turn exceeds W, rotate to the minimal window
+    # anyway (smaller than sending unrotated) and log bound_too_small as well.
     msgs = history(6) + [user("new prompt")]
     huge_head = request(msgs, system=[{"type": "text", "text": FILL * 8}])  # F above the bound
     up, st, ev = rewrite(huge_head, None, MemoryStore(key=b"k" * 32), CONFIG, TokenEstimator())
     small = [e for e in ev if e["event"] == "bound_too_small"]
-    assert small and small[0]["window_budget"] <= 0 and "rotation" not in names(ev)
-    assert st.k == 0 and up["messages"] == msgs
-
+    assert small and small[0]["window_budget"] <= 0
+    assert "window_minimal" in names(ev) and st.k == len(msgs) - 1  # only the new turn is retained
+    assert up["messages"][0]["content"][-1] == msgs[-1]["content"][-1]  # the new turn, preamble merged
 
 def test_seat_sized_head_does_not_thrash():
     # Scaled-down OpenRig seat: head about 61% of the bound (92k of 150k measured). Half the bound as
@@ -815,3 +817,46 @@ def test_over_bound_at_a_turn_start_is_never_the_tool_loop_exemption():
     up, _, ev = rewrite(request(msgs + [assistant("a"), user("next")]), st, store, cfg, est)
     assert ev[-1]["estimate"] > cfg.bound
     assert not any(e["event"] == "over_bound" for e in ev) and not ev[-1].get("over_bound")
+
+
+# A2c: window_minimal (contract PR #50) --------------------------------------------------------------
+
+BIG = "synthetic large turn content " * 300  # about 9,000 bytes, about 2,600 tokens
+
+
+def big_history(turns):
+    msgs = [user(f"prompt 0 {BIG}", context=True), system("sys A"), assistant(f"a0 {BIG}")]
+    for t in range(1, turns):
+        msgs += [user(f"prompt {t} {BIG}"), assistant(f"a{t} {BIG}")]
+    return msgs
+
+
+def test_window_minimal_retains_only_the_new_turn_when_both_do_not_fit():
+    # builder-4's dry-run shape: turns so large that the newest complete turn plus the new turn exceed W,
+    # while the new turn alone fits.
+    cfg = Config(bound=12_000, headroom_floor=6_000, pin_budget=200, index_budget=200)
+    store = MemoryStore(key=b"k" * 32)
+    msgs = big_history(4) + [user(f"new prompt {BIG}")]
+    up, st, ev = rewrite(request(msgs), None, store, cfg, TokenEstimator())
+    minimal = [e for e in ev if e["event"] == "window_minimal"]
+    assert minimal and "bound_too_small" not in names(ev)
+    m = minimal[0]
+    assert m["k"] == len(msgs) - 1 == st.k and m["count"] == 1
+    assert m["new_turn_tokens"] <= m["window_budget"] < m["new_turn_tokens"] + m["previous_turn_tokens"]
+    assert ev[-1]["sent_estimate"] < cfg.bound  # the request sent is under the bound
+    pages = "".join(canonical_bytes(p).decode() for p in store.pages.values())
+    assert "prompt 3 " in pages  # the previous turn is paged and recallable
+    assert any(line for line in store.index_text(cfg.index_budget).splitlines())  # listed in the index
+
+
+def test_window_minimal_count_grows_and_normal_rotation_does_not_use_it():
+    cfg = Config(bound=12_000, headroom_floor=6_000, pin_budget=200, index_budget=200)
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=cfg)
+    msgs = big_history(4) + [user(f"new prompt {BIG}")]
+    engine(request(msgs), {}, MESSAGES)
+    msgs = msgs + [assistant(f"reply {BIG}"), user(f"next prompt {BIG}")]
+    _, _, ev = engine(request(msgs), {}, MESSAGES)
+    assert [e["count"] for e in ev if e["event"] == "window_minimal"] == [2]
+    _, _, normal, _ = run(history(6) + [user("new prompt")])  # both fit: ordinary rotation
+    assert "rotation" in names(normal) and "window_minimal" not in names(normal)
