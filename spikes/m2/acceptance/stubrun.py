@@ -298,6 +298,7 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
                        "any_oauth_beta_header": any(r["oauth_beta_header"] for r in stub.records)},
         "stub_paths": sorted({r["path"] for r in stub.records}),
         "verdicts": report.verdicts(),
+        "informational": report.informational(),
         "detectors": {"requests": report.requests, "rotations": report.rotations, "epochs": report.epochs,
                       "requests_per_epoch": report.requests_per_epoch, "over_bound_requests": report.over_bound_requests,
                       "unverified_requests": report.unverified_requests, "upstream_4xx": report.upstream_4xx,

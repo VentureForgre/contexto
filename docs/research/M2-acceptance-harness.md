@@ -16,7 +16,7 @@ Claims are tagged **[measured]**, **[vendor-documented]**, or **[inferred]**.
 |---|---|
 | 1. Long run: zero compaction, every request under the bound except logged over-bound turns, zero 4xx | `detectors.analyze` over the session log and Claude Code's session JSONL |
 | 2. Fidelity: within 2 probes of the full-context baseline overall, no category more than 1 below | `run.py score`, using the deterministic L2f scorer on both answer sets plus `compare` |
-| 3. Recall: a paged-out-only probe answered, and the `contexto_recall` call in the log | 4 paged-only probes, plus the `mcp_call` events |
+| 3. Recall: a paged-out-only probe answered, and the answer reached the model through Contexto's tools: a `contexto_recall` of its page or a `contexto_search` hit whose returned lines contain it | 4 paged-only probes; `run.py check --answers` credits each from the `mcp_call` events' returned ranges (`recall_credited`). Whether `contexto_recall` was called is reported under `informational`, never a verdict |
 | 4. Cache within an epoch, misses reported as a rate | `Report.cache_hit_rate` and the list of misses |
 
 ## The session
@@ -343,8 +343,8 @@ stub, with the credential checked on every request.
 | Paged-only plants in pages | 4 of 4 | 4 of 4 |
 | H1 expected / worst (stub cross-check) | 1,962,037 / 2,629,277 | 1,220,746 / 1,632,146 |
 
-Every acceptance verdict passed in both runs except `recall_called`, since the stub calls no
-tools. The stub run's 40 KB total (2,387,214 / 3,082,454) sits about 248,000 tokens under the
+Every acceptance verdict passed in both runs except `recall_called` (then a verdict, now
+informational), since the stub calls no tools. The stub run's 40 KB total (2,387,214 / 3,082,454) sits about 248,000 tokens under the
 approval table, so the guard never stops a run the stub run predicts.
 
 **Recalls in the probe turn.** The probe turn's tool loop cannot rotate, so the budget prices 2

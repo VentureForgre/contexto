@@ -160,8 +160,14 @@ class Report:
             "zero_4xx": (self.upstream_4xx == 0 and self.model_request_4xx == 0 and self.encoded_body_rejected == 0
                          and not any(400 <= s < 500 for s in self.statuses)),
             "no_local_5xx": not self.local_5xx,
-            "recall_called": self.recall_ok > 0,
         }
+
+    def informational(self) -> dict[str, Any]:
+        """Reported beside the verdicts, never a pass condition. Acceptance 3 passes on recall credit
+        from a recall or a content-bearing search hit (contract, M2 acceptance 3; intake 07:57Z), so
+        whether ``contexto_recall`` itself was called is information only."""
+        return {"recall_called": self.recall_ok > 0, "recall_calls": self.recall_calls,
+                "search_calls": self.mcp_calls.get("contexto_search", 0)}
 
 
 def paged_statements(session_dir: Path, statements: Iterable[str]) -> dict[str, bool]:

@@ -150,7 +150,18 @@ def test_detectors_flag_compaction_unlogged_over_bound_4xx_and_misses():
     assert r.compaction_events == 2 and not v["zero_compaction"]
     assert r.over_bound_indexes == [2] and r.pre_send_tool_loop == [] and not v["no_request_over_bound"]
     assert r.upstream_4xx == 1 and not v["zero_4xx"]
-    assert r.cache_misses == [2, 3] and not v["recall_called"]
+    assert r.cache_misses == [2, 3] and "recall_called" not in v
+    assert r.informational() == {"recall_called": False, "recall_calls": 0, "search_calls": 0}
+
+
+def test_a_search_only_run_passes_every_verdict_and_reports_recall_as_information():
+    # Live run #2 (c8f0b08): 82 contexto_search calls, no contexto_recall, acceptance 3 credited 4/4
+    # from search hits. The contract's acceptance 3 counts either tool (intake 07:57Z).
+    log = [_req(0, 50_000), {"event": "mcp_call", "tool": "contexto_search", "ok": True,
+                             "returned": [{"page_id": "pg_x", "start": 0, "end": 10}]}]
+    r = detectors.analyze(log, [], bound=150_000)
+    assert all(r.verdicts().values()) and "recall_called" not in r.verdicts()
+    assert r.informational() == {"recall_called": False, "recall_calls": 0, "search_calls": 1}
 
 
 def test_read_jsonl_skips_a_torn_last_line(tmp_path):

@@ -244,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         out = {k: v for k, v in report.__dict__.items()}
         out["cache_hit_rate"] = report.cache_hit_rate
         out["verdicts"] = report.verdicts()
+        out["informational"] = report.informational()
         if args.session_dir is not None:
             s0 = script.build()
             paged = detectors.paged_statements(args.session_dir, [p.statements[0] for p in s0.probes
