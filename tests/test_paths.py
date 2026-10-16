@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from contexto.paths import contexto_home, session_dir
+from contexto.paths import absolute_home, contexto_home, session_dir
 
 
 def test_home_from_env(monkeypatch, tmp_path):
@@ -33,3 +33,11 @@ def test_relative_home_is_made_absolute(monkeypatch, tmp_path):
     assert contexto_home() == tmp_path / "rel-home" and contexto_home().is_absolute()
     assert contexto_home({"CONTEXTO_HOME": "other"}) == tmp_path / "other"  # an env mapping wins
     assert contexto_home({}) == Path.home() / ".contexto"
+
+
+def test_absolute_home_expands_and_absolutizes(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    monkeypatch.chdir(tmp_path)
+    assert absolute_home("~/x") == tmp_path / "h" / "x"
+    assert absolute_home("rel") == tmp_path / "rel"
+    assert absolute_home(tmp_path / "abs") == tmp_path / "abs"

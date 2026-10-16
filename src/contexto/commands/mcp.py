@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from contexto.paths import contexto_home
+from contexto.paths import absolute_home, contexto_home
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -25,5 +25,7 @@ def run(args: argparse.Namespace) -> int:
     from contexto.mcp import serve_stdio
     from contexto.store import SessionStore
 
-    home = args.home or contexto_home()  # the same resolution as the other subcommands (B24)
+    # The same resolution as the other subcommands, and --home under the same rule (B24): a client that
+    # writes --home=~/y without a shell gets the expanded absolute path, not a literal ./~/y.
+    home = absolute_home(args.home) if args.home else contexto_home()
     return serve_stdio(SessionStore(home, args.session))

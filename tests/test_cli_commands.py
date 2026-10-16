@@ -238,3 +238,19 @@ def test_mcp_resolves_contexto_home_like_the_other_subcommands(tmp_path, monkeyp
     assert seen["dir"] == expected / "sessions" / "s1"
     assert seen["dir"].is_absolute() and paths.contexto_home() == expected  # what `contexto sessions` reads
     assert not (tmp_path / "~").exists()  # no literal ./~ directory
+
+
+@pytest.mark.parametrize("value", ["~/y", "rel-home"])
+def test_mcp_home_option_is_expanded_and_absolute(tmp_path, monkeypatch, value):
+    # --home as a hand-written MCP client passes it, with no shell to expand ~ (reviewer-2 on #152).
+    import contexto.mcp
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ignored"))  # --home wins
+    seen = {}
+    monkeypatch.setattr(contexto.mcp, "serve_stdio", lambda store: seen.setdefault("dir", store.dir) and 0)
+    assert cli.main(["mcp", "--session", "s1", f"--home={value}"]) == 0
+    expected = {"~/y": tmp_path / "home" / "y", "rel-home": tmp_path / "rel-home"}[value]
+    assert seen["dir"] == expected / "sessions" / "s1" and seen["dir"].is_absolute()
+    assert not (tmp_path / "~").exists() and not (tmp_path / "ignored").exists()
