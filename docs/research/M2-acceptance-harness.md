@@ -319,10 +319,10 @@ KB, head 47,628, bound 150,000, 2 recalls sized by B9 (below).
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy, 6 probe turns (D27) | 2,952,139 | 4,001,983 |
+| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,880,890 | 6,561,088 |
 | Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,684,717 | 2,872,721 |
 | Full-context baseline through a plain CLI session (alternative) | 5,054,874 | - |
-| **Total, H1 + baseline (live refuses an approval below the worst case)** | **5,636,856** | **6,874,704** |
+| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,565,607** | **9,433,809** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
@@ -366,6 +366,24 @@ B21 grew those definitions, in Claude Code's request form, from 2,743 to 2,827 b
 dry run #5): 47,600 + ceil(84 / 3.0) = 47,628 (`budget.HEAD`). A test fails when the definitions
 change without updating it. The engine's own estimate of `F` rose about 85 at the dry runs'
 rotations, because it counts tool JSON more conservatively; the gate follows the measured bytes.
+
+**Tool-loop rounds** (calibrated on live run #3, main fbb1303; intake 2026-10-16 10:06Z). A probe
+turn's tool loop runs in rounds. Each round re-sends the whole window, so the round count, not the
+growth per round, drives the cost. Run #3's probe turns took 4/2/1/4/5/4 rounds after their first
+request (`budget.TOOL_ROUNDS_RUN3`, 20 in all, 78 searches), and the input grew 1,302 to 8,164 tokens
+per round (`budget.ROUND_GROWTH_RUN3`).
+- The **worst case** (the guard and the table's worst column) prices `Params.tool_rounds` = 5 rounds of
+  `Params.round_tokens` = 8,200 on every probe turn: the most rounds and the largest growth, rounded up
+  to 100.
+- The **expected case** prices round(3.33 x 6) = 20 rounds, spread 4, 4, 3, 3, 3, 3, at
+  `Params.round_tokens_expected` = 2,100: the rounds-weighted mean growth, 2,094, rounded up to 100.
+- Neither count is limited by the turn room, since run #3's rounds were not.
+- This replaces the earlier pricing of up to 2 room-limited recalls of 17,778 tokens each, which the
+  run exceeded by 795,945.
+- The expected H1 is now 3,880,890, 3.5% over run #3's real 3,748,084. The table's worst is 9,433,809,
+  so the next live run needs at least that approval.
+- `test_tool_rounds_are_calibrated_on_live_run_3` pins all of this. `script.MAX_RECALLS` (2) stays as a
+  report-only recall cap.
 
 **Intake's parameters** (2026-10-16 00:40Z): bound 150,000 with at least 375,000 tokens of
 history; the replay baseline, labeled no-replayed-thinking; up to 4,000,000 tokens with the guard

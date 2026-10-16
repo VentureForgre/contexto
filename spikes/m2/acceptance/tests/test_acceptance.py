@@ -75,8 +75,8 @@ def test_rotation_always_retains_the_newest_complete_turn(s):
     assert b.rotations >= 1 and b.bound_too_small == 0
     assert b.planned_over_bound == 0
     turn_epoch = {r.turn: r.epoch for r in b.rows if r.kind == "probe"}
-    recall_rows = [r for r in b.rows if r.kind == "recall"]
-    assert recall_rows and all(r.epoch == turn_epoch[r.turn] for r in recall_rows)  # tool loop never rotates
+    round_rows = [r for r in b.rows if r.kind == "round"]
+    assert round_rows and all(r.epoch == turn_epoch[r.turn] for r in round_rows)  # tool loop never rotates
 
 
 def test_budget_lines_and_worst_case(s):
@@ -84,7 +84,7 @@ def test_budget_lines_and_worst_case(s):
     b = budget.simulate(list(s.content_bytes), list(s.probe_bytes), p)
     assert b.h1_worst > b.h1_expected > 0
     assert b.baseline_cli > b.baseline_replay > b.history_tokens
-    assert b.h1_worst - b.h1_expected == sum(p.max_tokens_reserve - r.output_expected for r in b.rows)
+    assert b.h1_worst == sum(r.input_tokens + p.max_tokens_reserve for r in b.rows)  # the worst pass's rows
 
 
 def test_bound_too_small_when_the_window_budget_cannot_hold_a_turn():
@@ -491,7 +491,7 @@ def test_stub_budget_prices_six_probe_turns_and_six_baseline_requests():
     assert len(out["baseline_requests"]) == script.PROBE_TURNS
     assert out["baseline_replay_worst"] == sum(out["baseline_requests"]) + script.PROBE_TURNS * p.max_tokens_reserve
     per_recall = budget.recall_tokens(p)
-    priced = inputs[:3] + [x + k * per_recall for x in inputs[3:] for k in range(p.recalls + 1)]
+    priced = inputs[:3] + [x + k * per_recall for x in inputs[3:] for k in range(p.tool_rounds + 1)]
     assert out["h1_worst"] == sum(priced) + len(priced) * p.max_tokens_reserve
     assert out["total_worst"] == out["h1_worst"] + out["baseline_replay_worst"]
 
@@ -501,7 +501,7 @@ def test_probe_turn_is_tool_neutral_and_the_recall_budget_is_report_only():
     for probe in s4.probe_texts:
         assert "contexto" not in probe and "recall" not in probe  # intake: product-realistic wording
         assert "If the conversation does not contain it, say unknown." in probe
-    assert detectors.MAX_RECALLS == script.MAX_RECALLS == budget.Params().recalls == 2
+    assert detectors.MAX_RECALLS == script.MAX_RECALLS == 2  # a report-only recall cap; the budget prices rounds
     assert detectors.PROBE_TURNS == script.PROBE_TURNS  # D27: the budget prices 2 recalls per probe turn
     calls = [{"event": "mcp_call", "tool": "contexto_recall", "ok": True}] * (2 * script.PROBE_TURNS + 1)
     r = detectors.analyze(calls, [], bound=150_000)
@@ -534,10 +534,10 @@ def test_live_refuses_a_missing_seat_settings_file_or_a_git_scratch(tmp_path, ca
     assert code == 2 and "inside a git work tree" in capsys.readouterr().err
 
 
-def test_recalls_are_priced_at_the_largest_b9_chunk_and_the_probe_turn_fits():
+def test_tool_rounds_are_priced_per_round_and_the_probe_turn_fits():
     _, b = run.plan()
-    assert b.recall_tokens == budget.recall_tokens(budget.Params()) == 17_778  # 32,000 chars at 1.8
-    assert budget.b9_recall_tokens(84_303) <= b.recall_tokens  # B9 returns less at a smaller W
+    assert b.recall_tokens == budget.recall_tokens(budget.Params()) == budget.Params().round_tokens == 8_200
+    assert budget.b9_largest_chunk_tokens() == 17_778  # 32,000 chars at 1.8: one recall's largest chunk (info)
     assert budget.b9_recall_tokens(84_303) == math.ceil(int(84_303 / 4 * 1.5) / 1.8)
     probe_turns = [r for r in b.rows if r.kind in ("probe", "recall")]
     assert sum(r.kind == "probe" for r in probe_turns) == script.PROBE_TURNS  # D27
@@ -917,7 +917,9 @@ def test_a_trailing_slash_model_request_counts_toward_spend_exactly_once(tmp_pat
 def test_a12_both_triggers_use_the_room_target_when_it_restores_the_room():
     # Engine order (rewrite.rotate_at_turn_start) and contract PR #120 (9eb191b): when the size trigger
     # and the room condition both fire, the room-sized target is used if it restores the room.
-    p = budget.Params(bound=80_000, head=20_000, min_turn_room=12_000)
+    # One round of 17,778 at probe turn 1 is what the old room-limited recall pricing gave here, and it
+    # sets up the both-trigger case at turn 16.
+    p = budget.Params(bound=80_000, head=20_000, min_turn_room=12_000, tool_rounds=1, round_tokens=17_778)
     b = budget.simulate([24_000] * 14, [1_200] * 2, p)
     both = [r for r in b.rows if r.note.startswith("rotation (bound + A12 room)")]
     assert both
@@ -949,3 +951,20 @@ def test_head_follows_contexto_tool_bytes():
     assert budget.HEAD == budget.Params().head == 47_628
     assert budget.HEAD == budget.HEAD_MEASURED + math.ceil(
         (budget.CONTEXTO_TOOL_BYTES - budget.CONTEXTO_TOOL_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN)
+
+
+def test_tool_rounds_are_calibrated_on_live_run_3():
+    # Intake 10:06Z: price the worst case at run #3's most rounds and largest per-round growth, the
+    # expected case at its mean rounds and rounds-weighted mean growth (each rounded up to 100).
+    rounds, growth = budget.TOOL_ROUNDS_RUN3, budget.ROUND_GROWTH_RUN3
+    p = budget.Params()
+    assert sum(rounds) == 20 and p.tool_rounds == max(rounds) == 5
+    assert p.tool_rounds_expected == sum(rounds) / len(rounds)
+    assert p.round_tokens == math.ceil(max(growth) / 100) * 100 == 8_200
+    weighted = sum(r * g for r, g in zip(rounds, growth)) / sum(rounds)
+    assert p.round_tokens_expected == math.ceil(weighted / 100) * 100 == 2_100
+    s, b = run.plan()
+    assert budget.expected_rounds(p, len(s.probe_texts)) == [4, 4, 3, 3, 3, 3] and b.expected_tool_rounds == 20
+    assert abs(b.h1_expected - budget.H1_SPENT_RUN3) / budget.H1_SPENT_RUN3 < 0.05  # tracks run #3's real H1
+    assert b.h1_worst > budget.H1_SPENT_RUN3 and b.planned_over_bound == 0
+    assert sum(r.kind == "round" for r in b.rows) == p.tool_rounds * len(s.probe_texts)  # worst: every turn

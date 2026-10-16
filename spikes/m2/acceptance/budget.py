@@ -37,6 +37,16 @@ HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
 CONTEXTO_TOOL_BYTES = 2_827  # main 8571095
 HEAD = HEAD_MEASURED + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
+
+# Tool-loop rounds, calibrated on live run #3 (main fbb1303, 2026-10-16; intake 10:06Z). Its probe
+# turns took 5/3/2/5/6/5 Messages requests: 4/2/1/4/5/4 tool-loop rounds after the first request, 20
+# in all, for 78 contexto_search calls. The input grew by these tokens per round (the turn's last input
+# minus its first, over its rounds). Params prices the worst case at the most rounds and the largest
+# growth, rounded up to 100, and the expected case at the mean rounds and the rounds-weighted mean
+# growth, rounded up to 100. test_tool_rounds_are_calibrated_on_live_run_3 pins both.
+TOOL_ROUNDS_RUN3 = (4, 2, 1, 4, 5, 4)
+ROUND_GROWTH_RUN3 = (1_534, 2_771, 8_164, 1_676, 1_302, 2_206)
+H1_SPENT_RUN3 = 3_748_084
 HEADROOM_FLOOR = 25_000
 
 
@@ -58,10 +68,14 @@ class Params:
     index_tokens_per_page: int = 60
     pinned_tokens: int = 1_500  # what the model pins over the run [inferred]
     probe_output: int = 4_000  # answers plus thinking on the probe turn [measured: 4,169 in L2f pilot 3]
-    recalls: int = 2  # contexto_recall round trips on the probe turn: the script's cap (intake, 2026-10-16)
-    # Tokens one recall adds. None: the largest chunk B9 (PR #56) can return, RECALL_LIMIT characters of
-    # log text at 1.8 bytes per token. B9 returns less when W / 4 is smaller, so this errs high.
-    recall_tokens: int | None = None
+    # Tool-loop rounds per probe turn and what each adds to the input (calibrated on live run #3,
+    # intake 2026-10-16 10:06Z; see TOOL_ROUNDS_RUN3 below). Each round re-sends the whole window, so the
+    # round count drives the cost. The worst case prices the observed maximum, the expected case the
+    # observed mean; neither is limited by the turn room, since run #3's rounds were not.
+    tool_rounds: int = 5  # worst: the most rounds any probe turn took in run #3
+    round_tokens: int = 8_200  # worst: the largest per-round input growth in run #3 (8,164), rounded up
+    tool_rounds_expected: float = 20 / 6  # expected: run #3's 20 rounds over 6 probe turns
+    round_tokens_expected: int = 2_100  # expected: run #3's rounds-weighted mean growth (2,094), rounded up
     max_tokens_reserve: int = 32_000  # the guard reserves this much output per request
     # A12 (contract PR #115): a turn also rotates when the recall room it would publish,
     # bound - estimate - headroom floor, would be under this. The engine's own default, when it has one.
@@ -95,8 +109,9 @@ class Budget:
     bound_too_small: int = 0
     window_budget_first: int = 0
     window_budget_probe: int = 0  # W at the probe turn, as simulated
-    recall_tokens: int = 0  # tokens each recall is priced at
+    recall_tokens: int = 0  # tokens each worst-case tool-loop round adds (Params.round_tokens)
     b9_recall_tokens: int = 0  # what B9 would return at the simulated W (informational)
+    expected_tool_rounds: int = 0  # tool-loop rounds the expected pass priced over all probe turns
     probe_rooms: list[int] = field(default_factory=list)  # A9 turn room at each probe turn's start
     baseline_requests: list[int] = field(default_factory=list)  # D27 baseline: input of each request
     room_rotations: int = 0  # rotations fired by A12's room condition (contract PR #115)
@@ -105,8 +120,13 @@ class Budget:
 
 
 def recall_tokens(p: Params) -> int:
-    """Tokens each ``contexto_recall`` is priced at: the largest chunk B9 can return, read as log text."""
-    return p.recall_tokens if p.recall_tokens is not None else math.ceil(RECALL_LIMIT / BYTES_PER_TOKEN_LOG)
+    """The worst-case input growth of one tool-loop round."""
+    return p.round_tokens
+
+
+def b9_largest_chunk_tokens() -> int:
+    """The largest chunk B9 can return in one recall, read as log text (informational since run #3)."""
+    return math.ceil(RECALL_LIMIT / BYTES_PER_TOKEN_LOG)
 
 
 def b9_recall_tokens(window_budget: int) -> int:
@@ -120,13 +140,34 @@ def turn_tokens(turn_bytes: int) -> int:
     return int(turn_bytes / BYTES_PER_TOKEN_LOG) + 1
 
 
+def expected_rounds(p: Params, probe_turns: int) -> list[int]:
+    """The expected rounds per probe turn: round(mean x turns) in total, spread as evenly as possible,
+    the extra rounds on the earliest turns."""
+    total = round(p.tool_rounds_expected * probe_turns)
+    base, extra = divmod(total, probe_turns)
+    return [base + (1 if k < extra else 0) for k in range(probe_turns)]
+
+
 def simulate(turn_bytes: list[int], probe_bytes: int | list[int], p: Params = Params()) -> Budget:
+    """The worst-case simulation (``_simulate`` at ``tool_rounds`` rounds of ``round_tokens``), with
+    ``h1_expected`` from a second pass at the expected rounds and growth (live run #3 calibration)."""
+    probes = probe_bytes if isinstance(probe_bytes, list) else [probe_bytes]
+    b = _simulate(turn_bytes, probe_bytes, p, [p.tool_rounds] * len(probes), p.round_tokens)
+    e = _simulate(turn_bytes, probe_bytes, p, expected_rounds(p, len(probes)), p.round_tokens_expected)
+    b.h1_expected = e.h1_expected
+    b.expected_tool_rounds = sum(expected_rounds(p, len(probes)))
+    return b
+
+
+def _simulate(turn_bytes: list[int], probe_bytes: int | list[int], p: Params, rounds: list[int],
+              round_tokens: int) -> Budget:
     """Simulate the proxy per contract rule 4 (window budget after fixed overhead) and rule 5.
 
     ``probe_bytes`` is one probe turn's size, or (D27) a list of probe turns asked in order. Each
     probe turn starts like any turn (rotation rules apply), A9's turn room is set from its first
-    request (``max(0, bound - (input + output) - headroom floor)``), and its recalls, each priced at
-    ``recall_tokens(p)``, stop at that room. Its answers and recalled evidence stay in the history.
+    request (``max(0, bound - (input + output) - headroom floor)``). Its tool loop then runs
+    ``rounds[k]`` rounds, each adding ``round_tokens`` to the input; the loop never rotates. Its answers
+    and the tool output stay in the history.
     """
     b = Budget()
     sizes = [turn_tokens(x) for x in turn_bytes]
@@ -136,7 +177,7 @@ def simulate(turn_bytes: list[int], probe_bytes: int | list[int], p: Params = Pa
     paged = 0
     epoch = 1
     max_growth = 0
-    b.recall_tokens = recall_tokens(p)
+    b.recall_tokens = round_tokens
 
     def start_turn(t: int, u: int, kind: str) -> tuple[int, int, int]:
         """Apply the turn-start rotation rules for a new turn of ``u`` tokens; return its first input,
@@ -230,15 +271,13 @@ def simulate(turn_bytes: list[int], probe_bytes: int | list[int], p: Params = Pa
         room = max(0, p.bound - (inp + 200) - HEADROOM_FLOOR)  # A9, from the turn's first request
         b.probe_rooms.append(room)
         added = 0
-        recalls = 0
-        while recalls < p.recalls and added + b.recall_tokens <= room:
-            recalls += 1
-            added += b.recall_tokens
-            last = recalls == p.recalls or added + b.recall_tokens > room
+        n = rounds[k - 1]
+        for r in range(1, n + 1):
+            added += round_tokens
             r_inp = inp + added
-            b.rows.append(Row(len(sizes) + k, "recall", r_inp, len(retained), paged, epoch, r_inp > p.bound,
-                              output_per_probe_turn if last else 200, "tool loop: never rotates"))
-        if recalls == 0:
+            b.rows.append(Row(len(sizes) + k, "round", r_inp, len(retained), paged, epoch, r_inp > p.bound,
+                              output_per_probe_turn if r == n else 200, "tool loop: never rotates"))
+        if n == 0:
             b.rows[-1].output_expected = output_per_probe_turn
         retained.append(u + added + output_per_probe_turn)
     b.h1_expected = sum(r.input_tokens + r.output_expected for r in b.rows)
