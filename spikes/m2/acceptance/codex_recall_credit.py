@@ -2,8 +2,7 @@
 
 ``recall_credit.credit`` finds the answering request as the last ``/v1/messages`` request. A Codex
 session's model requests go through the proxy as ``POST /responses`` (or ``/v1/responses``), so it
-finds none, applies no cutoff, and credits calls logged after the answer too. Everything else carries
-over unchanged, because render and search read
+finds none and, since B28, credits nothing. Everything else carries over unchanged, because render and search read
 Responses pages (B20, B23): ranges come from the content-free ``mcp_call`` events, plants from
 ``render_page``, only ``paged`` spans credit (B19), and a page's ranges are merged before the
 containment check (B16). This module therefore differs only in how it finds the answer:
@@ -85,8 +84,5 @@ def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
     """``recall_credit.credit`` for a Codex session; same arguments and result shape."""
     if not any(_is_responses_request(ev) for ev in session_log):
         return recall_credit.credit(probes, answers, session_log, pages)
-    answer_at = answer_index(session_log)
-    view = answer_view(session_log, answer_at)
-    if answer_at is None:  # fail closed: an answer marker before every call, so none precedes it
-        view = [{"event": "request", "path": "/v1/messages"}] + view
-    return recall_credit.credit(probes, answers, view, pages)
+    # With no answer the view has no request event, and recall_credit fails closed (B28).
+    return recall_credit.credit(probes, answers, answer_view(session_log, answer_index(session_log)), pages)

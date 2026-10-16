@@ -60,12 +60,11 @@ def test_credited_through_a_contexto_recall_range():
     assert row["credited"] and row["via"]["tool"] == "contexto_recall" and r["acceptance_3"]
 
 
-def test_the_messages_rule_fails_open_on_a_codex_log():
-    # recall_credit finds no /v1/messages request in a Codex log, so it applies no cutoff and credits a
-    # call logged after the answer. The Codex rule finds the answer and does not.
-    late = turn(call("contexto_search", [])) + [call("contexto_recall", [WHOLE])]
-    assert recall_credit.credit([PROBE], ANSWERED, late, [PAGE])["credited"] == 1
-    assert codex_recall_credit.credit([PROBE], ANSWERED, late, [PAGE])["credited"] == 0
+def test_the_messages_rule_finds_no_answer_in_a_codex_log():
+    # recall_credit looks for /v1/messages, so on a Codex log it fails closed (B28) and credits nothing.
+    log = turn(call("contexto_search", [WHOLE]))
+    assert recall_credit.credit([PROBE], ANSWERED, log, [PAGE])["credited"] == 0
+    assert codex_recall_credit.credit([PROBE], ANSWERED, log, [PAGE])["credited"] == 1
 
 
 def test_credited_through_a_contexto_search_paged_hit():
@@ -156,10 +155,10 @@ def test_the_log_view_keeps_indices_and_every_other_event():
 
 
 def test_a_stub_shaped_log_without_held_events_takes_the_last_answer():
-    # The A16 stub dry run (codex_stub.py) streams output_item.done but no output_item.added, so the
-    # proxy's hold never starts: every request logs held_events 0, tool rounds included. Each probe
-    # turn then reads: the tool round's request, the exec call's search and recall, the answer request.
-    # The rule falls back to the last successful request, which is the last probe turn's answer.
+    # An upstream that streams output_item.done but no output_item.added (codex_stub.py before #154's
+    # fix) never starts the proxy's hold: every request logs held_events 0, tool rounds included. Each
+    # probe turn then reads: the tool round's request, the exec call's search and recall, the answer
+    # request. The rule falls back to the last successful request, the last probe turn's answer.
     probe_turn = [resp(0), call("contexto_search", [WHOLE]), call("contexto_recall", [WHOLE]), resp(0)]
     log = [resp(0), resp(0)] + probe_turn + probe_turn
     assert codex_recall_credit.answer_index(log) == len(log) - 1
