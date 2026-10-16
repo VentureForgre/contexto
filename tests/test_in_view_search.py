@@ -21,8 +21,15 @@ def store(request, tmp_path):
     return s
 
 
-def snapshot(store, entries, room=10_000):
-    """One request as lane A drives it (A14): the snapshot, then the request-time room publish."""
+def snapshot(store, entries, room=10_000, question="what changed?"):
+    """One request as lane A drives it (A14): the snapshot, then the request-time room publish.
+
+    The snapshot ends with the current turn's own question (a user entry in the newest turn), which
+    in-view search skips (B22); pass question=None to send the entries as they are.
+    """
+    if question is not None:
+        newest = max((e["turn"] for e in entries), default=0) + 1
+        entries = [*entries, entry(newest, 0, question)]
     store.set_retained(3, 12, entries)
     store.set_turn_room("7", room)
 
@@ -154,3 +161,27 @@ def test_the_newest_in_view_matches_win_across_messages(store):
     assert body.split("\n")[1:5] == ["> in view (turn 17): deploy.target=b2", "> in view (turn 17): deploy.target=b1",
                                       "> in view (turn 16): deploy.target=a4", "  [3 more matching lines in view]"]
     assert last_event(store)["in_view_hits"] == 3
+
+
+
+# B22 (contract PR #143): the current turn's own question is not an in-view hit
+
+
+def test_the_current_question_is_not_returned_in_view_but_earlier_turns_and_tool_results_are(store):
+    snapshot(store, [entry(16, 0, "earlier: deploy.target=blue"),
+                     entry(18, 0, "What is deploy.target now?"),  # the question, in the newest turn
+                     entry(18, 1, "tool_result deploy.target=green", "tool_result"),  # a tool result in it
+                     entry(17, 0, "the user said deploy.target=red")], question=None)
+    body, _ = search(store, "deploy.target")
+    lines = body.split("\n")
+    assert lines[1:4] == ["> in view (turn 18): tool_result deploy.target=green",
+                          "> in view (turn 17): the user said deploy.target=red",
+                          "> in view (turn 16): earlier: deploy.target=blue"]
+    assert "What is deploy.target now?" not in body
+    assert last_event(store)["in_view_hits"] == 3
+
+
+def test_a_snapshot_holding_only_the_current_question_has_no_in_view_hit(store):
+    snapshot(store, [entry(18, 0, "What is deploy.target now?")], question=None)
+    body, coverage = search(store, "deploy.target")
+    assert body == mcp.NO_HIT and coverage == mcp.SEARCH_COVERAGE
