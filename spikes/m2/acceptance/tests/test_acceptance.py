@@ -494,6 +494,11 @@ def test_stub_budget_prices_six_probe_turns_and_six_baseline_requests():
     priced = inputs[:3] + [x + k * per_recall for x in inputs[3:] for k in range(p.tool_rounds + 1)]
     assert out["h1_worst"] == sum(priced) + len(priced) * p.max_tokens_reserve
     assert out["total_worst"] == out["h1_worst"] + out["baseline_replay_worst"]
+    # The expected figure at the expected rounds and growth, not the worst (reviewer-2 on #146)
+    rounds = budget.expected_rounds(p, script.PROBE_TURNS)
+    exp_in = inputs[:3] + [x + k * p.round_tokens_expected for x, n in zip(inputs[3:], rounds) for k in range(n + 1)]
+    exp_out = [p.reply_tokens] * 3 + [o for n in rounds for o in [200] * n + [max(200, p.probe_output // script.PROBE_TURNS)]]
+    assert out["h1_expected"] == sum(exp_in) + sum(exp_out) < out["h1_worst"]
 
 
 def test_probe_turn_is_tool_neutral_and_the_recall_budget_is_report_only():

@@ -196,13 +196,22 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
     window = budgets[-1] if budgets else 0
     per_recall = budget.recall_tokens(p)
     recall_inputs = [probe_input + k * per_recall for k in range(1, p.tool_rounds + 1)]
-    all_inputs = inputs[:len(inputs) - len(probe_inputs)]
-    outputs = [p.reply_tokens] * len(all_inputs)
-    for x in probe_inputs:
-        all_inputs += [x] + [x + k * per_recall for k in range(1, p.tool_rounds + 1)]
-        outputs += [200] * p.tool_rounds + [output_per_probe_turn]
-    h1_expected = sum(all_inputs) + sum(outputs)
-    h1_worst = sum(x + p.max_tokens_reserve for x in all_inputs)
+    content_inputs = inputs[:len(inputs) - len(probe_inputs)]
+
+    def priced(rounds: list[int], growth: int) -> tuple[list[int], list[int]]:
+        """Every request's input and expected output, the probe turns run at ``rounds`` of ``growth``."""
+        ins, outs = list(content_inputs), [p.reply_tokens] * len(content_inputs)
+        for x, n in zip(probe_inputs, rounds):
+            ins += [x] + [x + k * growth for k in range(1, n + 1)]
+            outs += [200] * n + [output_per_probe_turn]
+        return ins, outs
+
+    # As budget.simulate prices them: the worst case at tool_rounds of round_tokens on every probe turn,
+    # the expected case at the expected rounds and growth (reviewer-2 on #146).
+    worst_inputs, _ = priced([p.tool_rounds] * len(probe_inputs), per_recall)
+    exp_inputs, exp_outputs = priced(budget.expected_rounds(p, len(probe_inputs)), p.round_tokens_expected)
+    h1_expected = sum(exp_inputs) + sum(exp_outputs)
+    h1_worst = sum(x + p.max_tokens_reserve for x in worst_inputs)
     # D27's symmetric baseline: one full-context request per probe turn, request k carrying probe
     # turns 1..k-1 with their answers (budget.simulate's baseline_requests, with the measured head).
     history = sum(budget.turn_tokens(x) + p.reply_tokens for x in turn_bytes)
