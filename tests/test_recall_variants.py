@@ -163,3 +163,36 @@ def test_the_index_does_not_repeat_identifiers_already_on_the_line(store):
     [pid] = store.page_out([turn], 2)
     assert store.index_text(4000) == (f"{pid} turn 2: deploy billing-edge now, see conf/app.toml; then ledger-edge "
                                       "[tools: read_file] [files: conf/app.toml] [ids: owner, retry_policy]")
+
+
+JSON_RESULT = '{"deploy_target": "blue-canary", "region": "eu-west", "owner_team": "data-platform"}'
+
+
+def test_values_after_a_colon_in_json_are_never_listed(store):
+    """Reviewer-1's case on PR #71: a Bash tool_result printing JSON with digit-free values."""
+    turn = [{"role": "user", "content": "check the deploy config"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                                "input": {"command": "cat deploy.json"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": JSON_RESULT}]}]
+    store.page_out([turn], 2)
+    ids = store.index_text(4000).split("[ids: ", 1)[1].rstrip("]").split(", ")
+    assert {"deploy_target", "region", "owner_team"} <= set(ids)
+    for value in ("blue-canary", "eu-west", "data-platform"):
+        assert value not in store.index_text(4000)
+
+
+@pytest.mark.parametrize("text", [
+    "deploy_target: blue-canary\nregion: eu-west\n  - owner_team: data-platform\n",  # YAML
+    "deploy_target = blue-canary; region =  eu-west, owner_team= data-platform",  # spaced =
+    "deploy_target='blue-canary' region:\"eu-west\" owner_team = \"data-platform\"",  # quoted
+    JSON_RESULT,
+])
+def test_values_after_equals_or_colon_are_never_listed_in_any_layout(text):
+    ids = salient_identifiers([text])
+    assert {"deploy_target", "owner_team"} <= set(ids)
+    assert not {"blue-canary", "eu-west", "data-platform"} & set(ids)
+
+
+def test_a_value_in_plain_prose_is_the_documented_limit():
+    # No = or : marks it, and it has no digit, so it reads as a name. Documented in salient_identifiers.
+    assert "blue-canary" in salient_identifiers(["the deploy target is now blue-canary"])

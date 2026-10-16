@@ -73,10 +73,13 @@ def lists_identifiers(variant: str) -> bool:
     return variant != "legacy"
 
 
-# A key in key=value, or a dotted, underscored, dashed, or slashed name starting with a letter.
-_KEY = re.compile(r"([A-Za-z][\w.\-/]*?)=")
+# Keys: key=value and key = value; "key": (JSON); key: at the start of a line (YAML, logs).
+_KEY = re.compile(r"""(?:"([A-Za-z][\w.\-/]*)"\s*[=:]|([A-Za-z][\w.\-/]*?)\s*=|^[ \t]*(?:-[ \t]+)?([A-Za-z][\w.\-/]*):)""",
+                  re.MULTILINE)
+# A dotted, underscored, dashed, or slashed name starting with a letter.
 _NAME = re.compile(r"(?<![\w.\-/])[A-Za-z][A-Za-z0-9]*(?:[._\-/][A-Za-z0-9]+)+")
-_VALUE = re.compile(r"=[^\s,;]*")
+# What follows = or : is a value: a quoted string, or everything up to a separator.
+_VALUE = re.compile(r"""([=:])[ \t]*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;{}\[\]]*)""")
 
 
 def _value_like(ident: str) -> bool:
@@ -85,21 +88,25 @@ def _value_like(ident: str) -> bool:
 
 
 def salient_identifiers(texts: Iterable[str], limit: int = SALIENT_MAX, max_chars: int = SALIENT_CHARS) -> list[str]:
-    """The page's rarest identifiers: keys of key=value pairs and multi-part names, never values.
+    """The page's rarest identifiers: keys (key=value, "key": value, key: value) and multi-part names.
 
-    Values are never listed, so the index names what a page is about without giving its answers
-    away: anything right after ``=``, and any identifier containing a digit (ids such as AI-93532,
-    cohorts such as onyx-4681, regions such as west-lo2, versions such as v2.13.0) are left out. The
-    cost is that names with an incidental digit (s3-bucket) are not listed either; search still
-    finds them in the page text. Identifiers are ranked by how rarely they occur in
-    the page (a one-off key outranks a field repeated on every log line), then by first appearance.
+    The index should name what a page is about without giving its answers away, so values are left
+    out: whatever follows ``=`` or ``:`` (with or without spaces or quotes), and any identifier
+    containing a digit (ids such as AI-93532, cohorts such as onyx-4681, regions such as west-lo2,
+    versions such as v2.13.0). Names with an incidental digit (s3-bucket) are not listed either;
+    search still finds them in the page text.
+
+    Limit: a value stated in a plain sentence ("the target is now blue-canary") has no marker, and
+    a digit-free one can still be listed as a name. Identifiers are ranked by how rarely they
+    occur in the page (a one-off key outranks a field repeated on every log line), then by first
+    appearance.
     """
     counts: Counter[str] = Counter()
     first: dict[str, int] = {}
     order = 0
     for text in texts:
-        keys = _KEY.findall(text)
-        names = _NAME.findall(_VALUE.sub("=", text))
+        keys = [k for groups in _KEY.findall(text) for k in groups if k]
+        names = _NAME.findall(_VALUE.sub(r"\1", text))
         for ident in keys + names:
             ident = ident.strip("./-")
             if not ident or not any(c.isalpha() for c in ident) or _value_like(ident):
