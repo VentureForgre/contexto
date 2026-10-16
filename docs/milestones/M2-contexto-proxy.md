@@ -265,6 +265,35 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   session metadata). Reason: a 32,000-character recall of numeric log text is about 17,800 tokens,
   more than half of an OpenRig seat's `W` near 33,000, and recall results arrive inside a tool
   loop where the engine cannot rotate (D17).
+  **Per-turn recall budget.** Recall results stay in the window until the turn ends, so a turn
+  that recalls too much would push its own requests over the bound. Rules:
+  - The **turn id** is the number of turn-start messages in the CLI's full history, so it is
+    stable across rotation and proxy restarts.
+  - The **room** is `bound - (input + output) - headroom_floor`, from the response's real usage
+    (the output, including thinking and `tool_use`, is passed back in the loop). No `max_tokens`
+    reservation: Claude Code sends `max_tokens` 128,000 on every request, which would leave no room.
+  - The engine publishes `(turn_id, room_tokens)` through `SessionStore.set_turn_room` when the
+    response's real usage arrives, and the proxy relays the stream's final event only after that
+    publish (the terminator hold-back of PR #57). Lane A measures at zero spend whether Claude Code
+    can start an MCP tool call before the response stream ends; if it can, the proxy also holds
+    `tool_use` content blocks until the publish. Either way a tool call sees the current room.
+  - `contexto_recall`, `contexto_search`, and `contexto_state` charge the tokens they return
+    against the room for the current turn id, converted with the same ratio as the per-call limit,
+    with an atomic, locked read-modify-write so parallel calls cannot overspend; the charge
+    counter resets when the turn id changes. They never return more than remains; when it is
+    used up they return: "Recall budget for this turn is used up; answer from what is in view, or
+    say the detail is unknown."
+  - Charges convert at `min(bytes_per_token, 1.5)` characters per token, using 1.0 before
+    `set_window` has recorded a ratio. `contexto_recall`, `contexto_search`, and `contexto_state`
+    return text content blocks only (no `structuredContent`), and the charge counts exactly what
+    they return.
+  - With no engine (no window recorded, for example tests or a direct `contexto mcp`), the per-turn
+    budget does not apply and only the per-call limit holds. With an engine present but no room
+    published for the call's turn, the same applies and the store logs `turn_room_missing`, so a
+    missed publish shows up in acceptance logs.
+  - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
+    output) are outside Contexto's control; a turn they push over the bound is logged
+    `over_bound` as before.
 - `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
