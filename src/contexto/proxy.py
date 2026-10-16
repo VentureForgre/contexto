@@ -136,33 +136,66 @@ class EncodedBodyError(Exception):
         self.reason = reason
 
 
+class _NotThisForm(Exception):
+    """The first stream did not parse as this candidate form; try the next one."""
+
+
+def _decode_streams(make: Callable[[], Any], body: bytes, limit: int, multi: bool) -> bytes:
+    """Decode ``body`` as one stream, or as concatenated members/frames when ``multi``. Never returns
+    a partial body: a truncated stream, data left after the last stream (when not ``multi``), or an
+    undecodable later member raises; ``limit`` applies to the total across members."""
+    out = bytearray()
+    rest = body
+    first = True
+    while True:
+        decompressor = make()
+        try:
+            out += decompressor.decompress(rest, limit + 1 - len(out))
+        except MemoryError:
+            raise
+        except Exception as exc:  # zlib.error, or zstd's own ZstdError
+            if first:
+                raise _NotThisForm from exc
+            raise EncodedBodyError("data after the first compressed member could not be decoded") from exc
+        if len(out) > limit:
+            raise EncodedBodyError(f"the body decodes to more than {limit:,} bytes")
+        if not decompressor.eof:
+            raise EncodedBodyError("the body is truncated" if not first or out else "the body could not be decoded")
+        rest = decompressor.unused_data
+        first = False
+        if not rest:
+            return bytes(out)
+        if not multi:
+            raise EncodedBodyError("there is data after the end of the compressed stream")
+
+
 def decode_request_body(body: bytes, encoding: str, limit: int = MAX_DECODED_BODY_BYTES) -> bytes:
     """Decode a gzip, deflate, or (Python 3.14+) zstd request body, refusing anything over ``limit``.
 
-    Raises EncodedBodyError for an unsupported encoding, a corrupt or truncated body, or a body that
-    decodes to more than ``limit`` bytes."""
+    gzip members (RFC 1952) and zstd frames may be concatenated; every one is decoded and the
+    results joined. Anything after the last complete member or frame that is not another one,
+    zero padding included, is refused (intake, A1c). A zlib or raw deflate stream is single: trailing
+    bytes after it are refused. The ``limit`` applies to the total. Raises EncodedBodyError for an
+    unsupported encoding, a corrupt or truncated body, trailing data, or a body over ``limit``; a
+    partial body is never returned."""
     if encoding == "gzip":
-        candidates = [lambda: zlib.decompressobj(16 + zlib.MAX_WBITS)]
+        forms = [(lambda: zlib.decompressobj(16 + zlib.MAX_WBITS), True)]
     elif encoding == "deflate":  # HTTP deflate is zlib-wrapped; some clients send raw deflate
-        candidates = [lambda: zlib.decompressobj(zlib.MAX_WBITS), lambda: zlib.decompressobj(-zlib.MAX_WBITS)]
+        forms = [(lambda: zlib.decompressobj(zlib.MAX_WBITS), False),
+                 (lambda: zlib.decompressobj(-zlib.MAX_WBITS), False)]
     elif encoding == "zstd":
         if _zstd is None:
             raise EncodedBodyError("zstd decoding needs Python 3.14 or newer")
-        candidates = [_zstd.ZstdDecompressor]
+        forms = [(_zstd.ZstdDecompressor, True)]
     else:
         raise EncodedBodyError("this encoding is not supported (gzip, deflate, and zstd on Python 3.14+ are)")
-    for make in candidates:
-        decompressor = make()
+    if not body:
+        raise EncodedBodyError("the body is empty")
+    for make, multi in forms:
         try:
-            out = decompressor.decompress(body, limit + 1)
-        except MemoryError:
-            raise
-        except Exception:  # zlib.error, or zstd's own ZstdError: try the next form, else corrupt
+            return _decode_streams(make, body, limit, multi)
+        except _NotThisForm:
             continue
-        if len(out) > limit:
-            raise EncodedBodyError(f"the body decodes to more than {limit:,} bytes")
-        if decompressor.eof:
-            return out
     raise EncodedBodyError("the body could not be decoded")
 
 
