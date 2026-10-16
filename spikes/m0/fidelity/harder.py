@@ -409,6 +409,76 @@ def _drive(plan: Plan, settings: Path, out: Path, cap: int, label: str, margin: 
     return summary
 
 
+PILOT3_CAP = 60_000
+PILOT3_TARGET = 15_000
+PILOT3_MAX_TOKENS = 24_000
+PILOT3_EFFORT = "low"
+
+
+def pilot3(settings: Path, out: Path) -> dict[str, Any]:
+    """Pilot 3: 30 probes in the recommended mix at about 15k counted tokens, effort low.
+
+    Sizing uses the token-counting endpoint (no generation) where the route supports it: the probe
+    request is counted, the checkpoint rescaled by target / counted, and counted once more. The
+    counted values become the guard's estimates, with no margin.
+    """
+    from fidelity import replay
+
+    post = replay.http_post(settings)
+
+    def count(messages: list[dict[str, Any]]) -> int | None:
+        status, payload = post({"model": replay.MODEL, "system": replay.SYSTEM, "messages": messages}, None,
+                               "/v1/messages/count_tokens")
+        return payload.get("input_tokens") if status == 200 else None
+
+    mix = Mix().scaled(0.25)
+    checkpoint = PILOT3_TARGET
+    sizing = []
+    plan = build(seed=DEFAULT_SEED + 2, checkpoints=(checkpoint,), mix=mix)
+    for _ in range(2):
+        probe_msgs = [replay.user(plan.turns[0]), {"role": "assistant", "content": [{"type": "text", "text": "OK"}]},
+                      replay.user(plan.probe_turns[0])]
+        counted = count(probe_msgs)
+        sizing.append({"checkpoint": checkpoint, "estimate": plan.estimates[0], "counted": counted})
+        if counted is None:
+            break
+        checkpoint = int(checkpoint * PILOT3_TARGET / counted)
+        plan = build(seed=DEFAULT_SEED + 2, checkpoints=(checkpoint,), mix=mix)
+    final_msgs = [replay.user(plan.turns[0]), {"role": "assistant", "content": [{"type": "text", "text": "OK"}]},
+                  replay.user(plan.probe_turns[0])]
+    counted_build = count(final_msgs[:1])
+    counted_probe = count(final_msgs)
+    sizing.append({"checkpoint": checkpoint, "estimate": plan.estimates[0], "counted_build": counted_build,
+                   "counted_probe": counted_probe})
+    estimates = {"B1": counted_build or int(plan.estimates[0] * 1.4), "P1": counted_probe or int(plan.estimates[0] * 1.4)}
+    binding = {"anthropic-beta": "thinking-binding-controls-2026-08-01"}
+
+    def post_with_header(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        return post(body, binding)
+
+    runner = replay.Runner(post_with_header, PILOT3_CAP, estimates, margin=1.0 if counted_probe else 1.15,
+                           max_tokens=PILOT3_MAX_TOKENS, effort=PILOT3_EFFORT)
+    run_dir = out / f"pilot3-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    scores: dict[str, Any] = {}
+    status = "complete"
+    try:
+        history = [replay.user(plan.turns[0])]
+        payload = runner.call("B1", "B1", list(history))
+        history.append({"role": "assistant", "content": payload["content"]})
+        payload = runner.call("P1", "P1", [*history, replay.user(plan.probe_turns[0])])
+        answer = replay.text_of(payload)
+        (run_dir / "answers_1.txt").write_text(answer + "\n", encoding="utf-8")
+        scores["P1"] = score(plan.probes, answer)
+    except (replay.CapExceeded, replay.RequestFailed) as exc:
+        status = f"stopped: {exc}"
+    summary = {"status": status, "total_tokens": runner.spent, "records": runner.records, "scores": scores,
+               "sizing": sizing, "probes": len(plan.probes), "effort": PILOT3_EFFORT, "max_tokens": PILOT3_MAX_TOKENS}
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    summary["run_dir"] = str(run_dir)
+    return summary
+
+
 def pilot_plan() -> Plan:
     return build(seed=DEFAULT_SEED + 1, checkpoints=(PILOT_SIZE,), mix=Mix().scaled(0.5))
 
@@ -418,7 +488,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     pl = sub.add_parser("plan")
     pl.add_argument("--out", type=Path, required=True)
-    for name in ("pilot", "run"):
+    for name in ("pilot", "pilot3", "run"):
         sp = sub.add_parser(name)
         sp.add_argument("--settings", type=Path, required=True)
         sp.add_argument("--out", type=Path, required=True)
@@ -432,6 +502,13 @@ def main(argv: list[str] | None = None) -> int:
                       "contamination": len(contamination(plan)), "order_problems": len(_check_turn_counts(plan))}
             (d / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
             print(name, json.dumps(report))
+        return 0
+    if args.command == "pilot3":
+        summary = pilot3(args.settings, args.out)
+        brief = {k: summary[k] for k in ("status", "total_tokens", "sizing", "run_dir")}
+        brief["scores"] = {k: {"correct": v["correct"], "total": v["total"], "interval": v["interval"]}
+                           for k, v in summary["scores"].items()}
+        print(json.dumps(brief, indent=2))
         return 0
     if args.command == "pilot":
         summary = _drive(pilot_plan(), args.settings, args.out, PILOT_CAP, "pilot2", margin=1.15)

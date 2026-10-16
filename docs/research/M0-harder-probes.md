@@ -108,6 +108,41 @@ size.
   `low` with a larger output allowance, exact sizing with the token-counting endpoint, and a run
   cap near 950k.
 
+### Pilot 3 [measured, 2026-10-15]: above target
+
+**Setup** (`harder.py pilot3`):
+- 30 probes in the recommended mix (scaled 0.25), effort `low`, `max_tokens` 24,000.
+- Context sized with the token-counting endpoint, ending at 15,002 counted tokens for the probe
+  request.
+- The guard reserved the full output allowance.
+
+**Spend:** 33,142 tokens, under the 60,000 cap. Build turn 13,846; probe fork 19,296, with 4,169
+output tokens and an answer this time.
+
+**Sizing.** Character estimates ran about 20% low: 13,509 estimated against 16,169 counted before
+rescaling. Counting fixes that before any generation.
+
+**Accuracy: 29/30 (96.7%, Wilson 0.833-0.994)**, against a 75% to 92% target, so the pilot
+**missed high**.
+
+| Type, tier | Score |
+|---|---|
+| multihop 3-hop / 4-hop | 3/3, 3/3 |
+| chain depth 6, current / previous | 3/3, 2/2 |
+| chain depth 8, current / previous | 3/3, 1/2 |
+| distractor, 8 look-alikes | 6/6 |
+| obligations single / set of 6 | 3/3, 3/3 |
+| reasoning 1-step / 2-step | 1/1, 1/1 |
+
+- **Thinking.** The probe fork's replayed thinking was dropped (`end_user_binding_mismatch`), as
+  before on this route.
+- **Across pilots 1 and 3,** at 12k to 15k context, the only probes that fail are deep supersession
+  chains: 4 misses in 18 depth-6 and depth-8 probes. Every other type, including 4-hop joins, 8
+  look-alikes and sets of 6, stays at ceiling.
+- At these sizes Haiku 5.5 is near ceiling even on the harder set. A baseline in 75% to 92% would
+  need either chains as the main probe type, or larger contexts.
+- Per intake's rule, pilot 3 missed and work stops here. Intake takes the best available set.
+
 **Recommended mix for the run** (120 probes per checkpoint), aiming at 80% to 90% at 41k
 [inferred, to be confirmed]:
 
