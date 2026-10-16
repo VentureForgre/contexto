@@ -142,6 +142,12 @@ def h1_spend(results_spent: int, session_log: list[dict[str, Any]], abnormal: bo
             "spent_logged": logged, "in_flight_allowance": in_flight}
 
 
+def _expected_turns(seed: int, turn_kbytes: int) -> int:
+    """The user turns the live run made: its plan's content turns plus the D27 probe turns (B29)."""
+    s, _ = plan(seed, 0, turn_kbytes * 1_000)
+    return s.n_content + len(s.probe_turn_ids)
+
+
 def plan(seed: int = script.DEFAULT_SEED, turns: int = 0, turn_bytes: int = 40_000,
          params: budget.Params = budget.Params()) -> tuple[script.Script, budget.Budget]:
     """The script and its simulated budget: the one figure dry-run prints, the doc shows, and live gates on."""
@@ -214,6 +220,9 @@ def main(argv: list[str] | None = None) -> int:
     chk.add_argument("--session-log", type=Path, required=True)
     chk.add_argument("--cc-jsonl", type=Path, required=True)
     chk.add_argument("--bound", type=int, default=150_000)
+    chk.add_argument("--seed", type=int, default=script.DEFAULT_SEED,
+                     help="the run's seed: with --turn-kbytes, gives the turn count recall credit expects")
+    chk.add_argument("--turn-kbytes", type=int, default=40, help="the run's content turn size, in KB")
     chk.add_argument("--session-dir", type=Path, default=None,
                      help="session directory, to confirm the paged-only plants were really paged")
     chk.add_argument("--answers", type=Path, default=None,
@@ -263,7 +272,9 @@ def main(argv: list[str] | None = None) -> int:
 
                 probes = [p for p in s0.probes if p.id in s0.paged_only]
                 credit = recall_credit.credit(probes, args.answers.read_text(encoding="utf-8"),
-                                              detectors.read_jsonl(args.session_log), reach.load_pages(args.session_dir))
+                                              detectors.read_jsonl(args.session_log), reach.load_pages(args.session_dir),
+                                              probe_turn_ids=s0.probe_turn_ids,
+                                              expected_turns=_expected_turns(args.seed, args.turn_kbytes))
                 out["recall_credit"] = credit
                 out["verdicts"]["recall_credited"] = credit["acceptance_3"]
         print(json.dumps(out, indent=2, default=str))
