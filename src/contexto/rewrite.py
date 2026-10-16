@@ -103,6 +103,7 @@ STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
 PAGE_ID = re.compile(r"\bpg_[0-9a-f]{16}\b")
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
+RESTORED_RATIO_RANGE = (1.0, 6.0)  # bytes per token a restore accepts; outside it the seed is safer (A2e)
 
 
 class Store(Protocol):
@@ -825,7 +826,9 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
 
     # Rule 13's baseline is the carried content at the conversation's first request, so it is taken
     # before that request can rotate; set after, a first request that rotates (a resumed session, or a
-    # new engine on an existing one) measured its growth from zero (A6 smoke, PR #67).
+    # new engine on an existing one) measured its growth from zero (A6 smoke, PR #67). The baseline is
+    # per engine: after a proxy restart it is the carried content at the new engine's first request,
+    # so growth before the restart is not counted again (accepted by manager-1, 2026-10-16).
     if state.initial_carried is None:
         state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
     estimate = estimate_upstream(request, messages, previous_n, state, estimator)
@@ -996,7 +999,9 @@ def restore_ratio(store: Store, estimator: TokenEstimator) -> dict | None:
     published through ``set_window`` instead of the seed, which the A6 smoke measured 1.34 to 1.40 times
     high (F 21.3k estimated against 15.3k measured, so W 14.7k instead of about 20.7k). The ratio enters
     the estimator with the weight of one mid-sized request, so the session's own usage soon dominates.
-    Returns the content-free ``sizing_restored`` event (also logged), or None when there is nothing to
+    The ratio is not checked against the model: ``set_window`` records no model yet (asked of lane B,
+    A2e), so a session that changes model restores the previous model's ratio until its own usage
+    dominates. Returns the content-free ``sizing_restored`` event (also logged), or None when there is nothing to
     restore or the store cannot be read (the next turn start meets the store again under rule 14)."""
     if estimator.measured_bytes_per_token is not None:
         return None
@@ -1006,15 +1011,21 @@ def restore_ratio(store: Store, estimator: TokenEstimator) -> dict | None:
         return None
     if not ratio:
         return None
-    estimator.observe(round(ratio * RESTORED_RATIO_WEIGHT), RESTORED_RATIO_WEIGHT)
-    event = {"event": "sizing_restored", "bytes_per_token": round(ratio, 4), "weight_tokens": RESTORED_RATIO_WEIGHT}
+    low, high = RESTORED_RATIO_RANGE
+    if not low <= ratio <= high:
+        # Reviewer-2 on PR #72: a recorded ratio no real session produces (corrupt metadata, or a usage
+        # report that undercounted) must not size every request; the seed is the safer start.
+        event = {"event": "sizing_not_restored", "reason": "ratio_out_of_range", "bytes_per_token": round(ratio, 4)}
+    else:
+        estimator.observe(round(ratio * RESTORED_RATIO_WEIGHT), RESTORED_RATIO_WEIGHT)
+        event = {"event": "sizing_restored", "bytes_per_token": round(ratio, 4), "weight_tokens": RESTORED_RATIO_WEIGHT}
     log = getattr(store, "log", None)
     if callable(log):
         try:
             log(event)
         except STORE_FAILURES:
             pass  # the restore is an optimization; rule 14 handles a broken store at the next turn start
-    return event
+    return event if event["event"] == "sizing_restored" else None
 
 
 @dataclass

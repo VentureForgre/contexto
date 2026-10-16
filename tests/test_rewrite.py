@@ -1309,3 +1309,16 @@ def test_page_conflict_id_prefers_the_structured_attribute_and_falls_back_to_the
     malformed = PageConflictError(f"page {quoted} exists")
     malformed.page_id = "not-a-page-id"
     assert store_failure(malformed, calls, state)["page_id"] == quoted
+
+
+@pytest.mark.parametrize("ratio", [0.4, 9.5])
+def test_a_restored_ratio_outside_the_sane_range_is_ignored(ratio):
+    """A2e (reviewer-2 on PR #72): a ratio outside 1.0 to 6.0 bytes per token keeps the seed and logs why."""
+    store = MemoryStore(key=b"k" * 32)
+    store.set_window(10_000, ratio)
+    engine = RewriteEngine(store, config=CONFIG)
+    assert engine.restored is None and engine.estimator.measured_bytes_per_token is None
+    assert [e["reason"] for e in store.events if e["event"] == "sizing_not_restored"] == ["ratio_out_of_range"]
+    store = MemoryStore(key=b"k" * 32)
+    store.set_window(10_000, 4.2)
+    assert RewriteEngine(store, config=CONFIG).restored["bytes_per_token"] == 4.2
