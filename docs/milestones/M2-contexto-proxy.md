@@ -254,7 +254,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       `set_retained`; a failed write never blocks the send). The record holds every piece of
       engine state that decides later request bytes or rotation decisions, so a resumed engine
       behaves exactly as the old one would have: `epoch`, `k`, `strip_upto`, `turns_paged`, the
-      exact `pinned_text` and `index_text` sent in that epoch, `head_fingerprint`, `paged_carried`
+      exact `pinned_text` and `index_text` sent in that epoch, a SHA-256 of the rendered preamble
+      as sent, `head_fingerprint`, `paged_carried`
       (hashes only), `head_tokens`, `initial_carried`, `max_turn_growth`, the turn-start counters
       (`last_turn_start_n`, `last_turn_count`, `last_carried_text_count`, `carried_text_streak`),
       `window_budget`, `window_minimal_count`, and `turn_room_low_epoch`; the whole engine
@@ -268,22 +269,28 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       engine (rule 14) writes no record.
     - **Resume.** A new engine reads the record once, at the first request of a conversation
       whose identity matches the record's, and resumes only if every check holds: same dialect,
-      model, and configuration; the request's head fingerprint equals the record's; the request
-      has at least `n` messages; and its first `n` messages hash to the anchor. The newest record written is
-      trusted: if a write and its invalidation both failed, an older record can still be found,
-      which is consistent but has a smaller `k`, so a resume at a turn start applies rule 4's
-      decisions to that request at once, and a resume mid-turn is sent under rule 5 (a logged
-      in-turn over-bound turn if it is over). A resume adopts
-      every recorded field, seeds rule 10's previous-request hashes with the hashes of those
-      first `n` messages (so the request is matched as an append and does not start a new
-      epoch), makes this conversation the main one, and continues append-only (rules 1 to 3);
-      rule 4's decisions apply from the next turn start as usual. Any failed check, an
-      unreadable or malformed record, or no record starts the epoch from 0 as before, and the
-      engine logs content-free `epoch_not_resumed` with one reason (`no_record`, `unreadable`,
-      `dialect_changed`, `model_changed`, `settings_changed`, `head_changed`, `history_shorter`,
-      `history_diverged`, `other_conversation`). A resume logs `epoch_resumed` with `epoch` and
-      `k`. Measured sizing (packet A8's ratio restore) is unchanged and still applies.
-    - **Store interface.** `SessionStore.set_epoch(record)` writes `epoch.json` atomically at
+      model, and configuration; the preamble the engine renders from the recorded texts with its
+      own code hashes to the recorded SHA-256 (so a code change that renders differently does not
+      resume); the request's head fingerprint equals the record's; the request has at least `n`
+      messages; and its first `n` messages hash to the anchor. A resume adopts every recorded
+      field, seeds rule 10's previous-request hashes with the hashes of those first `n` messages
+      (so the request is matched as an append and does not start a new epoch), makes this
+      conversation the main one, and continues append-only (rules 1 to 3). A resume at a turn
+      start applies rule 4's decisions (room and size) to that request itself; a resume mid-turn
+      is sent under rule 5 (a logged in-turn over-bound turn if it is over). The newest record
+      written is trusted: if a write and its invalidation both failed, an older record can still
+      be found, which is consistent but has a smaller `k`, and the two rules above bound the
+      harm. Any failed check, an unreadable or malformed record, or no record starts the epoch
+      from 0 as before, and the engine logs content-free `epoch_not_resumed` with one reason
+      (`no_record`, `unreadable`, `dialect_changed`, `model_changed`, `settings_changed`,
+      `preamble_changed`, `head_changed`, `history_shorter`, `history_diverged`,
+      `other_conversation`). A resume logs `epoch_resumed` with `epoch` and `k`. Measured sizing
+      (packet A8's ratio restore) is unchanged and still applies.
+    - **Who writes.** Only the main conversation writes. After a restart, no conversation writes
+      until one has resumed from the record or has strictly more turn starts than the record's
+      `last_turn_count`, so a side request that arrives first cannot overwrite it.
+    - **Store interface.** `SessionStore.set_epoch(record)` writes `epoch.json` atomically (temp
+      file, fsync, rename) at
       mode 0600 with `version: 1`, never logged; on a failed write it unlinks the previous record
       and raises. `SessionStore.epoch_record()` returns the record or `None`. The store validates
       shape and version (an unknown version returns `None`); the engine validates meaning (the
