@@ -137,6 +137,19 @@ the owner's delegation. Open decisions are listed at the end with the options an
   (except logged in-turn over-bound turns per rule 5) and model-request 4xx, acceptance 1 fails on `degraded_enter`, `store_error`, `page_conflict`,
   `fallback_failed`, `transform_error`, `turn_room_missing`, or `unclassified_system_message`.
 
+- **D27. Acceptance asks the 54 probes over 6 user turns of 9.** Intake, 2026-10-16, decided after
+  a failed run and recorded as such. The second live H1 run scored 18 of 54 against the
+  full-context baseline's 44. An offline estimate on that run's pages (builder-3, zero spend, a
+  simulated ideal searcher, not a model run) found every probe answerable on its own (54 of 54,
+  with the search hit carrying the answer), but answering all 54 in one turn needs about 91,000
+  tokens of returned evidence against a recall room of about 23,000, so even an ideal searcher
+  tops out near 38 to 42. No design bounded at 150,000 with a working window can pull that much
+  evidence into a single turn, and long real sessions do not ask 54 deep-history questions at
+  once. The probes are therefore asked over 6 user turns of 9, a fixed assignment (seed 20261016)
+  chosen before any estimate under it; no other split was computed. Questions, scoring, and the
+  44 of 54 baseline (one full-context request) are unchanged. A single turn that needs more
+  evidence than the room holds is a stated known limitation.
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
