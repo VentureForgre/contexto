@@ -128,13 +128,14 @@ def _key_position_tokens(text: str) -> list[str]:
         return keys  # valid JSON: object keys only, never a value or an array element
     found: list[tuple[int, str]] = []
     rest: list[str] = []
+    offset = 0  # length of rest so far, so each line costs its own length, not the text's
     for line in text.splitlines(keepends=True):  # JSON Lines: each object line contributes keys only
         parsed, keys = _parse_json(line)
         if parsed:
-            found.extend((len("".join(rest)), k) for k in keys)
-            rest.append("\n")
-        else:
-            rest.append(line)
+            found.extend((offset, k) for k in keys)
+            line = "\n"
+        rest.append(line)
+        offset += len(line)
     plain = "".join(rest)
     for pattern in (_EQ_KEY, _LINE_KEY, _QUOTED_KEY):
         found.extend((m.start(1), m.group(1)) for m in pattern.finditer(plain))
