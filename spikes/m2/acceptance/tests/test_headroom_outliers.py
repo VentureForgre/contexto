@@ -84,3 +84,36 @@ def test_the_candidates_are_inert_without_an_outlier():
         g = growths(steady, rule)
         assert [rewrite.headroom(EpochState(max_turn_growth=x), Config()) for x in g] == \
                [rewrite.headroom(EpochState(max_turn_growth=x), Config()) for x in today]
+
+
+def test_a_retried_turn_start_does_not_decay_twice():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=150_000))
+    messages: list[dict] = []
+    values = []
+    with ho.headroom_rule(decay=0.5):
+        for t, size in enumerate(SIZES[:5]):
+            messages = messages + [{"role": "user", "content": f"turn {t} " + WORDS * size}]
+            engine(body(messages), {}, "/v1/messages")
+            values.append(next(iter(engine.states.values())).max_turn_growth)
+            if t == 3:  # the same turn start sent again (a CLI retry): no new growth, no decay
+                engine(body(messages), {}, "/v1/messages")
+                assert next(iter(engine.states.values())).max_turn_growth == values[-1]
+            messages = messages + [{"role": "assistant", "content": [{"type": "text", "text": f"reply {t}"}]}]
+    assert values[3] == values[2] // 2 and values[4] == values[2] // 4  # one decay per new turn start
+
+
+def test_a_resume_on_the_turn_start_that_wrote_the_record_does_not_decay_again():
+    store = MemoryStore(key=b"k" * 32)
+    messages: list[dict] = []
+    with ho.headroom_rule(decay=0.5):
+        first = RewriteEngine(store, config=Config(bound=150_000))
+        for t, size in enumerate(SIZES[:4]):
+            messages = messages + [{"role": "user", "content": f"turn {t} " + WORDS * size}]
+            first(body(messages), {}, "/v1/messages")
+            if t < 3:
+                messages = messages + [{"role": "assistant", "content": [{"type": "text", "text": f"reply {t}"}]}]
+        written = next(iter(first.states.values())).max_turn_growth
+        second = RewriteEngine(store, config=Config(bound=150_000))  # a restart, the same request again
+        _, _, events = second(body(messages), {}, "/v1/messages")
+    assert any(e.get("event") == "epoch_resumed" for e in events)
+    assert next(iter(second.states.values())).max_turn_growth == written
