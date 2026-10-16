@@ -11,6 +11,7 @@ import math
 import shutil
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -229,6 +230,39 @@ def test_auth_watcher_stops_the_process_on_the_first_401(tmp_path):
     assert watcher.status == 401
 
 
+def test_auth_watcher_ignores_the_unauthenticated_startup_probe(tmp_path):
+    # First live H1 attempt: Claude Code's HEAD /api/hello probe got 401 from the owner's proxy.
+    log = tmp_path / "log.jsonl"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    watcher = driver.AuthWatcher(log, proc)
+    try:
+        log.write_text(json.dumps({"event": "request", "method": "HEAD", "path": "/api/hello", "status": 401,
+                                   "usage": None}) + "\n"
+                       + json.dumps({"event": "request", "method": "POST", "path": "/v1/messages", "status": 200}) + "\n")
+        time.sleep(1.5)
+        assert proc.poll() is None and watcher.status is None
+        with log.open("a") as fh:  # a credential failure on the Messages API still stops the run
+            fh.write(json.dumps({"event": "request", "method": "POST", "path": "/v1/messages", "status": 403}) + "\n")
+        assert proc.wait(timeout=10) != 0 and watcher.status == 403
+    finally:
+        watcher.stop()
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_auth_failure_is_only_a_messages_api_post():
+    f = driver.is_auth_failure
+    assert f({"event": "request", "method": "POST", "path": "/v1/messages", "status": 401})
+    assert f({"event": "upstream_4xx", "path": "/v1/messages/count_tokens", "status": 403})
+    assert f({"event": "request", "method": "POST", "path": "/v1/messages?beta=true", "status": 401})
+    assert not f({"event": "request", "method": "HEAD", "path": "/api/hello", "status": 401})
+    assert not f({"event": "request", "method": "GET", "path": "/v1/models", "status": 401})
+    assert not f({"event": "request", "method": "POST", "path": "/v1/messages", "status": 429})
+    assert f({"event": "request", "method": "POST", "path": "/responses", "status": 401})  # contract PR #61
+    from contexto.proxy import TRANSFORMED_PATHS
+    assert driver.AUTH_PATHS == detectors.MODEL_PATHS == TRANSFORMED_PATHS  # one list, the proxy's
+
+
 def test_stream_compactions_fail_the_zero_compaction_verdict():
     r = detectors.analyze([], [], bound=150_000, stream_compactions=1)
     assert r.verdicts()["zero_compaction"] is False
@@ -429,3 +463,12 @@ def test_recalls_are_priced_at_the_largest_b9_chunk_and_the_probe_turn_fits():
     probe_turn = [r for r in b.rows if r.kind in ("probe", "recall")]
     assert len(probe_turn) == 1 + script.MAX_RECALLS
     assert max(r.input_tokens for r in probe_turn) < budget.Params().bound
+
+
+def test_non_model_4xx_are_counted_apart_from_acceptance_1():
+    probe = {"event": "request", "method": "HEAD", "path": "/api/hello", "status": 401, "usage": None}
+    probe_4xx = {"event": "upstream_4xx", "status": 401, "path": "/api/hello"}
+    r = detectors.analyze([probe, probe_4xx, _req(0, 50_000)], [], bound=150_000)
+    assert r.non_model_4xx == {"HEAD /api/hello": 1} and r.upstream_4xx == 0 and r.verdicts()["zero_4xx"]
+    model_4xx = {"event": "upstream_4xx", "status": 400, "path": "/v1/messages/count_tokens"}
+    assert not detectors.analyze([model_4xx], [], bound=150_000).verdicts()["zero_4xx"]

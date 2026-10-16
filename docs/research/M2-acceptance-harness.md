@@ -124,7 +124,11 @@ measured this case, PR #9). So:
   indexes are reported in `unverified_requests`, and the `every_request_has_usage` verdict fails
   unless the count is 0. The usage comes from the JSON body or, for streamed replies, the SSE
   `message_start` and `message_delta` events.
-- **4xx.** `upstream_4xx` events, plus any 4xx status on a request record. Both must be zero.
+- **4xx (acceptance 1).** Only model requests count (contract PR #61): `upstream_4xx` events and
+  request records on the paths the proxy transforms (`contexto.proxy.TRANSFORMED_PATHS`:
+  `/v1/messages`, its `count_tokens`, and `/responses`). Both must be zero. 4xx on any other path, such as Claude Code's
+  unauthenticated `HEAD /api/hello` startup probe, are reported in `non_model_4xx` by method and
+  path, and no verdict uses them.
 - **Epochs and cache (acceptance 4).**
   - The first request seen in each `epoch` starts that epoch.
   - Every later successful request in the epoch is cache-eligible, and it is a hit if
@@ -320,9 +324,28 @@ planned over-bound requests.
      the request shape the CLI recorded (`api-request-shape`). That is not yet built; it is open
      question 3.
 
+## Live H1, attempt 1: aborted (2026-10-16)
+
+- **What ran:** main `dc9ffe3` (PR #60's merge), Claude Code 2.1.301, `claude-haiku-5-5`, bound
+  150,000, H1 approval 2,852,611. `check-credential` passed at that SHA just before the start.
+- **What stopped it:** the run started at 02:29:18Z and stopped 7 seconds later. The only 401 in
+  the session log was `HEAD /api/hello`, Claude Code's unauthenticated connectivity probe, which the
+  owner's proxy answers with 401. The harness's auth watcher stopped on any 401 in the session log,
+  so it ended the run on the probe. It was not a credential failure. The stub dry runs never saw
+  it, because the stub answered `HEAD` with 200.
+- **Spend:** the harness recorded 0, and no `/v1/messages` response was logged. Claude Code's JSONL
+  shows its first model request had been issued when the process was stopped, so up to one first
+  request (about 49,000 to 65,000 input tokens, modelled) may have been processed upstream. Intake
+  counts it as spent: the total line becomes 3,395,292.
+- **Fix:** the auth watcher stops only on a 401 or 403 for a `POST` to a model path
+  (`contexto.proxy.TRANSFORMED_PATHS`), as a request record or an `upstream_4xx` event, and still
+  stops on the first one. Acceptance 1's
+  zero-4xx counts model requests only, and other 4xx are reported apart (see Detectors).
+- **Artifacts** (private, never in Git): `.contexto/runs/acceptance-20261016T022918Z/`.
+
 ## Tests
 
-`uv run --with pytest pytest spikes/m2` runs 42 tests with no live calls. Most use synthetic
+`uv run --with pytest pytest spikes/m2` runs 45 tests with no live calls. Most use synthetic
 fixtures; `test_engine_log.py` drives the real proxy and rewrite engine against a stub upstream,
 once with JSON replies and once with SSE replies, since the acceptance session streams.
 They cover:
