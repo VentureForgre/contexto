@@ -168,7 +168,9 @@ def _draft_fields(draft: dict) -> dict:
     return fields
 
 
-def _chain(fields: dict, prev: str, existing: list[Record]) -> Record:
+def _chain(fields: dict, prev: str, existing: list[Record], precondition=None) -> Record:
+    if precondition is not None:
+        precondition(existing)  # runs on the records as they are under the lock
     record = Record.from_dict({**fields, "id": compute_id(fields), "prev": prev})
     Ledger._check_references(record, existing)
     return record
@@ -239,8 +241,13 @@ class Ledger:
             lines = self._lines()
         return [message for _, message in _problems(lines)]
 
-    def append(self, draft: dict) -> Record:
-        """Validate a draft, chain it, and durably append it as one line."""
+    def append(self, draft: dict, precondition=None) -> Record:
+        """Validate a draft, chain it, and durably append it as one line.
+
+        ``precondition(existing_records)``, if given, runs inside the exclusive lock on the records as
+        they stand, so a check such as "the obligation is still open" cannot race another writer.
+        It raises to refuse the append.
+        """
         fields = _draft_fields(draft)
         with self._locked(exclusive=True):
             lines = self._lines()
@@ -250,7 +257,7 @@ class Ledger:
                     f"ledger does not verify; run repair or inspect manually: {problems[0][1]}"
                 )
             prev = _sha256(lines[-1].raw) if lines else GENESIS_PREV
-            record = _chain(fields, prev, [line.record for line in lines])
+            record = _chain(fields, prev, [line.record for line in lines], precondition)
 
             created = not self.path.exists()
             fd = open_private(self.path, os.O_WRONLY | os.O_APPEND)
@@ -347,8 +354,8 @@ class MemoryLedger:
     def verify(self) -> list[str]:
         return []
 
-    def append(self, draft: dict) -> Record:
-        record = _chain(_draft_fields(draft), self.head(), self._records)
+    def append(self, draft: dict, precondition=None) -> Record:
+        record = _chain(_draft_fields(draft), self.head(), self._records, precondition)
         self._lines.append(canonical_json(record.to_dict()).encode("utf-8"))
         self._records.append(record)
         return record

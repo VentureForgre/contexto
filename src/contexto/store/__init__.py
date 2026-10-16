@@ -7,6 +7,10 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
 - ``pages/<page id>.json``: one immutable page per paged-out turn (see ``contexto.store.pages``).
 - ``page.key``: the random per-store HMAC key for page ids. It never leaves the store.
 - ``ledger.jsonl`` (with ``ledger.lock`` and ``quarantine/``): the hash-chained session ledger.
+  Opening a store repairs a crash-truncated tail and logs ``ledger_repaired``; other damage is
+  left for a human and logged as ``ledger_damaged`` (pins and closes then fail).
+- ``meta.json``: session metadata, today ``{"workdir": ...}``, the directory file sources are
+  checked against. Lane A's launcher records it with ``set_workdir`` at session start.
 - ``log.jsonl``: the session log, one canonical JSON event per line.
 
 Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``) come from
@@ -27,7 +31,7 @@ from typing import Any
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
-from contexto.store.ledger import Ledger
+from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, render_index, search_pages
 from contexto.store.records import LedgerOps
 
@@ -72,6 +76,42 @@ class SessionStore(LedgerOps):
         private_dir(self.pages_dir)
         self._key = self._load_key()
         self.ledger = Ledger(self.dir)
+        self._repair_ledger()
+
+    def _repair_ledger(self) -> None:
+        if not self.ledger.path.exists():
+            return
+        try:
+            quarantined = self.ledger.repair()
+        except LedgerCorruptError as e:
+            self.log({"event": "ledger_damaged", "error": str(e)})
+            return
+        if quarantined is not None:
+            self.log({"event": "ledger_repaired", "quarantine": quarantined.name})
+
+    def set_workdir(self, path: Path) -> None:
+        """Record the session's working directory (absolute), which file sources are checked against."""
+        meta = self._meta()
+        meta["workdir"] = str(Path(path).resolve())
+        tmp = self.dir / f".meta.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        fd = open_private(tmp, os.O_WRONLY | os.O_EXCL)
+        try:
+            os.write(fd, canonical_bytes(meta))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, self.dir / "meta.json")
+
+    def _meta(self) -> dict[str, Any]:
+        try:
+            meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+        return meta if isinstance(meta, dict) else {}
+
+    def workdir(self) -> Path | None:
+        value = self._meta().get("workdir")
+        return Path(value) if isinstance(value, str) and value else None
 
     def _load_key(self) -> bytes:
         """The store's HMAC key, created atomically on first use; refuses an empty or short key."""

@@ -11,6 +11,7 @@ a draft spelled absent optional fields.
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -69,6 +70,9 @@ class Source:
                 raise ValidationError("file source requires sha256 as 64 lowercase hex chars")
             if PurePosixPath(self.locator).is_absolute():
                 raise ValidationError(f"file source locator must be a relative path: {self.locator!r}")
+            normalized = posixpath.normpath(self.locator)
+            if normalized == ".." or normalized.startswith("../") or "\\" in self.locator:
+                raise ValidationError(f"file source locator escapes the root: {self.locator!r}")
         if self.type == "page" and not _PAGE_ID.fullmatch(self.locator):
             raise ValidationError(f"page source locator must be a page id: {self.locator!r}")
 
