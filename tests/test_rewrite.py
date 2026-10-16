@@ -732,3 +732,45 @@ def test_carried_text_growing_per_turn_is_reported_early():
         _, _, ev = engine(request(msgs), {}, MESSAGES)
         seen.append("carried_text_growing" in names(ev))
     assert True in seen and seen.count(True) == 1  # reported once, when the growth starts per turn
+
+
+# A2b: over-bound accounting from real usage -------------------------------------------------------
+
+def test_real_usage_over_the_bound_is_flagged_even_when_the_estimate_was_low():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=Config(bound=100_000, headroom_floor=500))
+    req = request(history(2) + [user("p")])
+    _, _, ev = engine(req, {}, MESSAGES)
+    estimate = ev[-1]["estimate"]
+    assert estimate < 100_000 and not ev[-1].get("over_bound")  # the pre-send estimate was under the bound
+    out = engine.observe_usage(MESSAGES, {"input_tokens": 1_000, "cache_read_input_tokens": 100_500,
+                                          "cache_creation_input_tokens": 0, "output_tokens": 9}, req)
+    over = [e for e in out if e["event"] == "over_bound_actual"]
+    assert over and over[0]["over_bound"] is True and over[0]["real"] is True
+    assert over[0]["real_tokens"] == 101_500 and over[0]["estimate"] == estimate
+    assert [e["event"] for e in store.events if e["event"] == "over_bound_actual"] == ["over_bound_actual"]
+
+
+def test_estimate_error_is_reported_when_real_exceeds_the_estimate_by_more_than_ten_percent():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=Config(bound=10_000_000))
+    req = request([user("p0")])
+    _, _, ev = engine(req, {}, MESSAGES)
+    estimate = ev[-1]["estimate"]
+    close = engine.observe_usage(MESSAGES, {"input_tokens": estimate}, req)
+    assert close == []
+    req2 = request([user("p0"), assistant("a0"), user("p1")])
+    _, _, ev2 = engine(req2, {}, MESSAGES)
+    low = engine.observe_usage(MESSAGES, {"input_tokens": int(ev2[-1]["estimate"] * 1.5) + 10}, req2)
+    err = [e for e in low if e["event"] == "estimate_error"]
+    assert err and err[0]["ratio"] < 0.91 and 0 < err[0]["mean_ratio"] <= 1.0
+    assert not any(e["event"] == "over_bound_actual" for e in low)
+
+
+def test_count_tokens_usage_raises_nothing():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=Config(bound=1_000))
+    req = request([user("p0")])
+    engine(req, {}, MESSAGES)
+    assert engine.observe_usage(COUNT_TOKENS, {"input_tokens": 999_999}, req) == []
+    assert not any(e["event"] in ("over_bound_actual", "estimate_error") for e in store.events)

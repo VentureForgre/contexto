@@ -114,6 +114,9 @@ class EpochState:
     paged_carried: frozenset[str] = frozenset()  # hashes of carried text messages paged by the fallback
     last_carried_text_count: int | None = None  # carried text messages at the previous turn start
     carried_text_streak: int = 0  # consecutive turn starts at which that count grew
+    last_estimate: int | None = None  # pre-send estimate of the previous request (A2b)
+    estimate_ratio_sum: float = 0.0  # running sum of estimate / real over observed requests
+    estimate_ratio_count: int = 0
 
 
 # Message classification -------------------------------------------------------------------------
@@ -560,7 +563,7 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
         state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
     upstream = {**request, "messages": transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
-    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
+    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent, last_estimate=estimate,
                     last_window_tokens=window_tokens(upstream["messages"], estimator))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream["messages"]), "estimate": estimate, "sent_bytes": sent}
@@ -608,18 +611,44 @@ class RewriteEngine:
         upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator)
         return upstream, headers, events
 
-    def observe_usage(self, endpoint: str, usage: dict, request: dict) -> None:
+    def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
+        """Feed a response's real usage back (``/v1/messages`` only; never ``count_tokens``). Returns the
+        content-free events it raised, which are also written to the session log through
+        ``store.log`` when the store has one (packet A2b, intake's wording):
+
+        - ``over_bound_actual``: the real upstream input (input + cache read + cache write) exceeded the
+          bound, whatever the pre-send estimate said, so acceptance 1 can rely on the session log;
+        - ``estimate_error``: the real input exceeded the pre-send estimate by more than 10%, with the
+          running mean of estimate / real for the conversation.
+        """
         if endpoint != MESSAGES:
-            return
+            return []
         key = conversation_key(request)
         state = self.states.get(key)
         if state is None:
-            return
+            return []
         real = usage_tokens(usage)
-        self.estimator.observe(state.last_sent_bytes, real)
+        self.estimator.observe(state.last_sent_bytes, real)  # the session's measured ratio from now on
         state = replace(state, last_input_tokens=real)
         if state.head_tokens is None and state.k == 0:
             # Rule 4: the first measured request gives the head (its input minus its non-carried
             # messages, which also covers a resumed first request with a long history).
             state = replace(state, head_tokens=max(0, real - state.last_window_tokens))
+        events: list[dict] = []
+        estimate = state.last_estimate
+        if estimate is not None and real > 0:
+            state = replace(state, estimate_ratio_sum=state.estimate_ratio_sum + estimate / real,
+                            estimate_ratio_count=state.estimate_ratio_count + 1)
+        if real > self.config.bound:
+            events.append({"event": "over_bound_actual", "epoch": state.epoch, "over_bound": True, "real": True,
+                           "real_tokens": real, "estimate": estimate, "bound": self.config.bound})
+        if estimate is not None and real > estimate * 1.1:
+            events.append({"event": "estimate_error", "epoch": state.epoch, "real_tokens": real, "estimate": estimate,
+                           "ratio": round(estimate / real, 3) if real else None,
+                           "mean_ratio": round(state.estimate_ratio_sum / state.estimate_ratio_count, 3)})
         self.states[key] = state
+        log = getattr(self.store, "log", None)
+        if callable(log):
+            for event in events:
+                log(event)
+        return events
