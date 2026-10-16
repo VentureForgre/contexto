@@ -18,9 +18,13 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 - A turn is a turn-start message plus every following assistant, ``tool_result`` user, and
   ``role: "system"`` message up to the next turn start; a trailing system message after the new
   prompt belongs to the new turn.
-- Carried content is never paged: the context blocks of paged turn-start messages and every system
-  message of a paged turn, both in the form the CLI sends now (rule 12: settings-only system messages
-  with empty content are carried like any other). Settings-only system messages accrue per settings
+- Carried content is never paged: the context blocks of paged turn-start messages and the carried
+  system messages of paged turns (contract PR #35), in the form the CLI sends now. ``classify_system``
+  sorts every system message deterministically: ``settings`` (empty content plus settings fields;
+  rule 12), ``session_start`` (content, first turn), ``per_turn`` (content, a later turn, before its
+  first assistant message; per-turn hook context lands there) and ``unclassified`` (anything else).
+  Session-start, settings-only (latest per key) and unclassified messages are carried, an unclassified
+  one also logging ``unclassified_system_message``; per-turn ones are paged with their turn. Settings-only system messages accrue per settings
   change (measured), so only the latest per settings key is carried; the carried set is computed from
   the paged region, so it changes only at a rotation. Rule 13 (PR #27): carried content is never
   paged; when a rotation finds it grown by more than ``carried_budget`` (4,000 tokens) over its size at
@@ -200,44 +204,73 @@ def settings_key(message: dict) -> tuple | None:
     return tuple((f, tuple(sorted(message[f])) if isinstance(message[f], dict) else ()) for f in fields)
 
 
+SESSION_START = "session_start"
+SETTINGS = "settings"
+PER_TURN = "per_turn"
+UNCLASSIFIED = "unclassified"
+
+
+def classify_system(messages: list[dict], i: int) -> str:
+    """Deterministic class of the system message at ``messages[i]`` (contract PR #35, measured shapes in
+    spikes/m2/carried/README.md):
+
+    - ``settings``: empty content plus settings fields such as ``output_config`` (checked first; a
+      message with text content is never settings-only, even with ``output_config``).
+    - ``session_start``: a system message with content inside the first turn.
+    - ``per_turn``: a system message with content in a later turn, before that turn's first assistant
+      message (where per-turn hook context lands); paged with its turn.
+    - ``unclassified``: anything else (for example a content message after an assistant message in a
+      later turn); carried, and reported as ``unclassified_system_message``.
+    """
+    if settings_key(messages[i]) is not None:
+        return SETTINGS
+    starts = turn_starts(messages[: i + 1])
+    if len(starts) <= 1:
+        return SESSION_START
+    if all(m.get("role") != "assistant" for m in messages[starts[-1]:i]):
+        return PER_TURN
+    return UNCLASSIFIED
+
+
+def carried_systems(messages: list[dict], k: int) -> tuple[list[int], int]:
+    """Indexes of the carried system messages in M[0..k), after deduplicating settings-only messages
+    (latest per settings key), and the number of unclassified ones among them."""
+    carried, latest, unclassified = [], {}, 0
+    for i in range(k):
+        if messages[i].get("role") != "system":
+            continue
+        kind = classify_system(messages, i)
+        if kind == PER_TURN:
+            continue
+        if kind == UNCLASSIFIED:
+            unclassified += 1
+        if kind == SETTINGS:
+            latest[settings_key(messages[i])] = i
+        carried.append(i)
+    keep = [i for i in carried if classify_system(messages, i) != SETTINGS or latest[settings_key(messages[i])] == i]
+    return keep, unclassified
+
+
 def carried_content(messages: list[dict], k: int) -> tuple[list[dict], list[dict]]:
-    """(context blocks of paged turn starts, system messages of paged turns), in original order and
-    in the form the CLI sends now. Settings-only system messages are deduplicated: only the latest
-    per settings key is carried (they accrue per settings change, spikes/m2/carried/README.md)."""
-    blocks, systems = [], []
-    for m in messages[:k]:
-        if m.get("role") == "system":
-            systems.append(m)
-        elif is_turn_start(m):
-            blocks.extend(b for b in _blocks(m) if is_context_block(b))
-    latest = {}
-    for i, m in enumerate(systems):
-        key = settings_key(m)
-        if key is not None:
-            latest[key] = i
-    systems = [m for i, m in enumerate(systems) if settings_key(m) is None or latest[settings_key(m)] == i]
-    return blocks, systems
+    """(context blocks of paged turn starts, carried system messages of paged turns), in original order
+    and in the form the CLI sends now. Per-turn system messages are paged with their turn, not carried."""
+    blocks = [b for m in messages[:k] if is_turn_start(m) for b in _blocks(m) if is_context_block(b)]
+    indexes, _ = carried_systems(messages, k)
+    return blocks, [messages[i] for i in indexes]
 
 
-def page_turn(turn: list[dict]) -> list[dict]:
-    """A turn as stored: thinking kept as received, carried content removed."""
+def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
+    """M[start..end) as stored in a page: thinking kept as received; carried system messages and the
+    context blocks of turn starts removed; per-turn system messages kept."""
     out = []
-    for m in turn:
-        if m.get("role") == "system":
+    for i in range(start, end):
+        m = messages[i]
+        if m.get("role") == "system" and classify_system(messages, i) != PER_TURN:
             continue
         if is_turn_start(m) and any(is_context_block(b) for b in _blocks(m)):
             m = {**m, "content": [b for b in _blocks(m) if not is_context_block(b)]}
         out.append(m)
     return out
-
-
-def split_turns(messages: list[dict], start: int, end: int) -> list[list[dict]]:
-    turns: list[list[dict]] = []
-    for i in range(start, end):
-        if not turns or (i != start and is_turn_start(messages[i])):
-            turns.append([])
-        turns[-1].append(messages[i])
-    return turns
 
 
 def preamble(state: EpochState) -> str:
@@ -277,9 +310,10 @@ def estimate_upstream(request: dict, messages: list[dict], previous_n: int, stat
     return head + estimator.estimate_messages(transform_messages(messages, state))
 
 
-def window_tokens(messages: list[dict], estimator: TokenEstimator) -> int:
-    """Tokens of the non-carried part of messages (no system messages, no context blocks)."""
-    return estimator.estimate_messages([strip_thinking(m) for m in page_turn(messages) if m.get("content")])
+def window_tokens(messages: list[dict], estimator: TokenEstimator, start: int = 0) -> int:
+    """Tokens of the non-carried part of M[start..) (no carried system messages, no context blocks)."""
+    kept = strip_carried(messages, start, len(messages))
+    return estimator.estimate_messages([strip_thinking(m) for m in kept if m.get("content")])
 
 
 def carried_tokens(messages: list[dict], estimator: TokenEstimator) -> int:
@@ -310,7 +344,7 @@ def choose_k(messages: list[dict], state: EpochState, target: int, estimator: To
     for k in starts:
         if k > newest_complete:
             break
-        if window_tokens(messages[k:], estimator) <= target:
+        if window_tokens(messages, estimator, k) <= target:
             return k
     return newest_complete
 
@@ -319,7 +353,11 @@ def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Sto
               estimator: TokenEstimator, k: int, strip_upto: int, events: list[dict], reason: str,
               sizing: tuple[int, int] | None = None) -> EpochState:
     if k > state.k:
-        turns = [page_turn(t) for t in split_turns(messages, state.k, k)]
+        bounds = [i for i in turn_starts(messages) if state.k <= i < k]
+        if not bounds or bounds[0] != state.k:
+            bounds = [state.k, *bounds]
+        edges = [*bounds, k]
+        turns = [strip_carried(messages, a, b) for a, b in zip(edges, edges[1:])]
         ids = store.page_out(turns, state.turns_paged)
         events.append({"event": "page_out", "epoch": state.epoch + 1, "turns": len(turns),
                        "pages": len(ids), "first_turn": state.turns_paged})
@@ -334,11 +372,14 @@ def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Sto
     if sizing is not None:
         rotation.update({"fixed_overhead": sizing[0], "window_budget": sizing[1]})
     events.append(rotation)
+    _, unclassified = carried_systems(messages, k)
+    if unclassified:
+        events.append({"event": "unclassified_system_message", "epoch": new.epoch, "count": unclassified})
     carried = carried_tokens(messages, estimator)
     growth = carried - (state.initial_carried or 0)
     if growth > config.carried_budget:
         events.append({"event": "carried_over_budget", "epoch": new.epoch, "carried_tokens": carried,
-                       "carried_growth": growth, "system_messages": len(carried_content(messages, k)[1]),
+                       "carried_growth": growth, "system_messages": len(carried_systems(messages, k)[0]),
                        "budget": config.carried_budget})
     return new
 
@@ -373,8 +414,13 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
             # current turn start, keep an in-flight turn's thinking, never send the full history.
             starts = turn_starts(messages)
             current = starts[-1] if starts else 0
+            # Known limitation (reviewer-2): an in-flight tool loop keeps its thinking although the prefix
+            # before it changed; on an enforcing account those blocks are invalid.
+            inflight = any(isinstance(b, dict) and b.get("type") in THINKING_TYPES
+                           for m in messages[current:] for b in _blocks(m))
             events.append({"event": "resync", "epoch": state.epoch, "kind": "paged_changed",
-                           "matched": match, "previous_messages": previous_n, "messages": n})
+                           "matched": match, "previous_messages": previous_n, "messages": n,
+                           "inflight_thinking_kept": inflight})
             fresh = replace(state, k=0, turns_paged=state.turns_paged)
             state = new_epoch(messages, request, fresh, store, config, estimator, current, current, events,
                               "paged_changed")
@@ -404,14 +450,14 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
             f = fixed_overhead(request, messages, state, store, config, estimator)
             w = config.bound - headroom(state, config) - f
             starts = turn_starts(messages)
-            newest = messages[starts[-2]:] if len(starts) >= 2 else messages[starts[-1]:]
+            newest_start = starts[-2] if len(starts) >= 2 else starts[-1]
             sizing = {"epoch": state.epoch, "fixed_overhead": f, "window_budget": w}
             target = int(config.window_fraction * w)
             if state.head_changed:  # rule 6: always a new epoch; page only if the budget allows
                 k = choose_k(messages, state, target, estimator) if w > 0 else state.k
                 state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "head_change",
                                   sizing=(f, w))
-            elif w <= 0 or window_tokens(newest, estimator) > w:
+            elif w <= 0 or window_tokens(messages, estimator, newest_start) > w:
                 events.append({"event": "bound_too_small", **sizing, "bound": config.bound})
             else:
                 k = choose_k(messages, state, target, estimator)

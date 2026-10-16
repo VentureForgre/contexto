@@ -1,7 +1,9 @@
 #!/bin/bash
 # Zero-token live multi-turn shape probe: a throwaway Claude Code session talks to
 # fake_model_stub.py on loopback for six turns (turn 1 asks for a tool, so its turn has a tool
-# loop; turns 4 and 6 change --effort), resuming the CLI-written session each time. Isolated config, dummy key, scrubbed env,
+# loop; turns 4 and 6 change --effort), resuming the CLI-written session each time; then a
+# four-turn session with a per-turn context hook, and a four-turn session that adds and removes an
+# MCP server. Isolated config, dummy key, scrubbed env,
 # pinned model. Output: <repo>/.contexto/spikes/M2-A2/live-shapes.jsonl
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"
@@ -31,3 +33,23 @@ turn turn3 --resume "$SID" "Synthetic prompt three."
 turn turn4-effort-high --resume "$SID" --effort high "Synthetic prompt four."
 turn turn5 --resume "$SID" "Synthetic prompt five."
 turn turn6-effort-low --resume "$SID" --effort low "Synthetic prompt six."
+
+# Hook case: a UserPromptSubmit hook that adds per-turn context (as OpenRig seats do).
+HOOKS="$TMP/hook-settings.json"
+printf '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 %s"}]}]}}\n' \
+  "$S/hook_context.py" > "$HOOKS"
+SID2=$(python3 -c "import uuid; print(uuid.uuid4())")
+turn hook-turn1 --session-id "$SID2" --settings "$HOOKS" "Synthetic hook prompt one."
+turn hook-turn2 --resume "$SID2" --settings "$HOOKS" "Synthetic hook prompt two."
+turn hook-turn3 --resume "$SID2" --settings "$HOOKS" "Synthetic hook prompt three."
+turn hook-turn4 --resume "$SID2" --settings "$HOOKS" "Synthetic hook prompt four."
+
+# Tool-addition case: a resume that adds an MCP server (its tools are sent upfront behind a
+# non-first-party base URL), then a resume that drops it again.
+MCP="$TMP/mcp.json"
+printf '{"mcpServers": {"probe": {"command": "python3", "args": ["%s"]}}}\n' "$S/mcp_probe_server.py" > "$MCP"
+SID3=$(python3 -c "import uuid; print(uuid.uuid4())")
+turn mcp-turn1-none --session-id "$SID3" "Synthetic tools prompt one."
+turn mcp-turn2-added --mcp-config "$MCP" --resume "$SID3" "Synthetic tools prompt two."  # --mcp-config takes several values
+turn mcp-turn3-kept --mcp-config "$MCP" --resume "$SID3" "Synthetic tools prompt three."
+turn mcp-turn4-removed --resume "$SID3" "Synthetic tools prompt four."

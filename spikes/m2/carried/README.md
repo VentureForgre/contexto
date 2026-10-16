@@ -14,8 +14,10 @@ positions, and the key names of extra fields. No text is logged.
   same structure. No model is called.
 - `probe.sh`: a fresh turn, then `--resume` of two hand-written session files (two text turns; a
   tool loop), against `shape_stub.py`.
-- `live_probe.sh`: six turns of a real CLI-written session against `fake_model_stub.py`: turn 1
-  with a tool loop, then five `--resume` turns, of which turns 4 and 6 change `--effort`.
+- `live_probe.sh`: three real CLI-written sessions against `fake_model_stub.py`: six turns (turn 1
+  with a tool loop, then five `--resume` turns, of which turns 4 and 6 change `--effort`); four turns
+  with a UserPromptSubmit hook (`hook_context.py`) that adds per-turn context; and four turns that add
+  an MCP server (`mcp_probe_server.py`) on the second turn and drop it on the fourth.
 - `live_check.py`: three placements sent to the real API through the seat's route (credential held
   in memory as in L1-e, `claude-haiku-5-5`, synthetic content). Needs the L1-e probe
   (`spikes/m0/route-identity/probe.py`; `M2_PROBE_PATH` overrides its location).
@@ -45,14 +47,32 @@ All throwaway CLI runs use an isolated `CLAUDE_CONFIG_DIR`, a dummy key that is 
    `{role: system, content: [], output_config: {effort: ...}}`; it appears at `messages[1]` when a
    session file without the CLI's own system record is resumed (`probe.sh`), and as described in 5.
    No edit precedes kept thinking, so the rule 12 conformance call was not needed and was not run.
-5. **Accrual** [measured: `live_probe.sh`]: system messages accrue per settings change, not per turn
-   or per resume. Turns 1 to 3 (same effort) carry exactly one system message. Each `--effort`
-   change (turn 4 high, turn 5 back to the default medium, turn 6 low) appends one settings-only
-   message as the request's last message, after the new prompt. Context blocks stay at
-   `messages[0]`.
+5. **Accrual without hooks** [measured: `live_probe.sh`, first session]: with no hooks, system
+   messages accrue per settings change, not per turn or per resume. Turns 1 to 3 (same effort) carry
+   exactly one system message. Each `--effort` change (turn 4 high, turn 5 back to the default
+   medium, turn 6 low) appends one settings-only message as the request's last message, after the new
+   prompt. Context blocks stay at `messages[0]`.
+7. **Per-turn hook context** [measured by a single four-turn probe, `live_probe.sh` hook session;
+   reviewer-2 measured the same with three turns]: with a UserPromptSubmit hook that adds
+   `additionalContext`, every turn after the first gets one role `system` message right after its
+   prompt (indexes 4, 7, 10), about 70 characters of text, no `output_config`. The session-start
+   message at `messages[1]` keeps its text and `output_config`. So per-turn system messages exist
+   whenever such a hook runs; the engine pages them with their turn (contract PR #35).
+8. **Tool-list changes** [measured: `live_probe.sh` MCP session]: adding an MCP server on a resume put
+   `mcp__probe__contexto_probe` into `tools` (sent upfront behind a non-first-party base URL) and
+   added no system message; dropping it removed the tool, again with no system message. A tool-list
+   change is therefore a head change (rule 6), not carried content.
 6. **Hand-written resume shape** [measured: `probe.sh`]: when the resumed session file lacks the CLI's
    own records, the context block rides in the new turn's user message and the full system text
    follows the new prompt as a trailing system message.
 
-Not measured: system messages added when the tool list changes (for example MCP tools appearing);
-the engine treats any `tools` change as a head change (rule 6).
+## Classifier (contract PR #35)
+
+`classify_system` in `src/contexto/rewrite.py` sorts each role `system` message by measured shape:
+settings-only (empty content plus settings fields such as `output_config`; checked first, so a message
+with text is never settings-only), session-start (content, inside the first turn), per-turn (content,
+in a later turn, before that turn's first assistant message, where hook context lands; paged with its
+turn), and unclassified (anything else; carried and logged as `unclassified_system_message`).
+
+Not measured: MCP `tools/list_changed` notifications within a single running process, and other
+hook events that inject context (SessionStart, PostToolUse).

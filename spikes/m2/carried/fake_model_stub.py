@@ -52,6 +52,7 @@ class H(BaseHTTPRequestHandler):
         msgs = body.get("messages") or []
         with open(LOG, "a") as f:
             f.write(json.dumps({"method": "POST", "path": path, "bytes": n, "stream": body.get("stream"),
+                                "tool_names": [t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)],
                                 "messages": [message_shape(m) for m in msgs]}) + "\n")
         if path.endswith("/count_tokens"):
             return self._reply(200, "application/json", b'{"input_tokens": 10}')
