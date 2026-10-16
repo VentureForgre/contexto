@@ -87,6 +87,27 @@ each), with 34 probes per group.
 - The pilot ran at about 12k context. Difficulty will rise with size, which is what the run is
   for [inferred].
 
+**Evidence for a pinned current-state block** [measured, small sample]. Revisions came only every
+few turns, yet at about 12k context the depth-6 chains were the one probe type that failed. All 3
+misses gave an older value. The model reached for a stale value even with the current one in
+context. The policy's pinned block lists only current values (policy doc, section 2), which
+targets this failure directly. The sample is small (8 probes), so the run should confirm it at
+size.
+
+### Pilot 2 [measured, 2026-10-15]: missed, no result
+
+- **Setup.** The recommended mix scaled to 60 probes at about 15k context, effort `medium` (`harder.py
+  pilot`).
+- **No answer.** The probe fork reasoned until `max_tokens`: 16,000 output tokens, all thinking,
+  and no answer text. There was nothing to score.
+- **Over the cap.** Spend was 50,327 tokens, 5,327 over the 45,000 cap. The guard before each call
+  reserved only a quarter of `max_tokens` for output; it now reserves all of it.
+- **Estimates ran low.** Inputs were 20% to 38% above estimate for this content: 15,841 against
+  about 13,200, and 18,482 against 13,391.
+- Per intake's rule the run was not started. Options went to intake: a smaller pilot at effort
+  `low` with a larger output allowance, exact sizing with the token-counting endpoint, and a run
+  cap near 950k.
+
 **Recommended mix for the run** (120 probes per checkpoint), aiming at 80% to 90% at 41k
 [inferred, to be confirmed]:
 
