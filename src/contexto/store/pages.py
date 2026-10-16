@@ -28,9 +28,20 @@ _PATH_KEYS = ("file_path", "path", "notebook_path")
 _PATH_RE = re.compile(r"(?<![\w/.-])(?:~?/|\./|\.\./)?(?:[\w.-]+/)+[\w.-]*\w")
 
 
+def same_content(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """True when two page records hold the same hashed content, ``{turn, messages}``."""
+    return canonical_bytes({"turn": a.get("turn"), "messages": a.get("messages")}) == canonical_bytes(
+        {"turn": b.get("turn"), "messages": b.get("messages")})
+
+
 def page_id(key: bytes, page: dict[str, Any]) -> str:
-    """``pg_`` + first 16 hex of HMAC-SHA256 over the canonical JSON of the page without its id."""
-    body = {k: v for k, v in page.items() if k != "id"}
+    """``pg_`` + first 16 hex of HMAC-SHA256 over the canonical JSON of the page's turn and messages.
+
+    Only the turn number and the exact messages are hashed (contract PR #47). Derived fields (byte
+    and token estimates, the stub) are left out, so a change to the estimator or the stub rule never
+    changes the id of the same content.
+    """
+    body = {"turn": page["turn"], "messages": page["messages"]}
     return "pg_" + hmac.new(key, canonical_bytes(body), hashlib.sha256).hexdigest()[:16]
 
 

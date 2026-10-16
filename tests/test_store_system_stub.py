@@ -13,15 +13,11 @@ NORMAL = [
     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]},
 ]
 MIXED = [{"role": "system", "content": "Effort changed to high"}, {"role": "user", "content": "carry on"}]
-# No tool_result, so the page's token estimate, and with it the id, does not depend on the tool seed.
-TOOL_FREE = NORMAL[:2]
 
 
-def test_pages_with_user_text_keep_their_ids():
-    # Golden ids computed with the pre-B6 pages.py on main (1b2b262) and the same key. Both turns are
-    # free of tool_result content, so the ids hold across the 2.0 to 1.5 tool seed change (B7).
-    assert build_page(KEY, TOOL_FREE, 3)["id"] == "pg_c47cb9a1f16fcb53"
-    assert build_page(KEY, MIXED, 3)["id"] == "pg_54695d1e9037b3d1"
+def test_the_stub_rule_does_not_reach_page_ids():
+    # B6 added system_text to the stub; ids hash only {turn, messages} (B8), so stubs never move ids.
+    assert build_page(KEY, NORMAL, 3)["id"] == "pg_ddfe6e1db2f05ad6"
     assert "system_text" not in build_page(KEY, NORMAL, 3)["stub"]
     assert "system_text" not in build_page(KEY, MIXED, 3)["stub"]
 
@@ -60,11 +56,9 @@ def test_search_finds_system_only_pages(store):
     assert store.search("grep_files") == [pid]
 
 
-def test_a_tool_result_page_records_the_1_5_seed_estimate():
-    # The page body hashes its token estimate, so a page holding tool_result content has a different
-    # id under a different seed; existing page files keep the ids they were written with.
+def test_a_tool_result_page_records_the_seed_estimate_without_it_reaching_the_id():
     from contexto.tokens import estimate_message_tokens
 
     page = build_page(KEY, NORMAL, 3)
     assert page["tokens"] == estimate_message_tokens(NORMAL)
-    assert page["id"] == "pg_b3934632e94cc207"  # was pg_4fd02b9dd10fc4da with the 2.0 seed
+    assert page["id"] == "pg_ddfe6e1db2f05ad6"
