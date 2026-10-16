@@ -331,7 +331,7 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     version path). The caller starts the proxy with ``launch.upstream``, runs ``launch.argv`` with
     ``launch.env``, and calls ``launch.cleanup()`` on exit. Nothing here reads or writes a credential."""
     base_env = dict(os.environ if env is None else env)
-    contexto_home = Path(contexto_home) if contexto_home is not None else paths.contexto_home()
+    contexto_home = Path(contexto_home) if contexto_home is not None else paths.contexto_home(base_env)
     cwd = cwd or Path.cwd()
     home = home or Path.home()
     target = resolve_codex_upstream(auth_mode, upstream, base_env, claude_upstream)

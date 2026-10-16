@@ -23,3 +23,13 @@ def test_session_dir(tmp_path):
 def test_session_dir_rejects_unsafe_ids(tmp_path, bad):
     with pytest.raises(ValueError):
         session_dir(tmp_path, bad)
+
+
+def test_relative_home_is_made_absolute(monkeypatch, tmp_path):
+    """Packet A18: the home is handed to child processes that start in other directories (Codex runs its
+    MCP servers in its own working directory), so a relative CONTEXTO_HOME is made absolute once, here."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CONTEXTO_HOME", "rel-home")
+    assert contexto_home() == tmp_path / "rel-home" and contexto_home().is_absolute()
+    assert contexto_home({"CONTEXTO_HOME": "other"}) == tmp_path / "other"  # an env mapping wins
+    assert contexto_home({}) == Path.home() / ".contexto"
