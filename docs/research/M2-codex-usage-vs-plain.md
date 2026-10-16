@@ -251,8 +251,9 @@ The main cause was a new Contexto proxy for every `codex exec` turn, not bound 6
 - **Reproduced offline.** A28's baseline replay (`docs/research/M2-cache-aware-rotation.md`, PR #174)
   reproduces every logged rotation: 19, at the same requests, with bytes within 597 of the log.
 - **Bound 64,000 is a secondary factor.** In A28's model (**modeled**), bound 100,000 still rotates 11
-  times on restarts and costs 65.7% more. Bound 150,000 never rotates, which is plain Codex at the same
-  request points, and costs 40.0% more than Contexto at 64,000.
+  times on restarts and costs 65.7% more. Bound 150,000 never rotates. At Contexto's own request points
+  (tool rounds included, so not plain Codex), A28 models it at 40.0% more than Contexto at 64,000, under
+  A28's cache model.
 - **Resuming epoch state across restarts** (A28, **modeled**: one engine kept across restarts):
   - rotations fall from 19 to 9;
   - the cached share rises from 75.5% to 83.5% (A28's cache model, whose baseline gives 75.5% against
