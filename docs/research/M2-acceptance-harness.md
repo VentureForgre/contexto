@@ -16,7 +16,7 @@ Claims are tagged **[measured]**, **[vendor-documented]**, or **[inferred]**.
 |---|---|
 | 1. Long run: zero compaction, every request under the bound except logged over-bound turns, zero 4xx | `detectors.analyze` over the session log and Claude Code's session JSONL |
 | 2. Fidelity: within 2 probes of the full-context baseline overall, no category more than 1 below | `run.py score`, using the deterministic L2f scorer on both answer sets plus `compare` |
-| 3. Recall: a paged-out-only probe answered, and the `contexto_recall` call in the log | 4 paged-only probes, plus the `mcp_call` events |
+| 3. Recall: a paged-out-only probe answered, and the answer reached the model through Contexto's tools: a `contexto_recall` of its page or a `contexto_search` hit whose returned lines contain it | 4 paged-only probes; `run.py check --answers` credits each from the `mcp_call` events' returned ranges (`recall_credited`). Whether `contexto_recall` was called is reported under `informational`, never a verdict. Without `--session-dir` and `--answers`, acceptance 3 is not evaluated and `check` fails closed |
 | 4. Cache within an epoch, misses reported as a rate | `Report.cache_hit_rate` and the list of misses |
 
 ## The session
@@ -344,8 +344,8 @@ stub, with the credential checked on every request.
 | Paged-only plants in pages | 4 of 4 | 4 of 4 |
 | H1 expected / worst (stub cross-check) | 1,962,037 / 2,629,277 | 1,220,746 / 1,632,146 |
 
-Every acceptance verdict passed in both runs except `recall_called`, since the stub calls no
-tools. The stub run's 40 KB total (2,387,214 / 3,082,454) sits about 248,000 tokens under the
+Every acceptance verdict passed in both runs except `recall_called` (then a verdict, now
+informational), since the stub calls no tools. The stub run's 40 KB total (2,387,214 / 3,082,454) sits about 248,000 tokens under the
 approval table, so the guard never stops a run the stub run predicts.
 
 **Recalls in the probe turn.** The probe turn's tool loop cannot rotate, so the budget prices 2
@@ -355,8 +355,8 @@ so the preamble and page index must lead the model to recall. B9 (PR #56) sizes 
 session's measured bytes per token and 1.5, never above 32,000 characters, and at 12,000 characters
 until the engine records `W` with `set_window`. The budget prices each recall at the largest chunk,
 32,000 characters of log text, 17,778 tokens; at this run's `W` (62,000 to 85,000) B9 returns
-13,000 to 17,600 tokens. `recalls_over_budget` reports recall calls beyond the 2 priced, across the
-whole session; no verdict uses it.
+13,000 to 17,600 tokens. `recalls_over_budget` reports recall calls beyond the 2 priced per probe turn, 12
+over D27's six probe turns, across the whole session; no verdict uses it.
 
 Under option (a) the pre-usage request stays far below 135,000, so the logs stay pasted user
 text. `Params.head` is now 47,600 (the engine's `F` here) and the default turn size 40 KB.

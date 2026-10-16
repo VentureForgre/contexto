@@ -48,9 +48,11 @@ FAILURE_EVENTS = ("degraded_enter", "store_error", "page_conflict", "fallback_fa
                   "turn_room_missing", "unclassified_system_message",
                   "turn_room_low",  # A12: decided a failure, contract PR #115 at 1eb8a4c
                   "retained_stale")  # a failed snapshot write, contract PR #125 at 01a58a2
-# The recalls the budget prices (script.MAX_RECALLS). A cost guard only (intake, 2026-10-16): the
-# model is not told about it, and ``recalls_over_budget`` reports it without failing any verdict.
+# The recalls the budget prices per probe turn (script.MAX_RECALLS), over D27's probe turns
+# (script.PROBE_TURNS). A cost guard only (intake, 2026-10-16): the model is not told about it, and
+# ``recalls_over_budget`` reports it without failing any verdict.
 MAX_RECALLS = 2
+PROBE_TURNS = 6
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -139,8 +141,9 @@ class Report:
 
     @property
     def recalls_over_budget(self) -> int:
-        """Recall calls beyond the budget's priced count: reported, never a verdict."""
-        return max(0, self.recall_calls - MAX_RECALLS)
+        """Recall calls beyond the budget's priced count for the run, MAX_RECALLS per probe turn:
+        reported, never a verdict."""
+        return max(0, self.recall_calls - MAX_RECALLS * PROBE_TURNS)
 
     @property
     def cache_hit_rate(self) -> float | None:
@@ -158,8 +161,14 @@ class Report:
             "zero_4xx": (self.upstream_4xx == 0 and self.model_request_4xx == 0 and self.encoded_body_rejected == 0
                          and not any(400 <= s < 500 for s in self.statuses)),
             "no_local_5xx": not self.local_5xx,
-            "recall_called": self.recall_ok > 0,
         }
+
+    def informational(self) -> dict[str, Any]:
+        """Reported beside the verdicts, never a pass condition. Acceptance 3 passes on recall credit
+        from a recall or a content-bearing search hit (contract, M2 acceptance 3; intake 07:57Z), so
+        whether ``contexto_recall`` itself was called is information only."""
+        return {"recall_called": self.recall_ok > 0, "recall_calls": self.recall_calls,
+                "search_calls": self.mcp_calls.get("contexto_search", 0)}
 
 
 def paged_statements(session_dir: Path, statements: Iterable[str]) -> dict[str, bool]:
