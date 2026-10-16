@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import stat
+import subprocess
 from pathlib import Path
+
+import pytest
 
 import variants
 from contexto.canonical import canonical_json
@@ -100,3 +104,37 @@ def test_strip_thinking_removes_every_thinking_block():
     assert count == 2 and "signature" not in json.dumps(out)
     assert out["messages"][1]["content"] == [{"type": "text", "text": "a"}]
     assert out["messages"][2]["content"] and out["messages"][2]["content"][0]["type"] == "text"  # placeholder
+
+
+def test_outputs_are_deterministic_and_private(tmp_path):
+    run = write_run(tmp_path / "run")
+    spec = tmp_path / "v.json"
+    spec.write_text(json.dumps({"v": {"engine": {"turn_reminder": "R"}, "bound": 6_000}}))
+    outs = []
+    for i in range(2):
+        out = tmp_path / f"out{i}"
+        variants.main([str(run), "--variants", str(spec), "--out", str(out)])
+        outs.append((out / "v" / "probe_request.json").read_bytes())
+        assert stat.S_IMODE((out / "v" / "probe_request.json").stat().st_mode) == 0o600
+        assert stat.S_IMODE((out / "summary.json").stat().st_mode) == 0o600
+    assert outs[0] == outs[1]  # fixed page key: byte-identical requests
+
+
+def test_out_inside_a_repo_must_be_gitignored(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text(".contexto/\n")
+    variants.check_out_is_ignored(repo / ".contexto" / "out")  # ignored: fine
+    variants.check_out_is_ignored(tmp_path / "elsewhere")  # outside any repo: fine
+    with pytest.raises(SystemExit, match="not ignored"):
+        variants.check_out_is_ignored(repo / "results")
+
+
+def test_probe_substitution_skips_a_trailing_context_block():
+    request = {"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "old probe"},
+        {"type": "text", "text": "<system-reminder>synthetic context</system-reminder>"}]}]}
+    out = variants.substitute_probe_text(request, "new probe")
+    assert out["messages"][0]["content"] == [{"type": "text", "text": "new probe"},
+                                             {"type": "text", "text": "<system-reminder>synthetic context</system-reminder>"}]
