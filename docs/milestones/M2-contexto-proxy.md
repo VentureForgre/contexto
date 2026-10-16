@@ -74,10 +74,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   but not observed on Claude Code 2.1.301 (builder-2 measured that adding or removing an MCP server
   on resume changes `tools`, a head change under rule 6, and adds no system message). All are carried in the CLI's current form, never restored from a stored copy. Any
   other `role: "system"` message carries per-turn content (for example the output of a
-  context-injecting `UserPromptSubmit` hook) and belongs to its turn: it is paged with that turn. Classification, deterministic and in this order: (1) the
-  session-start message is the first `role: "system"` message of the session, or any system
-  message carrying both content and settings fields (this covers resumes of hand-written session
-  files); (2) a settings-only message has empty content plus settings fields; (3) any other system
+  context-injecting `UserPromptSubmit` hook) and belongs to its turn: it is paged with that turn. Classification, deterministic and in this order: (1) a
+  session-start message carries both content and settings fields such as `output_config`
+  (measured: the session-start message has `output_config`, hook messages do not; position is not
+  used, so resumes of hand-written session files classify correctly); (2) a settings-only message has empty content plus settings fields; (3) any other system
   message whose content is text only is per-turn content and is paged with the turn it sits in,
   wherever it sits in that turn (measured by reviewer-2 at zero spend in the PR #30 review: a
   `PostToolUse` hook's `additionalContext` arrives as a system message right after the
