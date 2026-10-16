@@ -20,6 +20,7 @@ from contexto.store.memory import MemoryStore
 from contexto.proxy import (
     THINKING_BINDING_BETA,
     ContextoProxy,
+    UsageReader,
     add_beta,
     identity_transform,
     serialize_request,
@@ -1076,3 +1077,107 @@ def test_idle_keep_alive_connections_do_not_delay_stop(make_proxy, scripted_upst
     assert time.monotonic() - started < 1
     assert not any(e["event"] == "proxy_stop_incomplete" for e in log.events)
     conn.close()
+
+
+# Packet A23: how each response ended, on its log entry, content-free -------------------------------
+
+def sse_body(*events: dict) -> bytes:
+    return b"".join(b"event: %s\ndata: %s\n\n" % (e["type"].encode(), json.dumps(e).encode()) for e in events)
+
+
+def responses_end(kind: str, **response) -> dict:
+    return {"type": f"response.{kind}", "response": {"id": "resp_1", **response}}
+
+
+def ending(reader_api: str, body: bytes, content_type: str = "text/event-stream") -> dict:
+    reader = UsageReader(content_type, reader_api)
+    for i in range(0, len(body), 7):  # split mid-event, as a network would
+        reader.feed(body[i:i + 7])
+    reader.finish()
+    return reader.end_fields()
+
+
+SECRET_TEXT = "PRIVATE quoted content: rm -rf / and a password"
+
+
+@pytest.mark.parametrize("events, want", [
+    ([responses_end("completed", status="completed")], {"end_event": "completed", "response_status": "completed"}),
+    ([responses_end("incomplete", status="incomplete", incomplete_details={"reason": "content_filter"})],
+     {"end_event": "incomplete", "response_status": "incomplete", "incomplete_reason": "content_filter"}),
+    ([responses_end("incomplete", status="incomplete", incomplete_details={"reason": "max_output_tokens"})],
+     {"end_event": "incomplete", "response_status": "incomplete", "incomplete_reason": "max_output_tokens"}),
+    ([responses_end("failed", status="failed", error={"code": "server_error", "message": SECRET_TEXT})],
+     {"end_event": "failed", "response_status": "failed", "error_code": "server_error"}),
+    ([{"type": "response.created", "response": {"id": "resp_1", "status": "in_progress"}},
+      {"type": "response.output_text.delta", "delta": SECRET_TEXT}], {"end_event": "none"}),  # cut before the end
+    ([{"type": "error", "code": "rate_limit_exceeded", "message": SECRET_TEXT}],
+     {"end_event": "none", "error_code": "rate_limit_exceeded"}),
+])
+def test_responses_stream_end_is_recorded(events, want):
+    assert ending("responses", sse_body(*events)) == want
+
+
+@pytest.mark.parametrize("stop_reason", ["end_turn", "tool_use", "max_tokens", "refusal", "stop_sequence", "pause_turn"])
+def test_messages_stop_reason_is_recorded(stop_reason):
+    body = sse_body({"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
+                    {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": SECRET_TEXT},
+                     "usage": {"output_tokens": 1}},
+                    {"type": "message_stop"})
+    assert ending("messages", body) == {"stop_reason": stop_reason}
+
+
+def test_a_messages_error_event_records_its_type_only():
+    body = sse_body({"type": "error", "error": {"type": "overloaded_error", "message": SECRET_TEXT}})
+    assert ending("messages", body) == {"error_type": "overloaded_error"}
+
+
+def test_non_streaming_bodies_record_the_same_fields():
+    responses = {"id": "resp_1", "status": "incomplete", "incomplete_details": {"reason": "content_filter"},
+                 "output": [{"type": "message", "content": [{"type": "output_text", "text": SECRET_TEXT}]}]}
+    assert ending("responses", json.dumps(responses).encode(), "application/json") == {
+        "response_status": "incomplete", "incomplete_reason": "content_filter"}
+    messages = {"type": "message", "stop_reason": "refusal", "content": [{"type": "text", "text": SECRET_TEXT}]}
+    assert ending("messages", json.dumps(messages).encode(), "application/json") == {"stop_reason": "refusal"}
+
+
+@pytest.mark.parametrize("value", [SECRET_TEXT, "Content_Filter", "x" * 65, 42, None, ["content_filter"]])
+def test_only_enum_values_are_kept(value):
+    body = sse_body(responses_end("incomplete", status="incomplete", incomplete_details={"reason": value}))
+    assert ending("responses", body) == {"end_event": "incomplete", "response_status": "incomplete"}
+
+
+def serve_sse(body: bytes):
+    def script(sock: socket.socket, got: bytearray) -> None:
+        while b"\r\n\r\n" not in got:
+            got += sock.recv(65536)
+        head = bytes(got).split(b"\r\n\r\n", 1)[0].decode()
+        length = int(next(line.split(":", 1)[1] for line in head.split("\r\n") if line.lower().startswith("content-length")))
+        while len(got) < len(head) + 4 + length:
+            got += sock.recv(1 << 20)
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+        for i in range(0, len(body), 50):
+            part = body[i:i + 50]
+            sock.sendall(b"%x\r\n%s\r\n" % (len(part), part))
+        sock.sendall(b"0\r\n\r\n")
+    return script
+
+
+@pytest.mark.parametrize("path, body, want", [
+    ("/responses", sse_body(responses_end("incomplete", status="incomplete",
+                                          incomplete_details={"reason": "content_filter"})),
+     {"end_event": "incomplete", "response_status": "incomplete", "incomplete_reason": "content_filter"}),
+    ("/responses", sse_body({"type": "response.created", "response": {"status": "in_progress"}}), {"end_event": "none"}),
+    ("/v1/messages", sse_body({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}}),
+     {"stop_reason": "max_tokens"}),
+])
+def test_the_entry_carries_the_ending_and_the_relay_is_byte_identical(make_proxy, scripted_upstream, path, body, want):
+    url, _ = scripted_upstream(serve_sse(body))
+    proxy, log = make_proxy(upstream=url)
+    request = {"model": "m", "stream": True, "input": []} if path == "/responses" else json.loads(REQUEST_BYTES)
+    response, data = call(proxy, "POST", path, json.dumps(request).encode(), AUTH)
+    assert response.status == 200 and data == body  # what the client gets is unchanged
+    entry = log.requests()[0]
+    assert {k: entry[k] for k in want} == want
+    assert not set(entry) & ({"end_event", "response_status", "incomplete_reason", "error_code", "stop_reason",
+                               "error_type"} - set(want))
+    assert SECRET_TEXT not in json.dumps(log.events)
