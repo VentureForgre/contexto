@@ -96,12 +96,21 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    Until the first real usage arrives, count `tool_result` content at 2.0 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
    character); after that, use the session's measured bytes-per-token ratio.
-4. **Rotation.** Choose the smallest `k` (retain as many recent turns as fit) such that the
-   retained turns fit in `window_target` (default 50% of the bound), always retaining the newest
-   complete turn and the new turn, and never below the current `E.k` (a rotation never un-pages
-   a turn already in the store); write the newly paged turns
-   to the page store, one page per turn, minus carried content; add any newly paged system
-   messages to `carried`; rebuild `pinned_text` and `index_text`; strip thinking per rule 2.
+4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
+   index), in tokens, taken from measured usage once available (the first request's input is the
+   head) and from the estimator before that. The window budget is `W = bound - headroom - F`, and
+   the retained window after rotation targets `window_fraction * W` (default 0.5), so the window
+   can grow before the next trigger. Choose the smallest `k` (retain as many recent turns as fit)
+   within that target, always retaining the newest complete turn and the new turn, and never below
+   the current `E.k` (a rotation never un-pages a turn already in the store). If the chosen `k`
+   equals `E.k`, the rotation is a no-op: nothing is paged and no thinking is stripped. Write the
+   newly paged turns to the page store, one page per turn, minus carried content; add any newly
+   paged system messages to `carried`; rebuild `pinned_text` and `index_text`; strip thinking per
+   rule 2. If `W` is not positive or cannot hold the newest complete turn, log
+   `bound_too_small` and send the request unrotated; the launcher warns at start when the measured
+   head leaves less than 25,000 tokens of window budget and suggests a larger `--bound`. Example
+   from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
+   OpenRig seat head near 92k leaves about 33k.
 5. **Never rotate inside a tool loop** (D17). A turn that grows past the bound is sent as is and
    recorded as over-bound in the session log; the next turn start rotates.
 6. **Head change.** If the CLI's `system` or `tools` change (byte fingerprint), start a new epoch at
@@ -126,11 +135,21 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     fields (such as `output_config`) is carried like any other system message and forwarded as the
     CLI sends it. Lane A measured that Claude Code does not empty earlier system messages, so no
     client-side edit precedes kept thinking (zero-spend stubs; measured by builder-2, reported by
-    manager-1, pending review; evidence to land in the A2 PR under `spikes/m2/carried/`). If a later CLI
-    version starts emptying them, re-run that check before relying on kept thinking after one.
+    manager-1, pending review; evidence to land in the A2 PR under `spikes/m2/carried/`). If a
+    later CLI version starts emptying them, re-run that check before relying on kept thinking.
+13. **Carried growth.** Measured by builder-2 (zero spend, real CLI-written history, one fresh
+    start and five resumes; reported by manager-1, pending review): system messages accrue per
+    settings change, not per turn or per resume; each effort change adds one settings-only message
+    of about 66 bytes after the new prompt, and injected context blocks stay in `messages[0]`. So
+    carried content grows only with settings changes. At rotation only (deterministic, and safe for
+    thinking because rotation strips it), keep the latest settings-only system message per
+    settings key and drop superseded ones from the carried set. If carried content grows by more
+    than 4,000 tokens over its size at the session's first request, log `carried_over_budget` in
+    the session log (the initial size, which includes CLAUDE.md, is normal); tool-addition system messages
+    from MCP tool-list changes are not yet measured and would show up there.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
-online running max of per-turn growth plus 25%, floor 25,000; `window_target` 50% of the bound.
+online running max of per-turn growth plus 25%, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
 Constraint: `bound` plus the largest expected over-bound turn must stay below both Claude Code's
 idle-compaction minimum (200,000 by default, `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`) and the model's
 compaction trigger, or the CLI may compact; the launcher refuses a `bound` above 170,000 unless
@@ -183,7 +202,7 @@ the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
 ## Lanes
 
 - **Lane A, management.manager-1 (builder-1, builder-2):** launcher, proxy server and SSE relay,
-  rewrite engine (rules 1 to 12), upstream resolution, session log; then the Codex adapter
+  rewrite engine (rules 1 to 13), upstream resolution, session log; then the Codex adapter
   (Responses API over HTTP through a temporary `CODEX_HOME` whose provider uses `auth.command`;
   force HTTP or handle WebSocket deltas, decided with evidence).
 - **Lane B, management.manager-2 (builder-3, builder-4):** package scaffolding first (harvest PR #2),
