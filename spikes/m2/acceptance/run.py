@@ -2,6 +2,7 @@
 
 From the repository root:
     python3 spikes/m2/acceptance/run.py dry-run [--turns N --turn-kbytes K --head H]   # budget, no calls
+    python3 spikes/m2/acceptance/run.py approval-table   # the approval lines the doc carries and live gates on
     python3 spikes/m2/acceptance/run.py score --h1 ANSWERS --baseline ANSWERS [--seed N --turns N --turn-kbytes K]
     python3 spikes/m2/acceptance/run.py check --session-log PATH --cc-jsonl PATH [--bound 100000]
     python3 spikes/m2/acceptance/run.py check-credential --seat-settings PATH        # zero spend
@@ -38,6 +39,13 @@ def compare(h1: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
             "pass": overall_gap <= 2 and all(g <= 1 for g in gaps.values())}
 
 
+def plan(seed: int = script.DEFAULT_SEED, turns: int = 0, turn_bytes: int = 40_000,
+         params: budget.Params = budget.Params()) -> tuple[script.Script, budget.Budget]:
+    """The script and its simulated budget: the one figure dry-run prints, the doc shows, and live gates on."""
+    s = build_script(seed, turns, turn_bytes, params)
+    return s, budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], params)
+
+
 def build_script(seed: int, turns: int, turn_bytes: int, params: budget.Params) -> script.Script:
     """With ``turns`` 0, the fewest content turns whose actual sizes reach 2.5x the bound."""
     if turns:
@@ -54,7 +62,7 @@ def build_script(seed: int, turns: int, turn_bytes: int, params: budget.Params) 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="M2 acceptance harness")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("dry-run", "score", "live"):
+    for name in ("dry-run", "approval-table", "score", "live"):
         sp = sub.add_parser(name)
         sp.add_argument("--seed", type=int, default=script.DEFAULT_SEED)
         sp.add_argument("--turns", type=int, default=0, help="content turns; 0 = the fewest reaching 2.5x the bound")
@@ -104,9 +112,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if all(out["verdicts"].values()) else 1
 
     params = budget.Params(bound=args.bound, head=args.head)
-    s = build_script(args.seed, args.turns, args.turn_kbytes * 1_000, params)
+    s, b = plan(args.seed, args.turns, args.turn_kbytes * 1_000, params)
+    if args.command == "approval-table":
+        print(budget.approval_table(b))
+        return 0
     if args.command == "dry-run":
-        b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], params)
         print(f"Script: seed {s.seed}, {len(s.turns) - 1} content turns of about {args.turn_kbytes} KB, "
               f"{len(s.probes)} probes ({len(s.paged_only)} paged-only), restatements {len(script.restatements(s))}.")
         print()
@@ -123,8 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"h1": h1, "baseline": base, "compare": compare(h1, base),
                           "paged_only": score(paged, args.h1.read_text(encoding="utf-8"))}, indent=2, default=str))
         return 0
-    # live
-    b = budget.simulate(list(s.turn_bytes[:-1]), s.turn_bytes[-1], params)
+    # live: gates on the same Budget that dry-run and approval-table print
     if b.history_tokens < 2.5 * args.bound:
         print(f"refusing: planned history {b.history_tokens:,} is below 2.5x the bound ({int(2.5 * args.bound):,})",
               file=sys.stderr)

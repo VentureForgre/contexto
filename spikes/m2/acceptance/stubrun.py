@@ -163,7 +163,7 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
         usage = ev.get("usage") or {}
         real = sum(int(usage.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
         eng = _engine_request(ev)
-        estimate = eng.get("estimate")
+        estimate = eng.get("sent_estimate", eng.get("estimate"))  # after a rotation, the request actually sent
         rows.append({"request": i + 1, "epoch": ev.get("epoch"), "real": real, "estimate": estimate,
                      "gap": None if estimate is None else real - int(estimate),
                      "rotation": any(t.get("event") == "rotation" for t in ev.get("transform_events") or [])})
