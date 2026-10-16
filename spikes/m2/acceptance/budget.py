@@ -1,9 +1,11 @@
 """Dry-run budget for the acceptance run (H1) and its full-context baseline. No model calls.
 
-H1 is simulated with the contract's rotation rule (M2 contract, rewrite rules 3 to 5): before each
-new turn, if the estimated upstream input would exceed ``bound - headroom``, page out the oldest
-turns until the retained turns fit ``window_target``, always keeping the newest complete turn and
-the new one. ``headroom`` is the running max of per-turn growth plus 25%, floor 25,000.
+H1 is simulated with the contract's rotation rules (M2 contract, rules 3 to 5): before each new
+turn, if the estimated upstream input would exceed ``bound - headroom``, page out the oldest turns
+until the retained turns fit half the window budget ``W = bound - headroom - F`` (``F`` = head plus
+preamble), always keeping the newest complete turn and the new one; if ``W`` cannot hold the newest
+complete turn, the request goes unrotated (``bound_too_small``). ``headroom`` is the running max of
+per-turn growth plus 25%, floor 25,000.
 
 Token estimates use the contract's conservative estimator, 2.0 bytes per token for tool output
 and 3.5 for other text, except that this script's pasted log text counts at 2.0 too: it is numeric
@@ -24,8 +26,8 @@ HEADROOM_FLOOR = 25_000
 @dataclass(frozen=True)
 class Params:
     bound: int = 100_000
-    head: int = 45_925  # a default Claude Code throwaway's fixed head on the rig route (lane 1, relayed 2026-10-15)
-    window_target_ratio: float = 0.5
+    head: int = 54_500  # the contract's M0 figure for a throwaway head with pins (rule 4); lane 1 relayed 45,925 without
+    window_fraction: float = 0.5  # rule 4: retained window targets this share of W
     reply_tokens: int = 20  # "OK" plus a little thinking per build turn
     preamble_base: int = 300  # the preamble's fixed lines
     index_tokens_per_page: int = 60
@@ -60,6 +62,8 @@ class Budget:
     baseline_cli: int = 0
     rotations: int = 0
     planned_over_bound: int = 0
+    bound_too_small: int = 0
+    window_budget_first: int = 0
 
 
 def turn_tokens(turn_bytes: int) -> int:
@@ -67,10 +71,10 @@ def turn_tokens(turn_bytes: int) -> int:
 
 
 def simulate(turn_bytes: list[int], probe_bytes: int, p: Params = Params()) -> Budget:
+    """Simulate the proxy per contract rule 4 (window budget after fixed overhead) and rule 5."""
     b = Budget()
     sizes = [turn_tokens(x) for x in turn_bytes]
-    window_target = int(p.bound * p.window_target_ratio)
-    retained: list[int] = []  # sizes of retained turns (user text + reply)
+    retained: list[int] = []  # retained complete turns (user text + reply), oldest first
     paged = 0
     epoch = 1
     max_growth = 0
@@ -78,19 +82,26 @@ def simulate(turn_bytes: list[int], probe_bytes: int, p: Params = Params()) -> B
         max_growth = max(max_growth, u + p.reply_tokens)
         headroom = max(HEADROOM_FLOOR, int(1.25 * max_growth))
         preamble = 0 if paged == 0 else p.preamble_base + p.pinned_tokens + paged * p.index_tokens_per_page
-        estimate = p.head + preamble + sum(retained) + u
+        fixed = p.head + preamble  # rule 4: F = system + tools + carried + preamble
+        window_budget = p.bound - headroom - fixed
         note = ""
-        if retained and estimate > p.bound - headroom:
-            # Rotate: smallest k such that the retained turns plus the new one fit window_target,
-            # keeping at least the newest complete turn.
-            # Never page the newest complete turn (contract rule 4).
-            while len(retained) > 1 and sum(retained) + u > window_target:
-                retained.pop(0)
-                paged += 1
-            epoch += 1
-            b.rotations += 1
-            note = "rotation"
-            preamble = p.preamble_base + p.pinned_tokens + paged * p.index_tokens_per_page
+        if retained and fixed + sum(retained) + u > p.bound - headroom:
+            if window_budget <= 0 or window_budget < retained[-1]:
+                b.bound_too_small += 1
+                note = "bound_too_small: sent unrotated"
+            else:
+                target = int(p.window_fraction * window_budget)
+                before = paged
+                while len(retained) > 1 and sum(retained) + u > target:
+                    retained.pop(0)
+                    paged += 1
+                if paged > before:
+                    epoch += 1
+                    b.rotations += 1
+                    note = "rotation"
+                    preamble = p.preamble_base + p.pinned_tokens + paged * p.index_tokens_per_page
+                else:
+                    note = "rotation no-op (newest complete turn already alone)"
         inp = p.head + preamble + sum(retained) + u
         over = inp > p.bound
         b.rows.append(Row(t, "turn", inp, len(retained), paged, epoch, over, p.reply_tokens, note))
@@ -110,6 +121,7 @@ def simulate(turn_bytes: list[int], probe_bytes: int, p: Params = Params()) -> B
     b.baseline_replay = full + p.probe_output
     b.baseline_replay_worst = full + p.max_tokens_reserve
     b.baseline_cli = sum(p.head + sum(sizes[:t]) + t * p.reply_tokens for t in range(1, len(sizes) + 1)) + full + p.probe_output
+    b.window_budget_first = p.bound - HEADROOM_FLOOR - p.head
     return b
 
 
@@ -122,7 +134,9 @@ def table(b: Budget, p: Params) -> str:
     out += [
         "",
         f"Bound {p.bound:,}; head {p.head:,}; local history at the probe turn {b.history_tokens:,} tokens "
-        f"({b.history_tokens / p.bound:.2f}x the bound); rotations {b.rotations}; planned over-bound requests {b.planned_over_bound}.",
+        f"({b.history_tokens / p.bound:.2f}x the bound); rotations {b.rotations}; planned over-bound requests "
+        f"{b.planned_over_bound}; bound_too_small {b.bound_too_small}; window budget W at the floor headroom "
+        f"{b.window_budget_first:,} (the launcher warns below 25,000).",
         "",
         "| Line | Expected tokens | Worst case (guard reserve) |",
         "|---|---|---|",
@@ -144,5 +158,5 @@ def sweep(probe_bytes: int, p: Params, turn_kbytes: tuple[int, ...] = (20, 26, 3
         b = simulate([size] * n, probe_bytes, p)
         rows.append({"turn_kbytes": kb, "turns": n, "h1_expected": b.h1_expected, "baseline_replay": b.baseline_replay,
                      "total": b.h1_expected + b.baseline_replay, "planned_over_bound": b.planned_over_bound,
-                     "rotations": b.rotations})
+                     "rotations": b.rotations, "bound_too_small": b.bound_too_small})
     return rows

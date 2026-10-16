@@ -20,14 +20,14 @@ from acceptance import budget, detectors, driver, run, script  # noqa: E402
 
 @pytest.fixture(scope="module")
 def s():
-    return script.build(turns=12, turn_bytes=44_000)
+    return script.build(turns=17, turn_bytes=30_000)
 
 
 # Script
 
 
 def test_script_is_deterministic_and_chain_heavy(s):
-    again = script.build(turns=12, turn_bytes=44_000)
+    again = script.build(turns=17, turn_bytes=30_000)
     assert again.turns == s.turns and again.probes == s.probes
     types = Counter(p.type for p in s.probes)
     assert types["chain"] == 30 and types["chain"] > sum(v for k, v in types.items() if k != "chain")
@@ -56,7 +56,7 @@ def test_every_plant_statement_appears_once_and_the_probe_turn_holds_no_answer(s
 
 def test_turns_reach_the_requested_size(s):
     for size in s.turn_bytes[:-1]:
-        assert abs(size - 44_000) <= 0.03 * 44_000
+        assert abs(size - 30_000) <= 0.03 * 30_000
 
 
 # Budget
@@ -79,6 +79,14 @@ def test_budget_lines_and_worst_case(s):
     assert b.h1_worst > b.h1_expected > 0
     assert b.baseline_cli > b.baseline_replay > b.history_tokens
     assert b.h1_worst - b.h1_expected == sum(p.max_tokens_reserve - r.output_expected for r in b.rows)
+
+
+def test_bound_too_small_when_the_window_budget_cannot_hold_a_turn():
+    # 44 KB turns at a 54.5k head and a 100k bound: W = 20,500 cannot hold a 22k-token turn (rule 4).
+    big = script.build(turns=12, turn_bytes=44_000)
+    b = budget.simulate(list(big.turn_bytes[:-1]), big.turn_bytes[-1], budget.Params())
+    assert b.bound_too_small > 0 and b.planned_over_bound > 0 and b.rotations == 0
+    assert b.window_budget_first == 100_000 - 25_000 - 54_500
 
 
 def test_conservative_estimator_for_log_text():

@@ -40,8 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("dry-run", "score", "live"):
         sp = sub.add_parser(name)
         sp.add_argument("--seed", type=int, default=script.DEFAULT_SEED)
-        sp.add_argument("--turns", type=int, default=12)
-        sp.add_argument("--turn-kbytes", type=int, default=44)
+        sp.add_argument("--turns", type=int, default=17)
+        sp.add_argument("--turn-kbytes", type=int, default=30)
         sp.add_argument("--bound", type=int, default=100_000)
         sp.add_argument("--head", type=int, default=budget.Params.head)
     score_p = sub.choices["score"]
