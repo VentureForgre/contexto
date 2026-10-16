@@ -10,8 +10,9 @@ It follows lane B's B25 method (docs/research/M2-usage-savings-run3.md) for the 
   (``original_request_bytes``, its full history) and what Contexto sent (``request_bytes``). Plain
   tokens = Contexto's measured input + the difference converted to tokens, so only the paged-out part
   is modeled. Unlike B25, the difference is split in two, because tool JSON tokenizes more sparsely
-  than text: the paged tool-loop bytes of earlier probe turns convert at the JSON rate, the rest
-  (paged turn text, net of Contexto's preamble) at the text rate.
+  than text: the tool-loop bytes of the paged probe turns convert at the JSON rate, the rest (paged
+  turn text, net of Contexto's preamble) at the text rate. Which turns are paged at each request comes
+  from the logged rotation events; a turn still in the window stays measured.
 - **Calibration, on the run itself.** The text rate is each added turn's bytes over its measured tokens
   on the epoch-0 requests, which Contexto passes through unchanged (asserted). The JSON rate is the
   same ratio on the append-only requests inside a probe turn (one tool call and its output appended,
@@ -51,17 +52,24 @@ LONG_CONTEXT = 272_000
 
 def requests(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The run's Responses requests in order: user turn (1-based), held events, both byte sizes,
-    measured usage, and whether a rotation happened on it."""
-    out, turn = [], 1
+    measured usage, whether a rotation happened on it, and the user turns paged when it was sent.
+
+    Paging comes from the logged rotation events, carried forward to the requests that do not rotate.
+    The engine counts Codex's opening context as its turn 0, so ``turns_paged`` = p pages user turns 1 to
+    p - 1. A rotation need not page every completed turn: in a probe turn the previous turn stays in
+    the window with its tool loop [measured: A22, retained_messages above 1 from probe turn 1 on]."""
+    out, turn, paged = [], 1, 0
     for e in codex_driver.responses_requests(events):
         if "status" not in e:
             continue
         inp, cached, output = codex_driver.usage_tokens(e.get("usage"))
         held = (e.get("stream_hold") or {}).get("held_events")
-        rotated = any(t.get("event") == "rotation" for t in e.get("transform_events") or [])
+        rotations = [t for t in e.get("transform_events") or [] if t.get("event") == "rotation"]
+        if rotations:
+            paged = max(0, rotations[-1]["turns_paged"] - 1)
         out.append({"n": len(out) + 1, "turn": turn, "held": held, "epoch": e.get("epoch"),
                     "orig": e["original_request_bytes"], "sent": e["request_bytes"], "input": inp,
-                    "cached": cached, "output": output, "rotated": rotated})
+                    "cached": cached, "output": output, "rotated": bool(rotations), "paged_turns": paged})
         if held == 0:
             turn += 1
     return out
@@ -111,11 +119,12 @@ def tool_loop_bytes(reqs: list[dict[str, Any]]) -> dict[int, int]:
 
 def plain_same_points(reqs: list[dict[str, Any]], r_text: float, r_json: float) -> list[float]:
     """Plain Codex's input at each request: measured input + paged text at r_text + paged tool JSON at
-    r_json. Every rotation pages every completed turn, so the paged tool loops are the earlier turns'."""
+    r_json. The paged tool loops are those of the user turns the rotation state had paged; a retained
+    turn's loop is already in the measured input."""
     loops = tool_loop_bytes(reqs)
     out = []
     for r in reqs:
-        paged_json = sum(b for t, b in loops.items() if t < r["turn"]) if r["orig"] != r["sent"] else 0
+        paged_json = sum(b for t, b in loops.items() if t <= r["paged_turns"])
         out.append(r["input"] + (r["orig"] - r["sent"] - paged_json) / r_text + paged_json / r_json)
     return out
 
@@ -275,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         same = [r["plain"] for r in out["per_request"]]
         out["o200k"]["validation"] = o200k_validation(requests(events), same, check["turn_tokens"], n_content)
     if a.csv:
-        cols = ["n", "turn", "held", "orig", "sent", "input", "cached", "output", "plain"]
+        cols = ["n", "turn", "held", "paged_turns", "orig", "sent", "input", "cached", "output", "plain"]
         a.csv.write_text(",".join(cols) + "\n" + "".join(
             ",".join(str(r[c]) for c in cols) + "\n" for r in out["per_request"]))
     print(json.dumps({k: v for k, v in out.items() if k != "per_request"}, indent=1, default=float))
