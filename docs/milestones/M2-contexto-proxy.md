@@ -152,13 +152,16 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
 7. **Usage.** Return the upstream `usage` unchanged. The CLI therefore sees the bounded prompt's
    real size.
 8. **Errors.** Forward upstream errors unchanged. Never retry by silently changing the request.
-   Log every 4xx with the epoch state for diagnosis. One exception, measured in the second live H1
-   run (an 18.2 s OS-level timeout on a reused upstream connection, no upstream bytes received; the
-   CLI's identical retry succeeded in 2.4 s): if a request fails on a reused upstream connection
-   before any upstream response byte arrived and before anything was relayed to the client, the
-   proxy resends the same bytes once on a fresh connection and logs `upstream_retry` with the
-   original error. A fresh-connection failure, or any failure after bytes flowed, returns the
-   error as before.
+   Log every 4xx with the epoch state for diagnosis. Every locally generated upstream failure is
+   logged with its phase (`connect`, `tls`, `send`, `wait_headers`), elapsed milliseconds, and
+   errno, content-free. One exception to never retrying, from the second live H1 run (a locally
+   generated 502 after an 18.2 s OS-level timeout; the proxy opens a fresh upstream connection for
+   every request): if the failure happened before the request body was fully written (`connect`,
+   `tls`, or mid-`send`), upstream cannot have acted on the request, so the proxy resends the same
+   bytes once on a new connection and logs `upstream_retry` with the original phase and error. A
+   failure after the body was fully sent (`wait_headers`) or after any response byte is never
+   retried, because upstream may be running it; it returns the 502 as before, and the CLI may
+   retry on its own.
 9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
    per-turn recall budget; the proxy reads `message_start` and `message_delta` usage.
 10. **Matching history.** Recognise each retained message in later requests by a hash of its
