@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-16 15:05Z by intake.lead. Decisions taken and still open, with reasons:
+Updated 2026-10-16 16:45Z by intake.lead. Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -86,6 +86,29 @@ cost, with 9 rotations instead of 6; accuracy at that bound is unmeasured and lo
 still cross it. Decision: no default change and no live run (the owner's seats run Opus 5.5,
 which has no price step); the README gives `--bound 125000` as a Haiku tip with those caveats. Limits: one synthetic session, one
 run, one model.
+
+## Usage against plain Codex (Codex acceptance run, zero-spend analysis)
+
+Record: `docs/research/M2-codex-usage-vs-plain.md` (with the cause correction, #177). Contexto's
+side is measured; plain Codex's side is modeled from the request sizes in the proxy log. One run,
+bound 64,000, 20 KB turns.
+
+| | Input tokens | Cost at gpt-6-astra prices |
+|---|---|---|
+| Contexto (measured; 680,832 cached) | 919,998 | about $3.78 |
+| Plain Codex, plain-run shape (modeled, best-case caching) | 1,672,525 | about $3.05 |
+| Difference | 45.0 percent fewer | **24.0 percent more** (15.5 percent more pricing uncached input at the input rate) |
+
+Content turns: 71.0 percent fewer tokens and 12.5 percent lower cost. Probe turns: 8.1 percent
+fewer tokens but 2.3 times the cost. The main cause is Contexto's handling of restarts, not the
+bound: the acceptance harness started a new Contexto proxy for each of the 21 `codex exec` turns,
+and a new proxy kept no epoch state, so every one of the 19 rotations was the first request after
+a restart (verified from the run's log). Each rotation changes the text right after Codex's
+9,088-token head, so 17 of those 19 requests read only the head from cache. A zero-spend replay (A28,
+`docs/research/M2-cache-aware-rotation.md`) models resuming the epoch after a restart at 9 rotations
+instead of 19 and 9.8 to 16.2 percent lower cost, depending on the bytes-per-token rate; that is
+rule 16, being built (A30, B31). Codex's own compaction would not have fired (plain peak 116,731,
+modeled). Users who keep one proxy for the whole session do not hit these restarts.
 
 ## Token spend on live model calls (owner's proxy unless noted)
 
@@ -177,6 +200,7 @@ run, one model.
 | v0.1.3 | 031ca59 | B23: search and index lines read Codex message parts, tool calls, and tool outputs (Codex search found nothing before; recall already worked, B20 in v0.1.0) |
 | v0.1.4 | 314d575 | B24: standalone `contexto mcp` resolves `CONTEXTO_HOME` and `--home` to an expanded absolute path |
 | v0.1.5 | 5ef9370 | A23: the proxy logs how each response ended (status, incomplete reason, stop reason), content-free |
+| v0.1.6 | db472a9 | A26: the proxy's end-status log fields accept only documented values; anything else logs as `other` |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
