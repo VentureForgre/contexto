@@ -14,8 +14,11 @@ under it, and what that would have cost or saved.
 **For Haiku 5.5, run with bound 125,000** (headroom floor 25,000 and `min_turn_room` 12,000
 unchanged), as a Haiku-only setting.
 
-In run #3's replay it removes every request over 100,000: 0 against 7, with a peak of 87,605 against
-109,868. It cuts input tokens 21.0% and **modeled** cost 45.7%. Each probe turn keeps about as much
+**Main limit, first:** these figures hold the model's behavior fixed, with run #3's own turns,
+tool calls and tool results. With smaller windows the model may search more or differently.
+
+In run #3's replay, with behavior held fixed, it removes every request over 100,000: 0 against 7,
+with a peak of 87,605 against 109,868. It cuts input tokens 21.0% and **modeled** cost 45.7%. Each probe turn keeps about as much
 recall room as run #3 had.
 
 The cost is 3 more rotations (9 against 6) and a retained window of 2 content turns instead of 3.
@@ -65,25 +68,34 @@ the tokens are run #3's measured tokens moved by the replayed bytes):
 | headroom floor 40,000 | 4 | 103,160 | 7 | 3,282,927 | 0.1942 | −32.7% |
 
 - **Rotation threshold.** A turn rotates when bound − estimate − headroom floor would be under
-  `min_turn_room`. So the largest turn-start request is about bound − floor − room: 113,000 in run #3
-  and 90,000 for both bound 125,000 and `min_turn_room` 35,000. A probe turn's tool loop then grows it
-  by up to about 8,800 tokens in run #3 (largest per-turn growth), which keeps it under 100,000.
+  `min_turn_room`. So the largest turn-start request is about bound − floor − room:
+  - 113,000 in run #3;
+  - 88,000 at bound 125,000 (125,000 − 25,000 − 12,000);
+  - 90,000 at `min_turn_room` 35,000 (150,000 − 25,000 − 35,000).
+
+  A probe turn's tool loop then grows it by up to about 8,800 tokens in run #3 (its largest per-turn
+  growth), which keeps it under 100,000.
 - **Partial steps can stay over.** At bounds of 130,000 and 128,000, the shifted rotation timing leaves
-  probe turn 3's tool loop starting high, so 2 requests stay at 109,771. Only a threshold near 90,000
-  removed every crossing.
+  probe turn 3's tool loop starting high, so 2 requests stay at 109,771. Only a threshold of 88,000 to
+  90,000 removed every crossing.
 - **Bound 125,000 against `min_turn_room` 35,000.** Their requests are identical in this replay, but
   their recall rooms differ:
-  - **bound 125,000:** the room it publishes is 125,000 − input − 25,000 = 100,000 − input, so search
-    output charged against the room also ends near 100,000.
+  - **bound 125,000:** the room it publishes is 125,000 − input − 25,000 = 100,000 − input. That room
+    bounds Contexto's own search and recall output in the loop. The model's own in-loop output
+    (thinking, tool_use blocks) and other tools' results are not charged against it. That leaves about
+    12,000 tokens of uncharged growth above the 88,000 start before 100,000; run #3's largest
+    per-turn growth was about 8,800.
   - **`min_turn_room` 35,000 at bound 150,000:** the room is 125,000 − input, so a probe turn's tool
     loop can grow past 100,000 if the model reads a lot.
 
-  That is why bound 125,000 is the recommendation: it caps the loop too, not only the turn's first
-  request.
+  That is why bound 125,000 is the recommendation. It bounds Contexto's own search and recall output
+  in the loop, not only the turn's first request. The loop's uncharged growth (the model's own output,
+  other tools) is not capped. Run #3's stayed within the about 12,000 tokens of margin that leaves.
 
-(2) Cost in both directions (bound 125,000 against run #3, **modeled**):
+(2) Cost in both directions (bound 125,000 against run #3; **both columns replayed and modeled**, with
+behavior held fixed; run #3's own measured figures are in [M2-usage-savings-run3.md](M2-usage-savings-run3.md)):
 
-| | Run #3 | bound 125,000 |
+| | Run #3 (replayed, modeled) | bound 125,000 (replayed, modeled) |
 |---|---|---|
 | Requests over 100K (priced ×5) | 7 | 0 |
 | Rotations | 6 | 9 |
@@ -128,9 +140,13 @@ the tokens are run #3's measured tokens moved by the replayed bytes):
   defence: run #3 answered 51/54 with 6 rotations.
 - **Only a live run can tell** whether 9 rotations and 2-turn windows keep that score: chain evidence
   in view against paged, the in-view hit count, the rounds per probe turn, and acceptance 2 against
-  the baseline. A live run #4 on Haiku at bound 125,000 would measure all four. At the calibrated
-  tool_rounds the approval table's worst case falls from 9,433,809 at bound 150,000 to 7,881,354 at
-  bound 125,000 (H1 6,561,088 to 5,408,497), with no turn_room_low.
+  the baseline. A live run #4 on Haiku at bound 125,000 would measure all four. It should use run #3's session
+  shape, 18 content turns of 40 KB (`--turns 18`): at bound 125,000 the default plan re-sizes to 15
+  content turns by the 2.5x-bound rule, which would not compare like for like.
+  - **Like for like, 18 turns:** the approval table's worst falls from 9,433,809 at bound 150,000 to
+    8,601,434 at bound 125,000 (H1 6,561,088 to 5,728,713; `approval-table --bound 125000 --turns 18`),
+    with no turn_room_low.
+  - **Default re-planned session, 15 turns:** the worst is 7,881,354 (H1 5,408,497).
 
 ## Per model
 
@@ -159,12 +175,13 @@ the tokens are run #3's measured tokens moved by the replayed bytes):
 
 ## Limits
 
+- **Behavior held fixed, the main limit.** The model's turns, tool calls and tool results are run #3's.
+  With smaller windows the model might search more or differently, and search replies sized by a
+  smaller room would differ. Every candidate figure here assumes the model would have behaved the
+  same. Request sizes inside tool loops are the least certain.
 - **Measured vs modeled.** Measured: run #3's tokens, cache pattern and decisions at bound 150,000.
   Modeled: every candidate's request sizes (from replayed bytes at 1.8274 bytes per token), their
   cache split, and all USD.
-- **Behavior held fixed.** The model's turns, tool calls and tool results are run #3's. With other
-  windows the model might search differently, and search replies sized by a different room would
-  differ. Request sizes inside tool loops are the least certain figures.
 - **Rotation sensitivity.** Run #3's request-27 rotation fired on a 119-token margin. Small changes in
   estimates can move a rotation by a turn, as bounds 130,000 and 128,000 show.
 - **One synthetic run, one model:** 40 KB pasted log per turn and Haiku 5.5's ×5 step. Other models
