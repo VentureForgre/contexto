@@ -39,7 +39,7 @@ def search(store, query):
     result = server.handle_line(line)["result"]
     assert result["isError"] is False and "structuredContent" not in result
     block, coverage = result["content"]  # B19 (a): every reply ends with its uncharged coverage note
-    assert coverage == {"type": "text", "text": mcp.SEARCH_COVERAGE}
+    assert coverage["type"] == "text" and coverage["text"] in (mcp.SEARCH_COVERAGE, mcp.SEARCH_COVERAGE_UNCHECKED)
     return block["text"]
 
 
@@ -194,10 +194,10 @@ def test_search_logs_the_spans_it_returned_and_nothing_else(store):
     page = render_page(store.get_page(pid))
     [event] = events(store, "contexto_search")
     [span] = event["returned"]  # the match and its context are contiguous: one span
-    assert set(span) == {"page_id", "start", "end"} and span["page_id"] == pid
+    assert set(span) == {"source", "page_id", "start", "end"} and span["page_id"] == pid and span["source"] == "paged"
     shown = [line.split(": ", 1)[1] for line in reply.split("\n")[1:]]
     assert page[span["start"]:span["end"]] == "\n".join(shown)  # exactly the returned lines
-    assert all(isinstance(v, int) for k, v in span.items() if k != "page_id")
+    assert all(isinstance(v, int) for k, v in span.items() if k not in ("page_id", "source"))
     assert "cache.ttl_seconds" not in json.dumps(event)  # ids and integers only, no content
 
 
@@ -223,7 +223,7 @@ def test_recall_logs_its_span_and_a_spent_reply_logs_none(store):
     [event] = events(store, "contexto_recall")
     [span] = event["returned"]
     page = render_page(store.get_page(pid))
-    assert span == {"page_id": pid, "start": 1_000, "end": 1_000 + event["chars"]}
+    assert span == {"source": "paged", "page_id": pid, "start": 1_000, "end": 1_000 + event["chars"]}
     assert reply.startswith(page[span["start"]:span["end"]])
     store.set_turn_room("1", 0)
     assert recall(store, pid, 2_000) == SPENT
