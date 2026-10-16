@@ -56,11 +56,11 @@ reviewer-2 with zero-spend stubs on Claude Code 2.1.301 (PR #20 review comments)
 request, and can carry `cache_control` (their kinds, such as tool additions and effort changes,
 are vendor-documented); injected context blocks (CLAUDE.md and similar) ride in a turn-start user
 message, `messages[0]` in a fresh session but the resumed turn's user message after `--resume`;
-and earlier turns' system messages arrive with empty content. That last item is measured CLI
-behavior whose validity is undocumented: the vendor's valid case is a turn-scoped system message
-cleared server-side via `clear_at` while the client resends the original unchanged, and editing
-an earlier system message is listed as invalid. The proxy forwards whatever the CLI sends, so it
-adds no edit of its own; lane A verifies which case this is (rule 12).
+and a system message with empty `content` can appear. Lane A resolved that last item (rule 12):
+it is a settings-only message, `{role: system, content: [], output_config: {effort: ...}}`, seen at
+`messages[1]` only when a session file lacking the CLI's own system record is resumed; with real
+CLI-written history, including a tool loop and two resumes, the original system message is never
+emptied, only its form changes (one text block with `cache_control` becomes a plain string).
 
 - A **turn-start message** is a user message whose content includes user-authored text and no
   `tool_result` block.
@@ -76,10 +76,11 @@ adds no edit of its own; lane A verifies which case this is (rule 12).
 1. **Upstream request** = the CLI's `system` and `tools` byte for byte, plus the retained turns as
    sent, where the first retained turn-start message gets, ahead of its own content, the carried
    context blocks in their original order and then a preamble text block (pinned state and page
-   index). Carried system messages from paged turns are placed immediately before that first
-   retained turn-start message in their original order, unless lane A's stub evidence shows that
-   ordering is rejected, in which case their text is merged into the same message as labeled text
-   blocks. No `tool_result` is displaced either way. In the first epoch `k = 0`, nothing is carried separately, and the
+   index). Carried system messages from paged turns are placed immediately after that first
+   retained turn-start message, in their original order, matching Claude Code's own
+   user-then-system shape. Measured by builder-2 (341 tokens, haiku via the owner's proxy): a
+   `role: "system"` message before the first retained turn-start message returns 400; after it,
+   or merged into it as text, returns 200. No `tool_result` is displaced. In the first epoch `k = 0`, nothing is carried separately, and the
    preamble is empty. Every other request field passes through unchanged, including
    `cache_control`, `anthropic-beta`, `stream`, and `thinking`.
 2. **Thinking.** For every retained message that existed when `E` was created, strip thinking and
@@ -111,21 +112,19 @@ adds no edit of its own; lane A verifies which case this is (rule 12).
    `message_delta` usage. No hold-back is needed because recall is an MCP tool (D19).
 10. **Matching history.** Recognise each retained message in later requests by a hash of its
     canonical JSON with every `cache_control` field removed (the CLI moves `cache_control` along
-    the tail). A system message whose content the CLI has emptied matches its earlier, non-empty
-    version at the same position; any other change to a system message is a mismatch. On a mismatch, resynchronise: find the longest prefix of the stored messages that
+    the tail), and with content normalised so that a plain string and a single text block holding
+    the same text hash equal (the CLI converts one to the other along the history). On a mismatch, resynchronise: find the longest prefix of the stored messages that
     still matches and continue from there; if paged turns themselves changed (for example the CLI
     compacted locally), start a new epoch at the current turn start with everything before it
     paged. Never fall back to sending the full history unbounded.
 11. **Other endpoints.** `/v1/messages/count_tokens` is transformed exactly like `/v1/messages`, so
     the CLI's own counts match what is sent. `HEAD /api/hello` and any other endpoint pass through
     unchanged.
-12. **Emptied system messages.** Lane A determines, with stub and conformance evidence, whether the
-    CLI empties earlier system messages itself or the content is cleared server-side with the
-    original resent. If client-emptied, it runs a conformance check with
-    `prefix_mismatch_behavior: error` on a thinking-bearing turn after an emptied system message.
-    If that returns 400, the proxy treats each newly emptied system message as a rotation boundary
-    for thinking: thinking before and after it is stripped at the next turn start, so no kept
-    thinking follows an edited message. Either way the proxy never restores a stored copy.
+12. **Settings-only system messages.** A system message with empty `content` and only settings
+    fields (such as `output_config`) is carried like any other system message and forwarded as the
+    CLI sends it. Lane A measured that Claude Code does not empty earlier system messages, so no
+    client-side edit precedes kept thinking (zero-spend stubs, spikes/m2/carried/). If a later CLI
+    version starts emptying them, re-run that check before relying on kept thinking after one.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens until L2f sets O3; `headroom` the
 online running max of per-turn growth plus 25%, floor 25,000; `window_target` 50% of the bound.
