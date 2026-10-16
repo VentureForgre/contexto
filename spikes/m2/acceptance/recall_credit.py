@@ -63,15 +63,23 @@ def answer_index(session_log: list[dict[str, Any]]) -> int | None:
 
 
 def turn_answer_indices(session_log: list[dict[str, Any]]) -> list[int]:
-    """Log indices of the requests that answered a user turn, in order (B29).
+    """Log indices of the Messages requests that answered a user turn, in order (B29).
 
-    A Messages request whose response called no tool (no ``mcp_call`` before the next Messages
-    request) ends its turn: the content turns' replies, then each probe turn's final answer.
+    A request whose response called no tool ends its turn: the content turns' replies, then each
+    probe turn's final answer. The proxy's stream hold (A9) holds a response from its first
+    ``tool_use`` block, any tool, so ``stream_hold.held_events == 0`` marks a response with no tool
+    call. A log without ``stream_hold`` falls back to "no ``mcp_call`` before the next request",
+    which misses non-MCP tools (Bash, Read). Codex logs need their own rule: pass ``turn_ends``.
     """
     requests = [i for i, ev in enumerate(session_log)
                 if ev.get("event") == "request" and str(ev.get("path") or "").split("?")[0] == "/v1/messages"]
     ends = []
     for n, i in enumerate(requests):
+        hold = session_log[i].get("stream_hold")
+        if isinstance(hold, dict) and isinstance(hold.get("held_events"), int):
+            if hold["held_events"] == 0:
+                ends.append(i)
+            continue
         nxt = requests[n + 1] if n + 1 < len(requests) else len(session_log)
         if not any(session_log[j].get("event") == "mcp_call" for j in range(i + 1, nxt)):
             ends.append(i)
@@ -93,24 +101,28 @@ def plant_spans(probes: list[Any], pages: list[dict[str, Any]]) -> dict[str, dic
 
 
 def credit(probes: list[Any], answers: str, session_log: list[dict[str, Any]],
-           pages: list[dict[str, Any]], probe_turn_ids: tuple[tuple[str, ...], ...] | None = None) -> dict[str, Any]:
+           pages: list[dict[str, Any]], probe_turn_ids: tuple[tuple[str, ...], ...] | None = None,
+           turn_ends: list[int] | None = None) -> dict[str, Any]:
     """Credit each paged-only probe answered correctly from a range returned before its answer.
 
     With ``probe_turn_ids`` (D27's assignment), a probe's cutoff is the answer of the probe turn that
     asked it, so a range returned in a later probe turn never credits an earlier answer (B29);
-    without it, the session's last answer request. Either way it fails closed (B28): with no answer
-    request to cut off at, nothing is credited and the result says why.
+    without it, the session's last answer request. ``turn_ends`` (log indices of the requests that
+    answered each user turn, in order) lets a caller with its own dialect supply them: it replaces
+    ``turn_answer_indices`` and its last entry replaces ``answer_index``; omitted, the Messages rules
+    apply. Either way it fails closed (B28): with no answer request to cut off at, nothing is
+    credited and the result says why.
     """
     given = {}
     for line in answers.splitlines():
         qid, sep, value = line.partition(":")
         if sep:
             given[qid.strip()] = value.strip()
-    cutoff = answer_index(session_log)
+    cutoff = answer_index(session_log) if turn_ends is None else (turn_ends[-1] if turn_ends else None)
     cutoffs: dict[str, int | None] = {probe.id: cutoff for probe in probes}
     reason = None if cutoff is not None else "answer request not found"
     if probe_turn_ids is not None and cutoff is not None:
-        ends = turn_answer_indices(session_log)
+        ends = turn_answer_indices(session_log) if turn_ends is None else list(turn_ends)
         if len(ends) < len(probe_turn_ids):
             cutoffs, reason = {probe.id: None for probe in probes}, "probe turn answers not found"
         else:

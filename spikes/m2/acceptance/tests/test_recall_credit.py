@@ -151,3 +151,27 @@ def test_too_few_turn_answers_fail_closed_and_say_why():
     assert r["credited"] == 0 and r["acceptance_3"] is False and r["reason"] == "probe turn answers not found"
     no_request = recall_credit.credit([PROBE], ANSWERED, [_call("contexto_search", HIT)], [PAGE], probe_turn_ids=TURNS)
     assert no_request["reason"] == "answer request not found" and no_request["credited"] == 0  # B28 still holds
+
+
+def test_a_non_mcp_tool_round_is_not_a_turn_end_when_the_stream_hold_is_logged():
+    """A Bash or Read round calls no MCP tool, but the proxy held its tool_use: not a turn end."""
+    def req(held):
+        return {**_req(), "stream_hold": {"triggered": bool(held), "held_events": held}}
+    log = [req(0), req(5), req(3), _call("contexto_search", HIT), req(0)]  # a Bash round, a search round, the answer
+    assert recall_credit.turn_answer_indices(log) == [0, 4]
+    assert recall_credit.turn_answer_indices([_req(), _req()]) == [0, 1]  # no stream_hold: the mcp_call fallback
+
+
+def test_caller_supplied_turn_ends_replace_the_messages_rules():
+    """Lane A's Codex credit passes its own turn ends (2xx /responses with held_events 0)."""
+    codex = [{"event": "request", "path": "/v1/responses", "status": 200}, _call("contexto_search", HIT),
+             {"event": "request", "path": "/v1/responses", "status": 200}] * 4
+    ends = [2, 5, 8, 11]  # turn 2's answer is index 5; the hit at index 4 precedes it
+    r = recall_credit.credit([PROBE], ANSWERED, codex, [PAGE], probe_turn_ids=TURNS, turn_ends=ends)
+    assert r["credited"] == 1 and "reason" not in r
+    assert recall_credit.credit([PROBE], ANSWERED, codex, [PAGE])["reason"] == "answer request not found"
+    assert recall_credit.credit([PROBE], ANSWERED, codex, [PAGE], turn_ends=[])["reason"] == "answer request not found"
+    log = [_req(), *_turn(), *_turn(_req(), _call("contexto_search", HIT)), *_turn(), *_turn()]
+    assert (recall_credit.credit([PROBE], ANSWERED, log, [PAGE], probe_turn_ids=TURNS)
+            == recall_credit.credit([PROBE], ANSWERED, log, [PAGE], probe_turn_ids=TURNS,
+                                    turn_ends=recall_credit.turn_answer_indices(log)))  # omitted = today's result
