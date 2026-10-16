@@ -44,7 +44,7 @@ def render_page(page: dict[str, Any]) -> str:
         if not isinstance(message, dict):
             lines.append("[malformed message omitted]")
             continue
-        if "type" in message:  # a Responses API item: a Messages API message has no top-level type
+        if _is_responses_item(message):
             lines.extend(_responses_lines(turn, message))
             continue
         role = message.get("role", "unknown")
@@ -84,6 +84,18 @@ def render_page(page: dict[str, Any]) -> str:
             else:
                 lines.append(f"[{kind} omitted]")
     return "\n".join(lines)
+
+
+def _is_responses_item(message: dict[str, Any]) -> bool:
+    """A Responses API item rather than a Messages API message: it has a top-level ``type`` (a Messages API
+    message never does), or, typeless like a message the CLI sent without one, its content parts use the
+    Responses part types (``input_*`` or ``output_text``), which the Messages API never uses."""
+    if "type" in message:
+        return True
+    content = message.get("content")
+    return isinstance(content, list) and any(
+        isinstance(part, dict) and isinstance(part.get("type"), str)
+        and (part["type"].startswith("input_") or part["type"] == "output_text") for part in content)
 
 
 def _responses_lines(turn: Any, item: dict[str, Any]) -> list[str]:

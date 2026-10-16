@@ -85,6 +85,8 @@ def test_each_responses_item_type_renders_its_text():
         "[turn 2] user:", "tool_result:", "out text",
         "[turn 2] user:", "tool_result:", "listed out",
     ]
+    typeless = {"role": "user", "content": [{"type": "input_text", "text": "no type key"}]}
+    assert render_page({"turn": 2, "messages": [typeless]}) == "[turn 2] user:\nno type key"
 
 
 def body_lines(text):
@@ -94,8 +96,10 @@ def body_lines(text):
 
 def test_page_lines_and_in_view_lines_are_identical():
     """The cross-check B20 exists for: a block found in view (A14 snapshot) and the same block found in
-    a page read the same, so search shows one line either way."""
-    items = codex_turn()
+    a page read the same, so search shows one line either way. Includes typeless Responses messages,
+    which lane A treats as messages (reviewer-1 on PR #136)."""
+    items = codex_turn() + [{"role": "user", "content": [{"type": "input_text", "text": "typeless prompt"}]},
+                            {"role": "assistant", "content": [{"type": "output_text", "text": "typeless answer"}]}]
     in_view = "\n".join(e["text"] for e in retained_entries(items, 0, RESPONSES)).split("\n")
     assert body_lines(render_page({"turn": 1, "messages": items})) == in_view
     anthropic = [m for m in ANTHROPIC_PAGE["messages"][1:3]]  # text, tool_use, and tool_results, no images
