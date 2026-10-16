@@ -2,15 +2,15 @@
 
 The pinned text always opens with the contract's mandatory line: earlier turns are paged out and
 how to recall them. It must also tell the model to recall before relying on a paged-out detail and
-to pin decisions and obligations as it makes them (M2 contract, MCP server). The variants exist so a
-targeted experiment can compare them; each is cumulative over the one before:
+to pin decisions and obligations as it makes them (M2 contract, MCP server).
 
-- ``legacy``: the text shipped before the H1 fix, for comparison only.
-- ``default``: the conformant opening lines.
-- ``v1``: default, plus index lines that list each page's salient identifiers.
-- ``v2``: v1, plus a worked example of one search and one recall.
+- ``default``: the conformant opening lines, a worked example of one search and one recall, and
+  index lines that list each page's salient identifiers. This is variant V2 of the H1 experiment,
+  which intake chose (2026-10-16 03:26Z).
+- ``legacy``: the text shipped before the H1 fix, kept for diagnosis: it reproduces the preamble
+  of a run recorded before the fix byte for byte.
 
-Placement of the preamble and any end-of-window reminder are lane A's (the rewrite engine).
+Placement of the preamble is lane A's (the rewrite engine).
 
 The variant is chosen by ``CONTEXTO_RECALL_VARIANT`` or an explicit argument, and a session store
 records the first one it resolves so the text stays fixed for the session.
@@ -23,7 +23,7 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 
-VARIANTS = ("legacy", "default", "v1", "v2")
+VARIANTS = ("default", "legacy")
 ENV_VAR = "CONTEXTO_RECALL_VARIANT"
 
 LEGACY_FIRST_LINE = (
@@ -31,7 +31,7 @@ LEGACY_FIRST_LINE = (
     "paged turn; call contexto_recall with its page id to read it, or contexto_search to find one."
 )
 
-DEFAULT_LINES = (
+RULE_LINES = (
     "Earlier turns of this conversation are paged out of your context; to read one, call "
     "contexto_search with an exact term (a key, name, or identifier) and then contexto_recall with a "
     "page id it returns.",
@@ -46,6 +46,8 @@ EXAMPLE_LINE = (
     '"cache.ttl_seconds"}; it lists matching pages such as "pg_0123456789abcdef (turn 3): ...". Then '
     'call contexto_recall with {"page_id": "pg_0123456789abcdef"} and read the value there.'
 )
+
+DEFAULT_LINES = (*RULE_LINES, EXAMPLE_LINE)
 
 SALIENT_MAX = 12  # identifiers per index line
 SALIENT_CHARS = 240  # and at most this many characters of them
@@ -64,13 +66,11 @@ def env_variant() -> str:
 
 def opening_lines(variant: str) -> tuple[str, ...]:
     """The lines the pinned text (and the full state) start with, for ``variant``."""
-    if variant == "legacy":
-        return (LEGACY_FIRST_LINE,)
-    return DEFAULT_LINES + ((EXAMPLE_LINE,) if variant == "v2" else ())
+    return (LEGACY_FIRST_LINE,) if variant == "legacy" else DEFAULT_LINES
 
 
 def lists_identifiers(variant: str) -> bool:
-    return variant in ("v1", "v2")
+    return variant != "legacy"
 
 
 # A key in key=value, or a dotted, underscored, dashed, or slashed name starting with a letter.

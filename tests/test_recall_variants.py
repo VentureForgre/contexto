@@ -1,4 +1,4 @@
-"""Recall guidance and its variants (M2 H1 recall fix)."""
+"""Recall guidance: the default (H1 variant V2) and the legacy text kept for diagnosis (M2 H1 recall fix)."""
 
 import json
 import re
@@ -12,6 +12,7 @@ from contexto.store.recall import (
     ENV_VAR,
     EXAMPLE_LINE,
     LEGACY_FIRST_LINE,
+    RULE_LINES,
     salient_identifiers,
 )
 
@@ -34,7 +35,7 @@ def store(request, tmp_path):
 
 
 def test_the_default_text_meets_the_contract():
-    text = " ".join(DEFAULT_LINES)
+    text = " ".join(RULE_LINES)
     assert DEFAULT_LINES[0].startswith("Earlier turns of this conversation are paged out")
     for required in ("contexto_search", "contexto_recall", "before you rely on a detail",
                      "before you answer that something is unknown", "contexto_pin", "contexto_close"):
@@ -45,12 +46,17 @@ def test_legacy_reproduces_the_text_shipped_before_the_fix(store):
     assert store.pinned_text(6000, variant="legacy").splitlines() == [LEGACY_FIRST_LINE]
 
 
-@pytest.mark.parametrize("variant, example", [("default", False), ("v1", False), ("v2", True)])
-def test_opening_lines_per_variant(store, variant, example):
-    lines = store.pinned_text(6000, variant=variant).splitlines()
-    assert tuple(lines[:3]) == DEFAULT_LINES
-    assert (EXAMPLE_LINE in lines) is example
-    assert store.state_text(variant=variant).splitlines()[:3] == list(DEFAULT_LINES)
+def test_the_default_opens_with_the_rule_then_the_worked_example(store):
+    lines = store.pinned_text(6000).splitlines()
+    assert tuple(lines[:4]) == (*RULE_LINES, EXAMPLE_LINE) == DEFAULT_LINES
+    assert store.state_text().splitlines()[:4] == list(DEFAULT_LINES)
+    assert EXAMPLE_LINE not in store.pinned_text(6000, variant="legacy")
+
+
+@pytest.mark.parametrize("retired", ["v1", "v2", "rule"])
+def test_experiment_only_variants_are_not_selectable(store, retired):
+    with pytest.raises(ValueError):
+        store.pinned_text(6000, variant=retired)
 
 
 def test_salient_identifiers_list_keys_never_values_rarest_first():
@@ -89,40 +95,46 @@ def test_no_answer_of_the_acceptance_script_reaches_the_index():
     store = MemoryStore()
     store.page_out([[{"role": "user", "content": text}, {"role": "assistant", "content": "OK"}]
                     for text in script.turns[:-1]], 0)
-    index = store.index_text(1_000_000, variant="v1")
+    index = store.index_text(1_000_000)
     assert "retention_days" in index
     answers = {a.strip() for p in script.probes for a in p.answer.split(",")} - {""}
     words = set(re.findall(r"[\w.\-/]+", index))
     assert sorted(answers & words) == []
 
 
-def test_index_lists_ids_only_from_v1(store):
+def test_the_default_index_lists_ids_and_legacy_does_not(store):
     [pid] = store.page_out([PLANT_TURN], 1)
-    default = store.index_text(4000, variant="default")
-    v1 = store.index_text(4000, variant="v1")
-    assert "[ids:" not in default
-    assert v1.startswith(f"{pid} turn 1: ") and "[ids: checkout-api.retention_days, ingest-api.retention_days" in v1
-    assert "juniper-2573" not in v1 and "amber-1036" not in v1
-    assert store.index_text(4000, variant="v2") == v1
+    legacy = store.index_text(4000, variant="legacy")
+    default = store.index_text(4000)
+    assert "[ids:" not in legacy
+    assert default.startswith(f"{pid} turn 1: ")
+    assert "[ids: checkout-api.retention_days, ingest-api.retention_days" in default
+    assert "juniper-2573" not in default and "amber-1036" not in default
 
 
 def test_index_with_ids_stays_within_its_budget(store):
     store.page_out([PLANT_TURN for _ in range(40)], 1)
     from contexto.tokens import estimate_tokens
-    text = store.index_text(1000, variant="v1")
+    text = store.index_text(1000)
     assert estimate_tokens(text) <= 1000 + 60  # the omitted-pages line may sit just past the budget
     assert text.splitlines()[-1].endswith("older pages omitted; use contexto_search to find them)")
 
 
 def test_variant_comes_from_the_environment_and_is_recorded_once(tmp_path, monkeypatch):
-    monkeypatch.setenv(ENV_VAR, "v1")
+    monkeypatch.setenv(ENV_VAR, "legacy")
     store = SessionStore(tmp_path, "s1")
-    assert store.recall_variant() == "v1"
-    assert json.loads((store.dir / "meta.json").read_text())["recall_variant"] == "v1"
-    monkeypatch.setenv(ENV_VAR, "v2")  # a mid-session change does not move the text
-    assert SessionStore(tmp_path, "s1").recall_variant() == "v1"
-    assert store.recall_variant("v2") == "v2"  # an explicit argument wins and is not recorded
-    assert json.loads((store.dir / "meta.json").read_text())["recall_variant"] == "v1"
+    assert store.recall_variant() == "legacy"
+    assert json.loads((store.dir / "meta.json").read_text())["recall_variant"] == "legacy"
+    monkeypatch.setenv(ENV_VAR, "default")  # a mid-session change does not move the text
+    assert SessionStore(tmp_path, "s1").recall_variant() == "legacy"
+    assert store.recall_variant("default") == "default"  # an explicit argument wins and is not recorded
+    assert json.loads((store.dir / "meta.json").read_text())["recall_variant"] == "legacy"
+
+
+def test_a_retired_recorded_variant_falls_back_to_the_default(tmp_path):
+    store = SessionStore(tmp_path, "s1")
+    store._update_meta({"recall_variant": "v1"})  # an H1 experiment session
+    assert store.recall_variant() == "default"
 
 
 def test_default_variant_when_unset_and_errors_for_unknown(tmp_path, monkeypatch):
@@ -136,7 +148,7 @@ def test_default_variant_when_unset_and_errors_for_unknown(tmp_path, monkeypatch
 
 def test_a_read_only_store_does_not_record_the_variant(tmp_path, monkeypatch):
     SessionStore(tmp_path, "s1")
-    monkeypatch.setenv(ENV_VAR, "v1")
+    monkeypatch.setenv(ENV_VAR, "legacy")
     reader = SessionStore.open_existing(tmp_path, "s1")
-    assert reader.recall_variant() == "v1"
+    assert reader.recall_variant() == "legacy"
     assert not (reader.dir / "meta.json").exists()
