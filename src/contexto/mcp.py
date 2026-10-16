@@ -25,12 +25,14 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
+from contexto.store.render import RECALL_LIMIT, recall_chunk
+from contexto.store.render import render_page as render_page  # re-exported: contexto.mcp.render_page
+
 SERVER_NAME = "contexto"
 SERVER_VERSION = "0.1.0"
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
-RECALL_LIMIT = 32_000  # characters per contexto_recall call
 SEARCH_LIMIT = 50  # page ids per contexto_search result
 # Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
 # rejects a tools/list result without them (reviewer-2, real client, 2026-10-16). The tool list is
@@ -156,51 +158,6 @@ TOOLS: list[dict[str, Any]] = [
 _TOOL_NAMES = {t["name"] for t in TOOLS}
 
 
-def render_page(page: dict[str, Any]) -> str:
-    """Render a page's messages as plain text, thinking omitted. Deterministic for a given page."""
-    lines: list[str] = []
-    turn = page.get("turn")
-    for message in page.get("messages") or []:
-        if not isinstance(message, dict):
-            lines.append("[malformed message omitted]")
-            continue
-        role = message.get("role", "unknown")
-        lines.append(f"[turn {turn}] {role}:")
-        content = message.get("content")
-        if isinstance(content, str):
-            lines.append(content)
-            continue
-        if not isinstance(content, list):
-            lines.append("[malformed content omitted]" if content is not None else "")
-            continue
-        for block in content:
-            if not isinstance(block, dict):
-                lines.append("[malformed block omitted]")
-                continue
-            kind = block.get("type")
-            if kind == "text":
-                lines.append(block.get("text", ""))
-            elif kind in ("thinking", "redacted_thinking"):
-                continue
-            elif kind == "tool_use":
-                args = json.dumps(block.get("input", {}), ensure_ascii=False, sort_keys=True)
-                lines.append(f"tool_use {block.get('name', '')} {args}")
-            elif kind == "tool_result":
-                lines.append("tool_result:")
-                inner = block.get("content")
-                if isinstance(inner, str):
-                    lines.append(inner)
-                elif isinstance(inner, list):
-                    for part in inner:
-                        if not isinstance(part, dict):
-                            lines.append("[malformed block omitted]")
-                        elif part.get("type") == "text":
-                            lines.append(part.get("text", ""))
-                        else:
-                            lines.append(f"[{part.get('type', 'block')} omitted]")
-            else:
-                lines.append(f"[{kind} omitted]")
-    return "\n".join(lines)
 
 
 class Server:
@@ -328,19 +285,19 @@ class Server:
         page = self.store.get_page(page_id)
         if page is None:
             raise ToolError(f"Unknown page id: {page_id}. Page ids appear in the paged-history index.")
-        text = render_page(page)
-        if offset > len(text):
-            raise ToolError(f"offset {offset} is past the end of the page ({len(text)} characters)")
-        chunk = text[offset : offset + RECALL_LIMIT]
+        try:
+            part = recall_chunk(page, offset)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
+        chunk, next_offset, total = part["text"], part["next_offset"], part["total_chars"]
         end = offset + len(chunk)
-        next_offset = end if end < len(text) else None
         content = [{"type": "text", "text": chunk}]
         if next_offset is not None:
-            content.append({"type": "text", "text": f"[{len(text) - end} more characters: call contexto_recall "
+            content.append({"type": "text", "text": f"[{total - end} more characters: call contexto_recall "
                                                     f"with page_id {page_id} and offset {next_offset}]"})
         structured = {"page_id": page_id, "turn": page.get("turn"), "offset": offset,
-                      "next_offset": next_offset, "total_chars": len(text)}
-        return content, structured, {"page_id": page_id, "offset": offset, "chars": len(chunk), "total_chars": len(text)}
+                      "next_offset": next_offset, "total_chars": total}
+        return content, structured, {"page_id": page_id, "offset": offset, "chars": len(chunk), "total_chars": total}
 
     def _tool_pin(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         _reject_extra(args, {"kind", "text", "supersedes", "epistemic", "provenance"})

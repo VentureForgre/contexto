@@ -77,7 +77,8 @@ Session data lives under `$CONTEXTO_HOME` (default `~/.contexto`) and is never c
 ## Inspecting sessions (`contexto sessions`, `contexto recall`, `contexto state`)
 
 These commands read a session's store under `$CONTEXTO_HOME/sessions/<id>/`. They never create a
-session or change its pages, ledger, or log.
+session or change its pages, ledger, or log, and `sessions list` skips symlinked entries rather than
+following them out of `sessions/`.
 
 **Session selection** for `recall` and `state`: `--session ID`, else the `CONTEXTO_SESSION`
 environment variable, else the session with the most recent activity. The chosen session and how
@@ -112,8 +113,10 @@ Prints a paged-out turn as plain text with thinking omitted, rendered exactly as
 
 Prints the session's full pinned state without the budget cap: open obligations, active
 decisions, and verified facts with their record ids. This is the same text as the MCP
-`contexto_state` tool. File sources are checked against the session's recorded working
-directory; if none is recorded, the output says staleness was not checked.
+`contexto_state` tool. By design it reads files: each file a record cites as provenance is hashed
+inside the session's recorded working directory to check whether it changed (`STALE`). It only
+reads paths that stay inside that directory, symlinks included, and never writes there. If no
+working directory is recorded, the output says staleness was not checked.
 
 ### Exit codes
 

@@ -60,6 +60,15 @@ def test_sessions_list_ties_sort_by_id(home, capsys):
     assert [d["id"] for d in json.loads(out)] == ["c", "b", "a"]
 
 
+def test_sessions_list_skips_symlinks_out_of_sessions(home, capsys, tmp_path_factory):
+    make(home, "real", 1_000_000)
+    elsewhere = tmp_path_factory.mktemp("elsewhere")
+    SessionStore(elsewhere, "foreign")
+    (home / "sessions" / "linked").symlink_to(elsewhere / "sessions" / "foreign")
+    _, out, _ = run(capsys, "sessions", "list", "--json")
+    assert [d["id"] for d in json.loads(out)] == ["real"]
+
+
 def test_sessions_list_empty_home(home, capsys):
     code, out, _ = run(capsys, "sessions", "list")
     assert code == 0 and "No sessions" in out

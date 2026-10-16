@@ -50,6 +50,8 @@ def session_ids(home: Path) -> list[str]:
         return []
     ids = []
     for p in root.iterdir():
+        if p.is_symlink():  # never follow a link out of sessions/
+            continue
         try:
             if p.is_dir() and session_dir(home, p.name) == p:
                 ids.append(p.name)
