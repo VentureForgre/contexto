@@ -95,6 +95,10 @@ jobs:
           test -n "$remote"
           echo "$TAG points at $GITHUB_SHA; HEAD unchanged; no commit was made."
 
+      - name: Make gh available (the self-hosted runner has none)
+        if: steps.plan.outputs.released == 'true'
+        run: bash .github/scripts/ensure-gh.sh
+
       - name: Attach the sdist and wheel
         if: steps.plan.outputs.released == 'true'
         env:
@@ -127,6 +131,8 @@ jobs:
           python-version: "3.12"
           # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
           ignore-nothing-to-cache: true
+      - name: Make gh available (the self-hosted runner has none)
+        run: bash .github/scripts/ensure-gh.sh
       - name: Refuse anything but an existing release tag on main
         run: bash .github/scripts/reattach-verify.sh "$TAG"
       - name: Create the release if the tag exists without one
