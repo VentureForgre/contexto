@@ -526,7 +526,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   main one, subagents, side requests), and the main conversation is the one with the most turn
   starts, re-evaluated at each turn start: it changes only when another conversation has strictly
   more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
-  stay main. Other conversations publish none of them, so their tool calls see the
+  stay main. The choice is made before the request is transformed, so a request that fails after
+  its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them, so their tool calls see the
   main conversation's room and snapshot, and for a subagent "in view" refers to the main
   conversation's window (part of the documented subagent limitation); the MCP
   server cannot tell which conversation issued a call. Matches in the

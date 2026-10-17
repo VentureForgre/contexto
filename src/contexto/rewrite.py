@@ -1301,9 +1301,11 @@ class RewriteEngine:
         if state is None and not self._record_consumed:
             state, resumed = self._resume(key, request, dialect)
         # Only the main conversation publishes the window (W, ratio, model): the store holds one, which
-        # sizes contexto_recall's per-call limit and the next engine's restore. Decided without moving
-        # main, so main changes exactly where publishes() below would change it.
-        main = self._would_publish(key, request.get(dialect.field) or [], dialect)
+        # sizes contexto_recall's per-call limit and the next engine's restore. Main is committed before
+        # the transform, whose turn-start rotation may publish the window, so a request that fails after
+        # that publish (a genuine bug, or degraded mode's forwarded original) still leaves it recorded
+        # as main and the previous main's publish forgotten. publishes() below agrees for this request.
+        main = self.publishes(key, request.get(dialect.field) or [], dialect)
         owner = _WINDOW_OWNER.set(main)
         try:
             upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator,
@@ -1453,9 +1455,9 @@ class RewriteEngine:
         choice is re-evaluated: it becomes main only with strictly more turn starts than the current
         main (a tie keeps the current one), so a subagent or side request, with about one turn start,
         never takes over, and main never changes inside a tool loop. The window (``set_window``) follows
-        the same choice (``_would_publish``); when main moves away from a conversation, its last publish
-        is forgotten, since the new main replaces the store's window, so it publishes again if it
-        becomes main again."""
+        the same choice, committed before the transform; when main moves away from a conversation, its
+        last publish is forgotten, since the new main replaces the store's window, so it publishes again
+        if it becomes main again."""
         main, self._turn_starts[key] = self._main_after(key, messages, dialect)
         self._set_main(main)
         return key == self._main
@@ -1465,10 +1467,6 @@ class RewriteEngine:
         self._main = key
         if previous is not None and previous != key and previous in self.states:
             self.states[previous] = replace(self.states[previous], published_window=None)
-
-    def _would_publish(self, key: str, messages: list[dict], dialect: Dialect) -> bool:
-        """What ``publishes`` would return for this request, without recording anything."""
-        return self._main_after(key, messages, dialect)[0] == key
 
     def _main_after(self, key: str, messages: list[dict], dialect: Dialect) -> tuple[str, int]:
         """The main conversation after this request, and this request's turn-start count."""

@@ -1711,6 +1711,48 @@ def test_a_former_main_that_becomes_main_again_republishes_its_window():
     assert store.inner.window()[0] == engine.states[keyed(ANTHROPIC, a4)].window_budget == a_window[0]
 
 
+@pytest.mark.parametrize("path", ["transform_error", "degraded_fallback"])
+def test_a_conversation_that_publishes_at_its_rotation_is_main_even_if_the_request_then_fails(monkeypatch, path):
+    """A turn start that makes B main publishes B's W during its rotation. A genuine bug after the
+    rotation (re-raised, so the proxy logs transform_error) or a failure in degraded mode (the original
+    is forwarded) must still leave B recorded as main and A's last publish forgotten: the store holds
+    B's window, so A must publish again if it becomes main again."""
+    import contexto.rewrite as rewrite_module
+
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    a = request(conversation("a", 2))
+    engine(a, {}, MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": 400}, a)
+    assert len(store.windows) == 1 and engine.states[keyed(ANTHROPIC, a)].published_window is not None
+    b_msgs = history(8) + [user("b new")]
+    b_msgs[0] = user(f"b prompt 0 {FILL}", context=True)  # another conversation with more turn starts
+    if path == "degraded_fallback":
+        store.fail["page_out"] = OSError("synthetic")
+        engine(request(b_msgs[:-2]), {}, MESSAGES)  # B's rotation fails: B is degraded, nothing published
+        del store.fail["page_out"]
+        assert engine.states[keyed(ANTHROPIC, request(b_msgs))].degraded and len(store.windows) == 1
+    published = len(store.windows)
+    real = rewrite_module.transform_messages
+
+    def buggy(messages, state):  # a genuine bug once B's rotation has published its window
+        if len(store.windows) > published:
+            raise RuntimeError("synthetic bug")
+        return real(messages, state)
+
+    monkeypatch.setattr(rewrite_module, "transform_messages", buggy)
+    b = request(b_msgs)
+    if path == "transform_error":
+        with pytest.raises(RuntimeError):
+            engine(b, {}, MESSAGES)
+    else:
+        _, _, events = engine(b, {}, MESSAGES)
+        assert "fallback_failed" in names(events)
+    assert len(store.windows) == published + 1  # B's rotation published B's window
+    assert engine._main == keyed(ANTHROPIC, b)
+    assert engine.states[keyed(ANTHROPIC, a)].published_window is None
+
+
 def test_the_ratio_restore_waits_for_a_request_on_the_recorded_model():
     """A side request on another model can arrive first after a restart: the restore logs
     sizing_not_restored once and waits for the recorded model, then blends the recorded ratio with
