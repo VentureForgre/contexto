@@ -130,6 +130,12 @@ crash). The rate is unmeasured. Here it is once every 14 turns: 3 restarts in 56
 
 ## A large read (one turn, 149,140 tokens)
 
+This table describes the engine before rule 17. With rule 17 (headroom capped at a quarter of
+the bound and halving at each turn start that measures growth, v0.2.2), the 92,000-head session at bound 150,000 has 15
+rotations, 1 `window_minimal`, 0 `bound_too_small`, and a window budget never below 18,907
+(reviewer-2's real-engine reproduction for A34, PR #187; `docs/research/M2-headroom-outliers.md`).
+The large read itself still passes 200,000 at every bound.
+
 | Head | Bound | Peak input | Margin to 200,000 | `window_minimal` / `bound_too_small` | Rotations | USD |
 |---|---|---|---|---|---|---|
 | 82,000 | 150,000 | 259,873 | −59,873 | 27 / 27 | 33 | 7.51 |

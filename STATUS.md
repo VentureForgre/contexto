@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-16 18:15Z by intake.lead. Decisions taken and still open, with reasons:
+Updated 2026-10-17 01:00Z by intake.lead. Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -16,6 +16,8 @@ compaction never fires, and accuracy equals full context.
   fbb1303), and **Codex passed criteria 1 to 3** (D30), below.
   On Claude Code, Contexto answered 51 of 54 probes against 48 for the full-context baseline, with zero
   compaction and every request under the bound.
+- Latest release: v0.2.2. See "What is left" below for the remaining work and the items that need
+  the owner.
 
 ## Acceptance, live run #3 (main fbb1303, claude-haiku-5-5, bound 150,000, owner's proxy)
 
@@ -141,6 +143,41 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
 - D29: cut v0.1.0 after acceptance, on the owner's instruction to come back to a finished
   project; private GitHub Release only.
 
+## What is left (as of 2026-10-17)
+
+Definition of done for this project: M2 acceptance passed on both CLIs (done), every release
+published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
+
+In progress:
+- Nothing. v0.2.2 was the first release cut on the org's self-hosted runner (moved there because
+  hosted Actions minutes are blocked by billing). The runner has no `gh`, so its upload step
+  failed; PR #189 installs a pinned, checksum-verified `gh` in both release jobs, and the reattach
+  run then attached v0.2.2's wheel and sdist (the wheel installs and reports 0.2.2).
+
+This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
+- Keep STATUS, README, and the contract in step with `main`; nothing else is planned.
+- No live model runs and no new feature work. Idle seats stay idle.
+
+Measured candidates deliberately not pursued (each would need a live run or new evidence):
+- Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
+  cheaper in replays, but it shows the model less, so it needs an accuracy run first (A28).
+- A Haiku default bound of 125,000 (B27): only a README tip; accuracy at that bound unmeasured.
+- A search "follow" option for multihop chains (B26): the hops come from synthetic probes.
+- The default bound 150,000 on Codex, and a live check of 150,000 on an OpenRig seat (D31 says
+  revisit only if a seat shows a recall cost).
+
+Needs the owner:
+- O4: end-user authentication guidance (API key only, or subscription logins too).
+- O6: per-session upstream affinity on the owner's proxy (the remaining cache misses and dropped
+  thinking come from the proxy spreading requests across identities).
+- O7: whether to report the OpenRig context-usage clock bug upstream.
+- GitHub billing: the org's hosted Actions minutes are blocked by a failed payment or spending
+  limit; CI and releases now run on the self-hosted runner `ubuntu-final-middle`, one job at a
+  time.
+- The self-hosted runner group allows public repositories. A public repository's pull requests
+  could run code on the homelab runner; restricting the group to private repositories is an owner
+  setting.
+
 ## Open decisions (details in DECISIONS.md)
 
 - O3: settled by D31: the default bound stays 150,000, including for OpenRig seats, because a
@@ -153,7 +190,7 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
   thinking traced to the proxy spreading requests across identities).
 - O7 (owner): OpenRig context-usage clock bug (UTC parsed as local time).
 
-## Known limitations (v0.1.0)
+## Known limitations (v0.2.2)
 
 - Claude acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's
   proxy; Codex acceptance on gpt-6-astra at bound 64,000. The default bound 150,000 is untested
@@ -204,17 +241,23 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
 | v0.1.5 | 5ef9370 | A23: the proxy logs how each response ended (status, incomplete reason, stop reason), content-free |
 | v0.1.6 | db472a9 | A26: the proxy's end-status log fields accept only documented values; anything else logs as `other` |
 | v0.2.0 | 703d7c3 | Rule 16 (B31, A30): a restarted proxy resumes the main conversation's epoch instead of rotating again from epoch 0, so the prompt and its cache survive a restart |
+| v0.2.1 | 798a7ce | A31: a resume requires the store to hold at least the recorded number of pages (`pages_missing` otherwise) |
+| v0.2.2 | 2da3cb0 | Rule 17 (A34, #187): headroom capped at a quarter of the bound and halving at each turn start that measures growth, so one large read no longer leaves the session at the minimal window. Wheel and sdist attached by the reattach run after #189 |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
 ## Process notes
 
+- 2026-10-16 18:15Z: hosted GitHub Actions stopped starting jobs (billing). Until the move to
+  the self-hosted runner (PR #188, main 2da3cb0), merges were checked by full local test runs
+  from the author, the reviewer, and intake. 19:31Z to about 00:40Z the rig was down; the owner
+  restored it, and several seats' git worktrees were recreated.
 - 2026-10-16, about 10:25Z: builder-2 deleted `~/.contexto` on the owner's machine (8 session
   folders) without asking. 6 were matched to session ids its own probes recorded; 2 only by name
   pattern and time (builder-2's account, relayed verbatim by manager-1 at 10:29Z and noted on
   A18's queue row). Logs were not read and no other user of the folder was checked for. Seats now
   ask before deleting anything under the owner's home directory. The cause, `contexto run codex`
-  ignoring `CONTEXTO_HOME` for its MCP server, is being fixed in A18.
+  ignoring `CONTEXTO_HOME` for its MCP server, was fixed in v0.1.2 (A18).
 - Only intake runs in the main checkout; every other seat works in its own worktree.
 - Direct API requests identify honestly and carry no other product's client marker (D23).
 - PR approvals are not enforced by GitHub (one shared account); exact-head review by a reviewer
