@@ -89,11 +89,11 @@ no releasable commit, PSR proposes `v0.0.0`; the workflow treats that as nothing
 
 ## Packaging
 
-`main` has no package yet. The workflow handles both states:
+`main` has carried the package since PR #23 (M2 B1). The workflow handles both states:
 
 - **No `pyproject.toml`:** a releasable commit still gets a tag and a GitHub Release with notes; the
   build step prints that there is nothing to build, and no assets are attached.
-- **With `pyproject.toml` (`uv_build` backend and a static version, as in PR #2):** the build hook
+- **With `pyproject.toml` (`uv_build` backend and a static version, as on `main`):** the build hook
   stamps the computed version and runs `uv build`, and both artifacts are attached.
 
 No VCS-derived version plugin (hatch-vcs, setuptools-scm) is needed.
@@ -105,6 +105,7 @@ No VCS-derived version plugin (hatch-vcs, setuptools-scm) is needed.
 | `.github/semantic-release.toml` | PSR settings: `v{version}` tags, conventional parser, release types, `main` only, no version files |
 | `.github/scripts/release-build.sh` | PSR `build_command`: stamp, build, and verify artifact versions; skip cleanly without `pyproject.toml` |
 | `.github/scripts/reattach-verify.sh` | Recovery guard: the tag must be an existing `vX.Y.Z` tag on `main` |
+| `.github/scripts/ensure-gh.sh` | Both release jobs: use `gh` if the runner has it, else install a pinned, checksum-verified `gh` (the self-hosted runner has none) |
 | `.github/workflows/ci.yml` | Pull request checks; also the required gate for releases (`workflow_call`) |
 | `.github/workflows/release.yml` | Release on push to `main`; manual recovery for an existing tag; both gated on `RELEASES_ENABLED` |
 
@@ -112,6 +113,9 @@ CI runs Ruff only when the repository configures it, runs `uv run --with pytest 
 tree has test files, and checks that the package builds when `pyproject.toml` exists. On a tree with
 none of those, every job passes without doing anything. The pytest run collects spike tests under
 `spikes/` as well. That is intended, because those tests back numbers that research documents cite.
+
+Every CI and release job runs on the organization's self-hosted runner (labels `self-hosted`,
+`Linux`, `X64`), one job at a time, since hosted Actions minutes were blocked by billing (PR #188).
 
 Third-party actions are pinned by commit SHA, with the release tag in a comment:
 `actions/checkout` v7.0.1 and `astral-sh/setup-uv` v10.2.0. To update one, resolve the new tag's

@@ -1,6 +1,6 @@
 # Milestone 2: Contexto proxy (context virtual memory)
 
-Status: contract, not implemented. Owner: intake.lead under D0. Date: 2026-10-16.
+Status: contract, implemented on main (released from v0.1.0; latest v0.2.2). Owner: intake.lead under D0. Date: 2026-10-16.
 Why this design: `docs/research/M0-recommendation.md`. Decisions D16 to D21.
 
 ## Outcome
@@ -35,7 +35,8 @@ contexto run claude ...      (launcher)
 
 proxy (Anthropic Messages API)        mcp server (stdio, JSON-RPC)
   rewrite engine  ---- store ----       contexto_recall, contexto_pin,
-                     (session S)        contexto_close, contexto_state
+                     (session S)        contexto_close, contexto_state,
+                                        contexto_search
 ```
 
 Upstream resolution: the launcher computes the base URL Claude Code would otherwise use, in this
@@ -229,7 +230,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       fallback at most once; there is no retry loop.
     - **Genuine bugs.** An exception on a path not listed by lane A is handled the same way: the
       original request is forwarded so the user is never blocked by a Contexto defect, logged as
-      `transform_error` at error level, and reported prominently by `contexto sessions show`.
+      `transform_error` at error level, and counted in `contexto sessions show --json`
+      (`events_by_type`).
     Acceptance counts these and the other off-path events listed in acceptance 1 as failures. Lane
     A lists every engine path that can raise and covers each with a fault-injection test.
 15. **Encoded request bodies.** The launcher disables request compression, so a compressed
@@ -459,11 +461,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     budget does not apply and only the per-call limit holds. With an engine present but no room
     published for the call's turn, the same applies and the store logs `turn_room_missing`, so a
     missed publish shows up in acceptance logs.
-  - Known limitation for v0.1.0: subagents launched by the CLI share the session's room and
-    store. When subagents run concurrently with each other or with the main conversation, each
-    one's publish replaces the shared room and resets its counter, so the per-turn recall budget is
-    not enforced across overlapping conversations and they can overspend it; keying the room by
-    conversation is the later fix.
+  - Known limitation (v0.1.0 to v0.2.2): subagents and side requests launched by the CLI share the
+    session's store. Only the main conversation publishes the room (packet A14; see
+    `contexto_search` below), so their tool calls are charged against the main conversation's
+    room, which was not measured from their requests, and concurrent subagents can overspend it;
+    keying the room by conversation is the later fix.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
