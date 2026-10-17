@@ -134,7 +134,16 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    and still publishes a room below it after the decision logs `turn_room_low`, once per epoch. This keeps a small bound from rotating on
    every turn (reviewer-2: a plain re-trigger would thrash at bounds of 42,000 to 100,000).
    `budget.simulate` models both conditions. Estimate = last upstream
-   `input_tokens + cache_read + cache_creation` for this session plus the bytes added since.
+   `input_tokens + cache_read + cache_creation` for this session plus the bytes added since, when
+   the previous request sent in this conversation got its usage; when it did not (a 4xx or 5xx, a
+   dropped stream, a response without usage, or a request still in flight), the whole request is
+   estimated instead, logged content-free as `usage_missing` (epoch only) when that replaces a real
+   input. Usage is paired only with the request it measured, identified by its message count and
+   its last message's hash (rule 10): usage for any other request (the CLI's original, forwarded
+   after `transform_error`, or an older request still in flight) never feeds the ratio, the last
+   real input, the measured head, or `estimate_error`, and logs `usage_unattributed` (the epoch,
+   the request's message count, and the expected one); it still counts for `over_bound` and the
+   published room, which describe what the model received.
    Until the first real usage arrives, count `tool_result` content at 1.5 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
    character, and M0 saw log-heavy tool output near 1.8 bytes per token, so 1.5 errs high); after
@@ -276,7 +285,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       dialect; the model named by the request; the conversation's identity as the engine keys
       it (a hash); and an anchor: the count `n` of messages in the request that wrote the record
       and a hash over their normalised hashes (rule 10). Per-request values (the previous
-      request's hashes, sizes, and estimates) are not recorded. It is a full atomic overwrite at
+      request's hashes, sizes, estimates, and whether its usage arrived) are not recorded. It is a full atomic overwrite at
       mode 0600, never logged, never sent upstream, and holds conversation text only in
       `pinned_text` and `index_text`, which the store already holds in other forms. A degraded
       engine (rule 14) writes no record.
@@ -521,7 +530,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   main one, subagents, side requests), and the main conversation is the one with the most turn
   starts, re-evaluated at each turn start: it changes only when another conversation has strictly
   more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
-  stay main. Other conversations publish none of them, so their tool calls see the
+  stay main. The choice is made before the request is transformed, so a request that fails after
+  its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them, so their tool calls see the
   main conversation's room and snapshot, and for a subagent "in view" refers to the main
   conversation's window (part of the documented subagent limitation); the MCP
   server cannot tell which conversation issued a call. Matches in the
