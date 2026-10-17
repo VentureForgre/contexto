@@ -195,8 +195,10 @@ Needs the owner:
 - Claude acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's
   proxy; Codex acceptance on gpt-6-astra at bound 64,000. The default bound 150,000 is untested
   on Codex (D30).
-- Codex pages written by v0.1.0 to v0.1.2 are searchable from v0.1.3 on, but their index lines
-  keep empty user text, tools, and paths (index stubs are stored when a page is written).
+- Codex pages written by v0.1.0 to v0.1.2 were stored with empty index stubs. From the next
+  release the store rebuilds such a stub from the page's messages each time it reads the page, so
+  their index lines show user text, tools, and paths. The page file is not rewritten and its id is
+  unchanged; anything reading page files directly still sees the empty stub.
 - Codex: HTTP is forced through a custom
   provider (no WebSocket). Contexto's tools sit behind Codex tool search and need
   `default_tools_approval_mode = approve`, which `contexto run codex` sets. Only API-key mode is

@@ -14,7 +14,7 @@ from contexto.store import (PageConflictError, PageNotFoundError, charge_room, c
                              check_page_id, check_retained, check_turn_room, check_window, redact)
 from contexto.store.ledger import MemoryLedger
 from contexto.store.recall import lists_identifiers
-from contexto.store.pages import build_page, render_index, same_content, search_pages
+from contexto.store.pages import build_page, current_stub, render_index, same_content, search_pages
 from contexto.store.records import LedgerOps
 
 
@@ -118,16 +118,20 @@ class MemoryStore(LedgerOps):
         return path
 
     def get_page(self, page_id: str) -> dict[str, Any] | None:
-        return self.pages.get(page_id)
+        page = self.pages.get(page_id)
+        return None if page is None else current_stub(page)
+
+    def _pages(self) -> list[dict[str, Any]]:
+        return [current_stub(p) for p in self.pages.values()]
 
     def page_ids(self) -> list[str]:
         return [p["id"] for p in sorted(self.pages.values(), key=lambda p: (p["turn"], p["id"]), reverse=True)]
 
     def search(self, query: str) -> list[str]:
-        return search_pages(list(self.pages.values()), query)
+        return search_pages(self._pages(), query)
 
     def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
-        return render_index(list(self.pages.values()), budget_tokens,
+        return render_index(self._pages(), budget_tokens,
                             salient=lists_identifiers(self.recall_variant(variant)))
 
     def _recorded_variant(self) -> str | None:
