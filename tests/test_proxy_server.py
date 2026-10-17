@@ -506,13 +506,18 @@ def reset_after_some_bytes(sock: socket.socket, got: bytearray) -> None:
     # closing with linger 0 sends RST: the proxy's send fails mid-body
 
 
-def answer_ok(sock: socket.socket, got: bytearray) -> None:
+def read_request(sock: socket.socket, got: bytearray) -> None:
+    """Read one request with a Content-Length body, as the proxy sends it upstream."""
     while b"\r\n\r\n" not in got:
         got += sock.recv(65536)
     head = bytes(got).split(b"\r\n\r\n", 1)[0].decode()
     length = int(next(line.split(":", 1)[1] for line in head.split("\r\n") if line.lower().startswith("content-length")))
     while len(got) < len(head) + 4 + length:
         got += sock.recv(1 << 20)
+
+
+def answer_ok(sock: socket.socket, got: bytearray) -> None:
+    read_request(sock, got)
     payload = b'{"ok":true}'
     sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
                  % (len(payload), payload))
@@ -576,6 +581,74 @@ def test_tls_failure_is_named_and_retried_once(make_proxy, scripted_upstream):
     entry = log.requests()[0]
     assert entry["upstream_phase"] == "tls" and entry["upstream_retried"] is True and len(received) == 2
     assert b"small" not in b"".join(received)  # the request never left before TLS
+
+
+@pytest.mark.parametrize("answer, error", [
+    (b"garbage\r\n", "BadStatusLine"),
+    (b"HTTP/1.1 200 OK\r\nX-Long: " + b"a" * 70000 + b"\r\n\r\n", "LineTooLong"),
+    (b"HTTP/1.1 200 OK\r\n" + b"".join(b"X-%d: 1\r\n" % i for i in range(120)) + b"\r\n", "HTTPException"),
+], ids=["bad_status_line", "line_too_long", "too_many_headers"])
+def test_a_malformed_response_head_is_a_logged_502_not_retried(make_proxy, scripted_upstream, answer, error):
+    # Contract rule 8: http.client raises these as HTTPException, not OSError; the failure is still
+    # named (phase, elapsed, errno), logged on the request's entry, and, after the body was sent, not retried.
+    def malformed_head(sock: socket.socket, got: bytearray) -> None:
+        read_request(sock, got)
+        try:
+            sock.sendall(answer)
+        except OSError:  # the proxy may close before reading every byte of an over-long head
+            pass
+
+    url, received = scripted_upstream(malformed_head, answer_ok)
+    proxy, log = make_proxy(upstream=url)
+    response, data = call(proxy, "POST", "/v1/other", b"small", {"Content-Type": "application/octet-stream"})
+    assert response.status == 502 and f"upstream unreachable ({error})".encode() in data
+    entry = log.requests()[0]
+    assert entry["status"] == 502 and entry["error"] == f"upstream unreachable: {error}"
+    assert entry["upstream_phase"] == "wait_headers" and entry["errno"] is None
+    assert 0 <= entry["phase_ms"] <= entry["duration_ms"]
+    assert [e for e in log.events if e["event"] in ("upstream_retry", "proxy_error")] == [] and len(received) == 1
+
+
+def _stream_then(ending: str):
+    """Answer 200 SSE, send message_start, then fail: a chunk cut short, or a TCP reset."""
+    def script(sock: socket.socket, got: bytearray) -> None:
+        read_request(sock, got)
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+        first = sse(STREAM[0])
+        sock.sendall(b"%x\r\n%s\r\n" % (len(first), first))
+        if ending == "partial_chunk":
+            sock.sendall(b"64\r\n" + sse(STREAM[1])[:10])  # 100 bytes promised, 10 sent, then close
+        time.sleep(0.2)  # let the proxy read what was sent before the connection ends
+        if ending == "reset":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    return script
+
+
+def read_until_closed(sock: socket.socket) -> bytes:
+    reply = b""
+    while chunk := sock.recv(65536):
+        reply += chunk
+    return reply
+
+
+@pytest.mark.parametrize("ending, error", [("partial_chunk", "IncompleteRead"), ("reset", "ConnectionResetError")])
+def test_upstream_dropping_mid_stream_still_logs_the_entry_and_feeds_usage(make_proxy, scripted_upstream,
+                                                                           ending, error):
+    engine = StubEngine()
+    url, _ = scripted_upstream(_stream_then(ending))
+    proxy, log = make_proxy(upstream=url, transform=engine, observe_usage=engine.observe_usage)
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
+        reply = read_until_closed(sock)  # the proxy closes the connection after a failed relay
+    assert reply.startswith(b"HTTP/1.1 200") and sse(STREAM[0]) in reply
+    assert not reply.endswith(b"0\r\n\r\n")  # no terminator: the client sees the stream fail
+    entry = log.requests()[0]
+    assert entry["status"] == 200 and entry["error"] == f"relay: {error}" and "client_aborted" not in entry
+    assert entry["usage"]["input_tokens"] == 12 and entry["usage"]["cache_read_input_tokens"] == 4000
+    assert entry["stream_hold"] == {"held_events": 0, "triggered": False}
+    assert len(engine.usage) == 1 and engine.usage[0][1]["input_tokens"] == 12
+    assert [e for e in log.events if e["event"] == "proxy_error"] == []
 
 
 @pytest.mark.parametrize("mode, error", [("raise", "RuntimeError"), ("bad-return", "TypeError")])
@@ -711,6 +784,21 @@ def test_malformed_framing_gets_a_400_not_a_dropped_connection(make_proxy):
     assert log.requests()[0]["status"] == 400
 
 
+@pytest.mark.parametrize("framing", [b"Content-Length: -1\r\n\r\n", b"Transfer-Encoding: chunked\r\n\r\n-5\r\n",
+                                     b"Transfer-Encoding: chunked\r\n\r\n-1\r\n"],
+                         ids=["content_length", "chunk_size", "chunk_size_minus_one"])
+def test_a_negative_body_length_gets_a_prompt_400(make_proxy, framing):
+    # A negative size would read until the client closes; the client keeps its side open here, so a
+    # regression times out instead of answering.
+    proxy, log = make_proxy()
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=3) as sock:
+        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\n" + framing)
+        reply = read_until_closed(sock)
+    assert reply.startswith(b"HTTP/1.1 400") and b"malformed request framing" in reply
+    assert Upstream.received == []
+    assert log.requests()[0]["status"] == 400
+
+
 def test_internal_error_before_upstream_forwards_the_original_request(make_proxy, monkeypatch):
     def broken(headers, beta):
         raise RuntimeError("boom")
@@ -739,6 +827,24 @@ def test_internal_error_after_upstream_answers_502_without_resending(make_proxy,
     assert len(Upstream.received) == 1  # never sent twice
     errors = [e for e in log.events if e["event"] == "proxy_error"]
     assert [(e["error"], e["fallback"]) for e in errors] == [("RuntimeError", "local_502")]
+
+
+def test_internal_error_after_the_response_started_logs_no_local_502(make_proxy, monkeypatch):
+    # The status line already reached the client, so no 502 can be sent: the record says none was.
+    def broken(self):
+        raise RuntimeError("boom")
+
+    Upstream.mode = "json"
+    monkeypatch.setattr(proxy_module.UsageReader, "finish", broken)
+    proxy, log = make_proxy()
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
+        reply = read_until_closed(sock)
+    assert reply.startswith(b"HTTP/1.1 200") and b"502" not in reply
+    assert len(Upstream.received) == 1
+    errors = [e for e in log.events if e["event"] == "proxy_error"]
+    assert [(e["error"], e["fallback"]) for e in errors] == [("RuntimeError", "none")]
 
 
 # OpenAI Responses API (lane A packet A1b, for the A5 Codex adapter)

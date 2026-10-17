@@ -177,7 +177,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    bytes once on a new connection and logs `upstream_retry` with the original phase and error. A
    failure after the body was fully sent (`wait_headers`) or after any response byte is never
    retried, because upstream may be running it; it returns the 502 as before, and the CLI may
-   retry on its own.
+   retry on its own. A malformed response head (a bad status line, an over-long header line, too
+   many headers) is a `wait_headers` failure with a null errno. An upstream failure after the
+   response started (a cut-short chunk, a reset) is logged on the request's entry as
+   `error: "relay: <class>"` with the status and any usage already read, which still reaches the
+   engine; the client sees the stream end without its terminator. A proxy failure after the
+   response started logs `proxy_error` with `fallback: "none"`, because no local 502 can be sent.
 9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
    per-turn recall budget; the proxy reads `message_start` and `message_delta` usage.
 10. **Matching history.** Recognise each retained message in later requests by a hash of its

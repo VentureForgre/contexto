@@ -142,6 +142,11 @@ class EncodedBodyError(Exception):
         self.reason = reason
 
 
+class _UpstreamReadError(Exception):
+    """An upstream read failed mid-relay. Its own type keeps an upstream ConnectionResetError from
+    being logged as a client abort; the cause names the failure."""
+
+
 class _NotThisForm(Exception):
     """The first stream did not parse as this candidate form; try the next one."""
 
@@ -626,6 +631,8 @@ class _Handler(BaseHTTPRequestHandler):
             body = bytearray()
             while True:
                 size = int(self.rfile.readline().split(b";", 1)[0].strip() or b"0", 16)
+                if size < 0:  # read(-1) would wait for the client to close the connection
+                    raise ValueError("negative chunk size")
                 if size == 0:
                     while self.rfile.readline() not in (b"\r\n", b"\n", b""):
                         pass
@@ -633,6 +640,8 @@ class _Handler(BaseHTTPRequestHandler):
                 body += self.rfile.read(size)
                 self.rfile.readline()
         length = int(self.headers.get("Content-Length") or 0)
+        if length < 0:
+            raise ValueError("negative Content-Length")
         return self.rfile.read(length) if length else b""
 
     def _handle(self) -> None:
@@ -659,7 +668,8 @@ class _Handler(BaseHTTPRequestHandler):
             path = self.path.split("?", 1)[0]
             fallback = self._raw is not None and not self._upstream_sent and not self._response_started
             self.owner.log({"event": "proxy_error", "method": self.command, "path": path,
-                            "error": type(exc).__name__, "fallback": "forward_original" if fallback else "local_502"})
+                            "error": type(exc).__name__,
+                            "fallback": "forward_original" if fallback else self._local_fallback()})
             if fallback:
                 body, headers = self._raw
                 entry = {"event": "request", "method": self.command, "path": path, "fallback": True,
@@ -669,10 +679,15 @@ class _Handler(BaseHTTPRequestHandler):
                     return
                 except Exception as again:
                     self.owner.log({"event": "proxy_error", "path": path, "error": type(again).__name__,
-                                    "fallback": "local_502"})
+                                    "fallback": self._local_fallback()})
             if not self._response_started:
                 self._send_local_error(502, f"contexto proxy: internal error ({type(exc).__name__})")
             self.close_connection = True
+
+    def _local_fallback(self) -> str:
+        """``local_502`` when the 502 below is sent; ``none`` once the response has started, since
+        then the client only sees the connection close."""
+        return "none" if self._response_started else "local_502"
 
     def _handle_request(self) -> None:
         started = time.monotonic()
@@ -801,11 +816,14 @@ class _Handler(BaseHTTPRequestHandler):
                 phase, phase_started = "wait_headers", time.monotonic()
                 response = conn.getresponse()
                 break
-            except OSError as exc:
+            except (OSError, http.client.HTTPException) as exc:
+                # HTTPException: a malformed response head (BadStatusLine, LineTooLong, too many
+                # headers). It is raised at wait_headers, so it is never retried, and has no errno.
                 conn.close()
                 if phase == "connect":
                     phase = getattr(conn, "phase", phase)
-                failure = {"upstream_phase": phase, "phase_ms": _ms(phase_started), "errno": exc.errno}
+                failure = {"upstream_phase": phase, "phase_ms": _ms(phase_started),
+                           "errno": getattr(exc, "errno", None)}
                 if not retried and phase in RETRYABLE_PHASES:
                     retried = True
                     owner.log({"event": "upstream_retry", "path": entry["path"], "error": type(exc).__name__,
@@ -867,6 +885,12 @@ class _Handler(BaseHTTPRequestHandler):
                        "chunked": chunked})
         pending = bytearray()
 
+        def read_upstream() -> bytes:
+            try:
+                return response.read1(65536)
+            except (OSError, http.client.HTTPException) as exc:  # IncompleteRead is not an OSError
+                raise _UpstreamReadError from exc
+
         def write_events(events: list[bytes]) -> None:
             for raw in events:
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(raw), raw))
@@ -874,7 +898,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
         try:
-            while chunk := response.read1(65536):
+            while chunk := read_upstream():
                 response_bytes += len(chunk)
                 if hold is not None:
                     pending += chunk
@@ -897,6 +921,10 @@ class _Handler(BaseHTTPRequestHandler):
                     reader.feed(bytes(pending))
                     write_events(hold.feed(bytes(pending)))
                 write_events(hold.eof())
+        except _UpstreamReadError as exc:  # upstream ended early: the client gets no terminator
+            entry["error"] = f"relay: {type(exc.__cause__).__name__}"
+            self.close_connection = True
+            relay_ok = False
         except (BrokenPipeError, ConnectionResetError):
             entry["client_aborted"] = True
             self.close_connection = True
