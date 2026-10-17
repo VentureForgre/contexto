@@ -275,6 +275,7 @@ class UsageReader:
         self.end_event: str | None = None  # Responses stream: completed, incomplete, or failed
         self.ending: dict[str, str] = {}  # response_status, incomplete_reason, error_code, stop_reason, error_type
         self._buffer = bytearray()
+        self._events = SSEEventSplitter()
         self._overflow = False
 
     def feed(self, chunk: bytes) -> None:
@@ -285,16 +286,14 @@ class UsageReader:
             elif not self._overflow:
                 self._buffer += chunk
             return
-        self._buffer += chunk.replace(b"\r\n", b"\n")
-        while (end := self._buffer.find(b"\n\n")) >= 0:
-            event = bytes(self._buffer[:end])
-            del self._buffer[: end + 2]
-            self._event(event)
+        for raw in self._events.feed(chunk):
+            self.feed_event(raw)
 
     def finish(self) -> None:
         if self.sse:
-            if self._buffer.strip():
-                self._event(bytes(self._buffer))
+            # A final event that upstream ended the stream on without its blank line is still what
+            # upstream sent (its message_delta usage is the response's real usage), so it is read.
+            self.feed_event(self._events.flush())
         elif self._buffer and not self._overflow:
             try:
                 body = json.loads(bytes(self._buffer))
@@ -310,8 +309,10 @@ class UsageReader:
                     self._take_messages_end(body)
         self._buffer.clear()
 
-    def _event(self, raw: bytes) -> None:
-        data = b"\n".join(line[5:].lstrip() for line in raw.split(b"\n") if line.startswith(b"data:"))
+    def feed_event(self, raw: bytes) -> None:
+        """One raw SSE event, as split by ``SSEEventSplitter``. The stream hold's path calls this
+        directly, so one splitter serves both the hold and this reader."""
+        data = sse_data(raw)
         try:
             payload = json.loads(data) if data else None
         except ValueError:
@@ -379,7 +380,67 @@ class UsageReader:
                 self.input_transformations = [_scalar_summary(v) for v in value]
 
 
-_SSE_EVENT_END = re.compile(rb"\r\n\r\n|\n\n|\r\r")
+# Server-sent events (WHATWG HTML, "Parsing an event stream"): a line ends at CRLF, LF, or a CR not
+# followed by LF, and an event ends at a blank line, so at two line endings in a row in any mix. The
+# stream hold's splitter and the usage reader both use this grammar, through SSEEventSplitter and
+# sse_lines, so they always agree on where an event ends and what it says.
+_SSE_LINE_END = rb"(?:\r\n|\n|\r(?!\n))"
+_SSE_EVENT_END = re.compile(_SSE_LINE_END + _SSE_LINE_END)
+_SSE_LINE_SPLIT = re.compile(rb"\r\n|\n|\r")
+
+
+class SSEEventSplitter:
+    """Splits an SSE byte stream into raw events, each with its terminating blank line, byte for
+    byte: joining what ``feed`` and ``flush`` return gives back exactly what was fed.
+
+    A CR that ends a read and would end an event may be the first half of a CRLF, so that event is
+    returned once the next byte arrives (or by ``flush``); every other event is returned as soon as
+    its blank line is read. ``flush`` returns what is left at end of stream: a final event without
+    its blank line, or ``b""``. The SSE spec has a browser discard such an event; the proxy still
+    relays its bytes unchanged (rule 8: the CLI decides) and reads its usage (rule 9), because it is
+    what upstream actually sent and the tokens it reports were spent.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self._scanned = 0
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        self._buffer += chunk
+        events: list[bytes] = []
+        start = 0
+        # A match must include a new byte, and the longest unmatched end (CRLF CR) is 3 bytes.
+        pos = max(0, self._scanned - 3)
+        while match := _SSE_EVENT_END.search(self._buffer, pos):
+            if match.end() == len(self._buffer) and self._buffer.endswith(b"\r"):
+                break  # wait for the next byte: CRLF CR + LF is CRLF CRLF
+            events.append(bytes(self._buffer[start:match.end()]))
+            start = pos = match.end()
+        del self._buffer[:start]
+        self._scanned = len(self._buffer)
+        return events
+
+    def flush(self) -> bytes:
+        tail, self._buffer, self._scanned = bytes(self._buffer), bytearray(), 0
+        return tail
+
+
+def sse_lines(raw: bytes) -> list[bytes]:
+    """The lines of one raw SSE event, split at CRLF, LF, or CR (blank lines included)."""
+    return _SSE_LINE_SPLIT.split(raw)
+
+
+def _sse_field(line: bytes, name: bytes) -> bytes | None:
+    """The value of ``line`` if it is field ``name``: after the colon, minus one leading space."""
+    if not line.startswith(name + b":"):
+        return None
+    value = line[len(name) + 1:]
+    return value[1:] if value.startswith(b" ") else value
+
+
+def sse_data(raw: bytes) -> bytes:
+    """The data of one raw SSE event: its ``data:`` lines joined with LF."""
+    return b"\n".join(v for line in sse_lines(raw) if (v := _sse_field(line, b"data")) is not None)
 
 # Packet A26: the only values each end field can log; anything else is logged as "other". Sources,
 # read 2026-10-16:
@@ -410,22 +471,17 @@ END_ALLOWLISTS: dict[str, frozenset[str]] = {
 
 def sse_event_type(raw: bytes) -> str | None:
     """The ``type`` of one raw SSE event (from its data JSON, else its ``event:`` line)."""
-    data = b"\n".join(line[5:].lstrip() for line in raw.splitlines() if line.startswith(b"data:"))
-    if data:
-        try:
-            payload = json.loads(data)
-        except ValueError:
-            payload = None
-        if isinstance(payload, dict) and isinstance(payload.get("type"), str):
-            return payload["type"]
-    for line in raw.splitlines():
-        if line.startswith(b"event:"):
-            return line[6:].strip().decode("utf-8", "replace")
+    payload = _sse_payload(raw)
+    if isinstance(payload.get("type"), str):
+        return payload["type"]
+    for line in sse_lines(raw):
+        if (value := _sse_field(line, b"event")) is not None:
+            return value.strip().decode("utf-8", "replace")
     return None
 
 
 def _sse_payload(raw: bytes) -> dict[str, Any]:
-    data = b"\n".join(line[5:].lstrip() for line in raw.splitlines() if line.startswith(b"data:"))
+    data = sse_data(raw)
     try:
         payload = json.loads(data) if data else {}
     except ValueError:
@@ -894,7 +950,7 @@ class _Handler(BaseHTTPRequestHandler):
             # Not silently: an upstream that encodes anyway (or does not chunk) defeats the hold.
             owner.log({"event": "hold_skipped", "path": entry["path"], "encoding": decoder.encoding or "identity",
                        "chunked": chunked})
-        pending = bytearray()
+        splitter = SSEEventSplitter()  # the hold path splits once, for both the reader and the hold
 
         def read_upstream() -> bytes:
             try:
@@ -912,11 +968,8 @@ class _Handler(BaseHTTPRequestHandler):
             while chunk := read_upstream():
                 response_bytes += len(chunk)
                 if hold is not None:
-                    pending += chunk
-                    while match := _SSE_EVENT_END.search(pending):
-                        raw = bytes(pending[: match.end()])
-                        del pending[: match.end()]
-                        reader.feed(raw)
+                    for raw in splitter.feed(chunk):
+                        reader.feed_event(raw)  # usage is read before the hold can trigger on it
                         write_events(hold.feed(raw))
                     continue
                 reader.feed(decoder.decode(chunk))
@@ -928,9 +981,9 @@ class _Handler(BaseHTTPRequestHandler):
                     held = chunk
                 self.wfile.flush()
             if hold is not None:
-                if pending:  # a final event without its blank line
-                    reader.feed(bytes(pending))
-                    write_events(hold.feed(bytes(pending)))
+                if tail := splitter.flush():  # a final event without its blank line (see SSEEventSplitter)
+                    reader.feed_event(tail)
+                    write_events(hold.feed(tail))
                 write_events(hold.eof())
             elif expected is not None and response_bytes < expected:
                 # read1 returns b"" at EOF instead of raising, so a Content-Length body cut short

@@ -722,6 +722,66 @@ def test_a_hold_ended_without_message_delta_publishes_before_releasing(make_prox
     assert entry["usage"]["input_tokens"] == 12
 
 
+LINE_ENDINGS = {"lf": b"\n", "crlf": b"\r\n", "cr": b"\r"}
+
+
+def _sse_events(events: list[dict], sep: bytes) -> list[bytes]:
+    return [b"event: " + e["type"].encode() + sep + b"data: " + json.dumps(e).encode() + sep + sep for e in events]
+
+
+def _tool_stream_ending(sep: bytes, final: str):
+    """Answer 200 SSE in the given line ending, one event per chunk: message_start, a text block, a
+    whole tool_use block (held by the proxy), and message_delta, then a clean end of stream. With
+    ``final`` other than "whole", message_delta is the last event and upstream closes before its
+    blank line ("no_blank_line") or before even its data line's line ending ("no_line_end")."""
+    events = _sse_events([*STREAM[:3], *TOOL_BLOCK, STREAM[3], *([STREAM[4]] if final == "whole" else [])], sep)
+    if final != "whole":
+        events[-1] = events[-1][: -len(sep) * (1 if final == "no_blank_line" else 2)]
+
+    def script(sock: socket.socket, got: bytearray) -> None:
+        read_request(sock, got)
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+        for raw in events:
+            sock.sendall(b"%x\r\n%s\r\n" % (len(raw), raw))
+            time.sleep(0.01)  # one event per read, as upstream writes them
+        sock.sendall(b"0\r\n\r\n")
+        time.sleep(0.2)
+    return script, b"".join(events)
+
+
+@pytest.mark.parametrize("final", ["whole", "no_blank_line", "no_line_end"])
+@pytest.mark.parametrize("ending", LINE_ENDINGS)
+def test_message_delta_usage_reaches_the_engine_once_before_the_hold_is_released(make_proxy, scripted_upstream,
+                                                                                ending, final):
+    # SSE allows CRLF, LF, or CR line endings, and the proxy's event splitter and usage reader share
+    # one grammar. A final message_delta that upstream ends the stream on, without its blank line, is
+    # still upstream's real usage: it is read before the hold triggers, so the output tokens reach the
+    # engine in the one publish, before the CLI sees the held tool_use. The client gets every byte.
+    observed: list[tuple[float, dict]] = []
+
+    def observe(endpoint, usage, request):
+        time.sleep(0.3)  # a slow publish: released events must still wait for it
+        observed.append((time.monotonic(), dict(usage)))
+
+    script, upstream_body = _tool_stream_ending(LINE_ENDINGS[ending], final)
+    url, _ = scripted_upstream(script)
+    proxy, log = make_proxy(upstream=url, transform=StubEngine(), observe_usage=observe)
+    tool_at, reply = None, b""
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
+        while not reply.endswith(b"0\r\n\r\n") and (chunk := sock.recv(65536)):
+            reply += chunk
+            if tool_at is None and b'"tool_use"' in reply:
+                tool_at = time.monotonic()
+    assert dechunk(reply.partition(b"\r\n\r\n")[2]) == upstream_body  # byte-identical, original order
+    assert len(observed) == 1 and tool_at is not None and observed[0][0] <= tool_at
+    assert observed[0][1]["output_tokens"] == 42 and observed[0][1]["input_tokens"] == 12
+    entry = log.requests()[0]
+    assert "error" not in entry and entry["stream_hold"] == {"held_events": 3, "triggered": True}
+    assert entry["usage"]["output_tokens"] == 42 and entry["stop_reason"] == "end_turn"
+
+
 def _content_length_then(send: int):
     """Answer 200 with a Content-Length for the whole SSE body (so no chunking and no hold), send its
     first ``send`` bytes, then close cleanly: read1 sees EOF, not an error."""
