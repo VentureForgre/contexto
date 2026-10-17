@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from contexto.proxy import ContextoProxy, StreamHold, sse_event_type
+from contexto.proxy import ContextoProxy, SSEEventSplitter, StreamHold, UsageReader, sse_event_type
 from contexto.store.memory import MemoryStore
 
 
@@ -154,6 +154,93 @@ def test_responses_hold_from_any_tool_call_item_until_the_terminal_event(call_ty
 def test_sse_event_type_reads_data_or_event_line_and_crlf():
     assert sse_event_type(ev({"type": "message_delta"}, crlf=True)) == "message_delta"
     assert sse_event_type(b"event: ping\n\n") == "ping"
+
+
+# One SSE event grammar (WHATWG HTML, server-sent events): a line ends at CRLF, LF, or CR, and an
+# event ends at a blank line. The splitter that feeds StreamHold and the usage reader share it.
+
+TERMINATORS = {"lf": b"\n", "crlf": b"\r\n", "cr": b"\r"}
+
+
+def ev_with(payload: dict, sep: bytes) -> bytes:
+    return b"event: " + payload["type"].encode() + sep + b"data: " + json.dumps(payload).encode() + sep + sep
+
+
+def split_all(data: bytes, step: int) -> tuple[list[bytes], bytes]:
+    splitter, events = SSEEventSplitter(), []
+    for i in range(0, len(data), step):
+        events += splitter.feed(data[i:i + step])
+    return events, splitter.flush()
+
+
+@pytest.mark.parametrize("step", [1, 2, 3, 7, 1 << 16])
+@pytest.mark.parametrize("name", TERMINATORS)
+def test_the_splitter_ends_events_at_a_blank_line_in_every_line_ending(name, step):
+    sep = TERMINATORS[name]
+    stream = [ev_with(e, sep) for e in (
+        {"type": "message_start", "message": {"usage": {"input_tokens": 10}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 40}},
+        {"type": "message_stop"})]
+    events, tail = split_all(b"".join(stream), step)
+    if name == "cr":
+        # The last CR of the stream ends the read, so it may still be the first half of a CRLF:
+        # that event waits for the next byte, or for end of stream, where flush returns it.
+        assert events == stream[:-1] and tail == stream[-1]
+    else:
+        assert events == stream and tail == b""
+
+
+@pytest.mark.parametrize("step", [1, 2, 1 << 16])
+def test_crlf_split_across_reads_is_one_line_ending_not_two(step):
+    one = b"event: ping\r\ndata: {\"type\": \"ping\"}\r\n\r\n"
+    events, tail = split_all(one + one, step)
+    assert events == [one, one] and tail == b""
+
+
+def test_a_cr_ending_a_read_waits_for_the_next_byte_then_dispatches():
+    splitter = SSEEventSplitter()
+    assert splitter.feed(b"data: {}\r\n\r") == []  # an LF may follow: CRLF CRLF, not CRLF CR
+    assert splitter.feed(b"\ndata: {}\r") == [b"data: {}\r\n\r\n"]
+    assert splitter.feed(b"\rdata") == [b"data: {}\r\r"]  # the next byte is not LF: CR CR ends it
+    assert splitter.flush() == b"data" and splitter.flush() == b""
+
+
+def test_mixed_line_endings_and_a_final_event_without_its_blank_line():
+    data = b"data: {\"type\":\"a\"}\r\n\ndata: {\"type\":\"b\"}\n\r\ndata: {\"type\":\"c\"}\r\r\ndata: {\"type\":\"d\"}\n"
+    events, tail = split_all(data, 1 << 16)
+    assert [sse_event_type(e) for e in events] == ["a", "b", "c"]
+    assert sse_event_type(tail) == "d" and b"".join(events) + tail == data
+
+
+def read_usage(data: bytes, step: int = 7) -> UsageReader:
+    reader = UsageReader("text/event-stream")
+    for i in range(0, len(data), step):
+        reader.feed(data[i:i + step])
+    reader.finish()
+    return reader
+
+
+@pytest.mark.parametrize("name", TERMINATORS)
+def test_the_usage_reader_reads_message_start_and_message_delta_in_every_line_ending(name):
+    sep = TERMINATORS[name]
+    data = b"".join(ev_with(e, sep) for e in (
+        {"type": "message_start", "message": {"usage": {"input_tokens": 10, "output_tokens": 1}}},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 40}},
+        {"type": "message_stop"}))
+    reader = read_usage(data)
+    assert reader.usage == {"input_tokens": 10, "output_tokens": 40}
+    assert reader.ending == {"stop_reason": "tool_use"}
+
+
+@pytest.mark.parametrize("name", TERMINATORS)
+def test_the_usage_reader_reads_a_final_message_delta_without_its_blank_line(name):
+    sep = TERMINATORS[name]
+    data = START + ev_with(DELTA_PAYLOAD, sep)[: -len(sep)]  # upstream closed right after the event
+    assert read_usage(data).usage == {"input_tokens": 10, "output_tokens": 40}
+
+
+DELTA_PAYLOAD = {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 40}}
 
 
 # End to end through the proxy

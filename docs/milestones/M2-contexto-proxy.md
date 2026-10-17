@@ -186,7 +186,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    engine; the client sees the stream end without its terminator (or the body end short). A proxy failure after the
    response started logs `proxy_error` with `fallback: "none"`, because no local 502 can be sent.
 9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
-   per-turn recall budget; the proxy reads `message_start` and `message_delta` usage.
+   per-turn recall budget; the proxy reads `message_start` and `message_delta` usage. The hold's
+   event splitter and the usage reader share one SSE grammar (WHATWG: a line ends at CRLF, LF, or
+   CR; an event ends at a blank line). A final event that upstream ends the stream on without its
+   blank line is relayed unchanged and its usage is read before the hold acts on it, because it is
+   what upstream sent and its tokens were spent; a browser would discard it, the CLI decides.
 10. **Matching history.** Recognise each retained message in later requests by a hash of its
     canonical JSON with every `cache_control` field removed (the CLI moves `cache_control` along
     the tail), and with content normalised so that a plain string and a single text block holding
