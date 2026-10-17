@@ -13,7 +13,7 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes
 from contexto.store.recall import DEFAULT_LINES, salient_identifiers
-from contexto.store.render import as_message
+from contexto.store.render import as_message, is_responses_item
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
 STUB_TEXT_CHARS = 200
@@ -136,6 +136,26 @@ def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
         if system is not None:
             stub["system_text"] = system
     return stub
+
+
+def current_stub(page: dict[str, Any]) -> dict[str, Any]:
+    """The page with its stub rebuilt if it is a pre-v0.1.3 Codex stub, else the page itself.
+
+    v0.1.0 to v0.1.2 stored every Responses (Codex) page with empty user text, tools, and paths: the
+    stub rule read only Messages API blocks (fixed by B23). A page keeps its exact messages, so the
+    stub is rebuilt from them with the current rule, in memory only: the page file, its id, and its
+    content are never changed (pages are immutable). Only that empty shape on a page holding a
+    Responses item is rebuilt; Messages API pages and any stub with a field filled are returned as
+    stored, and so is a rebuild that comes out the same. Idempotent.
+    """
+    stub = page.get("stub")
+    if not isinstance(stub, dict) or stub.get("user_text") or stub.get("tools") or stub.get("paths"):
+        return page
+    messages = page.get("messages")
+    if not isinstance(messages, list) or not any(isinstance(m, dict) and is_responses_item(m) for m in messages):
+        return page
+    rebuilt = build_stub(messages)
+    return page if rebuilt == stub else {**page, "stub": rebuilt}
 
 
 def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int) -> dict[str, Any]:

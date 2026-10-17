@@ -44,7 +44,7 @@ def render_page(page: dict[str, Any]) -> str:
         if not isinstance(message, dict):
             lines.append("[malformed message omitted]")
             continue
-        if _is_responses_item(message):
+        if is_responses_item(message):
             lines.extend(_responses_lines(turn, message))
             continue
         role = message.get("role", "unknown")
@@ -86,7 +86,7 @@ def render_page(page: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _is_responses_item(message: dict[str, Any]) -> bool:
+def is_responses_item(message: dict[str, Any]) -> bool:
     """A Responses API item rather than a Messages API message: it has a top-level ``type`` (a Messages API
     message never does), or, typeless like a message the CLI sent without one, its content parts use the
     Responses part types (``input_*`` or ``output_text``), which the Messages API never uses."""
@@ -115,7 +115,7 @@ def as_message(message: Any) -> dict[str, Any] | None:
     a Responses item through ``ResponsesDialect.retained_blocks`` (B20), or None for an item that is
     not searchable (system-like, reasoning, other types). Rendering, search, and the stub all read
     pages through this one mapping (B23), so what search matches is what the page shows."""
-    if not isinstance(message, dict) or not _is_responses_item(message):
+    if not isinstance(message, dict) or not is_responses_item(message):
         return message
     from contexto.codex import RESPONSES  # imported here: contexto.codex builds on the engine, which imports this
 

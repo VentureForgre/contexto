@@ -37,7 +37,7 @@ from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
 from contexto.store.ledger import Ledger, LedgerCorruptError
-from contexto.store.pages import build_page, render_index, same_content, search_pages
+from contexto.store.pages import build_page, current_stub, render_index, same_content, search_pages
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 
@@ -627,7 +627,7 @@ class SessionStore(LedgerOps):
             return out
         for path in self.pages_dir.glob("pg_*.json"):
             try:
-                out.append(json.loads(path.read_text(encoding="utf-8")))
+                out.append(current_stub(json.loads(path.read_text(encoding="utf-8"))))
             except (OSError, json.JSONDecodeError) as e:
                 self.log({"event": "page_unreadable", "path": path.name, "error": str(e)})
         return out
@@ -637,7 +637,7 @@ class SessionStore(LedgerOps):
         if not page_id.startswith("pg_") or not all(c in "0123456789abcdef" for c in page_id[3:]):
             return None
         try:
-            return json.loads((self.pages_dir / f"{page_id}.json").read_text(encoding="utf-8"))
+            return current_stub(json.loads((self.pages_dir / f"{page_id}.json").read_text(encoding="utf-8")))
         except FileNotFoundError:
             return None
 
