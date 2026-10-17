@@ -85,14 +85,17 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 - The window budget ``W`` and the measured bytes-per-token ratio are published through
   ``set_window`` (lane B B9, PR #56, for ``contexto_recall``'s per-call cap) when ``W`` changes at a
   rotation or head change, when the first response measures the head, or when the ratio moves more
-  than 1% after real usage; never before the
+  than 1% after real usage; only for the main conversation (as for the room and the snapshot), never
+  before the
   ratio is measured, never for a ``W`` that is not positive (``bound_too_small`` reports that case;
   the store accepts positive values only), never from ``observe_usage`` while degraded, and never
   from ``count_tokens``.
-- An engine started on an existing session seeds its estimator, at its first request, with the ratio
-  the previous engine published (``store.window()``, packet A8), so a proxy restart sizes like the
-  process before it; it skips the restore when the recorded model differs from the request's
-  (``window_model()``, lane B B12, packet A2f). Every ``set_window`` call passes the request's model,
+- An engine started on an existing session seeds its estimator with the ratio the previous engine
+  published (``store.window()``, packet A8), so a proxy restart sizes like the process before it. The
+  record is read at the engine's first request; when the recorded model differs from the request's
+  (``window_model()``, lane B B12, packet A2f) the engine logs ``sizing_not_restored`` once and
+  restores at the first later request on the recorded model, blended with what was measured
+  meanwhile. Every ``set_window`` call passes the request's model,
   because a call without one clears the recorded model.
 """
 
@@ -806,13 +809,20 @@ def window_model_name(request: dict) -> str | None:
     return model if isinstance(model, str) and 0 < len(model) <= 200 and model.isprintable() else None
 
 
+# Whether the conversation being transformed is the main one, which alone publishes the window (the
+# engine sets it per request; a bare ``rewrite`` call is a single conversation, so it defaults to True).
+_WINDOW_OWNER: ContextVar[bool] = ContextVar("contexto_rewrite_window_owner", default=True)
+
+
 def publish_window(store: Store, state: EpochState, estimator: TokenEstimator, model: str | None) -> EpochState:
     """Lane B B9 and B12: give ``W``, the measured ratio, and the request's model to ``set_window`` when
     ``W`` or the model changed or the ratio moved more than ``WINDOW_RATIO_CHANGE``. Every call passes
     the model, since a call without one clears the recorded model (reviewer-1 on PR #82). Skipped
-    before the ratio is measured and for a ``W`` that is not positive, which ``set_window`` rejects."""
+    before the ratio is measured, for a ``W`` that is not positive, which ``set_window`` rejects, and
+    for a conversation that is not main (``published_window`` stays as it was, so a side conversation
+    that later becomes main publishes at its first chance as main)."""
     ratio = estimator.measured_bytes_per_token
-    if state.window_budget is None or state.window_budget <= 0 or ratio is None:
+    if not _WINDOW_OWNER.get() or state.window_budget is None or state.window_budget <= 0 or ratio is None:
         return state
     published = state.published_window
     if (published is not None and published[0] == state.window_budget and published[2] == model
@@ -1105,7 +1115,19 @@ def keyed(dialect: Dialect, request: dict) -> str:
         _DIALECT.reset(token)
 
 
-def restore_ratio(store: Store, estimator: TokenEstimator, model: str | None) -> dict | None:
+def window_record(store: Store) -> tuple[float, str | None] | None:
+    """The ratio and model the previous engine gave ``set_window``, or None when there is no ratio or
+    the store cannot be read."""
+    try:
+        _, ratio = store.window()
+        recorded_model = store.window_model() if ratio else None
+    except STORE_FAILURES:
+        return None
+    return (ratio, recorded_model) if ratio else None
+
+
+def restore_ratio(store: Store, estimator: TokenEstimator, model: str | None, *, allow_measured: bool = False,
+                  record: tuple[float, str | None] | None = None) -> dict | None:
     """Packet A8 (c): an engine started on an existing session (a proxy restart, ``codex exec resume``,
     ``contexto run claude --session S``) begins from the bytes-per-token ratio the previous engine
     published through ``set_window`` instead of the seed, which the A6 smoke measured 1.34 to 1.40 times
@@ -1116,16 +1138,18 @@ def restore_ratio(store: Store, estimator: TokenEstimator, model: str | None) ->
     request); a record with no model (written before lane B B12) is restored as before. Returns the
     content-free ``sizing_restored`` or ``sizing_not_restored`` event for that request's events, or
     None when there is nothing to restore or the store cannot be read (the next turn start meets the
-    store again under rule 14)."""
-    if estimator.measured_bytes_per_token is not None:
+    store again under rule 14).
+
+    ``record`` is a ``window_record`` read earlier (else the store is read now). ``allow_measured`` is
+    the engine's deferred restore after ``model_changed``: a later request on the recorded model blends
+    the recorded ratio with what other requests measured meanwhile, instead of being skipped."""
+    if estimator.measured_bytes_per_token is not None and not allow_measured:
         return None
-    try:
-        _, ratio = store.window()
-        recorded_model = store.window_model() if ratio else None
-    except STORE_FAILURES:
+    if record is None:
+        record = window_record(store)
+    if record is None:
         return None
-    if not ratio:
-        return None
+    ratio, recorded_model = record
     low, high = RESTORED_RATIO_RANGE
     if recorded_model is not None and model is not None and recorded_model != model:
         return {"event": "sizing_not_restored", "reason": "model_changed", "bytes_per_token": round(ratio, 4)}
@@ -1231,7 +1255,9 @@ class RewriteEngine:
         self.restored: dict | None = None  # the sizing_restored event, once the first request restored it
         self._turn_starts: dict[str, int] = {}  # A14: conversation key -> turn starts at its latest request
         self._main: str | None = None  # A14: the conversation that publishes the room and the snapshot
-        self._restore_pending = True  # A2f: the restore waits for the first request, which names the model
+        self._restore_pending = True  # A2f: the restore waits for a request on the recorded model
+        self._restore_record: tuple[float, str | None] | None = None  # the previous engine's, read once
+        self._restore_mismatch_logged = False  # sizing_not_restored model_changed is logged once
         # Rule 16: the epoch record, read once at the engine's first request.
         self._record_read = False
         self._record: dict | None = None
@@ -1252,17 +1278,22 @@ class RewriteEngine:
         if endpoint == COUNT_TOKENS:  # never publishes a room, here or on usage (contract PR #89, 6ffc22b)
             epoch = state.epoch if state else 0
             return count_tokens_view(request, state), headers, [{"event": "count_tokens", "epoch": epoch}]
-        restore = None
-        if self._restore_pending:
-            self._restore_pending = False
-            restore = restore_ratio(self.store, self.estimator, window_model_name(request))
-            if restore and restore["event"] == "sizing_restored":
-                self.restored = restore
+        restore = self._restore(window_model_name(request)) if self._restore_pending else None
         resumed: list[dict] = []
         if state is None and not self._record_consumed:
             state, resumed = self._resume(key, request, dialect)
-        upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator, dialect)
+        # Only the main conversation publishes the window (W, ratio, model): the store holds one, which
+        # sizes contexto_recall's per-call limit and the next engine's restore. Decided without moving
+        # main, so main changes exactly where publishes() below would change it.
+        main = self._would_publish(key, request.get(dialect.field) or [], dialect)
+        owner = _WINDOW_OWNER.set(main)
+        try:
+            upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator,
+                                                         dialect)
+        finally:
+            _WINDOW_OWNER.reset(owner)
         events[0:0] = resumed
+        events[-1].update(main=main, conversations=len(self.states))  # content-free, for side requests
         # Per-turn recall budget, request-time publish (contract PR #69, kept by 367916a): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
         # to 128,000, which would leave no room at all; the response-time publish adds the real output.
@@ -1279,6 +1310,32 @@ class RewriteEngine:
                 events[-1:-1] = failures  # the engine's request event stays last
         self._write_epoch(key, request, dialect, events)
         return upstream, headers, [restore, *events] if restore else events
+
+    def _restore(self, model: str | None) -> dict | None:
+        """Packet A8 (c) and A2f: restore the previous engine's ratio at the first request on its model.
+        The record is read once, at the engine's first request, before this engine can overwrite it. A
+        request on another model (often a side request that arrives first after a restart) logs
+        ``sizing_not_restored`` ``model_changed`` once and leaves the restore pending; the first later
+        request on the recorded model restores it, blended with what was measured meanwhile."""
+        deferred = self._restore_record is not None
+        if not deferred:
+            if self.estimator.measured_bytes_per_token is not None:
+                self._restore_pending = False
+                return None
+            self._restore_record = window_record(self.store)
+            if self._restore_record is None:
+                self._restore_pending = False
+                return None
+        event = restore_ratio(self.store, self.estimator, model, allow_measured=deferred, record=self._restore_record)
+        if event is not None and event.get("reason") == "model_changed":
+            if self._restore_mismatch_logged:
+                return None
+            self._restore_mismatch_logged = True
+            return event
+        self._restore_pending = False
+        if event is not None and event["event"] == "sizing_restored":
+            self.restored = event
+        return event
 
     def _resume(self, key: str, request: dict, dialect: Dialect) -> tuple[EpochState | None, list[dict]]:
         """Rule 16: at the first request of a conversation new to this engine, resume the recorded epoch
@@ -1376,15 +1433,23 @@ class RewriteEngine:
         called it. The first conversation seen is main. At each of a conversation's turn starts the
         choice is re-evaluated: it becomes main only with strictly more turn starts than the current
         main (a tie keeps the current one), so a subagent or side request, with about one turn start,
-        never takes over, and main never changes inside a tool loop."""
-        starts = [i for i, m in enumerate(messages) if dialect.is_turn_start(m)]
-        self._turn_starts[key] = len(starts)
-        if self._main is None:
-            self._main = key
-        at_start = bool(starts) and not any(dialect.is_assistant(m) for m in messages[starts[-1]:])
-        if at_start and key != self._main and len(starts) > self._turn_starts.get(self._main, 0):
-            self._main = key
+        never takes over, and main never changes inside a tool loop. The window (``set_window``) follows
+        the same choice (``_would_publish``)."""
+        self._main, self._turn_starts[key] = self._main_after(key, messages, dialect)
         return key == self._main
+
+    def _would_publish(self, key: str, messages: list[dict], dialect: Dialect) -> bool:
+        """What ``publishes`` would return for this request, without recording anything."""
+        return self._main_after(key, messages, dialect)[0] == key
+
+    def _main_after(self, key: str, messages: list[dict], dialect: Dialect) -> tuple[str, int]:
+        """The main conversation after this request, and this request's turn-start count."""
+        starts = [i for i, m in enumerate(messages) if dialect.is_turn_start(m)]
+        main = key if self._main is None else self._main
+        at_start = bool(starts) and not any(dialect.is_assistant(m) for m in messages[starts[-1]:])
+        if at_start and key != main and len(starts) > self._turn_starts.get(main, 0):
+            main = key
+        return main, len(starts)
 
     def _publish_retained(self, state: EpochState, messages: list[dict], dialect: Dialect,
                           events: list[dict]) -> None:
@@ -1459,7 +1524,7 @@ class RewriteEngine:
                 messages = request.get(dialect.field) or []
                 if self.publishes(key, messages, dialect):
                     calls.set_turn_room(turn_id(messages, dialect), self.turn_room(real + output))
-                state = publish_window(calls, state, self.estimator, window_model_name(request))
+                    state = publish_window(calls, state, self.estimator, window_model_name(request))
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;
             # the next turn start retries it. The event reaches the log with the others, via the proxy.
