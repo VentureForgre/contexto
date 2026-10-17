@@ -166,6 +166,14 @@ def test_turn_ends_are_the_successful_replies_without_a_tool_call():
     assert codex_recall_credit.turn_ends([call("contexto_search", [])]) == []
 
 
+def test_a_2xx_cut_short_upstream_is_not_a_turn_end():
+    """A 200 whose relay failed (``error: "relay: <class>"``) is retried by Codex, so it answers
+    nothing, held or not; without hold info the last successful request is the last uncut one."""
+    cut = {**resp(0), "error": "relay: IncompleteRead"}
+    assert codex_recall_credit.turn_ends([resp(0), cut, resp(0)]) == [0, 2]
+    assert codex_recall_credit.turn_ends([resp(None), {**resp(None), "error": "relay: OSError"}]) == [0]
+
+
 def test_a_recall_in_a_later_probe_turn_does_not_credit_an_earlier_probe():
     # Probe turn 1 answers q_p_01 with no recall of its plant; probe turn 2 recalls both plants.
     log = ([resp(0), resp(0)]  # content turns

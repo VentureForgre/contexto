@@ -69,12 +69,13 @@ def turn_answer_indices(session_log: list[dict[str, Any]]) -> list[int]:
     probe turn's final answer. The proxy's stream hold (A9) holds a response from its first
     ``tool_use`` block, any tool, so ``stream_hold.held_events == 0`` marks a response with no tool
     call. A log without ``stream_hold`` falls back to "no ``mcp_call`` before the next request",
-    which misses non-MCP tools (Bash, Read). Only 2xx responses count, so a failed request the CLI
-    retried (a local 502, say) is not a turn end. Codex logs need their own rule: pass ``turn_ends``.
+    which misses non-MCP tools (Bash, Read). Only answered requests count (``answered``), so a failed
+    request the CLI retried (a local 502, or a 2xx cut short upstream) is not a turn end. Codex logs
+    need their own rule: pass ``turn_ends``.
     """
     requests = [i for i, ev in enumerate(session_log)
                 if ev.get("event") == "request" and str(ev.get("path") or "").split("?")[0] == "/v1/messages"
-                and _ok(ev.get("status"))]
+                and answered(ev)]
     ends = []
     for n, i in enumerate(requests):
         hold = session_log[i].get("stream_hold")
@@ -86,6 +87,14 @@ def turn_answer_indices(session_log: list[dict[str, Any]]) -> list[int]:
         if not any(session_log[j].get("event") == "mcp_call" for j in range(i + 1, nxt)):
             ends.append(i)
     return ends
+
+
+def answered(event: dict[str, Any]) -> bool:
+    """A request whose response reached the CLI whole: 2xx (``_ok``) and no ``relay: <class>`` error.
+    The proxy logs a response that started but whose relay failed (upstream cut it short or reset it;
+    contract rule 8) with its 2xx status and that error, and the client saw no terminator, so the CLI
+    retries the request: whatever it held, it answered nothing."""
+    return _ok(event.get("status")) and not str(event.get("error") or "").startswith("relay:")
 
 
 def _ok(status: Any) -> bool:

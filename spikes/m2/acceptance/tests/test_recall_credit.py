@@ -186,6 +186,17 @@ def test_a_failed_request_and_its_retry_are_one_turn_end():
     assert recall_credit.turn_answer_indices([{**_req(), "status": None}]) == [0]  # no status: counted
 
 
+def test_a_2xx_cut_short_upstream_and_its_retry_are_one_turn_end():
+    """A 200 whose relay failed (contract rule 8: ``error: "relay: <class>"``, no terminator) is a
+    request the CLI retries, not an answer, even with nothing held, under either rule."""
+    cut = {**_req(), "error": "relay: IncompleteRead"}
+    held = {**_req(), "stream_hold": {"triggered": False, "held_events": 0}}
+    cut_held = {**held, "error": "relay: ConnectionResetError"}
+    assert recall_credit.turn_answer_indices([_req(), cut, _req()]) == [0, 2]  # the mcp_call fallback
+    assert recall_credit.turn_answer_indices([held, cut_held, held]) == [0, 2]  # the stream-hold rule
+    assert recall_credit.turn_answer_indices([{**_req(), "error": None}]) == [0]  # no error: counted
+
+
 def test_a_spurious_or_missing_turn_end_fails_closed_when_the_count_is_expected():
     """Reviewer-1: the last N detected ends must be exactly the script's turns, or the mapping shifts."""
     good = [_req(), *_turn(), *_turn(_req(), _call("contexto_search", HIT)), *_turn(), *_turn()]  # 1 + 4 turn ends
