@@ -180,9 +180,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    retried, because upstream may be running it; it returns the 502 as before, and the CLI may
    retry on its own. A malformed response head (a bad status line, an over-long header line, too
    many headers) is a `wait_headers` failure with a null errno. An upstream failure after the
-   response started (a cut-short chunk, a reset) is logged on the request's entry as
+   response started (a cut-short chunk, a reset, or a `Content-Length` body that ends short, logged
+   as `IncompleteRead` like a cut-short chunk) is logged on the request's entry as
    `error: "relay: <class>"` with the status and any usage already read, which still reaches the
-   engine; the client sees the stream end without its terminator. A proxy failure after the
+   engine; the client sees the stream end without its terminator (or the body end short). A proxy failure after the
    response started logs `proxy_error` with `fallback: "none"`, because no local 502 can be sent.
 9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
    per-turn recall budget; the proxy reads `message_start` and `message_delta` usage.
@@ -430,7 +431,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     the first `response.output_item.added` whose item is any tool-call type (anything other than a
     `message` or `reasoning` item; Codex 0.154.0 emits `custom_tool_call`, measured in the A6 smoke)
     until `response.completed`, `response.incomplete`, or `response.failed` (whose usage, when
-    present, sets the room), an error event, or end of stream. A tool call
+    present, sets the room), an error event, or end of stream. A hold that ends at an error event
+    or end of stream, including an upstream failure mid-stream (rule 8), first observes the usage
+    already read (`message_start`'s, for Messages), so that publish also comes before any held
+    event; the held events are still released, because rule 8 forwards what upstream sent and the
+    CLI decides what a stream without its terminator means. A tool call
     therefore always sees the current turn's room. Keepalive pings may be sent during a hold.
   - `contexto_recall`, `contexto_search`, and `contexto_state` charge the tokens they return
     against the room for the current turn id, converted with the same ratio as the per-call limit,
@@ -440,8 +445,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     therefore count only results not yet in measured input. This is safe within one conversation
     because of the stream hold: a tool call can only charge after its response's real-usage
     publish, and the next request-time estimate includes its results. If a hold is released at end
-    of stream without usage, tool calls see the request-time room, which is off by at most one
-    response's output. `count_tokens` never publishes a room. A single `contexto_recall` call
+    of stream without its final usage, tool calls see the room from the usage already read (the
+    request-time room when none was read), which is off by at most one response's output. `count_tokens` never publishes a room. A single `contexto_recall` call
     returns at most the smaller of its per-call limit and half of the room that remains when it is
     made, with offset paging for the rest, so one recall cannot consume the turn; parallel recalls
     therefore get successively smaller halves. Measured in the second live H1 run

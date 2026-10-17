@@ -18,9 +18,9 @@ Codex turn ends, in log order:
   has no answer.
 - The proxy's stream hold (contract PR #74, A9) starts at the first ``response.output_item.added``
   whose item is a ``*_call``, so ``stream_hold.held_events`` is above 0 for a tool round and 0 for a
-  reply with no tool call. A turn end is a 2xx Responses request with ``held_events == 0``, using
-  ``recall_credit``'s status rule (a request logged without a status counts). Failed attempts, which
-  Codex retries, never end a turn. On the A16 stub dry run (#154 with its stub fix),
+  reply with no tool call. A turn end is an answered Responses request with ``held_events == 0``, using
+  ``recall_credit.answered`` (2xx, a request logged without a status counts, and no ``relay: <class>``
+  error). Failed attempts, which Codex retries, never end a turn, including a 2xx cut short upstream. On the A16 stub dry run (#154 with its stub fix),
   the 6 tool rounds log ``held_events`` 3 and the 21 turn ends (15 content replies, 6 probe answers)
   log 0.
 - A request without ``stream_hold`` (the hold was skipped: an encoded or unchunked stream, or a log
@@ -54,7 +54,7 @@ def _held_events(event: dict[str, Any]) -> int | None:
 
 def turn_ends(session_log: list[dict[str, Any]]) -> list[int]:
     """Log indices of the Responses requests that answered a user turn, in order."""
-    ok = [i for i, ev in enumerate(session_log) if _is_responses_request(ev) and recall_credit._ok(ev.get("status"))]
+    ok = [i for i, ev in enumerate(session_log) if _is_responses_request(ev) and recall_credit.answered(ev)]
     if not any(_held_events(session_log[i]) is not None for i in ok):
         return ok[-1:]
     return [i for i in ok if _held_events(session_log[i]) == 0]
