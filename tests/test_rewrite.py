@@ -510,7 +510,7 @@ def test_rotation_that_keeps_k_is_a_noop():
     est = TokenEstimator()
     msgs = history(3, think=True) + [user("p")]
     _, st, _ = rewrite(request(msgs), None, store, cfg, est)
-    st = replace(st, last_input_tokens=99_900, head_tokens=1_000)
+    st = replace(st, last_input_tokens=99_900, head_tokens=1_000, pending_usage=None)  # as if observed
     nxt = msgs + [assistant("a", think="z"), user("next")]
     up, st2, ev = rewrite(request(nxt), st, store, cfg, est)
     assert "rotation_noop" in names(ev) and "rotation" not in names(ev)
@@ -826,7 +826,7 @@ def test_over_bound_at_a_turn_start_is_never_the_tool_loop_exemption():
     est = TokenEstimator()
     msgs = history(3) + [user("p")]
     _, st, _ = rewrite(request(msgs), None, store, cfg, est)
-    st = replace(st, last_input_tokens=150_000, head_tokens=1_000)
+    st = replace(st, last_input_tokens=150_000, head_tokens=1_000, pending_usage=None)  # as if observed
     up, _, ev = rewrite(request(msgs + [assistant("a"), user("next")]), st, store, cfg, est)
     assert ev[-1]["estimate"] > cfg.bound
     assert not any(e["event"] == "over_bound" for e in ev) and not ev[-1].get("over_bound")
@@ -1134,10 +1134,12 @@ def test_set_window_publishes_w_and_the_measured_ratio_only_when_they_change():
     sent = state.last_sent_bytes
     engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, req)
     assert store.windows == [(state.window_budget, engine.estimator.measured_bytes_per_token, MODEL)]
+    engine(req, {}, MESSAGES)  # usage pairs with the request just sent, so send it again
     engine.observe_usage(MESSAGES, {"input_tokens": sent // 3}, req)  # ratio unchanged
     assert len(store.windows) == 1
     engine(req, {}, COUNT_TOKENS)  # never from count_tokens
     assert len(store.windows) == 1
+    engine(req, {}, MESSAGES)
     engine.observe_usage(MESSAGES, {"input_tokens": sent // 2}, req)  # ratio moves well over 1%
     assert len(store.windows) == 2 and store.windows[-1][1] == engine.estimator.measured_bytes_per_token
     assert store.inner.window() == store.windows[-1][:2]  # the real MemoryStore accepted both

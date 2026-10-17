@@ -193,6 +193,9 @@ class EpochState:
     conflict_page: str | None = None  # page id of the page_conflict that entered degraded mode
     window_budget: int | None = None  # W at the latest rotation decision
     published_window: tuple[int, float, str | None] | None = None  # (W, bytes per token, model) last given to set_window
+    # Rule 3: (messages, hash of the last message) of the newest request sent whose usage has not arrived;
+    # only that request's usage is paired with last_sent_bytes and last_estimate. Per-request, never recorded.
+    pending_usage: tuple[int, str] | None = None
 
 
 # Message classification -------------------------------------------------------------------------
@@ -698,6 +701,11 @@ def page_carried_text(messages: list[dict], state: EpochState, store: Store, con
                    turns_paged=state.turns_paged + len(chosen))
 
 
+def usage_identity(messages: list[dict]) -> tuple[int, str]:
+    """Which request a response's usage measured: its message count and its last message's hash."""
+    return len(messages), message_hash(messages[-1]) if messages else ""
+
+
 def matching_prefix(hashes: tuple[str, ...], messages: list[dict]) -> int:
     n = 0
     for old, m in zip(hashes, messages):
@@ -897,7 +905,8 @@ def forward_original(request: dict, messages: list[dict], state: EpochState, rea
     events.append({"event": "request", "epoch": state.epoch, "k": state.k, "messages": len(messages),
                    "upstream_messages": len(messages), "sent_bytes": sent, "degraded": True,
                    "fallback_failed": True})
-    return request, replace(state, degraded=True, last_sent_bytes=sent, last_estimate=None, last_input_tokens=None), events
+    return request, replace(state, degraded=True, last_sent_bytes=sent, last_estimate=None, last_input_tokens=None,
+                            pending_usage=usage_identity(messages)), events
 
 
 def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str, state: EpochState, store: Store,
@@ -917,6 +926,12 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     # so growth before the restart is not counted again (accepted by manager-1, 2026-10-16).
     if state.initial_carried is None:
         state = replace(state, initial_carried=carried_tokens(messages, estimator, state.paged_carried))
+    if state.pending_usage is not None and state.last_input_tokens is not None:
+        # Rule 3: the previous request sent got no usage (a 4xx or 5xx, a dropped stream, a response
+        # without usage, or one still in flight), so the last real input predates it and would leave its
+        # growth out: estimate the whole request instead. Logged only when it changes the estimate.
+        events.append({"event": "usage_missing", "epoch": state.epoch})
+        state = replace(state, last_input_tokens=None)
     estimate = estimate_upstream(request, messages, previous_n, state, estimator)
     if n > previous_n and at_turn_start(messages):
         count = len(turn_starts(messages))
@@ -956,7 +971,8 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     upstream = {**request, field_name: transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
     state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent, last_estimate=sent_estimate,
-                    last_window_tokens=window_tokens(upstream[field_name], estimator))
+                    last_window_tokens=window_tokens(upstream[field_name], estimator),
+                    pending_usage=usage_identity(messages))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
     if rotated:
@@ -1488,7 +1504,12 @@ class RewriteEngine:
           write) exceeded the bound, whatever the pre-send estimate said, so acceptance 1 can rely on
           the session log (the pre-send flag stays on the request event);
         - ``estimate_error``: the real input exceeded the pre-send estimate by more than 10%, with the
-          running mean of estimate / real for the conversation.
+          running mean of estimate / real for the conversation;
+        - ``usage_unattributed``: the usage is not for the newest request the engine sent in this
+          conversation (a request it never transformed, after ``transform_error``, or an older request
+          still in flight), so it is not paired with that request's bytes or estimate: the ratio, the
+          last real input, and the estimate checks are left alone. ``over_bound`` and the room still
+          use it, since they describe what the model received.
         """
         dialect = dialect_for(endpoint)
         if dialect is None or endpoint == COUNT_TOKENS:
@@ -1497,27 +1518,38 @@ class RewriteEngine:
         state = self.states.get(key)
         if state is None:
             return []
+        token = _DIALECT.set(dialect)
+        try:
+            identity = usage_identity(request.get(dialect.field) or [])
+        finally:
+            _DIALECT.reset(token)
         real = usage_tokens(usage, dialect)
-        self.estimator.observe(state.last_sent_bytes, real)  # the session's measured ratio from now on
-        state = replace(state, last_input_tokens=real)
-        if state.head_tokens is None and state.k == 0:
-            # Rule 4: the first measured request gives the head (its input minus its non-carried
-            # messages, which also covers a resumed first request with a long history).
-            state = replace(state, head_tokens=max(0, real - state.last_window_tokens))
-        if state.window_budget is None and state.head_tokens is not None:
-            # A8 (c): W from the measured head, so set_window publishes W and the ratio after the first
-            # response rather than only after a rotation decision, and a restarted engine can restore
-            # the ratio even when the previous one never rotated. The epoch's in-memory pinned and index
-            # text stand in for the store's (no store read here), composed with this engine's recall
-            # knobs as sent; the next rotation decision recomputes W.
-            pre = compose_preamble(self.config, state.pinned_text, state.index_text)
-            f = state.head_tokens + (self.estimator.estimate(pre) if pre else 0)
-            state = replace(state, window_budget=self.config.bound - headroom(state, self.config) - f)
         events: list[dict] = []
-        estimate = state.last_estimate
-        if estimate is not None and real > 0:
-            state = replace(state, estimate_ratio_sum=state.estimate_ratio_sum + estimate / real,
-                            estimate_ratio_count=state.estimate_ratio_count + 1)
+        estimate = None
+        if identity != state.pending_usage:
+            pending = state.pending_usage
+            events.append({"event": "usage_unattributed", "epoch": state.epoch, "messages": identity[0],
+                           "expected_messages": pending[0] if pending else None})
+        else:
+            self.estimator.observe(state.last_sent_bytes, real)  # the session's measured ratio from now on
+            state = replace(state, last_input_tokens=real, pending_usage=None)
+            if state.head_tokens is None and state.k == 0:
+                # Rule 4: the first measured request gives the head (its input minus its non-carried
+                # messages, which also covers a resumed first request with a long history).
+                state = replace(state, head_tokens=max(0, real - state.last_window_tokens))
+            if state.window_budget is None and state.head_tokens is not None:
+                # A8 (c): W from the measured head, so set_window publishes W and the ratio after the first
+                # response rather than only after a rotation decision, and a restarted engine can restore
+                # the ratio even when the previous one never rotated. The epoch's in-memory pinned and index
+                # text stand in for the store's (no store read here), composed with this engine's recall
+                # knobs as sent; the next rotation decision recomputes W.
+                pre = compose_preamble(self.config, state.pinned_text, state.index_text)
+                f = state.head_tokens + (self.estimator.estimate(pre) if pre else 0)
+                state = replace(state, window_budget=self.config.bound - headroom(state, self.config) - f)
+            estimate = state.last_estimate
+            if estimate is not None and real > 0:
+                state = replace(state, estimate_ratio_sum=state.estimate_ratio_sum + estimate / real,
+                                estimate_ratio_count=state.estimate_ratio_count + 1)
         if real > self.config.bound:
             events.append({"event": "over_bound", "source": "real", "epoch": state.epoch, "over_bound": True,
                            "real_tokens": real, "estimate": estimate, "bound": self.config.bound})

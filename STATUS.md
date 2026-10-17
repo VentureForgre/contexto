@@ -215,6 +215,12 @@ Needs the owner:
   (`min_turn_room`).
 - Subagents and side requests share the main conversation's recall room and in-view snapshot;
   concurrent subagents can overspend the room.
+- Usage refines the estimate only for the request it measured (rule 3): with two requests of one
+  conversation in flight, only the newer one's usage counts (`usage_unattributed` for the other),
+  and after a request without usage the next estimate is a full one (`usage_missing`).
+- After a restart, a side request that arrives before main and finds no epoch record (or main's
+  resume fails) is main until main's next turn start, so its window and model stay in the store
+  until then.
 - Small bounds with large fixed heads leave little window: the launcher warns when the window
   budget is under 25,000; at 42,000 with a 16,000 head nearly every turn rotates. Use a larger
   bound for OpenRig seat-sized heads (O3).

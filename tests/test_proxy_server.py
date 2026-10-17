@@ -760,6 +760,76 @@ def test_a_content_length_body_cut_short_is_a_relay_error(make_proxy, scripted_u
     assert len(engine.usage) == 1 and engine.usage[0][1]["input_tokens"] == 12
 
 
+def answer_usage(input_tokens: int):
+    """Answer one JSON message whose usage reports ``input_tokens``."""
+    def script(sock: socket.socket, got: bytearray) -> None:
+        read_request(sock, got)
+        payload = json.dumps({"id": "msg_u", "type": "message", "content": [{"type": "text", "text": "ok"}],
+                              "usage": {"input_tokens": input_tokens, "output_tokens": 1}}).encode()
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
+                     % (len(payload), payload))
+    return script
+
+
+class FailingOnce:
+    """A real RewriteEngine whose transform raises while ``raise_next`` is set (a genuine bug), as
+    StubEngine's raise mode does; usage still goes to the real engine."""
+
+    def __init__(self, engine) -> None:
+        self.engine = engine
+        self.raise_next = False
+
+    def __call__(self, request, headers, endpoint):
+        if self.raise_next:
+            self.raise_next = False
+            request["messages"].pop()
+            raise RuntimeError("engine bug")
+        return self.engine(request, headers, endpoint)
+
+
+def test_usage_after_a_transform_error_leaves_the_measured_ratio_unchanged(make_proxy, scripted_upstream):
+    """The proxy forwards the CLI's original after transform_error and still feeds its usage back; the
+    engine never sent those bytes, so it must not pair them with the previous request's."""
+    from contexto.rewrite import RewriteEngine
+
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32))
+    wrapper = FailingOnce(engine)
+    url, _ = scripted_upstream(answer_usage(77), answer_usage(50_000))
+    proxy, log = make_proxy(upstream=url, transform=wrapper, observe_usage=engine.observe_usage)
+    call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    ratio = engine.estimator.measured_bytes_per_token
+    assert ratio is not None
+    longer = dict(REQUEST, messages=[*REQUEST["messages"], {"role": "assistant", "content": "done"},
+                                     {"role": "user", "content": "next"}])
+    wrapper.raise_next = True
+    response, _ = call(proxy, "POST", "/v1/messages", json.dumps(longer).encode(), AUTH)
+    assert response.status == 200
+    entry = log.requests()[1]
+    assert entry["transform_error"] == "RuntimeError"
+    assert [e["event"] for e in entry["usage_events"]] == ["usage_unattributed"]
+    assert engine.estimator.measured_bytes_per_token == ratio
+    assert next(iter(engine.states.values())).last_input_tokens == 77
+
+
+def test_usage_from_a_truncated_stream_is_paired_with_its_request(make_proxy, scripted_upstream):
+    """PR #193 feeds usage from a 2xx stream that ended early (its input count is complete): it is the
+    same request's usage, so the engine pairs it."""
+    from contexto.rewrite import RewriteEngine
+
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32))
+    url, _ = scripted_upstream(_stream_then("partial_chunk"))
+    proxy, log = make_proxy(upstream=url, transform=engine, observe_usage=engine.observe_usage)
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
+        read_until_closed(sock)
+    entry = log.requests()[0]
+    state = next(iter(engine.states.values()))
+    assert "usage_events" not in entry or "usage_unattributed" not in [e["event"] for e in entry["usage_events"]]
+    assert state.last_input_tokens == 12 + 300 + 4000 and state.pending_usage is None
+    assert engine.estimator.measured_bytes_per_token == state.last_sent_bytes / (12 + 300 + 4000)
+
+
 @pytest.mark.parametrize("mode, error", [("raise", "RuntimeError"), ("bad-return", "TypeError")])
 def test_failing_transform_forwards_original_bytes(make_proxy, mode, error):
     proxy, log = make_proxy(transform=StubEngine(mode))
