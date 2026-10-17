@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-17 01:00Z by intake.lead. Decisions taken and still open, with reasons:
+Updated 2026-10-17 03:24Z by claude (docs audit). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -18,6 +18,7 @@ compaction never fires, and accuracy equals full context.
   compaction and every request under the bound.
 - Latest release: v0.2.2. See "What is left" below for the remaining work and the items that need
   the owner.
+- Tests on main (51d8d63): 1371 passed, 1 skipped (`uv run --with pytest pytest -q`, local run).
 
 ## Acceptance, live run #3 (main fbb1303, claude-haiku-5-5, bound 150,000, owner's proxy)
 
@@ -184,8 +185,8 @@ Needs the owner:
   larger bound lowers the largest single turn that stays under Claude Code's 200,000 idle-compaction
   minimum (about 87k at 150,000 against 67k at 170,000 on a 92k head, modeled).
 - O4 (owner): end-user auth guidance (API key only, or subscription logins too).
-- O5: settled by D29. v0.1.0 is cut from the merge of this status (tag and GitHub Release on this
-  private repository, sdist and wheel attached, no package registry).
+- O5: settled by D29. v0.1.0 was cut from f990703 (tag and GitHub Release on this private
+  repository, sdist and wheel attached, no package registry).
 - O6 (owner): per-session upstream affinity on the owner's proxy (cache misses and dropped
   thinking traced to the proxy spreading requests across identities).
 - O7 (owner): OpenRig context-usage clock bug (UTC parsed as local time).
@@ -224,10 +225,9 @@ Needs the owner:
 - Compressed request bodies: gzip and deflate are decoded (zstd only on Python 3.14+); other
   encodings get 415 (rule 15). `count_tokens` errors from upstream pass through unchanged (the
   owner's proxy returns 403; Claude Code calls it only around compaction).
-- On restart, sizing restores the measured token ratio (clamped 1.0 to 6.0) unless the model
-  changed; mixed-model sessions blend the ratio under the last model's label.
-- In a question turn, the question itself can take one of the 3 in-view search slots (B22,
-  queued: exclude the current turn's own text).
+- On restart, sizing restores the measured token ratio unless the model changed or the ratio is
+  outside 1.0 to 6.0 bytes per token (then the seed ratios apply); mixed-model sessions blend the
+  ratio under the last model's label.
 
 ## Releases
 

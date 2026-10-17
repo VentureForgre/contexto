@@ -4,8 +4,8 @@ Contexto keeps a Claude Code or Codex session going indefinitely without compact
 
 `contexto run claude` starts a small proxy on `127.0.0.1` and points Claude Code at it. Every model
 request passes through the proxy, which keeps the prompt sent upstream under a token bound (150,000
-by default). When a request gets within the headroom floor of the bound (25,000 tokens by default),
-the proxy moves the oldest turns out of the prompt and writes them, word for word, to a local store under `~/.contexto`. In their place the model sees a
+by default). When a request gets within the headroom of the bound (25,000 tokens by default, raised
+after large turns up to a quarter of the bound), the proxy moves the oldest turns out of the prompt and writes them, word for word, to a local store under `~/.contexto`. In their place the model sees a
 short index of those turns and a pinned state of the session's decisions and open obligations.
 
 The model reads old turns back with MCP tools: `contexto_search` finds a turn by exact text and
@@ -18,14 +18,14 @@ Contexto sends no extra model calls. It reads and rewrites the requests your CLI
 ## Install
 
 Contexto needs Python 3.12 or later and has no runtime dependencies. Install the wheel from the
-latest release, [v0.1.3](https://github.com/VentureForgre/contexto/releases/tag/v0.1.3). It has two
-assets: `contexto-0.1.3-py3-none-any.whl` and `contexto-0.1.3.tar.gz`. The repository is private, so
+latest release, [v0.2.2](https://github.com/VentureForgre/contexto/releases/tag/v0.2.2). It has two
+assets: `contexto-0.2.2-py3-none-any.whl` and `contexto-0.2.2.tar.gz`. The repository is private, so
 download with a `gh` login that can read it:
 
 ```sh
-gh release download v0.1.3 --repo VentureForgre/contexto --pattern 'contexto-0.1.3-py3-none-any.whl'
-uv tool install ./contexto-0.1.3-py3-none-any.whl     # or: pipx install ./contexto-0.1.3-py3-none-any.whl
-contexto --version                                    # contexto 0.1.3
+gh release download v0.2.2 --repo VentureForgre/contexto --pattern 'contexto-0.2.2-py3-none-any.whl'
+uv tool install ./contexto-0.2.2-py3-none-any.whl     # or: pipx install ./contexto-0.2.2-py3-none-any.whl
+contexto --version                                    # contexto 0.2.2
 ```
 
 `pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`. To
@@ -214,9 +214,10 @@ pinned records in `ledger.jsonl` in the same directory.
 
 ## Known limitations
 
-v0.1.0 was accepted on one model, one bound, and one upstream. Codex has no live acceptance run, and
-cache efficiency depends on the upstream route. The full list is in
-[STATUS.md, "Known limitations (v0.1.0)"](STATUS.md#known-limitations-v010).
+Claude Code acceptance ran on one model, one bound, and one upstream. Codex passed acceptance
+criteria 1 to 3 on one model at bound 64,000; the default bound 150,000 is untested on Codex. Cache
+efficiency depends on the upstream route. The full list is in
+[STATUS.md, "Known limitations (v0.2.2)"](STATUS.md#known-limitations-v022).
 
 ## Exit codes
 
