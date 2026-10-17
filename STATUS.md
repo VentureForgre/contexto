@@ -149,13 +149,12 @@ Definition of done for this project: M2 acceptance passed on both CLIs (done), e
 published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
 
 In progress:
-- **v0.2.2 has no wheel or sdist.** It was the first release cut on the org's self-hosted runner
-  (moved there because hosted Actions minutes are blocked by billing), which has no `gh`, so the
-  upload step failed. PR #189 installs a pinned, checksum-verified `gh` in both release jobs; after
-  it merges, intake dispatches the Release workflow's reattach for v0.2.2.
+- Nothing. v0.2.2 was the first release cut on the org's self-hosted runner (moved there because
+  hosted Actions minutes are blocked by billing). The runner has no `gh`, so its upload step
+  failed; PR #189 installs a pinned, checksum-verified `gh` in both release jobs, and the reattach
+  run then attached v0.2.2's wheel and sdist (the wheel installs and reports 0.2.2).
 
 This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
-- Merge #189, reattach v0.2.2's assets, and confirm the wheel installs.
 - Keep STATUS, README, and the contract in step with `main`; nothing else is planned.
 - No live model runs and no new feature work. Idle seats stay idle.
 
@@ -243,10 +242,10 @@ Needs the owner:
 | v0.1.6 | db472a9 | A26: the proxy's end-status log fields accept only documented values; anything else logs as `other` |
 | v0.2.0 | 703d7c3 | Rule 16 (B31, A30): a restarted proxy resumes the main conversation's epoch instead of rotating again from epoch 0, so the prompt and its cache survive a restart |
 | v0.2.1 | 798a7ce | A31: a resume requires the store to hold at least the recorded number of pages (`pages_missing` otherwise) |
-| v0.2.2 | 2da3cb0 | Rule 17 (A34, #187): headroom capped at a quarter of the bound and decaying by half per turn, so one large read no longer leaves the session at the minimal window. Wheel and sdist pending (#189) |
+| v0.2.2 | 2da3cb0 | Rule 17 (A34, #187): headroom capped at a quarter of the bound and halving at each turn start that measures growth,
+so one large read no longer leaves the session at the minimal window. Wheel and sdist attached by the reattach run after #189 |
 
-Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached,
-except v0.2.2 until its reattach runs.
+Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
 ## Process notes
 

@@ -282,7 +282,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       request's real input; at a borderline it can differ from what an uninterrupted engine would
       have decided (reviewer-2's differential for A34: 17 of 17 restart points byte-identical in
       every case but Codex at 3.0 bytes per token, where one restart at the session's last turn
-      start did not rotate where the uninterrupted engine did, and none went over the bound). A
+      start did not rotate where the uninterrupted engine did, and none went over the bound; rule
+      17's smaller headroom makes such borderlines likelier). A
       resume mid-turn
       is sent under rule 5 (a logged in-turn over-bound turn if it is over). The newest record
       written is trusted: if a write and its invalidation both failed, an older record can still
