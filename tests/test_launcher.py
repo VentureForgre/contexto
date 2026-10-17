@@ -340,6 +340,20 @@ def test_notice_log_shows_engine_sizing_problems_once(tmp_path):
     lines = err.getvalue().splitlines()
     assert len(store.events) == 5 and len(lines) == 2
     assert "window budget 20,000" in lines[0] and "bound 150,000 is too small" in lines[1]
+    # Since contract PR #50 the engine still rotates, to a window of only the new turn (rule 4).
+    assert "keeps only the new turn" in lines[1] and "may exceed the bound" in lines[1]
+    assert "unrotated" not in err.getvalue()
+
+
+@pytest.mark.parametrize("event", [{"event": "bound_too_small"},
+                                   {"event": "bound_too_small", "fixed_overhead": 140_000, "window_budget": -15_000}])
+def test_bound_too_small_notice_without_full_sizing(tmp_path, event):
+    import io
+
+    store, err = FakeStore(tmp_path, "s"), io.StringIO()
+    NoticeLog(store, err).log({"event": "request", "transform_events": [event]})
+    line = err.getvalue().strip()
+    assert "keeps only the new turn" in line and "may exceed the bound" in line and "unrotated" not in line
 
 
 @pytest.mark.parametrize("user_args", [["--settings", "mine.json"], ["-p", "hi", "--settings={}"]])

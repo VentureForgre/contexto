@@ -258,7 +258,8 @@ def five_xx(session_log: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], li
     - ``_forward`` when upstream cannot be reached: the request entry gets status 502 and
       ``error: "upstream unreachable: <class>"``, and no ``response_bytes``;
     - ``_handle``'s last resort: no request entry, but ``{event: proxy_error, fallback: "local_502"}``
-      with the path (a ``fallback: "forward_original"`` record forwards the CLI's bytes instead);
+      with the path (a ``fallback: "forward_original"`` record forwards the CLI's bytes instead,
+      and ``fallback: "none"`` means the response had already started, so no 502 was sent);
     - a WebSocket upgrade: ``{event: websocket_rejected, path}``, answered 501.
     A passed-through upstream 5xx is a request entry with ``response_bytes`` and no such error. A
     model-path 5xx entry with neither mark fails closed: it counts as LOCAL, flagged ``unmarked``.

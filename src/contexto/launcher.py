@@ -154,10 +154,15 @@ class NoticeLog:
                 continue
             budget, overhead = inner.get("window_budget"), inner.get("fixed_overhead")
             if inner.get("event") == "bound_too_small":
-                self._once("bound_too_small", f"bound {inner.get('bound', '?'):,} is too small: fixed overhead "
-                           f"{overhead:,} leaves a window budget of {budget:,}; requests are sent unrotated. "
-                           f"Restart with a larger --bound." if isinstance(overhead, int) and isinstance(budget, int)
-                           else "bound is too small for the measured fixed overhead; requests are sent unrotated.")
+                # Rule 4 window_minimal (contract PR #50): the engine still rotates, to a window of
+                # only the new turn, which can still put the request over the bound.
+                bound = inner.get("bound")
+                self._once("bound_too_small", f"bound {bound:,} is too small: fixed overhead {overhead:,} leaves a "
+                           f"window budget of {budget:,}; the engine keeps only the new turn, and requests may "
+                           f"exceed the bound. Restart with a larger --bound."
+                           if all(isinstance(v, int) for v in (bound, overhead, budget))
+                           else "bound is too small for the measured fixed overhead; the engine keeps only the new "
+                           "turn, and requests may exceed the bound.")
             elif isinstance(budget, int) and budget < MIN_WINDOW_BUDGET:
                 self._once("small_window", f"measured window budget {budget:,} is below {MIN_WINDOW_BUDGET:,} "
                            f"(fixed overhead {overhead:,}); consider a larger --bound."
