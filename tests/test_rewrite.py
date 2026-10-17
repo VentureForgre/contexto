@@ -23,6 +23,7 @@ from contexto.rewrite import (
     RewriteEngine,
     at_turn_start,
     is_turn_start,
+    keyed,
     message_hash,
     classify_system,
     rewrite,
@@ -1678,6 +1679,34 @@ def test_a_conversation_that_takes_over_main_publishes_on_its_next_response():
     other = engine.states[engine._main]
     assert len(store.windows) == 2 and store.windows[-1][2] == OPUS
     assert store.inner.window()[0] == other.window_budget and store.inner.window_model() == OPUS
+
+
+def test_a_former_main_that_becomes_main_again_republishes_its_window():
+    """A to B to A: A's own last publish still matches its W, ratio, and model, but the store holds B's
+    since B was main, so A must publish again at its first chance as main. Every usage is fed at A's
+    first ratio, so the ratio never moves enough to republish on its own."""
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+
+    def respond(req):  # real usage at exactly 2.0 bytes per token
+        engine.observe_usage(MESSAGES, {"input_tokens": engine.states[keyed(ANTHROPIC, req)].last_sent_bytes // 2},
+                             req)
+
+    a2 = request(conversation("a", 2))
+    engine(a2, {}, MESSAGES)
+    respond(a2)
+    a_window = store.windows[-1]
+    b3 = request(conversation("b", 3), model=OPUS)
+    engine(b3, {}, MESSAGES)
+    respond(b3)
+    assert len(store.windows) == 2 and store.inner.window_model() == OPUS  # B took over and published
+    a4 = request(conversation("a", 4))
+    _, _, events = engine(a4, {}, MESSAGES)
+    assert events[-1]["main"] is True
+    respond(a4)
+    assert abs(engine.estimator.measured_bytes_per_token - a_window[1]) <= 0.01 * a_window[1]
+    assert len(store.windows) == 3 and store.windows[-1][2] == MODEL == store.inner.window_model()
+    assert store.inner.window()[0] == engine.states[keyed(ANTHROPIC, a4)].window_budget == a_window[0]
 
 
 def test_the_ratio_restore_waits_for_a_request_on_the_recorded_model():

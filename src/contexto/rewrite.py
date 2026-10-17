@@ -40,9 +40,11 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   non-carried messages), else from the estimator; the window budget is ``W = bound - headroom - F``.
   Rotation picks the smallest ``k`` at a turn start whose retained turns fit ``window_fraction * W``,
   never below the current ``k``, always keeping the newest complete turn and the new turn. A ``k`` equal
-  to the current one is a no-op (``rotation_noop``: nothing paged, nothing stripped); a ``W`` that is
-  not positive or cannot hold the newest complete turn logs ``bound_too_small`` and sends the request
-  unrotated. ``F`` and ``W`` appear in these events.
+  to the current one is a no-op (``rotation_noop``: nothing paged, nothing stripped); a ``W`` that
+  cannot hold the newest complete turn and the new turn rotates to the minimal window (only the new
+  turn; ``window_minimal``, contract PR #50), and a ``W`` that is not positive or cannot hold even the
+  new turn also logs ``bound_too_small`` and still rotates there, so such a request can exceed the
+  bound. ``F`` and ``W`` appear in these events.
 - A second rotation condition (packet A12, contract PR #115): at a turn start, when the recall room
   the request-time publish would give the new turn (``bound - estimate - headroom_floor``) is below
   ``min_turn_room`` (default 12,000), the engine rotates with the window target ``0.5 * (W -
@@ -1368,7 +1370,8 @@ class RewriteEngine:
             return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": reason}]
         if not self._pages_present(state.turns_paged):
             return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": "pages_missing"}]
-        self._main, self._resumed = key, True
+        self._set_main(key)
+        self._resumed = True
         return state, [{"event": "epoch_resumed", "epoch": state.epoch, "k": state.k}]
 
     def _pages_present(self, turns_paged: int) -> bool:
@@ -1434,9 +1437,18 @@ class RewriteEngine:
         choice is re-evaluated: it becomes main only with strictly more turn starts than the current
         main (a tie keeps the current one), so a subagent or side request, with about one turn start,
         never takes over, and main never changes inside a tool loop. The window (``set_window``) follows
-        the same choice (``_would_publish``)."""
-        self._main, self._turn_starts[key] = self._main_after(key, messages, dialect)
+        the same choice (``_would_publish``); when main moves away from a conversation, its last publish
+        is forgotten, since the new main replaces the store's window, so it publishes again if it
+        becomes main again."""
+        main, self._turn_starts[key] = self._main_after(key, messages, dialect)
+        self._set_main(main)
         return key == self._main
+
+    def _set_main(self, key: str) -> None:
+        previous = self._main
+        self._main = key
+        if previous is not None and previous != key and previous in self.states:
+            self.states[previous] = replace(self.states[previous], published_window=None)
 
     def _would_publish(self, key: str, messages: list[dict], dialect: Dialect) -> bool:
         """What ``publishes`` would return for this request, without recording anything."""
