@@ -301,7 +301,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       `preamble_changed`, `head_changed`, `history_shorter`, `history_diverged`,
       `other_conversation`, `pages_missing`: the store holds fewer pages than the record's
       `turns_paged`, packet A31). A resume logs `epoch_resumed` with `epoch` and `k`. Measured sizing
-      (packet A8's ratio restore) is unchanged and still applies.
+      (packet A8's ratio restore) still applies; it waits for the first request on the recorded
+      model, so a side request on another model that arrives first logs `sizing_not_restored` once
+      and does not cancel it.
     - **Who writes.** Only the main conversation writes. After a restart, no conversation writes
       until one has resumed from the record or has strictly more turn starts than the record's
       `last_turn_count`, so a side request that arrives first cannot overwrite it.
@@ -403,7 +405,7 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   characters and about one quarter of the session's window budget `W` in tokens, converted with the
   smaller of the session's measured bytes-per-token ratio and the 1.5 `tool_result` seed (recalled
   pages are often numeric, and the session average would let one recall reach about 0.42 `W`);
-  until `set_window` has been called, the limit is 12,000 characters; the engine publishes `W` and the ratio through the
+  until `set_window` has been called, the limit is 12,000 characters; the engine publishes the main conversation's `W` and the ratio (see `contexto_search` below) through the
   session store (`SessionStore.set_window(window_tokens, bytes_per_token)`, kept in the private
   session metadata). Reason: a 32,000-character recall of numeric log text is about 17,800 tokens,
   more than half of an OpenRig seat's `W` near 33,000, and recall results arrive inside a tool
@@ -506,11 +508,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   request sequence differs from the latest room publish's and says "in view not checked". A failed
   snapshot write only marks the snapshot stale (search then says "in view not checked") and logs
   `retained_stale`, not `store_error`; it does not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Only the main
-  conversation publishes the room and the snapshot: the engine keeps state per conversation (the
+  conversation publishes the room, the snapshot, and the window (`set_window`): the engine keeps state per conversation (the
   main one, subagents, side requests), and the main conversation is the one with the most turn
   starts, re-evaluated at each turn start: it changes only when another conversation has strictly
   more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
-  stay main. Other conversations publish neither, so their tool calls see the
+  stay main. Other conversations publish none of them, so their tool calls see the
   main conversation's room and snapshot, and for a subagent "in view" refers to the main
   conversation's window (part of the documented subagent limitation); the MCP
   server cannot tell which conversation issued a call. Matches in the

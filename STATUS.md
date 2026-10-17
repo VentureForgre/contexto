@@ -227,9 +227,11 @@ Needs the owner:
 - Compressed request bodies: gzip and deflate are decoded (zstd only on Python 3.14+); other
   encodings get 415 (rule 15). `count_tokens` errors from upstream pass through unchanged (the
   owner's proxy returns 403; Claude Code calls it only around compaction).
-- On restart, sizing restores the measured token ratio unless the model changed or the ratio is
-  outside 1.0 to 6.0 bytes per token (then the seed ratios apply); mixed-model sessions blend the
-  ratio under the last model's label.
+- On restart, sizing restores the measured token ratio at the first request on the recorded model
+  (so a side request on another model that arrives first does not cancel it), unless the ratio is
+  outside 1.0 to 6.0 bytes per token (then the seed ratios apply). Only the main conversation
+  publishes the ratio and its model label, but the ratio is measured over every request, so
+  mixed-model sessions still blend it.
 
 ## Releases
 

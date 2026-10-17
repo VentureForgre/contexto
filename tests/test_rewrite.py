@@ -23,6 +23,7 @@ from contexto.rewrite import (
     RewriteEngine,
     at_turn_start,
     is_turn_start,
+    keyed,
     message_hash,
     classify_system,
     rewrite,
@@ -1622,3 +1623,118 @@ def test_a_failed_snapshot_write_leaves_no_current_snapshot_in_the_real_store(tm
     assert [e["event"] for e in events if e["event"] in ("retained_stale", "store_error")] == ["retained_stale"]
     assert not next(iter(engine.states.values())).degraded
     assert store.turn_room()[0] == "4" and store.retained_current() is None
+
+
+# Only the main conversation publishes the window (W, ratio, model) -------------------------------
+
+OPUS = "claude-opus-5-5"
+
+
+def test_a_side_conversation_never_publishes_the_window():
+    """The store's W, ratio, and model size contexto_recall's per-call limit and the next engine's
+    restore, so a side request's first response (its own small head) must not replace main's."""
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    main = request(conversation("main", 3))
+    engine(main, {}, MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": 400}, main)
+    assert len(store.windows) == 1
+    window, model = store.inner.window(), store.inner.window_model()
+    side = request(conversation("side", 1), model=OPUS)
+    engine(side, {}, MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": 90}, side)
+    assert len(store.windows) == 1 and store.calls.count("set_window") == 1
+    assert store.inner.window() == window and store.inner.window_model() == model == MODEL
+
+
+def test_a_side_conversation_rotating_at_its_turn_start_does_not_publish_the_window():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    main = request(history(8) + [user("main new")])
+    engine(main, {}, MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": 3_000}, main)
+    assert len(store.windows) == 1
+    window = store.inner.window()
+    side_msgs = history(6) + [user("side new")]
+    side_msgs[0] = user(f"side prompt 0 {FILL}", context=True)  # another conversation, fewer turn starts
+    _, _, events = engine(request(side_msgs, model=OPUS), {}, MESSAGES)
+    assert "rotation" in names(events) and events[-1]["main"] is False
+    assert len(store.windows) == 1 and store.inner.window() == window and store.inner.window_model() == MODEL
+
+
+def test_a_conversation_that_takes_over_main_publishes_on_its_next_response():
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    main = request(conversation("main", 2))
+    engine(main, {}, MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": 400}, main)
+    tie = request(conversation("other", 2), model=OPUS)
+    engine(tie, {}, MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": 300}, tie)
+    assert len(store.windows) == 1  # a tie keeps main, so other publishes nothing
+    more = request(conversation("other", 3), model=OPUS)
+    _, _, events = engine(more, {}, MESSAGES)
+    assert events[-1]["main"] is True
+    engine.observe_usage(MESSAGES, {"input_tokens": 320}, more)
+    other = engine.states[engine._main]
+    assert len(store.windows) == 2 and store.windows[-1][2] == OPUS
+    assert store.inner.window()[0] == other.window_budget and store.inner.window_model() == OPUS
+
+
+def test_a_former_main_that_becomes_main_again_republishes_its_window():
+    """A to B to A: A's own last publish still matches its W, ratio, and model, but the store holds B's
+    since B was main, so A must publish again at its first chance as main. Every usage is fed at A's
+    first ratio, so the ratio never moves enough to republish on its own."""
+    store = FaultyStore()
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+
+    def respond(req):  # real usage at exactly 2.0 bytes per token
+        engine.observe_usage(MESSAGES, {"input_tokens": engine.states[keyed(ANTHROPIC, req)].last_sent_bytes // 2},
+                             req)
+
+    a2 = request(conversation("a", 2))
+    engine(a2, {}, MESSAGES)
+    respond(a2)
+    a_window = store.windows[-1]
+    b3 = request(conversation("b", 3), model=OPUS)
+    engine(b3, {}, MESSAGES)
+    respond(b3)
+    assert len(store.windows) == 2 and store.inner.window_model() == OPUS  # B took over and published
+    a4 = request(conversation("a", 4))
+    _, _, events = engine(a4, {}, MESSAGES)
+    assert events[-1]["main"] is True
+    respond(a4)
+    assert abs(engine.estimator.measured_bytes_per_token - a_window[1]) <= 0.01 * a_window[1]
+    assert len(store.windows) == 3 and store.windows[-1][2] == MODEL == store.inner.window_model()
+    assert store.inner.window()[0] == engine.states[keyed(ANTHROPIC, a4)].window_budget == a_window[0]
+
+
+def test_the_ratio_restore_waits_for_a_request_on_the_recorded_model():
+    """A side request on another model can arrive first after a restart: the restore logs
+    sizing_not_restored once and waits for the recorded model, then blends the recorded ratio with
+    what the side requests measured meanwhile."""
+    store = MemoryStore(key=b"k" * 32)
+    store.set_window(10_000, 3.0, model=OPUS)
+    engine = RewriteEngine(store, config=Config(bound=1_000_000))
+    side = request(conversation("side", 1))
+    _, _, first = engine(side, {}, MESSAGES)
+    assert first[0] == {"event": "sizing_not_restored", "reason": "model_changed", "bytes_per_token": 3.0}
+    engine.observe_usage(MESSAGES, {"input_tokens": 90}, side)
+    side_bytes = next(iter(engine.states.values())).last_sent_bytes
+    _, _, again = engine(side, {}, MESSAGES)
+    assert not any(e["event"].startswith("sizing_") for e in again)  # the mismatch is logged once
+    assert engine.restored is None
+    _, _, events = engine(request(conversation("main", 3), model=OPUS), {}, MESSAGES)
+    assert events[0] == {"event": "sizing_restored", "bytes_per_token": 3.0, "weight_tokens": 10_000}
+    assert engine.restored == events[0]
+    assert engine.estimator.measured_bytes_per_token == (side_bytes + 30_000) / (90 + 10_000)
+    _, _, later = engine(request(conversation("main", 3), model=OPUS), {}, MESSAGES)
+    assert not any(e["event"].startswith("sizing_") for e in later)
+
+
+def test_the_request_event_says_whether_its_conversation_is_main_and_how_many_there_are():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=1_000_000))
+    _, _, events = engine(request(conversation("main", 3)), {}, MESSAGES)
+    assert events[-1]["event"] == "request" and events[-1]["main"] is True and events[-1]["conversations"] == 1
+    _, _, events = engine(request(conversation("side", 1)), {}, MESSAGES)
+    assert events[-1]["main"] is False and events[-1]["conversations"] == 2
