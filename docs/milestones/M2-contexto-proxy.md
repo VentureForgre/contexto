@@ -277,7 +277,13 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       field, seeds rule 10's previous-request hashes with the hashes of those first `n` messages
       (so the request is matched as an append and does not start a new epoch), makes this
       conversation the main one, and continues append-only (rules 1 to 3). A resume at a turn
-      start applies rule 4's decisions (room and size) to that request itself; a resume mid-turn
+      start applies rule 4's decisions (room and size) to that request itself. The record holds no
+      per-request usage, so that first decision uses a full estimate instead of the previous
+      request's real input; at a borderline it can differ from what an uninterrupted engine would
+      have decided (reviewer-2's differential for A34: 17 of 17 restart points byte-identical in
+      every case but Codex at 3.0 bytes per token, where one restart at the session's last turn
+      start did not rotate where the uninterrupted engine did, and none went over the bound). A
+      resume mid-turn
       is sent under rule 5 (a logged in-turn over-bound turn if it is over). The newest record
       written is trusted: if a write and its invalidation both failed, an older record can still
       be found, which is consistent but has a smaller `k`, and the two rules above bound the
