@@ -31,7 +31,7 @@ env:
 jobs:
   disabled:
     if: vars.RELEASES_ENABLED != 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Report that releases are off
         run: echo "::notice::Releases are disabled. Set the repository variable RELEASES_ENABLED to true to enable them (see RELEASING.md)."
@@ -43,7 +43,7 @@ jobs:
   release:
     needs: ci
     if: github.event_name == 'push' && vars.RELEASES_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
     steps:
@@ -111,7 +111,7 @@ jobs:
 
   reattach:
     if: github.event_name == 'workflow_dispatch' && vars.RELEASES_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
     env:
