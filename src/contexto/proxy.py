@@ -450,11 +450,16 @@ class StreamHold:
 
     ``on_trigger`` is called once, at the first ``message_delta`` or terminal ``response.*`` event,
     whether or not anything is held, before that event or any held event is released.
+    ``before_release`` is called when a hold ends any other way (an error event, end of stream, or
+    an upstream failure, through ``eof``) with something held, before the held events are returned,
+    so the usage already read is published before the CLI sees a tool call on those paths too.
     """
 
-    def __init__(self, api: str, on_trigger: Callable[[], None]) -> None:
+    def __init__(self, api: str, on_trigger: Callable[[], None],
+                 before_release: Callable[[], None] | None = None) -> None:
         self.api = api
         self.on_trigger = on_trigger
+        self.before_release = before_release
         self.held: list[bytes] = []
         self.holding = False
         self.triggered = False
@@ -485,7 +490,7 @@ class StreamHold:
             self.on_trigger()  # publish the real-usage room before anything held reaches the CLI
             return self._release() + [raw]
         if self._is_error(kind):
-            return self._release() + [raw]
+            return self._release_untriggered() + [raw]
         if kind == "ping":
             return [raw]
         if not self.holding and self._starts_hold(kind, raw):
@@ -497,6 +502,11 @@ class StreamHold:
         return [raw]
 
     def eof(self) -> list[bytes]:
+        return self._release_untriggered()
+
+    def _release_untriggered(self) -> list[bytes]:
+        if self.held and self.before_release is not None:
+            self.before_release()  # publish what usage there is before anything held reaches the CLI
         return self._release()
 
     def _release(self) -> list[bytes]:
@@ -844,6 +854,7 @@ class _Handler(BaseHTTPRequestHandler):
         decoder = _SideDecoder(response.getheader("Content-Encoding"))
         length = response.getheader("Content-Length")
         chunked = length is None and self.command != "HEAD"
+        expected = None if chunked else _declared_length(length, response, self.command)
         self._response_started = True
         self.send_response_only(response.status, response.reason)
         for name, value in response.getheaders():
@@ -877,7 +888,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         # Contract PR #74: SSE with identity encoding on a transformed endpoint is relayed event by event
         # through StreamHold, so no tool call reaches the CLI before the real-usage room is published.
-        hold = (StreamHold(entry.get("api", "messages"), observe)
+        hold = (StreamHold(entry.get("api", "messages"), observe, before_release=observe)
                 if feedback and reader.sse and chunked and decoder.encoding in ("", "identity") else None)
         if feedback and reader.sse and hold is None:
             # Not silently: an upstream that encodes anyway (or does not chunk) defeats the hold.
@@ -921,6 +932,10 @@ class _Handler(BaseHTTPRequestHandler):
                     reader.feed(bytes(pending))
                     write_events(hold.feed(bytes(pending)))
                 write_events(hold.eof())
+            elif expected is not None and response_bytes < expected:
+                # read1 returns b"" at EOF instead of raising, so a Content-Length body cut short
+                # ends the loop like a whole one: named like the IncompleteRead a chunked read raises.
+                raise _UpstreamReadError from http.client.IncompleteRead(b"", expected - response_bytes)
         except _UpstreamReadError as exc:  # upstream ended early: the client gets no terminator
             entry["error"] = f"relay: {type(exc.__cause__).__name__}"
             self.close_connection = True
@@ -935,7 +950,7 @@ class _Handler(BaseHTTPRequestHandler):
             relay_ok = False
         finally:
             conn.close()
-            if hold is not None and hold.held:  # upstream failed mid-hold: release what is held, in order
+            if hold is not None and hold.held:  # upstream failed mid-hold: observe, then release in order
                 try:
                     write_events(hold.eof())
                 except OSError:
@@ -1017,6 +1032,20 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except OSError:
             pass
+
+
+def _declared_length(length: str | None, response: http.client.HTTPResponse, method: str) -> int | None:
+    """The body length a Content-Length response promises, or None when it promises none: no or an
+    unparseable header (http.client then reads to close), a chunked body (the header is ignored),
+    HEAD, 1xx, 204, and 304 (no body whatever the header says)."""
+    if length is None or response.chunked or method == "HEAD" or response.status in (204, 304) \
+            or 100 <= response.status < 200:
+        return None
+    try:
+        declared = int(length)
+    except ValueError:
+        return None
+    return declared if declared >= 0 else None
 
 
 def _ms(started: float) -> int:

@@ -651,6 +651,115 @@ def test_upstream_dropping_mid_stream_still_logs_the_entry_and_feeds_usage(make_
     assert [e for e in log.events if e["event"] == "proxy_error"] == []
 
 
+TOOL_BLOCK = [
+    {"type": "content_block_start", "index": 1,
+     "content_block": {"type": "tool_use", "id": "toolu_1", "name": "mcp__contexto__contexto_search", "input": {}}},
+    {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+    {"type": "content_block_stop", "index": 1},
+]
+
+
+def dechunk(data: bytes) -> bytes:
+    """The payload of a chunked body, as far as it goes (a missing terminator is allowed)."""
+    out = b""
+    while data:
+        size, _, rest = data.partition(b"\r\n")
+        if not int(size, 16):
+            break
+        out, data = out + rest[: int(size, 16)], rest[int(size, 16) + 2:]
+    return out
+
+
+def _tool_stream_then(ending: str):
+    """Answer 200 SSE with message_start, a text block, and a whole tool_use block (held by the
+    proxy), then end without message_delta: a chunk cut short, a TCP reset, or a clean terminator."""
+    def script(sock: socket.socket, got: bytearray) -> None:
+        read_request(sock, got)
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+        for event in [*STREAM[:3], *TOOL_BLOCK]:
+            raw = sse(event)
+            sock.sendall(b"%x\r\n%s\r\n" % (len(raw), raw))
+        if ending == "partial_chunk":
+            sock.sendall(b"64\r\n" + sse(STREAM[3])[:10])  # 100 bytes promised, 10 sent, then close
+        elif ending == "clean":
+            sock.sendall(b"0\r\n\r\n")
+        time.sleep(0.2)  # let the proxy read what was sent before the connection ends
+        if ending == "reset":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    return script
+
+
+@pytest.mark.parametrize("ending, error", [("partial_chunk", "relay: IncompleteRead"),
+                                           ("reset", "relay: ConnectionResetError"), ("clean", None)])
+def test_a_hold_ended_without_message_delta_publishes_before_releasing(make_proxy, scripted_upstream, ending, error):
+    # Contract PR #74: the room is published before the CLI sees any tool call, on every path. Without
+    # message_delta the hold ends at end of stream (or at an upstream failure), and the usage already
+    # read (message_start's) must reach the engine before the held tool_use is released.
+    observed_at: list[float] = []
+
+    def observe(endpoint, usage, request):
+        time.sleep(0.3)  # a slow publish: released events must still wait for it
+        observed_at.append(time.monotonic())
+
+    url, _ = scripted_upstream(_tool_stream_then(ending))
+    proxy, log = make_proxy(upstream=url, transform=StubEngine(), observe_usage=observe)
+    tool_at, reply = None, b""
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
+        while chunk := sock.recv(65536):
+            reply += chunk
+            if tool_at is None and b'"tool_use"' in reply:
+                tool_at = time.monotonic()
+            if ending == "clean" and reply.endswith(b"0\r\n\r\n"):
+                break
+    events = sse(*STREAM[:3], *TOOL_BLOCK)
+    assert dechunk(reply.partition(b"\r\n\r\n")[2]) == events  # released in order, never swallowed
+    assert reply.endswith(b"0\r\n\r\n") == (ending == "clean")  # a failed relay has no terminator
+    assert len(observed_at) == 1 and tool_at is not None and observed_at[0] <= tool_at
+    entry = log.requests()[0]
+    assert entry.get("error") == error and entry["stream_hold"] == {"held_events": 3, "triggered": False}
+    assert entry["usage"]["input_tokens"] == 12
+
+
+def _content_length_then(send: int):
+    """Answer 200 with a Content-Length for the whole SSE body (so no chunking and no hold), send its
+    first ``send`` bytes, then close cleanly: read1 sees EOF, not an error."""
+    body = sse(*STREAM)
+
+    def script(sock: socket.socket, got: bytearray) -> None:
+        read_request(sock, got)
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: %d\r\n\r\n%s"
+                     % (len(body), body[:send]))
+        time.sleep(0.2)
+    return script, body
+
+
+@pytest.mark.parametrize("short", [True, False])
+def test_a_content_length_body_cut_short_is_a_relay_error(make_proxy, scripted_upstream, short):
+    engine = StubEngine()
+    script, body = _content_length_then(len(sse(STREAM[0])) if short else len(sse(*STREAM)))
+    url, _ = scripted_upstream(script)
+    proxy, log = make_proxy(upstream=url, transform=engine, observe_usage=engine.observe_usage)
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
+        reply = b""
+        while not reply.endswith(body) and (chunk := sock.recv(65536)):
+            reply += chunk  # a failed relay closes the connection; a whole body ends the loop
+    head, _, relayed = reply.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 200") and b"Content-Length: %d" % len(body) in head
+    entry = log.requests()[0]
+    if short:
+        assert len(relayed) < len(body)  # the client sees the body end short, never a complete response
+        assert entry["error"] == "relay: IncompleteRead" and "client_aborted" not in entry
+        assert entry["response_bytes"] == len(sse(STREAM[0]))
+    else:
+        assert relayed == body and "error" not in entry
+    assert entry["usage"]["input_tokens"] == 12  # usage already read still reaches the engine
+    assert len(engine.usage) == 1 and engine.usage[0][1]["input_tokens"] == 12
+
+
 @pytest.mark.parametrize("mode, error", [("raise", "RuntimeError"), ("bad-return", "TypeError")])
 def test_failing_transform_forwards_original_bytes(make_proxy, mode, error):
     proxy, log = make_proxy(transform=StubEngine(mode))

@@ -103,6 +103,33 @@ def test_end_of_stream_releases_the_hold_in_order():
     assert out == stream and calls == []
 
 
+@pytest.mark.parametrize("ending", ["eof", "error"])
+def test_a_hold_ended_without_its_trigger_calls_before_release_first(ending):
+    # The proxy passes its usage observe here, so the usage already read is published before the CLI
+    # sees a held tool call when the hold ends at an error event, end of stream, or upstream failure.
+    out, released_at = [], []
+    hold = StreamHold("messages", lambda: pytest.fail("no trigger in this stream"),
+                      before_release=lambda: released_at.append(len(out)))
+    stream = [START, *tool_block(0)]
+    for raw in stream:
+        out += hold.feed(raw)
+    if ending == "eof":
+        out += hold.eof()
+    else:
+        out += hold.feed(ev({"type": "error", "error": {"type": "overloaded_error"}}))
+    assert released_at == [1] and out[:4] == stream  # called once, while only message_start was out
+    assert hold.eof() == [] and released_at == [1]  # nothing held: not called again
+
+
+def test_before_release_is_not_called_when_nothing_is_held():
+    calls = []
+    hold = StreamHold("messages", lambda: None, before_release=lambda: calls.append(1))
+    for raw in [START, *text_block(0)]:
+        hold.feed(raw)
+    hold.feed(ev({"type": "error", "error": {"type": "overloaded_error"}}))
+    assert hold.eof() == [] and calls == []
+
+
 def test_streams_without_tool_use_trigger_the_publish_and_never_hold():
     stream = [START, *text_block(0), DELTA, STOP]
     hold = StreamHold("messages", lambda: None)
