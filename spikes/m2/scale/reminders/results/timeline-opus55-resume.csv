@@ -1,0 +1,181 @@
+turn,msg_index,location,kind,file,tokens
+1,0,m0,Codebase and user instructions are shown below. Be sure to a,,656
+1,0,m0,Attribution for git commits and pull requests you create fro,,318
+1,1,system_untagged,# Environment,,5252
+1,1,system_untagged,<total_tokens>N tokens left</total_tokens>,,43
+1,4,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+1,7,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+2,10,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+2,13,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+3,16,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+3,19,system_untagged,Contents of <path>,,79
+3,19,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+4,22,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+4,25,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+5,28,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+6,31,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+6,34,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+7,37,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+7,40,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+8,43,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+9,46,system_untagged,Plan mode is active. The user indicated that they do not wan,,2703
+9,46,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+9,49,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+10,52,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+11,55,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+11,55,system_untagged,## Exited Plan Mode,,55
+11,55,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+11,58,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+12,61,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+12,61,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+12,64,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+13,67,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+13,67,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+13,70,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+13,73,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+14,76,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+14,76,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+14,79,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+15,82,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+15,82,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+15,85,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+16,88,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+16,88,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+16,91,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+17,94,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+17,94,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+18,97,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+18,97,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+18,100,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+19,103,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+19,103,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+19,106,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+20,109,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+20,109,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+21,112,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+21,112,system_untagged,Plan mode is active. The user indicated that they do not wan,,2703
+21,112,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+21,115,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+22,118,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+22,118,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+23,121,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+23,121,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+23,121,system_untagged,## Exited Plan Mode,,55
+23,121,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+23,124,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+24,127,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+24,127,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+24,127,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+24,130,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+25,133,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+25,133,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+25,133,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+25,136,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+25,139,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+26,142,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+26,142,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+26,142,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+26,145,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+27,148,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+27,148,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+27,148,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+27,151,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+28,154,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+28,154,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+28,154,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+28,157,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+29,160,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+29,160,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+29,160,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+30,163,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+30,163,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+30,163,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+30,166,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+31,169,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+31,169,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+31,169,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+31,172,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+32,175,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+32,175,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+32,175,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+33,178,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+33,178,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+33,178,system_untagged,Plan mode is active. The user indicated that they do not wan,,2703
+33,178,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+33,181,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+34,184,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+34,184,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+34,184,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+35,187,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+35,187,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+35,187,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+35,187,system_untagged,## Exited Plan Mode,,55
+35,187,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+35,190,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+36,193,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+36,193,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+36,193,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+36,193,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+36,196,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+37,199,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+37,199,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+37,199,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+37,199,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+37,202,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+37,205,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+38,208,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+38,208,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+38,208,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+38,208,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+38,211,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+39,214,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+39,214,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+39,214,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+39,214,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+39,217,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+40,220,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+40,220,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+40,220,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+40,220,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+40,223,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+41,226,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+41,226,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+41,226,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+41,226,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+42,229,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+42,229,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+42,229,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+42,229,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+42,232,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+43,235,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+43,235,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+43,235,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+43,235,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+43,238,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+44,241,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+44,241,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+44,241,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+44,241,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+45,244,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+45,244,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+45,244,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+45,244,system_untagged,Plan mode is active. The user indicated that they do not wan,,2703
+45,244,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+45,247,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+46,250,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+46,250,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+46,250,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+46,250,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+47,253,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f40.txt,237
+47,253,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+47,253,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+47,253,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+47,253,system_untagged,## Exited Plan Mode,,55
+47,253,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+47,256,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+48,259,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f40.txt,237
+48,259,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,237
+48,259,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,237
+48,259,system_untagged,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,236
+48,259,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
+48,262,system_untagged,<total_tokens>N tokens left</total_tokens>,,27
