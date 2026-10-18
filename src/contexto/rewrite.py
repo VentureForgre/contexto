@@ -20,18 +20,23 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 - A turn is a turn-start message plus every following assistant, ``tool_result`` user, and
   ``role: "system"`` message up to the next turn start; a trailing system message after the new
   prompt belongs to the new turn.
-- Carried content is never paged: the context blocks of paged turn-start messages and the carried
-  system messages of paged turns (contract PR #35), in the form the CLI sends now. ``classify_system``
-  sorts every system message deterministically (contract PR #38): ``settings`` (empty content plus
-  settings fields; rule 12), ``session_start`` (content plus settings fields), ``per_turn`` (any other
-  text-only content, wherever it sits; per-turn hook context) and ``unclassified`` (non-text content).
-  Session-start, settings-only (latest per key) and unclassified messages are carried, an unclassified
-  one also logging ``unclassified_system_message``; per-turn ones are paged with their turn. Settings-only system messages accrue per settings
-  change (measured), so only the latest per settings key is carried; the carried set is computed from
-  the paged region, so it changes only at a rotation. Rule 13 (PR #27): carried content is never
-  paged; when a rotation finds it grown by more than ``carried_budget`` (4,000 tokens) over its size at
-  the conversation's first request, a content-free ``carried_over_budget`` event reports the estimate,
-  the growth, and the system-message count. Placement (rule 1, measured): carried context blocks
+- Carried content is never paged except under the bounded fallback: the context blocks of paged
+  turn-start messages and the carried system messages of paged turns (contract PR #35), in the form
+  the CLI sends now. ``classify_system`` sorts every system message deterministically (contract PR
+  #38, amended by D33): ``session_start`` (the ``# Environment`` signature, with or without settings
+  fields), ``settings`` (empty content plus settings fields; rule 12), ``settings_change`` (content
+  plus settings fields without the signature: an effort change riding on a reminder),
+  ``hook_output`` (paged with its turn), ``carried_text`` (any other text-only content) and
+  ``unclassified`` (non-text content, also logging ``unclassified_system_message``). Settings-only
+  messages accrue per settings change (measured), so only the latest per settings key is carried; the
+  carried set is computed from the paged region, so it changes only at a rotation. The bounded
+  fallback (``page_carried_text``, D32 and D33) pages, at a rotation, carried text, superseded
+  settings changes and the context blocks of turn starts after the first, never the session-start
+  message, the first turn start's blocks, the latest settings change per key or the latest item of a
+  recognisable kind, until carried growth is back under ``carried_text_budget``. Rule 13 (PR #27):
+  when a rotation finds carried content grown by more than ``carried_budget`` (4,000 tokens) over its
+  size at the conversation's first request, a content-free ``carried_over_budget`` event reports the
+  estimate, the growth, and the system-message count. Placement (rule 1, measured): carried context blocks
   and then the preamble go ahead of the first retained turn-start message's own content; carried
   system messages go immediately after that message (a system message before it returns 400).
 - Rotation (rules 3 and 4, PR #27) happens only when the newest turn has no assistant message yet and
@@ -392,10 +397,10 @@ def _anthropic_strip_thinking(message: dict) -> dict:
     return {**message, "content": kept}
 
 
-def settings_key(message: dict) -> tuple | None:
-    """For a settings-only system message (empty content, settings fields such as output_config),
-    the names of its settings fields and their keys; None for any other message."""
-    if message.get("role") != "system" or message.get("content") not in ([], "", None):
+def settings_fields(message: dict) -> tuple | None:
+    """The names of a system message's settings fields (any field but role and content, such as
+    output_config) and their keys; None when it has none."""
+    if message.get("role") != "system":
         return None
     fields = sorted(k for k in message if k not in ("role", "content"))
     if not fields:
@@ -403,11 +408,31 @@ def settings_key(message: dict) -> tuple | None:
     return tuple((f, tuple(sorted(message[f])) if isinstance(message[f], dict) else ()) for f in fields)
 
 
+def settings_key(message: dict) -> tuple | None:
+    """For a settings-only system message (empty content, settings fields such as output_config),
+    the names of its settings fields and their keys; None for any other message."""
+    if message.get("content") not in ([], "", None):
+        return None
+    return settings_fields(message)
+
+
 SESSION_START = "session_start"
 SETTINGS = "settings"
+SETTINGS_CHANGE = "settings_change"
 HOOK_OUTPUT = "hook_output"
 CARRIED_TEXT = "carried_text"
 UNCLASSIFIED = "unclassified"
+
+# D33: the session-start system message is recognised by its content, not by its settings fields or
+# its position. Measured on Claude Code 2.1.302 (spikes/m2/scale/reminders, every main request of 13
+# runs): on the 5.x ids the session's environment message is the only system message whose first
+# line is "# Environment", with output_config (claude-opus-5-5, claude-haiku-5-5) or without it and
+# wrapped in <system-reminder> (claude-sonnet-5, claude-fable-5); an effort change attaches
+# output_config to whatever system message the turn already has (a countdown, a file note, the
+# plan-mode text). On 2.1.301 the session-start message was the same size (about 8,470 characters,
+# spikes/m2/carried finding 1); its text was not kept, so that version is inferred, not measured.
+SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.302"
+SESSION_START_SIGNATURE = re.compile(r"\s*(?:<system-reminder>\s*)?# Environment[ \t]*(?:\r?\n|\Z)")
 
 # Documented hook-output signatures (measured on Claude Code 2.1.301 with zero-spend stubs,
 # spikes/m2/carried/README.md findings 7 and 9): the CLI wraps a hook's additionalContext in a role
@@ -448,18 +473,29 @@ def mode_kind(message: dict) -> str | None:
     return None
 
 
+def is_session_start(message: dict) -> bool:
+    """D33: text-only content whose first line is the session-start signature (``# Environment``,
+    optionally inside ``<system-reminder>``), with or without settings fields."""
+    return is_text_only(message) and bool(SESSION_START_SIGNATURE.match(message_text(message)))
+
+
 def _anthropic_classify_system(messages: list[dict], i: int) -> str:
     """Deterministic class of the system message at ``messages[i]``, in the contract's order (Terms,
-    PR #38, merged): session-start (content plus settings fields), settings-only (empty content plus
-    settings fields), hook output (text-only, matching a documented signature; paged with its turn),
-    other text-only content (carried: output styles and plan mode are standing instructions), and
+    PR #38, amended by D33): session-start (the session-start signature, with or without settings
+    fields; carried), settings-only (empty content plus settings fields; carried, latest per key),
+    settings change (content plus settings fields without the signature: an effort change riding on a
+    reminder; carried while it is the latest per settings key, then pageable by the fallback), hook
+    output (text-only, matching a documented signature; paged with its turn), other text-only content
+    (carried, pageable by the fallback: output styles and plan mode are standing instructions), and
     non-text content (carried, logged as ``unclassified_system_message``). Position is not used;
     ``messages`` is accepted for a uniform signature."""
     m = messages[i]
+    if is_session_start(m):
+        return SESSION_START
     if settings_key(m) is not None:
         return SETTINGS
-    if any(k not in ("role", "content") for k in m) and m.get("content") not in ([], "", None):
-        return SESSION_START
+    if settings_fields(m) is not None:
+        return SETTINGS_CHANGE
     if is_hook_output(m):
         return HOOK_OUTPUT
     if is_text_only(m):
@@ -467,32 +503,153 @@ def _anthropic_classify_system(messages: list[dict], i: int) -> str:
     return UNCLASSIFIED
 
 
+# D32: kinds of injected context blocks, recognised by the first line inside <system-reminder>.
+# Measured on Claude Code 2.1.302 with 4.x model ids (spikes/m2/scale/reminders/results/features.md):
+# the first four arrive in later turn-start messages; the rest make up messages[0] and are listed so
+# that a later copy (a date change, or a resume that puts session context in the resumed turn's
+# message, spikes/m2/carried finding 6) keeps its latest copy. The fallback keeps the latest block of
+# each kind and may page older ones; blocks of no recognised kind are pageable.
+CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.302"
+CONTEXT_BLOCK_KINDS = (
+    ("token_countdown", re.compile(r"<total_tokens>")),
+    ("plan_mode", re.compile(r"Plan mode is active|## Exited Plan Mode")),
+    ("file_changed", re.compile(r"Note: .+ changed on disk")),
+    ("task_reminder", re.compile(r"The task tools haven't been used recently")),
+    ("environment", re.compile(r"# Environment[ \t]*\Z")),
+    ("model", re.compile(r"You are powered by the model")),
+    ("agent_types", re.compile(r"Available agent types")),
+    ("mcp_instructions", re.compile(r"# MCP Server Instructions[ \t]*\Z")),
+    ("skills", re.compile(r"The following skills are available")),
+    ("instructions", re.compile(r"Codebase and user instructions are shown below")),
+    ("date", re.compile(r"Today's date is")),
+    ("attribution", re.compile(r"Attribution for git commits")),
+)
+
+
+def context_block_kind(block: dict) -> str | None:
+    """The recognisable kind of an injected context block (D32), from the first non-empty line after
+    the ``<system-reminder>`` tag; None when not recognised."""
+    text = block.get("text", "").lstrip()
+    if text.startswith(CONTEXT_TAG):
+        text = text[len(CONTEXT_TAG):]
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    for kind, signature in CONTEXT_BLOCK_KINDS:
+        if signature.match(first):
+            return kind
+    return None
+
+
+def block_id(i: int, j: int, block: dict) -> str:
+    """D32: the identity a paged context block has in ``paged_carried``: block ``j`` of message ``i``,
+    with ``cache_control`` removed. The position keeps byte-identical blocks in different turn starts
+    (the countdown repeats) apart; the history is append-only, so it is stable."""
+    return hashlib.sha256(canonical_bytes({"carried_block": [i, j], "block": _drop_cache_control(block)})).hexdigest()
+
+
+PAGEABLE_SYSTEM = (CARRIED_TEXT, SETTINGS_CHANGE)  # the classes the fallback may page (D33)
+
+
+def _system_classes(messages: list[dict], k: int) -> dict[int, str]:
+    return {i: classify_system(messages, i) for i in range(k) if is_system_like(messages[i])}
+
+
+def protected_systems(messages: list[dict], k: int, classes: dict[int, str] | None = None) -> set[int]:
+    """Indexes in M[0..k) the fallback never pages: the latest settings change per settings key (D33)
+    and the latest text message of each recognisable kind (``mode_kind``). Computed over the messages,
+    not the paged set, so a paged older copy with the same hash never hides the latest one."""
+    classes = _system_classes(messages, k) if classes is None else classes
+    latest: dict[tuple, int] = {}
+    for i, kind in classes.items():
+        if kind == SETTINGS_CHANGE:
+            latest[("settings", settings_fields(messages[i]))] = i
+        if kind in PAGEABLE_SYSTEM:
+            mode = mode_kind(messages[i])
+            if mode is not None:
+                latest[("mode", mode)] = i
+    return set(latest.values())
+
+
 def carried_systems(messages: list[dict], k: int, paged: frozenset[str] = frozenset()) -> tuple[list[int], int]:
     """Indexes of the carried system messages in M[0..k), after deduplicating settings-only messages
-    (latest per settings key) and leaving out text messages the fallback has paged, and the number of
-    unclassified ones among them."""
+    (latest per settings key) and leaving out messages the fallback has paged (never a protected one),
+    and the number of unclassified ones among them."""
+    classes = _system_classes(messages, k)
+    protected = protected_systems(messages, k, classes) if paged else set()
     carried, latest, unclassified = [], {}, 0
-    for i in range(k):
-        if not is_system_like(messages[i]):
+    for i, kind in classes.items():
+        if kind == HOOK_OUTPUT:
             continue
-        kind = classify_system(messages, i)
-        if kind == HOOK_OUTPUT or (kind == CARRIED_TEXT and message_hash(messages[i]) in paged):
+        if kind in PAGEABLE_SYSTEM and i not in protected and paged and message_hash(messages[i]) in paged:
             continue
         if kind == UNCLASSIFIED:
             unclassified += 1
         if kind == SETTINGS:
             latest[settings_key(messages[i])] = i
         carried.append(i)
-    keep = [i for i in carried if classify_system(messages, i) != SETTINGS or latest[settings_key(messages[i])] == i]
+    keep = [i for i in carried if classes[i] != SETTINGS or latest[settings_key(messages[i])] == i]
     return keep, unclassified
+
+
+def carried_blocks(messages: list[dict], k: int, paged: frozenset[str] = frozenset()) -> list[tuple[int, int, dict]]:
+    """(message index, block index, block) for every context block of the turn starts in M[0..k) that the
+    fallback has not paged (D32), in original order."""
+    out = []
+    for i in range(k):
+        m = messages[i]
+        if not is_turn_start(m):
+            continue
+        for j, b in enumerate(_blocks(m)):
+            if is_context_block(b) and not (paged and block_id(i, j, b) in paged):
+                out.append((i, j, b))
+    return out
 
 
 def carried_content(messages: list[dict], k: int, paged: frozenset[str] = frozenset()) -> tuple[list[dict], list[dict]]:
     """(context blocks of paged turn starts, carried system messages of paged turns), in original order
-    and in the form the CLI sends now. Hook output is paged with its turn, not carried."""
-    blocks = [b for m in messages[:k] if is_turn_start(m) for b in _blocks(m) if is_context_block(b)]
+    and in the form the CLI sends now, without what the fallback paged. Hook output is paged with its
+    turn, not carried."""
+    blocks = [b for _, _, b in carried_blocks(messages, k, paged)]
     indexes, _ = carried_systems(messages, k, paged)
     return blocks, [messages[i] for i in indexes]
+
+
+def fallback_candidates(messages: list[dict], k: int,
+                        paged: frozenset[str] = frozenset()) -> list[tuple[tuple[int, int], str, dict]]:
+    """What the bounded fallback may page from M[0..k), in the order it pages: (position, identity in
+    ``paged_carried``, the page's one message). Superseded items of a recognisable kind come first,
+    then unrecognised ones, each oldest first by position.
+
+    System messages (D33): carried text and settings changes, never the session-start message, a
+    settings-only message, the latest settings change per settings key, or the latest text message of
+    each ``mode_kind``. Context blocks (D32): those of every turn start after the first, never the first
+    turn start's blocks or the latest block of each ``context_block_kind``. A paged block is stored as a
+    user message holding that one block, as the CLI sent it."""
+    classes = _system_classes(messages, k)
+    protected = protected_systems(messages, k, classes)
+    superseded: list[tuple[tuple[int, int], str, dict]] = []
+    unrecognised: list[tuple[tuple[int, int], str, dict]] = []
+    for i in carried_systems(messages, k, paged)[0]:
+        if classes[i] not in PAGEABLE_SYSTEM or i in protected:
+            continue
+        if classes[i] == SETTINGS_CHANGE and not is_text_only(messages[i]):
+            continue  # a superseded settings change with non-text content stays carried
+        item = ((i, 0), message_hash(messages[i]), messages[i])
+        (superseded if mode_kind(messages[i]) is not None else unrecognised).append(item)
+    starts = turn_starts(messages[:k])
+    later = [(i, j, b) for i, j, b in carried_blocks(messages, k, paged) if starts and i != starts[0]]
+    newest = {}
+    for i, j, b in later:
+        kind = context_block_kind(b)
+        if kind is not None:
+            newest[kind] = (i, j)
+    for i, j, b in later:
+        kind = context_block_kind(b)
+        if kind is not None and newest[kind] == (i, j):
+            continue
+        item = ((i, j), block_id(i, j, b), {"role": "user", "content": [b]})
+        (superseded if kind is not None else unrecognised).append(item)
+    order = lambda item: item[0]  # noqa: E731
+    return sorted(superseded, key=order) + sorted(unrecognised, key=order)
 
 
 def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
@@ -670,34 +827,30 @@ def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Sto
 
 def page_carried_text(messages: list[dict], state: EpochState, store: Store, config: Config,
                       estimator: TokenEstimator, events: list[dict]) -> EpochState:
-    """Terms fallback: when carried content has grown more than ``carried_text_budget`` over its size at
-    the first request, page carried text messages (step 4) of paged turns, superseded ones of a
-    recognisable kind first, then unrecognised ones, oldest first, never the latest of a recognisable
-    kind, until the growth is back under the budget. Each is its own page; logs ``carried_paged``."""
+    """Terms fallback (amended by D32 and D33): when carried content has grown more than
+    ``carried_text_budget`` over its size at the first request, page the carried items of paged turns
+    that ``fallback_candidates`` lists, in its order (superseded ones of a recognisable kind first,
+    then unrecognised ones, oldest first; never the session-start message, the first turn start's
+    context blocks, the latest settings change per key, or the latest of a recognisable kind), until
+    the growth is back under the budget. Runs only at a rotation, so carried content changes only
+    there. Each item is its own page, written in position order; logs ``carried_paged``."""
     growth = carried_tokens(messages, estimator, state.paged_carried) - (state.initial_carried or 0)
     if growth <= config.carried_text_budget:
         return state
-    texts = [i for i in carried_systems(messages, state.k, state.paged_carried)[0]
-             if classify_system(messages, i) == CARRIED_TEXT]
-    latest = {}
-    for i in texts:
-        kind = mode_kind(messages[i])
-        if kind is not None:
-            latest[kind] = i
-    superseded = [i for i in texts if mode_kind(messages[i]) is not None and latest[mode_kind(messages[i])] != i]
-    unrecognised = [i for i in texts if mode_kind(messages[i]) is None]
     chosen, freed = [], 0
-    for i in superseded + unrecognised:
+    for item in fallback_candidates(messages, state.k, state.paged_carried):
         if growth - freed <= config.carried_text_budget:
             break
-        chosen.append(i)
-        freed += estimate_items(estimator, [messages[i]])
+        chosen.append(item)
+        freed += estimate_items(estimator, [item[2]])
     if not chosen:
         return state
-    chosen.sort()
-    store.page_out([[messages[i]] for i in chosen], state.turns_paged)
-    events.append({"event": "carried_paged", "epoch": state.epoch, "count": len(chosen), "tokens": freed})
-    return replace(state, paged_carried=state.paged_carried | {message_hash(messages[i]) for i in chosen},
+    chosen.sort(key=lambda item: item[0])
+    store.page_out([[page] for _, _, page in chosen], state.turns_paged)
+    blocks = sum(1 for (i, _), _, page in chosen if page is not messages[i])  # a block's page is a new message
+    events.append({"event": "carried_paged", "epoch": state.epoch, "count": len(chosen), "tokens": freed,
+                   "context_blocks": blocks})
+    return replace(state, paged_carried=state.paged_carried | {ident for _, ident, _ in chosen},
                    turns_paged=state.turns_paged + len(chosen))
 
 
