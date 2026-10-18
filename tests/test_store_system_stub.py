@@ -64,9 +64,13 @@ def test_a_tool_result_page_records_the_seed_estimate_without_it_reaching_the_id
     assert page["id"] == "pg_ddfe6e1db2f05ad6"
 
 
-COUNTDOWN = {"type": "text", "text": "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>\n"}
-PLAN = {"type": "text", "text": "<system-reminder>\nPlan mode is active. The user indicated that they do not want you to "
-                                "execute yet -- you MUST NOT make any edits.\nmore\n</system-reminder>\n"}
+def reminder(body: str) -> dict:
+    return {"type": "text", "text": f"<system-reminder>\n{body}\n</system-reminder>\n"}
+
+
+COUNTDOWN = reminder("<total_tokens>15000000 tokens left</total_tokens>")
+PLAN = reminder("Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT "
+                "make any edits.\nmore")
 
 
 def test_a_paged_context_block_page_is_listed_as_a_reminder_not_as_raw_tagged_text(store):
@@ -97,10 +101,11 @@ def test_a_user_message_with_its_own_text_keeps_the_user_text_stub(store, conten
 
 
 def test_an_empty_reminder_gets_a_placeholder_and_a_tagged_system_message_shows_its_inner_line(store):
-    [pid] = store.page_out([[{"role": "user", "content": [{"type": "text", "text": "<system-reminder>\n\n</system-reminder>"}]}]], 2)
+    [pid] = store.page_out([[{"role": "user", "content": [reminder("")]}]], 2)
     assert store.get_page(pid)["stub"]["reminder_text"] == EMPTY_REMINDER_STUB
     # claude-sonnet-5 and claude-fable-5 wrap their system text in the tag: the index shows the line inside.
-    [sid] = store.page_out([[{"role": "system", "content": "<system-reminder>\n<total_tokens>9 tokens left</total_tokens>\n</system-reminder>"}]], 9)
+    tagged = "<system-reminder>\n<total_tokens>9 tokens left</total_tokens>\n</system-reminder>"
+    [sid] = store.page_out([[{"role": "system", "content": tagged}]], 9)
     assert store.get_page(sid)["stub"]["system_text"] == "<total_tokens>9 tokens left</total_tokens>"
 
 

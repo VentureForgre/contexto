@@ -226,7 +226,8 @@ def test_a_settings_change_with_non_text_content_is_unclassified_carried_and_log
     # Contract step 2(b) covers text-only content; anything with non-text blocks is step 5 whether or
     # not it has settings fields: carried, never paged, and logged so an unmeasured shape shows up.
     image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
-    odd = {"role": "system", "content": [{"type": "text", "text": "synthetic"}, image], "output_config": {"effort": "low"}}
+    odd = {"role": "system", "content": [{"type": "text", "text": "synthetic"}, image],
+           "output_config": {"effort": "low"}}
     msgs = session_5x(20)
     at = turn_starts(msgs)[3] + 1  # turn 4's system message
     msgs[at] = odd

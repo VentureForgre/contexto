@@ -871,8 +871,10 @@ def page_carried_text(messages: list[dict], state: EpochState, store: Store, con
     store.page_out([[page] for _, _, page in chosen], state.turns_paged)
     blocks = sum(1 for (i, _), _, page in chosen if page is not messages[i])  # a block's page is a new message
     # Content-free: how many were of no recognisable kind, so a CLI that adds a kind shows up in the log.
-    unrecognised = sum(1 for (i, _), _, page in chosen
-                       if (context_block_kind(page["content"][0]) if page is not messages[i] else mode_kind(page)) is None)
+    def kind(i: int, page: dict) -> str | None:
+        return context_block_kind(page["content"][0]) if page is not messages[i] else mode_kind(page)
+
+    unrecognised = sum(1 for (i, _), _, page in chosen if kind(i, page) is None)
     events.append({"event": "carried_paged", "epoch": state.epoch, "count": len(chosen), "tokens": freed,
                    "context_blocks": blocks, "unrecognised": unrecognised})
     return replace(state, paged_carried=state.paged_carried | {ident for _, ident, _ in chosen},
