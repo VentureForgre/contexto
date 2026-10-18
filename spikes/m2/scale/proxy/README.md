@@ -259,12 +259,16 @@ timing table: about 0.019 s per million tokens for a tool loop.
 | `index_text` re-reads every page twice per rotation | yes: `fixed_overhead` (rewrite.py:617) and `new_epoch` (649-650), each through `_pages()` |
 | Carried `<system-reminder>` blocks are uncapped | yes: `carried_content` (rewrite.py:493) keeps every context block of every paged turn start; `page_carried_text` (671-701) pages only role `system` text messages; `carried_over_budget` (663-667) only reports. This is the `mixed` failure above |
 
-## Obvious fixes (not applied; this spike changes nothing in `src/`)
+## Obvious fixes (this spike changes nothing in `src/`; fix 1 was applied later as D32)
 
 1. **Page old carried context blocks** the way `page_carried_text` pages system messages: keep the first
    message's blocks and the latest of each recognisable kind, and page the rest once growth passes
    `carried_text_budget`. [Inference] This removes the `mixed` failure, F stays near its first-request
-   size, and the same session would behave like the `first` profile to 30M.
+   size, and the same session would behave like the `first` profile to 30M. Applied as D32 on
+   2026-10-18 and measured: the `mixed` run to 30M (`results/*_mixed-carried-bound.csv`, against
+   `*_mixed-before.csv` on the code before) had 0 `bound_too_small` and 0 `over_bound` (871 and 692
+   before), F between 62,392 and 75,820, and largest measured request 134,203 tokens; details in
+   `../reminders/README.md`, "After D32 and D33".
 2. **Hash each message once per request.** `send` can reuse the hashes `matching_prefix` computed and hash
    only the messages after the match. Expected: 23 percent of transform time, about 0.13 s per request
    at 30M.

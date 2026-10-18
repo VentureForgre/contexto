@@ -45,6 +45,7 @@ spikes/m2/scale/reminders/analyze_all.sh <dir>   # re-analyse a kept run dir int
 | `run_session.py` | Drives one session. `--mode resume` runs one `claude -p` process per turn: turn 1 `--session-id`, every 5th turn `--continue`, the rest `--resume <id>`, with plan mode and effort set by flags. `--mode stream` runs one `claude -p --input-format stream-json` process for the whole session, toggles plan mode with the `set_permission_mode` control request and effort with `apply_flag_settings {effortLevel}`. Both succeeded on every change. `--plain` sends bare prompts |
 | `analyze.py` | Classifies every reminder span in every main request (requests with tools; there were 0 side requests) by location. Runs `carried_content`, `carried_tokens`, `carried_systems`, `classify_system` and `page_carried_text` from `src/contexto/rewrite.py` (imported, not changed) |
 | `timeline.py`, `features.py`, `table.py`, `effort_check.py` | Per-run reminder timeline, per-feature attribution, the per-run table below, and where effort changes land |
+| `before_after.py` | Carried tokens at chosen turns from two `turns.csv` files (before and after D32 and D33) |
 
 Isolation (every launch, from `../cli/harness.py`): scrubbed env, temp `HOME` and `CLAUDE_CONFIG_DIR`, temp
 project as cwd, fake `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`,
@@ -281,6 +282,69 @@ each, bytes/1.83), not per turn. On the claude-sonnet-5 and claude-fable-5 probe
 grew, but the session's environment message classifies as carried text, so it is the first message
 the fallback would page, a case the 5.x decision has to handle.
 
+## After D32 and D33 (2026-10-18)
+
+The owner approved two contract changes from these findings (`docs/DECISIONS.md` D32, D33): the
+bounded fallback may page context blocks of turn starts after the first, keeping the first turn
+start's blocks and the latest block of each recognisable kind; and session-start is the
+`# Environment` first-line signature, so an effort change makes a settings change (the latest per
+key carried, older ones pageable) instead of a permanent session-start message. The sections above
+describe the code before the change and stay as measured.
+
+Re-analysed with no new CLI run: the same raw bodies (`/tmp/rem-runs.8xQL0A`), `analyze.py` on the
+code before the change (origin/claude/scale-30m; it reproduced `results/table.md` byte for byte) and
+after it. `analyze.py` now takes "not pageable" from the engine itself: carried tokens once every
+item `fallback_candidates` lists is paged. `before_after.py` prints the full before and after tables
+(`results/d32-d33.md` has both columns for every run).
+
+| run | model | not pageable at turn 48, before -> after | max, turn 2 to 48, after | carried after the 8,000 fallback, max before -> after |
+|---|---|---|---|---|
+| sonnet46-stream-plain | claude-sonnet-4-6 | 5,452 -> 3,557 | 3,557 | 5,452 -> 5,452 |
+| sonnet46-stream | claude-sonnet-4-6 | 13,256 -> 3,794 | 5,251 | 13,256 -> 11,330 |
+| sonnet46-resume | claude-sonnet-4-6 | 22,953 -> 3,794 | 5,196 | 22,953 -> 11,381 |
+| opus55-stream-plain | claude-opus-5-5 | 3,305 -> 3,304 | 3,304 | 3,948 -> 3,948 |
+| opus55-stream | claude-opus-5-5 | 9,804 -> 4,897 | 4,897 | 11,254 -> 11,239 |
+| opus55-stream-todo | claude-opus-5-5 | 10,133 -> 4,902 | 4,902 | 11,357 -> 11,124 |
+| opus55-resume | claude-opus-5-5 | 12,169 -> 5,643 | 5,643 | 12,704 -> 11,284 |
+| haiku55-resume | claude-haiku-5-5 | 12,035 -> 5,504 | 5,504 | 12,570 -> 11,146 |
+| probes (12 turns) | claude-opus-4-7, claude-sonnet-4-5, claude-haiku-4-5 | 5,545 to 5,686 -> 3,788 to 3,797 | 5,196 to 5,202 | unchanged |
+| probes (12 turns) | claude-sonnet-5, claude-fable-5 | 534 -> 3,499 and 3,333 | 4,748 and 4,593 | unchanged |
+
+- **4.x ids: not-pageable growth per turn is 0 from turn 12 on** (was 44, 210 and 484 from turn 12
+  to 48). What stays is `messages[0]`'s blocks plus the latest block of each kind; it peaks while
+  plan mode is on (the entry block, about 1,400 tokens, is then the latest of its kind) and drops
+  when the exit block supersedes it.
+- **5.x ids: effort changes no longer grow it.** In one process it stays at 4,897 (4,902 with task
+  tools) from turn 12 to 48. With a resume every turn it still rises about 21 tokens per turn
+  (4,896 to 5,643): the carried set is the same three system messages and two blocks (environment,
+  latest effort change, latest plan-mode text; CLAUDE.md, attribution), but the latest effort
+  change's message is the turn's first system message, and on resume the CLI keeps adding the
+  unread file notes to it. That is one message growing, not messages accruing.
+- **claude-sonnet-5 and claude-fable-5:** the environment message is now session-start, never
+  paged; the rise from 534 to about 3,300 is that message moving into the not-pageable part, which
+  is what D33 intends.
+- "Carried after the fallback" is still up to about 11,300 in the busy runs: the fallback pages only
+  while growth exceeds 8,000 over the first request's carried size (about 3,300), as the contract
+  says. The difference is that it can now page what grows, so this no longer climbs with the turn
+  count.
+
+The 30M proxy scale test with the assumed `mixed` profile (`../proxy/`, `run.py --reminders mixed
+--checkpoints 5,10,30 --keep-going --profile-at 0`, same seed, run once on each code;
+`../proxy/results/*_mixed-before.csv` and `*_mixed-carried-bound.csv`):
+
+| checkpoint | bound_too_small, before -> after | over_bound | window_minimal | max upstream tokens (measured requests) | largest fast-forwarded turn | F at the last rotation |
+|---|---|---|---|---|---|---|
+| 5M | 1 -> 0 | 0 -> 0 | 57 -> 3 | 123,462 -> 120,205 | 142,567 -> 143,564 | |
+| 10M | 112 -> 0 | 14 -> 0 | 236 -> 7 | 159,255 -> 125,575 | 161,667 -> 139,265 | |
+| 30M | 871 -> 0 | 692 -> 0 | 995 -> 21 | 288,309 -> 134,203 | 287,419 -> 141,564 | 259,155 -> 74,240 |
+
+Event counts are cumulative through each checkpoint. After the change the fallback paged at 284 of
+582 rotations (`carried_paged`), F stayed between 62,392 and 75,820, and the store held 1,616 pages
+at 30M against 1,138 (each paged block is its own page). Timings at 30M: tool loop 0.622 s against
+0.615 s, turn start 0.786 s against 0.908 s (fewer minimal-window rotations); one run each, load
+averages about 5 to 6. `carried_over_budget` (the 4,000-token report, rule 13) still fires at almost
+every rotation, because the fallback's target (8,000) is above the report threshold.
+
 ## Limits
 
 - The model is scripted. Only the CLI's own behaviour is measured. A real model calls tools at other
@@ -299,5 +363,5 @@ the fallback would page, a case the 5.x decision has to handle.
 `results/table.md` (the per-run table), `results/features.md`, `results/summary.md` (per-turn tables
 and kinds per run), `results/turns.csv` (one row per turn per run, with the Contexto columns),
 `results/requests.csv` (one row per main request), `results/reminders.csv` (one row per distinct
-reminder occurrence: run, message index, location, kind, bytes, first and last request seen), and
-`results/timeline-*.csv`.
+reminder occurrence: run, message index, location, kind, bytes, first and last request seen),
+`results/timeline-*.csv`, and `results/d32-d33.md` (before and after D32 and D33).

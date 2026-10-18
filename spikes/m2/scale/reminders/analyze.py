@@ -232,7 +232,7 @@ def contexto_view(root: Path, turns: list[dict]) -> None:
         new = rw.page_carried_text(sub, state, _NullStore(), cfg, est, []) if k else state
         paged = new.paged_carried
         r["carried_after_fallback"] = rw.carried_tokens(sub, est, paged) if k else 0
-        blocks_k, _ = rw.carried_content(sub, k)
+        blocks_k, _ = rw.carried_content(sub, k, paged)  # since D32 the fallback can page later blocks
         r["carried_blocks_k"] = (rw.estimate_items(est, [{"role": "user", "content": blocks_k}])
                                  if blocks_k else 0)
         r["fallback_paged_total"] = len(paged)
@@ -247,9 +247,15 @@ def contexto_view(root: Path, turns: list[dict]) -> None:
         r["carried_text_k"] = by.get(rw.CARRIED_TEXT, 0)
         r["carried_unclassified_k"] = by.get(rw.UNCLASSIFIED, 0)
         r["session_start_msgs_k"] = sum(1 for i in idx if rw.classify_system(sub, i) == rw.SESSION_START)
-        # not pageable by the fallback: context blocks, session-start class, settings, unclassified
-        r["carried_unpageable_k"] = (r["carried_blocks_k"] + r["carried_session_start_k"] + r["carried_settings_k"]
-                                     + r["carried_unclassified_k"])
+        r["carried_settings_change_k"] = by.get(getattr(rw, "SETTINGS_CHANGE", "settings_change"), 0)
+        if hasattr(rw, "fallback_candidates"):
+            # D32/D33: what is left once the fallback has paged everything it may page
+            everything = paged | {ident for _, ident, _ in rw.fallback_candidates(sub, k, paged)} if k else paged
+            r["carried_unpageable_k"] = rw.carried_tokens(sub, est, everything) if k else 0
+        else:
+            # before D32/D33: context blocks, session-start class, settings, unclassified were never paged
+            r["carried_unpageable_k"] = (r["carried_blocks_k"] + r["carried_session_start_k"]
+                                         + r["carried_settings_k"] + r["carried_unclassified_k"])
 
 
 def main() -> None:
