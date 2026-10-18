@@ -260,8 +260,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     Terms: identified hook output pages with its turn, and everything else is carried, with the
     bounded 8,000-token fallback. At rotation only (deterministic, and
     safe for thinking because rotation strips it), keep the latest settings-only message per
-    settings key. If carried content grows by more than 4,000 tokens over its size at the
-    session's first request, log `carried_over_budget` in the session log.
+    settings key. If carried content, after the bounded fallback at a rotation, is still more than
+    8,000 tokens over its size at the session's first request (the fallback could not bound it), log
+    `carried_over_budget` in the session log.
 14. **Transform failures.** Expected failures never reuse the component that failed, and only the
     terminal step below may forward the CLI's original request:
     - **Degraded mode** (every request sent in it is logged with `degraded: true`) is entered on `page_conflict` (a stored page differs in

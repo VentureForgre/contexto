@@ -342,8 +342,10 @@ Event counts are cumulative through each checkpoint. After the change the fallba
 582 rotations (`carried_paged`), F stayed between 62,392 and 75,820, and the store held 1,616 pages
 at 30M against 1,138 (each paged block is its own page). Timings at 30M: tool loop 0.622 s against
 0.615 s, turn start 0.786 s against 0.908 s (fewer minimal-window rotations); one run each, load
-averages about 5 to 6. `carried_over_budget` (the 4,000-token report, rule 13) still fires at almost
-every rotation, because the fallback's target (8,000) is above the report threshold.
+averages about 5 to 6. `carried_over_budget` (then the 4,000-token report, rule 13) fired at almost
+every rotation in both runs (1,067 of 1,068 before, 581 of 582 after), because the fallback's target
+(8,000) was above the report threshold. PR #203 moved the threshold to the fallback's 8,000, so the
+event now means the fallback could not bound carried growth; these runs were not repeated for it.
 
 ## Limits
 

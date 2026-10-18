@@ -417,6 +417,26 @@ def test_a_long_4x_session_does_not_reach_bound_too_small():
         msgs = msgs + turn[1:]
 
 
+def test_carried_over_budget_reports_only_growth_the_fallback_could_not_page():
+    # Rule 13: once the fallback engages it pages until growth is at most 8,000 tokens, so a 4,000
+    # report fired at nearly every rotation (581 of 582 at 30M). The report now means the fallback
+    # could not bound carried growth: growth after it still above the fallback budget.
+    cfg = Config(bound=60_000, headroom_floor=2_000, pin_budget=200, index_budget=200, min_turn_room=2_000)
+    assert (cfg.carried_budget, cfg.carried_text_budget) == (4_000, 8_000)  # defaults: v0.2.8 records resume
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
+    msgs: list[dict] = []
+    events: list[dict] = []
+    for t in range(1, 90):
+        msgs = msgs + turn_4x(t)[:1]
+        events += engine(request(msgs), {}, MESSAGES)[2]
+        msgs = msgs + turn_4x(t)[1:]
+    assert "carried_paged" in names(events) and names(events).count("rotation") > 3
+    assert "carried_over_budget" not in names(events)
+    state = next(iter(engine.states.values()))
+    growth = carried_tokens(msgs[:state.k], TokenEstimator(), state.paged_carried) - state.initial_carried
+    assert cfg.carried_budget < growth <= cfg.carried_text_budget  # the old threshold would have reported it
+
+
 def test_a_restart_after_block_paging_sends_the_same_bytes():
     cfg = Config(bound=60_000, headroom_floor=2_000, pin_budget=200, index_budget=200, min_turn_room=2_000,
                  carried_text_budget=1_500, carried_budget=1_000_000)

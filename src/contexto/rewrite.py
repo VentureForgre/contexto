@@ -34,10 +34,12 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   fallback (``page_carried_text``, D32 and D33) pages, at a rotation, carried text, superseded
   settings changes and the context blocks of turn starts after the first, never the session-start
   message, the first turn start's blocks, the latest settings change per key or the latest item of a
-  recognisable kind, until carried growth is back under ``carried_text_budget``. Rule 13 (PR #27):
-  when a rotation finds carried content grown by more than ``carried_budget`` (4,000 tokens) over its
-  size at the conversation's first request, a content-free ``carried_over_budget`` event reports the
-  estimate, the growth, and the system-message count. Placement (rule 1, measured): carried context blocks
+  recognisable kind, until carried growth is back under ``carried_text_budget``. Rule 13 (PR #27,
+  amended in PR #203): when carried content after the fallback is still grown by more than the
+  larger of ``carried_budget`` and ``carried_text_budget`` (8,000 tokens with the defaults) over its
+  size at the conversation's first request, so the fallback could not bound it, a content-free
+  ``carried_over_budget`` event reports the estimate, the growth, the system-message count, and
+  that threshold. Placement (rule 1, measured): carried context blocks
   and then the preamble go ahead of the first retained turn-start message's own content; carried
   system messages go immediately after that message (a system message before it returns 400).
 - Rotation (rules 3 and 4, PR #27) happens only when the newest turn has no assistant message yet and
@@ -159,7 +161,10 @@ class Config:
     headroom_decay: float = 0.5  # rule 17: max_turn_growth's weight per later turn start that measures growth
     pin_budget: int = 6_000
     index_budget: int = 4_000
-    carried_budget: int = 4_000  # rule 13: carried growth above this is reported
+    # Rule 13: carried growth after the fallback above both budgets is reported. The default stays 4,000
+    # so asdict(config), which a resume compares, is unchanged; with the defaults the report threshold
+    # is carried_text_budget's 8,000, so the report means the fallback could not bound the growth.
+    carried_budget: int = 4_000
     carried_text_budget: int = 8_000  # Terms fallback: carried growth above this pages old text messages
     # Recall knobs (packet A7, H1 recall fix). Defaults are intake's V2 (A7b): preamble_first on, the rest off.
     recall_rule: str = ""  # placed before the store's pinned and index text in the preamble
@@ -833,11 +838,12 @@ def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Sto
     new = page_carried_text(messages, new, store, config, estimator, events)
     carried = carried_tokens(messages, estimator, new.paged_carried)
     growth = carried - (state.initial_carried or 0)
-    if growth > config.carried_budget:
+    budget = max(config.carried_budget, config.carried_text_budget)  # the fallback pages down to the latter
+    if growth > budget:
         events.append({"event": "carried_over_budget", "epoch": new.epoch, "carried_tokens": carried,
                        "carried_growth": growth,
                        "system_messages": len(carried_systems(messages, k, new.paged_carried)[0]),
-                       "budget": config.carried_budget})
+                       "budget": budget})
     return new
 
 

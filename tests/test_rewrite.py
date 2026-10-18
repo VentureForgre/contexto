@@ -465,7 +465,9 @@ def test_carried_growth_over_budget_is_reported_not_paged():
     # Rule 13: carried content that grows after the first request is reported, never paged; the initial
     # size is normal. A later message with content and settings fields (a settings change, carried
     # while it is the latest per settings key, D33) is one way carried content can still grow.
-    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=14_000, headroom_floor=500, carried_budget=1_000))
+    # The fallback cannot page the latest settings change, so growth stays above its budget.
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=14_000, headroom_floor=500, carried_budget=1_000,
+                                                                       carried_text_budget=1_000))
     start = [user(f"prompt 0 {FILL}", context=True), system("sys A")]
     engine(request(start), {}, MESSAGES)
     big = system("synthetic carried tool list " * 800)
