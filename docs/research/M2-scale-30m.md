@@ -13,44 +13,50 @@ the largest live run so far was about 494K (run #3)?
 
 ## Answer
 
-It depends on the model id. The request path held at 30M in a synthetic session with a context
-block on the first message only and a single session-start system message (the `first` profile,
-`spikes/m2/scale/proxy/synth.py:176`). Measured since (`spikes/m2/scale/reminders/`): Claude Code
-2.1.302 keeps context blocks on the first message on the 5.x model ids (claude-opus-5-5,
-claude-haiku-5-5; 12-turn probes on claude-sonnet-5, claude-fable-5), but not on the 4.x ids
-(claude-sonnet-4-6, claude-opus-4-7, claude-sonnet-4-5, claude-haiku-4-5). On 5.x ids it also sends
-a role `system` message with every main request (88 in 88 requests in a busy claude-opus-5-5 run),
-which the `first` profile does not have. So the 30M result covers the 5.x context-block placement,
-not the full 5.x request shape.
+It depends on the model id. The 30M run used the `first` profile: a context block on the first
+message only and one session-start system message (`spikes/m2/scale/proxy/synth.py:176`). Claude
+Code 2.1.302 places context blocks that way on the 5.x ids but not on the 4.x ids
+(`spikes/m2/scale/reminders/`). The 5.x ids also send a role `system` message with every main
+request (88 in 88 in a busy claude-opus-5-5 run), which the 30M run did not include. So the 30M
+result covers where 5.x puts context blocks, not everything 5.x sends.
 
-- **4.x ids: the blocker is real.** The CLI puts `<system-reminder>` blocks in every later turn-start
-  user message, and the proxy carries them with no cap: 45 to 425 tokens per turn, measured
-  (Contexto's estimator). [Inferred, linear, a rough guide] The engine runs out of room after about
-  90 to 860 turns, about 2.4M to 23M of history at the scale test's 26,900 tokens per turn, so short
-  of 30M. By bytes per turn the busy rate is 2.4 times the scale test's assumed profile, which would
-  put the busy one-process session's failure near turn 77 (about 2.1M), not 180.
-- **5.x ids: per-turn growth is pageable.** The same reminders arrive as role `system` messages that
-  the 8,000-token fallback can page. On claude-opus-5-5 and claude-haiku-5-5 one uncapped path is
-  left: an effort change puts `output_config` on that turn's first system message, which makes it
-  session-start class, carried forever (27 to 3,444 tokens per change, bytes / 1.83). On the
-  claude-sonnet-5 and claude-fable-5 probes, effort stayed in the top-level `output_config` and
-  nothing unpageable grew; there the session's own environment message (`messages[1]`) has no
-  `output_config`, classifies as carried text, and is first in line when the fallback pages.
-- **[Inferred, not measured] The 5.x role `system` text probably still fits at 30M.** The fallback
-  lets carried content sit up to about 8,000 tokens above its start before it pages (6,300 to 9,400
-  above start in the 48-turn resume run, with the fallback applied every turn; live it runs only at
-  rotations, so more can build up between them). At 30M the `first` run's largest request was
-  135,954, a 14,046-token margin under the bound, and its F was about 70,000 against the 100,810 at
-  which `bound_too_small` first fired in the `mixed` run.
+- **4.x ids (claude-sonnet-4-6; 12-turn probes on claude-opus-4-7, claude-sonnet-4-5,
+  claude-haiku-4-5): the blocker is real.** The CLI puts `<system-reminder>` blocks in every later
+  turn-start user message, and the proxy carries them with no cap: 45 to 425 tokens per turn,
+  measured (Contexto's estimator). [Inferred, linear, a rough guide] `bound_too_small` after about
+  860 turns at the bare-prompt floor, 180 in a busy session and 90 with a resume every turn (about
+  23M, 4.8M and 2.4M of history), all short of 30M. Scaled by bytes per turn instead, the busy
+  session fails near turn 77 (about 2.1M).
+- **5.x ids (claude-opus-5-5, claude-haiku-5-5; 12-turn probes on claude-sonnet-5,
+  claude-fable-5): per-turn growth is pageable.** The same reminders arrive as role `system`
+  messages that the 8,000-token fallback can page. On claude-opus-5-5 and claude-haiku-5-5 one
+  uncapped path is left: an effort change puts `output_config` on that turn's first system message,
+  which makes it session-start class, carried forever (27 to 3,444 tokens per change, bytes /
+  1.83). On the claude-sonnet-5 and claude-fable-5 probes, effort stayed in the top-level
+  `output_config` and nothing unpageable grew; there the session's own environment message
+  (`messages[1]`) has no `output_config`, classifies as carried text, and is first in line when the
+  fallback pages.
+- **[Inferred, not measured] The 5.x role `system` text probably still fits at 30M.** Carried
+  content counts in the fixed head F, and the engine sizes the window as the bound minus headroom
+  minus F (`rewrite.py:731`, `:735`), so extra F shrinks the window rather than pushing requests
+  toward the bound. The limit is `bound_too_small`, which first fired at F = 100,810 in the `mixed`
+  run; the `first` run's F at 30M was about 70,000, which leaves about 30,800 tokens of F headroom.
+  In the claude-opus-5-5 resume run the pageable text held 410 to 2,143 tokens once the fallback
+  engaged (turn 34) and peaked at 3,488 before it; the fallback ran every turn there and runs only at
+  rotations live, so more builds up between rotations. Effort-change content cannot be paged and
+  adds to the same F with each change.
 - **The owner's seats run Opus 5.5** (claude-opus-5-5), and acceptance run #3 ran on
-  claude-haiku-5-5: both are ids where the effort path was measured. On claude-opus-5-5 nothing the
+  claude-haiku-5-5: the effort path was measured on both. [Measured] On claude-opus-5-5 nothing the
   fallback cannot page grew except at effort changes. With bare prompts and no effort change it
   stayed at 3,305 tokens over 48 turns; in the busy runs (plan mode, outside edits, MCP) its growth
   equalled the session-start growth from effort changes exactly (+6,502 tokens in one process,
-  +8,867 with a resume every turn, +6,829 with task tools enabled; Contexto's estimator). [Inferred] The fallback writes
-  each paged message as its own page, so a 30M session on Opus 5.5 would hold about 3,000 pages or
-  more, where search reaches the planted page for 44 to 39 of 86 queries at 0.32 to 0.71 s (store
-  section). The 4.x blocker applies only when a session runs on a 4.x id.
+  +8,867 with a resume every turn, +6,829 with task tools enabled; Contexto's estimator). The 4.x
+  blocker applies only when a session runs on a 4.x id.
+- **[Inferred] An Opus 5.5 session holds more pages.** The fallback writes each paged message as
+  its own page (`rewrite.py:698`), so a 30M session on Opus 5.5 would hold about 3,000 pages or
+  more, most of them single small messages. In the store spike's 3,000 to 6,000 rows (about 23K
+  tokens per page) search reaches the planted page for 44 to 39 of 86 queries at 0.32 to 0.71 s;
+  for this shape those rows are a rough guide (store section).
 
 Search is fast enough, but its accuracy falls with page count.
 
@@ -174,15 +180,17 @@ how the CLI places reminders for those ids.
   `<system-reminder>` on claude-sonnet-5. `classify_system` marks them carried text, which the
   fallback pages, each message as its own page (`rewrite.py:698`). In the claude-opus-5-5 resume
   run the fallback (applied every turn in the spike) first paged at turn 34, had paged 40 messages
-  by turn 48, and from turn 34 on kept carried content at k between 9,618 and 12,704. [Inferred]
-  The live engine runs the fallback only at rotations, so between rotations carried content can be
-  higher.
+  by turn 48, and from turn 34 on kept carried content at k between 9,618 and 12,704. Most of that
+  was effort content it cannot page (9,204 to 12,169); the pageable part held 410 to 2,143. The
+  8,000-token budget covers growth of all carried content, unpageable included
+  (`rewrite.py:677-678`). [Inferred] The live engine runs the fallback only at rotations, so between
+  rotations carried content can be higher.
 - [Measured on claude-opus-5-5 and claude-haiku-5-5] **Effort changes are the uncapped path.** On
   2.1.301 an effort change added a settings-only message (`spikes/m2/carried` finding 5). On
   2.1.302 `output_config` lands on that turn's first system message instead (the countdown, a file
   note, or the plan-mode text), so `classify_system` (`rewrite.py:461-462`) returns session-start
   and the message is never paged. Each change adds the size of whatever that message happens to
-  be: over the 16 changes in each 48-turn busy run, 27 to 2,733 tokens in one process and 27 to
+  be: over the 16 changes in each 48-turn busy run, 27 to 2,732 tokens in one process and 27 to
   3,444 with a resume every turn (bytes / 1.83; 14 to 1,801 in Contexto's estimator). In this
   schedule 4 of the 16 changes landed on a plan-mode entry (1,428 to 1,801 estimator tokens each);
   the other 12 added 14 to 388. The session-start class grew from 2,770 to 9,272 estimator tokens
@@ -194,9 +202,9 @@ how the CLI places reminders for those ids.
   messages.** All 4 `apply_flag_settings {effortLevel}` changes succeeded, but `output_config`
   changed only at the top level, and no message carried it (`effort_check.py`). The session-start
   class stayed at 0 and the not-pageable part at 534 tokens. Their environment message
-  (`messages[1]`, about 9.2 to 9.6 KB of text) has no `output_config`, so `classify_system` calls it
-  carried text with no recognisable kind, and `page_carried_text` pages unrecognised carried text
-  oldest first: it is the first message the fallback would page. The contract foresaw this case
+  (`messages[1]`, 9,674 and 9,205 bytes of text) has no `output_config`, so `classify_system`
+  calls it carried text with no recognisable kind, and `page_carried_text` pages unrecognised
+  carried text oldest first: it is the first message the fallback would page. The contract foresaw this case
   (`M2-contexto-proxy.md:89-90`, "a session start with no effort setting ... falls here").
 - **Earlier evidence, now explained by the model id.** `spikes/m2/carried` (2.1.301,
   claude-haiku-5-5) found context blocks only at `messages[0]` with no hooks, and hook context as
@@ -215,16 +223,15 @@ how the CLI places reminders for those ids.
   estimator tokens onto the scale test's engine, which had usage feedback, so the turn numbers are a
   rough guide: by bytes per turn the busy one-process rate (701) is 2.4 times the assumed profile
   (297), which would put that session's failure near turn 77 (about 2.1M) instead of 180.
-- **[Inferred] When it fails on claude-opus-5-5 and claude-haiku-5-5.** The bound breaks only if
-  effort changes keep coming. The scale test's F grew 38,400 tokens before `bound_too_small`. On
-  these ids the pageable role `system` text takes up to about 6,300 to 9,400 of that room (what
-  carried content at k held above its start once the fallback engaged in the resume run), leaving
-  about 29,000 to 32,000, which is about 50 to 80 effort changes at this spike's average of 406 to
-  554 estimator tokens per change. That average depends on the schedule: 4 of the 16 changes
-  coincided with a plan-mode entry. If none had, the other 12 changes' average (66 to 201 estimator
-  tokens) would give about 140 to 480 changes. This mixes the spike's estimator tokens with the
-  scale test's usage-fed F, so it is a rough guide too. Real rates depend on how often a user enters plan mode, edits files
-  outside the CLI, leaves tasks idle, resumes, and changes effort; none was measured on real usage.
+- **When it fails on claude-opus-5-5 and claude-haiku-5-5.** [Measured] Only effort changes added
+  content the fallback cannot page: each adds the size of that turn's first system message, 27 to
+  3,444 tokens (bytes / 1.83), and in the busy runs that was all of the unpageable growth (+6,502,
+  +8,867, +6,829). [Inferred] So the bound breaks only if effort changes keep coming. Their content
+  raises F, and `bound_too_small` fires once F leaves no window for the new turn
+  (`rewrite.py:774-775`): at F = 100,810 in `mixed`, against about 70,000 in `first` at 30M, so
+  about 30,800 tokens of F headroom, shared with the pageable residual. How many changes fit depends
+  on what each lands on (4 of the 16 here landed on a plan-mode entry) and on how often users change
+  effort, enter plan mode, edit files outside the CLI and resume; none was measured on real usage.
 
 ## Store and search (spikes/m2/scale/store)
 
@@ -251,9 +258,10 @@ paged message as its own page (`rewrite.py:698`), it paged 40 messages in turns 
 claude-opus-5-5 resume run (`fallback_paged_total` in `reminders/results/turns.csv`), and once it
 engages it eventually pages nearly every carried role `system` message, about 1.8 per turn in that
 schedule (88 in 48 turns) and more with a real model that makes more tool calls. A 30M session on
-Opus 5.5 would then hold about 2 to 3 times the 1,145 turn pages, about 3,000 pages or more: the
-3,000 to 6,000 rows below, where 44 to 39 of 86 queries reach the detailed results and a search
-takes 0.32 to 0.71 s.
+Opus 5.5 would then hold about 2 to 3 times the 1,145 turn pages, about 3,000 pages or more, most of
+them single small messages, so the 3,000 to 6,000 rows below (44 to 39 of 86 queries in the
+detailed results, 0.32 to 0.71 s per search) are a rough guide to this shape, not a measurement of
+it.
 
 Quality: 30 planted facts, 86 queries written before any result was seen and fixed across sizes.
 Distractor rates came from word frequencies in the owner's local Claude Code transcripts (counts
@@ -311,8 +319,9 @@ least 1 page in 500, an assumption), 6,000 pages leave 15 of 86 queries in the d
 
 Limits: synthetic sessions; one run per size for the CLI; proxy checkpoints above 0.5M
 fast-forwarded. "Under the bound" is in the fake upstream's unit, forwarded bytes / 1.83 on
-synthetic text, so the engine's usage feedback is self-consistent by construction and the
-135,954-against-150,000 margin was not tested against real estimate error. The fast-forward check
+synthetic text, so the engine's usage feedback is self-consistent by construction and the margin
+(largest measured request 135,954; largest fast-forwarded last request 144,176, 5,824 under the
+bound) was not tested against real estimate error. The fast-forward check
 against the all-HTTP path reaches turn 120 (3.2M), not 30M. Fast-forward skips the tool-loop
 requests of fast-forwarded turns (2.2 per turn), so their room and retained-snapshot store writes
 and the stream hold run only in the measured HTTP rounds. Recall accuracy is measured only for the

@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-18 04:44Z by claude (scale record answers round-2 review: 5.x claims by model id, 30M shape gap). Decisions taken and still open, with reasons:
+Updated 2026-10-18 04:58Z by claude (scale record answers round-3 review: F headroom argument, effort-count estimate removed). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -151,7 +151,9 @@ fake upstream, no model calls.
   blocker is real on 4.x ids. [Inferred, linear from the scale test's failure at turn 181 at 215
   per turn; a rough guide] `bound_too_small` from about turn 860, 180, and 90. By bytes per turn
   the busy rate is 2.4 times the scale test's profile, which would put the busy session's failure
-  near turn 77 (about 2.1M).
+  near turn 77 (about 2.1M). Also measured: the token countdown is on by default in 2.1.302, a
+  plan-mode entry adds about 2,720 tokens, and on resume a file-changed note is sent again on every
+  launch until the file is read again.
 - On 5.x ids (claude-opus-5-5, claude-haiku-5-5; probes on claude-sonnet-5, claude-fable-5) the
   same content arrives as role `system` messages, one per main request, which the 8,000-token
   fallback can page. On claude-opus-5-5 and claude-haiku-5-5 one uncapped path is left: an effort
@@ -163,17 +165,18 @@ fake upstream, no model calls.
   claude-fable-5 probes effort stayed top-level and nothing unpageable grew; there the session's
   environment message has no `output_config`, classifies as carried text, and is the first message
   the fallback would page.
-- What that means for the owner's seats (Opus 5.5, claude-opus-5-5): per-turn reminders are
-  pageable, and only effort changes add carried content that is never paged, 27 to 3,444 tokens
-  each (bytes / 1.83). [Inferred, not measured] The per-request role `system` text probably still
-  fits at 30M: the fallback holds it to about 8,000 tokens over its start (6,300 to 9,400 in the
-  48-turn resume run, where it ran every turn; live it runs only at rotations), against a
-  14,046-token margin under the bound at 30M. [Inferred] The fallback writes each paged message as
-  its own page, so such a session would reach about 3,000 pages or more by 30M, where search finds
-  the planted page for 44 to 39 of 86 queries at 0.32 to 0.71 s. The 4.x blocker applies only to
-  sessions on a 4.x id. Also measured: the token countdown is on by default in 2.1.302, a plan-mode
-  entry adds about 2,720 tokens, and on resume a file-changed note is sent again on every launch
-  until the file is read again.
+- What that means for the owner's seats (Opus 5.5, claude-opus-5-5), measured: per-turn reminders
+  are pageable, and only effort changes add carried content that is never paged, 27 to 3,444
+  tokens each (bytes / 1.83). The 4.x blocker applies only to sessions on a 4.x id.
+- What that means for the owner's seats, [inferred, not measured]: the per-request role `system`
+  text probably still fits at 30M. Carried content counts in the fixed head F, and more F shrinks
+  the window rather than pushing requests toward the bound. F was about 70,000 at 30M against the
+  100,810 at which `bound_too_small` first fired in the `mixed` run, about 30,800 tokens of room;
+  the pageable text held 410 to 2,143 once the fallback engaged in the 48-turn resume run, and
+  effort-change content adds to the same F. The fallback writes each paged message as its own
+  page, so such a session would reach about 3,000 pages or more by 30M, most of them single small
+  messages; the store spike's 3,000 to 6,000 rows (planted page found for 44 to 39 of 86 queries,
+  0.32 to 0.71 s) are a rough guide for that shape.
 - Search takes 0.71 s at 6,000 pages, but the planted page reaches the 3 detailed results for 61
   of 86 queries at 17 pages, 50 at 1,000, 44 at 3,000, and 39 at 6,000 (exact substring, newest
   first, no ranking).
@@ -206,16 +209,18 @@ and reports 0.2.7).
 This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
 - Keep STATUS, README, and the contract in step with `main`.
 - No live model runs. Zero-spend work toward 30M-token sessions, in order
-  (`docs/research/M2-scale-30m.md`): (1) stop carried growth, each part a contract rule change
-  that needs a new decision: for 4.x model ids, page carried context blocks under the fallback,
-  keeping the first message's blocks and the latest of each recognisable kind (for example the
-  token countdown); for 5.x ids, the part that applies to the owner's seats, stop
-  `classify_system` from classifying a system message as session-start just because an effort
-  change attached `output_config` to it (measured on claude-opus-5-5 and claude-haiku-5-5; on
-  claude-sonnet-5 and claude-fable-5 the session-start message has no `output_config` and is
-  pageable, so the decision has to identify it there too); (2) rank
-  search results (BM25 with a recency term); (3) cache page text in the MCP server and give
-  `index_text` a manifest; (4) hash each message once in the proxy.
+  (`docs/research/M2-scale-30m.md`):
+  - (1) Stop carried growth. Each part is a contract rule change that needs a new decision.
+    - 5.x ids (the owner's seats): stop `classify_system` from classifying a system message as
+      session-start just because an effort change attached `output_config` to it (measured on
+      claude-opus-5-5 and claude-haiku-5-5). On claude-sonnet-5 and claude-fable-5 the
+      session-start message has no `output_config` and is pageable, so the decision must identify
+      it there too.
+    - 4.x ids: page carried context blocks under the fallback, keeping the first message's blocks
+      and the latest of each recognisable kind (for example the token countdown).
+  - (2) Rank search results (BM25 with a recency term).
+  - (3) Cache page text in the MCP server and give `index_text` a manifest.
+  - (4) Hash each message once in the proxy.
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent

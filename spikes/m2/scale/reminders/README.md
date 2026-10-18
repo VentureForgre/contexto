@@ -156,7 +156,7 @@ project CLAUDE.md and the attribution note stay in `messages[0]` on every model.
 items share one system message, joined by a blank line. `analyze.py` splits them at known item starts
 to attribute sizes.
 
-### Effort changes on 5.x ids (measured, `effort_check.py`)
+### Effort changes on claude-opus-5-5 and claude-haiku-5-5, and on the claude-sonnet-5 and claude-fable-5 probes (measured, `effort_check.py`)
 
 On 2.1.301 an effort change added a settings-only message (`{role: system, content: [], output_config}`).
 On 2.1.302 with claude-opus-5-5 and claude-haiku-5-5, the field lands on the first system message the
@@ -165,7 +165,7 @@ turn already has. In opus55-stream these were: turn 6, the countdown (27 tok); t
 content plus an extra field, `classify_system` returns session-start. The message is then carried and
 never paged, and the session-start class grew from 2,770 to 9,272 (stream) and 11,637 (resume)
 Contexto tokens. Each change adds the size of whatever that turn's first system message happens to
-be: 27 to 2,733 tok in one process and 27 to 3,444 with a resume every turn (bytes/1.83; 14 to 1,801
+be: 27 to 2,732 tok in one process and 27 to 3,444 with a resume every turn (bytes/1.83; 14 to 1,801
 Contexto tokens). In this schedule the effort reset on turn 9 coincides with the plan-mode entry, so 4
 of the 16 changes carried the plan-mode text (1,428 to 1,801 Contexto tokens each); the other 12 added
 14 to 388. On resume the largest grow each cycle (non-plan increments 138, 263, 388 Contexto tokens)
@@ -178,7 +178,7 @@ with plan mode, edits and tasks.
 On the claude-sonnet-5 and claude-fable-5 probes all 4 `apply_flag_settings {effortLevel}` changes
 succeeded, but `output_config` changed only at the top level: `effort_check.py` shows no message with
 extra fields on any turn, the session-start class stays 0, and not-pageable stays at 534. The
-session's environment message (`messages[1]`, 9,648 and 9,179 bytes of text) then has no
+session's environment message (`messages[1]`, 9,674 and 9,205 bytes of UTF-8 text) then has no
 `output_config`, so `classify_system` returns carried text with no recognisable kind. `page_carried_text`
 pages unrecognised carried text oldest first, so it is the first message the fallback would page. The
 contract foresaw this case (`docs/milestones/M2-contexto-proxy.md:89-90`).
@@ -188,8 +188,10 @@ contract foresaw this case (`docs/milestones/M2-contexto-proxy.md:89-90`).
 Carried role-system text (the countdown, file notes, plan-mode text) is class carried-text. Once
 carried growth passes 8,000, `page_carried_text` pages it. In opus55-resume it first fired at turn 34
 (carried at k 12,704 -> 11,194) and had paged 40 messages by turn 48. From turn 34 on, carried content
-at k stayed between 9,618 and 12,704, about the initial 3,329 plus the 8,000 budget plus what one turn
-adds. What keeps rising underneath is the session-start class from effort changes. In the live engine
+at k stayed between 9,618 and 12,704. Most of that was effort content the fallback cannot page (9,204 to
+12,169); the pageable part held 410 to 2,143, after peaking at 3,488 (turn 32) before the fallback
+engaged. The 8,000-token budget covers growth of all carried content, unpageable included
+(`rewrite.py:677-678`), so each effort change leaves less room for pageable text. In the live engine
 the fallback runs only at rotations. This simulation runs it every turn, so live carried size between
 rotations can be higher. Each paged message is its own page (`rewrite.py:698`).
 
@@ -242,13 +244,13 @@ figures.
    are a rough guide: by bytes per turn the busy one-process rate (701) is 2.4 times the scale test's
    assumed profile (297), which would put that session's failure near turn 77 (about 2.1M) instead of
    180. For claude-opus-5-5 and claude-haiku-5-5 the bound breaks only if effort changes keep coming.
-   Each one adds the size of that turn's first system message: 27 to 2,733 tok in one process and 27
-   to 3,444 with a resume every turn (bytes/1.83). The scale test's F grew 38,400 tokens before
-   `bound_too_small`; the pageable role-system text can take up to about 6,300 to 9,400 of that (what
-   carried content at k held above its start once the fallback engaged in opus55-resume), leaving
-   about 29,000 to 32,000, about 50 to 80 changes at this schedule's 406 to 554 Contexto tokens per
-   change. 4 of the 16 changes landed on a plan-mode entry; at the other 12's average (66 to 201) it
-   would be about 140 to 480. The scale test modelled none of this role-system text (one system
+   Each one adds the size of that turn's first system message, never paged: 27 to 2,732 tok in one
+   process and 27 to 3,444 with a resume every turn (bytes/1.83). That content raises the fixed head F,
+   which shrinks the window rather than pushing requests toward the bound (`rewrite.py:731`, `:735`).
+   The limit is `bound_too_small`, which fired at F = 100,810 in the scale test's `mixed` run, against
+   an F of about 70,000 in its `first` run at 30M: about 30,800 tokens of F headroom. The pageable
+   role-system text held 410 to 2,143 once the fallback engaged in opus55-resume, so most of that
+   headroom is left for effort content. The scale test modelled none of this role-system text (one system
    message per session, `../proxy/synth.py:176`). Real per-turn rates depend on how often a user
    enters plan mode, edits files outside the CLI, leaves tasks idle, resumes and changes effort. None
    of these was measured on real usage.
@@ -261,16 +263,18 @@ message. The token countdown appears on every turn, a plan-mode block (2.7k) on 
 file-changed note (258 to 358) on each external edit, repeated on each resume until the file is read
 again, and a task-tools reminder (250 to 330) about every 10 turns. Contexto carries all of them
 uncapped. Measured with Contexto's estimator, carried content grows 45 tokens per turn at the floor,
-about 215 per turn in a busy one-process session (the rate the scale test assumed), and about 425 per
-turn when every turn is a resume. So the blocker is real for 4.x ids.
+about 215 per turn in a busy one-process session (by bytes per turn, 2.4 times the scale test's
+assumed profile; finding 6), and about 425 per turn when every turn is a resume. So the blocker is
+real for 4.x ids.
 
 On the 5.x ids (claude-opus-5-5, claude-haiku-5-5; probes on claude-sonnet-5, claude-fable-5),
 reminders never leave `messages[0]`. The same content comes as role-`system` messages that the
 8,000-token fallback can page. The exception, on claude-opus-5-5 and claude-haiku-5-5, is an
 `--effort` change: it makes that turn's system message session-start class, carried forever. On
-those ids Contexto's carried content therefore grows only at effort changes (27 to 3,444 tokens
+those ids the carried content Contexto never pages grows only at effort changes (27 to 3,444 tokens
 each, bytes/1.83), not per turn. On the claude-sonnet-5 and claude-fable-5 probes nothing unpageable
-grew, and the session's environment message classifies as carried text, so it is pageable too.
+grew, but the session's environment message classifies as carried text, so it is the first message
+the fallback would page, a case the 5.x decision has to handle.
 
 ## Limits
 
