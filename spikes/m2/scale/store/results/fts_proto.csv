@@ -1,0 +1,59 @@
+n,what,query,seconds,hits,bytes,same
+1000,current search (rare),E4127,0.116143,1,,
+1000,current search (rare),SUP-48213,0.112016,1,,
+1000,current search (rare),ctx-artifacts-euw3-7f2a,0.110162,1,,
+1000,current search (common),self,0.102841,1000,,
+1000,current search (common),return,0.103560,1000,,
+1000,current search (common),import,0.101213,1000,,
+1000,current search (multi),the staging DB port,0.109368,1,,
+1000,current search (multi),failed with exit code,0.109159,251,,
+1000,current search (multi),Renamed parse_header to,0.112342,1,,
+1000,text cache: load all pages,,0.175258,,32941426,
+1000,text cache search (rare),E4127,0.014356,1,,True
+1000,text cache search (rare),SUP-48213,0.010663,1,,True
+1000,text cache search (rare),ctx-artifacts-euw3-7f2a,0.005524,1,,True
+1000,text cache search (common),self,0.000781,1000,,True
+1000,text cache search (common),return,0.001166,1000,,True
+1000,text cache search (common),import,0.001470,1000,,True
+1000,text cache search (multi),the staging DB port,0.008126,1,,True
+1000,text cache search (multi),failed with exit code,0.007237,251,,True
+1000,text cache search (multi),Renamed parse_header to,0.007837,1,,True
+1000,fts5 trigram: insert+commit per page (median),,0.001729,,105844736,
+1000,fts5 trigram search (rare),E4127,0.000041,1,,True
+1000,fts5 trigram search (rare),SUP-48213,0.000062,1,,True
+1000,fts5 trigram search (rare),ctx-artifacts-euw3-7f2a,0.000195,1,,True
+1000,fts5 trigram search (common),self,0.007042,1000,,True
+1000,fts5 trigram search (common),return,0.006108,1000,,True
+1000,fts5 trigram search (common),import,0.005778,1000,,True
+1000,fts5 trigram search (multi),the staging DB port,0.000199,1,,True
+1000,fts5 trigram search (multi),failed with exit code,0.001989,251,,True
+1000,fts5 trigram search (multi),Renamed parse_header to,0.000253,1,,True
+6000,current search (rare),E4127,0.762998,1,,
+6000,current search (rare),SUP-48213,0.700875,1,,
+6000,current search (rare),ctx-artifacts-euw3-7f2a,0.675554,1,,
+6000,current search (common),self,0.645325,6000,,
+6000,current search (common),return,0.644085,6000,,
+6000,current search (common),import,0.715181,6000,,
+6000,current search (multi),the staging DB port,0.765656,1,,
+6000,current search (multi),failed with exit code,0.723605,1572,,
+6000,current search (multi),Renamed parse_header to,0.724234,1,,
+6000,text cache: load all pages,,1.061344,,196327963,
+6000,text cache search (rare),E4127,0.086708,1,,True
+6000,text cache search (rare),SUP-48213,0.064538,1,,True
+6000,text cache search (rare),ctx-artifacts-euw3-7f2a,0.033445,1,,True
+6000,text cache search (common),self,0.004780,6000,,True
+6000,text cache search (common),return,0.006944,6000,,True
+6000,text cache search (common),import,0.009124,6000,,True
+6000,text cache search (multi),the staging DB port,0.049402,1,,True
+6000,text cache search (multi),failed with exit code,0.043408,1572,,True
+6000,text cache search (multi),Renamed parse_header to,0.048013,1,,True
+6000,fts5 trigram: insert+commit per page (median),,0.001741,,632303616,
+6000,fts5 trigram search (rare),E4127,0.000088,1,,True
+6000,fts5 trigram search (rare),SUP-48213,0.000107,1,,True
+6000,fts5 trigram search (rare),ctx-artifacts-euw3-7f2a,0.000448,1,,True
+6000,fts5 trigram search (common),self,0.042905,6000,,True
+6000,fts5 trigram search (common),return,0.039036,6000,,True
+6000,fts5 trigram search (common),import,0.037033,6000,,True
+6000,fts5 trigram search (multi),the staging DB port,0.000583,1,,True
+6000,fts5 trigram search (multi),failed with exit code,0.012327,1572,,True
+6000,fts5 trigram search (multi),Renamed parse_header to,0.000635,1,,True
