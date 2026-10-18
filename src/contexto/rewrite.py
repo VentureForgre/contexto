@@ -280,8 +280,13 @@ def _message_hash(message: dict, dialect: Dialect) -> str:
         # Fast path, the same value: without a cache_control key anywhere and with no single text block
         # to unwrap, normalisation copies the message unchanged. A cache_control key would appear in
         # the canonical JSON as the quoted name; the name inside a string value only takes the slow path.
-        data = canonical_bytes(message)
-        if b'"cache_control"' not in data:
+        # A message that cannot be encoded as it stands (a lone surrogate only inside cache_control,
+        # which normalisation drops) also takes the slow path, so it fails or hashes as before.
+        try:
+            data = canonical_bytes(message)
+        except UnicodeEncodeError:
+            data = None
+        if data is not None and b'"cache_control"' not in data:
             return hashlib.sha256(data).hexdigest()
     return hashlib.sha256(canonical_bytes(dialect.normalise(message))).hexdigest()
 
@@ -406,7 +411,8 @@ _MEMO: ContextVar[_RequestMemo | None] = ContextVar("contexto_rewrite_memo", def
 @contextmanager
 def request_scope(messages: Any):
     """Cache hashes and turn starts for one request whose message list is ``messages``. A nested scope
-    (``rewrite`` inside ``RewriteEngine``) reuses the outer one."""
+    (``rewrite`` inside ``RewriteEngine``) reuses the outer one. A message dict hashed inside a scope
+    must not be changed afterwards in that scope: the cache returns the hash it computed first."""
     if _MEMO.get() is not None:
         yield
         return

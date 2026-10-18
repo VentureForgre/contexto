@@ -98,6 +98,16 @@ def test_a_lone_surrogate_fails_to_hash_on_both_paths_alike():
         message_hash(message)
 
 
+def test_a_lone_surrogate_only_inside_cache_control_hashes_like_the_reference():
+    # Normalisation drops cache_control, so the reference path never encodes the surrogate; the fast
+    # path must fall back to it rather than raise (reviewer-1 on #205).
+    message = json.loads(r'{"role":"user","content":[{"type":"text","text":"hi",'
+                         r'"cache_control":{"type":"ephemeral","ttl":"\ud800"}}]}')
+    assert message_hash(message) == reference_hash(message, ANTHROPIC)
+    with request_scope([message]):
+        assert message_hash(message) == reference_hash(message, ANTHROPIC)
+
+
 def test_cache_control_and_string_conversion_still_hash_equal():
     plain = {"role": "user", "content": "the prompt"}
     block = {"role": "user", "content": [{"type": "text", "text": "the prompt", "cache_control": {"type": "ephemeral"}}]}

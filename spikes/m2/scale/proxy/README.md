@@ -279,7 +279,12 @@ Fixes 2, 4 and most of 6 below are applied in `src/`; the output is unchanged by
 - **Pathological change.** A body that parses but cannot be re-serialized (nesting between the decoder's
   and the encoder's recursion limits) used to be skipped with `transform_skipped`. With a preserving
   transform it now reaches the engine and fails as `transform_error`. The CLI's bytes are forwarded
-  either way.
+  either way. On Python 3.14.6 both the decoder and the encoder handle 100,000 levels, so this case
+  was not reached here.
+- **Deep nesting, the other way.** A message nested deeper than the recursion limit, with no
+  `cache_control`, used to raise `RecursionError` in normalisation (`transform_error`); the fast hash
+  path does not normalise, so it now hashes and goes through (reviewer-2 on #205, checked at 5,000 and
+  100,000 levels). Neither case comes from Claude Code.
 
 ### Equivalence
 
