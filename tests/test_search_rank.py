@@ -351,6 +351,90 @@ def test_the_newest_page_shown_in_detail_is_a_real_turn_page_when_one_matches(st
     assert set(found[5:]) == set(blocks)
 
 
+def test_codex_developer_pages_are_context_pages_and_hold_no_searchable_text(store):
+    # The fallback pages a carried Codex developer item on its own (test_carried_bound). Search reads
+    # Responses items through as_message, which drops system-like items (B23), so such a page never
+    # matches; it is still classed as context, so it would rank after every turn page if it did.
+    import test_codex as codex
+    from contexto.store.pages import build_page, is_context_page
+
+    dev = build_page(b"k" * 32, [codex.dev("synthetic standing note: HTTP_TIMEOUT_S is 30")], 3)
+    assert is_context_page(dev)
+    assert not is_context_page(build_page(b"k" * 32, [codex.prompt("HTTP_TIMEOUT_S"), codex.dev("note")], 3))
+    store.page_out([[codex.dev("synthetic standing note: HTTP_TIMEOUT_S is 30")]], 3)
+    assert store.search("HTTP_TIMEOUT_S") == []
+
+
+STATED = ("The deploy config changed and the current state is green. Fixed the timeout in "
+          "src/contexto/mcp.py: HTTP_TIMEOUT_S is now 45")
+
+
+def engine_store(monkeypatch, shape):
+    """A store paged by PR #203's RewriteEngine over 59 turns of Claude Code 2.1.302 shapes, with
+    file-changed notes that quote ``HTTP_TIMEOUT_S = 30`` and turn 36 saying it is now 45. Turns are
+    paged at each rotation and the context blocks paged at that rotation get the next page turns, so
+    a note sent at turn 32 or 35 is numbered after turn 36's page (reviewer-2 on PR #204)."""
+    import test_carried_bound as cb
+    from contexto.rewrite import Config, RewriteEngine
+
+    def note(t):
+        return ("Note: /repo/src/contexto/mcp.py changed on disk since you last read it. That's usually "
+                "deliberate, so take it as the current state.\n"
+                + f"{t}\tHTTP_TIMEOUT_S = 30  # synthetic changed line\n" * 12)
+
+    monkeypatch.setattr(cb, "file_note", note)
+    paged = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(paged, config=Config(**cb.RESUME_CONFIG))
+    msgs: list = []
+    for t in range(1, 60):
+        turn = shape(cb, t)
+        if t == 36:
+            turn[-1] = {"role": "assistant", "content": [{"type": "text", "text": f"ok 36 {cb.FILL}\n{STATED}"}]}
+        start = next(i for i, m in enumerate(turn) if m["role"] == "assistant")
+        msgs = msgs + turn[:start]
+        engine(cb.request(msgs), {}, cb.MESSAGES)
+        msgs = msgs + turn[start:]
+    paged.set_window(200_000, 2.0)
+    return paged
+
+
+@pytest.mark.parametrize("shape", [lambda cb, t: cb.turn_4x(t), lambda cb, t: cb.turn_5x(t),
+                                   lambda cb, t: cb.turn_5x(t, opus=False)], ids=["4x", "opus-5-5", "sonnet-5"])
+def test_turn_pages_are_shown_before_paged_reminders_numbered_after_them(monkeypatch, shape):
+    from contexto.store.pages import is_context_page
+
+    paged = engine_store(monkeypatch, shape)
+    pages = list(paged.pages.values())
+    [stated] = [p for p in pages if STATED in json.dumps(p["messages"])]
+    notes = [p for p in pages if is_context_page(p) and "HTTP_TIMEOUT_S = 30" in json.dumps(p["messages"])]
+    assert len(notes) >= 5 and max(p["turn"] for p in notes) > stated["turn"]  # the case this guards
+    turns = {p["id"]: (is_context_page(p), p["turn"]) for p in pages}
+    for query in ("HTTP_TIMEOUT_S", "changed"):
+        reply = search(paged, query)
+        lines = reply.split("\n")
+        rows = [i for i, line in enumerate(lines) if re.match(r"pg_[0-9a-f]{16} \(turn \d+\)", line)]
+        # The turn that set the current value is the first page shown, above every stale note.
+        assert lines[rows[0]] == f"{stated['id']} (turn {stated['turn']})", query
+        assert detailed(reply)[0] == stated["turn"] and listed(reply), query
+        headers = [i for i, line in enumerate(lines) if line == mcp.SEARCH_CONTEXT_HEADER]
+        assert len(headers) == 2, query  # once in the detailed part, once in the list
+        more = lines.index("[more matching pages, newest first; recall one at its offset:]")
+        for part, (lo, hi) in zip(headers, ((0, more), (more, len(lines)))):
+            assert lo < part < hi
+            shown = [lines[i].split()[0] for i in rows if lo < i < hi]
+            assert [turns[pid] for pid in shown] == sorted((turns[pid] for pid in shown),
+                                                           key=lambda k: (not k[0], k[1]), reverse=True)
+            first_context = next(i for i in rows if lo < i < hi and turns[lines[i].split()[0]][0])
+            assert lines[first_context - 1] == mcp.SEARCH_CONTEXT_HEADER
+
+
+def test_the_reply_has_no_context_line_when_no_context_page_is_shown(store):
+    store.page_out([page(FILLER + f"\nneedle {t}") for t in range(5)], 1)
+    store.page_out([block_page("needle in a reminder")], 2)
+    assert mcp.SEARCH_CONTEXT_HEADER in search(store, "needle")
+    assert mcp.SEARCH_CONTEXT_HEADER not in search(store, "needle 3")
+
+
 # The reply
 
 

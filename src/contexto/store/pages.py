@@ -229,11 +229,14 @@ def _is_context_text(text: Any) -> bool:
 
 
 def is_context_page(page: dict[str, Any]) -> bool:
-    """True for a page that holds no turn: only system messages, or user messages made only of
-    ``<system-reminder>`` context blocks. Lane A's fallback pages carried system messages one per
-    page, and the bounded fallback pages each paged context block as a user message holding that
-    block (D32). Read from the messages, not the stub (a paged block's stub has ``reminder_text``).
-    Search ranks these pages after every turn page (D34)."""
+    """True for a page that holds no turn: only system messages (Codex: ``developer`` items), or user
+    messages made only of ``<system-reminder>`` context blocks. The bounded fallback pages carried
+    system messages and Codex developer items one per page (lane A), and each paged context block as
+    a user message holding that block (D32). Read from the messages, not the stub (a paged block's
+    stub has ``reminder_text``). Search ranks these pages after every turn page, and its reply shows
+    them after every turn page (D34). A Codex developer page has no searchable text today (search
+    reads Responses items through ``as_message``, which drops system-like items, B23), so it never
+    matches; it is recognised so that it would rank as context if that changed."""
     messages = page.get("messages")
     if not isinstance(messages, list) or not messages:
         return False
@@ -241,7 +244,7 @@ def is_context_page(page: dict[str, Any]) -> bool:
         if not isinstance(message, dict):
             return False
         role, content = message.get("role"), message.get("content")
-        if role == "system":
+        if role in ("system", "developer"):  # developer: a Codex (Responses) item
             continue
         if role != "user":
             return False

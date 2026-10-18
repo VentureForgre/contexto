@@ -26,6 +26,7 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
+from contexto.store.pages import is_context_page
 from contexto.store.render import (MATCH_CONTEXT, MATCHES_PER_PAGE, MAX_CHARS_PER_TOKEN, RECALL_LIMIT, match_lines,
                                    matching_line_starts, recall_chunk, recall_limit, render_page)
 from contexto.store.search import SHOWN_IN_DETAIL, Query, text_matches
@@ -40,6 +41,10 @@ SEARCH_LIMIT = SHOWN_IN_DETAIL  # the best pages, shown with their matching line
 # sit above one that holds the whole query (reviewer-2 on PR #204). In the reply, not the tool
 # description, so the head the description adds to every request is unchanged.
 SEARCH_BEST_HEADER = "[best matching pages by relevance, shown newest first:]"
+# Put before the first paged context block in each part of a search reply. A context page's turn is
+# when the proxy paged the block, which can be long after the turn that sent it and after turns that
+# supersede it, so context pages are shown after every turn page (reviewer-2 on PR #204, D34).
+SEARCH_CONTEXT_HEADER = "[paged reminders and system messages, not dated by turn:]"
 SEARCH_MORE_LIMIT = 50  # the next best pages, listed compactly newest first (page id, turn, match offsets)
 # Per-turn recall budget (M2 contract PR #69): what recall, search, and state return this turn.
 BUDGET_SPENT = ("Recall budget for this turn is used up; answer from what is in view, or say the detail is "
@@ -423,9 +428,12 @@ class Server:
         found = self.store.search(query)  # best first (D34)
         pages = [(page_id, self.store.get_page(page_id) or {}) for page_id in found[:SEARCH_LIMIT + SEARCH_MORE_LIMIT]]
         # The best pages are chosen by relevance and shown newest first, so among them the newest statement
-        # of a fact comes first (D28); the next best are listed newest first too.
-        hits = [_hit_rows(page_id, page, query) for page_id, page in _newest_first(pages[:SEARCH_LIMIT])]
-        more = [_more_row(page_id, page, query) for page_id, page in _newest_first(pages[SEARCH_LIMIT:])]
+        # of a fact comes first (D28); the next best are listed newest first too. In each part turn pages
+        # come first and paged context blocks after them, under their own line (D34).
+        hits = _with_context_header([(_hit_rows(page_id, page, query), page)
+                                     for page_id, page in _newest_first(pages[:SEARCH_LIMIT])])
+        more = _with_context_header([([_more_row(page_id, page, query)], page)
+                                     for page_id, page in _newest_first(pages[SEARCH_LIMIT:])])
         in_view_found = [0]
         in_view = self._in_view_rows(query, in_view_found)  # None: in view not checked
         lead = in_view or []
@@ -436,7 +444,7 @@ class Server:
             lines = [t for t, _ in lead] + [SEARCH_BEST_HEADER] + [t for t, _ in rows]
             if listed:
                 lines.append("[more matching pages, newest first; recall one at its offset:]")
-                lines += [t for t, _ in more[:listed]]
+                lines += [t for entry in more[:listed] for t, _ in entry]
             if len(found) > detailed + listed:
                 lines.append(f"[{len(found) - detailed - listed} more matching pages not shown; {why}]")
             return "\n".join(lines)
@@ -465,10 +473,11 @@ class Server:
                         picked.update(rows=rows, pages=detailed + listed)
                         return [text]
             # Not even one whole hit: its page line and matching lines, without context, as far as they fit.
-            header, *lines = hits[0]
+            context = [row for row in hits[0] if row[0] == SEARCH_CONTEXT_HEADER]
+            header, *lines = [row for row in hits[0] if row[0] != SEARCH_CONTEXT_HEADER]
             matches = [row for row in lines if row[0].startswith(">")]
             for count in range(len(matches), 0, -1):
-                rows = [header, *matches[:count], (f"  [the rest of this hit is not shown; {why}]", None)]
+                rows = [*context, header, *matches[:count], (f"  [the rest of this hit is not shown; {why}]", None)]
                 text = render(rows, 1, 0, why)
                 if len(text) <= cap:
                     picked.update(rows=rows, pages=1)
@@ -592,11 +601,29 @@ Row = tuple[str, "tuple[Any, ...] | None"]
 
 
 def _newest_first(pages: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:
-    def key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
+    """Turn pages newest first, then pages of paged context blocks newest first (D34).
+
+    A context page's turn is the turn at which the proxy paged the block (PR #203 pages a block at a
+    rotation, numbered after every turn paged by then), not the turn that sent it, so it says nothing
+    about which of a context page and a turn page is newer."""
+    def key(item: tuple[str, dict[str, Any]]) -> tuple[bool, int, str]:
         turn = item[1].get("turn")
-        return (turn if isinstance(turn, int) and not isinstance(turn, bool) else -1, item[0])
+        return (not is_context_page(item[1]), turn if isinstance(turn, int) and not isinstance(turn, bool) else -1,
+                item[0])
 
     return sorted(pages, key=key, reverse=True)
+
+
+def _with_context_header(entries: list[tuple[list[Row], dict[str, Any]]]) -> list[list[Row]]:
+    """Each entry's rows, with ``SEARCH_CONTEXT_HEADER`` put before the first context page's rows, so
+    the line is shown exactly when a context page is. ``entries`` are in ``_newest_first`` order."""
+    out: list[list[Row]] = []
+    headed = False
+    for rows, page in entries:
+        if not headed and is_context_page(page):
+            rows, headed = [(SEARCH_CONTEXT_HEADER, None), *rows], True
+        out.append(rows)
+    return out
 
 
 def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:

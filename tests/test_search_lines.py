@@ -345,7 +345,8 @@ def test_a_stub_only_match_shows_the_stub_line_and_lists_as_stub():
     reply = search(store, EMPTY_SYSTEM_STUB)
     assert f"{newest[0]} (turn 5)\n> stub: " in reply  # the stub line is the matching line
     head, compact = reply.split("\n[more matching pages, newest first; recall one at its offset:]\n")
-    assert compact.split("\n") == [f"{pid} (turn {store.get_page(pid)['turn']}) @stub" for pid in newest[3:]]
+    assert head.split("\n")[1] == compact.split("\n")[0] == mcp.SEARCH_CONTEXT_HEADER  # system pages hold no turn
+    assert compact.split("\n")[1:] == [f"{pid} (turn {store.get_page(pid)['turn']}) @stub" for pid in newest[3:]]
     assert events(store, "contexto_search")[-1]["returned"] == []  # no page text was returned
 
 
