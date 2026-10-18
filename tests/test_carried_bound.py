@@ -17,6 +17,8 @@ import copy
 import json
 from pathlib import Path
 
+import pytest
+
 from contexto.canonical import canonical_bytes
 from contexto.rewrite import (
     SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION,
@@ -436,6 +438,49 @@ def test_a_restart_after_block_paging_sends_the_same_bytes():
     got, _, events = after(request(copy.deepcopy(final)), {}, MESSAGES)
     assert "epoch_resumed" in names(events)
     assert canonical_bytes(got) == canonical_bytes(expected)
+
+
+@pytest.mark.parametrize("opus", [True, False], ids=["opus-5-5", "sonnet-5"])
+@pytest.mark.parametrize("restart_at", [22, 27, 33, 40])  # rotations at turns 21 and 32 or 33
+def test_a_restart_after_settings_change_paging_sends_the_same_bytes(opus, restart_at):
+    # D33 pages superseded settings changes and protects the latest one and the session-start message
+    # (with output_config on opus, without it on sonnet-5): a resumed engine must carry exactly what
+    # the uninterrupted one does, at the turn start and inside the tool loop.
+    cfg = Config(**RESUME_CONFIG)
+    steady = RewriteEngine(EpochStore(), config=cfg)
+    store = EpochStore()
+    before = RewriteEngine(store, config=cfg)
+    msgs: list[dict] = []
+    for t in range(1, restart_at):
+        turn = turn_5x(t, opus)
+        msgs = msgs + turn[:2]
+        steady(request(copy.deepcopy(msgs)), {}, MESSAGES)
+        before(request(copy.deepcopy(msgs)), {}, MESSAGES)
+        msgs = msgs + turn[2:4]
+        steady(request(copy.deepcopy(msgs)), {}, MESSAGES)
+        before(request(copy.deepcopy(msgs)), {}, MESSAGES)
+        msgs = msgs + turn[4:]
+    state = next(iter(before.states.values()))
+    systems = [i for i in range(state.k) if msgs[i].get("role") == "system"]
+    assert state.paged_carried, "the fallback must have paged before the restart"
+    if opus:
+        changes = [i for i in systems if classify_system(msgs, i) == "settings_change"]
+        assert any(message_hash(msgs[i]) in state.paged_carried for i in changes), "a settings change was paged"
+        assert changes[-1] in carried_systems(msgs, state.k, state.paged_carried)[0]  # the latest is protected
+    assert 1 in carried_systems(msgs, state.k, state.paged_carried)[0]  # the session-start message
+    after = RewriteEngine(store, config=cfg)
+    resumed = None
+    for t in range(restart_at, restart_at + 4):
+        turn = turn_5x(t, opus)
+        for cut in (2, 4, len(turn)):
+            sent = msgs + turn[:cut]
+            expected, _, _ = steady(request(copy.deepcopy(sent)), {}, MESSAGES)
+            got, _, events = after(request(copy.deepcopy(sent)), {}, MESSAGES)
+            if resumed is None:
+                resumed = names(events)
+            assert canonical_bytes(got) == canonical_bytes(expected), (t, cut)
+        msgs = msgs + turn
+    assert "epoch_resumed" in resumed and "carried_reclassified" not in resumed
 
 
 def test_the_fallback_still_pages_carried_developer_items_on_codex():
