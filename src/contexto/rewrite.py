@@ -592,6 +592,22 @@ def carried_systems(messages: list[dict], k: int, paged: frozenset[str] = frozen
     return keep, unclassified
 
 
+def reclassified_carried(messages: list[dict], k: int, paged: frozenset[str]) -> int:
+    """Rule 16 across the D32 and D33 upgrade: how many system messages in M[0..k) this version carries
+    although the resumed record's paged set names them by hash, and that v0.2.8 hid. v0.2.8 hid any
+    carried text message whose hash was paged; this version carries one anyway when it is the
+    session-start message (the claude-sonnet-5 and claude-fable-5 environment message, which v0.2.8
+    classified as carried text) or the latest of its kind (protected even when an older byte-identical
+    copy was paged). Messages with settings fields are left out: v0.2.8 classified them as
+    session-start and never paged them. The record does not say which version wrote it, so on a record
+    this version wrote the count can include a protected latest copy that was already carried; it is
+    an upper bound on what changed. Context blocks need no check: v0.2.8 never paged one."""
+    if not paged:
+        return 0
+    indexes, _ = carried_systems(messages, k, paged)
+    return sum(1 for i in indexes if settings_fields(messages[i]) is None and message_hash(messages[i]) in paged)
+
+
 def carried_blocks(messages: list[dict], k: int, paged: frozenset[str] = frozenset()) -> list[tuple[int, int, dict]]:
     """(message index, block index, block) for every context block of the turn starts in M[0..k) that the
     fallback has not paged (D32), in original order."""
@@ -1411,7 +1427,8 @@ class RewriteEngine:
     Rule 16 (contract PR #176): the main conversation writes its epoch record at every turn start and
     on leaving degraded mode, after the transform and before the request is sent; a new engine reads
     the record once and, at the first request of the matching conversation, resumes the epoch when
-    every check holds. A resumed engine sends the same request bytes as the old one would have. Its
+    every check holds. A resumed engine sends the same request bytes as the old one would have, except
+    once after an upgrade that reclassifies carried content (``carried_reclassified``). Its
     first rule 4 estimate is not the same: the previous request's real input (``last_input_tokens``)
     is per-request and not recorded, so that first decision sizes from a full estimate."""
 
@@ -1530,9 +1547,12 @@ class RewriteEngine:
             return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": "other_conversation"}]
         self._record_consumed = True
         token = _DIALECT.set(dialect)
+        messages = request.get(dialect.field) or []
+        reclassified = 0
         try:
-            state, reason = resume_state(self._record, request, request.get(dialect.field) or [], dialect,
-                                         self.config)
+            state, reason = resume_state(self._record, request, messages, dialect, self.config)
+            if state is not None:
+                reclassified = reclassified_carried(messages, state.k, state.paged_carried)
         except (KeyError, TypeError, ValueError, AttributeError):
             state, reason = None, "unreadable"  # a field the store let through but the engine cannot use
         finally:
@@ -1543,7 +1563,12 @@ class RewriteEngine:
             return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": "pages_missing"}]
         self._set_main(key)
         self._resumed = True
-        return state, [{"event": "epoch_resumed", "epoch": state.epoch, "k": state.k}]
+        events = [{"event": "epoch_resumed", "epoch": state.epoch, "k": state.k}]
+        if reclassified:
+            # D33: a record written before D32 and D33 can have paged a message this version never
+            # pages; it is carried again from this request on (one cache write), and the count says so.
+            events.append({"event": "carried_reclassified", "epoch": state.epoch, "count": reclassified})
+        return state, events
 
     def _pages_present(self, turns_paged: int) -> bool:
         """Packet A31: the resumed epoch's index and recall need its paged turns, one page per turn, so

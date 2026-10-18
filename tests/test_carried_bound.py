@@ -14,6 +14,8 @@ the text is synthetic.
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 from contexto.canonical import canonical_bytes
 from contexto.rewrite import (
@@ -26,6 +28,8 @@ from contexto.rewrite import (
     carried_tokens,
     classify_system,
     context_block_kind,
+    message_hash,
+    message_text,
     page_carried_text,
     turn_starts,
 )
@@ -152,6 +156,12 @@ def turn_5x(t: int, opus: bool = True) -> list[dict]:
 
 def session_5x(turns: int, opus: bool = True) -> list[dict]:
     return [m for t in range(1, turns + 1) for m in turn_5x(t, opus)]
+
+
+# Small enough that 5.x sessions rotate and engage the fallback within 40 turns (restart tests, and
+# the v0.2.8 record in fixtures/, which tests/fixtures/make_v028_epoch_record.py wrote with it).
+RESUME_CONFIG = dict(bound=60_000, headroom_floor=2_000, pin_budget=200, index_budget=200, min_turn_room=2_000,
+                     carried_text_budget=1_500, carried_budget=1_000_000)
 
 
 def request(messages: list[dict]) -> dict:
@@ -452,3 +462,48 @@ def test_the_fallback_still_pages_carried_developer_items_on_codex():
         _DIALECT.reset(token)
     paged = next(e for e in events if e["event"] == "carried_paged")
     assert paged["count"] == 11 and paged["context_blocks"] == 0 and len(new.paged_carried) == 11
+
+
+# Rule 16 across the upgrade: records written before D32 and D33 ----------------------------------
+
+FIXTURES = Path(__file__).with_name("fixtures")
+
+
+def placeholder_pages(store: EpochStore, count: int) -> None:
+    """A resume checks only that the store holds the record's ``turns_paged`` pages (packet A31); the
+    request bytes come from the record's texts and the CLI's messages, not from the pages."""
+    store.page_out([[{"role": "user", "content": f"placeholder page {i}"}] for i in range(count)], 0)
+
+
+def test_a_v028_record_resumes_and_logs_that_it_carries_again_what_v028_paged():
+    # Written by v0.2.8's rewrite.py (tests/fixtures/make_v028_epoch_record.py): its fallback paged
+    # the claude-sonnet-5 environment message as carried text. D33 classifies it as session-start,
+    # never paged, so the resumed engine carries it again from this request on.
+    record = json.loads((FIXTURES / "v028_epoch_sonnet5.json").read_text(encoding="utf-8"))
+    msgs = session_5x(39, opus=False)
+    assert message_hash(msgs[1]) in record["paged_carried"]
+    store = EpochStore(record)
+    placeholder_pages(store, record["turns_paged"])
+    engine = RewriteEngine(store, config=Config(**RESUME_CONFIG))
+    final = msgs + turn_5x(40, opus=False)[:2]
+    got, _, events = engine(request(copy.deepcopy(final)), {}, MESSAGES)
+    assert names(events)[:2] == ["epoch_resumed", "carried_reclassified"]
+    assert events[1] == {"event": "carried_reclassified", "epoch": record["epoch"], "count": 1}
+    assert "rotation" not in names(events)
+    carried = [m for m in got["messages"] if m.get("role") == "system" and ENVIRONMENT[:40] in message_text(m)]
+    assert len(carried) == 1  # the environment message is carried again
+
+
+def test_a_record_this_version_wrote_resumes_without_carried_reclassified():
+    for opus in (True, False):
+        store = EpochStore()
+        before = RewriteEngine(store, config=Config(**RESUME_CONFIG))
+        msgs: list[dict] = []
+        for t in range(1, 40):
+            msgs = msgs + turn_5x(t, opus)[:2]
+            before(request(copy.deepcopy(msgs)), {}, MESSAGES)
+            msgs = msgs + turn_5x(t, opus)[2:]
+        assert next(iter(before.states.values())).paged_carried
+        after = RewriteEngine(store, config=Config(**RESUME_CONFIG))
+        _, _, events = after(request(msgs + turn_5x(40, opus)[:2]), {}, MESSAGES)
+        assert "epoch_resumed" in names(events) and "carried_reclassified" not in names(events), opus

@@ -1,0 +1,50 @@
+{
+ "anchor": {
+  "hash": "2b4d9a89e4c33dc6cd042841d439900eb98fa3c5eac217350cbce518c858d650",
+  "n": 230
+ },
+ "carried_text_streak": 5,
+ "config": {
+  "bound": 60000,
+  "carried_budget": 1000000,
+  "carried_text_budget": 1500,
+  "headroom_cap": 0.25,
+  "headroom_decay": 0.5,
+  "headroom_factor": 1.25,
+  "headroom_floor": 2000,
+  "index_budget": 200,
+  "min_turn_room": 2000,
+  "pin_budget": 200,
+  "preamble_first": true,
+  "recall_example": "",
+  "recall_rule": "",
+  "turn_reminder": "",
+  "window_fraction": 0.5
+ },
+ "conversation": "anthropic:225ef54cc0c7e3cc0cf5b5e9d9b4da1d8fffd1adf8664d01822213d1299aae8d",
+ "dialect": "anthropic",
+ "epoch": 2,
+ "head_fingerprint": "96a3cf79565303989504da5dd10cd58e5a8f965dfc86fbd27c3be0e92dc8a017",
+ "head_tokens": null,
+ "index_text": "pg_e6bc267e9b56a9f9 turn 25: Turn 24. Synthetic user request number 24. synthetic filler text synthetic filler text synthetic filler text synthetic filler text synthetic filler text synthetic filler text synthetic filler text syn [tools: Read] [files: /tmp/synthetic/project/data.txt]\npg_da06482078e7d901 turn 24: Turn 23. Synthetic user request number 23. synthetic filler text synthetic filler text synthetic filler text synthetic filler text synthetic filler text synthetic filler text synthetic filler text syn [tools: Read] [files: /tmp/synthetic/project/data.txt]\n(24 older pages omitted; use contexto_search to find them)",
+ "initial_carried": 3149,
+ "k": 144,
+ "last_carried_text_count": 73,
+ "last_turn_count": 39,
+ "last_turn_start_n": 230,
+ "max_turn_growth": 2606,
+ "model": "claude-opus-5-5",
+ "paged_carried": [
+  "8eff1b2a707f26912a884014fa2425636f540f92d971123e3af60758b20a59e9",
+  "cdad039854fed380638a59da70d0cec64a252b69b6b9ddff9b3e51630b2f3dab",
+  "d167bf4a8fbbe517073f5b318e4b53b144539f498a3e517178a244f8699d6c4a",
+  "f5bf5e908979d4180978819e55fdbb0cba02ca08110384b71bfa2c24727809c9"
+ ],
+ "pinned_text": "Earlier turns of this conversation are paged out of your context; to read one, call contexto_search with an exact term (a key, name, or identifier) and then contexto_recall with a page id it returns.\nDo this before you rely on a detail from an earlier turn, and before you answer that something is unknown or not in the conversation. The page index below lists the paged turns, newest first.\nAs you work, record decisions and obligations with contexto_pin, and close finished obligations with contexto_close, so they stay in view.\nExample: to find the value of cache.ttl_seconds, call contexto_search with {\"query\": \"cache.ttl_seconds\"}. Each hit names a page, such as \"pg_0123456789abcdef (turn 3)\", then shows its matching lines with their character offsets, such as \"> 18240: cache.ttl_seconds=...\". Answer from that line, or call contexto_recall with {\"page_id\": \"pg_0123456789abcdef\", \"offset\": 18240} to read on from it. Search covers only paged-out turns, so when the conversation in view states the same thing, the conversation in view is newer.",
+ "preamble_sha256": "d7609b4fe565e6fca01e3998b87acc64d7f3d42b6216dace2fd78d02e4cf1a75",
+ "strip_upto": 194,
+ "turn_room_low_epoch": null,
+ "turns_paged": 28,
+ "window_budget": 48745,
+ "window_minimal_count": 0
+}
