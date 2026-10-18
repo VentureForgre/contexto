@@ -81,7 +81,10 @@ def test_targets_recall_of_the_page_or_a_search_that_hits_it():
     assert t({"name": "mcp__contexto__contexto_recall", "input": {"page_id": "pg_bbbb2222"}}, "pg_bbbb2222", PAGE)
     assert not t({"name": "mcp__contexto__contexto_recall", "input": {"page_id": "pg_aaaa1111"}}, "pg_bbbb2222", PAGE)
     assert t({"name": "mcp__contexto__contexto_search", "input": {"query": "checkout-api.retention_days"}}, None, PAGE)
-    assert not t({"name": "mcp__contexto__contexto_search", "input": {"query": "Checkout"}}, None, PAGE)  # case-sensitive
+    for query in ("Checkout", "RETENTION_DAYS checkout-api", "juniper-2573 cfg"):  # any case, any order (D34)
+        assert t({"name": "mcp__contexto__contexto_search", "input": {"query": query}}, None, PAGE), query
+    for query in ("checkout-api absent", " ", ""):  # every word must be on the page; no words, no hit
+        assert not t({"name": "mcp__contexto__contexto_search", "input": {"query": query}}, None, PAGE), query
     assert not t({"name": "Read", "input": {}}, "pg_bbbb2222", PAGE)
 
 
