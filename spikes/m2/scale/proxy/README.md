@@ -18,7 +18,8 @@ runs (`load1` in `results/requests_*.csv`; the `uptime` line for each checkpoint
   run does not model (`../reminders/`). Every upstream request stayed under the 150,000 bound
   (largest measured 135,954 tokens; largest last request of any fast-forwarded turn 144,176). There were no `over_bound`,
   `bound_too_small` or `transform_error` events, and no non-200 responses. At 30M the proxy added 0.58 s
-  to a tool-loop request and 0.86 s to a turn start. The cost grows linearly with history.
+  to a tool-loop request and 0.86 s to a turn start. The cost grows linearly with history. With the
+  CPU fixes in "Before and after" it is 0.26 s and 0.56 s, with byte-identical output.
 - **What breaks first is carried `<system-reminder>` growth, not size.** If later turn starts also
   carry reminders (the assumed `mixed` profile), the fixed overhead F grows by about 215 tokens per
   turn without limit, because context blocks of paged turn starts are carried forever and nothing
@@ -247,6 +248,94 @@ By own time, `json` encoding (1.304 s) and decoding (0.352 s) are 61 percent of 
 only 0.112 s. Everything above is linear in history length, which matches the near-linear growth of the
 timing table: about 0.019 s per million tokens for a tool loop.
 
+## Before and after the per-request CPU fixes (branch claude/proxy-cpu)
+
+Fixes 2, 4 and most of 6 below are applied in `src/`; the output is unchanged byte for byte.
+
+- **One hash per message per request.** `RewriteEngine` calls, `rewrite` and `observe_usage` run inside
+  `request_scope` (rewrite.py), which memoises each message object's rule 10 hash, so
+  `matching_prefix`, `send`'s epoch hashes, `usage_identity`, the conversation key and the resume
+  anchor share one computation. The memo holds the message object, so an id cannot be reused while it
+  lives. A tool-loop request at 52 messages now hashes 52 times instead of 104.
+- **No normalising copy for most messages.** For the Messages API, a message with no `cache_control`
+  key and no single text block to unwrap normalises to an equal copy, so its hash is the SHA-256 of its
+  own canonical JSON. The fast path is taken only when the quoted name `"cache_control"` does not occur
+  in that JSON. A key would always show up there, so a false match only sends the message to the slow
+  path.
+- **No defensive copy and no reference serialization in the proxy.** A transform with a true
+  `preserves_input` attribute (the engine and `identity_transform`; the harness timer forwards it)
+  gets the parsed request, and that same object goes to `observe_usage`. The proxy no longer
+  serializes the 55 MB request (`before`) or parses it a second time (`original`). The
+  unchanged-request check is now `same_wire(new, request)`. It is exactly `serialize_request(new) ==
+  serialize_request(request)`, decided by walking both: identical objects are equal, values of
+  different JSON types never are, and floats compare by `repr`. Anything outside the JSON types, or
+  nesting too deep to walk, falls back to serializing both. The engine's output shares `system`,
+  `tools` and the message dicts with its input, so the walk is mostly identity checks. A transform
+  without the attribute keeps the copy-and-compare path.
+- **One turn-start scan per request.** `turn_starts`, `at_turn_start`, `turn_id`, `_main_after` and
+  `retained_entries` share one scan of the request's own message list (`request_scope` caches it by
+  list identity and length). `carried_content`'s scan of `M[:k]` is not cached; it sits in code another
+  branch is changing. Turn-start checks per tool-loop request at 52 messages: 468 before, 107 after.
+- **Pathological change.** A body that parses but cannot be re-serialized (nesting between the decoder's
+  and the encoder's recursion limits) used to be skipped with `transform_skipped`. With a preserving
+  transform it now reaches the engine and fails as `transform_error`. The CLI's bytes are forwarded
+  either way.
+
+### Equivalence
+
+- **Every scale run.** The non-timing columns of `requests_*.csv` and `ff_*.csv` match row for row
+  between base and after, in all three run pairs: 150 HTTP requests and 1,097 fast-forwarded turn
+  starts each. That covers upstream bytes, tokens and message counts, rotation and its reason, k,
+  epoch, F, W, and events, through 30M. Event counts and pages per checkpoint match too.
+- **In the suite.** `tests/test_proxy_cpu.py::test_old_and_new_paths_send_identical_bytes_and_reach_identical_state`
+  drives a synthetic session through the real proxy and a local upstream twice, once on the old paths
+  (no memo, normalise-then-hash, the copying transform step) and once on the new. The session is 18
+  turns: tool loops with signed thinking, 17 rotations, a paged-history resync, count_tokens, moving
+  `cache_control`, string and single-block prompts, and a proxy restart that resumes the epoch. The test
+  compares every upstream body, every log entry (clock and port removed), the engine state, the
+  estimator, the epoch record, the pages, and the published window, room and retained snapshot.
+- **Against the base commit.** The same driver run against `a15770f`'s `src/` gives identical digests
+  for 18 turns (42 bodies, 17 rotations) and 40 turns (92 bodies, 39 rotations).
+- **No aliasing.** A test checks that the engine leaves the request unchanged across a 16-turn session,
+  through the transform and `observe_usage`. Further tests check the hash fast path against
+  normalise-then-hash on 23 message shapes under both dialects, and `same_wire` against serialized
+  equality on 28 pairs (`1` and `1.0`, `True` and `1`, `0.0` and `-0.0`, key order, tuples, non-string
+  keys, sets, surrogates).
+
+### Numbers (`first` profile, 3 runs each, `results/*_base-{1,2,3}.*` and `results/*_perf-{1,2,3}.*`)
+
+Base is `a15770f` (this branch's parent), measured on 2026-10-18 just before the change, on the same
+machine. 1-minute load was 1.9 to 4.1 during the base runs and 2.3 to 6.5 during the after runs.
+Seconds; median of the three runs' medians:
+
+| History | Tool loop e2e | Proxy transform, tool loop | Engine, tool loop | Turn start e2e | Rotating turn start e2e | Peak RSS MB | Fast-forward 10M to 30M |
+|---|---|---|---|---|---|---|---|
+| 10M, base | 0.209 | 0.202 | 0.118 | 0.295 | 0.382 | 1,337 | |
+| 10M, after | 0.090 (-57%) | 0.083 | 0.064 | 0.174 (-41%) | 0.260 | 756 | |
+| 30M, base | 0.610 | 0.594 | 0.347 | 0.906 | 0.911 | 1,707 | 331 to 344 s |
+| 30M, after | 0.260 (-57%) | 0.245 | 0.185 | 0.555 (-39%) | 0.563 | 1,573 | 247 to 256 s |
+
+Per-run medians of the 30M tool loop were 0.583 to 0.616 s before and 0.244 to 0.264 s after. The
+cost is still linear in history, at about 0.0085 s per million tokens per tool loop instead of 0.020.
+
+cProfile of `_transform` + `observe_usage` at 10M (`results/profile_{base,perf}-*_10M.txt`, the same
+10 requests and one rotation):
+
+| | Base | After |
+|---|---|---|
+| Total under the profiler (3 runs) | 2.80 to 2.90 s | 1.23 to 1.33 s |
+| Function calls | 7,100,362 | 3,036,238 |
+| Hashes computed (`message_hash` work) | 48,040, 1.311 s | 24,030, 0.654 s |
+| `json.loads` | 0.396 s (the body, then the copy) | 0.224 s (the body) |
+| `serialize_request` | 0.457 s (20 calls, the ten `before` ones 18 MB each) | under 0.05 s, not in the top 40 (upstream bodies of 0.1 to 0.3 MB only) |
+| Turn-start checks | 290,564, 0.306 s | 81,810, 0.091 s (mostly `carried_content`) |
+| `index_text` (not touched here) | 0.231 s | 0.237 s |
+
+What is left per request: one canonical JSON encoding and SHA-256 per message (0.48 s of encoding
+over the 10 profiled requests), one parse of the body, and `carried_content`'s scan of the paged
+region. Fix 3 (hash only from the first byte that differs from the previous request) would remove most
+of the first; `carried_content` could be cached per epoch.
+
 ## Static analysis checked
 
 | Claim | Verified |
@@ -259,7 +348,7 @@ timing table: about 0.019 s per million tokens for a tool loop.
 | `index_text` re-reads every page twice per rotation | yes: `fixed_overhead` (rewrite.py:617) and `new_epoch` (649-650), each through `_pages()` |
 | Carried `<system-reminder>` blocks are uncapped | yes: `carried_content` (rewrite.py:493) keeps every context block of every paged turn start; `page_carried_text` (671-701) pages only role `system` text messages; `carried_over_budget` (663-667) only reports. This is the `mixed` failure above |
 
-## Obvious fixes (not applied; this spike changes nothing in `src/`)
+## Obvious fixes (as found at 4525388; 2, 4 and most of 6 are applied on claude/proxy-cpu, above)
 
 1. **Page old carried context blocks** the way `page_carried_text` pages system messages: keep the first
    message's blocks and the latest of each recognisable kind, and page the rest once growth passes
@@ -296,5 +385,6 @@ timing table: about 0.019 s per million tokens for a tool loop.
 - `results/ff_<label>.csv`: one row per fast-forwarded turn start, with engine and store timings, k,
   epoch, F, W, events, and the turn's last-request size.
 - `results/profile_first-{1,2,3}_10M.txt`, `results/fidelity_*_120.json`, `results/leak_*.csv`.
+- `results/*_base-{1,2,3}.*` and `results/*_perf-{1,2,3}.*`: the before and after runs of the CPU fixes.
 - `tests/test_scale_proxy_harness.py`: fast checks of the helpers (7 tests, under a second, collected
   by the default `pytest`). The scale run itself is not in the suite.

@@ -16,7 +16,10 @@ without treating it as a turn. ``events`` is a list of
 content-free dicts the proxy copies into the session log entry for that request. Keys the
 proxy reads from events: ``over_bound`` (truthy marks the request over the bound) and
 ``epoch`` (the epoch state, repeated in the log entry of any 4xx response). Resync and other
-engine events (contract rule 10) are logged as given, reduced to scalars.
+engine events (contract rule 10) are logged as given, reduced to scalars. A transform may mutate
+its argument: the proxy then parses an untouched copy for ``observe_usage``. A transform with a true
+``preserves_input`` attribute (the rewrite engine, ``identity_transform``) declares that it never does,
+and the parsed request itself is that original.
 
 Usage feedback: an optional ``observe_usage(endpoint, usage, request)`` callable is called after each
 successful (2xx) ``/v1/messages`` or ``/responses`` response, before the client sees the response
@@ -35,7 +38,8 @@ transform are serialized under a lock, so a stateful engine sees one request at 
 Byte stability: the transformed request is serialized deterministically (original key order,
 compact separators, non-ASCII kept as UTF-8, the same choices Claude Code's JSON.stringify
 makes), so an unchanged prefix stays byte-identical across requests and the prompt cache can
-read it. When the transform leaves the request unchanged, the CLI's original bytes are sent.
+read it. When the transform leaves the request unchanged (its serialization would equal that of the
+parsed request; ``same_wire``), the CLI's original bytes are sent.
 
 Responses are relayed as they arrive, including SSE streams. A side copy is read only for
 ``message_start`` and ``message_delta`` usage and any ``input_transformations``; usage reaches
@@ -105,6 +109,9 @@ def identity_transform(request: dict[str, Any], headers: Headers, endpoint: str)
     return request, headers, []
 
 
+identity_transform.preserves_input = True  # type: ignore[attr-defined]
+
+
 def serialize_request(request: Any) -> bytes:
     """Deterministic wire bytes: insertion key order, no spaces, UTF-8 without escaping.
 
@@ -117,6 +124,58 @@ def serialize_request(request: Any) -> bytes:
     what JSON.stringify emits for the same string.
     """
     return json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "backslashreplace")
+
+
+# The types json.loads produces. Values of two different ones never serialize alike (a float always
+# serializes with ".", "e", "Infinity" or "NaN"; bool is checked by exact type, not as an int).
+_JSON_TYPES = frozenset({dict, list, str, int, float, bool, type(None)})
+
+
+class _Undecided(Exception):
+    """A value outside the JSON types: the structural comparison cannot decide."""
+
+
+def _same_wire(a: Any, b: Any) -> bool:
+    if a is b:
+        return True  # one object serializes to one byte string
+    ta, tb = type(a), type(b)
+    if ta is not tb or ta not in _JSON_TYPES:
+        if ta in _JSON_TYPES and tb in _JSON_TYPES:
+            return False
+        raise _Undecided
+    if ta is dict:
+        if len(a) != len(b):
+            return False
+        for (ka, va), (kb, vb) in zip(a.items(), b.items()):
+            if type(ka) is not str or type(kb) is not str:
+                raise _Undecided  # json.dumps converts other keys to strings
+            if ka != kb or not _same_wire(va, vb):
+                return False
+        return True
+    if ta is list:
+        return len(a) == len(b) and all(_same_wire(x, y) for x, y in zip(a, b))
+    if ta is float:
+        return repr(a) == repr(b)  # json.dumps writes float.__repr__ (0.0 and -0.0 differ)
+    return a == b
+
+
+def same_wire(a: Any, b: Any) -> bool:
+    """``serialize_request(a) == serialize_request(b)``, decided without serializing when it can be.
+
+    Insertion order counts, as it does on the wire. A transform's output shares most objects with its
+    input (the rewrite engine returns the same ``system``, ``tools`` and message dicts), so the
+    comparison mostly checks identity and is linear in the number of messages, not their bytes. JSON
+    values serialize prefix-free, so the first difference found at a position decides. A value json.loads
+    cannot produce, or nesting too deep to walk, falls back to serializing both; a value that cannot be
+    serialized compares unequal (the caller's own serialization then reports it)."""
+    try:
+        return _same_wire(a, b)
+    except (_Undecided, RecursionError):
+        pass
+    try:
+        return serialize_request(a) == serialize_request(b)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        return False
 
 
 def utc_now() -> str:
@@ -816,12 +875,19 @@ class _Handler(BaseHTTPRequestHandler):
         entry["model"] = request.get("model")
         entry["stream"] = bool(request.get("stream"))
         entry["original_message_count"] = len(request.get("messages") or [])
-        try:
-            before = serialize_request(request)
-            original = json.loads(before)  # an untouched copy; the transform may mutate its argument
-        except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
-            entry["transform_skipped"] = f"cannot serialize request: {type(exc).__name__}"
-            return body, headers, None
+        preserves = getattr(owner.transform, "preserves_input", False) is True
+        before: bytes | None = None
+        if preserves:
+            # The transform declares it never mutates its argument (the rewrite engine): the parsed
+            # request is the untouched original, and no copy or reference serialization is made.
+            original = request
+        else:
+            try:
+                before = serialize_request(request)
+                original = json.loads(before)  # an untouched copy; the transform may mutate its argument
+            except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+                entry["transform_skipped"] = f"cannot serialize request: {type(exc).__name__}"
+                return body, headers, None
         try:
             with owner.transform_lock:
                 new_request, new_headers, events = owner.transform(request, dict(headers), endpoint)
@@ -845,6 +911,8 @@ class _Handler(BaseHTTPRequestHandler):
         if owner.observe_thinking:
             new_headers = add_beta(new_headers, THINKING_BINDING_BETA)
         entry["message_count"] = len(new_request.get("messages") or [])
+        if before is None and same_wire(new_request, request):
+            return body, new_headers, original  # unchanged: the CLI's own bytes, nothing serialized
         try:
             after = serialize_request(new_request)
         except (ValueError, TypeError, UnicodeError, RecursionError) as exc:

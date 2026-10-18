@@ -157,6 +157,9 @@ def make_transform(engine):
         METER.events("events", out[2])
         return out
 
+    # The timer forwards the engine's declaration, so the proxy takes the same path as with the bare engine.
+    transform.preserves_input = getattr(engine, "preserves_input", False)
+
     def observe(endpoint, usage, request):
         t = time.perf_counter()
         profiler = PROFILE["p"]
