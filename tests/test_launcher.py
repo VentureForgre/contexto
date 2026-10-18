@@ -150,7 +150,7 @@ def test_run_wires_settings_mcp_and_args_and_cleans_up(env, upstream, tmp_path):
     base = record["settings"]["env"]["ANTHROPIC_BASE_URL"]
     assert record["settings"] == {"env": {"ANTHROPIC_BASE_URL": base}} and base.startswith("http://127.0.0.1:")
     server = record["mcp"]["mcpServers"]["contexto"]
-    assert server["command"] == sys.executable and server["args"] == ["-m", "contexto", "mcp", "--session", "s1"]
+    assert server["command"] == sys.executable and server["args"] == ["-P", "-m", "contexto", "mcp", "--session", "s1"]
     assert server["env"] == {"CONTEXTO_HOME": env["CONTEXTO_HOME"]}
     assert record["settings_mode"] == record["mcp_mode"] == 0o600 and record["settings_dir_mode"] == 0o700
     assert record["env_base_url"] is None  # the base URL travels only in the --settings file

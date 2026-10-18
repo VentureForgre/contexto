@@ -257,9 +257,11 @@ MCP_APPROVAL_MODE = "approve"
 # Codex looks an MCP server's command up on PATH and, when it cannot start the server, runs the turn
 # without its tools and reports nothing (measured on codex-cli 0.163.0: a bare "contexto" not on PATH
 # left code mode's ALL_TOOLS with no contexto tool). The server is started as the Claude path starts it
-# (launcher.mcp_payload): this interpreter by absolute path, "-m contexto".
+# (launcher.mcp_payload): this interpreter by absolute path, "-P -m contexto" (-P keeps the
+# project directory Codex starts it in off sys.path, so a project's own contexto package cannot
+# shadow the installed one).
 def _mcp_server(session_id: str) -> tuple[str, list[str]]:
-    return sys.executable, ["-m", "contexto", "mcp", "--session", session_id]
+    return sys.executable, ["-P", "-m", "contexto", "mcp", "--session", session_id]
 
 
 def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: Path) -> str:

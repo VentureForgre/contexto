@@ -50,8 +50,8 @@ The session id is printed on stderr at start. The launcher:
    `127.0.0.1:<free port>`;
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets only
    `env.ANTHROPIC_BASE_URL` to the proxy, and an `--mcp-config` file that starts Contexto's MCP
-   server (`python -m contexto mcp --session <id>` with the same Python, and `CONTEXTO_HOME` in its
-   environment);
+   server (`python -P -m contexto mcp --session <id>` with the same Python, and `CONTEXTO_HOME` in
+   its environment; `-P` keeps your project directory off the import path);
 4. runs `claude --settings <file> --mcp-config <file> [your args]` in your terminal and returns its
    exit code.
 
@@ -75,8 +75,8 @@ writes a `config.toml` there (mode 0600) that:
 - adds a model provider `contexto` whose `base_url` is the proxy, with `wire_api = "responses"`,
   `supports_websockets = false`, and the key helper as its auth command;
 - turns request compression off (`features.enable_request_compression = false`);
-- adds the MCP server `contexto` (`contexto mcp --session <id>`) with
-  `default_tools_approval_mode = "approve"`, so recall works in `codex exec` too, and `CONTEXTO_HOME`
+- adds the MCP server `contexto` (`python -P -m contexto mcp --session <id>` with the same Python)
+  with `default_tools_approval_mode = "approve"`, so recall works in `codex exec` too, and `CONTEXTO_HOME`
   in its `env` table, because Codex starts MCP servers with a restricted environment.
 
 On exit the `config.toml` is deleted and the directory is kept, so Codex can resume its rollouts.
@@ -85,6 +85,12 @@ Because `CODEX_HOME` is new, your own `~/.codex` configuration is not loaded in 
 Before v0.1.2, the Codex MCP server was not given `CONTEXTO_HOME`. With a non-default home, the proxy
 wrote the session to `$CONTEXTO_HOME/sessions/<id>/` while the MCP tools looked in
 `~/.contexto/sessions/<id>/` and did not find it. Upgrade if you use a non-default home with Codex.
+
+Before v0.2.8, the Codex MCP server was started as a bare `contexto` looked up on `PATH`. When
+`contexto` was not on `PATH` (for example `.venv/bin/contexto run codex` without activating the
+venv), Codex ran with no Contexto tools and reported no error, so recall and search were missing.
+Because Codex starts MCP servers with a restricted environment, install Contexto (an editable
+install is fine) rather than running it from a checkout with `PYTHONPATH=src`.
 
 Codex requests go to `--codex-upstream`, else `$CONTEXTO_CODEX_UPSTREAM`, else (API-key mode) the
 upstream Claude Code would use plus `/v1`, or (ChatGPT mode) the ChatGPT Codex backend.
