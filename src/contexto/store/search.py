@@ -24,8 +24,10 @@ Ties go to the newer page. Last, the newest matching turn page (the newest match
 page matches) is moved up to the last of the ``SHOWN_IN_DETAIL`` places if it ranked below them: the
 turn that states a new value is often a long one, which BM25 discounts.
 
-``contexto_search`` shows the 3 best pages in detail and lists the next 50, each group newest
-first, so among the pages it shows the newest statement comes first (D28) whatever their scores.
+``contexto_search`` shows the 3 best pages in detail and lists the next 50. In each part turn pages
+come first, newest first, so among the turn pages it shows the newest statement comes first (D28)
+whatever their scores; context pages follow under their own line, newest first, because a context
+page's turn is when the block was paged, not when it was sent (``contexto.mcp._newest_first``).
 
 Lines. Within a page (or an in-view message) the matching lines are those that hold the most of the
 query: lines holding the whole query if there are any, else lines holding all its words, else the
