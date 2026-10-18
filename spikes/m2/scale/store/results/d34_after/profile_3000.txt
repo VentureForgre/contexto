@@ -1,0 +1,138 @@
+=== contexto_search 'E4127' at 3000 pages, in-process, 5 calls aggregated, median 0.065 s per call under the profiler ===
+--- top 25 by tottime ---
+         2037437 function calls (2037322 primitive calls) in 0.824 seconds
+
+   Ordered by: internal time
+   List reduced from 172 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        5    0.237    0.047    0.239    0.048 search.py:83(rank)
+     3035    0.156    0.000    0.156    0.000 decoder.py:351(raw_decode)
+    15000    0.053    0.000    0.053    0.000 {method 'stat' of 'posix.DirEntry' objects}
+     3030    0.052    0.000    0.073    0.000 {built-in method _io.open}
+   105349    0.044    0.000    0.172    0.000 pages.py:62(_texts)
+   148252    0.030    0.000    0.045    0.000 render.py:98(<genexpr>)
+     3145    0.027    0.000    0.027    0.000 {method 'lower' of 'str' objects}
+   701726    0.026    0.000    0.026    0.000 {built-in method builtins.isinstance}
+   423325    0.023    0.000    0.023    0.000 {method 'get' of 'dict' objects}
+    59220    0.023    0.000    0.074    0.000 render.py:91(is_responses_item)
+        5    0.023    0.005    0.572    0.114 catalog.py:60(entries)
+     3030    0.015    0.000    0.025    0.000 {method 'read' of '_io.TextIOWrapper' objects}
+    59130    0.009    0.000    0.085    0.000 render.py:115(as_message)
+     3030    0.009    0.000    0.009    0.000 {built-in method _codecs.utf_8_decode}
+     3000    0.008    0.000    0.214    0.000 pages.py:177(searchable_text)
+     3000    0.008    0.000    0.101    0.000 pages.py:57(_view)
+    62130    0.007    0.000    0.092    0.000 pages.py:59(<genexpr>)
+   119245    0.006    0.000    0.006    0.000 {method 'startswith' of 'str' objects}
+     6121    0.005    0.000    0.005    0.000 {method 'join' of 'str' objects}
+     3051    0.004    0.000    0.007    0.000 <frozen posixpath>:72(join)
+     3060    0.004    0.000    0.019    0.000 __init__.py:251(__str__)
+        5    0.003    0.001    0.816    0.163 __init__.py:650(search)
+     3030    0.003    0.000    0.003    0.000 {method '__exit__' of '_io._IOBase' objects}
+     3000    0.003    0.000    0.492    0.000 catalog.py:120(_load)
+     3000    0.003    0.000    0.269    0.000 catalog.py:111(_read)
+
+
+--- top 25 by cumulative ---
+         2037437 function calls (2037322 primitive calls) in 0.824 seconds
+
+   Ordered by: cumulative time
+   List reduced from 172 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        5    0.000    0.000    0.824    0.165 scale_bench.py:169(call)
+        5    0.000    0.000    0.824    0.165 mcp.py:230(handle_line)
+        5    0.000    0.000    0.824    0.165 mcp.py:249(_dispatch)
+        5    0.000    0.000    0.824    0.165 mcp.py:297(_tools_call)
+        5    0.000    0.000    0.823    0.165 mcp.py:419(_tool_search)
+        5    0.003    0.001    0.816    0.163 __init__.py:650(search)
+        5    0.023    0.005    0.572    0.114 catalog.py:60(entries)
+     3000    0.003    0.000    0.492    0.000 catalog.py:120(_load)
+     3000    0.003    0.000    0.269    0.000 catalog.py:111(_read)
+        5    0.237    0.047    0.239    0.048 search.py:83(rank)
+     3000    0.008    0.000    0.214    0.000 pages.py:177(searchable_text)
+   105349    0.044    0.000    0.172    0.000 pages.py:62(_texts)
+     3035    0.001    0.000    0.162    0.000 __init__.py:304(loads)
+     3035    0.002    0.000    0.160    0.000 decoder.py:340(decode)
+     3035    0.156    0.000    0.156    0.000 decoder.py:351(raw_decode)
+     3030    0.002    0.000    0.104    0.000 __init__.py:780(read_text)
+     3000    0.008    0.000    0.101    0.000 pages.py:57(_view)
+    62130    0.007    0.000    0.092    0.000 pages.py:59(<genexpr>)
+    59130    0.009    0.000    0.085    0.000 render.py:115(as_message)
+    59220    0.023    0.000    0.074    0.000 render.py:91(is_responses_item)
+     3030    0.001    0.000    0.074    0.000 __init__.py:763(open)
+     3030    0.052    0.000    0.073    0.000 {built-in method _io.open}
+    15000    0.053    0.000    0.053    0.000 {method 'stat' of 'posix.DirEntry' objects}
+   148252    0.030    0.000    0.045    0.000 render.py:98(<genexpr>)
+     3000    0.001    0.000    0.034    0.000 search.py:198(searchable)
+
+
+=== contexto_search 'self' at 3000 pages, in-process, 5 calls aggregated, median 0.134 s per call under the profiler ===
+--- top 25 by tottime ---
+         1851630 function calls (1851490 primitive calls) in 0.669 seconds
+
+   Ordered by: internal time
+   List reduced from 164 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    15000    0.317    0.000    0.317    0.000 {method 'count' of 'str' objects}
+      280    0.056    0.000    0.125    0.000 search.py:135(matching_lines)
+    15000    0.053    0.000    0.053    0.000 {method 'stat' of 'posix.DirEntry' objects}
+        5    0.028    0.006    0.359    0.072 search.py:83(rank)
+   419165    0.028    0.000    0.028    0.000 {method 'find' of 'str' objects}
+      280    0.023    0.000    0.039    0.000 render.py:204(_line_bounds)
+   412240    0.017    0.000    0.017    0.000 {method 'append' of 'list' objects}
+      295    0.017    0.000    0.017    0.000 decoder.py:351(raw_decode)
+        5    0.016    0.003    0.073    0.015 catalog.py:60(entries)
+   101760    0.013    0.000    0.019    0.000 {built-in method builtins.max}
+      265    0.007    0.000    0.025    0.000 render.py:38(render_page)
+   110335    0.006    0.000    0.006    0.000 {method 'get' of 'dict' objects}
+      315    0.005    0.000    0.009    0.000 {built-in method builtins.sorted}
+      290    0.005    0.000    0.007    0.000 {built-in method _io.open}
+    50685    0.005    0.000    0.005    0.000 {built-in method _bisect.bisect_right}
+   129335    0.005    0.000    0.005    0.000 {built-in method builtins.len}
+      995    0.005    0.000    0.005    0.000 {method 'lower' of 'str' objects}
+    50685    0.004    0.000    0.009    0.000 search.py:131(_line_index)
+   101370    0.004    0.000    0.004    0.000 search.py:177(<genexpr>)
+    50690    0.004    0.000    0.004    0.000 {method 'setdefault' of 'dict' objects}
+        5    0.003    0.001    0.437    0.087 __init__.py:650(search)
+    12970    0.003    0.000    0.005    0.000 render.py:98(<genexpr>)
+     2340    0.003    0.000    0.003    0.000 encoder.py:207(iterencode)
+       10    0.002    0.000    0.002    0.000 {method 'sort' of 'list' objects}
+    57595    0.002    0.000    0.002    0.000 {built-in method builtins.isinstance}
+
+
+--- top 25 by cumulative ---
+         1851630 function calls (1851490 primitive calls) in 0.669 seconds
+
+   Ordered by: cumulative time
+   List reduced from 164 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        5    0.000    0.000    0.669    0.134 scale_bench.py:169(call)
+        5    0.000    0.000    0.669    0.134 mcp.py:230(handle_line)
+        5    0.000    0.000    0.669    0.134 mcp.py:249(_dispatch)
+        5    0.001    0.000    0.669    0.134 mcp.py:297(_tools_call)
+        5    0.000    0.000    0.667    0.133 mcp.py:419(_tool_search)
+        5    0.003    0.001    0.437    0.087 __init__.py:650(search)
+        5    0.028    0.006    0.359    0.072 search.py:83(rank)
+    15000    0.317    0.000    0.317    0.000 {method 'count' of 'str' objects}
+      250    0.002    0.000    0.175    0.001 mcp.py:623(_more_row)
+      265    0.002    0.000    0.156    0.001 render.py:192(matching_line_starts)
+      280    0.056    0.000    0.125    0.000 search.py:135(matching_lines)
+        5    0.016    0.003    0.073    0.015 catalog.py:60(entries)
+    15000    0.053    0.000    0.053    0.000 {method 'stat' of 'posix.DirEntry' objects}
+      280    0.023    0.000    0.039    0.000 render.py:204(_line_bounds)
+   419165    0.028    0.000    0.028    0.000 {method 'find' of 'str' objects}
+      265    0.001    0.000    0.028    0.000 __init__.py:637(get_page)
+      265    0.007    0.000    0.025    0.000 render.py:38(render_page)
+       15    0.000    0.000    0.022    0.001 mcp.py:601(_hit_rows)
+   101760    0.013    0.000    0.019    0.000 {built-in method builtins.max}
+      295    0.000    0.000    0.017    0.000 __init__.py:304(loads)
+      295    0.000    0.000    0.017    0.000 decoder.py:340(decode)
+   412240    0.017    0.000    0.017    0.000 {method 'append' of 'list' objects}
+      295    0.017    0.000    0.017    0.000 decoder.py:351(raw_decode)
+       15    0.000    0.000    0.011    0.001 render.py:153(match_lines)
+      290    0.000    0.000    0.010    0.000 __init__.py:780(read_text)
+
+

@@ -8,7 +8,7 @@ by default). When a request gets within the headroom of the bound (25,000 tokens
 after large turns up to a quarter of the bound), the proxy moves the oldest turns out of the prompt and writes them, word for word, to a local store under `~/.contexto`. In their place the model sees a
 short index of those turns and a pinned state of the session's decisions and open obligations.
 
-The model reads old turns back with MCP tools: `contexto_search` finds a turn by exact text and
+The model reads old turns back with MCP tools: `contexto_search` finds turns by the words they contain and
 `contexto_recall` returns it in full. The bound stays below the point where Claude Code would
 compact the conversation itself, so nothing is summarized away. The full history stays on disk and
 can be inspected with `contexto sessions`, `contexto recall`, and `contexto state`.
@@ -166,7 +166,7 @@ not start it by hand.
 
 | Tool | What it does |
 |---|---|
-| `contexto_search(query)` | Exact, case-sensitive substring search. Matching lines from the conversation still in view come first (at most 3, newest first), skipping the current turn's own user message. Then the 3 newest matching paged-out turns, each with its last 3 matching lines in page order and their offsets, then up to 50 more matching turns as page id and the offsets of their first and last matches (`@first..last`, one offset when they are the same). Each reply ends with a note on what was searched |
+| `contexto_search(query)` | Finds turns holding every word of the query, in any case and any order (words match as substrings, so identifiers and paths work; no stemming, no fuzzy or similarity matching). Turns holding the whole query rank first, then by relevance (BM25) with newer turns preferred among similar ones. Matching lines from the conversation still in view come first (at most 3, newest first), skipping the current turn's own user message. Then the 3 best matching paged-out turns, newest first, each with its last 3 matching lines in page order and their offsets, then up to 50 more matching turns, newest first, as page id and the offsets of their first and last matches (`@first..last`, one offset when they are the same). Each reply ends with a note on what was searched |
 | `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
 | `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`. A verified event, artifact, or reference shows as a fact in the pinned state; decisions and obligations keep their own groups |
 | `contexto_close(obligation_id, note)` | Close an open obligation |

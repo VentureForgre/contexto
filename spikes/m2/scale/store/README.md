@@ -258,6 +258,98 @@ Prototype figures are in `results/fts_proto.csv`, `results/fts_quality.csv`, and
    repeats its key words in 2 or 3 places (assistant text, tool output, edit), which may flatter
    BM25 here.
 
+## After D34: word matching, BM25 with a recency prior, and page caches (2026-10-18)
+
+D34 (`docs/DECISIONS.md`) changed `contexto_search` and the store; the probes, plants, and
+distractors above are unchanged. What changed, in short (details in `src/contexto/store/search.py`
+and `src/contexto/store/catalog.py`):
+
+- Matching: every whitespace-separated word of the query, case-insensitively, in any order,
+  each as a substring, so every page the old rule matched still matches.
+- Ranking: pages holding the whole query rank above pages holding only its words; within each group
+  BM25 (k1 1.2, b 0.75) over the words and the whole query, times `1 + 0.5 r`, `r` the page's
+  position among the matching pages (0 oldest, 1 newest). The 3 best pages are shown newest
+  first, and so are the next 50, so among the pages shown the newest statement comes first.
+- Speed: the MCP server keeps each page's folded searchable text for its lifetime, the proxy each
+  page's id, turn, stub, and index line; both list `pages/` per call and read only new or changed
+  files. Nothing is written to the store.
+
+Command (both runs on this machine, M5 Pro, load 3.3 to 4.2, back to back):
+
+```
+# before: origin/claude/scale-30m a15770f, from a `git archive` copy so the MCP children import that code
+.venv/bin/python spikes/m2/scale/store/scale_bench.py --sizes 17,1000,3000,6000 --out results/d34_before
+# after: this branch, the code committed with D34
+.venv/bin/python spikes/m2/scale/store/scale_bench.py --sizes 17,1000,3000,6000 --out results/d34_after
+.venv/bin/python spikes/m2/scale/store/scale_bench.py --sizes 17,1000,6000 --responses-sizes "" --passes 0 \
+    --profile-n 0 --floor 0.002 --out results/d34_after/floor_0.002
+.venv/bin/python spikes/m2/scale/store/scale_compare.py results/d34_before results/d34_after
+```
+
+The before run reproduces the quality figures above exactly (quality is deterministic; the
+`floor_0.002` before run is byte-identical to `results/floor_0.002/quality.csv`), and its latency
+is within about 6 percent of them.
+
+### Before and after (`results/d34_before`, `results/d34_after`; `scale_compare.py`)
+
+Top 3: the planted page among the 3 detailed hits, of 86 probe queries. Latest first: changing
+values whose first value page among the detailed hits is the latest, of 24. Facts: facts with
+some query in the detailed hits, of 30. Search: stdio, seconds, median as in the tables above.
+First search: the first call of each MCP child, which after D34 loads the page cache. index_text:
+in-process, warm is the median of 5 calls on one store (the proxy's case: it wrote the pages, or
+read them once), cold is the first call on a fresh store (a proxy restart).
+
+| N | dialect | run | top 3 (of 86) | latest first (of 24) | facts (of 30) | value shown | search rare / common / multi, s | first search, s | index_text warm / cold, s | MCP peak RSS MB |
+|---:|---|---|---:|---:|---:|---:|---|---:|---|---:|
+| 17 | messages | before | 61 | 19 | 30 | 52 | 0.002 / 0.004 / 0.002 | 0.003 | 0.035 / 0.035 | 34 |
+| 17 | messages | after | 71 | 21 | 30 | 61 | 0.001 / 0.006 / 0.001 | 0.003 | 0.000 / 0.037 | 35 |
+| 1,000 | messages | before | 50 | 17 | 28 | 44 | 0.107 / 0.105 / 0.109 | 0.119 | 0.119 / 0.122 | 103 |
+| 1,000 | messages | after | 63 | 21 | 29 | 57 | 0.016 / 0.038 / 0.039 | 0.125 | 0.003 / 0.122 | 79 |
+| 3,000 | messages | before | 44 | 14 | 27 | 40 | 0.349 / 0.323 / 0.348 | 0.378 | 0.319 / 0.319 | 245 |
+| 3,000 | messages | after | 60 | 21 | 29 | 54 | 0.050 / 0.088 / 0.119 | 0.376 | 0.013 / 0.297 | 164 |
+| 6,000 | messages | before | 39 | 12 | 26 | 36 | 0.694 / 0.659 / 0.715 | 0.761 | 0.590 / 0.616 | 456 |
+| 6,000 | messages | after | 56 | 20 | 29 | 50 | 0.095 / 0.156 / 0.230 | 0.764 | 0.028 / 0.589 | 292 |
+| 1,000 | responses | before | 50 | 17 | 28 | 41 | 0.119 / 0.119 / 0.123 | 0.127 | 0.118 / 0.116 | 94 |
+| 1,000 | responses | after | 63 | 21 | 29 | 54 | 0.016 / 0.041 / 0.039 | 0.140 | 0.004 / 0.119 | 78 |
+
+With the topic floor of 1 page in 500 (`results/floor_0.002` before, `results/d34_after/floor_0.002` after):
+
+| N | run | top 3 (of 86) | latest first (of 24) | facts (of 30) | value shown |
+|---:|---|---:|---:|---:|---:|
+| 17 | before / after | 61 / 71 | 19 / 21 | 30 / 30 | 52 / 61 |
+| 1,000 | before / after | 44 / 58 | 16 / 20 | 26 / 27 | 38 / 52 |
+| 6,000 | before / after | 15 / 40 | 9 / 17 | 12 / 24 | 13 / 36 |
+
+What the numbers show:
+
+- Quality. At 6,000 pages the planted page is in the top 3 for 56 of 86 queries (39 before), the
+  latest value comes first for 20 of 24 (12 before), and 29 of 30 facts are found (26). The
+  prototype's BM25 without recency reached 57 and 29 but only 7 of 24 latest first; the recency
+  prior and the newest-first display keep "latest value wins" at every size (21, 21, 21, 20 of
+  24, against 19, 17, 14, 12). With the topic floor, 6,000 pages go from 15 to 40 of 86 and from
+  12 to 24 facts.
+- The 10 queries per size that missed only because of case or word order now match (the "not on
+  page" count falls from 25 to 15, and none of the 15 would match case-insensitively or by all
+  words). The 15 left are words the plant does not contain (`hashing algorithm`, `Python
+  version`), which no lexical search finds.
+- Still buried at 6,000 (5 queries): single words on 3 to 31 percent of the pages (`flaky`,
+  `owner`, `regression`, `rename`; `df.csv`), where the plant does not stand out from the
+  hundreds of other pages that mention the word, and `flaky test`, whose plant holds both words but
+  not the phrase while about 50 distractor pages hold the phrase, which ranks them first by design.
+  A more specific query finds each of these facts (29 of 30 facts are in the top 3).
+- Not tuned to the probes: k1, b, the recency weight 0.5, the phrase tier, and the display order
+  were fixed and unit-tested (`tests/test_search_rank.py`, scenarios of its own) before the after
+  run, and nothing changed after it. The caveat above still holds: each plant repeats its key
+  words in 2 or 3 places, which flatters BM25.
+- Speed. Search at 6,000 pages takes 0.10 to 0.23 s (0.66 to 0.72 before): it no longer reads or
+  parses pages, but it still scans the cached text (about 240 MB at 6,000) once per query word,
+  so multi-word queries cost more (`results/d34_after/profile_3000.txt`: `rank` is most of a warm
+  call; listing `pages/` with a `stat` per file is about 10 ms at 3,000). The first search of
+  each MCP process loads the cache, 0.76 s at 6,000, about one search before D34. `index_text`
+  takes 0.028 s warm (0.59 before), so a rotation no longer spends about 1.2 s on it; after a proxy
+  restart its first call still reads every page once (0.59 s). Peak RSS of the MCP child is lower
+  (292 MB at 6,000 against 456): the cache holds folded text, not the parsed pages.
+
 ## Files
 
 - `scale_bench.py`: the harness (store build, stdio and in-process timing, quality, profile, summary).
@@ -265,6 +357,8 @@ Prototype figures are in `results/fts_proto.csv`, `results/fts_quality.csv`, and
 - `scale_probes.py`: the 30 facts, 86 probe queries, and 9 latency queries (fixed).
 - `scale_calibrate.py`, `calibration.json`: real-turn query frequencies and turn sizes (numbers only).
 - `scale_fts_proto.py`: the text-cache, FTS5 trigram, and BM25 prototypes.
+- `scale_compare.py`: the before and after table of D34 from two result directories.
 - `test_scale_store.py`: fast checks of the helpers (about 0.5 s, part of the default suite).
 - `results/`: `stores.csv`, `latency.csv` (every call), `quality.csv` (every probe query), `df.csv`,
-  `profile_3000.txt`, `env.json`, `summary.md`, `fts_*`, and `floor_0.002/`.
+  `profile_3000.txt`, `env.json`, `summary.md`, `fts_*`, and `floor_0.002/`; `d34_before/` and
+  `d34_after/` (with `d34_after/floor_0.002/`) are the same outputs from the D34 runs.

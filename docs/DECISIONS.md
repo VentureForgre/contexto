@@ -234,6 +234,53 @@ the owner's delegation. Open decisions are listed at the end with the options an
   history instead, no bound helps, and only Claude Code's own `idleCompaction: false` setting, which
   belongs to whoever runs the CLI, prevents it.
 
+- **D34. Search matches every word in any case, ranks by BM25 with a recency prior, and both
+  processes cache page reads.** Owner approval, 2026-10-18, including the contract change. The
+  store-scale spike (`spikes/m2/scale/store/`, synthetic, zero spend) measured the exact,
+  case-sensitive, newest-first search at 17 to 6,000 pages: the planted page was among the 3
+  detailed hits for 61 of 86 probe queries at 17 pages and 39 at 6,000; 25 queries missed at
+  every size, 10 of them on case or word order alone; the latest value came first for 19 of 24
+  changing-value queries at 17 pages and 12 at 6,000. Each search read and parsed every page (0.71 s
+  at 6,000), and `index_text` read every page, twice per rotation, in the proxy's request path
+  (0.63 s per call). What changed: (1) a page matches when every whitespace-separated word of the
+  query occurs in it, case-insensitively, in any order, each word as a substring, so every page
+  the old rule matched still matches and identifiers, paths, and their parts keep working; (2)
+  pages holding the whole query rank above pages holding only its words, and within each group by
+  BM25 (k1 1.2, b 0.75) over the words and the whole query, times a recency prior `1 + 0.5 r`, `r`
+  the page's position among the matches from 0 (oldest) to 1 (newest): a newer page wins unless an
+  older one is clearly more about the query, and the oldest needs 1.5 times the newest's relevance;
+  (3) the 3 best pages are shown newest first, and so are the next 50, so among the pages shown
+  the newest statement of a fact comes first, as D28 requires; (4) a page's matching lines are the
+  ones holding the most of the query, the whole query first; in-view entries match by the same rule
+  and still come first (D28); (5) the MCP server keeps each page's folded searchable text, and the
+  proxy each page's id, turn, stub, and index line, for the life of the process, each listing
+  `pages/` per call and re-reading only new or changed files; `page_out` adds what it writes
+  without a read. No file is added to the store, pages stay immutable, and old sessions are read as
+  they are. The recall preamble is unchanged: it is acceptance-measured (D25), and the exact terms
+  it asks for still match and rank first. Measured on the same harness before and after
+  (`spikes/m2/scale/store/README.md`): at 6,000 pages top 3 rose from 39 to 56 of 86, latest
+  first from 12 to 20 of 24, facts from 26 to 29 of 30; at 3,000, 44 to 60, 14 to 21, 27 to 29;
+  with the 0.2 percent topic floor at 6,000, 15 to 40, 9 to 17, 12 to 24. Search at 6,000 pages
+  takes 0.10 to 0.23 s instead of about 0.7 (the first search of a process loads the cache in about
+  0.76 s), `index_text` 0.028 s instead of 0.59 (0.59 once after a proxy restart), and the MCP
+  server's peak memory fell from 456 to 292 MB. The weights were fixed before the after run and not
+  changed after it. Options considered: BM25 alone (rejected: the prototype put the latest value
+  first for 7 of 24 at 6,000 and 2 of 24 at 1,000, breaking D28); case-insensitive all-words
+  matching with newest-first order only (rejected: the prototype reached 43 of 86, since common
+  words still push the planted page out); a time decay with a half-life in pages (rejected: any
+  half-life suits one session length and not another, while a position among the matches does not
+  depend on N); relevance bands, newest first inside the top band (rejected: for a common word
+  every passing mention falls inside the band, which restores the old order); showing the best
+  pages in rank order (rejected: the newest statement among them would not come first); whole-word
+  tokens or stemming (rejected: parts of identifiers such as `TIMEOUT` in `HTTP_TIMEOUT_S` would
+  stop matching, and stemming is fuzzy matching, which the owner ruled out with "not RAG"); SQLite
+  FTS5 written at page time (deferred: the trigram index that keeps substring semantics measured
+  632 MB at 6,000 pages, 2.5 times the store, and search is no longer the slow part); an
+  append-only stub manifest written by `page_out` for both processes (rejected for now: a new store
+  file that must stay consistent with quarantine, with a crash between the page and the manifest
+  write, and with stub-rule changes such as `current_stub`, to save one read of every page after a
+  proxy restart).
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
