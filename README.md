@@ -198,6 +198,27 @@ the first Claude Code settings file that sets it (in a git worktree, the main ch
 route requests through the proxy. Put those settings in your Claude settings files instead. Your own
 `--mcp-config` is allowed and loads alongside Contexto's.
 
+**"warning: ... running without Contexto's tools".** The model has no `contexto_search` or
+`contexto_recall`, so it cannot get paged-out turns back. Neither Claude Code nor Codex reports an MCP
+server that fails to start, so the proxy checks the main conversation (subagents and side requests do
+not count) and the launcher prints this once, during the run or when the CLI exits. The session log
+records it as `mcp_tools_missing`. Likely causes:
+
+- *The MCP server did not start.* Run the command the warning names (`<python> -P -m contexto mcp
+  --help`); it should print the `contexto mcp` usage. Before v0.2.8, `contexto run codex` registered
+  the server as a bare `contexto` command, and Codex ran without the tools whenever `contexto` was not
+  on its PATH; upgrade. In Claude Code, `/mcp` shows the server's status.
+- *Claude Code started the server but did not offer its tools.* A permission deny rule or
+  `--disallowedTools` that matches `mcp__contexto__` tools removes them.
+- *The server started too slowly.* Codex 0.163.0 does not wait long for MCP servers: in a
+  zero-spend test, `codex exec` sent its only request about 1 second in, before a server that took 3
+  seconds was up, and that turn ran without the tools.
+
+How it is checked: in Claude Code's requests the tools appear by name, in the tool list or, with tool
+search on, in the deferred-tools list. Codex never names MCP tools in its requests, so for Codex the
+MCP server records in the session when it answers Codex's tool list request, and the proxy checks for
+that record.
+
 **"window budget about N tokens ... is below 25,000".** The bound leaves little room for turns after
 the fixed overhead, so rotations page often. Start again with the suggested `--bound`.
 

@@ -31,7 +31,9 @@ page index). ``F`` is only measured after the first upstream response, so at sta
 warns when an assumed ``F`` leaves less than 25,000 tokens: 92,000 inside an OpenRig seat (M0
 measured seat heads of 82k to 84k before pins) and 55,000 otherwise (a throwaway head near 46k
 plus pins and index). Once the engine measures ``F``, a ``bound_too_small`` event or a window
-budget under 25,000 is shown on stderr once. stderr stays quiet otherwise.
+budget under 25,000 is shown on stderr once. So is a main conversation running without Contexto's
+MCP tools (``contexto.toolcheck``): neither CLI reports an MCP server that fails to start, so the
+proxy checks and the launcher warns, during the run or at exit. stderr stays quiet otherwise.
 
 Exit codes: claude's own code; 128 + N if claude died from signal N; 2 for a usage error such as
 a bound above the guard; 1 if the proxy cannot start; 127 if ``claude`` is not on PATH.
@@ -54,6 +56,7 @@ from typing import Any, Callable
 from contexto.paths import contexto_home
 from contexto.proxy import ContextoProxy, identity_transform
 from contexto.store import SessionStore
+from contexto.toolcheck import missing_tools_message
 from contexto.upstream import resolve_upstream
 
 DEFAULT_BOUND = 150_000
@@ -139,8 +142,9 @@ def start_warning(bound: int, headroom_floor: int | None, overhead: int) -> str 
 
 
 class NoticeLog:
-    """Session log wrapper: everything goes to the store; the engine's first bound_too_small event
-    and first window budget under MIN_WINDOW_BUDGET are also shown on stderr, once each."""
+    """Session log wrapper: everything goes to the store; the engine's first bound_too_small event,
+    first window budget under MIN_WINDOW_BUDGET, and first ``mcp_tools_missing`` (from a request, or
+    logged at exit by ``report_missing_tools``) are also shown on stderr, once each."""
 
     def __init__(self, store: Any, stderr) -> None:
         self.store = store
@@ -149,8 +153,14 @@ class NoticeLog:
 
     def log(self, event: dict[str, Any]) -> None:
         self.store.log(event)
-        for inner in event.get("transform_events") or []:
+        for inner in [event, *(event.get("transform_events") or [])]:
             if not isinstance(inner, dict):
+                continue
+            if inner.get("event") == "mcp_tools_missing":
+                self._once("mcp_tools_missing",
+                           "warning: " + missing_tools_message(inner.get("dialect"), inner.get("server_listed")))
+                continue
+            if inner is event:
                 continue
             budget, overhead = inner.get("window_budget"), inner.get("fixed_overhead")
             if inner.get("event") == "bound_too_small":
@@ -266,6 +276,19 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     return proxy, engine_name
 
 
+def report_missing_tools(proxy: ContextoProxy) -> None:
+    """At exit, after the proxy stopped: if the main conversation ended without Contexto's MCP tools and
+    that was not reported during the run (a run shorter than the check's grace), log the engine's
+    ``mcp_tools_missing``; the proxy's NoticeLog shows the warning. Shared by claude and codex."""
+    verdict = getattr(proxy.transform, "tools_verdict", None)
+    try:
+        event = verdict() if callable(verdict) else None
+    except Exception:  # a diagnostic; never change the exit
+        return
+    if event:
+        proxy.log(event)
+
+
 def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None) -> int:
     """Run a CLI with the terminal passed through and return its exit code (128 + N if it died from
     signal N, 127 if it cannot be started). Ctrl+C reaches it through the terminal while the
@@ -325,6 +348,7 @@ def _run(options: LaunchOptions, stderr) -> int:
         return code
     finally:
         proxy.stop()
+        report_missing_tools(proxy)
         shutil.rmtree(tmp, ignore_errors=True)
         store.log({"event": "exit", "code": code})
 
