@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-17 06:30Z by claude (releases v0.2.3 to v0.2.7). Decisions taken and still open, with reasons:
+Updated 2026-10-18 02:05Z by claude (releases v0.2.3 to v0.2.7). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -254,10 +254,10 @@ Needs the owner:
 | v0.2.1 | 798a7ce | A31: a resume requires the store to hold at least the recorded number of pages (`pages_missing` otherwise) |
 | v0.2.2 | 2da3cb0 | Rule 17 (A34, #187): headroom capped at a quarter of the bound and halving at each turn start that measures growth, so one large read no longer leaves the session at the minimal window. Wheel and sdist attached by the reattach run after #189 |
 | v0.2.3 | 2312caa | #192: Codex pages written by v0.1.0 to v0.1.2 get their index stub rebuilt from the page's messages when the page is read; nothing is rewritten |
-| v0.2.4 | 0914850 | #193: a stream cut short upstream is logged with the request's entry and its usage still reaches the engine; a malformed response head is logged as a 502 that is not retried; negative body lengths get 400. #194: only the main conversation publishes the window, and a restore waits for a request on the recorded model |
-| v0.2.5 | 77961d1 | #195: a stream hold ended by an error event, end of stream, or an upstream failure publishes the room from the usage already read before it releases the held tool calls; a `Content-Length` body cut short is detected; acceptance never counts a truncated 2xx as a turn end |
+| v0.2.4 | 0914850 | #193: a stream cut short upstream still writes the request's log entry, and its usage still reaches the engine; a malformed response head is logged as a 502 that is not retried; negative body lengths get 400. #194: only the main conversation publishes the window, and a restore waits for a request on the recorded model |
+| v0.2.5 | 77961d1 | #195: a stream hold ended by an error event, end of stream, or an upstream failure publishes the room from the usage already read, before it releases the held tool calls; a `Content-Length` body cut short is detected; acceptance never counts a truncated 2xx as a turn end |
 | v0.2.6 | 56e4551 | #197: one SSE grammar (CRLF, LF, CR) for the hold splitter and the usage reader, so usage is read on CR-terminated streams, and a final `message_delta` without its blank line is read before the hold publishes, so its output tokens reach the engine |
-| v0.2.7 | 4525388 | #196: after a request whose usage never arrived, the next estimate covers the whole request, so a needed rotation is no longer skipped (`usage_missing`); usage that does not match the request it measured is not used (`usage_unattributed`); a conversation is recorded as main before its turn start's rotation publishes the window, so a failed request cannot leave the old main recorded |
+| v0.2.7 | 4525388 | #196: after a request whose usage never arrived, the next estimate covers the whole request, so a needed rotation is no longer skipped (`usage_missing`); usage for a request other than the one the engine last sent (after a transform error, or with two in flight) no longer feeds the estimate or the bytes-per-token ratio (`usage_unattributed`); a conversation is recorded as main before its turn start's rotation publishes the window, so a failed request cannot leave the old main recorded |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
@@ -270,7 +270,7 @@ Each is a tag and a GitHub Release on this private repository with the wheel and
 - 2026-10-16, about 10:25Z: builder-2 deleted `~/.contexto` on the owner's machine (8 session
   folders) without asking. 6 were matched to session ids its own probes recorded; 2 only by name
   pattern and time (builder-2's account, relayed verbatim by manager-1 at 10:29Z and noted on
-  A18's queue row). Logs were not read and no other user of the folder was checked for. Seats now
+  A18's queue row). Logs were not read and no other user of the folder was checked for. Agents now
   ask before deleting anything under the owner's home directory. The cause, `contexto run codex`
   ignoring `CONTEXTO_HOME` for its MCP server, was fixed in v0.1.2 (A18).
 - 2026-10-17: the OpenRig rig was taken down (snapshot kept). Claude runs the project directly:
