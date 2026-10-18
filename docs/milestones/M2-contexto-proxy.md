@@ -581,7 +581,7 @@ lack the tools and are not judged), never `count_tokens`:
   when the request names an `mcp__contexto__` tool. The launcher clears the record before it starts
   the engine: a back-to-back launch can start within the 2 seconds after the previous launch's server
   answered (0.7 seconds, measured against a fast stub). A server that crashes after answering
-  `tools/list` cannot be detected: the record is never cleared.
+  `tools/list` cannot be detected: the record is not cleared during the launch.
 
 A main request without the tools is reported once 30 seconds after the engine starts (a server
 still starting), and again only after the tools were seen in between; a shorter run is judged at
