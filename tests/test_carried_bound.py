@@ -210,6 +210,34 @@ def test_an_effort_change_on_a_reminder_message_is_a_settings_change_not_session
     assert {classify_system(msgs, i) for i in plain} == {"carried_text"}
 
 
+def test_a_settings_change_with_non_text_content_is_unclassified_carried_and_logged():
+    # Contract step 2(b) covers text-only content; anything with non-text blocks is step 5 whether or
+    # not it has settings fields: carried, never paged, and logged so an unmeasured shape shows up.
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+    odd = {"role": "system", "content": [{"type": "text", "text": "synthetic"}, image], "output_config": {"effort": "low"}}
+    msgs = session_5x(20)
+    at = turn_starts(msgs)[3] + 1  # turn 4's system message
+    msgs[at] = odd
+    assert classify_system(msgs, at) == "unclassified"
+    k = turn_starts(msgs)[-1]
+    events: list[dict] = []
+    new = page_carried_text(msgs, EpochState(k=k, initial_carried=0), MemoryStore(key=b"k" * 32),
+                            Config(carried_text_budget=0), TokenEstimator(), events)
+    kept, unclassified = carried_systems(msgs, k, new.paged_carried)
+    assert at in kept and unclassified == 1
+    cfg = Config(bound=40_000, headroom_floor=2_000, pin_budget=200, index_budget=200, min_turn_room=2_000)
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
+    logged = []
+    for t in range(1, 30):
+        turn = turn_5x(t)
+        prefix = msgs[:turn_starts(msgs)[t - 1] + 2] if t <= 20 else msgs + turn[:2]
+        _, _, ev = engine(request(copy.deepcopy(prefix)), {}, MESSAGES)
+        logged += [e for e in ev if e["event"] == "unclassified_system_message"]
+        if t > 20:
+            msgs = msgs + turn
+    assert logged and all(e["count"] == 1 for e in logged)
+
+
 def test_effort_changes_no_longer_grow_what_the_fallback_cannot_page():
     # Budget 0 pages everything the fallback may page; what stays is the unpageable part. Before D33
     # it grew by the size of each effort change's message (2,770 -> 9,272 over 48 turns measured).

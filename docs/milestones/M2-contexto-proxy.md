@@ -84,10 +84,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      Position is not used, so resumes of hand-written session files classify correctly. Carried,
      never paged.
   2. **Settings**: (a) **settings-only**: empty content plus settings fields. Carried, latest per
-     settings key (rule 13). (b) **Settings change** (D33): content plus settings fields without
-     the step 1 signature, measured as an effort change riding on a countdown, a file note, or the
-     plan-mode text. Carried while it is the latest settings change per settings key; a superseded
-     one is carried text that the fallback may page like step 4.
+     settings key (rule 13). (b) **Settings change** (D33): text-only content plus settings fields
+     without the step 1 signature, measured as an effort change riding on a countdown, a file note,
+     or the plan-mode text. Carried while it is the latest settings change per settings key; a
+     superseded one is carried text that the fallback may page like step 4. Non-text content with
+     settings fields is step 5, not a settings change: never measured, so it is carried, never
+     paged, and logged.
   3. **Hook output**: text-only content matching the hook-output signature that lane A documents
      with stub evidence in the A2 PR. Per-turn: paged with the turn it sits in, wherever it sits
      in that turn (measured by reviewer-2 at zero spend in the PR #30 review: `UserPromptSubmit`
@@ -98,8 +100,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      keep applying). Lane A measured how an output-style change and a plan-mode toggle arrive
      (`spikes/m2/carried/`, finding 11); they fall here. A session start with no effort setting
      is recognised by the step 1 signature (D33), not here.
-  5. **Tool-addition messages and anything with non-text blocks**: carried; non-text ones are
-     logged as `unclassified_system_message`. Tool-addition messages are vendor-documented but
+  5. **Tool-addition messages and anything with non-text blocks** (with or without settings
+     fields): carried, never paged; non-text ones are logged as `unclassified_system_message`. Tool-addition messages are vendor-documented but
      not observed on Claude Code 2.1.301 (builder-2 measured that adding or removing an MCP
      server on resume changes `tools`, a head change under rule 6, and adds no system message).
   Carrying is the safe failure, since paging a message that must persist would lose state.

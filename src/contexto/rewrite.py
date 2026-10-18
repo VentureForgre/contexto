@@ -24,10 +24,11 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   turn-start messages and the carried system messages of paged turns (contract PR #35), in the form
   the CLI sends now. ``classify_system`` sorts every system message deterministically (contract PR
   #38, amended by D33): ``session_start`` (the ``# Environment`` signature, with or without settings
-  fields), ``settings`` (empty content plus settings fields; rule 12), ``settings_change`` (content
-  plus settings fields without the signature: an effort change riding on a reminder),
+  fields), ``settings`` (empty content plus settings fields; rule 12), ``settings_change`` (text-only
+  content plus settings fields without the signature: an effort change riding on a reminder),
   ``hook_output`` (paged with its turn), ``carried_text`` (any other text-only content) and
-  ``unclassified`` (non-text content, also logging ``unclassified_system_message``). Settings-only
+  ``unclassified`` (non-text content, with or without settings fields, also logging
+  ``unclassified_system_message``). Settings-only
   messages accrue per settings change (measured), so only the latest per settings key is carried; the
   carried set is computed from the paged region, so it changes only at a rotation. The bounded
   fallback (``page_carried_text``, D32 and D33) pages, at a rotation, carried text, superseded
@@ -483,18 +484,19 @@ def _anthropic_classify_system(messages: list[dict], i: int) -> str:
     """Deterministic class of the system message at ``messages[i]``, in the contract's order (Terms,
     PR #38, amended by D33): session-start (the session-start signature, with or without settings
     fields; carried), settings-only (empty content plus settings fields; carried, latest per key),
-    settings change (content plus settings fields without the signature: an effort change riding on a
-    reminder; carried while it is the latest per settings key, then pageable by the fallback), hook
-    output (text-only, matching a documented signature; paged with its turn), other text-only content
-    (carried, pageable by the fallback: output styles and plan mode are standing instructions), and
-    non-text content (carried, logged as ``unclassified_system_message``). Position is not used;
+    settings change (text-only content plus settings fields without the signature: an effort change
+    riding on a reminder; carried while it is the latest per settings key, then pageable by the
+    fallback), hook output (text-only, matching a documented signature; paged with its turn), other
+    text-only content (carried, pageable by the fallback: output styles and plan mode are standing
+    instructions), and non-text content, with or without settings fields (carried, never paged,
+    logged as ``unclassified_system_message``). Position is not used;
     ``messages`` is accepted for a uniform signature."""
     m = messages[i]
     if is_session_start(m):
         return SESSION_START
     if settings_key(m) is not None:
         return SETTINGS
-    if settings_fields(m) is not None:
+    if settings_fields(m) is not None and is_text_only(m):
         return SETTINGS_CHANGE
     if is_hook_output(m):
         return HOOK_OUTPUT
@@ -631,8 +633,6 @@ def fallback_candidates(messages: list[dict], k: int,
     for i in carried_systems(messages, k, paged)[0]:
         if classes[i] not in PAGEABLE_SYSTEM or i in protected:
             continue
-        if classes[i] == SETTINGS_CHANGE and not is_text_only(messages[i]):
-            continue  # a superseded settings change with non-text content stays carried
         item = ((i, 0), message_hash(messages[i]), messages[i])
         (superseded if mode_kind(messages[i]) is not None else unrecognised).append(item)
     starts = turn_starts(messages[:k])
