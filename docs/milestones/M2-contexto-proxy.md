@@ -625,7 +625,7 @@ a no-replayed-thinking baseline.
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
    `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`,
-   `epoch_record_stale`, or `unclassified_system_message`.
+   `epoch_record_stale`, `mcp_tools_missing`, or `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the

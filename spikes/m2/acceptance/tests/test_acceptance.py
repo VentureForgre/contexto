@@ -973,3 +973,13 @@ def test_tool_rounds_are_calibrated_on_live_run_3():
     assert abs(b.h1_expected - budget.H1_SPENT_RUN3) / budget.H1_SPENT_RUN3 < 0.05  # tracks run #3's real H1
     assert b.h1_worst > budget.H1_SPENT_RUN3 and b.planned_over_bound == 0
     assert sum(r.kind == "round" for r in b.rows) == p.tool_rounds * len(s.probe_texts)  # worst: every turn
+
+
+def test_failure_events_match_the_contracts_acceptance_1_list():
+    # The detector and the contract drifted once (epoch_record_stale was in the contract's list but not
+    # in FAILURE_EVENTS); read the list from the contract so they cannot drift again.
+    import re
+    contract = (Path(__file__).resolve().parents[4] / "docs" / "milestones" / "M2-contexto-proxy.md").read_text()
+    start = contract.index("means the product left its designed path:")
+    listed = contract[start:contract.index("2. **Fidelity:**", start)]
+    assert set(re.findall(r"`([a-z_]+)`", listed)) == set(detectors.FAILURE_EVENTS)
