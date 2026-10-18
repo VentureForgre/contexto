@@ -72,12 +72,24 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   context blocks of any turn-start message (everything but the user's own prompt text), and the
   `role: "system"` messages that the classification below marks as carried. All carried content is
   forwarded in the CLI's current form, never restored from a stored copy.
-- **Classification of `role: "system"` messages**, deterministic and in this order:
-  1. **Session-start**: content and settings fields such as `output_config` together (measured:
-     the session-start message has `output_config`, hook messages do not; position is not used,
-     so resumes of hand-written session files classify correctly). Carried.
-  2. **Settings-only**: empty content plus settings fields. Carried, latest per settings key
-     (rule 13).
+- **Classification of `role: "system"` messages**, deterministic and in this order (amended by
+  D33):
+  1. **Session-start**: text-only content whose first line, after an optional `<system-reminder>`
+     tag, is `# Environment` (the session's environment message), with or without settings fields.
+     Measured on Claude Code 2.1.302 over every main request of the 13 runs in
+     `spikes/m2/scale/reminders/`: on the 5.x ids it is the only system message with that first
+     line, with `output_config` on claude-opus-5-5 and claude-haiku-5-5, without it and wrapped in
+     the tag on claude-sonnet-5 and claude-fable-5. Settings fields do not decide it: an
+     `--effort` change attaches `output_config` to whatever system message that turn already has.
+     Position is not used, so resumes of hand-written session files classify correctly. Carried,
+     never paged.
+  2. **Settings**: (a) **settings-only**: empty content plus settings fields. Carried, latest per
+     settings key (rule 13). (b) **Settings change** (D33): text-only content plus settings fields
+     without the step 1 signature, measured as an effort change riding on a countdown, a file note,
+     or the plan-mode text. Carried while it is the latest settings change per settings key; a
+     superseded one is carried text that the fallback may page like step 4. Non-text content with
+     settings fields is step 5, not a settings change: never measured, so it is carried, never
+     paged, and logged.
   3. **Hook output**: text-only content matching the hook-output signature that lane A documents
      with stub evidence in the A2 PR. Per-turn: paged with the turn it sits in, wherever it sits
      in that turn (measured by reviewer-2 at zero spend in the PR #30 review: `UserPromptSubmit`
@@ -85,18 +97,42 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      `tool_result`).
   4. **Other text-only content**: carried, because it may be a standing instruction (the vendor
      documents output-style changes and plan mode as instructions delivered as a message that
-     keep applying). Before A2 merges, lane A measures with zero-spend stubs how an output-style
-     change, a plan-mode toggle, and a session start with no effort setting arrive; any of them
-     that lacks a settings field falls here and is carried.
-  5. **Tool-addition messages and anything with non-text blocks**: carried; non-text ones are
-     logged as `unclassified_system_message`. Tool-addition messages are vendor-documented but
+     keep applying). Lane A measured how an output-style change and a plan-mode toggle arrive
+     (`spikes/m2/carried/`, finding 11); they fall here. A session start with no effort setting
+     is recognised by the step 1 signature (D33), not here.
+  5. **Tool-addition messages and anything with non-text blocks** (with or without settings
+     fields): carried, never paged; non-text ones are logged as `unclassified_system_message`. Tool-addition messages are vendor-documented but
      not observed on Claude Code 2.1.301 (builder-2 measured that adding or removing an MCP
      server on resume changes `tools`, a head change under rule 6, and adds no system message).
   Carrying is the safe failure, since paging a message that must persist would lose state.
-  Bounded fallback: if carried content grows more than 8,000 tokens over its size at the
-  session's first request, the oldest step 4 messages are paged at the next rotation, each listed
-  in the index with its first line and recallable, and the proxy logs `carried_paged`. Lane A
-  pins down, with stub evidence, exactly which blocks count as injected context.
+  Bounded fallback (amended by D32 and D33): if carried content grows more than 8,000 tokens over
+  its size at the session's first request, the next rotation pages carried items of paged turns
+  until the growth is back under 8,000. Pageable are step 4 messages, superseded settings changes,
+  and the context blocks of every turn-start message after the first. Never paged: the
+  session-start message, settings-only messages, the latest settings change per settings key, the
+  first turn-start message's context blocks (`messages[0]` in a fresh session: CLAUDE.md and the
+  session context), and the latest item of each recognisable kind. Kinds are documented
+  signatures: for text messages, output style and plan mode; for context blocks, the first line
+  inside the tag (`CONTEXT_BLOCK_KINDS` in `rewrite.py`, measured on 2.1.302 with 4.x ids: token
+  countdown, plan mode entry and exit as one kind, file changed on disk, task-tools reminder, and
+  the kinds that make up `messages[0]`). Superseded items of a recognisable kind are paged first,
+  then unrecognised ones, oldest first by position. Each paged item is its own immutable page (a
+  context block is stored as a user message holding that block as sent), listed in the index with
+  its first line inside the tag (marked `[earlier system message]` or `[earlier reminder]`, see Store) and recallable.
+  Paging happens only at rotations, so carried content stays
+  byte-identical between them. The paged set is part of the epoch record (rule 16,
+  `paged_carried`): a system message by its normalised hash, a context block by a hash of its
+  position and content (identical countdowns in different turn starts stay distinct), so a
+  resumed engine carries exactly what the previous one did, except once after an upgrade that
+  reclassifies carried content: a v0.2.8 record can have paged, as carried text, a message this
+  version never pages (the claude-sonnet-5 and claude-fable-5 environment message, or a latest
+  copy hidden because an older byte-identical copy was paged). The resumed engine carries it
+  again from its first request (one cache write from the carried position on) and logs
+  `carried_reclassified` (rule 16). The proxy logs `carried_paged` with
+  the count, the tokens freed, how many were context blocks, and how many were of no recognisable
+  kind (`unrecognised`; on 5.x ids the per-turn system reminders and settings changes riding on them
+  count here, since the text-message kinds are only output style and plan mode). Lane A pins down, with stub
+  evidence, exactly which blocks count as injected context.
 - The proxy keeps an epoch state `E = (k, carried, pinned_text, index_text, head_fingerprint)`:
   the turns before turn index `k` are paged out.
 
@@ -227,8 +263,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     Terms: identified hook output pages with its turn, and everything else is carried, with the
     bounded 8,000-token fallback. At rotation only (deterministic, and
     safe for thinking because rotation strips it), keep the latest settings-only message per
-    settings key. If carried content grows by more than 4,000 tokens over its size at the
-    session's first request, log `carried_over_budget` in the session log.
+    settings key. If carried content, after the bounded fallback at a rotation, is still more than
+    8,000 tokens over its size at the session's first request (the fallback could not bound it), log
+    `carried_over_budget` in the session log.
 14. **Transform failures.** Expected failures never reuse the component that failed, and only the
     terminal step below may forward the CLI's original request:
     - **Degraded mode** (every request sent in it is logged with `degraded: true`) is entered on `page_conflict` (a stored page differs in
@@ -314,7 +351,13 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       (`no_record`, `unreadable`, `dialect_changed`, `model_changed`, `settings_changed`,
       `preamble_changed`, `head_changed`, `history_shorter`, `history_diverged`,
       `other_conversation`, `pages_missing`: the store holds fewer pages than the record's
-      `turns_paged`, packet A31). A resume logs `epoch_resumed` with `epoch` and `k`. Measured sizing
+      `turns_paged`, packet A31). A resume logs `epoch_resumed` with `epoch` and `k`. It then logs
+      content-free `carried_reclassified` with `epoch` and `count` when the record's
+      `paged_carried` names, by hash, system messages without settings fields that the current
+      rules carry (session-start, or protected as the latest of a kind) and that v0.2.8's rules
+      hid; the resume goes ahead and those messages are carried again. The record does not say
+      which version wrote it, so on a record this version wrote the count can include a latest
+      copy that was already carried: it is an upper bound on what changed. Measured sizing
       (packet A8's ratio restore) still applies; it waits for the first request on the recorded
       model, so a side request on another model that arrives first logs `sizing_not_restored` once
       and does not cancel it.
@@ -378,7 +421,14 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 - **Pages:** `pages/<page id>.json`, one per paged-out turn, holding the exact message JSON of that
   turn (thinking included as received), its turn number, byte size (canonical JSON, summed per
   content block) and token estimate, and a stub: first 200 characters of the user text, tool names
-  used, and at most 20 file paths mentioned.
+  used, and at most 20 file paths mentioned. A page with no user text but a system message adds
+  the first non-empty line of that text, shown in the index after `[earlier system message]`; a page whose only
+  message is a user message made entirely of `<system-reminder>` context blocks (a context block
+  the bounded fallback paged) has no user text and adds the first non-empty line inside the tag,
+  shown after `[earlier reminder]`. Both lines are taken from inside the tag when the CLI wraps the
+  text in it, so an index line never starts with the tag, and the marker says the item is past: a
+  superseded reminder (for example a plan-mode entry) can be listed above the one that replaced it,
+  because pages the fallback writes take turn numbers after the turns paged at the same rotation.
   Page id: `pg_` + first 16 hex of HMAC-SHA256 over the canonical JSON of `{turn, messages}`
   only (not the stub or token estimate, so ids stay stable when those rules change), keyed with a
   random per-store key kept in the store and never sent upstream (ids appear in prompts, and short turns

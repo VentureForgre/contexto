@@ -21,8 +21,12 @@ from contexto.tokens import estimate_message_tokens, estimate_tokens, message_by
 STUB_TEXT_CHARS = 200
 STUB_MAX_PATHS = 20
 EMPTY_SYSTEM_STUB = "(empty system message)"
-# The tag Claude Code wraps an injected context block in (``contexto.rewrite.CONTEXT_TAG``).
-CONTEXT_TAG = "<system-reminder>"
+EMPTY_REMINDER_STUB = "(empty reminder)"
+# Claude Code wraps injected context in this tag (context blocks of turn-start messages on 4.x ids,
+# the system text of claude-sonnet-5 and claude-fable-5); it is ``contexto.rewrite.CONTEXT_TAG``. A
+# stub shows the first line inside it: the tag line alone says nothing, and in the preamble's index it
+# reads as a live instruction. Search also uses it to tell a paged context block from a turn (D34).
+REMINDER_TAG = "<system-reminder>"
 
 # The mandatory first line of the pinned text (default variant); see contexto.store.recall.
 PINNED_FIRST_LINE = DEFAULT_LINES[0]
@@ -90,25 +94,58 @@ def _texts(turn: list[dict[str, Any]]):
                         yield b.get("text", "")
 
 
+def _first_line(text: str) -> str | None:
+    """First non-empty line of ``text`` with ``<system-reminder>`` tags removed, None if there is none."""
+    for line in text.replace(REMINDER_TAG, "\n").replace("</system-reminder>", "\n").splitlines():
+        if line.strip():
+            return line.strip()[:STUB_TEXT_CHARS]
+    return None
+
+
 def _system_first_line(turn: list[dict[str, Any]]) -> str | None:
-    """First non-empty line of the turn's system text, a placeholder if it is empty, None if no system message."""
+    """First non-empty line of the turn's system text (inside the tag, if tagged), a placeholder if it
+    is empty, None if no system message."""
     systems = [m for m in turn if isinstance(m, dict) and m.get("role") == "system"]
     if not systems:
         return None
     for message in systems:
-        for line in _user_text(message).splitlines():
-            if line.strip():
-                return line.strip()[:STUB_TEXT_CHARS]
+        line = _first_line(_user_text(message))
+        if line is not None:
+            return line
     return EMPTY_SYSTEM_STUB
+
+
+def _is_reminder(block: Any) -> bool:
+    return (isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+            and block["text"].lstrip().startswith(REMINDER_TAG))
+
+
+def _reminder_first_line(turn: list[dict[str, Any]]) -> str | None:
+    """For a page whose only message is a user message made entirely of context blocks (the bounded
+    fallback pages a context block as such a message, D32): the first non-empty line inside the tag,
+    or a placeholder when it is empty. None for any other page."""
+    if len(turn) != 1 or not isinstance(turn[0], dict) or turn[0].get("role") != "user":
+        return None
+    content = turn[0].get("content")
+    if not isinstance(content, list) or not content or not all(_is_reminder(b) for b in content):
+        return None
+    for block in content:
+        line = _first_line(block["text"])
+        if line is not None:
+            return line
+    return EMPTY_REMINDER_STUB
 
 
 def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
     """First 200 characters of the turn-start user text, tool names used, and file paths mentioned.
 
     A page with no user text but a system message (lane A's carried-text fallback pages each such
-    message on its own) adds ``system_text``: the first non-empty line of the system text, or a
-    placeholder when it is empty. Pages with user text keep exactly the three fields, so their ids
-    are unchanged.
+    message on its own) adds ``system_text``: the first non-empty line of the system text (inside
+    the ``<system-reminder>`` tag when the CLI wraps it), or a placeholder when it is empty. A page
+    whose only message is a user message made entirely of context blocks (a paged context block,
+    D32) is treated the same way: empty ``user_text`` and ``reminder_text``, the first non-empty line
+    inside the tag. Other pages with user text keep exactly the three fields. Stubs never reach page
+    ids, which hash only the turn number and the messages.
     """
     view = _view(turn)  # Responses (Codex) items as Messages API messages, the same view search reads (B23)
     first_user = next((m for m in view if m.get("role") == "user"), {})
@@ -130,12 +167,15 @@ def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
         for match in _PATH_RE.findall(text):
             if match not in paths:
                 paths.append(match)
+    reminder = _reminder_first_line(turn)
     stub = {
-        "user_text": _user_text(first_user)[:STUB_TEXT_CHARS],
+        "user_text": "" if reminder is not None else _user_text(first_user)[:STUB_TEXT_CHARS],
         "tools": tools,
         "paths": paths[:STUB_MAX_PATHS],
     }
-    if not stub["user_text"].strip():
+    if reminder is not None:
+        stub["reminder_text"] = reminder
+    elif not stub["user_text"].strip():
         system = _system_first_line(turn)
         if system is not None:
             stub["system_text"] = system
@@ -179,19 +219,20 @@ def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int) -> dict
 def searchable_text(page: dict[str, Any]) -> str:
     """What search reads on a page, folded: the stub fields and every text of the page's turn (D34)."""
     stub = page["stub"]
-    return searchable([stub["user_text"], stub.get("system_text", ""), *stub["tools"], *stub["paths"],
+    return searchable([stub["user_text"], stub.get("system_text", ""),
+                       stub.get("reminder_text", ""), *stub["tools"], *stub["paths"],
                        *_texts(page["messages"])])
 
 
 def _is_context_text(text: Any) -> bool:
-    return isinstance(text, str) and text.lstrip().startswith(CONTEXT_TAG)
+    return isinstance(text, str) and text.lstrip().startswith(REMINDER_TAG)
 
 
 def is_context_page(page: dict[str, Any]) -> bool:
     """True for a page that holds no turn: only system messages, or user messages made only of
     ``<system-reminder>`` context blocks. Lane A's fallback pages carried system messages one per
-    page, and PR #203 pages each paged context block as a user message holding that block. Read from
-    the messages, so the stub's form (PR #203 may give such pages a system-like stub) does not matter.
+    page, and the bounded fallback pages each paged context block as a user message holding that
+    block (D32). Read from the messages, not the stub (a paged block's stub has ``reminder_text``).
     Search ranks these pages after every turn page (D34)."""
     messages = page.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -241,7 +282,9 @@ def index_line(page: dict[str, Any], salient: bool = False) -> str:
     stub = page["stub"]
     text = " ".join(stub["user_text"].split())
     if not text and stub.get("system_text"):
-        text = "[system] " + stub["system_text"]
+        text = "[earlier system message] " + stub["system_text"]
+    if not text and stub.get("reminder_text"):
+        text = "[earlier reminder] " + stub["reminder_text"]
     line = f"{page['id']} turn {page['turn']}: {text}"
     if stub["tools"]:
         line += f" [tools: {', '.join(stub['tools'])}]"

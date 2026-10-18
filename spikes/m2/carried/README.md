@@ -107,3 +107,8 @@ over its size at the first request, the oldest carried text messages are paged a
 
 Not measured: MCP `tools/list_changed` notifications within a single running process, and other
 hook events that inject context (SessionStart, PostToolUse).
+
+Amended 2026-10-18 by D32 and D33 (`docs/DECISIONS.md`) after Claude Code 2.1.302 measurements in
+`spikes/m2/scale/reminders/`: session-start is now the `# Environment` first-line signature, not
+content plus settings fields; content plus settings fields without it is a settings change (latest
+per key carried); and the fallback can also page context blocks of turn starts after the first.

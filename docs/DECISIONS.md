@@ -234,6 +234,69 @@ the owner's delegation. Open decisions are listed at the end with the options an
   history instead, no bound helps, and only Claude Code's own `idleCompaction: false` setting, which
   belongs to whoever runs the CLI, prevents it.
 
+- **D32. The bounded fallback also pages context blocks of later turn starts.** Owner approval,
+  2026-10-18. Claude Code 2.1.302 on the 4.x model ids puts `<system-reminder>` blocks in every
+  later turn-start user message (the token countdown, a 2,720-token plan-mode entry, file-changed
+  notes repeated on each resume, task reminders; `spikes/m2/scale/reminders/`). The contract carried
+  every one forever and the 8,000-token fallback paged only system messages, so carried content
+  grew 45 to 425 tokens per turn until `bound_too_small` and over-bound requests
+  (`docs/research/M2-scale-30m.md`). Now, at a rotation and only while carried growth exceeds 8,000
+  tokens, the fallback may also page the context blocks of every turn-start message after the
+  first. It keeps the first turn-start message's blocks (CLAUDE.md and the session context on
+  `messages[0]`) and the latest block of each recognisable kind, from a documented table of
+  first-line signatures measured on 2.1.302 (`CONTEXT_BLOCK_KINDS`: token countdown, plan mode
+  entry and exit as one kind, file changed on disk, task-tools reminder, and the kinds that make up
+  `messages[0]`). Superseded blocks of a kind go first, then unrecognised ones, oldest first. Each
+  paged block is its own immutable page (a user message holding that block as sent), listed in
+  the index and recallable; `paged_carried` identifies it by a hash of its position and content,
+  so byte-identical countdowns in different turn starts stay distinct and a restart (rule 16)
+  resumes the same carried bytes. Measured on the captured bodies with the engine's own functions
+  (`analyze.py`, fallback applied at every turn start), what the fallback cannot page on
+  claude-sonnet-4-6 over 48 turns now stays between 3,386 and 3,557 with bare prompts and between
+  3,382 and 5,251 in the busy runs (the top while plan mode is on and its entry is the latest of its
+  kind), and is 3,557, 3,794 and 3,794 at turn 48, against 5,452, 13,256 and 22,953 before (bare
+  prompts, one process, resume every turn). Carried content after the fallback peaks at 11,330 and
+  11,381 in the busy runs, against 13,256 and 22,953. Options
+  considered: page every later block with no kept kinds (rejected: the latest countdown,
+  plan-mode state and file note are current instructions the model should keep seeing); keep the
+  latest file note per path (rejected: unbounded in the number of files edited outside the CLI);
+  cap carried blocks by count instead of tokens (rejected: one plan-mode entry is 60 times a
+  countdown, so a count cap does not bound F); strip reminders from the request (rejected: carried
+  content is forwarded as the CLI sends it, and what is not sent must stay recallable).
+
+- **D33. Session-start is recognised by its content, not by settings fields.** Owner approval,
+  2026-10-18. On claude-opus-5-5 and claude-haiku-5-5, Claude Code 2.1.302 attaches an `--effort`
+  change's `output_config` to the turn's first system message (a countdown, a file note, or the
+  plan-mode text), and the classifier then called it session-start, carried forever and never
+  paged: the session-start class grew from 2,770 to 9,272 and 11,637 tokens over 16 effort
+  changes. On claude-sonnet-5 and claude-fable-5 the session's environment message has no
+  `output_config`, so it classified as carried text and was the first message the fallback would
+  page. In every main request of the 13 captured runs the session-start message on 5.x ids is the
+  one system message whose first line, after an optional `<system-reminder>` tag, is
+  `# Environment`, and no other has it. That signature now makes a message session-start, with or
+  without settings fields; a message with text-only content plus settings fields and no signature
+  is a settings change (non-text content stays unclassified: carried and logged), carried while it is the latest per settings key (so the current effort stays in
+  view) and pageable as carried text once a later one supersedes it. The fallback never hides the
+  latest settings change per settings key or the latest text of a recognisable kind, even when an
+  older byte-identical copy was paged (measured: effort resets land on byte-identical countdown
+  messages); any other pageable message whose hash is in the paged set is hidden with it. Measured
+  on the captured bodies, what the fallback cannot page in the busy one-process claude-opus-5-5 run
+  now stays between 3,301 and 4,897 tokens over 48 turns (9,804 at turn 48 before), and between
+  3,304 and 4,902 with task tools (10,133 before). With a resume every turn it reaches 5,643 at
+  turn 48 (12,169 before; claude-haiku-5-5 5,504 against 12,035): the same three system messages
+  and two blocks are carried, but the latest effort-change message the CLI sends grows as it
+  re-sends unread file notes. On the claude-sonnet-5 and claude-fable-5 probes the
+  environment message is now carried and never paged (not-pageable 534 before, 3,298 and 3,164
+  now, which is that message). Options considered: position (`messages[1]`, rejected by the
+  contract: a hand-written resume puts the system text after the new prompt); the first system
+  message with settings fields (rejected: positional in effect, and absent on claude-sonnet-5);
+  keep classing content plus settings fields as session-start but page superseded ones
+  (rejected: leaves the claude-sonnet-5 environment message pageable); drop the in-message
+  `output_config` (rejected: carried content is forwarded as sent). Risk: the signature is a
+  Claude Code text, recorded with its version (`SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION`); if a
+  later CLI changes that heading, the message falls to the settings-change or carried-text class
+  and can be paged once superseded, so a CLI upgrade should re-run the reminders spike.
+
 - **D34. Search matches every word in any case, ranks by BM25 with a recency prior, and both
   processes cache page reads.** Owner approval, 2026-10-18, including the contract change. The
   store-scale spike (`spikes/m2/scale/store/`, synthetic, zero spend) measured the exact,

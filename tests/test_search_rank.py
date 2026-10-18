@@ -293,13 +293,14 @@ def block_page(*bodies):
 
 def test_context_pages_are_recognised_by_their_content_whatever_their_stub():
     from contexto.rewrite import CONTEXT_TAG
-    from contexto.store.pages import CONTEXT_TAG as PAGES_TAG, build_page, is_context_page
+    from contexto.store.pages import REMINDER_TAG, build_page, is_context_page
 
-    assert PAGES_TAG == CONTEXT_TAG
+    assert REMINDER_TAG == CONTEXT_TAG
     key = b"k" * 32
     note = build_page(key, block_page(file_note(34)), 34)
-    assert note["stub"]["user_text"].startswith("<system-reminder>")  # today's stub: the raw block
-    marked = {**note, "stub": {**note["stub"], "user_text": "", "system_text": "Note: /tmp/synthetic changed"}}
+    assert note["stub"]["user_text"] == "" and note["stub"]["reminder_text"].startswith("Note: ")  # D32's stub
+    marked = {**note, "stub": {**note["stub"], "user_text": rem(file_note(34))["text"][:200]}}  # any stub
+    del marked["stub"]["reminder_text"]
     tagged_system = build_page(key, [{"role": "system", "content": rem("Plan mode is active.")["text"]}], 9)
     plain_system = build_page(key, [{"role": "system", "content": "Plan mode is active. Do not edit."}], 9)
     string_block = build_page(key, [{"role": "user", "content": rem(countdown(3))["text"]}], 3)
