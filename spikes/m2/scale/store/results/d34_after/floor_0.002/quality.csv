@@ -65,7 +65,7 @@ n,dialect,fact,kind,query,outcome,rank_shown,matching_pages,query_on_planted_pag
 17,messages,c01,changing,HTTP_TIMEOUT,detailed,1,3,True,False,True,True,True
 17,messages,c01,changing,timeout,detailed,1,5,True,True,True,True,True
 17,messages,c02,changing,worker pool,detailed,1,3,True,True,True,True,True
-17,messages,c02,changing,pool size,detailed,1,11,True,True,True,True,True
+17,messages,c02,changing,pool size,detailed,2,11,True,True,True,True,True
 17,messages,c02,changing,workers,absent_nomatch,,0,False,False,False,False,False
 17,messages,c03,changing,API version,detailed,1,3,True,True,True,True,True
 17,messages,c03,changing,pinned the upstream,detailed,1,3,True,True,True,True,True
@@ -82,12 +82,12 @@ n,dialect,fact,kind,query,outcome,rank_shown,matching_pages,query_on_planted_pag
 17,messages,c07,changing,cache TTL,detailed,1,3,True,True,True,True,True
 17,messages,c07,changing,TTL,detailed,1,3,True,True,True,True,True
 17,messages,c07,changing,ttl_seconds,detailed,1,3,True,False,True,True,True
-17,messages,c08,changing,max retries,detailed,1,4,True,True,True,True,True
+17,messages,c08,changing,max retries,detailed,2,4,True,True,True,True,True
 17,messages,c08,changing,MAX_RETRIES,detailed,2,4,True,True,True,True,True
-17,messages,c08,changing,retries,detailed,1,4,True,True,True,True,True
-1000,messages,s01,static,staging DB port,detailed,2,5,True,True,True,True,
+17,messages,c08,changing,retries,detailed,2,4,True,True,True,True,True
+1000,messages,s01,static,staging DB port,detailed,3,5,True,True,True,True,
 1000,messages,s01,static,staging database,absent_nomatch,,3,False,False,False,False,
-1000,messages,s01,static,DB port,detailed,2,541,True,True,True,True,
+1000,messages,s01,static,DB port,detailed,3,541,True,True,True,True,
 1000,messages,s02,static,flaky,listed,40,45,True,False,True,True,
 1000,messages,s02,static,flaky test,listed,40,45,True,False,False,True,
 1000,messages,s02,static,fails intermittently,absent_nomatch,,2,False,False,False,False,
@@ -105,14 +105,14 @@ n,dialect,fact,kind,query,outcome,rank_shown,matching_pages,query_on_planted_pag
 1000,messages,s06,static,CSV export,detailed,2,2,True,True,True,True,
 1000,messages,s07,static,feature flag,listed,4,6,True,False,True,True,
 1000,messages,s07,static,streaming path,detailed,1,4,True,True,True,True,
-1000,messages,s07,static,flag,detailed,2,225,True,True,True,True,
+1000,messages,s07,static,flag,detailed,3,225,True,True,True,True,
 1000,messages,s08,static,eviction policy,detailed,2,3,True,True,True,True,
 1000,messages,s08,static,maxmemory-policy,detailed,1,3,True,True,True,True,
 1000,messages,s08,static,eviction,detailed,3,6,True,True,True,True,
 1000,messages,s09,static,release branch,detailed,1,1,True,True,True,True,
 1000,messages,s09,static,cut every,detailed,1,1,True,True,True,True,
 1000,messages,s09,static,code freeze,absent_nomatch,,2,False,False,False,False,
-1000,messages,s10,static,max upload size,detailed,1,7,True,False,True,True,
+1000,messages,s10,static,max upload size,detailed,2,7,True,False,True,True,
 1000,messages,s10,static,MAX_UPLOAD,detailed,3,3,True,True,True,True,
 1000,messages,s10,static,upload limit,absent_nomatch,,2,False,False,False,False,
 1000,messages,s11,static,webhook secret,listed,4,4,True,False,False,True,
@@ -136,7 +136,7 @@ n,dialect,fact,kind,query,outcome,rank_shown,matching_pages,query_on_planted_pag
 1000,messages,s17,static,oncall,detailed,3,4,True,True,True,True,
 1000,messages,s17,static,incident channel,absent_nomatch,,3,False,False,False,False,
 1000,messages,s18,static,cidr_block,detailed,1,4,True,True,True,True,
-1000,messages,s18,static,VPC CIDR,listed,4,4,True,False,False,True,
+1000,messages,s18,static,VPC CIDR,detailed,1,4,True,True,False,True,
 1000,messages,s18,static,CIDR,detailed,1,9,True,True,True,True,
 1000,messages,r01,rename,parse_header,detailed,3,17,True,True,True,True,
 1000,messages,r01,rename,renamed parse_header,detailed,3,3,True,True,True,True,
@@ -148,29 +148,29 @@ n,dialect,fact,kind,query,outcome,rank_shown,matching_pages,query_on_planted_pag
 1000,messages,r04,rename,retry_backoff_ms,detailed,2,9,True,True,True,True,
 1000,messages,r04,rename,retry_backoff,detailed,3,14,True,True,True,True,
 1000,messages,c01,changing,client timeout,listed,4,9,True,False,True,True,False
-1000,messages,c01,changing,HTTP_TIMEOUT,detailed,1,6,True,True,True,True,True
+1000,messages,c01,changing,HTTP_TIMEOUT,detailed,2,6,True,True,True,True,True
 1000,messages,c01,changing,timeout,detailed,3,130,True,True,True,True,True
 1000,messages,c02,changing,worker pool,detailed,2,10,True,True,True,True,True
-1000,messages,c02,changing,pool size,detailed,1,523,True,True,True,True,True
+1000,messages,c02,changing,pool size,detailed,2,523,True,True,True,True,True
 1000,messages,c02,changing,workers,absent_nomatch,,4,False,False,False,False,False
-1000,messages,c03,changing,API version,detailed,1,11,True,True,True,True,True
+1000,messages,c03,changing,API version,detailed,2,11,True,True,True,True,True
 1000,messages,c03,changing,pinned the upstream,detailed,1,5,True,True,True,True,True
 1000,messages,c03,changing,api_version,absent_nomatch,,3,False,False,False,False,False
 1000,messages,c04,changing,batch size,detailed,2,20,True,True,True,True,True
-1000,messages,c04,changing,BATCH_SIZE,detailed,1,5,True,True,True,True,True
+1000,messages,c04,changing,BATCH_SIZE,detailed,2,5,True,True,True,True,True
 1000,messages,c04,changing,ingest batch,detailed,2,29,True,True,True,True,True
 1000,messages,c05,changing,deploy region,detailed,1,5,True,False,True,True,True
-1000,messages,c05,changing,region,detailed,1,53,True,True,True,True,True
+1000,messages,c05,changing,region,detailed,2,53,True,True,True,True,True
 1000,messages,c05,changing,DEPLOY_REGION,detailed,1,4,True,True,True,True,True
 1000,messages,c06,changing,log level,detailed,1,8,True,True,True,True,True
 1000,messages,c06,changing,LOG_LEVEL,detailed,1,5,True,False,True,True,True
 1000,messages,c06,changing,logging level,absent_nomatch,,0,False,False,False,False,False
-1000,messages,c07,changing,cache TTL,detailed,1,12,True,True,True,True,True
-1000,messages,c07,changing,TTL,detailed,1,16,True,True,True,True,True
+1000,messages,c07,changing,cache TTL,detailed,2,12,True,True,True,True,True
+1000,messages,c07,changing,TTL,detailed,2,16,True,True,True,True,True
 1000,messages,c07,changing,ttl_seconds,detailed,1,3,True,True,True,True,True
 1000,messages,c08,changing,max retries,detailed,1,11,True,True,True,True,True
 1000,messages,c08,changing,MAX_RETRIES,detailed,1,10,True,False,True,True,True
-1000,messages,c08,changing,retries,detailed,1,64,True,True,True,True,True
+1000,messages,c08,changing,retries,detailed,2,64,True,True,True,True,True
 6000,messages,s01,static,staging DB port,listed,18,31,True,False,True,True,
 6000,messages,s01,static,staging database,absent_nomatch,,25,False,False,False,False,
 6000,messages,s01,static,DB port,listed,44,3183,True,False,True,True,
@@ -183,7 +183,7 @@ n,dialect,fact,kind,query,outcome,rank_shown,matching_pages,query_on_planted_pag
 6000,messages,s04,static,password hashing,listed,15,17,True,False,True,True,
 6000,messages,s04,static,argon2,detailed,3,10,True,True,True,True,
 6000,messages,s04,static,hashing algorithm,absent_nomatch,,10,False,False,False,False,
-6000,messages,s05,static,rate limit,listed,29,135,True,False,True,True,
+6000,messages,s05,static,rate limit,listed,30,135,True,False,True,True,
 6000,messages,s05,static,requests per minute,detailed,3,15,True,True,True,True,
 6000,messages,s05,static,rate-limit,absent_nomatch,,50,False,False,False,False,
 6000,messages,s06,static,export bug,detailed,3,5995,True,True,True,True,
@@ -201,7 +201,7 @@ n,dialect,fact,kind,query,outcome,rank_shown,matching_pages,query_on_planted_pag
 6000,messages,s10,static,max upload size,detailed,3,17,True,False,True,True,
 6000,messages,s10,static,MAX_UPLOAD,detailed,3,11,True,True,True,True,
 6000,messages,s10,static,upload limit,absent_nomatch,,9,False,False,False,False,
-6000,messages,s11,static,webhook secret,listed,4,11,True,False,False,True,
+6000,messages,s11,static,webhook secret,detailed,1,11,True,True,False,True,
 6000,messages,s11,static,webhook signing,detailed,2,10,True,True,True,True,
 6000,messages,s11,static,signing secret,detailed,3,12,True,True,True,True,
 6000,messages,s12,static,nightly backup,listed,8,9,True,False,True,True,
@@ -227,33 +227,33 @@ n,dialect,fact,kind,query,outcome,rank_shown,matching_pages,query_on_planted_pag
 6000,messages,r01,rename,parse_header,detailed,3,104,True,True,True,True,
 6000,messages,r01,rename,renamed parse_header,listed,11,14,True,False,True,True,
 6000,messages,r01,rename,rename,absent_buried,,285,True,False,True,True,
-6000,messages,r02,rename,UserCache,detailed,1,166,True,True,True,True,
+6000,messages,r02,rename,UserCache,detailed,2,166,True,True,True,True,
 6000,messages,r02,rename,renamed UserCache,absent_nomatch,,12,False,False,False,False,
-6000,messages,r03,rename,fetch_rows,detailed,2,202,True,True,True,True,
+6000,messages,r03,rename,fetch_rows,detailed,3,202,True,True,True,True,
 6000,messages,r03,rename,renamed fetch_rows,absent_nomatch,,14,False,False,False,False,
 6000,messages,r04,rename,retry_backoff_ms,detailed,2,41,True,True,True,True,
 6000,messages,r04,rename,retry_backoff,detailed,3,54,True,True,True,True,
 6000,messages,c01,changing,client timeout,detailed,2,24,True,True,True,True,True
 6000,messages,c01,changing,HTTP_TIMEOUT,detailed,2,22,True,True,True,True,True
-6000,messages,c01,changing,timeout,detailed,2,841,True,True,True,True,True
+6000,messages,c01,changing,timeout,detailed,3,841,True,True,True,True,True
 6000,messages,c02,changing,worker pool,listed,19,56,True,False,True,True,False
-6000,messages,c02,changing,pool size,detailed,1,2947,True,True,True,True,True
+6000,messages,c02,changing,pool size,detailed,2,2947,True,True,True,True,True
 6000,messages,c02,changing,workers,absent_nomatch,,42,False,False,False,False,False
-6000,messages,c03,changing,API version,detailed,2,53,True,True,True,True,True
+6000,messages,c03,changing,API version,detailed,3,53,True,True,True,True,True
 6000,messages,c03,changing,pinned the upstream,listed,4,17,True,False,True,True,False
 6000,messages,c03,changing,api_version,absent_nomatch,,14,False,False,False,False,False
-6000,messages,c04,changing,batch size,detailed,2,73,True,True,True,True,True
+6000,messages,c04,changing,batch size,detailed,3,73,True,True,True,True,True
 6000,messages,c04,changing,BATCH_SIZE,detailed,2,13,True,True,True,True,True
-6000,messages,c04,changing,ingest batch,detailed,2,125,True,True,True,True,True
-6000,messages,c05,changing,deploy region,detailed,1,40,True,False,True,True,True
-6000,messages,c05,changing,region,detailed,1,287,True,True,True,True,True
+6000,messages,c04,changing,ingest batch,detailed,3,125,True,True,True,True,True
+6000,messages,c05,changing,deploy region,detailed,2,40,True,False,True,True,True
+6000,messages,c05,changing,region,detailed,2,287,True,True,True,True,True
 6000,messages,c05,changing,DEPLOY_REGION,listed,4,18,True,False,True,True,False
-6000,messages,c06,changing,log level,detailed,1,37,True,True,True,True,True
+6000,messages,c06,changing,log level,detailed,2,37,True,True,True,True,True
 6000,messages,c06,changing,LOG_LEVEL,listed,5,23,True,False,True,True,False
 6000,messages,c06,changing,logging level,absent_nomatch,,5,False,False,False,False,False
 6000,messages,c07,changing,cache TTL,detailed,2,21,True,True,True,True,True
-6000,messages,c07,changing,TTL,detailed,1,79,True,True,True,True,True
+6000,messages,c07,changing,TTL,detailed,2,79,True,True,True,True,True
 6000,messages,c07,changing,ttl_seconds,detailed,2,13,True,False,True,True,True
-6000,messages,c08,changing,max retries,detailed,1,39,True,True,True,True,True
-6000,messages,c08,changing,MAX_RETRIES,detailed,1,27,True,False,True,True,True
-6000,messages,c08,changing,retries,detailed,1,339,True,True,True,True,True
+6000,messages,c08,changing,max retries,detailed,2,39,True,True,True,True,True
+6000,messages,c08,changing,MAX_RETRIES,detailed,2,27,True,False,True,True,True
+6000,messages,c08,changing,retries,detailed,2,339,True,True,True,True,True

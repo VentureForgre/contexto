@@ -166,7 +166,7 @@ not start it by hand.
 
 | Tool | What it does |
 |---|---|
-| `contexto_search(query)` | Finds turns holding every word of the query, in any case and any order (words match as substrings, so identifiers and paths work; no stemming, no fuzzy or similarity matching). Turns holding the whole query rank first, then by relevance (BM25) with newer turns preferred among similar ones. Matching lines from the conversation still in view come first (at most 3, newest first), skipping the current turn's own user message. Then the 3 best matching paged-out turns, newest first, each with its last 3 matching lines in page order and their offsets, then up to 50 more matching turns, newest first, as page id and the offsets of their first and last matches (`@first..last`, one offset when they are the same). Each reply ends with a note on what was searched |
+| `contexto_search(query)` | Finds turns holding every word of the query, in any case and any order (words match as substrings, so identifiers and paths work; no stemming, no fuzzy or similarity matching). Turns holding the whole query rank first, then by relevance (BM25) with newer turns preferred among similar ones; paged context blocks (`<system-reminder>` text paged on its own) rank after every turn. A query with no words finds nothing. Matching lines from the conversation still in view come first (at most 3, newest first), skipping the current turn's own user message. Then the 3 best matching paged-out turns (the newest matching turn is always one of them), newest first, each with its last 3 matching lines in page order and their offsets, then up to 50 more matching turns, newest first, as page id and the offsets of their first and last matches (`@first..last`, one offset when they are the same). Each reply ends with a note on what was searched |
 | `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
 | `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`. A verified event, artifact, or reference shows as a fact in the pinned state; decisions and obligations keep their own groups |
 | `contexto_close(obligation_id, note)` | Close an open obligation |
@@ -217,7 +217,11 @@ pinned records in `ledger.jsonl` in the same directory.
 
 Claude Code acceptance ran on one model, one bound, and one upstream. Codex passed acceptance
 criteria 1 to 3 on one model at bound 64,000; the default bound 150,000 is untested on Codex. Cache
-efficiency depends on the upstream route. The full list is in
+efficiency depends on the upstream route. Search keeps each page's searchable text in the MCP
+server's memory for the life of the process (about the UTF-8 size of the page text; peak RSS 293 MB
+at 6,000 synthetic pages), and the first search of each MCP process reads every page once (0.74 s at
+6,000 pages). Each query word scans that text once, so a long query with matches costs more. The
+full list is in
 [STATUS.md, "Known limitations (v0.2.7)"](STATUS.md#known-limitations-v027).
 
 ## Exit codes

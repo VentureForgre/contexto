@@ -264,22 +264,26 @@ D34 (`docs/DECISIONS.md`) changed `contexto_search` and the store; the probes, p
 distractors above are unchanged. What changed, in short (details in `src/contexto/store/search.py`
 and `src/contexto/store/catalog.py`):
 
-- Matching: every whitespace-separated word of the query, case-insensitively, in any order,
-  each as a substring, so every page the old rule matched still matches.
-- Ranking: pages holding the whole query rank above pages holding only its words; within each group
-  BM25 (k1 1.2, b 0.75) over the words and the whole query, times `1 + 0.5 r`, `r` the page's
-  position among the matching pages (0 oldest, 1 newest). The 3 best pages are shown newest
-  first, and so are the next 50, so among the pages shown the newest statement comes first.
-- Speed: the MCP server keeps each page's folded searchable text for its lifetime, the proxy each
-  page's id, turn, stub, and index line; both list `pages/` per call and read only new or changed
-  files. Nothing is written to the store.
+- Matching: every whitespace-separated word of the query, case-insensitively (one character at a
+  time), in any order, each as a substring, so for any query with a word every page the old rule
+  matched still matches. A whitespace-only query finds nothing.
+- Ranking: turn pages holding the whole query, then turn pages holding only its words, then pages
+  holding only paged context blocks; within each group BM25 (k1 1.2, b 0.75) over the words and
+  the whole query, times `1 + 0.5 r`, `r` the page's position among the matching pages (0 oldest,
+  1 newest). The newest matching turn page always takes one of the 3 detailed places. The 3 best
+  pages are shown newest first, and so are the next 50, so among the pages shown the newest
+  statement comes first.
+- Speed: the MCP server keeps each page's folded searchable text (UTF-8) for its lifetime, the
+  proxy each page's id, turn, stub, and index line; both list `pages/` per call and read only new
+  or changed files. Nothing is written to the store. Pages are narrowed word by word, and the scan
+  stops when no page holds every word so far.
 
 Command (both runs on this machine, M5 Pro, load 3.3 to 4.2, back to back):
 
 ```
 # before: origin/claude/scale-30m a15770f, from a `git archive` copy so the MCP children import that code
 .venv/bin/python spikes/m2/scale/store/scale_bench.py --sizes 17,1000,3000,6000 --out results/d34_before
-# after: this branch, the code committed with D34
+# after: this branch at 958e597 (D34 with the PR #204 review fixes; results/d34_after/env.json)
 .venv/bin/python spikes/m2/scale/store/scale_bench.py --sizes 17,1000,3000,6000 --out results/d34_after
 .venv/bin/python spikes/m2/scale/store/scale_bench.py --sizes 17,1000,6000 --responses-sizes "" --passes 0 \
     --profile-n 0 --floor 0.002 --out results/d34_after/floor_0.002
@@ -302,23 +306,23 @@ read them once), cold is the first call on a fresh store (a proxy restart).
 | N | dialect | run | top 3 (of 86) | latest first (of 24) | facts (of 30) | value shown | search rare / common / multi, s | first search, s | index_text warm / cold, s | MCP peak RSS MB |
 |---:|---|---|---:|---:|---:|---:|---|---:|---|---:|
 | 17 | messages | before | 61 | 19 | 30 | 52 | 0.002 / 0.004 / 0.002 | 0.003 | 0.035 / 0.035 | 34 |
-| 17 | messages | after | 71 | 21 | 30 | 61 | 0.001 / 0.006 / 0.001 | 0.003 | 0.000 / 0.037 | 35 |
+| 17 | messages | after | 71 | 21 | 30 | 61 | 0.001 / 0.005 / 0.001 | 0.003 | 0.000 / 0.035 | 35 |
 | 1,000 | messages | before | 50 | 17 | 28 | 44 | 0.107 / 0.105 / 0.109 | 0.119 | 0.119 / 0.122 | 103 |
-| 1,000 | messages | after | 63 | 21 | 29 | 57 | 0.016 / 0.038 / 0.039 | 0.125 | 0.003 / 0.122 | 79 |
+| 1,000 | messages | after | 63 | 21 | 29 | 57 | 0.014 / 0.035 / 0.035 | 0.119 | 0.003 / 0.112 | 79 |
 | 3,000 | messages | before | 44 | 14 | 27 | 40 | 0.349 / 0.323 / 0.348 | 0.378 | 0.319 / 0.319 | 245 |
-| 3,000 | messages | after | 60 | 21 | 29 | 54 | 0.050 / 0.088 / 0.119 | 0.376 | 0.013 / 0.297 | 164 |
+| 3,000 | messages | after | 60 | 21 | 29 | 54 | 0.043 / 0.079 / 0.107 | 0.367 | 0.011 / 0.300 | 165 |
 | 6,000 | messages | before | 39 | 12 | 26 | 36 | 0.694 / 0.659 / 0.715 | 0.761 | 0.590 / 0.616 | 456 |
-| 6,000 | messages | after | 56 | 20 | 29 | 50 | 0.095 / 0.156 / 0.230 | 0.764 | 0.028 / 0.589 | 292 |
+| 6,000 | messages | after | 56 | 20 | 29 | 50 | 0.087 / 0.152 / 0.217 | 0.742 | 0.025 / 0.550 | 293 |
 | 1,000 | responses | before | 50 | 17 | 28 | 41 | 0.119 / 0.119 / 0.123 | 0.127 | 0.118 / 0.116 | 94 |
-| 1,000 | responses | after | 63 | 21 | 29 | 54 | 0.016 / 0.041 / 0.039 | 0.140 | 0.004 / 0.119 | 78 |
+| 1,000 | responses | after | 63 | 21 | 29 | 54 | 0.014 / 0.041 / 0.036 | 0.138 | 0.003 / 0.114 | 79 |
 
 With the topic floor of 1 page in 500 (`results/floor_0.002` before, `results/d34_after/floor_0.002` after):
 
 | N | run | top 3 (of 86) | latest first (of 24) | facts (of 30) | value shown |
 |---:|---|---:|---:|---:|---:|
 | 17 | before / after | 61 / 71 | 19 / 21 | 30 / 30 | 52 / 61 |
-| 1,000 | before / after | 44 / 58 | 16 / 20 | 26 / 27 | 38 / 52 |
-| 6,000 | before / after | 15 / 40 | 9 / 17 | 12 / 24 | 13 / 36 |
+| 1,000 | before / after | 44 / 59 | 16 / 20 | 26 / 27 | 38 / 53 |
+| 6,000 | before / after | 15 / 41 | 9 / 17 | 12 / 24 | 13 / 37 |
 
 What the numbers show:
 
@@ -326,8 +330,15 @@ What the numbers show:
   latest value comes first for 20 of 24 (12 before), and 29 of 30 facts are found (26). The
   prototype's BM25 without recency reached 57 and 29 but only 7 of 24 latest first; the recency
   prior and the newest-first display keep "latest value wins" at every size (21, 21, 21, 20 of
-  24, against 19, 17, 14, 12). With the topic floor, 6,000 pages go from 15 to 40 of 86 and from
+  24, against 19, 17, 14, 12). With the topic floor, 6,000 pages go from 15 to 41 of 86 and from
   12 to 24 facts.
+- The PR #204 review fixes (newest matching turn always among the 3 detailed, context-block pages
+  last, per-character case folding, UTF-8 text in memory) left every quality figure of the main
+  run unchanged; the synthetic store has no context-block pages and no non-ASCII text. With the
+  topic floor two queries moved from listed to detailed because the planted page was the newest
+  match (`VPC CIDR` at 1,000, `webhook secret` at 6,000): top 3 58 to 59 and 40 to 41 of 86. Where
+  the newest match now takes a detailed place, the planted page's `rank_shown` in `quality.csv`
+  moved down by one without changing its outcome.
 - The 10 queries per size that missed only because of case or word order now match (the "not on
   page" count falls from 25 to 15, and none of the 15 would match case-insensitively or by all
   words). The 15 left are words the plant does not contain (`hashing algorithm`, `Python
@@ -337,18 +348,31 @@ What the numbers show:
   hundreds of other pages that mention the word, and `flaky test`, whose plant holds both words but
   not the phrase while about 50 distractor pages hold the phrase, which ranks them first by design.
   A more specific query finds each of these facts (29 of 30 facts are in the top 3).
-- Not tuned to the probes: k1, b, the recency weight 0.5, the phrase tier, and the display order
-  were fixed and unit-tested (`tests/test_search_rank.py`, scenarios of its own) before the after
-  run, and nothing changed after it. The caveat above still holds: each plant repeats its key
-  words in 2 or 3 places, which flatters BM25.
-- Speed. Search at 6,000 pages takes 0.10 to 0.23 s (0.66 to 0.72 before): it no longer reads or
-  parses pages, but it still scans the cached text (about 240 MB at 6,000) once per query word,
-  so multi-word queries cost more (`results/d34_after/profile_3000.txt`: `rank` is most of a warm
+- Tuning history. k1 1.2 and b 0.75 are the usual BM25 defaults. The recency prior and the phrase
+  group were added after the BM25-only prototype put the latest value first for only 7 of 24 on
+  these same probes (`docs/research/M2-scale-30m.md`), so the probes informed the design and there
+  is no held-out probe set. The recency weight 0.5 and the display order were not swept on the
+  probes. The newest-match place, the context-block group, and per-character case folding came
+  from the PR #204 review (unit cases of their own in `tests/test_search_rank.py`), and the after
+  run was repeated with them. The caveat above still holds: each plant repeats its key words in 2
+  or 3 places, which flatters BM25, and every synthetic page is 19,000 to 30,000 tokens, so BM25's
+  length discount is not exercised here (reviewer-2's repro of it is a unit test).
+- Speed. Search at 6,000 pages takes 0.09 to 0.22 s (0.66 to 0.72 before): it no longer reads or
+  parses pages, but it still scans the cached text (about 240 MB at 6,000) once per query word
+  while some page holds every word so far, so multi-word queries with matches cost more (`results/d34_after/profile_3000.txt`: `rank` is most of a warm
   call; listing `pages/` with a `stat` per file is about 10 ms at 3,000). The first search of
-  each MCP process loads the cache, 0.76 s at 6,000, about one search before D34. `index_text`
-  takes 0.028 s warm (0.59 before), so a rotation no longer spends about 1.2 s on it; after a proxy
-  restart its first call still reads every page once (0.59 s). Peak RSS of the MCP child is lower
-  (292 MB at 6,000 against 456): the cache holds folded text, not the parsed pages.
+  each MCP process loads the cache, 0.74 s at 6,000, about one search before D34. `index_text`
+  takes 0.025 s warm (0.59 before), so a rotation no longer spends about 1.2 s on it; after a proxy
+  restart its first call still reads every page once (0.55 s). Peak RSS of the MCP child is lower
+  (293 MB at 6,000 against 456): the cache holds folded text as UTF-8 bytes, not the parsed pages.
+  The synthetic text is ASCII; held as `str`, a page with one em dash would take 2 bytes per
+  character and one with an emoji 4 (measured on 924 KB of text: 1,848 and 3,696 KB as `str`,
+  924 KB as UTF-8 in every case), which is why the cache holds bytes.
+- Long queries (`scale_long_query.py`, `results/d34_after/long_query.txt`; 6,000 synthetic pages
+  of a Zipf vocabulary, 208 MB): with one word absent, 120 words took 7.5 s before and take 0.05
+  to 0.19 s, 40 words 2.2 s and 0.05 to 0.27 s, since pages are narrowed word by word and the
+  scan stops when none is left. A query whose every word is on nearly every page still costs one
+  scan per word (3 such words: 0.75 s before and after).
 
 ## Files
 
@@ -358,7 +382,8 @@ What the numbers show:
 - `scale_calibrate.py`, `calibration.json`: real-turn query frequencies and turn sizes (numbers only).
 - `scale_fts_proto.py`: the text-cache, FTS5 trigram, and BM25 prototypes.
 - `scale_compare.py`: the before and after table of D34 from two result directories.
+- `scale_long_query.py`: `rank` before and after word-by-word narrowing, on queries of 1 to 120 words.
 - `test_scale_store.py`: fast checks of the helpers (about 0.5 s, part of the default suite).
 - `results/`: `stores.csv`, `latency.csv` (every call), `quality.csv` (every probe query), `df.csv`,
   `profile_3000.txt`, `env.json`, `summary.md`, `fts_*`, and `floor_0.002/`; `d34_before/` and
-  `d34_after/` (with `d34_after/floor_0.002/`) are the same outputs from the D34 runs.
+  `d34_after/` (with `d34_after/floor_0.002/` and `long_query.txt`) are the same outputs from the D34 runs.

@@ -2,9 +2,9 @@
 
 | N | dialect | pages | MB on disk | page tokens min / median / max | total page tokens | write ms/page |
 |---:|---|---:|---:|---|---:|---:|
-| 17 | messages | 17 | 0.8 | 20,002 / 23,951 / 27,932 | 407,866 | 1.67 |
-| 1000 | messages | 1000 | 42.4 | 19,326 / 22,857 / 29,684 | 23,016,676 | 1.492 |
-| 6000 | messages | 6000 | 254.7 | 19,194 / 22,868 / 29,684 | 138,076,188 | 1.519 |
+| 17 | messages | 17 | 0.8 | 20,002 / 23,951 / 27,932 | 407,866 | 1.526 |
+| 1000 | messages | 1000 | 42.4 | 19,326 / 22,857 / 29,684 | 23,016,676 | 1.411 |
+| 6000 | messages | 6000 | 254.7 | 19,194 / 22,868 / 29,684 | 138,076,188 | 1.415 |
 
 ## Latency (seconds; median of 5 calls per query, median over queries and 3 passes)
 
@@ -16,8 +16,8 @@
 | N | dialect | detailed (top 3) | listed (4-53) | absent: buried | absent: query not on page (of which case-insensitive would match / all words present) | value shown in reply | changing: latest page first (of 24) | median matching pages |
 |---:|---|---:|---:|---:|---|---:|---:|---:|
 | 17 | messages | 71 | 0 | 0 | 15 (0 / 0) | 61 | 21 | 1 |
-| 1000 | messages | 58 | 12 | 1 | 15 (0 / 0) | 52 | 20 | 5 |
-| 6000 | messages | 40 | 26 | 5 | 15 (0 / 0) | 36 | 17 | 22 |
+| 1000 | messages | 59 | 11 | 1 | 15 (0 / 0) | 53 | 20 | 5 |
+| 6000 | messages | 41 | 25 | 5 | 15 (0 / 0) | 37 | 17 | 22 |
 
 ## Search quality: per fact, best of its 2-3 queries (30 facts)
 
