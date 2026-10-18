@@ -34,6 +34,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -253,13 +254,19 @@ def _toml(value: object) -> str:
 MCP_APPROVAL_MODE = "approve"
 
 
-def _mcp_args(session_id: str) -> list[str]:
-    return ["mcp", "--session", session_id]
+# Codex looks an MCP server's command up on PATH and, when it cannot start the server, runs the turn
+# without its tools and reports nothing (measured on codex-cli 0.163.0: a bare "contexto" not on PATH
+# left code mode's ALL_TOOLS with no contexto tool). The server is started as the Claude path starts it
+# (launcher.mcp_payload): this interpreter by absolute path, "-P -m contexto" (-P keeps the
+# project directory Codex starts it in off sys.path, so a project's own contexto package cannot
+# shadow the installed one).
+def _mcp_server(session_id: str) -> tuple[str, list[str]]:
+    return sys.executable, ["-P", "-m", "contexto", "mcp", "--session", session_id]
 
 
-def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: Path,
-                   contexto_bin: str = "contexto") -> str:
+def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: Path) -> str:
     parts = shlex.split(helper)
+    mcp_command, mcp_args = _mcp_server(session_id)
     if not parts:
         raise CodexLaunchError("the key helper command is empty")
     lines = [
@@ -279,8 +286,8 @@ def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: 
         f"enable_request_compression = {_toml(False)}",
         "",
         f"[mcp_servers.{PROVIDER_ID}]",
-        f"command = {_toml(contexto_bin)}",
-        f"args = {_toml(_mcp_args(session_id))}",
+        f"command = {_toml(mcp_command)}",
+        f"args = {_toml(mcp_args)}",
         f"default_tools_approval_mode = {_toml(MCP_APPROVAL_MODE)}",
         "",
         # Codex starts MCP servers with a restricted environment, so the server is told the home
@@ -293,14 +300,14 @@ def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: 
     return "\n".join(lines)
 
 
-def chatgpt_overrides(proxy_url: str, session_id: str, contexto_home: Path,
-                      contexto_bin: str = "contexto") -> list[str]:
+def chatgpt_overrides(proxy_url: str, session_id: str, contexto_home: Path) -> list[str]:
+    mcp_command, mcp_args = _mcp_server(session_id)
     provider = (f"{{name={_toml('Contexto')}, base_url={_toml(proxy_url)}, wire_api={_toml('responses')}, "
                 f"requires_openai_auth=true, supports_websockets=false}}")
     return ["-c", f"model_providers.{PROVIDER_ID}={provider}", "-c", f"model_provider={PROVIDER_ID}",
             "-c", "features.enable_request_compression=false",
-            "-c", f"mcp_servers.{PROVIDER_ID}.command={_toml(contexto_bin)}",
-            "-c", f"mcp_servers.{PROVIDER_ID}.args={_toml(_mcp_args(session_id))}",
+            "-c", f"mcp_servers.{PROVIDER_ID}.command={_toml(mcp_command)}",
+            "-c", f"mcp_servers.{PROVIDER_ID}.args={_toml(mcp_args)}",
             "-c", f"mcp_servers.{PROVIDER_ID}.default_tools_approval_mode={_toml(MCP_APPROVAL_MODE)}",
             "-c", f"mcp_servers.{PROVIDER_ID}.env.CONTEXTO_HOME={_toml(contexto_home)}"]
 
@@ -323,7 +330,7 @@ def resolve_codex_upstream(auth_mode: str, explicit: str | None, env: dict[str, 
 
 
 def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_mode: str = API_KEY_MODE,
-               key_helper: str | None = None, upstream: str | None = None, contexto_bin: str = "contexto",
+               key_helper: str | None = None, upstream: str | None = None,
                codex_bin: str = "codex", env: dict[str, str] | None = None, cwd: Path | None = None,
                home: Path | None = None, claude_upstream: str | None = None,
                codex_home_dir: Path | None = None, contexto_home: Path | None = None) -> CodexLaunch:
@@ -336,7 +343,7 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     home = home or Path.home()
     target = resolve_codex_upstream(auth_mode, upstream, base_env, claude_upstream)
     if auth_mode == CHATGPT_MODE:
-        return CodexLaunch(argv=[codex_bin, *chatgpt_overrides(proxy_url, session_id, contexto_home, contexto_bin), *codex_args],
+        return CodexLaunch(argv=[codex_bin, *chatgpt_overrides(proxy_url, session_id, contexto_home), *codex_args],
                            env=base_env, upstream=target, notes=[CHATGPT_MODE_HELP])
     helper = key_helper or base_env.get(KEY_HELPER_ENV) or claude_api_key_helper(cwd, home)
     if not helper:
@@ -358,7 +365,7 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
             config.unlink()  # a stale config from an interrupted run
         fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(api_key_config(proxy_url, helper, session_id, contexto_home, contexto_bin))
+            f.write(api_key_config(proxy_url, helper, session_id, contexto_home))
     except BaseException:
         if keep:
             config.unlink(missing_ok=True)
@@ -387,7 +394,6 @@ def add_arguments(parser) -> None:
 
 def run_codex(args, *, launcher=None, stderr=None) -> int:
     """Run ``codex`` behind a Contexto proxy; returns the exit code (codex's, or a launcher error)."""
-    import sys
     import uuid
 
     from contexto import upstream as upstream_module
