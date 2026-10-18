@@ -23,8 +23,10 @@ Code 2.1.302 and codex-cli 0.163.0, temporary homes and fake keys):
 - Codex (Responses API): the request cannot show it. With code mode Codex defers MCP tools behind
   its ``exec`` tool and never names them; the request with the server running is the same, byte for
   byte apart from ids, as the request without it. So the MCP server records in the session store
-  when it answers ``tools/list`` (``SessionStore.set_mcp_listed``), and the check reads that record:
-  a record older than this engine is from an earlier launch and does not count. A Contexto tool
+  when it answers ``tools/list`` (``SessionStore.set_mcp_listed``), and the check reads that record.
+  The launcher clears it before the engine starts (``start_proxy``), and a record older than the
+  engine (beyond ``WALL_SLACK_S``) does not count either. Once written, it stays: a server that
+  crashes after answering cannot be detected. A Contexto tool
   named in ``tools`` or ``additional_tools`` would count too (not seen on 0.163.0).
 
 When: a main request without the tools is reported once the grace (``GRACE_S``, for a server still
@@ -32,8 +34,10 @@ starting) has passed, and again only after the tools were seen in between. A run
 grace is judged at exit (``verdict``) from its last main request, when startup races are over. The
 events are content-free: ``mcp_tools_missing`` (dialect, where it was judged, whether the server
 answered ``tools/list``, how many main requests lacked the tools, seconds since start) and
-``mcp_tools_found`` when the tools appear after a report. The launcher shows ``missing_tools_message``
-once on stderr.
+``mcp_tools_found`` when the tools appear after a report. At exit, a session whose last main request
+still lacked the tools logs ``mcp_tools_missing`` again (``repeated``), since a warning printed mid-run
+can be drawn over by the CLI's TUI. The launcher shows ``missing_tools_message`` on stderr once during
+the run and once after the CLI exits.
 """
 
 from __future__ import annotations
@@ -181,6 +185,7 @@ class ToolCheck:
         self.present: bool | None = None  # at the last judged main request
         self.missing_requests = 0
         self.reported = False
+        self._exit_judged = False
         self._listed = False
 
     def listed(self) -> bool:
@@ -191,7 +196,7 @@ class ToolCheck:
                 at = reader() if callable(reader) else None
             except Exception:  # an unreadable record is no record; never fail the request
                 at = None
-            self._listed = isinstance(at, (int, float)) and at >= self.started_wall
+            self._listed = isinstance(at, (int, float)) and at >= self.started_wall - WALL_SLACK_S
         return self._listed
 
     def observe(self, request: dict[str, Any], dialect: str, *, main: bool) -> list[dict[str, Any]]:
@@ -217,14 +222,17 @@ class ToolCheck:
         return [self._event("request")]
 
     def verdict(self) -> dict[str, Any] | None:
-        """At exit: the ``mcp_tools_missing`` event when the last judged main request lacked the tools
-        and that was not reported yet; else None. A Codex record written after that request counts."""
-        if self.present is not False or self.reported:
+        """At exit, once: the ``mcp_tools_missing`` event when the last judged main request lacked the
+        tools, else None. ``repeated`` says it was already reported during the run: it is reported again
+        because a warning printed mid-run can be drawn over by the CLI's TUI, and the exit is where the
+        user sees it. A Codex record written after that request counts."""
+        if self.present is not False or self._exit_judged:
             return None
         if self.dialect == "responses" and self.listed():
             return None
-        self.reported = True
-        return self._event("exit")
+        self._exit_judged = True
+        repeated, self.reported = self.reported, True
+        return {**self._event("exit"), "repeated": repeated}
 
     def _event(self, at: str) -> dict[str, Any]:
         return {"event": "mcp_tools_missing", "dialect": self.dialect, "at": at, "server_listed": self.listed(),
@@ -232,19 +240,19 @@ class ToolCheck:
 
 
 def missing_tools_message(dialect: Any, server_listed: Any) -> str:
-    """The launcher's one stderr warning for an ``mcp_tools_missing`` event: what is wrong, the likely
-    cause, and what to try."""
+    """The launcher's stderr warning for an ``mcp_tools_missing`` event: what is wrong, the likely cause,
+    and what to try."""
     server = f"{sys.executable} -P -m contexto mcp --help"
     if dialect == "responses":
         return ("Codex is running without Contexto's tools (contexto_search, contexto_recall): the contexto MCP "
-                "server never answered Codex's tool list, and Codex reports no error for that, so paged-out turns "
+                "server did not answer Codex's tool list in time, and Codex reports no error for that, so paged-out turns "
                 f"cannot be recalled. Check that '{server}' runs; contexto before v0.2.8 started the server as a "
                 "bare 'contexto' command, which fails when it is not on PATH. See README, Troubleshooting.")
     if server_listed:
-        return ("Claude Code started the contexto MCP server but did not offer its tools to the model, so "
-                "paged-out turns cannot be recalled. A permission deny rule or --disallowedTools matching "
-                "mcp__contexto__ tools would do this; '/mcp' in Claude Code shows the server. "
-                "See README, Troubleshooting.")
+        return ("Claude Code started the contexto MCP server, but its tools are not available to the model, so "
+                "paged-out turns cannot be recalled. The server may have stopped after starting (check '/mcp' in "
+                "Claude Code), or a permission deny rule or --disallowedTools matching mcp__contexto__ tools "
+                "removed them. See README, Troubleshooting.")
     return ("Claude Code is running without Contexto's tools (contexto_search, contexto_recall): the contexto MCP "
             "server did not start or did not answer, and Claude Code reports no error for that, so paged-out turns "
             f"cannot be recalled. Check '/mcp' in Claude Code and that '{server}' runs. See README, Troubleshooting.")

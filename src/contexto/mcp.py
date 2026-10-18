@@ -298,7 +298,10 @@ class Server:
                 if callable(recorder):
                     recorder()
             except Exception as exc:  # the record is a diagnostic; never fail tools/list for it
-                self._diag(f"set_mcp_listed failed: {type(exc).__name__}")
+                try:
+                    self._diag(f"set_mcp_listed failed: {type(exc).__name__}")
+                except (OSError, ValueError):  # a closed or broken stderr
+                    pass
         return {"tools": TOOLS}
 
     def _tools_call(self, params: dict[str, Any]) -> dict[str, Any]:

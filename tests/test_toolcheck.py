@@ -241,7 +241,20 @@ def test_claude_missing_is_reported_once_after_the_grace():
     assert event == {"event": "mcp_tools_missing", "dialect": "anthropic", "at": "request", "server_listed": False,
                      "requests": 2, "elapsed_s": int(GRACE_S)}
     assert check.observe(claude_request(BUILTIN), "anthropic", main=True) == []  # once
-    assert check.verdict() is None  # already reported
+    # Still missing at exit: repeated, because a mid-run warning in a TUI may never be seen.
+    repeat = check.verdict()
+    assert repeat == {"event": "mcp_tools_missing", "dialect": "anthropic", "at": "exit", "server_listed": False,
+                      "requests": 3, "elapsed_s": int(GRACE_S), "repeated": True}
+    assert check.verdict() is None  # once at exit
+
+
+def test_exit_does_not_repeat_once_the_tools_came_back():
+    clock = Clock()
+    check = ToolCheck(Marker(), clock=clock, wall=lambda: 0.0)
+    clock.now += GRACE_S
+    assert check.observe(claude_request(BUILTIN), "anthropic", main=True)[0]["event"] == "mcp_tools_missing"
+    assert check.observe(claude_request(BUILTIN + CONTEXTO), "anthropic", main=True)[0]["event"] == "mcp_tools_found"
+    assert check.verdict() is None
 
 
 def test_claude_present_tools_never_report_and_a_change_reports_again():
@@ -273,6 +286,7 @@ def test_short_claude_run_reports_at_exit():
     assert check.observe(claude_request(BUILTIN), "anthropic", main=True) == []
     event = check.verdict()
     assert event["event"] == "mcp_tools_missing" and event["at"] == "exit" and event["requests"] == 1
+    assert event["repeated"] is False  # not reported during the run
     assert check.verdict() is None  # once
 
 
@@ -305,9 +319,15 @@ def test_codex_uses_the_mcp_servers_tools_list_record():
 
 
 def test_codex_record_from_an_earlier_launch_does_not_count():
-    check = ToolCheck(Marker(at=99.0), clock=Clock(), wall=lambda: 100.0)
+    check = ToolCheck(Marker(at=90.0), clock=Clock(), wall=lambda: 100.0)
     assert check.observe(codex_request(), "responses", main=True) == []
     assert check.verdict()["server_listed"] is False
+
+
+def test_codex_record_survives_a_small_wall_clock_step_back():
+    # An NTP correction between engine start and tools/list: this launch's record looks a little older.
+    assert ToolCheck(Marker(at=98.5), clock=Clock(), wall=lambda: 100.0).listed() is True
+    assert ToolCheck(Marker(at=97.0), clock=Clock(), wall=lambda: 100.0).listed() is False
 
 
 def test_codex_exit_rechecks_the_record():
@@ -368,6 +388,25 @@ def test_engine_check_does_not_alter_the_request():
     assert request == before and upstream == before
 
 
+def test_engine_check_that_raises_keeps_the_rewrite_and_logs_only_its_type():
+    # A diagnostic must never cost a successful rewrite (the proxy's catch-all would forward the original).
+    request = claude_request(BUILTIN)
+    expected, _, _ = RewriteEngine(MemoryStore(), config=Config(bound=150_000))(copy.deepcopy(request), {},
+                                                                                "/v1/messages")
+
+    class Raising:
+        def observe(self, *args, **kwargs):
+            raise ValueError("secret request text")
+
+    engine = RewriteEngine(MemoryStore(), config=Config(bound=150_000))
+    engine.tools = Raising()
+    upstream, _, events = engine(request, {}, "/v1/messages")
+    assert upstream == expected
+    assert {"event": "toolcheck_error", "error": "ValueError"} in events
+    assert "secret" not in json.dumps(events)
+    assert events[-1].get("main") is True  # the engine's request event stays last
+
+
 # The launcher's warning -----------------------------------------------------------------------------
 
 class ListStore:
@@ -378,10 +417,47 @@ class ListStore:
         self.events.append(event)
 
 
+class LockedProxy:
+    """What report_missing_tools needs from ContextoProxy: the transform, its lock, and the log."""
+
+    def __init__(self, event: dict | None) -> None:
+        self.transform_lock = threading.Lock()
+        self.logged: list[dict] = []
+        self.locked_during_verdict: bool | None = None
+        proxy = self
+
+        class Transform:
+            def tools_verdict(self):
+                proxy.locked_during_verdict = proxy.transform_lock.locked()
+                return event
+
+        self.transform = Transform()
+
+    def log(self, event: dict) -> None:
+        self.logged.append(event)
+
+
+def test_report_missing_tools_runs_under_the_transform_lock(monkeypatch):
+    # A request still in a handler after proxy_stop_incomplete cannot run the check while the exit does.
+    from contexto import launcher
+
+    event = {"event": "mcp_tools_missing", "dialect": "anthropic", "at": "exit", "repeated": False}
+    proxy = LockedProxy(event)
+    launcher.report_missing_tools(proxy)
+    assert proxy.locked_during_verdict is True and proxy.logged == [event]
+    assert not proxy.transform_lock.locked()
+    # A handler stuck holding the lock: the exit waits a moment, then skips the report rather than hang.
+    monkeypatch.setattr(launcher, "REPORT_LOCK_TIMEOUT_S", 0.05)
+    stuck = LockedProxy(event)
+    stuck.transform_lock.acquire()
+    launcher.report_missing_tools(stuck)
+    assert stuck.locked_during_verdict is None and stuck.logged == []
+
+
 @pytest.mark.parametrize("dialect, listed, words", [
     ("anthropic", False, ["Claude Code", "MCP server", "did not start", "contexto_search"]),
-    ("anthropic", True, ["Claude Code", "did not offer", "mcp__contexto__"]),
-    ("responses", False, ["Codex", "MCP server", "never answered", "v0.2.8"]),
+    ("anthropic", True, ["Claude Code", "stopped after starting", "'/mcp'", "mcp__contexto__"]),
+    ("responses", False, ["Codex", "MCP server", "did not answer Codex's tool list in time", "v0.2.8"]),
 ])
 def test_missing_tools_message_names_the_cause_and_the_fix(dialect, listed, words):
     message = missing_tools_message(dialect, listed)
@@ -395,10 +471,26 @@ def test_notice_log_prints_the_warning_once_from_a_request_or_at_exit():
     missing = {"event": "mcp_tools_missing", "dialect": "anthropic", "at": "request", "server_listed": False}
     log.log({"event": "request", "transform_events": [missing, {"event": "request", "epoch": 0}]})
     log.log({"event": "request", "transform_events": [missing]})
-    log.log({**missing, "at": "exit"})
     lines = err.getvalue().splitlines()
     assert len(lines) == 1 and lines[0].startswith("contexto: warning:") and "Claude Code" in lines[0]
-    assert len(log.store.events) == 3  # everything is still logged
+    assert len(log.store.events) == 2  # everything is still logged
+    short = NoticeLog(ListStore(), io.StringIO())
+    short.log({**missing, "at": "exit", "repeated": False})  # a run shorter than the grace
+    [line] = short.stderr.getvalue().splitlines()
+    assert line.startswith("contexto: warning:")
+
+
+def test_notice_log_repeats_the_warning_once_after_the_cli_exits():
+    # Interactive sessions report mid-run, where the TUI can draw over it: the exit event shows it again.
+    err = io.StringIO()
+    log = NoticeLog(ListStore(), err)
+    missing = {"event": "mcp_tools_missing", "dialect": "responses", "at": "request", "server_listed": False}
+    log.log({"event": "request", "transform_events": [missing]})
+    log.log({**missing, "at": "exit", "repeated": True})
+    log.log({**missing, "at": "exit", "repeated": True})
+    first, again = err.getvalue().splitlines()
+    assert first.startswith("contexto: warning: Codex")
+    assert again.startswith("contexto: warning (repeated from the session): Codex")
 
 
 def test_notice_log_is_quiet_for_normal_events():
@@ -453,6 +545,22 @@ def test_mcp_server_tools_list_survives_a_store_that_cannot_record():
 
     out = io.StringIO()
     server = Server(Failing(), out, io.StringIO())
+    reply = server.handle_line('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
+    assert reply is not None and reply["result"]["tools"]
+
+
+def test_mcp_server_tools_list_survives_a_broken_stderr_too():
+    from contexto.mcp import Server
+
+    class Failing(MemoryStore):
+        def set_mcp_listed(self) -> None:
+            raise OSError("read-only")
+
+    class BrokenPipe(io.StringIO):
+        def write(self, text):
+            raise BrokenPipeError("stderr closed")
+
+    server = Server(Failing(), io.StringIO(), BrokenPipe())
     reply = server.handle_line('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
     assert reply is not None and reply["result"]["tools"]
 
@@ -564,6 +672,29 @@ def test_codex_with_v027_config_and_contexto_off_path_gets_the_warning(tmp_path,
     assert code == 0 and record["status"] == 200 and record["command"] == "contexto" and not record["listed"]
     warnings = [line for line in err.splitlines() if "warning" in line]
     assert len(warnings) == 1 and "Codex is running without Contexto's tools" in warnings[0]
-    assert "never answered" in warnings[0] and "v0.2.8" in warnings[0]
+    assert "did not answer Codex's tool list in time" in warnings[0] and "v0.2.8" in warnings[0]
     [missing] = [e for e in events if e["event"] == "mcp_tools_missing"]
     assert missing["dialect"] == "responses" and missing["at"] == "exit" and missing["server_listed"] is False
+
+
+def test_codex_back_to_back_launch_does_not_count_the_previous_servers_record(tmp_path, monkeypatch, capsys):
+    """A second launch on the same session can start well within the clock slack of the first launch's
+    tools/list (0.7 s in a zero-spend Claude Code run against a fast stub). The launcher clears the
+    record before the engine starts, so only this launch's server can count."""
+    from contexto import codex
+
+    code, err, record, _ = run_fake_codex(tmp_path, monkeypatch, capsys, "c3")
+    assert code == 0 and record["listed"] and "warning" not in err
+    monkeypatch.setattr(codex, "_mcp_server", lambda session_id: ("contexto", ["mcp", "--session", session_id]))
+    code, err, record, events = run_fake_codex(tmp_path, monkeypatch, capsys, "c3")
+    assert code == 0 and not record["listed"]
+    assert len([line for line in err.splitlines() if "warning" in line]) == 1
+    [missing] = [e for e in events if e.get("event") == "mcp_tools_missing"]
+    assert missing["server_listed"] is False
+
+
+def test_store_record_can_be_cleared(tmp_path: Path):
+    for store in (SessionStore(tmp_path, "s"), MemoryStore()):
+        store.set_mcp_listed()
+        store.clear_mcp_listed()
+        assert store.mcp_listed_at() is None

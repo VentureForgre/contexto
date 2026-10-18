@@ -33,7 +33,8 @@ measured seat heads of 82k to 84k before pins) and 55,000 otherwise (a throwaway
 plus pins and index). Once the engine measures ``F``, a ``bound_too_small`` event or a window
 budget under 25,000 is shown on stderr once. So is a main conversation running without Contexto's
 MCP tools (``contexto.toolcheck``): neither CLI reports an MCP server that fails to start, so the
-proxy checks and the launcher warns, during the run or at exit. stderr stays quiet otherwise.
+proxy checks and the launcher warns, during the run or at exit, and once more after the CLI exits if
+the session ended still without them. stderr stays quiet otherwise.
 
 Exit codes: claude's own code; 128 + N if claude died from signal N; 2 for a usage error such as
 a bound above the guard; 1 if the proxy cannot start; 127 if ``claude`` is not on PATH.
@@ -60,6 +61,7 @@ from contexto.toolcheck import missing_tools_message
 from contexto.upstream import resolve_upstream
 
 DEFAULT_BOUND = 150_000
+REPORT_LOCK_TIMEOUT_S = 2.0  # report_missing_tools: how long the exit waits for a request still in the engine
 MIN_WINDOW_BUDGET = 25_000
 DEFAULT_HEADROOM_FLOOR = 25_000
 ASSUMED_OVERHEAD_OPENRIG = 92_000
@@ -144,7 +146,8 @@ def start_warning(bound: int, headroom_floor: int | None, overhead: int) -> str 
 class NoticeLog:
     """Session log wrapper: everything goes to the store; the engine's first bound_too_small event,
     first window budget under MIN_WINDOW_BUDGET, and first ``mcp_tools_missing`` (from a request, or
-    logged at exit by ``report_missing_tools``) are also shown on stderr, once each."""
+    logged at exit by ``report_missing_tools``) are also shown on stderr, once each; an exit-time
+    ``mcp_tools_missing`` that repeats a mid-run one is shown once more, after the CLI exited."""
 
     def __init__(self, store: Any, stderr) -> None:
         self.store = store
@@ -157,8 +160,12 @@ class NoticeLog:
             if not isinstance(inner, dict):
                 continue
             if inner.get("event") == "mcp_tools_missing":
-                self._once("mcp_tools_missing",
-                           "warning: " + missing_tools_message(inner.get("dialect"), inner.get("server_listed")))
+                # Once during the run, and once more after the CLI exits if the tools were still missing
+                # then: a warning printed mid-run can be drawn over by the CLI's TUI.
+                repeated = inner.get("at") == "exit" and inner.get("repeated") is True
+                message = missing_tools_message(inner.get("dialect"), inner.get("server_listed"))
+                self._once("mcp_tools_missing_exit" if repeated else "mcp_tools_missing",
+                           ("warning (repeated from the session): " if repeated else "warning: ") + message)
                 continue
             if inner is event:
                 continue
@@ -260,6 +267,14 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
                 observe_thinking: bool, *, stderr=None) -> tuple[ContextoProxy, str]:
     """Build the rewrite engine for ``store`` and start the proxy on 127.0.0.1 with a free port.
     Returns ``(proxy, engine_name)``; the caller stops the proxy. Shared by claude and codex."""
+    # The previous launch's MCP server record must not count for this one (contexto.toolcheck): a
+    # back-to-back launch can start within the check's clock slack of that server's tools/list.
+    clear = getattr(store, "clear_mcp_listed", None)
+    try:
+        if callable(clear):
+            clear()
+    except Exception:  # a diagnostic record; never stop a launch for it
+        pass
     transform, observe_usage, engine_name = build_engine(store, config)
     try:
         proxy = ContextoProxy(upstream_url, NoticeLog(store, stderr or sys.stderr), transform,
@@ -277,16 +292,26 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
 
 
 def report_missing_tools(proxy: ContextoProxy) -> None:
-    """At exit, after the proxy stopped: if the main conversation ended without Contexto's MCP tools and
-    that was not reported during the run (a run shorter than the check's grace), log the engine's
-    ``mcp_tools_missing``; the proxy's NoticeLog shows the warning. Shared by claude and codex."""
+    """At exit, after the proxy stopped: if the main conversation's last request lacked Contexto's MCP
+    tools, log the engine's exit-time ``mcp_tools_missing`` (``repeated`` if it was reported during the
+    run); the proxy's NoticeLog shows the warning. Shared by claude and codex. Runs under the transform
+    lock, so a request still in a handler (after ``proxy_stop_incomplete``) cannot run the check at the
+    same time; a handler stuck holding it makes the exit skip the report after a moment, not hang."""
     verdict = getattr(proxy.transform, "tools_verdict", None)
+    if not callable(verdict):
+        return
+    lock = getattr(proxy, "transform_lock", None)
+    if lock is not None and not lock.acquire(timeout=REPORT_LOCK_TIMEOUT_S):
+        return
     try:
-        event = verdict() if callable(verdict) else None
+        event = verdict()
+        if event:
+            proxy.log(event)
     except Exception:  # a diagnostic; never change the exit
         return
-    if event:
-        proxy.log(event)
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None) -> int:

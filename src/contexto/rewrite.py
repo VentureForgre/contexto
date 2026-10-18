@@ -1317,7 +1317,12 @@ class RewriteEngine:
             _WINDOW_OWNER.reset(owner)
         events[0:0] = resumed
         # The CLI's own request (rewrite() leaves it unchanged); the engine's request event stays last.
-        events[-1:-1] = self.tools.observe(request, dialect.name, main=main)
+        # A diagnostic: if it ever raised, the proxy's catch-all would discard this successful rewrite.
+        try:
+            checked = self.tools.observe(request, dialect.name, main=main)
+        except Exception as exc:
+            checked = [{"event": "toolcheck_error", "error": type(exc).__name__}]  # content-free
+        events[-1:-1] = checked
         events[-1].update(main=main, conversations=len(self.states))  # content-free, for side requests
         # Per-turn recall budget, request-time publish (contract PR #69, kept by 367916a): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up

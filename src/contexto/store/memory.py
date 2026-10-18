@@ -54,6 +54,9 @@ class MemoryStore(LedgerOps):
     def set_mcp_listed(self) -> None:
         self._mcp_listed_at = time.time()
 
+    def clear_mcp_listed(self) -> None:
+        self._mcp_listed_at = None
+
     def mcp_listed_at(self) -> float | None:
         return getattr(self, "_mcp_listed_at", None)
 

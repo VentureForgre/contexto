@@ -201,23 +201,29 @@ route requests through the proxy. Put those settings in your Claude settings fil
 **"warning: ... running without Contexto's tools".** The model has no `contexto_search` or
 `contexto_recall`, so it cannot get paged-out turns back. Neither Claude Code nor Codex reports an MCP
 server that fails to start, so the proxy checks the main conversation (subagents and side requests do
-not count) and the launcher prints this once, during the run or when the CLI exits. The session log
-records it as `mcp_tools_missing`. Likely causes:
+not count). The launcher prints the warning when it first finds the tools missing, during the run or
+when the CLI exits. If the session ends still without them, it prints the warning again after the CLI
+exits ("warning (repeated from the session)"), because an interactive session can draw over a line
+printed mid-run. The session log records it as `mcp_tools_missing`. Likely causes:
 
 - *The MCP server did not start.* Run the command the warning names (`<python> -P -m contexto mcp
   --help`); it should print the `contexto mcp` usage. Before v0.2.8, `contexto run codex` registered
   the server as a bare `contexto` command, and Codex ran without the tools whenever `contexto` was not
   on its PATH; upgrade. In Claude Code, `/mcp` shows the server's status.
-- *Claude Code started the server but did not offer its tools.* A permission deny rule or
-  `--disallowedTools` that matches `mcp__contexto__` tools removes them.
+- *Claude Code started the server, but its tools are gone.* The server may have stopped after
+  starting: `/mcp` in Claude Code shows whether it is still connected. Otherwise a permission deny rule
+  or `--disallowedTools` that matches `mcp__contexto__` tools removes them.
 - *The server started too slowly.* Codex 0.163.0 does not wait long for MCP servers: in a
   zero-spend test, `codex exec` sent its only request about 1 second in, before a server that took 3
   seconds was up, and that turn ran without the tools.
 
 How it is checked: in Claude Code's requests the tools appear by name, in the tool list or, with tool
-search on, in the deferred-tools list. Codex never names MCP tools in its requests, so for Codex the
-MCP server records in the session when it answers Codex's tool list request, and the proxy checks for
-that record.
+search on, in the deferred-tools list. When the server goes away later, Claude Code keeps the old list
+in the conversation and adds a notice that the tools are no longer available or that the server
+disconnected, so the proxy reads every system message in order and the latest notice wins. Codex
+never names MCP tools in its requests, so for Codex the MCP server records in the session when it
+answers Codex's tool list request, and the proxy checks for that record. For Codex, a server that
+crashes after it answered cannot be detected: the record stays.
 
 **"window budget about N tokens ... is below 25,000".** The bound leaves little room for turns after
 the fixed overhead, so rotations page often. Start again with the suggested `--bound`.

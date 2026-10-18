@@ -483,7 +483,8 @@ def test_claude_without_contexto_tools_gets_one_warning_at_exit(env, upstream, t
     events = session_log(env, "t1")
     [missing] = [e for e in events if e["event"] == "mcp_tools_missing"]
     assert missing == {"ts": missing["ts"], "event": "mcp_tools_missing", "dialect": "anthropic", "at": "exit",
-                       "server_listed": False, "requests": 1, "elapsed_s": missing["elapsed_s"]}
+                       "server_listed": False, "requests": 1, "elapsed_s": missing["elapsed_s"],
+                       "repeated": False}
     kinds = [e["event"] for e in events]
     assert kinds.index("proxy_stop") < kinds.index("mcp_tools_missing") < kinds.index("exit")
 

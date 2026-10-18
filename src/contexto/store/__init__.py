@@ -529,8 +529,12 @@ class SessionStore(LedgerOps):
         tell that the CLI received Contexto's tools during this launch (``contexto.toolcheck``)."""
         self._update_meta({"mcp_listed_at": time.time()})
 
+    def clear_mcp_listed(self) -> None:
+        """Forget the record before a launch starts its engine, so only this launch's server can count."""
+        self._update_meta({"mcp_listed_at": None})
+
     def mcp_listed_at(self) -> float | None:
-        """When the MCP server last answered ``tools/list``; None when never recorded."""
+        """When the MCP server last answered ``tools/list``; None when never recorded or cleared."""
         value = self._meta().get("mcp_listed_at")
         return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
