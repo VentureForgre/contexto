@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-18 05:08Z by claude (30M scale record and reminder placement). Decisions taken and still open, with reasons:
+Updated 2026-10-18 05:19Z by claude (v0.2.8). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -16,9 +16,9 @@ compaction never fires, and accuracy equals full context.
   fbb1303), and **Codex passed criteria 1 to 3** (D30), below.
   On Claude Code, Contexto answered 51 of 54 probes against 48 for the full-context baseline, with zero
   compaction and every request under the bound.
-- Latest release: v0.2.7. See "What is left" below for the remaining work and the items that need
+- Latest release: v0.2.8. See "What is left" below for the remaining work and the items that need
   the owner.
-- Tests on main (4525388): 1446 passed, 15 skipped (CI on the self-hosted runner).
+- Tests on main (0a8e4c3, v0.2.8): 1448 passed, 15 skipped (CI on the self-hosted runner).
 
 ## Acceptance, live run #3 (main fbb1303, claude-haiku-5-5, bound 150,000, owner's proxy)
 
@@ -202,10 +202,10 @@ fake upstream, no model calls.
 Definition of done for this project: M2 acceptance passed on both CLIs (done), every release
 published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
 
-In progress: nothing. The reminder-placement measurement is done (`spikes/m2/scale/reminders/`,
-PR #199) and sets step 1 of the 30M plan below. No release work: v0.2.3 to v0.2.7 are fixes (#192
-to #197), each released from main with its wheel and sdist attached (the v0.2.7 wheel installs
-and reports 0.2.7).
+In progress (owner approved on 2026-10-18 to fix everything the 30M measurement found): the 30M
+plan below, steps 1 to 4, each on its own branch with two reviewers per PR. v0.2.8 (#200) is
+released with its wheel and sdist attached (the wheel installs, reports 0.2.8, and starts the MCP
+server with `-P -m contexto`).
 
 This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
 - Keep STATUS, README, and the contract in step with `main`.
@@ -255,7 +255,7 @@ Needs the owner:
   thinking traced to the proxy spreading requests across identities).
 - O7 (owner): OpenRig context-usage clock bug (UTC parsed as local time).
 
-## Known limitations (v0.2.7)
+## Known limitations (v0.2.8)
 
 - Claude acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's
   proxy; Codex acceptance on gpt-6-astra at bound 64,000. The default bound 150,000 is untested
@@ -334,6 +334,7 @@ Needs the owner:
 | v0.2.5 | 77961d1 | #195: a stream hold ended by an error event, end of stream, or an upstream failure publishes the room from the usage already read, before it releases the held tool calls; a `Content-Length` body cut short is detected; acceptance never counts a truncated 2xx as a turn end |
 | v0.2.6 | 56e4551 | #197: one SSE grammar (CRLF, LF, CR) for the hold splitter and the usage reader, so usage is read on CR-terminated streams, and a final `message_delta` without its blank line is read before the hold publishes, so its output tokens reach the engine |
 | v0.2.7 | 4525388 | #196: after a request whose usage never arrived, the next estimate covers the whole request, so a needed rotation is no longer skipped (`usage_missing`); usage for a request other than the one the engine last sent (after a transform error, or with two in flight) no longer feeds the estimate or the bytes-per-token ratio (`usage_unattributed`); a conversation is recorded as main before its turn start's rotation publishes the window, so a failed request cannot leave the old main recorded |
+| v0.2.8 | 0a8e4c3 | #200: `contexto run codex` starts its MCP server as this Python by absolute path (`-P -m contexto`) instead of a bare `contexto` on `PATH`, so Codex no longer runs silently without the Contexto tools when `contexto` is not on `PATH`; both launchers pass `-P`, so a project's own `contexto` package cannot run in place of the server (the Claude path was exposed from v0.1.0) |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 

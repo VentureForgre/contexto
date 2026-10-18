@@ -71,6 +71,8 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   the longest matching prefix; a mismatch in paged turns starts a new epoch at the current turn start
   with everything before it paged. In that forced epoch an in-flight tool loop keeps its thinking
   (only messages before the turn start count as existing), and the full history is never sent.
+  Within one engine call each message is hashed once and the request's turn starts are found once
+  (``request_scope``), since the input is never mutated.
 - ``count_tokens`` (rule 11) gets the current epoch's transform with no side effects.
 - Transform failures (rule 14, PR #52; manager-1 2026-10-16 02:00Z): a ``PageConflictError`` is a
   ``page_conflict``; ``OSError``, ``LedgerError``, ``KeyFileError``, ``SessionNotFoundError`` and
@@ -103,13 +105,14 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import math
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError
@@ -223,7 +226,20 @@ def _anthropic_is_turn_start(message: dict) -> bool:
 
 
 def turn_starts(messages: list[dict]) -> list[int]:
-    return [i for i, m in enumerate(messages) if is_turn_start(m)]
+    return _turn_starts(messages, _dialect())
+
+
+def _turn_starts(messages: list[dict], dialect: Dialect) -> list[int]:
+    """Indexes of the turn-start messages under ``dialect``. Inside a ``request_scope`` the request's own
+    message list is scanned once per dialect; every other list is scanned each time."""
+    memo = _MEMO.get()
+    if memo is None or messages is not memo.root:
+        return [i for i, m in enumerate(messages) if dialect.is_turn_start(m)]
+    hit = memo.starts.get(id(dialect))
+    if hit is None or hit[0] is not dialect or hit[1] != len(messages):
+        hit = (dialect, len(messages), tuple(i for i, m in enumerate(messages) if dialect.is_turn_start(m)))
+        memo.starts[id(dialect)] = hit
+    return list(hit[2])
 
 
 def at_turn_start(messages: list[dict]) -> bool:
@@ -253,8 +269,40 @@ def _anthropic_normalise(message: dict) -> dict:
     return m
 
 
+def _is_single_text(message: dict) -> bool:
+    content = message.get("content")
+    return (isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict)
+            and set(content[0]) == {"type", "text"} and content[0]["type"] == "text")
+
+
+def _message_hash(message: dict, dialect: Dialect) -> str:
+    if dialect is ANTHROPIC and not _is_single_text(message):
+        # Fast path, the same value: without a cache_control key anywhere and with no single text block
+        # to unwrap, normalisation copies the message unchanged. A cache_control key would appear in
+        # the canonical JSON as the quoted name; the name inside a string value only takes the slow path.
+        # A message that cannot be encoded as it stands (a lone surrogate only inside cache_control,
+        # which normalisation drops) also takes the slow path, so it fails or hashes as before.
+        try:
+            data = canonical_bytes(message)
+        except UnicodeEncodeError:
+            data = None
+        if data is not None and b'"cache_control"' not in data:
+            return hashlib.sha256(data).hexdigest()
+    return hashlib.sha256(canonical_bytes(dialect.normalise(message))).hexdigest()
+
+
 def message_hash(message: dict) -> str:
-    return hashlib.sha256(canonical_bytes(normalise(message))).hexdigest()
+    """Rule 10's normalised hash. Inside a ``request_scope`` each message object is hashed once."""
+    dialect = _dialect()
+    memo = _MEMO.get()
+    if memo is None:
+        return _message_hash(message, dialect)
+    hit = memo.hashes.get(id(message))
+    if hit is not None and hit[0] is message and hit[1] is dialect:
+        return hit[2]
+    value = _message_hash(message, dialect)
+    memo.hashes[id(message)] = (message, dialect, value)  # holding the message keeps its id unique
+    return value
 
 
 def _anthropic_head_fingerprint(request: dict) -> str:
@@ -342,6 +390,37 @@ _DIALECT: ContextVar[Dialect | None] = ContextVar("contexto_rewrite_dialect", de
 
 def _dialect() -> Dialect:
     return _DIALECT.get() or ANTHROPIC
+
+
+class _RequestMemo:
+    """Per-request caches. The engine never mutates the request it transforms, so within one engine
+    call a message's normalised hash and the request list's turn starts do not change: each is computed
+    once and reused by history matching, the epoch's hashes, usage attribution, and the turn scans."""
+
+    __slots__ = ("root", "hashes", "starts")
+
+    def __init__(self, root: Any) -> None:
+        self.root = root  # the request's message list, the only list whose turn starts are cached
+        self.hashes: dict[int, tuple[Any, Dialect, str]] = {}  # id(message) -> (message, dialect, hash)
+        self.starts: dict[int, tuple[Dialect, int, tuple[int, ...]]] = {}  # id(dialect) -> (dialect, len, starts)
+
+
+_MEMO: ContextVar[_RequestMemo | None] = ContextVar("contexto_rewrite_memo", default=None)
+
+
+@contextmanager
+def request_scope(messages: Any):
+    """Cache hashes and turn starts for one request whose message list is ``messages``. A nested scope
+    (``rewrite`` inside ``RewriteEngine``) reuses the outer one. A message dict hashed inside a scope
+    must not be changed afterwards in that scope: the cache returns the hash it computed first."""
+    if _MEMO.get() is not None:
+        yield
+        return
+    token = _MEMO.set(_RequestMemo(messages))
+    try:
+        yield
+    finally:
+        _MEMO.reset(token)
 
 
 def is_context_block(block: Any) -> bool:
@@ -1002,7 +1081,8 @@ def rewrite(request: dict, state: EpochState | None, store: Store, config: Confi
     pass ``dialect`` for another API)."""
     token = _DIALECT.set(dialect or ANTHROPIC)
     try:
-        return _rewrite(request, state, store, config, estimator)
+        with request_scope(request.get(_dialect().field)):
+            return _rewrite(request, state, store, config, estimator)
     finally:
         _DIALECT.reset(token)
 
@@ -1095,7 +1175,7 @@ def turn_id(messages: list[dict], dialect: Dialect) -> str:
     """The current turn's id for the per-turn recall budget (contract PR #69): the number of
     turn-start messages in the CLI's full history, as a string. Stable across rotation, tool loops,
     retries, and proxy restarts; it changes at each new user turn start."""
-    return str(sum(1 for m in messages if dialect.is_turn_start(m)))
+    return str(len(_turn_starts(messages, dialect)))
 
 
 def retained_entries(messages: list[dict], k: int, dialect: Dialect) -> list[dict]:
@@ -1106,7 +1186,7 @@ def retained_entries(messages: list[dict], k: int, dialect: Dialect) -> list[dic
     found in view reads like the same line in a page. Carried system messages and injected context
     blocks are not turn text and are left out; thinking and images are never included. The entries
     hold conversation text: they go to the store only, never to a log or an event."""
-    turn = sum(1 for m in messages[:k] if dialect.is_turn_start(m))
+    turn = bisect.bisect_left(_turn_starts(messages, dialect), k)  # turn starts in M[:k]
     entries = []
     for i in range(k, len(messages)):
         item = messages[i]
@@ -1283,8 +1363,12 @@ class RewriteEngine:
         self._record_consumed = False  # the matching conversation has been checked (resumed or not)
         self._resumed = False
 
+    # The engine never mutates the request it is given (the proxy then skips its defensive copy).
+    preserves_input: ClassVar[bool] = True
+
     def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
-        with recall_knobs(self.config):
+        dialect = dialect_for(endpoint)
+        with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
             return self._call(request, headers, endpoint)
 
     def _call(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
@@ -1470,7 +1554,7 @@ class RewriteEngine:
 
     def _main_after(self, key: str, messages: list[dict], dialect: Dialect) -> tuple[str, int]:
         """The main conversation after this request, and this request's turn-start count."""
-        starts = [i for i, m in enumerate(messages) if dialect.is_turn_start(m)]
+        starts = _turn_starts(messages, dialect)
         main = key if self._main is None else self._main
         at_start = bool(starts) and not any(dialect.is_assistant(m) for m in messages[starts[-1]:])
         if at_start and key != main and len(starts) > self._turn_starts.get(main, 0):
@@ -1489,7 +1573,9 @@ class RewriteEngine:
             events.append({"event": "retained_stale", "epoch": state.epoch, "error": type(error).__name__})
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
-        with recall_knobs(self.config):  # preamble() must see the same knobs as the request did
+        dialect = dialect_for(endpoint)
+        # preamble() must see the same knobs as the request did
+        with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
             return self._observe_usage(endpoint, usage, request)
 
     def _observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
