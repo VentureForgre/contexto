@@ -170,7 +170,7 @@ def test_recall_argument_and_unknown_id_errors_are_tool_errors(server, stores, a
     assert result["isError"] is True and result["content"][0]["text"]
 
 
-def test_search_is_exact_substring_newest_first(server, stores):
+def test_search_matches_words_case_insensitively(server, stores):
     store, a, b = stores
     hit = tool(server, "contexto_search", {"query": "garnet-4821"})["result"]
     assert "structuredContent" not in hit
@@ -181,8 +181,10 @@ def test_search_is_exact_substring_newest_first(server, stores):
     assert head == f"{a} (turn 3)"  # one hit: page id and turn, no stub (B17)
     assert f"> {offset}: Remember: the staging port is garnet-4821." in lines  # the line, at its offset
     assert all(line.startswith(("> ", "  ")) for line in lines)
-    assert (tool(server, "contexto_search", {"query": "GARNET"})["result"]["content"][0]["text"]
-            == "No paged-out turn contains that exact text.")
+    assert tool(server, "contexto_search", {"query": "GARNET-4821"})["result"]["content"][0]["text"] == text  # D34
+    assert tool(server, "contexto_search", {"query": "staging garnet-4821"})["result"]["content"][0]["text"].startswith(a)
+    assert (tool(server, "contexto_search", {"query": "garnet-4821 absent-word"})["result"]["content"][0]["text"]
+            == "No paged-out turn contains every word of that query.")
     assert tool(server, "contexto_search", {"query": "x"})["result"]["content"][0]["text"].startswith(b)
     assert tool(server, "contexto_search", {"query": ""})["result"]["isError"] is True
 

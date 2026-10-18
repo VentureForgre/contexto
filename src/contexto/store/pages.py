@@ -14,6 +14,7 @@ from typing import Any
 from contexto.canonical import canonical_bytes
 from contexto.store.recall import DEFAULT_LINES, salient_identifiers
 from contexto.store.render import as_message, is_responses_item
+from contexto.store.search import Query, rank, searchable
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
 STUB_TEXT_CHARS = 200
@@ -172,20 +173,26 @@ def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int) -> dict
     return page
 
 
-def page_matches(page: dict[str, Any], query: str) -> bool:
-    """Exact, case-sensitive substring match over the stub and every text in the page's turn."""
-    if not query:
-        return False
+def searchable_text(page: dict[str, Any]) -> str:
+    """What search reads on a page, folded: the stub fields and every text of the page's turn (D34)."""
     stub = page["stub"]
-    haystacks = [stub["user_text"], stub.get("system_text", ""), *stub["tools"], *stub["paths"],
-                 *_texts(page["messages"])]
-    return any(query in h for h in haystacks)
+    return searchable([stub["user_text"], stub.get("system_text", ""), *stub["tools"], *stub["paths"],
+                       *_texts(page["messages"])])
+
+
+def page_matches(page: dict[str, Any], query: str) -> bool:
+    """Every word of ``query`` occurs in the page's stub or text, case-insensitively, in any order (D34)."""
+    q = Query.parse(query)
+    if q is None:
+        return False
+    text = searchable_text(page)
+    return all(w in text for w in q.words)
 
 
 def search_pages(pages: list[dict[str, Any]], query: str) -> list[str]:
-    """Ids of pages containing ``query``, newest first. No ranking and no similarity (not RAG)."""
-    hits = [p for p in pages if page_matches(p, query)]
-    return [p["id"] for p in sorted(hits, key=lambda p: (p["turn"], p["id"]), reverse=True)]
+    """Ids of the pages matching ``query``, best first (``contexto.store.search``; D34). Not RAG: no
+    embeddings and no similarity, only the query's own words, ranked by BM25 and recency."""
+    return rank([(p["id"], p["turn"], searchable_text(p)) for p in pages], query)
 
 
 _TOKEN = re.compile(r"[\w.\-/]+")

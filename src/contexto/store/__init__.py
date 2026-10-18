@@ -646,7 +646,7 @@ class SessionStore(LedgerOps):
         return [p["id"] for p in sorted(self._pages(), key=lambda p: (p["turn"], p["id"]), reverse=True)]
 
     def search(self, query: str) -> list[str]:
-        """Ids of pages whose stub or text contains ``query`` exactly, newest first."""
+        """Ids of pages holding every word of ``query`` (case-insensitive, any order), best first (D34)."""
         return search_pages(self._pages(), query)
 
     def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
