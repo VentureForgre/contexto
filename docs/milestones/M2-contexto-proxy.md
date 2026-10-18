@@ -486,7 +486,7 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     budget does not apply and only the per-call limit holds. With an engine present but no room
     published for the call's turn, the same applies and the store logs `turn_room_missing`, so a
     missed publish shows up in acceptance logs.
-  - Known limitation (v0.1.0 to v0.2.7): subagents and side requests launched by the CLI share the
+  - Known limitation (since v0.1.0): subagents and side requests launched by the CLI share the
     session's store. Only the main conversation publishes the room (packet A14; see
     `contexto_search` below), so their tool calls are charged against the main conversation's
     room, which was not measured from their requests, and concurrent subagents can overspend it;

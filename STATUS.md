@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-17 by claude (releases v0.2.3 to v0.2.7). Decisions taken and still open, with reasons:
+Updated 2026-10-17 06:30Z by claude (releases v0.2.3 to v0.2.7). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -150,13 +150,12 @@ Definition of done for this project: M2 acceptance passed on both CLIs (done), e
 published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
 
 In progress:
-- Nothing. v0.2.3 to v0.2.7 are fixes found in review (#192 to #197), each released from main
-  on the org's self-hosted runner with its wheel and sdist attached (the v0.2.7 wheel installs and
-  reports 0.2.7). Hosted Actions minutes are blocked by billing, so CI and releases run there.
+- Nothing. v0.2.3 to v0.2.7 are fixes (#192 to #197), each released from main with its wheel and
+  sdist attached (the v0.2.7 wheel installs and reports 0.2.7).
 
 This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
 - Keep STATUS, README, and the contract in step with `main`; nothing else is planned.
-- No live model runs and no new feature work. Idle seats stay idle.
+- No live model runs and no new feature work.
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
@@ -227,8 +226,10 @@ Needs the owner:
 - Cache efficiency depends on the upstream route (O6): 29 of 31 and 36 of 37 in the live runs.
 - Organization-managed Claude Code settings outrank the launcher's `--settings`; a user-supplied
   `--settings` is refused (exit 2); a user `--mcp-config` is allowed.
-- The proxy never reuses upstream connections, and retries once, on a new connection, only for connect, TLS, or send failures (rule 8);
-  a failure after the body is sent returns 502 and relies on the CLI's own retry.
+- The proxy never reuses upstream connections, and retries once, on a new connection, only for connect, TLS, or send failures (rule 8).
+  A failure after the body is sent and before the response head returns 502 and relies on the
+  CLI's own retry; a failure after the response started ends the stream without its terminator
+  (logged as `relay: <class>`).
 - Compressed request bodies: gzip and deflate are decoded (zstd only on Python 3.14+); other
   encodings get 415 (rule 15). `count_tokens` errors from upstream pass through unchanged (the
   owner's proxy returns 403; Claude Code calls it only around compaction).
@@ -253,10 +254,10 @@ Needs the owner:
 | v0.2.1 | 798a7ce | A31: a resume requires the store to hold at least the recorded number of pages (`pages_missing` otherwise) |
 | v0.2.2 | 2da3cb0 | Rule 17 (A34, #187): headroom capped at a quarter of the bound and halving at each turn start that measures growth, so one large read no longer leaves the session at the minimal window. Wheel and sdist attached by the reattach run after #189 |
 | v0.2.3 | 2312caa | #192: Codex pages written by v0.1.0 to v0.1.2 get their index stub rebuilt from the page's messages when the page is read; nothing is rewritten |
-| v0.2.4 | 0914850 | #193: upstream `HTTPException` failures (mid-stream `IncompleteRead`, malformed heads) are logged and observed, and negative body lengths get 400. #194: only the main conversation publishes the window, and a restore waits for a request on the recorded model |
-| v0.2.5 | 77961d1 | #195: a stream hold publishes usage before it releases on every path; a `Content-Length` body cut short is detected; acceptance never counts a truncated 2xx as a turn end |
-| v0.2.6 | 56e4551 | #197: one SSE grammar (CRLF, LF, CR) for the hold splitter and the usage reader, so usage is read on CR-terminated streams and from a final event without its blank line |
-| v0.2.7 | 4525388 | #196: usage refines the estimate only for the request it measured (`usage_unattributed`, `usage_missing`) |
+| v0.2.4 | 0914850 | #193: a stream cut short upstream is logged with the request's entry and its usage still reaches the engine; a malformed response head is logged as a 502 that is not retried; negative body lengths get 400. #194: only the main conversation publishes the window, and a restore waits for a request on the recorded model |
+| v0.2.5 | 77961d1 | #195: a stream hold ended by an error event, end of stream, or an upstream failure publishes the room from the usage already read before it releases the held tool calls; a `Content-Length` body cut short is detected; acceptance never counts a truncated 2xx as a turn end |
+| v0.2.6 | 56e4551 | #197: one SSE grammar (CRLF, LF, CR) for the hold splitter and the usage reader, so usage is read on CR-terminated streams, and a final `message_delta` without its blank line is read before the hold publishes, so its output tokens reach the engine |
+| v0.2.7 | 4525388 | #196: after a request whose usage never arrived, the next estimate covers the whole request, so a needed rotation is no longer skipped (`usage_missing`); usage that does not match the request it measured is not used (`usage_unattributed`); a conversation is recorded as main before its turn start's rotation publishes the window, so a failed request cannot leave the old main recorded |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
@@ -272,7 +273,10 @@ Each is a tag and a GitHub Release on this private repository with the wheel and
   A18's queue row). Logs were not read and no other user of the folder was checked for. Seats now
   ask before deleting anything under the owner's home directory. The cause, `contexto run codex`
   ignoring `CONTEXTO_HOME` for its MCP server, was fixed in v0.1.2 (A18).
-- Only intake runs in the main checkout; every other seat works in its own worktree.
+- 2026-10-17: the OpenRig rig was taken down (snapshot kept). Claude runs the project directly:
+  builder subagents work in their own worktrees, and two independent reviewer agents post
+  exact-head verdicts as PR comments before a merge. Before that, only intake ran in the main
+  checkout and every other seat worked in its own worktree.
 - Direct API requests identify honestly and carry no other product's client marker (D23).
-- PR approvals are not enforced by GitHub (one shared account); exact-head review by a reviewer
-  seat is a team rule. Ruleset `main: require pull request` (id 25202810) is active.
+- PR approvals are not enforced by GitHub (one shared account); two exact-head reviewer verdicts
+  per PR are a team rule. Ruleset `main: require pull request` (id 25202810) is active.

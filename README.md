@@ -197,8 +197,9 @@ the fixed overhead, so rotations page often. Start again with the suggested `--b
 
 **502 "contexto proxy: upstream unreachable (...)".** The proxy could not reach the upstream. It opens
 a new connection per request and retries once when the connection, TLS handshake, or request send
-fails. A failure after the request was fully sent is returned as 502 without a retry, and the CLI's
-own retry takes over. The session log records which step failed. "contexto proxy: internal error"
+fails. A failure after the request was fully sent and before the response head is returned as 502
+without a retry, and the CLI's own retry takes over; a failure after the response started ends the
+stream without its terminator. The session log records which step failed. "contexto proxy: internal error"
 is a Contexto bug; please report it.
 
 **415 "cannot read a request body with Content-Encoding ...".** The proxy decodes gzip and deflate
