@@ -19,25 +19,26 @@ runs (`load1` in `results/requests_*.csv`; the `uptime` line for each checkpoint
   (largest measured 135,954 tokens; largest last request of any fast-forwarded turn 144,176). There were no `over_bound`,
   `bound_too_small` or `transform_error` events, and no non-200 responses. At 30M the proxy added 0.58 s
   to a tool-loop request and 0.86 s to a turn start. The cost grows linearly with history.
-- **What breaks first is carried `<system-reminder>` growth, not size.** If later turn starts also carry
-  reminders (the assumed `mixed` profile), the fixed overhead F grows by about 215 tokens per turn
-  without limit, because context blocks of paged turn starts are carried forever and nothing pages
-  them. In that profile `bound_too_small` first fires at **4.86M tokens** (turn 181,
-  F = 100,810, W = 11,690), and the first request over the bound comes at **8.20M** (turn 308, last
+- **What breaks first is carried `<system-reminder>` growth, not size.** If later turn starts also
+  carry reminders (the assumed `mixed` profile), the fixed overhead F grows by about 215 tokens per
+  turn without limit, because context blocks of paged turn starts are carried forever and nothing
+  pages them. In that profile `bound_too_small` first fires at **4.86M tokens** (turn 181, F =
+  100,810, W = 11,690), and the first request over the bound comes at **8.20M** (turn 308, last
   request of the turn 150,046 tokens, F = 122,305, W = -3,473). At 10M, 7 of the 22 requests
-  measured at that checkpoint were over the bound, all tool loops (151,779 to 159,255). Where the CLI
-  puts reminders depends on the model id (measured on Claude Code 2.1.302 in `../reminders/`). On 4.x
-  ids it puts `<system-reminder>` blocks in every later turn start: 45 to 425 Contexto-estimator tokens
-  per turn, and the `mixed` profile's 297 bytes per turn lies between the measured floor (126) and the
-  busy one-process rate (701). On 5.x ids context blocks stay at `messages[0]` and the per-turn text
-  arrives as role `system` messages, one per main request, which the fallback can page but this run
-  did not include. [Inferred, not measured] That text probably still fits at 30M. Carried content
-  counts in F, and the engine sizes the window as bound - headroom - F (`rewrite.py:731`, `:735`),
-  so more F shrinks the window instead of pushing requests toward the bound. F here was about 70,000
-  at 30M, against the 100,810 at which `bound_too_small` first fired in `mixed`: about 30,800 tokens
-  of room. In the reminders resume run the pageable text held 410 to 2,143 tokens once the fallback
-  engaged (the fallback keeps it near or under 8,000); effort changes on claude-opus-5-5 and claude-haiku-5-5 add unpageable content to the same
-  F. The fallback also adds pages, one per paged message.
+  measured at that checkpoint were over the bound, all tool loops (151,779 to 159,255). Where the
+  CLI puts reminders depends on the model id (measured on Claude Code 2.1.302 in `../reminders/`).
+  On 4.x ids it puts `<system-reminder>` blocks in every later turn start: 45 to 425
+  Contexto-estimator tokens per turn, and the `mixed` profile's 297 bytes per turn lies between the
+  measured floor (126) and the busy one-process rate (701). On 5.x ids context blocks stay at
+  `messages[0]` and the per-turn text arrives as role `system` messages, one per main request, which
+  the fallback can page but this run did not include. [Inferred, not measured] That text probably
+  still fits at 30M. Carried content counts in F, and the engine sizes the window as bound -
+  headroom - F (`rewrite.py:731`, `:735`), so more F shrinks the window instead of pushing requests
+  toward the bound. F here was about 70,000 at 30M, against the 100,810 at which `bound_too_small`
+  first fired in `mixed`: about 30,800 tokens of room. In the reminders resume run the pageable text
+  held 410 to 2,143 tokens once the fallback engaged (at each rotation the fallback pages it back to
+  about 8,000 or less); effort changes on claude-opus-5-5 and claude-haiku-5-5 add unpageable
+  content to the same F. The fallback also adds pages, one per paged message.
 - **Memory is the next limit.** RSS is not a Python-object leak (live objects stay flat at about
   23,000), but the allocator keeps what each request frees. Over 79 requests at 30M, RSS after
   `gc.collect()` settled between 2.1 and 3.1 GB, with a peak RSS of 3.45 GB. At 5M it levels off near

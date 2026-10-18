@@ -43,9 +43,9 @@ result covers where 5.x puts context blocks, not everything 5.x sends.
   run; the `first` run's F at 30M was about 70,000, which leaves about 30,800 tokens of F headroom.
   In the claude-opus-5-5 resume run the pageable text held 410 to 2,143 tokens once the fallback
   engaged (turn 34) and about 3,500 just before it, a range kept small because effort content had
-  used most of the shared fallback budget (with few effort changes it can approach 8,000); the fallback ran every turn there and runs only at
-  rotations live, so more builds up between rotations. Effort-change content cannot be paged and
-  adds to the same F with each change.
+  used most of the shared fallback budget (with few effort changes it can approach 8,000); the
+  fallback ran every turn there and runs only at rotations live, so more builds up between
+  rotations. Effort-change content cannot be paged and adds to the same F with each change.
 - **The owner's seats run Opus 5.5** (claude-opus-5-5), and acceptance run #3 ran on
   claude-haiku-5-5: the effort path was measured on both. [Measured] On claude-opus-5-5 nothing the
   fallback cannot page grew except at effort changes. With bare prompts and no effort change it
@@ -175,18 +175,19 @@ how the CLI places reminders for those ids.
   reminder of 250 to 330 tokens about every 10 turns. The fallback never pages any of them.
 - [Measured] **5.x ids keep reminders out of turn starts.** `messages[0]` holds 2 blocks (CLAUDE.md,
   656 tokens; the attribution note, 318; bytes / 1.83) and no later user message holds a reminder.
-  The same content arrives as role `system` messages after the prompt or a tool result, one per
-  main request (88 in 88 requests in the busy one-process claude-opus-5-5 run, 48 in 48 with bare
+  The same content arrives as role `system` messages after the prompt or a tool result, one per main
+  request (88 in 88 requests in the busy one-process claude-opus-5-5 run, 48 in 48 with bare
   prompts), untagged on claude-opus-5-5, claude-haiku-5-5 and claude-fable-5 and wrapped in
   `<system-reminder>` on claude-sonnet-5. `classify_system` marks them carried text, which the
-  fallback pages, each message as its own page (`rewrite.py:698`). In the claude-opus-5-5 resume
-  run the fallback (applied every turn in the spike) first paged at turn 34, had paged 40 messages
-  by turn 48, and from turn 34 on kept carried content at k between 9,618 and 12,704. Most of that
-  was content the fallback cannot page (9,204 to 12,169: the 3,302 tokens at turn 2 plus 5,902 to
-  8,867 from effort changes); the pageable part held 410 to 2,143 (small because effort content had already used most of the shared 8,000-token budget; with few effort changes it can approach 8,000, still inside the F headroom). The
-  8,000-token budget covers growth of all carried content, unpageable included
-  (`rewrite.py:677-678`). [Inferred] The live engine runs the fallback only at rotations, so between
-  rotations carried content can be higher.
+  fallback pages, each message as its own page (`rewrite.py:698`). In the claude-opus-5-5 resume run
+  the fallback (applied every turn in the spike) first paged at turn 34, had paged 40 messages by
+  turn 48, and from turn 34 on kept carried content at k between 9,618 and 12,704. Most of that was
+  content the fallback cannot page (9,204 to 12,169: the 3,302 tokens at turn 2 plus 5,902 to 8,867
+  from effort changes); the pageable part held 410 to 2,143 (small because effort content had
+  already used most or all of the shared 8,000-token budget; with few effort changes it can approach
+  8,000, still inside the F headroom). The 8,000-token budget covers growth of all carried content,
+  unpageable included (`rewrite.py:677-678`). [Inferred] The live engine runs the fallback only at
+  rotations, so between rotations carried content can be higher.
 - [Measured on claude-opus-5-5 and claude-haiku-5-5] **Effort changes are the uncapped path.** On
   2.1.301 an effort change added a settings-only message (`spikes/m2/carried` finding 5). On
   2.1.302 `output_config` lands on that turn's first system message instead (the countdown, a file

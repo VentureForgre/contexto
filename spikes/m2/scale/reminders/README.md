@@ -186,14 +186,17 @@ contract foresaw this case (`docs/milestones/M2-contexto-proxy.md:89-90`).
 ### What the fallback does on 5.x ids (measured with the engine's own function; inferred for live use)
 
 Carried role-system text (the countdown, file notes, plan-mode text) is class carried-text. Once
-carried growth passes 8,000, `page_carried_text` pages it. In opus55-resume it first fired at turn 34
-(carried at k 12,704 -> 11,194) and had paged 40 messages by turn 48. From turn 34 on, carried content
-at k stayed between 9,618 and 12,704. Most of that was content the fallback cannot page (9,204 to 12,169: the
-3,302 tokens at turn 2 plus 5,902 to 8,867 from effort changes); the pageable part held 410 to 2,143
-(small because effort content had already used most of the shared 8,000-token budget; with few effort changes it can approach 8,000, still inside the F headroom), after reaching about 3,500 just before the fallback engaged. The 8,000-token budget covers growth of all carried content, unpageable included
-(`rewrite.py:677-678`), so each effort change leaves less room for pageable text. In the live engine
-the fallback runs only at rotations. This simulation runs it every turn, so live carried size between
-rotations can be higher. Each paged message is its own page (`rewrite.py:698`).
+carried growth passes 8,000, `page_carried_text` pages it. In opus55-resume it first fired at turn
+34 (carried at k 12,704 -> 11,194) and had paged 40 messages by turn 48. From turn 34 on, carried
+content at k stayed between 9,618 and 12,704. Most of that was content the fallback cannot page
+(9,204 to 12,169: the 3,302 tokens at turn 2 plus 5,902 to 8,867 from effort changes); the pageable
+part held 410 to 2,143 (small because effort content had already used most or all of the shared
+8,000-token budget; with few effort changes it can approach 8,000, still inside the F headroom),
+after reaching about 3,500 just before the fallback engaged. The 8,000-token budget covers growth of
+all carried content, unpageable included (`rewrite.py:677-678`), so each effort change leaves less
+room for pageable text. In the live engine the fallback runs only at rotations. This simulation runs
+it every turn, so live carried size between rotations can be higher. Each paged message is its own
+page (`rewrite.py:698`).
 
 The simulation approximates the engine in two ways. `analyze.py` takes the fallback's baseline
 (`initial_carried`) from turn 1's last request, where the engine takes it from the conversation's
@@ -249,9 +252,11 @@ figures.
    which shrinks the window rather than pushing requests toward the bound (`rewrite.py:731`, `:735`).
    The limit is `bound_too_small`, which fired at F = 100,810 in the scale test's `mixed` run, against
    an F of about 70,000 in its `first` run at 30M: about 30,800 tokens of F headroom. The pageable
-   role-system text held 410 to 2,143 once the fallback engaged in opus55-resume, and it cannot
-   exceed about 8,000 (the fallback budget), so most of that headroom is left for effort content. The scale test modelled none of this role-system text (one system
-   message per session, `../proxy/synth.py:176`). Real per-turn rates depend on how often a user
+   role-system text held 410 to 2,143 once the fallback engaged in opus55-resume, and at each
+   rotation the fallback pages it back to about 8,000 or less (the budget caps growth over its
+   starting size, 45 here; between rotations it can be larger), so most of that headroom is left for
+   effort content. The scale test modelled none of this role-system text (one system message per
+   session, `../proxy/synth.py:176`). Real per-turn rates depend on how often a user
    enters plan mode, edits files outside the CLI, leaves tasks idle, resumes and changes effort. None
    of these was measured on real usage.
 
