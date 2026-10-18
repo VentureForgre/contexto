@@ -354,7 +354,7 @@ def test_the_fallback_pages_superseded_blocks_first_then_unrecognised_oldest_fir
     pages = sorted(store.pages.values(), key=lambda p: p["turn"])
     assert len(pages) == 1 and "<total_tokens>" in canonical_bytes(pages[0]).decode()
     paged = next(e for e in events if e["event"] == "carried_paged")
-    assert paged["count"] == 1 and paged["context_blocks"] == 1
+    assert paged["count"] == 1 and paged["context_blocks"] == 1 and paged["unrecognised"] == 0
     # The countdown paged is the oldest superseded one (turn 2's).
     assert countdown(2) in canonical_bytes(pages[0]).decode()
     # With no budget left, the unrecognised block goes after every superseded one, and pages are in
@@ -364,6 +364,8 @@ def test_the_fallback_pages_superseded_blocks_first_then_unrecognised_oldest_fir
                       events2)
     texts = [canonical_bytes(p).decode() for p in sorted(store2.pages.values(), key=lambda p: p["turn"])]
     assert "nobody has measured" in texts[0]  # positions: turn 2's unknown block is the oldest page
+    # A CLI that adds a new kind shows up in the log: unrecognised items are counted, content-free.
+    assert next(e for e in events2 if e["event"] == "carried_paged")["unrecognised"] == 1
     assert all('"role":"user"' in t for t in texts)
 
 
@@ -527,6 +529,7 @@ def test_the_fallback_still_pages_carried_developer_items_on_codex():
         _DIALECT.reset(token)
     paged = next(e for e in events if e["event"] == "carried_paged")
     assert paged["count"] == 11 and paged["context_blocks"] == 0 and len(new.paged_carried) == 11
+    assert paged["unrecognised"] == 11  # standing notes of no recognisable kind
 
 
 # Rule 16 across the upgrade: records written before D32 and D33 ----------------------------------

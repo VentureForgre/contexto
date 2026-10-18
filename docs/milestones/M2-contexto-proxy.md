@@ -128,7 +128,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   copy hidden because an older byte-identical copy was paged). The resumed engine carries it
   again from its first request (one cache write from the carried position on) and logs
   `carried_reclassified` (rule 16). The proxy logs `carried_paged` with
-  the count, the tokens freed, and how many were context blocks. Lane A pins down, with stub
+  the count, the tokens freed, how many were context blocks, and how many were of no recognisable
+  kind (`unrecognised`; on 5.x ids the per-turn system reminders and settings changes riding on them
+  count here, since the text-message kinds are only output style and plan mode). Lane A pins down, with stub
   evidence, exactly which blocks count as injected context.
 - The proxy keeps an epoch state `E = (k, carried, pinned_text, index_text, head_fingerprint)`:
   the turns before turn index `k` are paged out.
