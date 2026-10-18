@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-18 07:25Z by claude (D32 to D34 and the 30M fixes). Decisions taken and still open, with reasons:
+Updated 2026-10-18 07:26Z by claude (D32 to D34 and the 30M fixes). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -310,11 +310,11 @@ Needs the owner:
 - Carried content after D32 and D33 (#203, measured on Claude Code 2.1.302's captured bodies in
   `spikes/m2/scale/reminders/`, Contexto's estimator): at turn 48 the content the fallback cannot
   page is 3,557 to 3,794 tokens on sonnet-4-6 (was 5,452 to 22,953) and 4,897 to 5,643 on
-  claude-opus-5-5 (was 9,804 to 12,169). On 4.x ids, and on 5.x ids in one process, it stops growing
-  from turn 12 (on 4.x about 5,250 while plan mode is on); on claude-opus-5-5 and claude-haiku-5-5
+  claude-opus-5-5 busy sessions (was 9,804 to 12,169). On 4.x ids, and on 5.x ids in one process, it stops growing
+  from turn 12 (on 4.x up to about 5,250 while plan mode is on); on claude-opus-5-5 and claude-haiku-5-5
   with a resume every turn it still grows about 21 tokens per turn, because the latest
   effort-change message itself grows as the CLI re-sends unread file notes on it. On
-  claude-sonnet-5 and claude-fable-5 the environment message (about 3,200 to 3,300) is now always
+  claude-sonnet-5 and claude-fable-5 the environment message (2,630 to 2,764 tokens) is now always
   carried.
   In the 30M proxy run with later-turn reminders, `bound_too_small` and `over_bound` fell from 871
   and 692 to 0, the largest request from 288,309 to 134,203 tokens, and F at 30M from 259,155 to
