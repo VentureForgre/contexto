@@ -118,7 +118,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   the kinds that make up `messages[0]`). Superseded items of a recognisable kind are paged first,
   then unrecognised ones, oldest first by position. Each paged item is its own immutable page (a
   context block is stored as a user message holding that block as sent), listed in the index with
-  its first line and recallable. Paging happens only at rotations, so carried content stays
+  its first line inside the tag (marked `[system]` or `[reminder]`, see Store) and recallable. Paging happens only at rotations, so carried content stays
   byte-identical between them. The paged set is part of the epoch record (rule 16,
   `paged_carried`): a system message by its normalised hash, a context block by a hash of its
   position and content (identical countdowns in different turn starts stay distinct), so a
@@ -406,7 +406,12 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 - **Pages:** `pages/<page id>.json`, one per paged-out turn, holding the exact message JSON of that
   turn (thinking included as received), its turn number, byte size (canonical JSON, summed per
   content block) and token estimate, and a stub: first 200 characters of the user text, tool names
-  used, and at most 20 file paths mentioned.
+  used, and at most 20 file paths mentioned. A page with no user text but a system message adds
+  the first non-empty line of that text, shown in the index after `[system]`; a page whose only
+  message is a user message made entirely of `<system-reminder>` context blocks (a context block
+  the bounded fallback paged) has no user text and adds the first non-empty line inside the tag,
+  shown after `[reminder]`. Both lines are taken from inside the tag when the CLI wraps the text in
+  it, so an index line never starts with the tag and never reads as a live instruction.
   Page id: `pg_` + first 16 hex of HMAC-SHA256 over the canonical JSON of `{turn, messages}`
   only (not the stub or token estimate, so ids stay stable when those rules change), keyed with a
   random per-store key kept in the store and never sent upstream (ids appear in prompts, and short turns
