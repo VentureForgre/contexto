@@ -463,9 +463,11 @@ def test_carried_settings_only_messages_keep_latest_per_key():
 
 def test_carried_growth_over_budget_is_reported_not_paged():
     # Rule 13: carried content that grows after the first request is reported, never paged; the initial
-    # size is normal. A later message with content and settings fields (session_start, carried) is one
-    # way carried content can still grow.
-    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=14_000, headroom_floor=500, carried_budget=1_000))
+    # size is normal. A later message with content and settings fields (a settings change, carried
+    # while it is the latest per settings key, D33) is one way carried content can still grow.
+    # The fallback cannot page the latest settings change, so growth stays above its budget.
+    cfg = Config(bound=14_000, headroom_floor=500, carried_budget=1_000, carried_text_budget=1_000)
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
     start = [user(f"prompt 0 {FILL}", context=True), system("sys A")]
     engine(request(start), {}, MESSAGES)
     big = system("synthetic carried tool list " * 800)
@@ -476,8 +478,8 @@ def test_carried_growth_over_budget_is_reported_not_paged():
     up, _, ev = engine(request(msgs), {}, MESSAGES)
     over = [e for e in ev if e["event"] == "carried_over_budget"]
     assert "rotation" in names(ev) and over and over[0]["carried_growth"] > 1_000
-    assert "unclassified_system_message" not in names(ev)  # content plus output_config: session_start
-    assert big in up["messages"]  # still carried, never paged
+    assert "unclassified_system_message" not in names(ev)  # content plus output_config: settings_change
+    assert big in up["messages"]  # the latest settings change: still carried, never paged
     assert all(isinstance(v, (int, str)) and (not isinstance(v, str) or len(v) < 40) for v in over[0].values())
 
 
@@ -595,25 +597,33 @@ def non_text_system():
     return {"role": "system", "content": [{"type": "image", "source": {"type": "base64", "data": "AA=="}}]}
 
 
+ENVIRONMENT = "# Environment\nYou have been invoked in the following environment: synthetic"
+
+
 def test_system_message_classes_follow_contract_pr_38():
-    msgs = [user("p0", context=True), system("session start text"), hook_system(0), assistant("a0"),
+    # Amended by D33: session-start is the "# Environment" signature, not content plus settings fields;
+    # content plus settings fields without it is a settings change (an effort change on a reminder).
+    msgs = [user("p0", context=True), system(ENVIRONMENT), hook_system(0), assistant("a0"),
             user("p1"), hook_system(1), tool_use(1), tool_result(1), post_tool_hook(11), assistant("a1"),
             settings_only("high"), user("p2"), settings_only("low"), assistant("a2"),
-            system("resumed full system text"), non_text_system(), style_message(),
-            {"role": "system", "content": "Synthetic hook context without the documented wrapper"}]
+            system(ENVIRONMENT + " resumed"), non_text_system(), style_message(),
+            {"role": "system", "content": "Synthetic hook context without the documented wrapper"},
+            system("<total_tokens>14999871 tokens left</total_tokens>"),
+            {"role": "system", "content": f"<system-reminder>\n{ENVIRONMENT}\n</system-reminder>"}]
     kinds = {i: classify_system(msgs, i) for i, m in enumerate(msgs) if m["role"] == "system"}
     assert kinds == {1: "session_start", 2: "hook_output", 5: "hook_output", 8: "hook_output", 10: "settings",
                      12: "settings", 14: "session_start", 15: "unclassified", 16: "carried_text",
-                     17: "carried_text"}
+                     17: "carried_text", 18: "settings_change", 19: "session_start"}
 
 
 def test_session_start_with_text_and_output_config_is_not_settings_only():
     # reviewer-1: the turn-1 message carries BOTH text and output_config; only empty content counts
-    # as settings-only.
-    start = system("session start text")
+    # as settings-only. D33: text plus output_config without the signature is a settings change.
+    start = system(ENVIRONMENT)
     assert "output_config" in start and start["content"]
-    msgs = [user("p0", context=True), start]
+    msgs = [user("p0", context=True), start, system("session start text")]
     assert classify_system(msgs, 1) == "session_start"
+    assert classify_system(msgs, 2) == "settings_change"
     assert classify_system([user("p0"), settings_only()], 1) == "settings"
 
 
@@ -662,8 +672,9 @@ def test_unclassified_non_text_system_message_is_carried_and_logged():
 
 def test_resumed_full_system_text_after_new_prompt_is_carried():
     # Measured on a hand-written session-file resume: the full system text (with output_config)
-    # follows the new prompt; it is session_start and carried, not paged with its turn.
-    resumed = system("resumed full system text")
+    # follows the new prompt; it is session_start (its "# Environment" signature, D33) and carried,
+    # not paged with its turn.
+    resumed = system(ENVIRONMENT + " resumed full system text")
     msgs = [user(f"prompt 0 {FILL}"), settings_only(), assistant(f"a0 {FILL}"),
             user(f"prompt 1 {FILL}", context=True), resumed, assistant(f"a1 {FILL}")]
     for t in range(2, 7):
