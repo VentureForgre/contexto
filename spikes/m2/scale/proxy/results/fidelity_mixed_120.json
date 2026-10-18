@@ -1,0 +1,70 @@
+{
+ "turns": 120,
+ "args": [
+  "--reminders",
+  "mixed"
+ ],
+ "turn_start_estimates": {
+  "compared": 122,
+  "different": 107,
+  "max_abs_diff": 143,
+  "max_rel_diff": 0.00157,
+  "largest": [
+   [
+    154,
+    125310,
+    125167
+   ],
+   [
+    624,
+    139116,
+    138973
+   ],
+   [
+    30,
+    106461,
+    106319
+   ]
+  ]
+ },
+ "rotations": {
+  "http": 78,
+  "ff": 78
+ },
+ "rotations_equal": true,
+ "max_f_w_diff_tokens": 0,
+ "rotation_diffs": [],
+ "pages": {
+  "http": 120,
+  "ff": 120
+ },
+ "pages_equal": true,
+ "epoch_fields": {},
+ "next_turn_requests_equal": true,
+ "next_turn_requests": {
+  "http": [
+   [
+    "turn_start",
+    155778,
+    2
+   ],
+   [
+    "tool_loop",
+    205288,
+    4
+   ]
+  ],
+  "ff": [
+   [
+    "turn_start",
+    155778,
+    2
+   ],
+   [
+    "tool_loop",
+    205288,
+    4
+   ]
+  ]
+ }
+}
