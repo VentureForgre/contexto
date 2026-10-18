@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-18 02:05Z by claude (releases v0.2.3 to v0.2.7). Decisions taken and still open, with reasons:
+Updated 2026-10-18 02:02Z by claude (releases v0.2.3 to v0.2.7). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
