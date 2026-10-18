@@ -199,7 +199,10 @@ rotations can be higher.
    per turn (Contexto's estimator) first hit `bound_too_small` at turn 181. That failure point depends on
    carried growth per turn, not on history size. Scaling linearly gives about turn 860 for a 4.x
    session of bare prompts (45 per turn), about turn 180 for the feature-heavy one-process session
-   (215), and about turn 90 if every turn is a resume (425). For 5.x ids the bound breaks only if
+   (215), and about turn 90 if every turn is a resume (425). This maps this spike's estimator tokens
+   (3.5 bytes per token) onto the scale test's engine, which had usage feedback, so the turn numbers
+   are a rough guide: by bytes per turn the busy one-process rate (701) is 2.4 times the scale test's
+   assumed profile (297), so the real failure may come earlier. For 5.x ids the bound breaks only if
    effort changes keep coming. Each one adds the size of that turn's first system message, about 27 to
    2,700 tokens. Real per-turn rates depend on how often a user enters plan mode, edits files outside
    the CLI, leaves tasks idle and resumes. None of these was measured on real usage.
