@@ -30,7 +30,7 @@ def store(request, tmp_path):
 def test_a_system_only_page_shows_its_first_line_in_the_index(store):
     [pid] = store.page_out([[{"role": "system", "content": "\n  Tool added: grep_files\nschema follows"}]], 4)
     assert store.get_page(pid)["stub"]["system_text"] == "Tool added: grep_files"
-    assert store.index_text(4000) == f"{pid} turn 4: [system] Tool added: grep_files"
+    assert store.index_text(4000) == f"{pid} turn 4: [earlier system message] Tool added: grep_files"
 
 
 def test_system_text_in_blocks_and_the_200_character_limit(store):
@@ -48,7 +48,7 @@ def test_a_mixed_turn_keeps_the_user_text_stub(store):
 def test_an_empty_system_message_gets_a_clear_placeholder(store, content):
     [pid] = store.page_out([[{"role": "system", "content": content}]], 5)
     assert store.get_page(pid)["stub"]["system_text"] == EMPTY_SYSTEM_STUB
-    assert store.index_text(4000) == f"{pid} turn 5: [system] {EMPTY_SYSTEM_STUB}"
+    assert store.index_text(4000) == f"{pid} turn 5: [earlier system message] {EMPTY_SYSTEM_STUB}"
 
 
 def test_search_finds_system_only_pages(store):
@@ -81,7 +81,7 @@ def test_a_paged_context_block_page_is_listed_as_a_reminder_not_as_raw_tagged_te
     assert stub["user_text"] == ""
     assert stub["reminder_text"].startswith("Plan mode is active.")
     line = store.index_text(4000)
-    assert line.startswith(f"{pid} turn 7: [reminder] Plan mode is active.")
+    assert line.startswith(f"{pid} turn 7: [earlier reminder] Plan mode is active.")
     assert "<system-reminder>" not in line
     [cid] = store.page_out([[{"role": "user", "content": [COUNTDOWN]}]], 8)
     assert store.get_page(cid)["stub"]["reminder_text"] == "<total_tokens>15000000 tokens left</total_tokens>"

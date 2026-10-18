@@ -237,9 +237,9 @@ def index_line(page: dict[str, Any], salient: bool = False) -> str:
     stub = page["stub"]
     text = " ".join(stub["user_text"].split())
     if not text and stub.get("system_text"):
-        text = "[system] " + stub["system_text"]
+        text = "[earlier system message] " + stub["system_text"]
     if not text and stub.get("reminder_text"):
-        text = "[reminder] " + stub["reminder_text"]
+        text = "[earlier reminder] " + stub["reminder_text"]
     line = f"{page['id']} turn {page['turn']}: {text}"
     if stub["tools"]:
         line += f" [tools: {', '.join(stub['tools'])}]"
