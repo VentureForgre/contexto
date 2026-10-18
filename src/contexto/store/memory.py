@@ -130,7 +130,7 @@ class MemoryStore(LedgerOps):
 
     def search(self, query: str) -> list[str]:
         """As ``SessionStore.search``; each page's searchable text is kept while the page object stays (D34)."""
-        texts = self.__dict__.setdefault("_texts", {})
+        texts = self.__dict__.setdefault("_search_texts", {})
         entries = []
         for page in self._pages():
             kept = texts.get(page["id"])
