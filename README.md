@@ -18,14 +18,14 @@ Contexto sends no extra model calls. It reads and rewrites the requests your CLI
 ## Install
 
 Contexto needs Python 3.12 or later and has no runtime dependencies. Install the wheel from the
-latest release, [v0.2.2](https://github.com/VentureForgre/contexto/releases/tag/v0.2.2). It has two
-assets: `contexto-0.2.2-py3-none-any.whl` and `contexto-0.2.2.tar.gz`. The repository is private, so
+latest release, [v0.2.7](https://github.com/VentureForgre/contexto/releases/tag/v0.2.7). It has two
+assets: `contexto-0.2.7-py3-none-any.whl` and `contexto-0.2.7.tar.gz`. The repository is private, so
 download with a `gh` login that can read it:
 
 ```sh
-gh release download v0.2.2 --repo VentureForgre/contexto --pattern 'contexto-0.2.2-py3-none-any.whl'
-uv tool install ./contexto-0.2.2-py3-none-any.whl     # or: pipx install ./contexto-0.2.2-py3-none-any.whl
-contexto --version                                    # contexto 0.2.2
+gh release download v0.2.7 --repo VentureForgre/contexto --pattern 'contexto-0.2.7-py3-none-any.whl'
+uv tool install ./contexto-0.2.7-py3-none-any.whl     # or: pipx install ./contexto-0.2.7-py3-none-any.whl
+contexto --version                                    # contexto 0.2.7
 ```
 
 `pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`. To
@@ -197,8 +197,9 @@ the fixed overhead, so rotations page often. Start again with the suggested `--b
 
 **502 "contexto proxy: upstream unreachable (...)".** The proxy could not reach the upstream. It opens
 a new connection per request and retries once when the connection, TLS handshake, or request send
-fails. A failure after the request was fully sent is returned as 502 without a retry, and the CLI's
-own retry takes over. The session log records which step failed. "contexto proxy: internal error"
+fails. A failure after the request was fully sent and before the response head is returned as 502
+without a retry, and the CLI's own retry takes over; a failure after the response started ends the
+stream without its terminator. The session log records which step failed. "contexto proxy: internal error"
 is a Contexto bug; please report it.
 
 **415 "cannot read a request body with Content-Encoding ...".** The proxy decodes gzip and deflate
@@ -217,7 +218,7 @@ pinned records in `ledger.jsonl` in the same directory.
 Claude Code acceptance ran on one model, one bound, and one upstream. Codex passed acceptance
 criteria 1 to 3 on one model at bound 64,000; the default bound 150,000 is untested on Codex. Cache
 efficiency depends on the upstream route. The full list is in
-[STATUS.md, "Known limitations (v0.2.2)"](STATUS.md#known-limitations-v022).
+[STATUS.md, "Known limitations (v0.2.7)"](STATUS.md#known-limitations-v027).
 
 ## Exit codes
 
