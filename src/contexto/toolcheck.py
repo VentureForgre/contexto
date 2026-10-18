@@ -13,8 +13,13 @@ Code 2.1.302 and codex-cli 0.163.0, temporary homes and fake keys):
 - Claude Code (Messages API): the request names them. Normally ``tools`` holds
   ``mcp__contexto__contexto_search`` and the other four by name; with tool search on, ``tools`` holds
   ``ToolSearch`` and a ``defer_loading`` placeholder, and a role ``system`` message lists every
-  deferred tool by name, one per line. Without the server neither appears. A request with no tool
-  list at all (Claude Code's title, topic, and quota side requests) is not judged.
+  deferred tool by name, one per line. Without the server neither appears. When the server goes away
+  later (a resumed session whose server cannot start, or a live one whose server died), Claude Code
+  leaves the old listing in history and adds notices: "deferred tools are no longer available" with
+  the names, and "MCP servers have disconnected" with ``contexto`` (with tool search off, the tool
+  list keeps naming the tools). So every system text is read, in order, and later notices override
+  earlier ones (``contexto_notices``). A request with no tool list at all (Claude Code's title,
+  topic, and quota side requests) is not judged.
 - Codex (Responses API): the request cannot show it. With code mode Codex defers MCP tools behind
   its ``exec`` tool and never names them; the request with the server running is the same, byte for
   byte apart from ids, as the request without it. So the MCP server records in the session store
@@ -39,10 +44,16 @@ import time
 from typing import Any, Callable
 
 TOOL_PREFIX = "mcp__contexto__"
+SERVER = "contexto"  # the server's name in Claude Code's notices (mcp__<server>__ is the tool prefix)
 # Claude Code's default MCP connect timeout is 30 s (MCP_TIMEOUT); Codex's startup_timeout_sec is 10 s.
 GRACE_S = 30.0
+# The MCP server's record is wall-clock time from another process: a clock stepped back (an NTP
+# correction) between engine start and tools/list must not make this launch's record look older. A
+# previous launch's server answers well over this long before the next engine starts.
+WALL_SLACK_S = 2.0
 DIALECTS = frozenset({"anthropic", "responses"})
-_LISTED_TOOL = re.compile(r"^mcp__contexto__contexto_[a-z_]+[ \t]*$", re.MULTILINE)
+_LISTED_TOOL = re.compile(r"^(mcp__contexto__contexto_[a-z_]+)[ \t]*$")
+_SERVER_LINE = re.compile(r"^contexto(?:[ \t(:]|$)")  # "contexto" or "contexto (ENOENT): ..." in a server list
 
 
 def _named(tool: Any) -> bool:
@@ -57,20 +68,84 @@ def _texts(content: Any) -> list[str]:
     return []
 
 
-def anthropic_tools_offered(request: dict[str, Any]) -> bool | None:
-    """True when a Contexto tool is in ``tools`` by name, or listed as a deferred tool in the system
-    prompt or a role ``system`` message (tool search); False when not; None for a request with no tool
-    list. The user's own messages are not read: naming a tool there says nothing."""
-    tools = request.get("tools")
-    if not isinstance(tools, list) or not tools:
-        return None
-    if any(_named(t) for t in tools):
-        return True
+def _system_texts(request: dict[str, Any]) -> list[str]:
+    """The system prompt, then every role ``system`` message, in order. The user's own messages are not
+    read: naming a tool there says nothing."""
     texts = _texts(request.get("system"))
     for message in request.get("messages") or []:
         if isinstance(message, dict) and message.get("role") == "system":
             texts += _texts(message.get("content"))
-    return any(_LISTED_TOOL.search(t) for t in texts)
+    return texts
+
+
+def contexto_notices(texts: list[str]) -> tuple[bool, bool]:
+    """Read Claude Code's system texts in order (2.1.302's notices, captured with zero spend) and return
+    (a Contexto tool is still offered by name, the contexto server is down). Later notices override
+    earlier ones, because Claude Code adds notices and never edits history:
+
+    - a tool name on its own line counts as offered, unless it falls under "The following deferred
+      tools are no longer available", which removes it (tool search; a resumed session whose server
+      could not start, or a live one whose server died);
+    - "N deferred tools are available again ... mcp__contexto__* (N)" offers the names announced
+      earlier again (the server came back);
+    - ``contexto`` under "The following MCP servers have disconnected" or "... failed to connect" means
+      the server is down (with tool search off, the tool list keeps naming the tools after a crash);
+      the server's "## contexto" section under "# MCP Server Instructions", or its tools offered again,
+      means it is up.
+
+    A listing ends at a blank line; the instructions section ends at the next top-level heading."""
+    offered: set[str] = set()
+    announced: set[str] = set()
+    down = False
+    for text in texts:
+        if SERVER not in text:  # says nothing about contexto
+            continue
+        section: str | None = None
+        for raw in text.splitlines():
+            line = raw.strip()
+            low = line.lower()
+            if not line:
+                if section != "instructions":
+                    section = None
+            elif "deferred tools" in low and "no longer available" in low:
+                section = "removed"
+            elif "deferred tools" in low and "available again" in low:
+                section = None
+                if TOOL_PREFIX in line:
+                    offered |= announced or {TOOL_PREFIX + "*"}
+                    down = False
+            elif "deferred tools" in low and "available" in low:
+                section = "offered"
+            elif low.startswith("the following mcp servers") and ("disconnected" in low or "failed to connect" in low):
+                section = "down"
+            elif line == "# MCP Server Instructions":
+                section = "instructions"
+            elif (named := _LISTED_TOOL.match(line)) is not None:
+                if section == "removed":
+                    offered.discard(named.group(1))
+                else:
+                    offered.add(named.group(1))
+                    announced.add(named.group(1))
+                    down = False
+            elif section == "down" and _SERVER_LINE.match(line):
+                down = True
+            elif section == "instructions":
+                if line == f"## {SERVER}":
+                    down = False
+                elif line.startswith("# "):
+                    section = None
+    return bool(offered), down
+
+
+def anthropic_tools_offered(request: dict[str, Any]) -> bool | None:
+    """True when a Contexto tool is in ``tools`` by name, or listed as a deferred tool in the system
+    prompt or a role ``system`` message (tool search), and Claude Code's later notices did not take it
+    away (``contexto_notices``); False when not; None for a request with no tool list."""
+    tools = request.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return None
+    offered, down = contexto_notices(_system_texts(request))
+    return (offered or any(_named(t) for t in tools)) and not down
 
 
 def _names_tree(tools: Any, depth: int = 0) -> bool:

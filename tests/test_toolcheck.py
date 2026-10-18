@@ -129,6 +129,93 @@ def test_claude_user_text_naming_a_tool_does_not_count_and_does_not_crash():
     assert anthropic_tools_offered(odd) is True
 
 
+# Claude Code 2.1.302's notices when the server goes away and comes back, captured with zero spend
+# (local stub, temporary homes, fake key): a resumed session whose second launch could not start the
+# server (``-c`` with its command off PATH), the third launch with it back, and an interactive session
+# whose server died after its first turn. Trimmed only where marked.
+REMOVED_ON_RESUME = (
+    "The following deferred tools are no longer available (their MCP server disconnected). Do not search for "
+    "them — ToolSearch will return no match:\n" + "\n".join(CONTEXTO) + "\n\nThis is ambient context — do "
+    "not narrate it to the user unless they ask or it is directly relevant to their request.\n\nThe following MCP "
+    "servers are configured but failed to connect — their tools (typically named mcp__<server>__*) are "
+    "unavailable for this session:\ncontexto (ENOENT): \"Executable not found in $PATH: stdio\"\n\nTreat this as a "
+    "connection failure, not a missing capability. [trimmed]\n\nThe following MCP servers have disconnected. Their "
+    "instructions above no longer apply:\ncontexto\n\nThis is ambient context [trimmed]\n\n"
+    "<total_tokens>15000000 tokens left</total_tokens>")
+REMOVED_LIVE = REMOVED_ON_RESUME.replace('contexto (ENOENT): "Executable not found in $PATH: stdio"', "contexto")
+AVAILABLE_AGAIN = (
+    "5 deferred tools are available again (MCP server reconnected — names announced earlier in this "
+    "conversation): mcp__contexto__* (5). Load via ToolSearch as before.\n\n# MCP Server Instructions\n\nThe "
+    "following MCP servers have provided instructions for how to use their tools and resources:\n\n## contexto\n"
+    "Contexto keeps this session's older turns in a local store. [trimmed]\n\n"
+    "<total_tokens>15000000 tokens left</total_tokens>")
+# Tool search off: the tool list keeps naming the tools after the server died (calling one fails with
+# "No such tool available ... Its MCP server 'contexto' has disconnected"); only this notice tells.
+DISCONNECTED = ("The following MCP servers have disconnected. Their instructions above no longer apply:\ncontexto\n\n"
+                "This is ambient context — do not narrate it to the user unless they ask or it is directly "
+                "relevant to their request.\n\n<total_tokens>15000000 tokens left</total_tokens>")
+INSTRUCTIONS = ("# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use "
+                "their tools and resources:\n\n## contexto\nContexto keeps this session's older turns in a local "
+                "store. [trimmed]\n\n<total_tokens>15000000 tokens left</total_tokens>")
+
+
+def with_system(request: dict, *texts: str) -> dict:
+    """Later turns: each notice arrives as a role "system" message after an assistant reply and a user turn."""
+    for text in texts:
+        request["messages"] += [{"role": "assistant", "content": [{"type": "text", "text": "OK"}]},
+                                {"role": "user", "content": [{"type": "text", "text": "next"}]},
+                                {"role": "system", "content": [{"type": "text", "text": text}]}]
+    return request
+
+
+def test_claude_tool_search_tools_no_longer_available_are_missing():
+    # Reviewer-1's repro: the removal notice alone lists the names, one per line.
+    removal_only = with_system(claude_request(["Bash", "Read"], deferred=["CronCreate"]), REMOVED_LIVE)
+    assert anthropic_tools_offered(removal_only) is False
+    # Resumed with the server down: the first launch's listing is still in history, then the removal.
+    resumed = with_system(claude_request(["Bash", "Read"], deferred=["CronCreate", *CONTEXTO]), REMOVED_ON_RESUME)
+    assert anthropic_tools_offered(resumed) is False
+    # The same notice in a live interactive session whose server died after the first turn.
+    live = with_system(claude_request(["Bash", "Read"], deferred=["CronCreate", *CONTEXTO]), REMOVED_LIVE)
+    assert anthropic_tools_offered(live) is False
+
+
+def test_claude_tool_search_tools_back_after_a_removal_are_present():
+    # Third launch with the server back: Claude Code names them by glob, "announced earlier".
+    again = with_system(claude_request(["Bash"], deferred=["CronCreate", *CONTEXTO]), REMOVED_ON_RESUME,
+                        AVAILABLE_AGAIN)
+    assert anthropic_tools_offered(again) is True
+    # A fresh listing by name after the removal counts too; a removal after that wins again.
+    fresh = with_system(claude_request(["Bash"], deferred=["CronCreate", *CONTEXTO]), REMOVED_LIVE,
+                        "The following deferred tools are now available via ToolSearch:\n" + "\n".join(CONTEXTO))
+    assert anthropic_tools_offered(fresh) is True
+    assert anthropic_tools_offered(with_system(fresh, REMOVED_LIVE)) is False
+
+
+def test_claude_tools_named_but_their_server_disconnected_are_missing():
+    # Tool search off, server died mid-session: the tool list still names them, the notice says otherwise.
+    dead = with_system(claude_request(BUILTIN + CONTEXTO), DISCONNECTED)
+    assert anthropic_tools_offered(dead) is False
+    # Resumed with the server back: its instructions are announced again after the notice.
+    assert anthropic_tools_offered(with_system(dead, INSTRUCTIONS)) is True
+    # Another server's disconnect says nothing about contexto's.
+    other = with_system(claude_request(BUILTIN + CONTEXTO), DISCONNECTED.replace(":\ncontexto\n", ":\nologs\n"))
+    assert anthropic_tools_offered(other) is True
+
+
+def test_claude_system_texts_are_read_in_order_top_level_first():
+    request = claude_request(["Bash"], deferred=["CronCreate"])
+    request["system"] = [{"type": "text", "text": "You are Claude Code."},
+                         {"type": "text", "text": "The following deferred tools are now available via ToolSearch:\n"
+                                                  + "\n".join(CONTEXTO)}]
+    assert anthropic_tools_offered(request) is True
+    assert anthropic_tools_offered(with_system(request, REMOVED_LIVE)) is False
+    request["system"][1]["text"] = REMOVED_LIVE
+    request["messages"][-1]["content"][0]["text"] += "\n\nThe following deferred tools are now available:\n" + \
+        "\n".join(CONTEXTO)
+    assert anthropic_tools_offered(request) is True
+
+
 def test_codex_code_mode_request_cannot_show_the_tools():
     assert responses_tools_offered(codex_request()) is None
 
