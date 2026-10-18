@@ -47,7 +47,10 @@ BILLED_PATHS = frozenset(p for p in MODEL_PATHS if not p.endswith(("count_tokens
 FAILURE_EVENTS = ("degraded_enter", "store_error", "page_conflict", "fallback_failed", "transform_error",
                   "turn_room_missing", "unclassified_system_message",
                   "turn_room_low",  # A12: decided a failure, contract PR #115 at 1eb8a4c
-                  "retained_stale")  # a failed snapshot write, contract PR #125 at 01a58a2
+                  "retained_stale",  # a failed snapshot write, contract PR #125 at 01a58a2
+                  "epoch_record_stale",  # a failed rule 16 epoch-record write (listed in the contract, missed here)
+                  "mcp_tools_missing",  # the main conversation ran without Contexto's MCP tools
+                  "toolcheck_error")  # the missing-tools check itself raised
 # The recalls the budget prices per probe turn (script.MAX_RECALLS), over D27's probe turns
 # (script.PROBE_TURNS). A cost guard only (intake, 2026-10-16): the model is not told about it, and
 # ``recalls_over_budget`` reports it without failing any verdict.

@@ -433,3 +433,4 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         if plan is not None:
             plan.cleanup()
         proxy.stop()
+        launcher.report_missing_tools(proxy)  # Codex reports no MCP server that fails to start

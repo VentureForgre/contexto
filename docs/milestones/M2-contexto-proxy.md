@@ -554,6 +554,50 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
 
+**Missing tools.** Neither CLI reports an MCP server that fails to start; the session runs on
+without the tools (measured: until v0.2.8, `contexto run codex` registered a bare `contexto` command,
+and with it off PATH codex-cli 0.163.0 ran with no Contexto tool and no error). So the proxy checks
+the main conversation's requests (the same choice as `publishes`; subagents and side requests may
+lack the tools and are not judged), never `count_tokens`:
+
+- Messages API: present when `tools` names an `mcp__contexto__` tool, or, with tool search, the
+  system prompt or a role `system` message lists one by name on its own line (Claude Code 2.1.302),
+  and Claude Code's later notices have not taken it away. The check reads the system prompt and then
+  every role `system` message, in order, because Claude Code never edits history: an old listing
+  stays when the server goes away. Later text overrides earlier text. Names under "The following
+  deferred tools are no longer available" are removed. "N deferred tools are available again ...
+  `mcp__contexto__*`" offers them again. `contexto` under "The following MCP servers have
+  disconnected" or "... failed to connect" marks the server down (with tool search off, `tools` keeps
+  naming the tools after a crash). Its `## contexto` section under "# MCP Server Instructions", or its
+  names offered again, marks it up. These shapes were captured with zero spend from 2.1.302: a
+  resumed session with the server off PATH, a resume with it back, and an interactive session whose
+  server died. In `-p` runs, 2.1.302 did not notice a server that died mid-run: its requests stayed
+  unchanged, so the check cannot see that case either. A request with no tool list is not judged
+  (Claude Code's side requests).
+- Responses API: Codex's code mode defers MCP tools and never names them, so the request is the same
+  with and without the server (measured, zero spend). The MCP server records in the session metadata
+  when it first answers `tools/list` (`SessionStore.set_mcp_listed`, wall-clock `mcp_listed_at`);
+  present when that record is newer than the engine (allowing 2 seconds for a wall-clock step), or
+  when the request names an `mcp__contexto__` tool. The launcher clears the record before it starts
+  the engine: a back-to-back launch can start within the 2 seconds after the previous launch's server
+  answered (0.7 seconds, measured against a fast stub). A server that crashes after answering
+  `tools/list` cannot be detected: the record is not cleared during the launch.
+
+A main request without the tools is reported once 30 seconds after the engine starts (a server
+still starting), and again only after the tools were seen in between; a shorter run is judged at
+exit from its last main request (for Codex, rechecking the record). Events, content-free:
+`mcp_tools_missing` with `dialect` (`anthropic` or `responses`), `at` (`request` or `exit`),
+`server_listed` (boolean), `requests` (main requests in a row without the tools), and `elapsed_s`;
+`mcp_tools_found` (`dialect`, `at`) when they appear after a report. At exit, if the last judged main
+request still lacked the tools, `mcp_tools_missing` is logged once more with `at: exit` and
+`repeated` (true when it was already reported during the run). A request-time event goes on that
+request's `transform_events`, before the engine's request event. The exit event is its own log entry,
+after `proxy_stop`, written under the transform lock (skipped if a stuck request holds the lock for 2
+seconds). The launcher prints the warning on stderr, naming the likely cause and the fix, once when
+it is first reported and once more after the CLI exits for a repeated exit event, because a TUI can
+draw over a line printed mid-run. If the check itself raises, the engine logs `toolcheck_error` with
+the exception's type name only and keeps the request's rewrite.
+
 ## CLI
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run
@@ -601,7 +645,7 @@ a no-replayed-thinking baseline.
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
    `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`,
-   `epoch_record_stale`, or `unclassified_system_message`.
+   `epoch_record_stale`, `mcp_tools_missing`, `toolcheck_error`, or `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the

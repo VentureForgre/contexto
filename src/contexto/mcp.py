@@ -203,6 +203,7 @@ class Server:
         self.stdout = stdout
         self.stderr = stderr or sys.stderr
         self.legacy_version: str | None = None  # set by initialize
+        self.listed = False  # tools/list answered and recorded (see _tools_list)
         self.handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "initialize": self._initialize,
             "server/discover": self._discover,
@@ -288,6 +289,19 @@ class Server:
         }
 
     def _tools_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        if not self.listed:
+            # The client now has the tools: recorded once per server so the proxy can tell that this
+            # launch's CLI received them (contexto.toolcheck; Codex's requests never name them).
+            self.listed = True
+            recorder = getattr(self.store, "set_mcp_listed", None)
+            try:
+                if callable(recorder):
+                    recorder()
+            except Exception as exc:  # the record is a diagnostic; never fail tools/list for it
+                try:
+                    self._diag(f"set_mcp_listed failed: {type(exc).__name__}")
+                except (OSError, ValueError):  # a closed or broken stderr
+                    pass
         return {"tools": TOOLS}
 
     def _tools_call(self, params: dict[str, Any]) -> dict[str, Any]:

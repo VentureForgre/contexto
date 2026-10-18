@@ -335,6 +335,9 @@ class FakeLauncher:
         self.calls["upstream"] = upstream_url
         return self.proxy, "rewrite"
 
+    def report_missing_tools(self, proxy):
+        self.calls["reported_after_stop"] = proxy.stopped
+
     def run_child(self, argv, env, *, stderr=None):
         home = env.get("CODEX_HOME")
         self.calls.update(argv=argv, home_existed=bool(home) and os.path.isdir(home), home=home)
@@ -366,7 +369,7 @@ def test_run_codex_api_key_mode_runs_and_cleans_up(tmp_path, monkeypatch):
     home = fake.calls["home"]
     assert home.endswith(os.path.join("sessions", "S9", "codex-home"))  # under the Contexto session dir
     assert os.path.isdir(home) and not os.path.exists(os.path.join(home, "config.toml"))  # rollouts kept
-    assert fake.proxy.stopped
+    assert fake.proxy.stopped and fake.calls["reported_after_stop"]
     assert "session S9" in err.getvalue()
 
 

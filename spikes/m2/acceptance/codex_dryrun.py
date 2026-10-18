@@ -118,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
         "budget": {"h1_worst": b.h1_worst, "baseline_worst": b.baseline_worst, "total_worst": b.total_worst,
                    "baseline_fits": b.baseline_fits, "formula": codex_budget.formula(b)},
         "home_workaround": a.home_workaround,
+        # The missing-tools check (contexto.toolcheck): a turn whose Codex never got the contexto tools.
+        "mcp_tools_missing": sum(1 for e in events for x in [e, *(e.get("transform_events") or [])]
+                                 if isinstance(x, dict) and x.get("event") == "mcp_tools_missing"),
     }
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / "codex-dry-run.json").write_text(json.dumps(summary, indent=2))
