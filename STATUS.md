@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-17 03:24Z by claude (docs audit). Decisions taken and still open, with reasons:
+Updated 2026-10-17 by claude (releases v0.2.3 to v0.2.7). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -16,9 +16,9 @@ compaction never fires, and accuracy equals full context.
   fbb1303), and **Codex passed criteria 1 to 3** (D30), below.
   On Claude Code, Contexto answered 51 of 54 probes against 48 for the full-context baseline, with zero
   compaction and every request under the bound.
-- Latest release: v0.2.2. See "What is left" below for the remaining work and the items that need
+- Latest release: v0.2.7. See "What is left" below for the remaining work and the items that need
   the owner.
-- Tests on main (51d8d63): 1371 passed, 1 skipped (`uv run --with pytest pytest -q`, local run).
+- Tests on main (4525388): 1446 passed, 15 skipped (CI on the self-hosted runner).
 
 ## Acceptance, live run #3 (main fbb1303, claude-haiku-5-5, bound 150,000, owner's proxy)
 
@@ -150,10 +150,9 @@ Definition of done for this project: M2 acceptance passed on both CLIs (done), e
 published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
 
 In progress:
-- Nothing. v0.2.2 was the first release cut on the org's self-hosted runner (moved there because
-  hosted Actions minutes are blocked by billing). The runner has no `gh`, so its upload step
-  failed; PR #189 installs a pinned, checksum-verified `gh` in both release jobs, and the reattach
-  run then attached v0.2.2's wheel and sdist (the wheel installs and reports 0.2.2).
+- Nothing. v0.2.3 to v0.2.7 are fixes found in review (#192 to #197), each released from main
+  on the org's self-hosted runner with its wheel and sdist attached (the v0.2.7 wheel installs and
+  reports 0.2.7). Hosted Actions minutes are blocked by billing, so CI and releases run there.
 
 This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
 - Keep STATUS, README, and the contract in step with `main`; nothing else is planned.
@@ -191,13 +190,13 @@ Needs the owner:
   thinking traced to the proxy spreading requests across identities).
 - O7 (owner): OpenRig context-usage clock bug (UTC parsed as local time).
 
-## Known limitations (v0.2.2)
+## Known limitations (v0.2.7)
 
 - Claude acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's
   proxy; Codex acceptance on gpt-6-astra at bound 64,000. The default bound 150,000 is untested
   on Codex (D30).
-- Codex pages written by v0.1.0 to v0.1.2 were stored with empty index stubs. From the next
-  release the store rebuilds such a stub from the page's messages each time it reads the page, so
+- Codex pages written by v0.1.0 to v0.1.2 were stored with empty index stubs. Since v0.2.3
+  the store rebuilds such a stub from the page's messages each time it reads the page, so
   their index lines show user text, tools, and paths. The page file is not rewritten and its id is
   unchanged; anything reading page files directly still sees the empty stub.
 - Codex: HTTP is forced through a custom
@@ -253,6 +252,11 @@ Needs the owner:
 | v0.2.0 | 703d7c3 | Rule 16 (B31, A30): a restarted proxy resumes the main conversation's epoch instead of rotating again from epoch 0, so the prompt and its cache survive a restart |
 | v0.2.1 | 798a7ce | A31: a resume requires the store to hold at least the recorded number of pages (`pages_missing` otherwise) |
 | v0.2.2 | 2da3cb0 | Rule 17 (A34, #187): headroom capped at a quarter of the bound and halving at each turn start that measures growth, so one large read no longer leaves the session at the minimal window. Wheel and sdist attached by the reattach run after #189 |
+| v0.2.3 | 2312caa | #192: Codex pages written by v0.1.0 to v0.1.2 get their index stub rebuilt from the page's messages when the page is read; nothing is rewritten |
+| v0.2.4 | 0914850 | #193: upstream `HTTPException` failures (mid-stream `IncompleteRead`, malformed heads) are logged and observed, and negative body lengths get 400. #194: only the main conversation publishes the window, and a restore waits for a request on the recorded model |
+| v0.2.5 | 77961d1 | #195: a stream hold publishes usage before it releases on every path; a `Content-Length` body cut short is detected; acceptance never counts a truncated 2xx as a turn end |
+| v0.2.6 | 56e4551 | #197: one SSE grammar (CRLF, LF, CR) for the hold splitter and the usage reader, so usage is read on CR-terminated streams and from a final event without its blank line |
+| v0.2.7 | 4525388 | #196: usage refines the estimate only for the request it measured (`usage_unattributed`, `usage_missing`) |
 
 Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
 
