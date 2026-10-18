@@ -554,6 +554,30 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
 
+**Missing tools.** Neither CLI reports an MCP server that fails to start; the session runs on
+without the tools (measured: until v0.2.8, `contexto run codex` registered a bare `contexto` command,
+and with it off PATH codex-cli 0.163.0 ran with no Contexto tool and no error). So the proxy checks
+the main conversation's requests (the same choice as `publishes`; subagents and side requests may
+lack the tools and are not judged), never `count_tokens`:
+
+- Messages API: present when `tools` names an `mcp__contexto__` tool, or, with tool search, the
+  system prompt or a role `system` message lists one by name on its own line (Claude Code 2.1.302).
+  A request with no tool list is not judged (Claude Code's side requests).
+- Responses API: Codex's code mode defers MCP tools and never names them, so the request is the same
+  with and without the server (measured, zero spend). The MCP server records in the session metadata
+  when it first answers `tools/list` (`SessionStore.set_mcp_listed`, wall-clock `mcp_listed_at`);
+  present when that record is newer than the engine, or when the request names an `mcp__contexto__`
+  tool.
+
+A main request without the tools is reported once 30 seconds after the engine starts (a server
+still starting), and again only after the tools were seen in between; a shorter run is judged at
+exit from its last main request (for Codex, rechecking the record). Events, content-free:
+`mcp_tools_missing` with `dialect` (`anthropic` or `responses`), `at` (`request` or `exit`),
+`server_listed` (boolean), `requests` (main requests in a row without the tools), and `elapsed_s`;
+`mcp_tools_found` (`dialect`, `at`) when they appear after a report. A request-time event goes on that
+request's `transform_events`, before the engine's request event; the exit event is its own log entry,
+after `proxy_stop`. The launcher prints one warning on stderr naming the likely cause and the fix.
+
 ## CLI
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run

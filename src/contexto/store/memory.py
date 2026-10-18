@@ -51,6 +51,12 @@ class MemoryStore(LedgerOps):
     def window_model(self) -> str | None:
         return getattr(self, "_window_model", None)
 
+    def set_mcp_listed(self) -> None:
+        self._mcp_listed_at = time.time()
+
+    def mcp_listed_at(self) -> float | None:
+        return getattr(self, "_mcp_listed_at", None)
+
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None:
         turn_id = check_turn_room(turn_id, room_tokens)
         with self._room_lock:  # every publish resets what was spent (see SessionStore.set_turn_room)

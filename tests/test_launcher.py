@@ -50,8 +50,11 @@ for flag, key in (("--settings", "settings"), ("--mcp-config", "mcp")):
     record[key + "_dir_mode"] = os.stat(os.path.dirname(path)).st_mode & 0o777
 if os.environ.get("FAKE_REQUEST"):
     base = record["settings"]["env"]["ANTHROPIC_BASE_URL"]
-    body = json.dumps({"model": "claude-haiku-5-5", "max_tokens": 16,
-                       "messages": [{"role": "user", "content": [{"type": "text", "text": "synthetic"}]}]}).encode()
+    payload = {"model": "claude-haiku-5-5", "max_tokens": 16,
+               "messages": [{"role": "user", "content": [{"type": "text", "text": "synthetic"}]}]}
+    if os.environ.get("FAKE_TOOLS"):  # the main conversation's tool list, as Claude Code sends it
+        payload["tools"] = [{"name": n, "input_schema": {"type": "object"}} for n in os.environ["FAKE_TOOLS"].split(",")]
+    body = json.dumps(payload).encode()
     request = urllib.request.Request(base + "/v1/messages", data=body, method="POST",
                                      headers={"Content-Type": "application/json", "x-api-key": "fake-key"})
     with urllib.request.urlopen(request, timeout=10) as response:
@@ -465,3 +468,30 @@ def test_relative_contexto_home_gives_the_store_and_claude_mcp_server_the_same_a
     assert store.dir == tmp_path / "rel-home" / "sessions" / "s-rel"
     env = mcp_payload("s-rel", home)["mcpServers"]["contexto"]["env"]
     assert env == {"CONTEXTO_HOME": str(tmp_path / "rel-home")}
+
+
+def test_claude_without_contexto_tools_gets_one_warning_at_exit(env, upstream, tmp_path):
+    """The failure neither CLI reports: the MCP server did not start, so Claude Code's main conversation
+    has its built-in tools and no contexto tool. A run shorter than the check's grace is judged at exit."""
+    env.update(FAKE_REQUEST="1", FAKE_TOOLS="Bash,Read,Edit")
+    proc = launch(env, "--upstream", upstream, "--session", "t1", "claude", "-p", "hello", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    warnings = [line for line in err.splitlines() if "warning" in line]
+    assert len(warnings) == 1 and "Claude Code is running without Contexto's tools" in warnings[0]
+    assert "MCP server did not start" in warnings[0] and "README" in warnings[0]
+    events = session_log(env, "t1")
+    [missing] = [e for e in events if e["event"] == "mcp_tools_missing"]
+    assert missing == {"ts": missing["ts"], "event": "mcp_tools_missing", "dialect": "anthropic", "at": "exit",
+                       "server_listed": False, "requests": 1, "elapsed_s": missing["elapsed_s"]}
+    kinds = [e["event"] for e in events]
+    assert kinds.index("proxy_stop") < kinds.index("mcp_tools_missing") < kinds.index("exit")
+
+
+def test_claude_with_contexto_tools_gets_no_warning(env, upstream, tmp_path):
+    env.update(FAKE_REQUEST="1", FAKE_TOOLS="Bash,Read,mcp__contexto__contexto_search,mcp__contexto__contexto_recall")
+    proc = launch(env, "--upstream", upstream, "--session", "t2", "claude", "-p", "hello", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert "warning" not in err and "Contexto's tools" not in err
+    assert not [e for e in session_log(env, "t2") if str(e.get("event")).startswith("mcp_tools")]

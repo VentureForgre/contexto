@@ -193,6 +193,7 @@ def test_dry_run_end_to_end_against_the_local_stub(tmp_path):
     assert d["ran"]["turns_completed"] == d["ran"]["turns"] and a["acceptance_1"] and a["rotations"]
     assert a["mcp_calls"] == {"contexto_recall": d["turns"]["probe"], "contexto_search": d["turns"]["probe"]}
     assert a["mcp_failed"] == 0 and d["score"]["correct"] == d["score"]["total"] == 54
+    assert d["mcp_tools_missing"] == 0  # a normal run: every turn's Codex got the tools, so no warning
     assert subprocess.run(["git", "-C", str(tmp_path), "rev-parse"], capture_output=True).returncode != 0
 
 

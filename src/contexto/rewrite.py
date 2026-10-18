@@ -116,6 +116,7 @@ from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, S
 from contexto.store.ledger import LedgerError
 from contexto.store.render import render_page
 from contexto.tokens import TokenEstimator
+from contexto.toolcheck import ToolCheck
 
 MESSAGES = "/v1/messages"
 COUNT_TOKENS = "/v1/messages/count_tokens"
@@ -1282,6 +1283,8 @@ class RewriteEngine:
         self._record_reason = "no_record"  # why there is no record to resume from
         self._record_consumed = False  # the matching conversation has been checked (resumed or not)
         self._resumed = False
+        # Are Contexto's MCP tools reaching the main conversation? (contexto.toolcheck)
+        self.tools = ToolCheck(self.store)
 
     def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
         with recall_knobs(self.config):
@@ -1313,6 +1316,8 @@ class RewriteEngine:
         finally:
             _WINDOW_OWNER.reset(owner)
         events[0:0] = resumed
+        # The CLI's own request (rewrite() leaves it unchanged); the engine's request event stays last.
+        events[-1:-1] = self.tools.observe(request, dialect.name, main=main)
         events[-1].update(main=main, conversations=len(self.states))  # content-free, for side requests
         # Per-turn recall budget, request-time publish (contract PR #69, kept by 367916a): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
@@ -1330,6 +1335,11 @@ class RewriteEngine:
                 events[-1:-1] = failures  # the engine's request event stays last
         self._write_epoch(key, request, dialect, events)
         return upstream, headers, [restore, *events] if restore else events
+
+    def tools_verdict(self) -> dict | None:
+        """At exit: ``mcp_tools_missing`` if the main conversation ended without Contexto's tools and that
+        was not reported during the run (``contexto.toolcheck.ToolCheck.verdict``); the launcher logs it."""
+        return self.tools.verdict()
 
     def _restore(self, model: str | None) -> dict | None:
         """Packet A8 (c) and A2f: restore the previous engine's ratio at the first request on its model.
