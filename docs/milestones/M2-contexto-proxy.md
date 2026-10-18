@@ -118,7 +118,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   the kinds that make up `messages[0]`). Superseded items of a recognisable kind are paged first,
   then unrecognised ones, oldest first by position. Each paged item is its own immutable page (a
   context block is stored as a user message holding that block as sent), listed in the index with
-  its first line inside the tag (marked `[system]` or `[reminder]`, see Store) and recallable. Paging happens only at rotations, so carried content stays
+  its first line inside the tag (marked `[system]` or `[reminder]`, see Store) and recallable.
+  Paging happens only at rotations, so carried content stays
   byte-identical between them. The paged set is part of the epoch record (rule 16,
   `paged_carried`): a system message by its normalised hash, a context block by a hash of its
   position and content (identical countdowns in different turn starts stay distinct), so a
