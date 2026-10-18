@@ -206,10 +206,12 @@ def settings_payload(proxy_url: str) -> dict[str, Any]:
 
 
 def mcp_payload(session_id: str, home: Path) -> dict[str, Any]:
+    # Claude Code starts the server in the user's project; -P keeps that directory off sys.path,
+    # so a project's own contexto package cannot run in place of the installed server.
     return {"mcpServers": {"contexto": {
         "type": "stdio",
         "command": sys.executable,
-        "args": ["-m", "contexto", "mcp", "--session", session_id],
+        "args": ["-P", "-m", "contexto", "mcp", "--session", session_id],
         "env": {"CONTEXTO_HOME": str(home)},
     }}}
 

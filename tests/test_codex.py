@@ -187,6 +187,7 @@ def test_engine_dispatches_responses_paths_with_separate_state():
 import json
 import os
 import stat
+import sys
 import tomllib
 from pathlib import Path
 
@@ -221,7 +222,8 @@ def test_api_key_mode_writes_a_private_temporary_codex_home(tmp_path):
         assert provider["supports_websockets"] is False
         assert provider["auth"] == {"command": "/synthetic/bin/key-helper", "args": ["--profile", "synthetic"]}
         assert config["features"]["enable_request_compression"] is False
-        assert config["mcp_servers"]["contexto"]["args"] == ["mcp", "--session", "S1"]
+        assert config["mcp_servers"]["contexto"]["command"] == sys.executable
+        assert config["mcp_servers"]["contexto"]["args"] == ["-P", "-m", "contexto", "mcp", "--session", "S1"]
         # A6 measured exec mode refusing MCP calls without this (approval policy "never").
         assert config["mcp_servers"]["contexto"]["default_tools_approval_mode"] == "approve"
         assert launch.env["CODEX_HOME"] == str(root) and launch.argv == ["codex", "exec", "hi"]
@@ -506,9 +508,60 @@ def test_mcp_server_gets_contexto_home_in_chatgpt_mode(tmp_path):
     assert tomllib.loads(f"v = {value}")["v"] == str(store_home)  # a valid TOML string, as codex parses -c
 
 
+def test_mcp_server_command_does_not_depend_on_path(tmp_path):
+    """Codex resolves an MCP server's command on PATH and, when it cannot start it, runs the turn
+    without the server's tools and without an error. A bare ``contexto`` broke recall for any run
+    whose PATH lacked the executable (``.venv/bin/contexto run codex`` without the venv activated:
+    the stub dry run saw no contexto tools in code mode's ALL_TOOLS). The server is started the way
+    the Claude path starts it (launcher.mcp_payload): this interpreter, ``-P -m contexto``."""
+    expected = ["-P", "-m", "contexto", "mcp", "--session", "S3"]
+    launch = plan_codex([], PROXY, "S3", env={"PATH": "/nonexistent"}, cwd=tmp_path, home=claude_home(tmp_path),
+                        upstream="https://u.invalid/v1")
+    try:
+        server = tomllib.loads((launch.codex_home / "config.toml").read_text())["mcp_servers"]["contexto"]
+        assert server["command"] == sys.executable and Path(server["command"]).is_absolute()
+        assert server["args"] == expected
+    finally:
+        launch.cleanup()
+    chatgpt = plan_codex(["exec", "hi"], PROXY, "S3", auth_mode=CHATGPT_MODE, env={"PATH": "/nonexistent"},
+                         cwd=tmp_path, home=tmp_path)
+    overrides = dict(chatgpt.argv[i + 1].split("=", 1) for i, a in enumerate(chatgpt.argv) if a == "-c")
+    assert tomllib.loads(f"v = {overrides['mcp_servers.contexto.command']}")["v"] == sys.executable
+    assert tomllib.loads(f"v = {overrides['mcp_servers.contexto.args']}")["v"] == expected
+
+
 def test_chatgpt_mode_mcp_home_is_absolute_for_a_relative_contexto_home(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     launch = plan_codex(["exec", "hi"], PROXY, "S2", auth_mode=CHATGPT_MODE, env={"CONTEXTO_HOME": "rel-home"},
                         cwd=tmp_path, home=tmp_path)
     overrides = dict(launch.argv[i + 1].split("=", 1) for i, a in enumerate(launch.argv) if a == "-c")
     assert tomllib.loads(f"v = {overrides['mcp_servers.contexto.env.CONTEXTO_HOME']}")["v"] == str(tmp_path / "rel-home")
+
+
+def test_mcp_server_ignores_a_contexto_package_in_the_working_directory(tmp_path):
+    """Claude Code and Codex start MCP servers in the user's project. ``python -m contexto`` would
+    put that directory first on sys.path, so a project with its own ``contexto/__main__.py`` would
+    run in place of the installed server, outside the CLI's sandbox and approvals. ``-P`` keeps the
+    working directory off sys.path (Python 3.11+)."""
+    import subprocess
+
+    from contexto.launcher import mcp_payload
+
+    project = tmp_path / "project"
+    (project / "contexto").mkdir(parents=True)
+    (project / "contexto" / "__init__.py").write_text("")
+    (project / "contexto" / "__main__.py").write_text("print('SHADOWED')\n")
+    claude = mcp_payload("S4", tmp_path / "home")["mcpServers"]["contexto"]
+    launch = plan_codex([], PROXY, "S4", env={"PATH": "/nonexistent"}, cwd=tmp_path, home=claude_home(tmp_path),
+                        upstream="https://u.invalid/v1")
+    try:
+        codex = tomllib.loads((launch.codex_home / "config.toml").read_text())["mcp_servers"]["contexto"]
+    finally:
+        launch.cleanup()
+    for server in (claude, codex):
+        args = server["args"]
+        prefix = args[:args.index("mcp")]  # the interpreter flags and module, without the subcommand
+        out = subprocess.run([server["command"], *prefix, "--version"], cwd=project, capture_output=True,
+                             text=True, timeout=30, env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.startswith("contexto ") and "SHADOWED" not in out.stdout

@@ -1,6 +1,6 @@
 # Milestone 2: Contexto proxy (context virtual memory)
 
-Status: contract, implemented on main (released from v0.1.0; latest v0.2.7). Owner: intake.lead under D0. Date: 2026-10-16.
+Status: contract, implemented on main (released from v0.1.0; latest v0.2.8). Owner: intake.lead under D0. Date: 2026-10-16.
 Why this design: `docs/research/M0-recommendation.md`. Decisions D16 to D21.
 
 ## Outcome
