@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-18 03:42Z by claude (30M scale measurement). Decisions taken and still open, with reasons:
+Updated 2026-10-18 03:59Z by claude (30M scale record, review answers). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -129,7 +129,7 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
   used more than the modelled 2,952,139 because the model made more searches and tool-loop
   requests per probe turn than the model assumed; still under its 4,007,279 cap.
 
-## Scale to 30M tokens of history (zero-spend measurement, 2026-10-18)
+## Scale to 30M tokens of history (zero-spend measurement, measured 2026-10-17, recorded 2026-10-18)
 
 Record: `docs/research/M2-scale-30m.md`; harnesses in `spikes/m2/scale/`. Synthetic sessions, local
 fake upstream, no model calls.
@@ -137,13 +137,20 @@ fake upstream, no model calls.
 - Claude Code 2.1.302 resumed and resent a 30M-token history (52.6 MiB request, 0.7 s, about 1 GB)
   and up to 525M; from 550M it stops with "API Error: Out of memory". With Contexto-like reported
   usage it never compacted.
-- The proxy kept every upstream request under 150,000 at 30M and added 0.58 s per tool-loop
-  request and 0.86 s per turn start. Blocker: `<system-reminder>` blocks on later turn starts are
-  carried forever and never paged; with an assumed rate (not measured) the session logs
-  `bound_too_small` from 4.86M and exceeds the bound from 8.20M.
+- The proxy kept every upstream request under 150,000 (counted by the fake upstream as bytes /
+  1.83) at 30M in a synthetic session with reminders on the first message only, the shape measured
+  CLI sessions show, and added 0.58 s per tool-loop request and 0.86 s per turn start.
+- Open question: `<system-reminder>` context blocks on later turn starts would be carried with no
+  cap. Measured Claude Code sessions keep them at `messages[0]` and send per-turn hook and reminder
+  context as separate role `system` messages, which are paged with their turn or under the
+  8,000-token fallback; the one measured exception is a hand-written resume (`spikes/m2/carried`
+  findings 5, 6, 7, 9). If later turn starts did carry blocks at an assumed rate (not measured),
+  the session would log `bound_too_small` from 4.86M and exceed the bound from 8.20M. A zero-spend
+  measurement of reminder placement in Claude Code 2.1.302 is in progress
+  (`spikes/m2/scale/reminders/`).
 - Search takes 0.71 s at 6,000 pages, but the planted page reaches the 3 detailed results for 61
-  of 86 queries at 17 pages, 50 at 1,000, and 39 at 6,000 (exact substring, newest first, no
-  ranking).
+  of 86 queries at 17 pages, 50 at 1,000, 44 at 3,000, and 39 at 6,000 (exact substring, newest
+  first, no ranking).
 
 ## Decisions taken in M2 and why (full text in DECISIONS.md)
 
@@ -166,15 +173,19 @@ Definition of done for this project: M2 acceptance passed on both CLIs (done), e
 published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
 
 In progress:
-- Nothing. v0.2.3 to v0.2.7 are fixes (#192 to #197), each released from main with its wheel and
-  sdist attached (the v0.2.7 wheel installs and reports 0.2.7).
+- Zero-spend measurement of where Claude Code 2.1.302 adds reminders after the first message
+  (step 1 of the 30M plan below; to be added as `spikes/m2/scale/reminders/`).
+- No release work: v0.2.3 to v0.2.7 are fixes (#192 to #197), each released from main with its
+  wheel and sdist attached (the v0.2.7 wheel installs and reports 0.2.7).
 
 This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
 - Keep STATUS, README, and the contract in step with `main`.
 - No live model runs. Zero-spend work toward 30M-token sessions, in order
-  (`docs/research/M2-scale-30m.md`): page carried reminders so the head cannot grow without bound;
-  rank search results (BM25 with a recency term); cache page text in the MCP server and give
-  `index_text` a manifest; hash each message once in the proxy.
+  (`docs/research/M2-scale-30m.md`): (1) measure where and how often Claude Code adds reminders
+  after the first message (zero spend), then, if they accrue, page carried context blocks under the
+  fallback (contract rule change and a new decision), keeping the first message's blocks; (2) rank
+  search results (BM25 with a recency term); (3) cache page text in the MCP server and give
+  `index_text` a manifest; (4) hash each message once in the proxy.
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent

@@ -6,9 +6,9 @@ fake upstream, and measures it at 0.5M, 2M, 5M, 10M and 30M tokens of history. N
 model API: the proxy's upstream is `http://127.0.0.1:<port>` and `worker.py serve` refuses anything else.
 
 Measured on 2026-10-17, main at 4525388, Python 3.14.6, Apple M5 Pro (18 cores, 48 GB), with other
-agents benchmarking on the same machine. Load averages were 3.3 to 6.5 during the timed runs (the
-`uptime` line for each checkpoint is in `results/checkpoints_*.csv`). Every number below is measured
-unless it is marked as an inference.
+agents benchmarking on the same machine. 1-minute load averages were 3.1 to 7.4 during the timed
+runs (`load1` in `results/requests_*.csv`; the `uptime` line for each checkpoint is in
+`results/checkpoints_*.csv`). Every number below is measured unless it is marked as an inference.
 
 ## Short answer
 
@@ -22,8 +22,11 @@ unless it is marked as an inference.
   without limit, because context blocks of paged turn starts are carried forever and nothing pages
   them. In that profile `bound_too_small` first fires at **4.86M tokens** (turn 181,
   F = 100,810, W = 11,690), and the first request over the bound comes at **8.20M** (turn 308, last
-  request of the turn 150,046 tokens, F = 122,305, W = -3,473). At 10M, 7 of 55 measured requests
-  were over the bound (max 159,255).
+  request of the turn 150,046 tokens, F = 122,305, W = -3,473). At 10M, 7 of the 22 requests
+  measured at that checkpoint were over the bound, all tool loops (151,779 to 159,255). Measured CLI
+  sessions put context blocks on later turn starts only when a hand-written session file is resumed
+  (spikes/m2/carried finding 6); with no hooks they stay at `messages[0]` (finding 5), and hook
+  context arrives as separate role `system` messages (findings 7 and 9).
 - **Memory is the next limit.** RSS is not a Python-object leak (live objects stay flat at about
   23,000), but the allocator keeps what each request frees. Over 79 requests at 30M, RSS after
   `gc.collect()` settled between 2.1 and 3.1 GB, with a peak RSS of 3.45 GB. At 5M it levels off near
@@ -111,7 +114,10 @@ HTTP in both (`results/fidelity_*_120.json`):
 - **`first` profile:** 120 identical pages and byte-identical next-turn requests, but one decision
   differs. At turn 71 the HTTP path estimated 113,001 and fast-forward 112,930, against the
   `min_turn_room` threshold of 113,000 (bound - floor - min room). HTTP rotated there (k = 441).
-  Fast-forward rotated one turn later (k = 455), and the two re-converge at turn 74.
+  Fast-forward rotated one turn later (k = 455). Request sizes differ at turns 71 to 75 and match
+  again from turn 76 (epoch 37), so the paths re-converge after 5 turns. At epoch 36 both rotate at
+  the same k but with a different reason, F and W (W 42,740 against 53,409): the JSON reports
+  `rotations_equal: false` (2 of 60 rotations differ) and `max_f_w_diff_tokens` 10,669.
 - **Cause:** fast-forward anchors the rule 3 estimate on the previous turn start's real usage, not on
   the last tool loop's. That moves the estimate by about 0.1 percent and can flip a decision that sits
   exactly on a threshold.
@@ -157,7 +163,7 @@ Engine events in the session log through each checkpoint (first run; the other t
 
 One `estimate_error` per run comes from the first request, sized on the seed ratio before any usage.
 The proxy rotates at about every second turn start: 534 of 1,097 fast-forwarded turn starts, reason
-`bound` 370 times and `min_turn_room` 160 times. F stays between 69,565 and 70,031 and W between
+`bound` 370 times, `min_turn_room` 160 times and `window_minimal` 4 times. F stays between 69,565 and 70,031 and W between
 42,469 and 55,435.
 
 ### Rotation request cost (fast-forward, engine only, `results/ff_first-1.csv`, medians)
