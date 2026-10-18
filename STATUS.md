@@ -176,11 +176,13 @@ fake upstream, no model calls.
   rotation the fallback pages it back to about 8,000 or less), and
   effort-change content adds to the same F. The fallback writes each paged message as its own
   page, so such a session would reach about 3,000 pages or more by 30M, most of them single small
-  messages; the store spike's 3,000 to 6,000 rows (planted page found for 44 to 39 of 86 queries,
-  0.32 to 0.71 s) are a rough guide for that shape.
-- Search takes 0.71 s at 6,000 pages, but the planted page reaches the 3 detailed results for 61
-  of 86 queries at 17 pages, 50 at 1,000, 44 at 3,000, and 39 at 6,000 (exact substring, newest
-  first, no ranking).
+  messages; the store spike's 3,000 to 6,000 rows (after D34: planted page in the 3 detailed
+  results for 60 and 56 of 86 queries, 0.04 to 0.22 s per search) are a rough guide for that shape.
+- Search (D34: every word in any case, BM25 with a recency prior, cached page text) takes 0.09 to
+  0.22 s at 6,000 pages, and the first search of an MCP process 0.74 s. The planted page reaches
+  the 3 detailed results for 71 of 86 queries at 17 pages, 63 at 1,000, 60 at 3,000, and 56 at
+  6,000 (before D34: 61, 50, 44, 39), and the latest value comes first for 20 of 24 at 6,000
+  (before: 12).
 
 ## Decisions taken in M2 and why (full text in DECISIONS.md)
 
@@ -196,6 +198,12 @@ fake upstream, no model calls.
   rerun both arms. Rejected: accept as a limitation, widen the tolerance, rerun one arm only.
 - D29: cut v0.1.0 after acceptance, on the owner's instruction to come back to a finished
   project; private GitHub Release only.
+- D32: the bounded fallback also pages context blocks of later turn starts (4.x ids), so carried
+  content stops growing with them.
+- D33: session-start is recognised by its content, not by settings fields, so an effort change no
+  longer makes a reminder unpageable (5.x ids).
+- D34: search matches every word in any case, ranks by BM25 with a recency prior (paged context
+  blocks after every turn, in rank and in the reply), and both processes cache page reads.
 
 ## What is left (as of 2026-10-18)
 
@@ -219,9 +227,15 @@ This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
       it there too.
     - 4.x ids: page carried context blocks under the fallback, keeping the first message's blocks
       and the latest of each recognisable kind (for example the token countdown).
-  - (2) Rank search results (BM25 with a recency term).
-  - (3) Cache page text in the MCP server and give `index_text` a manifest.
-  - (4) Hash each message once in the proxy.
+  - (2) Rank search results (BM25 with a recency term): done in D34 (PR #204).
+  - (3) Cache page text in the MCP server: done in D34 (PR #204); the `index_text` manifest was
+    rejected there (a cache keyed by file metadata does the work without a new store file).
+  - (4) Hash each message once in the proxy: done (#205).
+  - Follow-up to D34, zero spend: BM25's length discount can show an older short page that states
+    an old value in detail while the long turn with the current value is only listed (D34 (3)).
+    Choose b on a harness variant that draws page sizes from
+    `spikes/m2/scale/store/calibration.json`'s real turn sizes, or take BM25's length from the
+    messages that hold a match rather than the whole page.
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
@@ -289,6 +303,14 @@ Needs the owner:
   budget is under 25,000; at 42,000 with a 16,000 head nearly every turn rotates. Use a larger
   bound for OpenRig seat-sized heads (O3).
 - Very large single turns can still exceed the bound inside a tool loop (logged `over_bound`).
+- Search (D34) keeps each page's searchable text in the MCP server's memory for the life of the
+  process, with no cap (peak RSS 293 MB at 6,000 synthetic pages), and the first search of each MCP
+  process reads every page once (0.74 s at 6,000). Single common words can still bury a fact at
+  6,000 pages (5 of 86 probe queries). BM25's length discount can put an older short page that
+  states an old value among the 3 detailed pages while the long turn with the current value is only
+  listed: with turn 4 "Set max_retries to 3", the long turn 10 "max_retries is now 7", and passing
+  mentions at turns 6 and 13, the detailed pages are 13, 6, and 4 (the newest-first search showed
+  13, 10, and 6). The follow-up is under "What is left".
 - Carried content that is never paged grows in long Claude Code sessions (measured on Claude Code
   2.1.302, `spikes/m2/scale/reminders/`). On 4.x model ids the CLI puts `<system-reminder>` blocks
   in every later turn start: 45 tokens per turn with bare prompts, 215 in a busy one-process

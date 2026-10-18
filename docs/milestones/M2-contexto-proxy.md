@@ -556,17 +556,20 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   folded one character at a time, with every final sigma written as `σ`, so a word folds the same
   in the query and on the page. Matching pages are ranked in three groups: turn pages holding the
   whole query as typed (case-insensitively), then turn pages holding only its words, then pages
-  holding only paged context blocks (system messages, or user messages made only of
-  `<system-reminder>` blocks; recognised from the messages, whatever the stub), which stay
-  searchable and recallable. Within each group pages rank by BM25 relevance over the words and the
+  holding only paged context blocks (system messages and Codex `developer` items, or user messages
+  made only of `<system-reminder>` blocks, D32; recognised from the messages, whatever the stub),
+  which stay searchable and recallable. Within each group pages rank by BM25 relevance over the words and the
   whole query (k1 1.2, b 0.75, length in UTF-8 bytes, inverse document frequency over all pages of
   the store) times a recency prior `1 + 0.5 r`, where `r` runs from 0 for the oldest matching page
   to 1 for the newest, so a newer page wins unless an older one is clearly more about the query;
   ties go to the newer page. The newest matching turn page (the newest matching page when no turn
   page matches) is always one of the 3 best: if it ranks lower it takes the third place. The
-  reply's paged part opens with `[best matching pages by relevance, shown newest first:]`. For each
-  of the 3 best pages, shown newest first (for superseded facts the newest statement among them is
-  the current one) it
+  reply's paged part opens with `[best matching pages by relevance, shown newest first:]`. In both
+  the 3 best pages and the next 50, turn pages come first, newest first (for superseded facts the
+  newest statement among them is the current one), then context-block pages, newest first, after
+  the line `[paged reminders and system messages, not dated by turn:]`, shown only when a
+  context-block page is: such a page's turn is when the proxy paged the block, not when it was
+  sent, so it does not order it against a turn page. For each of the 3 best pages it
   returns a short header (page id and turn number, no stub) and up to 3 matching lines, the last 3 in page order (a turn's latest statements, shown oldest to
   newest, so the last line shown is the newest), each with one line of context and its character
   offset in the rendered page. The matching lines of a page are those holding the most of the
@@ -574,7 +577,7 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   on fewer lines of the page counting more. When a page has more matching lines than it shows, a note gives their
   count and the offset of the page's first matching line, so earlier statements stay reachable by recall; when the
   rendered page does not hold every word (the rest is in the stub only), the stub line is shown as the matching line. The next
-  50 best pages are listed, newest first,
+  50 best pages are listed, in the same order,
   compactly as page id, turn, and the offsets of their first and last matching line (`@first..last`, or
   one offset when they coincide; about 10 tokens each), so every
   match stays reachable by `contexto_recall` at that offset even when the query cannot be

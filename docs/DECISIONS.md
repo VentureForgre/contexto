@@ -314,22 +314,40 @@ the owner's delegation. Open decisions are listed at the end with the options an
   lowers capital sigma by its place in a word, so `ΑΣ` missed `ΑΣΑ` (reviewer-1; a property test
   over random stores checks the old matches are kept); (2) matching pages fall in three groups:
   turn pages holding the whole query, turn pages holding only its words, and pages holding only
-  paged context blocks (system messages, or user messages made only of `<system-reminder>`
-  blocks, the pages PR #203 writes, recognised from the messages whatever their stub), which repeat
-  the same words every few turns and are short, so they outranked the turn that is about the words
-  (reviewer-2); they stay searchable and recallable. Within each group pages rank by BM25 (k1 1.2,
+  paged context blocks (system messages and Codex `developer` items, or user messages made only of
+  `<system-reminder>` blocks, the pages D32 writes, recognised from the messages whatever their
+  stub), which repeat the same words every few turns and are short, so they outranked the turn that
+  is about the words (reviewer-2); they stay searchable and recallable. A Codex developer page has
+  no searchable text (search reads Responses items through `as_message`, which drops system-like
+  items, B23), so in practice the group holds Claude Code pages only. Within each group pages rank by BM25 (k1 1.2,
   b 0.75) over the words and the whole query, times a recency prior `1 + 0.5 r`, `r` the page's
   position among the matches from 0 (oldest) to 1 (newest): a newer page wins unless an older one is
   clearly more about the query, and the oldest needs 1.5 times the newest's relevance; (3) the
   newest matching turn page always takes one of the 3 detailed places (the third, if it ranked
   lower; owner's choice of reviewer-2's options): BM25 discounts long pages, and a long newest turn
   that states the current value lost to short older ones. It costs one place on common-word
-  queries. It does not cover a short passing mention newer than the statement: in reviewer-2's
-  13-turn case (the long turn 10 states the value, short turns 4, 5, 6, and 13 mention the key)
-  the detailed pages are 13, 6, and 5 and turn 10 is listed first among the rest; (4) the 3 best
-  pages are shown newest first under the line `[best matching pages by relevance, shown newest
-  first:]`, and so are the next 50, so among the pages shown the newest statement of a fact comes
-  first, as D28 requires; (5) a page's matching lines are the ones holding the most of the query,
+  queries. It does not cover a short passing mention newer than the statement. In reviewer-2's
+  13-turn cases turn 4 says "Set max_retries to 3", the long turn 10 says "max_retries is now 7",
+  and short turns mention the key in passing. With mentions at turns 5, 6, and 13 the detailed
+  pages are 13, 6, and 5, so neither value is shown, and turn 10 is listed first among the rest.
+  With mentions at turns 6 and 13 only, it is worse: an older short page that states an old value
+  is shown in detail while the long turn with the current value is only listed (detailed 13, 6,
+  and 4, so 3 is shown and 7 is not; the old newest-first search showed 13, 10, and 6). The cheap
+  fixes fail: b 0 (no length discount) brings back the bias toward long old log dumps; a second
+  recency place fails when four later short mentions follow the statement (6, 8, 12, 13); a length
+  cap helps only near the average length, which is b 0 again. Follow-up, both zero spend: choose b
+  on a harness variant that draws page sizes from the real turn sizes in
+  `spikes/m2/scale/store/calibration.json`, or take BM25's length from the messages that hold a
+  match rather than the whole page, so a tool output without the word does not dilute the turn's
+  own statement; (4) the 3 best pages are shown under the line `[best matching pages by relevance,
+  shown newest first:]`, and the next 50 after them: in each part turn pages come first, newest
+  first, then context pages, newest first, after the line `[paged reminders and system messages,
+  not dated by turn:]`, which is shown only when a context page is. So among the turn pages shown
+  the newest statement of a fact comes first, as D28 requires. A context page's turn is the turn at
+  which the proxy paged the block (D32 pages blocks at a rotation, numbered after every turn paged
+  by then), not the turn that sent it, so it cannot order a context page against a turn page: by
+  turn alone, file-changed notes saying "take it as the current state" of an old value were shown
+  above the turn that superseded them (reviewer-2, with D32's `RewriteEngine` over 59 turns); (5) a page's matching lines are the ones holding the most of the query,
   the whole query first; in-view entries match by the same rule and still come first (D28); (6)
   the MCP server keeps each page's folded searchable text as UTF-8 bytes (a `str` with one emoji
   takes 4 bytes per character), and the proxy each page's id, turn, stub, and index line, for the
