@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-18 05:19Z by claude (v0.2.8). Decisions taken and still open, with reasons:
+Updated 2026-10-18 07:23Z by claude (D32 to D34 and the 30M fixes). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -132,7 +132,8 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
 ## Scale to 30M tokens of history (zero-spend measurement, measured 2026-10-17, recorded 2026-10-18)
 
 Record: `docs/research/M2-scale-30m.md`; harnesses in `spikes/m2/scale/`. Synthetic sessions, local
-fake upstream, no model calls.
+fake upstream, no model calls. The carried-content findings in this section were measured before
+D32 and D33 (#203); what remains after them is under "Known limitations".
 
 - Claude Code 2.1.302 resumed and resent a 30M-token history (52.6 MiB request, 0.7 s, about 1 GB)
   and up to 525M; from 550M it stops with "API Error: Out of memory". With Contexto-like reported
@@ -210,23 +211,18 @@ fake upstream, no model calls.
 Definition of done for this project: M2 acceptance passed on both CLIs (done), every release
 published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
 
-In progress (owner approved on 2026-10-18 to fix everything the 30M measurement found): the 30M
-plan below, steps 1 to 4, each on its own branch with two reviewers per PR. v0.2.8 (#200) is
-released with its wheel and sdist attached (the wheel installs, reports 0.2.8, and starts the MCP
-server with `-P -m contexto`).
+In progress: nothing. The owner approved on 2026-10-18 fixing everything the 30M measurement found;
+steps 1 to 4 of the plan below are done (#203, #204, #205), and the missing-tools warning (#202)
+landed with them, each with two reviewers. The D34 follow-up below is open.
 
 This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
 - Keep STATUS, README, and the contract in step with `main`.
 - No live model runs. Zero-spend work toward 30M-token sessions, in order
   (`docs/research/M2-scale-30m.md`):
-  - (1) Stop carried growth. Each part is a contract rule change that needs a new decision.
-    - 5.x ids (the owner's seats): stop `classify_system` from classifying a system message as
-      session-start just because an effort change attached `output_config` to it (measured on
-      claude-opus-5-5 and claude-haiku-5-5). On claude-sonnet-5 and claude-fable-5 the
-      session-start message has no `output_config` and is pageable, so the decision must identify
-      it there too.
-    - 4.x ids: page carried context blocks under the fallback, keeping the first message's blocks
-      and the latest of each recognisable kind (for example the token countdown).
+  - (1) Stop carried growth: done in D32 and D33 (PR #203). Session-start is recognised by its
+    `# Environment` first line, so effort changes no longer grow it and the claude-sonnet-5 and
+    claude-fable-5 environment message is never paged; the bounded fallback pages later turn
+    starts' context blocks, keeping the first message's blocks and the latest of each kind.
   - (2) Rank search results (BM25 with a recency term): done in D34 (PR #204).
   - (3) Cache page text in the MCP server: done in D34 (PR #204); the `index_text` manifest was
     rejected there (a cache keyed by file metadata does the work without a new store file).
@@ -311,16 +307,19 @@ Needs the owner:
   listed: with turn 4 "Set max_retries to 3", the long turn 10 "max_retries is now 7", and passing
   mentions at turns 6 and 13, the detailed pages are 13, 6, and 4 (the newest-first search showed
   13, 10, and 6). The follow-up is under "What is left".
-- Carried content that is never paged grows in long Claude Code sessions (measured on Claude Code
-  2.1.302, `spikes/m2/scale/reminders/`). On 4.x model ids the CLI puts `<system-reminder>` blocks
-  in every later turn start: 45 tokens per turn with bare prompts, 215 in a busy one-process
-  session, 425 with a resume every turn (Contexto's estimator); [inferred, linear, a rough guide]
-  `bound_too_small` from about turn 860, 180, and 90, or near turn 77 for the busy session if
-  scaled by bytes per turn. On 5.x ids per-turn reminders are pageable. On claude-opus-5-5 (Opus
-  5.5) and claude-haiku-5-5 each effort change makes one system message session-start class, never
-  paged: 27 to 3,444 tokens per change (bytes / 1.83), and 16 changes grew that class from 2,770 to
-  9,272 tokens (11,637 with a resume every turn; Contexto's estimator). The 30M proxy run did not
-  include 5.x's per-request role `system` messages, so their effect at 30M is inferred.
+- Carried content after D32 and D33 (#203, measured on Claude Code 2.1.302's captured bodies in
+  `spikes/m2/scale/reminders/`, Contexto's estimator): at turn 48 the content the fallback cannot
+  page is 3,557 to 3,794 tokens on sonnet-4-6 (was 5,452 to 22,953) and 4,897 to 5,643 on
+  claude-opus-5-5 (was 9,804 to 12,169). On 4.x ids it stops growing from turn 12 (about 5,250 while
+  plan mode is on); with a resume every turn it still grows about 21 tokens per turn, because the
+  latest effort-change message itself grows as the CLI re-sends unread file notes on it. On
+  claude-sonnet-5 and claude-fable-5 the environment message (about 3,300) is now always carried.
+  In the 30M proxy run with later-turn reminders, `bound_too_small` and `over_bound` fell from 871
+  and 692 to 0, the largest request from 288,309 to 134,203 tokens, and F at 30M from 259,155 to
+  74,240; the store holds 1,616 pages at 30M instead of 1,138. Session-start recognition depends on
+  Claude Code's own `# Environment` text, and the kinds of context block on 2.1.302's first lines:
+  re-run the reminders spike when the CLI changes. Resuming an epoch record written by v0.2.8 can
+  carry one message the old code had paged (logged as `carried_reclassified`).
 - Cache efficiency depends on the upstream route (O6): 29 of 31 and 36 of 37 in the live runs.
 - Organization-managed Claude Code settings outrank the launcher's `--settings`; a user-supplied
   `--settings` is refused (exit 2); a user `--mcp-config` is allowed.
