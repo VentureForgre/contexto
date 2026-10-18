@@ -297,6 +297,101 @@ the owner's delegation. Open decisions are listed at the end with the options an
   later CLI changes that heading, the message falls to the settings-change or carried-text class
   and can be paged once superseded, so a CLI upgrade should re-run the reminders spike.
 
+- **D34. Search matches every word in any case, ranks by BM25 with a recency prior, and both
+  processes cache page reads.** Owner approval, 2026-10-18, including the contract change. The
+  store-scale spike (`spikes/m2/scale/store/`, synthetic, zero spend) measured the exact,
+  case-sensitive, newest-first search at 17 to 6,000 pages: the planted page was among the 3
+  detailed hits for 61 of 86 probe queries at 17 pages and 39 at 6,000; 25 queries missed at
+  every size, 10 of them on case or word order alone; the latest value came first for 19 of 24
+  changing-value queries at 17 pages and 12 at 6,000. Each search read and parsed every page (0.69 s
+  at 6,000, `results/d34_before`), and `index_text` read every page, twice per rotation, in the
+  proxy's request path (0.59 s per call). What changed: (1) a page matches when every
+  whitespace-separated word of the query occurs in it, case-insensitively, in any order, each word
+  as a substring, so for any query with a word every page the old rule matched still matches and
+  identifiers, paths, and their parts keep working. The one exception is a query with no words
+  (whitespace only), which the old rule matched on almost every page and which now finds nothing.
+  Case is folded one character at a time and every `ς` written `σ`: `str.lower` on a whole string
+  lowers capital sigma by its place in a word, so `ΑΣ` missed `ΑΣΑ` (reviewer-1; a property test
+  over random stores checks the old matches are kept); (2) matching pages fall in three groups:
+  turn pages holding the whole query, turn pages holding only its words, and pages holding only
+  paged context blocks (system messages and Codex `developer` items, or user messages made only of
+  `<system-reminder>` blocks, the pages D32 writes, recognised from the messages whatever their
+  stub), which repeat the same words every few turns and are short, so they outranked the turn that
+  is about the words (reviewer-2); they stay searchable and recallable. A Codex developer page has
+  no searchable text (search reads Responses items through `as_message`, which drops system-like
+  items, B23), so in practice the group holds Claude Code pages only. Within each group pages rank by BM25 (k1 1.2,
+  b 0.75) over the words and the whole query, times a recency prior `1 + 0.5 r`, `r` the page's
+  position among the matches from 0 (oldest) to 1 (newest): a newer page wins unless an older one is
+  clearly more about the query, and the oldest needs 1.5 times the newest's relevance; (3) the
+  newest matching turn page always takes one of the 3 detailed places (the third, if it ranked
+  lower; owner's choice of reviewer-2's options): BM25 discounts long pages, and a long newest turn
+  that states the current value lost to short older ones. It costs one place on common-word
+  queries. It does not cover a short passing mention newer than the statement. In reviewer-2's
+  13-turn cases turn 4 says "Set max_retries to 3", the long turn 10 says "max_retries is now 7",
+  and short turns mention the key in passing. With mentions at turns 5, 6, and 13 the detailed
+  pages are 13, 6, and 5, so neither value is shown, and turn 10 is listed first among the rest.
+  With mentions at turns 6 and 13 only, it is worse: an older short page that states an old value
+  is shown in detail while the long turn with the current value is only listed (detailed 13, 6,
+  and 4, so 3 is shown and 7 is not; the old newest-first search showed 13, 10, and 6). The cheap
+  fixes fail: b 0 (no length discount) brings back the bias toward long old log dumps; a second
+  recency place fails when four later short mentions follow the statement (6, 8, 12, 13); a length
+  cap helps only near the average length, which is b 0 again. Follow-up, both zero spend: choose b
+  on a harness variant that draws page sizes from the real turn sizes in
+  `spikes/m2/scale/store/calibration.json`, or take BM25's length from the messages that hold a
+  match rather than the whole page, so a tool output without the word does not dilute the turn's
+  own statement; (4) the 3 best pages are shown under the line `[best matching pages by relevance,
+  shown newest first:]`, and the next 50 after them: in each part turn pages come first, newest
+  first, then context pages, newest first, after the line `[paged reminders and system messages,
+  not dated by turn:]`, which is shown only when a context page is. So among the turn pages shown
+  the newest statement of a fact comes first, as D28 requires. A context page's turn is the turn at
+  which the proxy paged the block (D32 pages blocks at a rotation, numbered after every turn paged
+  by then), not the turn that sent it, so it cannot order a context page against a turn page: by
+  turn alone, file-changed notes saying "take it as the current state" of an old value were shown
+  above the turn that superseded them (reviewer-2, with D32's `RewriteEngine` over 59 turns); (5) a page's matching lines are the ones holding the most of the query,
+  the whole query first; in-view entries match by the same rule and still come first (D28); (6)
+  the MCP server keeps each page's folded searchable text as UTF-8 bytes (a `str` with one emoji
+  takes 4 bytes per character), and the proxy each page's id, turn, stub, and index line, for the
+  life of the process, each listing `pages/` per call and re-reading only new or changed files;
+  `page_out` adds what it writes without a read; (7) pages are narrowed word by word and the scan
+  stops when none is left. No file is added to the store, pages stay immutable, and old sessions
+  are read as they are. The recall preamble is unchanged: it is acceptance-measured (D25), and the
+  exact terms it asks for still match and rank first. The server instructions (`mcp.py`
+  `INSTRUCTIONS`, "contexto_search for an exact substring") are also left as they are: an exact
+  substring still matches and ranks in the first group, and changing them changes the initialize
+  payload of every session. Measured on the same harness before and after
+  (`spikes/m2/scale/store/README.md`; the after run is at 958e597, with the review fixes): at 6,000
+  pages top 3 rose from 39 to 56 of 86, latest first from 12 to 20 of 24, facts from 26 to 29 of 30;
+  at 3,000, 44 to 60, 14 to 21, 27 to 29; with the 0.2 percent topic floor at 6,000, 15 to 41, 9 to
+  17, 12 to 24. Search at 6,000 pages takes 0.09 to 0.22 s instead of about 0.7 (the first search of
+  a process loads the cache in about 0.74 s), `index_text` 0.025 s instead of 0.59 (0.55 once after
+  a proxy restart), and the MCP server's peak memory fell from 456 to 293 MB. A 120-word query with
+  one absent word takes 0.05 to 0.19 s at 6,000 pages instead of 7.5 s (`long_query.txt`); a query
+  whose every word is on nearly every page still scans once per word. Tuning: k1 and b are the
+  usual defaults; the recency prior and the whole-query group were added after BM25 alone put the
+  latest value first for 7 of 24 on these same probes (`docs/research/M2-scale-30m.md`), so there is
+  no held-out probe set; the 0.5 weight and the display order were not swept on the probes. Every
+  synthetic page is 19,000 to 30,000 tokens, so the harness does not exercise BM25's length
+  discount; the unit tests do. Limitations: the MCP server's memory grows with the store, with no
+  cap; the first search of each process reads every page; single common words can still bury a
+  fact at 6,000 pages (5 queries). Options considered: BM25 alone (rejected: the prototype put the
+  latest value first for 7 of 24 at 6,000, breaking D28); case-insensitive all-words matching with
+  newest-first order only (rejected: common words still push the planted page out; the prototype's
+  count was not recorded); a time decay with a half-life in pages (rejected: any half-life suits
+  one session length and not another, while a position among the matches does not depend on N);
+  relevance bands, newest first inside the top band (rejected: for a common word every passing
+  mention falls inside the band, which restores the old order); showing the best pages in rank
+  order (rejected: the newest statement among them would not come first); no length discount, or
+  a length cap chosen on a harness with spread-out page sizes (not chosen: the owner took the
+  newest-page place, which keeps D28 by construction); excluding context-block pages from search
+  (rejected: PR #203 relies on a paged block staying recallable); whole-word tokens or stemming
+  (rejected: parts of identifiers such as `TIMEOUT` in `HTTP_TIMEOUT_S` would stop matching, and
+  stemming is fuzzy matching, which the owner ruled out with "not RAG"); SQLite FTS5 written at
+  page time (deferred: the trigram index that keeps substring semantics measured 632 MB at 6,000
+  pages, 2.5 times the store, and search is no longer the slow part); an append-only stub manifest
+  written by `page_out` for both processes (rejected for now: a new store file that must stay
+  consistent with quarantine, with a crash between the page and the manifest write, and with
+  stub-rule changes such as `current_stub`, to save one read of every page after a proxy restart).
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.

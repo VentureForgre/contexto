@@ -8,7 +8,7 @@ by default). When a request gets within the headroom of the bound (25,000 tokens
 after large turns up to a quarter of the bound), the proxy moves the oldest turns out of the prompt and writes them, word for word, to a local store under `~/.contexto`. In their place the model sees a
 short index of those turns and a pinned state of the session's decisions and open obligations.
 
-The model reads old turns back with MCP tools: `contexto_search` finds a turn by exact text and
+The model reads old turns back with MCP tools: `contexto_search` finds turns by the words they contain and
 `contexto_recall` returns it in full. The bound stays below the point where Claude Code would
 compact the conversation itself, so nothing is summarized away. The full history stays on disk and
 can be inspected with `contexto sessions`, `contexto recall`, and `contexto state`.
@@ -172,7 +172,7 @@ not start it by hand.
 
 | Tool | What it does |
 |---|---|
-| `contexto_search(query)` | Exact, case-sensitive substring search. Matching lines from the conversation still in view come first (at most 3, newest first), skipping the current turn's own user message. Then the 3 newest matching paged-out turns, each with its last 3 matching lines in page order and their offsets, then up to 50 more matching turns as page id and the offsets of their first and last matches (`@first..last`, one offset when they are the same). Each reply ends with a note on what was searched |
+| `contexto_search(query)` | Finds turns holding every word of the query, in any case and any order (words match as substrings, so identifiers and paths work; no stemming, no fuzzy or similarity matching). Turns holding the whole query rank first, then by relevance (BM25) with newer turns preferred among similar ones; paged context blocks (`<system-reminder>` text paged on its own) rank after every turn. A query with no words finds nothing. Matching lines from the conversation still in view come first (at most 3, newest first), skipping the current turn's own user message. Then the 3 best matching paged-out turns (the newest matching turn is always one of them), newest first, each with its last 3 matching lines in page order and their offsets, then up to 50 more matching turns, newest first, as page id and the offsets of their first and last matches (`@first..last`, one offset when they are the same). In both parts, paged context blocks are shown after the turns, under their own line, because a block's turn number is when it was paged, not when it was sent. Each reply ends with a note on what was searched |
 | `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
 | `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`. A verified event, artifact, or reference shows as a fact in the pinned state; decisions and obligations keep their own groups |
 | `contexto_close(obligation_id, note)` | Close an open obligation |
@@ -250,7 +250,11 @@ pinned records in `ledger.jsonl` in the same directory.
 
 Claude Code acceptance ran on one model, one bound, and one upstream. Codex passed acceptance
 criteria 1 to 3 on one model at bound 64,000; the default bound 150,000 is untested on Codex. Cache
-efficiency depends on the upstream route. The full list is in
+efficiency depends on the upstream route. Search keeps each page's searchable text in the MCP
+server's memory for the life of the process (about the UTF-8 size of the page text; peak RSS 293 MB
+at 6,000 synthetic pages), and the first search of each MCP process reads every page once (0.74 s at
+6,000 pages). Each query word scans that text once, so a long query with matches costs more. The
+full list is in
 [STATUS.md, "Known limitations (v0.2.8)"](STATUS.md#known-limitations-v028).
 
 ## Exit codes

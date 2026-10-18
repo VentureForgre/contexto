@@ -5,6 +5,7 @@
 Directories are 0700 and files 0600 whatever the umask (``contexto.private``, contract PR #25).
 
 - ``pages/<page id>.json``: one immutable page per paged-out turn (see ``contexto.store.pages``).
+  Search and the index read them through a per-process cache (``contexto.store.catalog``, D34).
 - ``page.key``: the random per-store HMAC key for page ids. It never leaves the store.
 - ``ledger.jsonl`` (with ``ledger.lock`` and ``quarantine/``): the hash-chained session ledger.
   Opening a store repairs a crash-truncated tail and logs ``ledger_repaired``; other damage is
@@ -37,7 +38,9 @@ from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
 from contexto.store.ledger import Ledger, LedgerCorruptError
-from contexto.store.pages import build_page, current_stub, render_index, same_content, search_pages
+from contexto.store.catalog import PageCatalog
+from contexto.store.pages import build_page, current_stub, render_index, same_content
+from contexto.store.search import rank
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 
@@ -596,6 +599,8 @@ class SessionStore(LedgerOps):
                     raise PageConflictError(f"{path} exists but cannot be read: {e}", page_id=page["id"]) from e
                 if not same_content(stored, page):
                     raise PageConflictError(f"{path} exists with different turn or messages", page_id=page["id"])
+                page = stored  # the stored page stands, stub included
+            self._catalog.add(path, page)  # the index needs no read of a page this process wrote (D34)
             ids.append(page["id"])
         return ids
 
@@ -635,16 +640,13 @@ class SessionStore(LedgerOps):
         found = sorted((self.dir / "quarantine").glob(f"{page_id}.*.json"))
         return found[-1] if found else None
 
-    def _pages(self) -> list[dict[str, Any]]:
-        out = []
-        if not self.pages_dir.is_dir():
-            return out
-        for path in self.pages_dir.glob("pg_*.json"):
-            try:
-                out.append(current_stub(json.loads(path.read_text(encoding="utf-8"))))
-            except (OSError, json.JSONDecodeError) as e:
-                self.log({"event": "page_unreadable", "path": path.name, "error": str(e)})
-        return out
+    @property
+    def _catalog(self) -> PageCatalog:
+        """This process's cache of what search and the index read from each page (D34)."""
+        catalog = self.__dict__.get("_page_catalog")
+        if catalog is None:
+            catalog = self.__dict__["_page_catalog"] = PageCatalog(self.pages_dir, self.log)
+        return catalog
 
     def get_page(self, page_id: str) -> dict[str, Any] | None:
         """The page record for ``page_id``, or None if this store has no such page."""
@@ -657,14 +659,17 @@ class SessionStore(LedgerOps):
 
     def page_ids(self) -> list[str]:
         """Every page id in this store, newest turn first."""
-        return [p["id"] for p in sorted(self._pages(), key=lambda p: (p["turn"], p["id"]), reverse=True)]
+        return [e.id for e in sorted(self._catalog.entries(), key=lambda e: (e.turn, e.id), reverse=True)]
 
     def search(self, query: str) -> list[str]:
-        """Ids of pages whose stub or text contains ``query`` exactly, newest first."""
-        return search_pages(self._pages(), query)
+        """Ids of pages holding every word of ``query`` (case-insensitive, any order), best first (D34)."""
+        return rank([e.search for e in self._catalog.entries(texts=True)], query)
 
     def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
-        return render_index(self._pages(), budget_tokens, salient=lists_identifiers(self.recall_variant(variant)))
+        salient = lists_identifiers(self.recall_variant(variant))
+        entries = {id(e.view): e for e in self._catalog.entries()}
+        return render_index([e.view for e in entries.values()], budget_tokens, salient=salient,
+                            line_for=lambda view: self._catalog.line(entries[id(view)], salient))
 
     def _recorded_variant(self) -> str | None:
         value = self._meta().get("recall_variant")

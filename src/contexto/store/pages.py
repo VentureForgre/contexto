@@ -9,11 +9,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+from collections.abc import Callable
 from typing import Any
 
 from contexto.canonical import canonical_bytes
 from contexto.store.recall import DEFAULT_LINES, salient_identifiers
 from contexto.store.render import as_message, is_responses_item
+from contexto.store.search import Query, SearchEntry, rank, search_key, searchable
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
 STUB_TEXT_CHARS = 200
@@ -21,8 +23,9 @@ STUB_MAX_PATHS = 20
 EMPTY_SYSTEM_STUB = "(empty system message)"
 EMPTY_REMINDER_STUB = "(empty reminder)"
 # Claude Code wraps injected context in this tag (context blocks of turn-start messages on 4.x ids,
-# the system text of claude-sonnet-5 and claude-fable-5). A stub shows the first line inside it: the
-# tag line alone says nothing, and in the preamble's index it reads as a live instruction.
+# the system text of claude-sonnet-5 and claude-fable-5); it is ``contexto.rewrite.CONTEXT_TAG``. A
+# stub shows the first line inside it: the tag line alone says nothing, and in the preamble's index it
+# reads as a live instruction. Search also uses it to tell a paged context block from a turn (D34).
 REMINDER_TAG = "<system-reminder>"
 
 # The mandatory first line of the pinned text (default variant); see contexto.store.recall.
@@ -213,21 +216,66 @@ def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int) -> dict
     return page
 
 
-def page_matches(page: dict[str, Any], query: str) -> bool:
-    """Exact, case-sensitive substring match over the stub and every text in the page's turn."""
-    if not query:
-        return False
+def searchable_text(page: dict[str, Any]) -> str:
+    """What search reads on a page, folded: the stub fields and every text of the page's turn (D34)."""
     stub = page["stub"]
-    haystacks = [stub["user_text"], stub.get("system_text", ""), stub.get("reminder_text", ""), *stub["tools"],
-                 *stub["paths"],
-                 *_texts(page["messages"])]
-    return any(query in h for h in haystacks)
+    return searchable([stub["user_text"], stub.get("system_text", ""),
+                       stub.get("reminder_text", ""), *stub["tools"], *stub["paths"],
+                       *_texts(page["messages"])])
+
+
+def _is_context_text(text: Any) -> bool:
+    return isinstance(text, str) and text.lstrip().startswith(REMINDER_TAG)
+
+
+def is_context_page(page: dict[str, Any]) -> bool:
+    """True for a page that holds no turn: only system messages (Codex: ``developer`` items), or user
+    messages made only of ``<system-reminder>`` context blocks. The bounded fallback pages carried
+    system messages and Codex developer items one per page (lane A), and each paged context block as
+    a user message holding that block (D32). Read from the messages, not the stub (a paged block's
+    stub has ``reminder_text``). Search ranks these pages after every turn page, and its reply shows
+    them after every turn page (D34). A Codex developer page has no searchable text today (search
+    reads Responses items through ``as_message``, which drops system-like items, B23), so it never
+    matches; it is recognised so that it would rank as context if that changed."""
+    messages = page.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            return False
+        role, content = message.get("role"), message.get("content")
+        if role in ("system", "developer"):  # developer: a Codex (Responses) item
+            continue
+        if role != "user":
+            return False
+        if isinstance(content, str):
+            if not _is_context_text(content):
+                return False
+        elif not (isinstance(content, list) and content and all(
+                isinstance(b, dict) and b.get("type") == "text" and _is_context_text(b.get("text"))
+                for b in content)):
+            return False
+    return True
+
+
+def search_entry(page: dict[str, Any]) -> SearchEntry:
+    """What search reads of a page (``contexto.store.search.rank``)."""
+    return SearchEntry(page["id"], page["turn"], search_key(searchable_text(page)), is_context_page(page))
+
+
+def page_matches(page: dict[str, Any], query: str) -> bool:
+    """Every word of ``query`` occurs in the page's stub or text, case-insensitively, in any order (D34)."""
+    q = Query.parse(query)
+    if q is None:
+        return False
+    text = searchable_text(page)
+    return all(w in text for w in q.words)
 
 
 def search_pages(pages: list[dict[str, Any]], query: str) -> list[str]:
-    """Ids of pages containing ``query``, newest first. No ranking and no similarity (not RAG)."""
-    hits = [p for p in pages if page_matches(p, query)]
-    return [p["id"] for p in sorted(hits, key=lambda p: (p["turn"], p["id"]), reverse=True)]
+    """Ids of the pages matching ``query``, best first (``contexto.store.search``; D34). Not RAG: no
+    embeddings and no similarity, only the query's own words, ranked by BM25 and recency."""
+    return rank([search_entry(p) for p in pages], query)
 
 
 _TOKEN = re.compile(r"[\w.\-/]+")
@@ -253,13 +301,19 @@ def index_line(page: dict[str, Any], salient: bool = False) -> str:
     return line
 
 
-def render_index(pages: list[dict[str, Any]], budget_tokens: int, salient: bool = False) -> str:
-    """One line per page, newest first, within the budget, then a count of older pages omitted."""
+def render_index(pages: list[dict[str, Any]], budget_tokens: int, salient: bool = False,
+                 line_for: Callable[[dict[str, Any]], str] | None = None) -> str:
+    """One line per page, newest first, within the budget, then a count of older pages omitted.
+
+    Only ``id``, ``turn``, and ``stub`` of each page are read, and ``messages`` for the ``salient``
+    identifiers. ``line_for(page)`` overrides ``index_line(page, salient)``; ``SessionStore`` passes
+    one that keeps each page's line, so a page is read for its identifiers once per process (D34).
+    """
     ordered = sorted(pages, key=lambda p: (p["turn"], p["id"]), reverse=True)
     lines: list[str] = []
     used = 0
     for i, page in enumerate(ordered):
-        line = index_line(page, salient)
+        line = line_for(page) if line_for is not None else index_line(page, salient)
         rest = len(ordered) - i - 1
         tail = f"({rest} older pages omitted; use contexto_search to find them)" if rest else ""
         cost = estimate_tokens(line + "\n") + (estimate_tokens(tail) if tail else 0)

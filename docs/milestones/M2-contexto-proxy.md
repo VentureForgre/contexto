@@ -547,14 +547,38 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 - `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
-- `contexto_search(query)`: exact substring search over page stubs and text. For each of the 3 newest matching pages
-  (newest first, as in the index; for superseded facts the newest statement is the current one) it
+- `contexto_search(query)`: word search over page stubs and text (D34). The query is split on
+  whitespace; a page matches when every word occurs in it, case-insensitively and in any order. A
+  word matches as a substring, so identifiers, paths, and parts of them (`E4127`,
+  `src/contexto/mcp.py`, `TIMEOUT` in `HTTP_TIMEOUT_S`) still match, and for any query with a word
+  every page the earlier exact, case-sensitive rule matched still matches. A query with no words
+  (whitespace only) matches nothing, where the earlier rule matched almost every page. Case is
+  folded one character at a time, with every final sigma written as `σ`, so a word folds the same
+  in the query and on the page. Matching pages are ranked in three groups: turn pages holding the
+  whole query as typed (case-insensitively), then turn pages holding only its words, then pages
+  holding only paged context blocks (system messages and Codex `developer` items, or user messages
+  made only of `<system-reminder>` blocks, D32; recognised from the messages, whatever the stub),
+  which stay searchable and recallable. Within each group pages rank by BM25 relevance over the words and the
+  whole query (k1 1.2, b 0.75, length in UTF-8 bytes, inverse document frequency over all pages of
+  the store) times a recency prior `1 + 0.5 r`, where `r` runs from 0 for the oldest matching page
+  to 1 for the newest, so a newer page wins unless an older one is clearly more about the query;
+  ties go to the newer page. The newest matching turn page (the newest matching page when no turn
+  page matches) is always one of the 3 best: if it ranks lower it takes the third place. The
+  reply's paged part opens with `[best matching pages by relevance, shown newest first:]`. In both
+  the 3 best pages and the next 50, turn pages come first, newest first (for superseded facts the
+  newest statement among them is the current one), then context-block pages, newest first, after
+  the line `[paged reminders and system messages, not dated by turn:]`, shown only when a
+  context-block page is: such a page's turn is when the proxy paged the block, not when it was
+  sent, so it does not order it against a turn page. For each of the 3 best pages it
   returns a short header (page id and turn number, no stub) and up to 3 matching lines, the last 3 in page order (a turn's latest statements, shown oldest to
   newest, so the last line shown is the newest), each with one line of context and its character
-  offset in the rendered page; when a page has more matches than it shows, a note gives their
-  count and the offset of the page's first match, so earlier statements stay reachable by recall; when a match is in the stub
-  itself, the stub line is shown as the matching line. Any further matching pages are listed
-  compactly as page id, turn, and the offsets of their first and last match (`@first..last`, or
+  offset in the rendered page. The matching lines of a page are those holding the most of the
+  query: the whole query if any line does, else all its words, else the most of its words, a word
+  on fewer lines of the page counting more. When a page has more matching lines than it shows, a note gives their
+  count and the offset of the page's first matching line, so earlier statements stay reachable by recall; when the
+  rendered page does not hold every word (the rest is in the stub only), the stub line is shown as the matching line. The next
+  50 best pages are listed, in the same order,
+  compactly as page id, turn, and the offsets of their first and last matching line (`@first..last`, or
   one offset when they coincide; about 10 tokens each), so every
   match stays reachable by `contexto_recall` at that offset even when the query cannot be
   narrowed. The model can answer from a hit or recall exactly that offset instead of reading a
@@ -585,7 +609,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   main conversation's room and snapshot, and for a subagent "in view" refers to the main
   conversation's window (part of the documented subagent limitation); the MCP
   server cannot tell which conversation issued a call. Matches in the
-  snapshot are listed first, labeled in view, newest first, as the matching line only, at most 3
+  snapshot (a retained entry matches as a page does: every word of the query in its text, and its
+  matching lines chosen by the same rule) are listed first, labeled in view, newest first, as the matching line only, at most 3
   per reply (the newest 3 across the window, the rest counted in one line), charged,
   skipping the current turn's own question: entries with role `user` in the snapshot's newest
   turn are never matched, since that text is what is being asked, not a
@@ -598,8 +623,16 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   which measures retrieval of paged-out content. Measured basis (live run #2 chain
   analysis, builder-3, zero spend): 4 of H1's 5 extra chain misses had a newer link in the retained
   window, but the model answered from a search reply whose newest paged hit looked current.
-  Results are charged against the per-turn room. No embeddings, no
-  similarity ranking (owner: not RAG).
+  Results are charged against the per-turn room. No embeddings and no similarity matching
+  (owner: not RAG): only the query's own words, ranked lexically (D34). Speed (D34): the MCP
+  server keeps each page's folded searchable text in memory for its lifetime, as UTF-8 bytes, and
+  the proxy keeps each page's id, turn, stub, and index line, each process listing `pages/` on
+  every call to pick up new pages and drop quarantined ones (a file is read again only if its
+  inode, size, or modification time changed); pages stay immutable and the store format is
+  unchanged. Limitations: the MCP server's memory grows with the store (about the UTF-8 size of the
+  page text, with no cap); the first search of each MCP process reads every page once; pages are
+  narrowed word by word, so a query stops scanning as soon as no page holds every word so far, but
+  a query with matches scans the text once per word.
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.

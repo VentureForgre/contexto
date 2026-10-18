@@ -12,7 +12,7 @@ recorded through ``store.log`` with names, ids, and sizes, never text content.
 
 The store is the session's ``contexto.store.SessionStore`` (lane B packets B1 and B2): it provides
 ``get_page(page_id) -> dict | None`` (keys ``id``, ``turn``, ``messages``, ``stub``),
-``search(query) -> list[str]`` (exact, case-sensitive, newest first), ``pin(kind, text, *,
+``search(query) -> list[str]`` (every word of the query, case-insensitively, best first; D34), ``pin(kind, text, *,
 supersedes, epistemic, provenance) -> str``, ``close(obligation_id, note) -> str``,
 ``state_text() -> str``, and ``log(event)``. ``pin`` and ``close`` raise ``ValueError`` on
 validation failures, which become tool errors the model can act on.
@@ -26,16 +26,26 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
+from contexto.store.pages import is_context_page
 from contexto.store.render import (MATCH_CONTEXT, MATCHES_PER_PAGE, MAX_CHARS_PER_TOKEN, RECALL_LIMIT, match_lines,
-                                   recall_chunk, recall_limit, render_page)
+                                   matching_line_starts, recall_chunk, recall_limit, render_page)
+from contexto.store.search import SHOWN_IN_DETAIL, Query, text_matches
 
 SERVER_NAME = "contexto"
 SERVER_VERSION = "0.1.0"
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
-SEARCH_LIMIT = 3  # pages shown with their matching lines per contexto_search reply, newest first (B17)
-SEARCH_MORE_LIMIT = 50  # further matching pages listed compactly (page id, turn, first-match offset)
+SEARCH_LIMIT = SHOWN_IN_DETAIL  # the best pages, shown with their matching lines per contexto_search reply, newest first (B17, D34)
+# The reply's first line about paged pages, so the model sees why a page that holds only the words can
+# sit above one that holds the whole query (reviewer-2 on PR #204). In the reply, not the tool
+# description, so the head the description adds to every request is unchanged.
+SEARCH_BEST_HEADER = "[best matching pages by relevance, shown newest first:]"
+# Put before the first paged context block in each part of a search reply. A context page's turn is
+# when the proxy paged the block, which can be long after the turn that sent it and after turns that
+# supersede it, so context pages are shown after every turn page (reviewer-2 on PR #204, D34).
+SEARCH_CONTEXT_HEADER = "[paged reminders and system messages, not dated by turn:]"
+SEARCH_MORE_LIMIT = 50  # the next best pages, listed compactly newest first (page id, turn, match offsets)
 # Per-turn recall budget (M2 contract PR #69): what recall, search, and state return this turn.
 BUDGET_SPENT = ("Recall budget for this turn is used up; answer from what is in view, or say the detail is "
                 "unknown.")
@@ -46,7 +56,7 @@ RECALL_NEARLY_SPENT = ("The recall budget for this turn is nearly used up (about
                        "for a recall. Use contexto_search with an exact key to get the matching lines, answer from "
                        "what is in view, or say the detail is unknown.")
 SEARCH_TOO_LONG = "This search result is longer than one call can return; use a longer or more specific query."
-NO_HIT = "No paged-out turn contains that exact text."
+NO_HIT = "No paged-out turn contains every word of that query."
 # Fixed control replies are protocol text, never charged, and returned even when the room is smaller than they
 # are (contract PR #103); the longest is about 225 characters. RECALL_NEARLY_SPENT is a template, checked apart.
 CONTROL_REPLIES = frozenset({BUDGET_SPENT, SEARCH_TOO_LONG, NO_HIT})
@@ -176,13 +186,13 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "contexto_search",
         "description": (
-            "Find paged-out turns containing an exact substring (case-sensitive) in their text or stub. "
-            f"For the newest {SEARCH_LIMIT} matching pages, returns up to {MATCHES_PER_PAGE} matching lines "
-            f"(marked >) with {_lines(MATCH_CONTEXT)} of context either side, every line prefixed with its "
-            f"character offset in the page; up to {SEARCH_MORE_LIMIT} further matching pages are listed as page "
-            "id, turn, and @offset of their first match. Answer from a matching line, or call contexto_recall "
-            "with a page id and offset to read on. Search covers only paged-out turns: the conversation in "
-            "view is newer than any hit. No fuzzy or similarity matching."
+            "Find paged-out turns holding every word of the query, in any case and order, in text or "
+            "stub; best first: whole query, then relevance, newer among similar. "
+            f"For the best {SEARCH_LIMIT} pages, shown newest first, returns up to {MATCHES_PER_PAGE} matching lines "
+            f"(marked >) with {_lines(MATCH_CONTEXT)} of context either side, each with its page offset; the next "
+            f"{SEARCH_MORE_LIMIT} are listed as page id, turn, @offsets. Answer from a "
+            "matching line, or call contexto_recall with its page id and offset to read on. Search covers only "
+            "paged-out turns: the conversation in view is newer than any hit. No fuzzy or similarity matching."
         ),
         "inputSchema": {
             "type": "object",
@@ -429,10 +439,15 @@ class Server:
     def _tool_search(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], None, dict[str, Any]]:
         _reject_extra(args, {"query"})
         query = _require_str(args, "query")
-        found = self.store.search(query)
+        found = self.store.search(query)  # best first (D34)
         pages = [(page_id, self.store.get_page(page_id) or {}) for page_id in found[:SEARCH_LIMIT + SEARCH_MORE_LIMIT]]
-        hits = [_hit_rows(page_id, page, query) for page_id, page in pages[:SEARCH_LIMIT]]
-        more = [_more_row(page_id, page, query) for page_id, page in pages[SEARCH_LIMIT:]]
+        # The best pages are chosen by relevance and shown newest first, so among them the newest statement
+        # of a fact comes first (D28); the next best are listed newest first too. In each part turn pages
+        # come first and paged context blocks after them, under their own line (D34).
+        hits = _with_context_header([(_hit_rows(page_id, page, query), page)
+                                     for page_id, page in _newest_first(pages[:SEARCH_LIMIT])])
+        more = _with_context_header([([_more_row(page_id, page, query)], page)
+                                     for page_id, page in _newest_first(pages[SEARCH_LIMIT:])])
         in_view_found = [0]
         in_view = self._in_view_rows(query, in_view_found)  # None: in view not checked
         lead = in_view or []
@@ -440,10 +455,10 @@ class Server:
         specific = "use a longer or more specific query"
 
         def render(rows: list[Row], detailed: int, listed: int, why: str) -> str:
-            lines = [t for t, _ in lead + rows]
+            lines = [t for t, _ in lead] + [SEARCH_BEST_HEADER] + [t for t, _ in rows]
             if listed:
                 lines.append("[more matching pages, newest first; recall one at its offset:]")
-                lines += [t for t, _ in more[:listed]]
+                lines += [t for entry in more[:listed] for t, _ in entry]
             if len(found) > detailed + listed:
                 lines.append(f"[{len(found) - detailed - listed} more matching pages not shown; {why}]")
             return "\n".join(lines)
@@ -472,10 +487,11 @@ class Server:
                         picked.update(rows=rows, pages=detailed + listed)
                         return [text]
             # Not even one whole hit: its page line and matching lines, without context, as far as they fit.
-            header, *lines = hits[0]
+            context = [row for row in hits[0] if row[0] == SEARCH_CONTEXT_HEADER]
+            header, *lines = [row for row in hits[0] if row[0] != SEARCH_CONTEXT_HEADER]
             matches = [row for row in lines if row[0].startswith(">")]
             for count in range(len(matches), 0, -1):
-                rows = [header, *matches[:count], (f"  [the rest of this hit is not shown; {why}]", None)]
+                rows = [*context, header, *matches[:count], (f"  [the rest of this hit is not shown; {why}]", None)]
                 text = render(rows, 1, 0, why)
                 if len(text) <= cap:
                     picked.update(rows=rows, pages=1)
@@ -506,17 +522,17 @@ class Server:
         if snapshot is None:
             return None
         found = []
+        q = Query.parse(query)
         newest = max((e["turn"] for e in snapshot[3]), default=None)
         for entry in snapshot[3]:
             if entry["turn"] == newest and entry["role"] == "user":
                 continue  # the current turn's own question is what is asked, not a statement (B22, PR #143)
-            for form in _rendered_forms(query):
-                every = entry["text"].count("\n") + 1  # ALL matching lines: the newest are chosen below
-                shown, _ = match_lines(entry["text"], form, context=0, per_page=every)
-                if shown:
-                    found += [(entry["turn"], entry["message_index"], start, end, text)
-                              for start, end, is_match, text in shown if is_match]
-                    break
+            if q is None or not text_matches(entry["text"], q):  # a message matches as a page does (D34)
+                continue
+            every = entry["text"].count("\n") + 1  # ALL matching lines: the newest are chosen below
+            shown, _ = match_lines(entry["text"], q, context=0, per_page=every)
+            found += [(entry["turn"], entry["message_index"], start, end, text)
+                      for start, end, is_match, text in shown if is_match]
         found.sort(key=lambda m: (m[0], m[1], m[2]), reverse=True)
         total[0] = len(found)
         if not found:
@@ -598,52 +614,63 @@ def _state_trailer(rest: int) -> str:
 Row = tuple[str, "tuple[Any, ...] | None"]
 
 
+def _newest_first(pages: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:
+    """Turn pages newest first, then pages of paged context blocks newest first (D34).
+
+    A context page's turn is the turn at which the proxy paged the block (PR #203 pages a block at a
+    rotation, numbered after every turn paged by then), not the turn that sent it, so it says nothing
+    about which of a context page and a turn page is newer."""
+    def key(item: tuple[str, dict[str, Any]]) -> tuple[bool, int, str]:
+        turn = item[1].get("turn")
+        return (not is_context_page(item[1]), turn if isinstance(turn, int) and not isinstance(turn, bool) else -1,
+                item[0])
+
+    return sorted(pages, key=key, reverse=True)
+
+
+def _with_context_header(entries: list[tuple[list[Row], dict[str, Any]]]) -> list[list[Row]]:
+    """Each entry's rows, with ``SEARCH_CONTEXT_HEADER`` put before the first context page's rows, so
+    the line is shown exactly when a context page is. ``entries`` are in ``_newest_first`` order."""
+    out: list[list[Row]] = []
+    headed = False
+    for rows, page in entries:
+        if not headed and is_context_page(page):
+            rows, headed = [(SEARCH_CONTEXT_HEADER, None), *rows], True
+        out.append(rows)
+    return out
+
+
 def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     """One search hit: the page line, then its matching lines (>) and context, each with its offset.
 
     Each line carries the page span it shows, ``(page_id, start, end)`` with ``end`` exclusive, for
-    the content-free log that acceptance 3 reads (contract PR #95).
+    the content-free log that acceptance 3 reads (contract PR #95). A query from a tool input is
+    matched in its JSON-escaped form too, as ``render_page`` prints it (B18).
     """
     rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
     text = render_page(page) if page.get("messages") is not None else ""
-    shown, total, form = [], 0, query
-    for form in _rendered_forms(query):  # the query as typed, then as a tool input renders it
-        shown, total = match_lines(text, form, last=True)  # the page's LAST matching lines (B21)
-        if shown:
-            break
+    q = Query.parse(query)
+    on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only
+    shown, total = match_lines(text, q, last=True) if on_page else ([], 0)  # the LAST matching lines (B21)
     rows += [(f"{'>' if is_match else ' '} {start}: {text}", (page_id, start, end)) for start, end, is_match, text in shown]
     if not shown:  # the match is in the stub only: show the stub line as the matching line
         rows.append((f"> stub: {_stub_line(page.get('stub'))}", None))
-    else:
-        if total > MATCHES_PER_PAGE:  # earlier statements stay reachable from the first match's offset
-            first = _line_start(text, text.find(form))
-            rows.append((f"  [{total - MATCHES_PER_PAGE} more matching lines in this page, the first at offset "
-                         f"{first}; call contexto_recall with page_id {page_id} and that offset to read them]", None))
+    elif total > MATCHES_PER_PAGE:  # earlier statements stay reachable from the first match's offset
+        first = matching_line_starts(text, q)[0]
+        rows.append((f"  [{total - MATCHES_PER_PAGE} more matching lines in this page, the first at offset "
+                     f"{first}; call contexto_recall with page_id {page_id} and that offset to read them]", None))
     return rows
-
-
-def _line_start(text: str, pos: int) -> int:
-    return text.rfind("\n", 0, pos) + 1
-
-
-def _rendered_forms(query: str) -> list[str]:
-    """The query as typed, then JSON-escaped as render_page prints tool_use input (B18).
-
-    Search matches raw text, but a tool input renders as escaped JSON, so a query holding a quote,
-    a backslash, or a newline from a tool input appears in the page only in its escaped form.
-    """
-    escaped = json.dumps(query, ensure_ascii=False)[1:-1]
-    return [query] if escaped == query else [query, escaped]
 
 
 def _more_row(page_id: str, page: dict[str, Any], query: str) -> Row:
     """A further matching page, compactly: page id, turn, and where its first and last matching lines
     start (``@first..last``, one offset when they coincide; B21, contract PR #134)."""
     text = render_page(page) if page.get("messages") is not None else ""
-    form = next((f for f in _rendered_forms(query) if f in text), None)
-    if form is None:
+    q = Query.parse(query)
+    starts = matching_line_starts(text, q) if q is not None and text_matches(text, q) else []
+    if not starts:
         return (f"{page_id} (turn {page.get('turn')}) @stub", None)
-    first, last = _line_start(text, text.find(form)), _line_start(text, text.rfind(form))
+    first, last = starts[0], starts[-1]
     where = str(first) if first == last else f"{first}..{last}"
     return (f"{page_id} (turn {page.get('turn')}) @{where}", None)
 

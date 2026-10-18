@@ -3,8 +3,9 @@
 Thirty facts are planted at fixed fractions of the session, so the same fact sits at the same
 relative position at every store size N. Each fact has 2 or 3 queries, written as a model would
 type them from the question alone, before any result was looked at (2026-10-17); they are never
-tuned to the results. Search is an exact, case-sensitive substring match, so a query that is not
-literally on the planted page cannot find it.
+tuned to the results. They were written when search was an exact, case-sensitive substring match
+(before D34); since D34 a query finds a page that holds every one of its words, in any case and
+order, so a query whose words are not all on the planted page still cannot find it.
 
 Kinds:
 

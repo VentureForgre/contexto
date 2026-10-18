@@ -108,8 +108,8 @@ def test_a_hit_shows_the_page_then_offset_lines_matching_the_worked_example(stor
     text = LOG.replace("s0 line 0100 level=INFO", "s0 line 0100 level=INFO cache.ttl_seconds=short")
     [pid] = store.page_out([[{"role": "user", "content": text}]], 3)
     reply = search(store, "cache.ttl_seconds")
-    head, *lines = reply.split("\n")
-    assert head == f"{pid} (turn 3)"
+    best, head, *lines = reply.split("\n")
+    assert best == mcp.SEARCH_BEST_HEADER and head == f"{pid} (turn 3)"
     [match] = [line for line in lines if line.startswith(">")]
     offset = int(re.match(r"> (\d+): ", match).group(1))
     page = render_page(store.get_page(pid))
@@ -198,7 +198,7 @@ def test_search_logs_the_spans_it_returned_and_nothing_else(store):
     [event] = events(store, "contexto_search")
     [span] = event["returned"]  # the match and its context are contiguous: one span
     assert set(span) == {"source", "page_id", "start", "end"} and span["page_id"] == pid and span["source"] == "paged"
-    shown = [line.split(": ", 1)[1] for line in reply.split("\n")[1:]]
+    shown = [line.split(": ", 1)[1] for line in reply.split("\n")[2:]]  # after the header and the page line
     assert page[span["start"]:span["end"]] == "\n".join(shown)  # exactly the returned lines
     assert all(isinstance(v, int) for k, v in span.items() if k not in ("page_id", "source"))
     assert "cache.ttl_seconds" not in json.dumps(event)  # ids and integers only, no content
@@ -238,7 +238,7 @@ def test_only_hits_actually_returned_are_logged(store):
     for i in range(30):
         store.page_out([[{"role": "user", "content": f"needle {i}\n" + LOG[:300]}]], i + 1)
     full = search(store, "needle")
-    first_hit = full.split("\npg_", 1)[0]
+    first_hit = "\npg_".join(full.split("\npg_", 2)[:2])  # the header and the first hit
     store.set_turn_room("1", math.ceil((len(first_hit) + 90) / 1.5))  # room for one detailed hit only
     reply = search(store, "needle")
     event = events(store, "contexto_search")[-1]
@@ -271,7 +271,7 @@ def test_a_hit_over_the_per_call_cap_returns_its_matching_lines_not_the_budget_m
     reply = search(store, "deploy.target")
     assert reply != SPENT and len(reply) <= 400
     lines = reply.split("\n")
-    assert lines[0] == f"{pid} (turn 1)"
+    assert lines[:2] == [mcp.SEARCH_BEST_HEADER, f"{pid} (turn 1)"]
     assert any(line.startswith("> ") and line.endswith("cfg deploy.target=blue") for line in lines)
     assert lines[-1] == "  [the rest of this hit is not shown; use a longer or more specific query]"
     [event] = events(store, "contexto_search")
@@ -302,7 +302,7 @@ def test_a_hit_header_is_the_page_id_and_turn_and_the_index_keeps_the_stub(store
     text = "Deploy notes for the ledger service\n" + LOG.replace("line 0100 level=INFO", "line 0100 level=INFO NEEDLE")
     [pid] = store.page_out([[{"role": "user", "content": text}]], 7)
     reply = search(store, "NEEDLE")
-    assert reply.split("\n")[0] == f"{pid} (turn 7)"
+    assert reply.split("\n")[:2] == [mcp.SEARCH_BEST_HEADER, f"{pid} (turn 7)"]
     assert "Deploy notes for the ledger service" not in reply  # no stub in a search hit
     assert "Deploy notes for the ledger service" in store.index_text(4000)  # the index still shows it
 
@@ -345,7 +345,8 @@ def test_a_stub_only_match_shows_the_stub_line_and_lists_as_stub():
     reply = search(store, EMPTY_SYSTEM_STUB)
     assert f"{newest[0]} (turn 5)\n> stub: " in reply  # the stub line is the matching line
     head, compact = reply.split("\n[more matching pages, newest first; recall one at its offset:]\n")
-    assert compact.split("\n") == [f"{pid} (turn {store.get_page(pid)['turn']}) @stub" for pid in newest[3:]]
+    assert head.split("\n")[1] == compact.split("\n")[0] == mcp.SEARCH_CONTEXT_HEADER  # system pages hold no turn
+    assert compact.split("\n")[1:] == [f"{pid} (turn {store.get_page(pid)['turn']}) @stub" for pid in newest[3:]]
     assert events(store, "contexto_search")[-1]["returned"] == []  # no page text was returned
 
 
@@ -364,7 +365,7 @@ def test_a_query_from_a_tool_input_finds_its_rendered_line_and_offset(store, val
     assert value not in page and escaped in page  # rendered only in escaped form
     reply = search(store, value)
     assert "> stub:" not in reply and "@stub" not in reply  # never labelled a stub match
-    [match] = [line for line in reply.split("\npg_", 1)[0].split("\n") if line.startswith("> ")]  # newest page
+    [match] = [line for line in reply.split("\npg_", 2)[1].split("\n") if line.startswith("> ")]  # newest page
     offset = int(re.match(r"> (\d+): ", match).group(1))
     assert page[offset:].startswith('tool_use run {"note": "') and escaped in match
     assert recall(store, newest[0], offset).startswith("tool_use run")  # recallable at that offset

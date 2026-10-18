@@ -105,12 +105,15 @@ def test_pinned_text_starts_with_the_mandatory_line(store):
     assert "contexto_recall" in PINNED_FIRST_LINE
 
 
-def test_search_is_exact_substring_over_stub_and_text(store):
-    a, b = store.page_out([turn("alpha task", result="needle in result"), turn("beta task")], 1)
+def test_search_matches_every_word_case_insensitively_over_stub_and_text(store):
+    """D34: every word of the query, in any order and any case; the exact rule's matches all still match."""
+    a, b = store.page_out([turn("alpha task", result="needle in result"), turn("beta task", tool="Grep")], 1)
     assert store.search("needle") == [a]
-    assert store.search("task") == [b, a]
-    assert store.search("Needle") == []
-    assert store.search("") == []
+    assert store.search("task") == [b, a]  # equally relevant: the newer first
+    assert store.search("Needle") == store.search("NEEDLE result") == store.search("result needle") == [a]
+    assert store.search("needle beta") == []  # every word must be on the page
+    assert store.search("grep") == [b] and store.search("app.py") == [b, a]  # stub tools and paths
+    assert store.search("") == [] and store.search("   ") == []
     assert store.get_page("pg_nothere00000000") is None
     assert store.get_page("../page.key") is None
 

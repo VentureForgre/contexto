@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from contexto.store.search import Query, matching_lines
+
 RECALL_LIMIT = 32_000  # characters per contexto_recall call, at most
 DEFAULT_RECALL_LIMIT = 12_000  # characters per call before the engine has recorded the window
 MAX_CHARS_PER_TOKEN = 1.5  # W converts to characters at no more than this many per token
@@ -148,41 +150,61 @@ MATCHES_PER_PAGE = 3  # matching lines shown per page, each with its context
 MATCH_LINE_CHARS = 200  # characters shown of any one line
 
 
-def match_lines(text: str, query: str, context: int = MATCH_CONTEXT, per_page: int = MATCHES_PER_PAGE,
+def match_lines(text: str, query: str | Query, context: int = MATCH_CONTEXT, per_page: int = MATCHES_PER_PAGE,
                 line_chars: int = MATCH_LINE_CHARS, last: bool = False) -> tuple[list[tuple[int, int, bool, str]], int]:
-    """The lines of rendered page ``text`` that contain ``query``, with bounded context (M2 B15).
+    """The lines of rendered page ``text`` that match ``query``, with bounded context (M2 B15, D34).
 
-    Returns ``(shown, total)``: ``shown`` holds ``(start, end, is_match, line)`` for the first
-    ``per_page`` matching lines (the last ``per_page`` with ``last``, as search shows them: a turn's
-    latest statements, B21) and up to ``context`` lines either side, in page order, overlaps
-    merged; ``total`` counts every matching line. ``text[start:end]`` is the part of the page a
-    line shows, so ``contexto_recall`` can read on from ``start``. A line longer than
-    ``line_chars`` is cut to that many characters, marked with a trailing " ...". A matching line
-    is cut around its first match instead, widened when the query is long, so the whole match stays
-    in view. Linear in the size of ``text``.
+    The matching lines are those holding the most of the query (``contexto.store.search``): the
+    whole query, case-insensitively, else all its words, else the most of them. Returns ``(shown,
+    total)``: ``shown`` holds ``(start, end, is_match, line)`` for the first ``per_page`` matching
+    lines (the last ``per_page`` with ``last``, as search shows them: a turn's latest statements,
+    B21) and up to ``context`` lines either side, in page order, overlaps merged; ``total`` counts
+    every matching line. ``text[start:end]`` is the part of the page a line shows, so
+    ``contexto_recall`` can read on from ``start``. A line longer than ``line_chars`` is cut to that
+    many characters, marked with a trailing " ...". A matching line is cut around its match instead,
+    widened when the match is long, so the whole match stays in view. Linear in the size of ``text``
+    for a query whose words are on few lines.
     """
-    starts, matching = [0], []
+    q = Query.parse(query) if isinstance(query, str) else query
+    if q is None:
+        return [], 0
+    chosen, where = matching_lines(text, q)
+    if not chosen:
+        return [], 0
+    starts, ends = _line_bounds(text)
+    picked = chosen[-per_page:] if last else chosen[:per_page]
+    first_match = {n: where[n] for n in picked}
+    wanted = sorted({n for m in first_match for n in range(max(0, m - context), min(len(starts), m + context + 1))})
+    shown: list[tuple[int, int, bool, str]] = []
+    for n in wanted:
+        start, end = starts[n], ends[n]
+        width = line_chars
+        if n in first_match:
+            pos, size = first_match[n]
+            if pos + size > start + line_chars:
+                start = max(start, pos - line_chars // 3)
+                width = max(line_chars, pos + size - start)  # the whole match, however long
+        stop = min(end, start + width)
+        shown.append((start, stop, n in first_match, text[start:stop] + (" ..." if stop < end else "")))
+    return shown, len(chosen)
+
+
+def matching_line_starts(text: str, query: str | Query) -> list[int]:
+    """Where each matching line of ``text`` starts (see ``match_lines``), in page order."""
+    q = Query.parse(query) if isinstance(query, str) else query
+    if q is None:
+        return []
+    chosen, _ = matching_lines(text, q)
+    if not chosen:
+        return []
+    starts, _ = _line_bounds(text)
+    return [starts[n] for n in chosen]
+
+
+def _line_bounds(text: str) -> tuple[list[int], list[int]]:
+    starts = [0]
     newline = text.find("\n")
     while newline != -1:
         starts.append(newline + 1)
         newline = text.find("\n", newline + 1)
-    ends = [s - 1 for s in starts[1:]] + [len(text)]
-    pos, line = text.find(query), 0
-    while pos != -1:
-        while ends[line] < pos:
-            line += 1
-        if not matching or matching[-1][0] != line:
-            matching.append((line, pos))
-        pos = text.find(query, pos + 1)
-    shown: list[tuple[int, int, bool, str]] = []
-    first_match = dict(matching[-per_page:] if last else matching[:per_page])
-    wanted = sorted({n for m in first_match for n in range(max(0, m - context), min(len(starts), m + context + 1))})
-    for n in wanted:
-        start, end = starts[n], ends[n]
-        width = line_chars
-        if n in first_match and first_match[n] + len(query) > start + line_chars:
-            start = max(start, first_match[n] - line_chars // 3)
-            width = max(line_chars, first_match[n] + len(query) - start)  # the whole match, however long
-        stop = min(end, start + width)
-        shown.append((start, stop, n in first_match, text[start:stop] + (" ..." if stop < end else "")))
-    return shown, len(matching)
+    return starts, [s - 1 for s in starts[1:]] + [len(text)]

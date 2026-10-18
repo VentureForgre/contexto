@@ -61,7 +61,7 @@ def test_in_view_lines_come_first_newest_first_and_labelled(store):
     lines = body.split("\n")
     assert lines[:3] == ["[in view, newest first:]", "> in view (turn 17): cohort=c latest",
                          "> in view (turn 16): the cohort=b now"]  # the matching line only, no context, no offset
-    assert lines[3].startswith("pg_")  # then the paged hits
+    assert lines[3] == mcp.SEARCH_BEST_HEADER and lines[4].startswith("pg_")  # then the paged hits
     assert coverage == mcp.SEARCH_COVERAGE  # in view was checked
     event = last_event(store)
     assert event["in_view_checked"] is True and event["in_view_hits"] == 2 and event["in_view_more"] == 0
@@ -110,7 +110,7 @@ def test_in_view_is_not_checked_without_a_current_snapshot(store, case, monkeypa
             store._retained_stamp = None
         other.set_turn_room("7", 10_000)  # a publish from a store that wrote no snapshot: unstamped
     body, coverage = search(store, "cache.ttl")
-    assert "in view" not in body.split("\n")[0] and body.startswith("pg_")  # paged hits still work
+    assert body.startswith(mcp.SEARCH_BEST_HEADER + "\npg_")  # no in-view lines; paged hits still work
     assert coverage == mcp.SEARCH_COVERAGE_UNCHECKED
     assert last_event(store)["in_view_checked"] is False
 

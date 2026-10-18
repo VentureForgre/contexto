@@ -25,6 +25,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from acceptance import credcheck, driver, replay  # noqa: E402
+from contexto.store.search import Query, fold  # noqa: E402
 
 INPUT_LIMIT = 110_000  # per send: intake raised it from 102,000 (2026-10-16 03:17Z)
 OUTPUT_CAP = 8_000
@@ -78,14 +79,14 @@ def target_page_id(body: dict[str, Any], turn: int) -> str | None:
 
 
 def targets(tool_use: dict[str, Any], page_id: str | None, page_text: str) -> bool:
-    """Whether a tool call would reach the plant page: a recall of its id, or a search whose query
-    is in its text (contexto_search is an exact substring match)."""
+    """Whether a tool call would reach the plant page: a recall of its id, or a search every word of
+    whose query is in its text, in any case and order (contexto_search's rule since D34)."""
     name, args = str(tool_use.get("name") or ""), tool_use.get("input") or {}
     if name.endswith("contexto_recall"):
         return page_id is not None and args.get("page_id") == page_id
     if name.endswith("contexto_search"):
-        query = args.get("query")
-        return isinstance(query, str) and bool(query) and query in page_text
+        query, text = Query.parse(args.get("query")), fold(page_text)
+        return query is not None and all(w in text for w in query.words)
     return False
 
 
