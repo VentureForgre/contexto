@@ -132,10 +132,11 @@ def _line_index(starts: list[int], pos: int) -> int:
     return bisect.bisect_right(starts, pos) - 1
 
 
-def matching_lines(text: str, query: Query) -> tuple[list[int], dict[int, int]]:
+def matching_lines(text: str, query: Query) -> tuple[list[int], dict[int, tuple[int, int]]]:
     """The lines of ``text`` that hold the most of ``query``, as line numbers in order, and where each
-    line's match is: ``{line: offset in text}`` of the phrase if the line holds it, else of the
-    line's rarest query word. Empty when no line holds any word of the query.
+    line's match is: ``{line: (offset in text, length)}`` of the phrase if the line holds it, else of
+    the line's rarest query word. Empty when no line holds any word of the query. Linear in the size
+    of ``text`` plus the number of lines that hold a query word.
     """
     low = fold(text)
     starts = [0]
@@ -143,16 +144,16 @@ def matching_lines(text: str, query: Query) -> tuple[list[int], dict[int, int]]:
     while pos != -1:
         starts.append(pos + 1)
         pos = low.find("\n", pos + 1)
-    found: dict[str, dict[int, int]] = {}  # term -> {line: first offset of the term on that line}
+    found: dict[str, dict[int, tuple[int, int]]] = {}  # term -> {line: (first offset on the line, length)}
     for term in (query.phrase, *query.words) if query.multiword else query.words:
         if term in found:
             continue
-        lines: dict[int, int] = {}
+        lines: dict[int, tuple[int, int]] = {}
         for form in _forms(term):
             pos = low.find(form)
             while pos != -1:
                 line = _line_index(starts, pos)
-                lines.setdefault(line, pos)
+                lines.setdefault(line, (pos, len(form)))
                 # the next line: one occurrence per line is enough
                 nxt = starts[line + 1] if line + 1 < len(starts) else len(low)
                 pos = low.find(form, max(pos + 1, nxt))
@@ -183,16 +184,6 @@ def text_matches(text: str, query: Query) -> bool:
     """Every word of ``query`` occurs in ``text`` (case-insensitively, in any form ``render_page`` prints)."""
     low = fold(text)
     return all(any(form in low for form in _forms(w)) for w in query.words)
-
-
-def match_length(text: str, query: Query, pos: int) -> int:
-    """How many characters of ``text`` from ``pos`` the match there covers (phrase or word, in any form)."""
-    low = fold(text)
-    for term in (query.phrase, *query.words):
-        for form in _forms(term):
-            if low.startswith(form, pos):
-                return len(form)
-    return 0
 
 
 def searchable(fields: Iterable[str]) -> str:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from contexto.store.search import Query, match_length, matching_lines
+from contexto.store.search import Query, matching_lines
 
 RECALL_LIMIT = 32_000  # characters per contexto_recall call, at most
 DEFAULT_RECALL_LIMIT = 12_000  # characters per call before the engine has recorded the window
@@ -180,10 +180,10 @@ def match_lines(text: str, query: str | Query, context: int = MATCH_CONTEXT, per
         start, end = starts[n], ends[n]
         width = line_chars
         if n in first_match:
-            size = max(1, match_length(text, q, first_match[n]))
-            if first_match[n] + size > start + line_chars:
-                start = max(start, first_match[n] - line_chars // 3)
-                width = max(line_chars, first_match[n] + size - start)  # the whole match, however long
+            pos, size = first_match[n]
+            if pos + size > start + line_chars:
+                start = max(start, pos - line_chars // 3)
+                width = max(line_chars, pos + size - start)  # the whole match, however long
         stop = min(end, start + width)
         shown.append((start, stop, n in first_match, text[start:stop] + (" ..." if stop < end else "")))
     return shown, len(chosen)

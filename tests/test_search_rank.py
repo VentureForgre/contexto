@@ -175,3 +175,17 @@ def test_in_view_lines_match_like_pages(store):
     lines = search(store, "backup nightly").split("\n")
     assert lines[:2] == ["[in view, newest first:]", "> in view (turn 9): Nightly backups now run at 03:00"]
     assert lines[2].endswith("(turn 1)")
+
+
+def test_a_word_on_every_line_of_a_large_in_view_message_is_still_fast(store):
+    import time
+
+    store.set_window(200_000, 2.0)
+    text = "\n".join(f"    self.value_{i} = self.compute({i})" for i in range(20_000))  # about 700 KB
+    store.set_retained(1, 0, [{"turn": 9, "message_index": 0, "role": "tool_result", "text": text}])
+    store.set_turn_room("r", 10_000)
+    started = time.perf_counter()
+    lines = search(store, "self").split("\n")
+    assert time.perf_counter() - started < 2
+    assert lines[1] == "> in view (turn 9):     self.value_19999 = self.compute(19999)"
+    assert lines[4] == "  [19997 more matching lines in view]"
