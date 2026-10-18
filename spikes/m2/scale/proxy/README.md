@@ -36,7 +36,7 @@ runs (`load1` in `results/requests_*.csv`; the `uptime` line for each checkpoint
   so more F shrinks the window instead of pushing requests toward the bound. F here was about 70,000
   at 30M, against the 100,810 at which `bound_too_small` first fired in `mixed`: about 30,800 tokens
   of room. In the reminders resume run the pageable text held 410 to 2,143 tokens once the fallback
-  engaged; effort changes on claude-opus-5-5 and claude-haiku-5-5 add unpageable content to the same
+  engaged (the fallback keeps it near or under 8,000); effort changes on claude-opus-5-5 and claude-haiku-5-5 add unpageable content to the same
   F. The fallback also adds pages, one per paged message.
 - **Memory is the next limit.** RSS is not a Python-object leak (live objects stay flat at about
   23,000), but the allocator keeps what each request frees. Over 79 requests at 30M, RSS after

@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-18 04:58Z by claude (scale record answers round-3 review: F headroom argument, effort-count estimate removed). Decisions taken and still open, with reasons:
+Updated 2026-10-18 05:05Z by claude (scale record answers round-3 review: F headroom argument, effort-count estimate removed). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -172,7 +172,8 @@ fake upstream, no model calls.
   text probably still fits at 30M. Carried content counts in the fixed head F, and more F shrinks
   the window rather than pushing requests toward the bound. F was about 70,000 at 30M against the
   100,810 at which `bound_too_small` first fired in the `mixed` run, about 30,800 tokens of room;
-  the pageable text held 410 to 2,143 once the fallback engaged in the 48-turn resume run, and
+  the pageable text held 410 to 2,143 once the fallback engaged in the 48-turn resume run (the
+  fallback keeps it near or under 8,000), and
   effort-change content adds to the same F. The fallback writes each paged message as its own
   page, so such a session would reach about 3,000 pages or more by 30M, most of them single small
   messages; the store spike's 3,000 to 6,000 rows (planted page found for 44 to 39 of 86 queries,
