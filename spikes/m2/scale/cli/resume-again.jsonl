@@ -1,0 +1,2 @@
+{"resume": 2, "file_mb_before": 129.5, "file_mb_after": 144.3, "requests": [{"messages": 5026, "body_mb": 52.58, "compaction": false, "t": 0.72}], "exit": 0, "maxrss_mb": 916.6, "non_loopback": 0, "sockets": ["TCP 127.0.0.1:59398->127.0.0.1:59387 (ESTABLISHED)"]}
+{"resume": 3, "file_mb_before": 144.3, "file_mb_after": 152.4, "requests": [{"messages": 5029, "body_mb": 52.58, "compaction": false, "t": 0.74}], "exit": 0, "maxrss_mb": 880.6, "non_loopback": 0, "sockets": ["TCP 127.0.0.1:59416->127.0.0.1:59406 (ESTABLISHED)"]}

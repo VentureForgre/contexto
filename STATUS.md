@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-18 02:02Z by claude (releases v0.2.3 to v0.2.7). Decisions taken and still open, with reasons:
+Updated 2026-10-18 05:08Z by claude (30M scale record and reminder placement). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -129,6 +129,59 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
   used more than the modelled 2,952,139 because the model made more searches and tool-loop
   requests per probe turn than the model assumed; still under its 4,007,279 cap.
 
+## Scale to 30M tokens of history (zero-spend measurement, measured 2026-10-17, recorded 2026-10-18)
+
+Record: `docs/research/M2-scale-30m.md`; harnesses in `spikes/m2/scale/`. Synthetic sessions, local
+fake upstream, no model calls.
+
+- Claude Code 2.1.302 resumed and resent a 30M-token history (52.6 MiB request, 0.7 s, about 1 GB)
+  and up to 525M; from 550M it stops with "API Error: Out of memory". With Contexto-like reported
+  usage it never compacted.
+- The proxy kept every upstream request under 150,000 (counted by the fake upstream as bytes /
+  1.83) at 30M in a synthetic session with reminders on the first message only and one
+  session-start system message, and added 0.58 s per tool-loop request and 0.86 s per turn start.
+  Claude Code 2.1.302 places context blocks that way on 5.x model ids but not on 4.x ids (next
+  bullets), and on 5.x ids it also sends a role `system` message with every main request, which the
+  30M run did not model.
+- Where Claude Code 2.1.302 puts reminders (`spikes/m2/scale/reminders/`, 48-turn sessions against
+  a scripted local model). On 4.x model ids (claude-sonnet-4-6; 12-turn probes on claude-opus-4-7,
+  claude-sonnet-4-5, claude-haiku-4-5) it puts `<system-reminder>` blocks in every later turn-start
+  user message, which Contexto carries and never pages: 45 tokens per turn with bare prompts, 215
+  in a busy one-process session, 425 with a resume every turn (Contexto's estimator). So the
+  blocker is real on 4.x ids. [Inferred, linear from the scale test's failure at turn 181 at 215
+  per turn; a rough guide] `bound_too_small` from about turn 860, 180, and 90. By bytes per turn
+  the busy rate is 2.4 times the scale test's profile, which would put the busy session's failure
+  near turn 77 (about 2.1M). Also measured: the token countdown is on by default in 2.1.302, a
+  plan-mode entry adds about 2,720 tokens, and on resume a file-changed note is sent again on every
+  launch until the file is read again.
+- On 5.x ids (claude-opus-5-5, claude-haiku-5-5; probes on claude-sonnet-5, claude-fable-5) the
+  same content arrives as role `system` messages, one per main request, which the 8,000-token
+  fallback can page. On claude-opus-5-5 and claude-haiku-5-5 one uncapped path is left: an effort
+  change puts `output_config` on that turn's first system message, and `classify_system` (written
+  against 2.1.301) then classifies it as session-start, carried forever. 16 changes grew that
+  class from 2,770 to 9,272 tokens (one process) and 11,637 (resume every turn), Contexto's
+  estimator, and that was all of the unpageable growth. With bare prompts and no effort change
+  (claude-opus-5-5), nothing unpageable grew over 48 turns. On the claude-sonnet-5 and
+  claude-fable-5 probes effort stayed top-level and nothing unpageable grew; there the session's
+  environment message has no `output_config`, classifies as carried text, and is the first message
+  the fallback would page.
+- What that means for the owner's seats (Opus 5.5, claude-opus-5-5), measured: per-turn reminders
+  are pageable, and only effort changes add carried content that is never paged, 27 to 3,444
+  tokens each (bytes / 1.83). The 4.x blocker applies only to sessions on a 4.x id.
+- What that means for the owner's seats, [inferred, not measured]: the per-request role `system`
+  text probably still fits at 30M. Carried content counts in the fixed head F, and more F shrinks
+  the window rather than pushing requests toward the bound. F was about 70,000 at 30M against the
+  100,810 at which `bound_too_small` first fired in the `mixed` run, about 30,800 tokens of room;
+  the pageable text held 410 to 2,143 once the fallback engaged in the 48-turn resume run (at each
+  rotation the fallback pages it back to about 8,000 or less), and
+  effort-change content adds to the same F. The fallback writes each paged message as its own
+  page, so such a session would reach about 3,000 pages or more by 30M, most of them single small
+  messages; the store spike's 3,000 to 6,000 rows (planted page found for 44 to 39 of 86 queries,
+  0.32 to 0.71 s) are a rough guide for that shape.
+- Search takes 0.71 s at 6,000 pages, but the planted page reaches the 3 detailed results for 61
+  of 86 queries at 17 pages, 50 at 1,000, 44 at 3,000, and 39 at 6,000 (exact substring, newest
+  first, no ranking).
+
 ## Decisions taken in M2 and why (full text in DECISIONS.md)
 
 - D18: build H1, context virtual memory at the API boundary; the only approach that bounds the
@@ -144,18 +197,31 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
 - D29: cut v0.1.0 after acceptance, on the owner's instruction to come back to a finished
   project; private GitHub Release only.
 
-## What is left (as of 2026-10-17)
+## What is left (as of 2026-10-18)
 
 Definition of done for this project: M2 acceptance passed on both CLIs (done), every release
 published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
 
-In progress:
-- Nothing. v0.2.3 to v0.2.7 are fixes (#192 to #197), each released from main with its wheel and
-  sdist attached (the v0.2.7 wheel installs and reports 0.2.7).
+In progress: nothing. The reminder-placement measurement is done (`spikes/m2/scale/reminders/`,
+PR #199) and sets step 1 of the 30M plan below. No release work: v0.2.3 to v0.2.7 are fixes (#192
+to #197), each released from main with its wheel and sdist attached (the v0.2.7 wheel installs
+and reports 0.2.7).
 
 This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
-- Keep STATUS, README, and the contract in step with `main`; nothing else is planned.
-- No live model runs and no new feature work.
+- Keep STATUS, README, and the contract in step with `main`.
+- No live model runs. Zero-spend work toward 30M-token sessions, in order
+  (`docs/research/M2-scale-30m.md`):
+  - (1) Stop carried growth. Each part is a contract rule change that needs a new decision.
+    - 5.x ids (the owner's seats): stop `classify_system` from classifying a system message as
+      session-start just because an effort change attached `output_config` to it (measured on
+      claude-opus-5-5 and claude-haiku-5-5). On claude-sonnet-5 and claude-fable-5 the
+      session-start message has no `output_config` and is pageable, so the decision must identify
+      it there too.
+    - 4.x ids: page carried context blocks under the fallback, keeping the first message's blocks
+      and the latest of each recognisable kind (for example the token countdown).
+  - (2) Rank search results (BM25 with a recency term).
+  - (3) Cache page text in the MCP server and give `index_text` a manifest.
+  - (4) Hash each message once in the proxy.
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
@@ -223,6 +289,16 @@ Needs the owner:
   budget is under 25,000; at 42,000 with a 16,000 head nearly every turn rotates. Use a larger
   bound for OpenRig seat-sized heads (O3).
 - Very large single turns can still exceed the bound inside a tool loop (logged `over_bound`).
+- Carried content that is never paged grows in long Claude Code sessions (measured on Claude Code
+  2.1.302, `spikes/m2/scale/reminders/`). On 4.x model ids the CLI puts `<system-reminder>` blocks
+  in every later turn start: 45 tokens per turn with bare prompts, 215 in a busy one-process
+  session, 425 with a resume every turn (Contexto's estimator); [inferred, linear, a rough guide]
+  `bound_too_small` from about turn 860, 180, and 90, or near turn 77 for the busy session if
+  scaled by bytes per turn. On 5.x ids per-turn reminders are pageable. On claude-opus-5-5 (Opus
+  5.5) and claude-haiku-5-5 each effort change makes one system message session-start class, never
+  paged: 27 to 3,444 tokens per change (bytes / 1.83), and 16 changes grew that class from 2,770 to
+  9,272 tokens (11,637 with a resume every turn; Contexto's estimator). The 30M proxy run did not
+  include 5.x's per-request role `system` messages, so their effect at 30M is inferred.
 - Cache efficiency depends on the upstream route (O6): 29 of 31 and 36 of 37 in the live runs.
 - Organization-managed Claude Code settings outrank the launcher's `--settings`; a user-supplied
   `--settings` is refused (exit 2); a user `--mcp-config` is allowed.

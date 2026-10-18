@@ -1,0 +1,108 @@
+{
+ "turns": 120,
+ "args": [],
+ "turn_start_estimates": {
+  "compared": 122,
+  "different": 108,
+  "max_abs_diff": 44151,
+  "max_rel_diff": 0.34481,
+  "largest": [
+   [
+    462,
+    140663,
+    96512
+   ],
+   [
+    466,
+    87743,
+    117998
+   ],
+   [
+    456,
+    110372,
+    138011
+   ]
+  ]
+ },
+ "rotations": {
+  "http": 60,
+  "ff": 60
+ },
+ "rotations_equal": false,
+ "max_f_w_diff_tokens": 10669,
+ "rotation_diffs": [
+  [
+   [
+    "rotation",
+    35,
+    441,
+    "min_turn_room",
+    70,
+    69691,
+    53980
+   ],
+   [
+    "rotation",
+    35,
+    455,
+    "bound",
+    72,
+    69691,
+    49064
+   ]
+  ],
+  [
+   [
+    "rotation",
+    36,
+    461,
+    "bound",
+    73,
+    69760,
+    42740
+   ],
+   [
+    "rotation",
+    36,
+    461,
+    "min_turn_room",
+    73,
+    69839,
+    53409
+   ]
+  ]
+ ],
+ "pages": {
+  "http": 120,
+  "ff": 120
+ },
+ "pages_equal": true,
+ "epoch_fields": {},
+ "next_turn_requests_equal": true,
+ "next_turn_requests": {
+  "http": [
+   [
+    "turn_start",
+    121018,
+    2
+   ],
+   [
+    "tool_loop",
+    170528,
+    4
+   ]
+  ],
+  "ff": [
+   [
+    "turn_start",
+    121018,
+    2
+   ],
+   [
+    "tool_loop",
+    170528,
+    4
+   ]
+  ]
+ }
+}

@@ -1,0 +1,204 @@
+turn,msg_index,location,kind,file,tokens
+1,0,m0,# Environment,,415
+1,0,m0,You are powered by the model named Sonnet N.N. The exact mod,,91
+1,0,m0,Available agent types for the Agent tool:,,1028
+1,0,m0,# MCP Server Instructions,,327
+1,0,m0,The following skills are available for use with the Skill to,,3335
+1,0,m0,<total_tokens>N tokens left</total_tokens>,,47
+1,0,m0,Codebase and user instructions are shown below. Be sure to a,,657
+1,0,m0,Today's date is N-N-N.,,35
+1,0,m0,Attribution for git commits and pull requests you create fro,,319
+1,2,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+1,4,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+1,6,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+1,8,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+1,10,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+1,12,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+2,14,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+2,16,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+3,18,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+3,20,tool_result,Contents of <path>,,100
+3,20,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+4,22,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+4,24,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+5,26,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+6,28,ts_later,The task tools haven't been used recently. If you're working,,320
+6,28,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+6,30,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+7,32,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+7,34,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+7,36,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+7,38,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+8,40,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+9,42,ts_later,Plan mode is active. The user indicated that they do not wan,,2722
+9,42,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+9,44,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+10,46,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+11,48,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+11,48,ts_later,## Exited Plan Mode,,75
+11,48,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+11,50,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+12,52,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+12,52,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+12,54,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+13,56,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+13,56,ts_later,The task tools haven't been used recently. If you're working,,321
+13,56,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+13,58,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+13,60,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+13,62,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+13,64,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+14,66,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+14,66,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+14,68,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+15,70,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+15,70,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+15,72,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+16,74,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+16,74,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+16,76,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+17,78,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+17,78,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+18,80,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+18,80,ts_later,The task tools haven't been used recently. If you're working,,322
+18,80,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+18,82,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+19,84,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+19,84,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+19,86,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+19,88,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+19,90,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+20,92,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+20,92,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+21,94,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+21,94,ts_later,Plan mode is active. The user indicated that they do not wan,,2722
+21,94,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+21,96,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+22,98,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+22,98,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+23,100,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+23,100,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+23,100,ts_later,## Exited Plan Mode,,75
+23,100,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+23,102,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+24,104,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+24,104,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+24,104,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+24,106,tool_result,The task tools haven't been used recently. If you're working,,339
+24,106,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+25,108,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+25,108,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+25,108,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+25,110,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+25,112,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+26,114,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+26,114,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+26,114,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+26,116,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+27,118,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+27,118,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+27,118,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+27,120,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+28,122,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+28,122,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+28,122,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+28,124,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+29,126,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+29,126,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+29,126,ts_later,The task tools haven't been used recently. If you're working,,339
+29,126,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+30,128,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+30,128,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+30,128,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+30,130,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+31,132,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+31,132,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+31,132,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+31,134,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+32,136,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+32,136,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+32,136,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+33,138,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+33,138,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+33,138,ts_later,Plan mode is active. The user indicated that they do not wan,,2722
+33,138,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+33,140,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+34,142,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+34,142,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+34,142,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+35,144,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+35,144,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+35,144,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+35,144,ts_later,## Exited Plan Mode,,75
+35,144,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+35,146,tool_result,The task tools haven't been used recently. If you're working,,339
+35,146,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+36,148,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+36,148,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+36,148,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+36,148,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+36,150,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+37,152,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+37,152,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+37,152,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+37,152,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+37,154,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+37,156,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+38,158,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+38,158,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+38,158,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+38,158,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+38,160,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+39,162,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+39,162,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+39,162,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+39,162,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+39,164,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+40,166,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+40,166,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+40,166,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+40,166,ts_later,The task tools haven't been used recently. If you're working,,339
+40,166,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+40,168,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+41,170,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+41,170,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+41,170,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+41,170,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+42,172,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+42,172,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+42,172,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+42,172,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+42,174,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+43,176,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+43,176,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+43,176,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+43,176,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+43,178,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+44,180,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+44,180,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+44,180,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+44,180,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+45,182,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+45,182,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+45,182,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+45,182,ts_later,Plan mode is active. The user indicated that they do not wan,,2722
+45,182,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+45,184,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+46,186,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+46,186,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+46,186,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+46,186,ts_later,The task tools haven't been used recently. If you're working,,339
+46,186,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+47,188,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f40.txt,258
+47,188,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+47,188,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+47,188,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+47,188,ts_later,## Exited Plan Mode,,75
+47,188,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+47,190,tool_result,<total_tokens>N tokens left</total_tokens>,,47
+48,192,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f40.txt,258
+48,192,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f28.txt,258
+48,192,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f16.txt,258
+48,192,ts_later,Note: <path> changed on disk since you last read it. That's ,out/f4.txt,258
+48,192,ts_later,<total_tokens>N tokens left</total_tokens>,,47
+48,194,tool_result,<total_tokens>N tokens left</total_tokens>,,47
