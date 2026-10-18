@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+from collections.abc import Callable
 from typing import Any
 
 from contexto.canonical import canonical_bytes
@@ -216,13 +217,19 @@ def index_line(page: dict[str, Any], salient: bool = False) -> str:
     return line
 
 
-def render_index(pages: list[dict[str, Any]], budget_tokens: int, salient: bool = False) -> str:
-    """One line per page, newest first, within the budget, then a count of older pages omitted."""
+def render_index(pages: list[dict[str, Any]], budget_tokens: int, salient: bool = False,
+                 line_for: Callable[[dict[str, Any]], str] | None = None) -> str:
+    """One line per page, newest first, within the budget, then a count of older pages omitted.
+
+    Only ``id``, ``turn``, and ``stub`` of each page are read, and ``messages`` for the ``salient``
+    identifiers. ``line_for(page)`` overrides ``index_line(page, salient)``; ``SessionStore`` passes
+    one that keeps each page's line, so a page is read for its identifiers once per process (D34).
+    """
     ordered = sorted(pages, key=lambda p: (p["turn"], p["id"]), reverse=True)
     lines: list[str] = []
     used = 0
     for i, page in enumerate(ordered):
-        line = index_line(page, salient)
+        line = line_for(page) if line_for is not None else index_line(page, salient)
         rest = len(ordered) - i - 1
         tail = f"({rest} older pages omitted; use contexto_search to find them)" if rest else ""
         cost = estimate_tokens(line + "\n") + (estimate_tokens(tail) if tail else 0)
