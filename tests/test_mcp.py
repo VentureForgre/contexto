@@ -33,6 +33,8 @@ TURN_A = [
 LONG_TEXT = "x" * (mcp.RECALL_LIMIT + 1_234)
 TURN_B = [{"role": "user", "content": [{"type": "text", "text": LONG_TEXT}]}]
 
+BEST = mcp.SEARCH_BEST_HEADER + "\n"  # the first line of a reply with paged hits
+
 
 def make_store() -> tuple[MemoryStore, str, str]:
     store = MemoryStore("s1")
@@ -177,15 +179,15 @@ def test_search_matches_words_case_insensitively(server, stores):
     text = hit["content"][0]["text"]
     page_text = mcp.render_page(store.get_page(a))
     offset = page_text.index("Remember: the staging port is garnet-4821.")
-    head, *lines = text.split("\n")
-    assert head == f"{a} (turn 3)"  # one hit: page id and turn, no stub (B17)
+    best, head, *lines = text.split("\n")
+    assert best == mcp.SEARCH_BEST_HEADER and head == f"{a} (turn 3)"  # one hit: page id and turn, no stub (B17)
     assert f"> {offset}: Remember: the staging port is garnet-4821." in lines  # the line, at its offset
     assert all(line.startswith(("> ", "  ")) for line in lines)
     assert tool(server, "contexto_search", {"query": "GARNET-4821"})["result"]["content"][0]["text"] == text  # D34
-    assert tool(server, "contexto_search", {"query": "staging garnet-4821"})["result"]["content"][0]["text"].startswith(a)
+    assert tool(server, "contexto_search", {"query": "staging garnet-4821"})["result"]["content"][0]["text"].startswith(f"{BEST}{a}")
     assert (tool(server, "contexto_search", {"query": "garnet-4821 absent-word"})["result"]["content"][0]["text"]
             == "No paged-out turn contains every word of that query.")
-    assert tool(server, "contexto_search", {"query": "x"})["result"]["content"][0]["text"].startswith(b)
+    assert tool(server, "contexto_search", {"query": "x"})["result"]["content"][0]["text"].startswith(f"{BEST}{b}")
     assert tool(server, "contexto_search", {"query": ""})["result"]["isError"] is True
 
 
@@ -303,7 +305,7 @@ def test_contexto_mcp_cli_round_trip_and_stdout_carries_only_frames(tmp_path):
     assert by_id[2]["result"]["cacheScope"] == "private" and len(by_id[2]["result"]["tools"]) == 5
     assert "garnet-4821" in by_id[3]["result"]["content"][0]["text"]
     assert "ship it" in by_id[5]["result"]["content"][0]["text"]
-    assert by_id[6]["result"]["content"][0]["text"].startswith(f"{pid} (turn ")
+    assert by_id[6]["result"]["content"][0]["text"].startswith(f"{BEST}{pid} (turn ")
     assert by_id[7]["result"]["isError"] is True
     reopened = SessionStore(tmp_path, "cli-test")  # the pin is durable in the session's ledger
     assert "ship it" in reopened.state_text()

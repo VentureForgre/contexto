@@ -70,6 +70,23 @@ def test_an_unreadable_page_is_logged_each_call_and_skipped(tmp_path):
     assert [e["path"] for e in log if e["event"] == "page_unreadable"] == ["pg_00000000000000ff.json"] * 2
 
 
+@pytest.mark.parametrize("stub", ["not an object", None])
+def test_repaging_a_stored_page_with_a_malformed_stub_returns_its_id(tmp_path, stub):
+    """A stored page with the same content keeps its id even when its stub was tampered with: the catalog
+    leaves it to the next listing, which logs it (reviewer-1 on PR #204)."""
+    store = SessionStore(tmp_path, "s1")
+    [a] = store.page_out([page("needle")], 1)
+    path = store.pages_dir / f"{a}.json"
+    record = json.loads(path.read_text())
+    record["stub"] = stub
+    path.write_text(json.dumps(record))
+    fresh = SessionStore(tmp_path, "s1")
+    assert fresh.page_out([page("needle")], 1) == [a]
+    assert fresh.search("needle") == []
+    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+    assert [e["path"] for e in log if e["event"] == "page_unreadable"] == [f"{a}.json"]
+
+
 @pytest.mark.parametrize("variant", ["default", "legacy"])
 def test_index_text_reads_no_page_the_proxy_wrote_and_matches_the_full_render(tmp_path, monkeypatch, variant):
     store = SessionStore(tmp_path, "s1")

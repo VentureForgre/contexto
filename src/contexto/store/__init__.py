@@ -649,7 +649,7 @@ class SessionStore(LedgerOps):
 
     def search(self, query: str) -> list[str]:
         """Ids of pages holding every word of ``query`` (case-insensitive, any order), best first (D34)."""
-        return rank([(e.id, e.turn, e.text) for e in self._catalog.entries(texts=True)], query)
+        return rank([e.search for e in self._catalog.entries(texts=True)], query)
 
     def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
         salient = lists_identifiers(self.recall_variant(variant))

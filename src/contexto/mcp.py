@@ -28,14 +28,18 @@ from typing import IO, Any, Protocol
 
 from contexto.store.render import (MATCH_CONTEXT, MATCHES_PER_PAGE, MAX_CHARS_PER_TOKEN, RECALL_LIMIT, match_lines,
                                    matching_line_starts, recall_chunk, recall_limit, render_page)
-from contexto.store.search import Query, text_matches
+from contexto.store.search import SHOWN_IN_DETAIL, Query, text_matches
 
 SERVER_NAME = "contexto"
 SERVER_VERSION = "0.1.0"
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
-SEARCH_LIMIT = 3  # the best pages, shown with their matching lines per contexto_search reply, newest first (B17, D34)
+SEARCH_LIMIT = SHOWN_IN_DETAIL  # the best pages, shown with their matching lines per contexto_search reply, newest first (B17, D34)
+# The reply's first line about paged pages, so the model sees why a page that holds only the words can
+# sit above one that holds the whole query (reviewer-2 on PR #204). In the reply, not the tool
+# description, so the head the description adds to every request is unchanged.
+SEARCH_BEST_HEADER = "[best matching pages by relevance, shown newest first:]"
 SEARCH_MORE_LIMIT = 50  # the next best pages, listed compactly newest first (page id, turn, match offsets)
 # Per-turn recall budget (M2 contract PR #69): what recall, search, and state return this turn.
 BUDGET_SPENT = ("Recall budget for this turn is used up; answer from what is in view, or say the detail is "
@@ -429,7 +433,7 @@ class Server:
         specific = "use a longer or more specific query"
 
         def render(rows: list[Row], detailed: int, listed: int, why: str) -> str:
-            lines = [t for t, _ in lead + rows]
+            lines = [t for t, _ in lead] + [SEARCH_BEST_HEADER] + [t for t, _ in rows]
             if listed:
                 lines.append("[more matching pages, newest first; recall one at its offset:]")
                 lines += [t for t, _ in more[:listed]]

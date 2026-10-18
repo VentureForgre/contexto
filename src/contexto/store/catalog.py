@@ -12,7 +12,7 @@ Each process keeps its own catalog, because the proxy and the MCP server are sep
   the line of only the newest pages that fit the index budget. The pages it writes itself are
   added by ``page_out`` without a read; after a restart each page is read once.
 - the MCP server calls ``search``, which also needs each page's folded searchable text. It is read
-  once per page and held in memory (about the size of the page text).
+  once per page and held in memory as UTF-8 bytes, about the UTF-8 size of the page's text.
 """
 
 from __future__ import annotations
@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from contexto.store.pages import current_stub, index_line, searchable_text
+from contexto.store.pages import current_stub, index_line, search_entry
+from contexto.store.search import SearchEntry
 
 Signature = tuple[int, int, int]  # inode, size, modification time (ns)
 
@@ -34,7 +35,7 @@ Signature = tuple[int, int, int]  # inode, size, modification time (ns)
 class Entry:
     signature: Signature
     view: dict[str, Any]  # id, turn, stub: what the index line reads
-    text: str | None = None  # folded searchable text, read when search first needs it
+    search: SearchEntry | None = None  # what search reads (folded text as UTF-8), read when search first needs it
     lines: dict[bool, str] = field(default_factory=dict)  # the index line, by whether it lists identifiers
 
     @property
@@ -77,7 +78,7 @@ class PageCatalog:
             out = []
             for name, signature in listing.items():
                 entry = self._entries.get(name)
-                if entry is None or entry.signature != signature or (texts and entry.text is None):
+                if entry is None or entry.signature != signature or (texts and entry.search is None):
                     entry = self._load(name, signature, texts)
                     if entry is None:
                         self._entries.pop(name, None)
@@ -92,10 +93,14 @@ class PageCatalog:
             signature = _signature(path.stat())
         except OSError:
             return  # the next listing reads it
+        try:
+            view = _view(current_stub(page))
+        except (KeyError, TypeError, AttributeError):
+            return  # a stored page with a malformed stub: the next listing reads it, and logs it
         with self._lock:
             known = self._entries.get(path.name)
             if known is None or known.signature != signature:
-                self._entries[path.name] = Entry(signature, _view(current_stub(page)))
+                self._entries[path.name] = Entry(signature, view)
 
     def line(self, entry: Entry, salient: bool) -> str:
         """The page's index line, built once per page; listing identifiers reads the page's text."""
@@ -122,11 +127,11 @@ class PageCatalog:
         if page is None:
             return None
         try:
-            text = searchable_text(page) if texts else None
+            search = search_entry(page) if texts else None
         except (KeyError, TypeError, AttributeError) as e:
             self._log({"event": "page_unreadable", "path": name, "error": str(e)})
             return None
-        return Entry(signature, _view(page), text)
+        return Entry(signature, _view(page), search)
 
 
 def _view(page: dict[str, Any]) -> dict[str, Any]:

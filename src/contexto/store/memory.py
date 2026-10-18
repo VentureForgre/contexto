@@ -14,7 +14,7 @@ from contexto.store import (PageConflictError, PageNotFoundError, charge_room, c
                              check_page_id, check_retained, check_turn_room, check_window, redact)
 from contexto.store.ledger import MemoryLedger
 from contexto.store.recall import lists_identifiers
-from contexto.store.pages import build_page, current_stub, render_index, same_content, searchable_text
+from contexto.store.pages import build_page, current_stub, render_index, same_content, search_entry
 from contexto.store.search import rank
 from contexto.store.records import LedgerOps
 
@@ -135,8 +135,8 @@ class MemoryStore(LedgerOps):
         for page in self._pages():
             kept = texts.get(page["id"])
             if kept is None or kept[0] is not self.pages.get(page["id"]):
-                kept = texts[page["id"]] = (self.pages.get(page["id"]), searchable_text(page))
-            entries.append((page["id"], page["turn"], kept[1]))
+                kept = texts[page["id"]] = (self.pages.get(page["id"]), search_entry(page))
+            entries.append(kept[1])
         return rank(entries, query)
 
     def index_text(self, budget_tokens: int, variant: str | None = None) -> str:

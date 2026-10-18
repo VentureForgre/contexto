@@ -328,12 +328,12 @@ def test_search_shows_whole_hits_that_fit_then_the_message(store):
     for i in range(30):
         page(store, chars=40, turn=i + 1)
     full = text_of(call(store, "contexto_search", {"query": "aaa"}))  # the page cap: 3 of 30
-    first_hit = full.split("\npg_", 1)[0]
+    first_hit = "\npg_".join(full.split("\npg_", 2)[:2])  # the header and the first hit
     room = math.ceil((len(first_hit) + 90) / RATIO)  # room for one hit and the trailer, not all three
     store.set_turn_room("1", room)
     cut = text_of(call(store, "contexto_search", {"query": "aaa"}))
     body, trailer = cut.rsplit("\n", 1)
-    shown = body.count("\npg_") + 1
+    shown = body.count("\npg_")  # the reply's first line is the header (mcp.SEARCH_BEST_HEADER)
     assert len(cut) <= room * RATIO and 1 <= shown < mcp.SEARCH_LIMIT
     assert full.startswith(body + "\n")  # whole hits, in order
     assert trailer == f"[{30 - shown} more matching pages not shown; the recall budget for this turn is used up]"

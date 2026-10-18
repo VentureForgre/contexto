@@ -15,12 +15,14 @@ from typing import Any
 from contexto.canonical import canonical_bytes
 from contexto.store.recall import DEFAULT_LINES, salient_identifiers
 from contexto.store.render import as_message, is_responses_item
-from contexto.store.search import Query, rank, searchable
+from contexto.store.search import Query, SearchEntry, rank, search_key, searchable
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
 STUB_TEXT_CHARS = 200
 STUB_MAX_PATHS = 20
 EMPTY_SYSTEM_STUB = "(empty system message)"
+# The tag Claude Code wraps an injected context block in (``contexto.rewrite.CONTEXT_TAG``).
+CONTEXT_TAG = "<system-reminder>"
 
 # The mandatory first line of the pinned text (default variant); see contexto.store.recall.
 PINNED_FIRST_LINE = DEFAULT_LINES[0]
@@ -181,6 +183,42 @@ def searchable_text(page: dict[str, Any]) -> str:
                        *_texts(page["messages"])])
 
 
+def _is_context_text(text: Any) -> bool:
+    return isinstance(text, str) and text.lstrip().startswith(CONTEXT_TAG)
+
+
+def is_context_page(page: dict[str, Any]) -> bool:
+    """True for a page that holds no turn: only system messages, or user messages made only of
+    ``<system-reminder>`` context blocks. Lane A's fallback pages carried system messages one per
+    page, and PR #203 pages each paged context block as a user message holding that block. Read from
+    the messages, so the stub's form (PR #203 may give such pages a system-like stub) does not matter.
+    Search ranks these pages after every turn page (D34)."""
+    messages = page.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            return False
+        role, content = message.get("role"), message.get("content")
+        if role == "system":
+            continue
+        if role != "user":
+            return False
+        if isinstance(content, str):
+            if not _is_context_text(content):
+                return False
+        elif not (isinstance(content, list) and content and all(
+                isinstance(b, dict) and b.get("type") == "text" and _is_context_text(b.get("text"))
+                for b in content)):
+            return False
+    return True
+
+
+def search_entry(page: dict[str, Any]) -> SearchEntry:
+    """What search reads of a page (``contexto.store.search.rank``)."""
+    return SearchEntry(page["id"], page["turn"], search_key(searchable_text(page)), is_context_page(page))
+
+
 def page_matches(page: dict[str, Any], query: str) -> bool:
     """Every word of ``query`` occurs in the page's stub or text, case-insensitively, in any order (D34)."""
     q = Query.parse(query)
@@ -193,7 +231,7 @@ def page_matches(page: dict[str, Any], query: str) -> bool:
 def search_pages(pages: list[dict[str, Any]], query: str) -> list[str]:
     """Ids of the pages matching ``query``, best first (``contexto.store.search``; D34). Not RAG: no
     embeddings and no similarity, only the query's own words, ranked by BM25 and recency."""
-    return rank([(p["id"], p["turn"], searchable_text(p)) for p in pages], query)
+    return rank([search_entry(p) for p in pages], query)
 
 
 _TOKEN = re.compile(r"[\w.\-/]+")
