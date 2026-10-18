@@ -252,7 +252,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
   so byte-identical countdowns in different turn starts stay distinct and a restart (rule 16)
   resumes the same carried bytes. Measured on the captured bodies with the engine's own functions
   (`analyze.py`, fallback applied at every turn start), what the fallback cannot page on
-  claude-sonnet-4-6 over 48 turns now stays between 3,382 and 3,557 with bare prompts and between
+  claude-sonnet-4-6 over 48 turns now stays between 3,386 and 3,557 with bare prompts and between
   3,382 and 5,251 in the busy runs (the top while plan mode is on and its entry is the latest of its
   kind), and is 3,557, 3,794 and 3,794 at turn 48, against 5,452, 13,256 and 22,953 before (bare
   prompts, one process, resume every turn). Carried content after the fallback peaks at 11,330 and
@@ -274,11 +274,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
   page. In every main request of the 13 captured runs the session-start message on 5.x ids is the
   one system message whose first line, after an optional `<system-reminder>` tag, is
   `# Environment`, and no other has it. That signature now makes a message session-start, with or
-  without settings fields; a message with content plus settings fields and no signature is a
-  settings change, carried while it is the latest per settings key (so the current effort stays in
-  view) and pageable as carried text once a later one supersedes it. The fallback never pages the
-  latest settings change, the latest text of a recognisable kind, or a message whose hash equals a
-  paged older copy's (measured: effort resets land on byte-identical countdown messages). Measured
+  without settings fields; a message with text-only content plus settings fields and no signature
+  is a settings change (non-text content stays unclassified: carried and logged), carried while it is the latest per settings key (so the current effort stays in
+  view) and pageable as carried text once a later one supersedes it. The fallback never hides the
+  latest settings change per settings key or the latest text of a recognisable kind, even when an
+  older byte-identical copy was paged (measured: effort resets land on byte-identical countdown
+  messages); any other pageable message whose hash is in the paged set is hidden with it. Measured
   on the captured bodies, what the fallback cannot page in the busy one-process claude-opus-5-5 run
   now stays between 3,301 and 4,897 tokens over 48 turns (9,804 at turn 48 before), and between
   3,304 and 4,902 with task tools (10,133 before). With a resume every turn it reaches 5,643 at

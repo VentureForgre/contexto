@@ -221,7 +221,7 @@ figures.
    notes. Resuming on every turn doubled it to 782 by bytes/1.83 and 425 in Contexto's estimator,
    because file-changed notes repeat on each launch (80 against 8).
 3. **[measured] Contexto's carried content grows per turn on 4.x ids, and nothing pages it.** Carried
-   context blocks at k grew 3,382 -> 5,452 (bare prompts), 3,382 -> 13,256 (one process) and
+   context blocks at k grew 3,386 -> 5,452 (bare prompts), 3,382 -> 13,256 (one process) and
    3,382 -> 22,953 (resume) over 48 turns. The scale test's assumed `mixed` profile (297 bytes, about 162
    tok per turn by bytes/1.83) falls between the measured floor (126 bytes per turn) and the
    feature-heavy one-process rate (701 bytes per turn).
@@ -295,7 +295,8 @@ Re-analysed with no new CLI run: the same raw bodies (`/tmp/rem-runs.8xQL0A`), `
 code before the change (origin/claude/scale-30m; it reproduced `results/table.md` byte for byte) and
 after it. `analyze.py` now takes "not pageable" from the engine itself: carried tokens once every
 item `fallback_candidates` lists is paged. `before_after.py` prints the full before and after tables
-(`results/d32-d33.md` has both columns for every run).
+(`results/d32-d33.md` has both columns for every run) from `results/turns.csv` (before) and
+`results/turns-d32-d33.csv` (after), so both sides regenerate without the raw bodies.
 
 | run | model | not pageable at turn 48, before -> after | max, turn 2 to 48, after | carried after the 8,000 fallback, max before -> after |
 |---|---|---|---|---|
