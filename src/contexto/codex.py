@@ -423,7 +423,10 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         target, source = codex_upstream_with_source(args.codex_auth, args.codex_upstream, dict(os.environ),
                                                     claude.url, claude.source)
         session_id = args.session or uuid.uuid4().hex
-        store = launcher.open_session(paths.contexto_home(), session_id, Path.cwd())
+        try:
+            store = launcher.open_session(paths.contexto_home(), session_id, Path.cwd())
+        except (OSError, ValueError) as exc:  # as `contexto run claude` reports it
+            raise launcher.LaunchError(f"cannot open session {session_id!r}: {exc}", 2) from exc
         proxy, engine_name = launcher.start_proxy(store, target, source, launcher.engine_config(options),
                                                   args.observe_thinking, stderr=stderr)
     except CodexLaunchError as exc:

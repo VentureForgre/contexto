@@ -445,6 +445,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   and builder-2's unpushed ledger work at commit 1ab5f29 (readable from the shared object store),
   append-only JSONL with a hash chain and crash-truncation repair. File sources require `sha256`;
   a missing file counts as stale. Records may cite pages as provenance (`type: page`).
+- **Live lock (D37):** every process that opens a session for writing (proxy, launcher, MCP server)
+  holds a shared `flock` on `live.lock` in the session directory until it exits; the descriptor is
+  not inherited by child processes. A session whose lock another process holds is in use, and
+  `contexto sessions prune` never deletes it. Stores never follow a symlinked `live.lock`.
 - **Pinned text** starts with fixed instruction lines, then lists open obligations, active
   decisions, then verified facts, newest first, each with its id, capped at `pin_budget` (default
   6,000 tokens). The instruction lines must say that earlier turns are paged out and how to reach
@@ -689,7 +693,24 @@ the exception's type name only and keeps the request's rewrite.
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run
 the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
-`contexto recall <page id>`, `contexto state`. Exit codes and `--help` documented in README.
+`contexto sessions prune`, `contexto recall <page id>`, `contexto state`. Exit codes and `--help`
+documented in README.
+
+`contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated
+blocks under the session directory, symlinks counted as links) and a total. `contexto sessions
+prune` (D37) deletes whole session directories. It selects by `--older-than DURATION` (`30d`, `12h`;
+idle time since the last activity `sessions list` shows), `--keep N` (keep the N most recently
+active), and `--session ID`; all given conditions must hold and at least one is required. Without
+`--yes` it only prints the selection with sizes and a total, and writes nothing. `--json` prints
+`dry_run`, `total_bytes`, and each selected session's `status` and `reason`, or `{"error": ...}`
+when selection fails. It never deletes a
+session whose `live.lock` another process holds, one whose `live.lock` is a symlink or not a regular
+file, or one active in the last 10 minutes. `sessions/` and each session must be real directories,
+and every step after the check works through open directory descriptors (`O_NOFOLLOW`, inode
+checked against the selected entry), so a symlink swapped in at any moment cannot make prune delete
+or create anything outside the checked directory. Failures are per session; the exit code is 1 if
+any failed or if the session named by `--session` was skipped, with `contexto: error:` on stderr.
+A store resumed while prune deletes its session waits, starts empty, and prints a warning.
 
 ## Lanes
 

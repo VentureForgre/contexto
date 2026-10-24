@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from contexto.paths import absolute_home, contexto_home
@@ -28,4 +29,9 @@ def run(args: argparse.Namespace) -> int:
     # The same resolution as the other subcommands, and --home under the same rule (B24): a client that
     # writes --home=~/y without a shell gets the expanded absolute path, not a literal ./~/y.
     home = absolute_home(args.home) if args.home else contexto_home()
-    return serve_stdio(SessionStore(home, args.session))
+    try:
+        store = SessionStore(home, args.session)
+    except (OSError, ValueError) as exc:  # stderr only: stdout carries the protocol
+        print(f"contexto mcp: cannot start: {exc}", file=sys.stderr)
+        return 1
+    return serve_stdio(store)
