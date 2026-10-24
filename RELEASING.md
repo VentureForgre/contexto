@@ -40,8 +40,9 @@ CI gate, no tag, no release, and no upload. A manual dispatch does nothing eithe
   bump or changelog commit is made. The workflow then checks that `HEAD` is still the merged commit
   and that the tag points at it. Even if a step tried to push to `main`, the ruleset would reject the
   push, because `GITHUB_TOKEN` is not a bypass actor.
-- **It never publishes a package anywhere else.** This repository is private: no PyPI, npm,
-  Homebrew, or Scoop. The sdist and wheel exist only as GitHub Release assets.
+- **It never publishes a package anywhere else.** Releases go only to this repository's GitHub
+  Releases (D42): no PyPI, npm, Homebrew, or Scoop. The sdist and wheel exist only as GitHub
+  Release assets.
 - **It never edits the version in Git.** No file in the repository carries the release version.
   `pyproject.toml` keeps its static `version`; the release build overwrites it in the runner's
   checkout only (`uv version <v> --frozen`), and `.github/scripts/release-build.sh` fails the release
@@ -115,8 +116,8 @@ as well. That is intended, because those tests back numbers that research docume
 
 Every CI and release job runs on a GitHub-hosted `ubuntu-latest` runner, or `macos-latest` for the
 macOS test jobs. From PR #188 until the repository went public they ran on the organization's
-self-hosted runner, because hosted Actions minutes were blocked by billing. A self-hosted runner on
-a public repository would let a fork's pull request run code on that machine.
+self-hosted runner. A self-hosted runner on a public repository would let a fork's pull request
+run code on that machine.
 
 Third-party actions are pinned by commit SHA, with the release tag in a comment:
 `actions/checkout` v7.0.1 and `astral-sh/setup-uv` v10.2.0. To update one, resolve the new tag's
