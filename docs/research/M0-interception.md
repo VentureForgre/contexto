@@ -178,8 +178,8 @@ What the source adds [documented: `codex-rs/hooks/src/events/compact.rs:47-54, 2
 - **Breaks:** undocumented PreCompact steering can disappear in an update; Codex cannot steer
   remote compaction at all. Hook output that changes every turn breaks the prompt cache from that
   point on [inferred].
-- **Role relative to H1:** H2 is a cheap, terms-safe complement (no credentials touched) and a
-  fallback if the proxy is not allowed. It does not replace H1 [inferred].
+- **Role relative to H1:** H2 is a cheap complement that touches no credentials, and a fallback
+  if the proxy is not allowed. It does not replace H1 [inferred].
 
 ## 2. Session files (H3)
 
@@ -579,8 +579,10 @@ intake merges the recommendation; this document does not resolve it.
 
 ### Credential mode
 
-Both CLIs send API-key and login credentials to a custom base URL, so a local proxy sees whichever
-one the CLI uses. Which modes Contexto routes is an owner decision (section 10).
+Both CLIs send a login credential, not only an API key, to a custom base URL [documented for both
+(bullets above); measured for the Claude Code login fallback; inferred from code for the Codex
+ChatGPT token]. A local proxy therefore sees whichever credential the CLI uses [inferred]. Which
+modes Contexto routes is an owner decision (section 10).
 
 ## 7. Experiments and reproduction
 
