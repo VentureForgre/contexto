@@ -57,10 +57,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from contexto.cliversions import launch_check
 from contexto.paths import contexto_home
-from contexto.proxy import ContextoProxy, identity_transform
+from contexto.private import affinity_salt
+from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import SessionStore
 from contexto.toolcheck import missing_tools_message
 from contexto.upstream import resolve_upstream
@@ -272,6 +274,24 @@ def check_options(options: LaunchOptions) -> None:
                           EXIT_USAGE)
 
 
+def session_affinity_key(store: Any, upstream_url: str) -> str | None:
+    """The store's ``X-Session-Affinity`` value (D36), salted by the install's ``affinity.salt`` in
+    the store's home. None, without touching the salt, for a vendor upstream (no header is sent
+    there) or a store without a home (in memory); None when the salt cannot be read, which is logged
+    and only costs the header."""
+    home, session_id = getattr(store, "home", None), getattr(store, "session_id", None)
+    if home is None or not isinstance(session_id, str):
+        return None
+    host = urlsplit(upstream_url).hostname
+    if not host or is_vendor_host(host):
+        return None
+    try:
+        return affinity_key(session_id, affinity_salt(home))
+    except (OSError, ValueError) as exc:
+        store.log({"event": "affinity_salt_unavailable", "error": type(exc).__name__})
+        return None
+
+
 def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dict[str, int | float],
                 observe_thinking: bool, *, stderr=None) -> tuple[ContextoProxy, str]:
     """Build the rewrite engine for ``store`` and start the proxy on 127.0.0.1 with a free port.
@@ -285,10 +305,11 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     except Exception:  # a diagnostic record; never stop a launch for it
         pass
     transform, observe_usage, engine_name = build_engine(store, config)
+    key = session_affinity_key(store, upstream_url)
     try:
         proxy = ContextoProxy(upstream_url, NoticeLog(store, stderr or sys.stderr), transform,
                               observe_usage=observe_usage, observe_thinking=observe_thinking,
-                              upstream_source=upstream_source)
+                              upstream_source=upstream_source, affinity_key=key)
     except ValueError as exc:
         raise LaunchError(f"invalid upstream: {exc}", EXIT_USAGE) from exc
     try:
@@ -392,7 +413,8 @@ def _run(options: LaunchOptions, stderr) -> int:
         mcp = write_private_json(tmp, "mcp.json", mcp_payload(session_id, home))
         store.log({"event": "launch", "cli": "claude", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": upstream.source,
-                   "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args)})
+                   "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args),
+                   "affinity_header": proxy.affinity_header is not None})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
         if not check_cli_version("claude", claude, store, enabled=options.version_check, stderr=stderr):
