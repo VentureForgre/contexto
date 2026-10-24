@@ -80,7 +80,7 @@ contexto run --bound 150000 --session <id> --upstream <url> claude -p --input-fo
   model never sees this limit. The run then reports `BudgetExceeded` with the spend so far.
 
 **Credential** (intake-approved, D12). If the scratch run inherits `HOME`, Claude Code falls back
-to the owner's claude.ai subscription login, which the rig proxy rejects with a 401 (lane 1
+to the user's claude.ai subscription login, which the rig proxy rejects with a 401 (lane 1
 measured this case, PR #9). So:
 - **Isolated config.** The run uses an isolated `CLAUDE_CONFIG_DIR` in the scratch directory. Its
   only setting is an `apiKeyHelper` pointing at `keyhelper.py`, whose sole argument is the path of

@@ -9,9 +9,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
 - **D0. Intake has free rein to finish the project.** Owner, 2026-10-15. The owner prefers to return
   to a finished project and asked that STATUS show decisions taken, why, and decisions still open.
   The owner's one limit: nothing is published outside this repository (no PyPI, npm, Homebrew,
-  public repos, or public posts). Intake added two limits of its own: the owner's personal Claude
-  and Codex configuration is not changed, and heavy spend on the owner's ChatGPT plan waits for
-  the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
+  public repos, or public posts). (Superseded in part by D42: the repository itself goes public;
+  the rest of the limit stands.) Intake added two limits of its own: user-level Claude and Codex
+  configuration on the owner's machine is not changed, and heavy spend on the ChatGPT plan the
+  team's Codex seats use waits for the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
   including the M0 brief's Q5 gate (see D12).
 
 ## Product direction
@@ -45,9 +46,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   (Claude Code, claude-haiku-5-5) and `labcodex.subject` (Codex, gpt-6-astra) are real long-running
   OpenRig seats, the owner's actual use case, and avoid builder-seat hook and resume-token
   collisions.
-- **D8. Seats stay on `builtin:yolo`; the Codex test seat uses the owner's ChatGPT login.** Owner,
+- **D8. Seats stay on `builtin:yolo`; the Codex test seat uses a ChatGPT login.** Owner,
   2026-10-15. Under yolo Codex drops `-p` profiles and project-local config cannot set
-  `model_provider`, so routing the seat to the rig proxy would change the owner's personal default.
+  `model_provider`, so routing the seat to the rig proxy would change the user-level Codex default.
 - **D9. The 2M compaction-loss run was replaced by a quality-versus-context-size probe.** Intake under
   D2, 2026-10-15. Forcing a session into compaction measures the wrong thing; the probe finds the
   context size where recall starts to slip, which bounds the working window.
@@ -56,14 +57,14 @@ the owner's delegation. Open decisions are listed at the end with the options an
   and at about 92k, each with thinking preserved and stripped (408,851 tokens planned), so the
   replay is symmetric and comparable with the seat run at the same size. The third large checkpoint runs only if the smaller
   ones show a gap of at least 2 probes.
-- **D11. The rig proxy is the owner's infrastructure.** Owner, 2026-10-15. Auth headers reaching
-  `cliproxy.sullylab.de` are not an exposure.
+- **D11. The rig proxy is the owner's infrastructure.** Owner, 2026-10-15. The rig proxy is the
+  owner's CLIProxyAPI deployment; auth headers that reach it stay on owner infrastructure.
 - **D12. Phase 2 rewriting is authorized under D0, on owner infrastructure only.** Intake,
   2026-10-15. The M0 brief gated rewriting on an owner decision about Q5; the owner delegated that
   decision through D0. This settles Q5 for development: rewriting experiments run through the
   owner's proxy with the rig key (Claude) or the same proxy through a throwaway `CODEX_HOME` whose
-  provider uses `auth.command` (Codex). Rewritten traffic never uses the owner's ChatGPT or
-  claude.ai subscription login, and the owner's own config files are never edited. What end users
+  provider uses `auth.command` (Codex). The team's rewritten traffic never uses a ChatGPT or
+  claude.ai login, and the team never edits user-level config files. What end users
   should use is a product documentation question, listed under open decisions.
 
 - **D16. Phase 2 attaches through a launcher wrapper.** Intake under D0, 2026-10-15. Measured by
@@ -190,13 +191,14 @@ the owner's delegation. Open decisions are listed at the end with the options an
   owner's instruction ("just keep going, I would prefer to come to a finished project ... just
   have free reign", spelling corrected; the owner's next message to intake in the same session
   added "but nothing to publish outside this repo though", which is not otherwise on file). The
-  private-only scope rests on D14, D0, and `RELEASING.md` in any case. Live run #3 on main
+  no-registry scope rests on D14, D0, and `RELEASING.md` in any case; the private-only part is
+  superseded by D42. Live run #3 on main
   fbb1303 passed acceptance 1 to 4 (STATUS.md), and the M2 contract's criterion 6 says intake then
   cuts v0.1.0. Intake sets the repository variable `RELEASES_ENABLED` to `true` before merging the
   pull request that records this decision, so that merge's push releases. Semantic-release 10.7.0
   (the workflow's pin), run locally with `--noop` on main 75105f5, proposes `v0.1.0` with no
-  earlier tag. The release is a tag and a GitHub Release on this private repository with the sdist
-  and wheel attached; no package registry (D14, D0). Options considered: wait for the owner to
+  earlier tag. The release is a tag and a GitHub Release on this repository (private until D42) with
+  the sdist and wheel attached; no package registry (D14, D0). Options considered: wait for the owner to
   return (rejected: the owner asked to come back to a finished project, and a private release
   is reversible by deleting the tag and release); release after B22 (rejected: B22 refines search
   but is not needed for what acceptance measured, and it ships in a later version).
@@ -453,18 +455,44 @@ the owner's delegation. Open decisions are listed at the end with the options an
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
-  The personal account's plan reports `free` through the API (the owner believed it was Pro), and
-  branch rules are unavailable for private repos on that plan; the
-  org is on Team. Ruleset 25202810: PR required, no force-push, no deletion, no bypass, 0 required
+  (Private status superseded by D42; the PR-only rules stand.)
+  The personal account's plan reports `free` through the API, and branch rules are unavailable
+  for private repos on that plan; the org is on Team. Ruleset 25202810: PR required, no force-push, no deletion, no bypass, 0 required
   approvals because all seats share one GitHub account. Exact-head review by a reviewer seat is a
   team rule.
 - **D14. Releases follow discord-cli's Conventional Commit versioning, adapted.** Owner request,
   intake design, 2026-10-15. Versions come from tags, so CI never commits to `main` (which the
   ruleset would reject); artifacts attach to GitHub Releases on this private repo only. No package
-  registry publishing (D0).
+  registry publishing (D0). (The private-only wording is superseded by D42: releases stay on this
+  repository's GitHub Releases, which become public with it.)
 - **D15. M1 (ledger, checkpoints, recovery) paused when M0 started.** An operator message relaying
   the owner's setup boundary, 2026-10-15. The owner had not chosen M1; an earlier intake occupant drafted it. Its PRs #2, #3,
   #4 stay open and untouched until decision O1.
+- **D42. The repository goes public; GitHub Releases stay the only distribution.** Owner,
+  2026-10-24. The owner decided to make VentureForgre/contexto public. GitHub Releases on this
+  repository remain the only way Contexto is distributed; nothing goes to a package registry (PyPI,
+  npm, Homebrew) yet. This supersedes D0's "no public repos" limit for this repository and the
+  private-only wording in D13, D14, D29 and `RELEASING.md`.
+  - **Scrub at `HEAD`.** Before publishing, tracked files were scrubbed: the owner's proxy
+    hostname, statements about the owner's own accounts, plan usage and the organization's
+    billing, and the self-hosted runner's machine name were replaced with neutral wording that
+    keeps the technical content (which auth modes, headers and endpoints were measured, and how
+    they behaved).
+  - **Terms analysis removed on purpose.** The vendor terms quotes and the inferred terms reading
+    in `docs/research/M0-interception.md` section 6, and the summaries of them elsewhere, were
+    removed. They are public vendor text, but here they were applied to the owner's own use. The
+    repository makes no claim about terms compliance. End-user auth guidance stays open as O4,
+    and the README tells users to follow their providers' terms for the credentials they use.
+  - **History is not rewritten** (owner decision). Old commits, pull request diffs and pull request
+    comments keep the proxy hostname, one home-directory path, the owner's commit email, the
+    runner's machine name and billing notes. A rewrite would need force pushes, which the ruleset
+    forbids, and would still leave the pull request comments.
+  - **CI on fork pull requests.** CI runs every job on the organization's self-hosted runner, so
+    a fork pull request on a public repository could run code on it. When the repository goes
+    public, the Actions approval policy for fork pull requests is set to "require approval for all
+    external contributors" at the same moment. CI moves to GitHub-hosted runners in the CI pull
+    request. The organization's runner group stays open to public repositories because other
+    public repositories in the organization use it.
 
 ## Open decisions
 
@@ -475,7 +503,7 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   Sonnet 5.5, and Haiku 5.5, editing history before a thinking block invalidates it, and the API
   returns 400 by default only for accounts created on or after 2026-08-31. Measured by builder-4's
   conformance probe (4,973 tokens; claude-haiku-5-5 and gpt-6-astra, both through the owner's
-  proxy `cliproxy.sullylab.de`, D11; not yet reviewed; whether the probe set
+  proxy, D11; not yet reviewed; whether the probe set
   `prefix_mismatch_behavior` is not stated in the handback):
   stripping all thinking at a rotation returns 200; changing system or editing an earlier user turn
   while keeping thinking returns 400; dropping the oldest turns while keeping thinking returns 200
@@ -490,7 +518,7 @@ All open decisions are intake's to make under D0 unless marked otherwise.
 - **O5. First real release.** Settled by D29 (v0.1.0 after M2 acceptance).
 - **O6. Upstream affinity on the owner's proxy.** Measured: full cache misses with byte-identical
   prefixes (4 of 14 eligible throwaway calls) and thinking dropped on every request
-  (`end_user_binding_mismatch`) through `cliproxy.sullylab.de`. Lane 1's black-box test (L1-e,
+  (`end_user_binding_mismatch`) through the owner's proxy. Lane 1's black-box test (L1-e,
   81,319 tokens): over 10 haiku requests the keep/drop pattern falls into exactly 3 consistent
   classes, and a byte-identical series shows exactly 3 cache writes before steady reads (counts
   measured; reported by manager-1, doc pending in lane 1's L1-f PR). Inferred: the route spreads
