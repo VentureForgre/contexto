@@ -405,24 +405,38 @@ the owner's delegation. Open decisions are listed at the end with the options an
   its launch note and help now give this guidance instead of pointing at O4; (3) users must follow
   their providers' terms, including any terms on subscription use through a proxy; Contexto does
   not decide that for them. Compatibility, read
-  from CLIProxyAPI's source (local checkout, v7.3.12) and checked against the code: its
+  from CLIProxyAPI's source (local checkout, v7.2.142; the running binary is 7.3.12) and checked
+  against the code: its
   `/v1/messages`, `/v1/messages/count_tokens`, and `/v1/responses` sit under the root that
   `ANTHROPIC_BASE_URL` names, so Claude Code needs the root and Codex the root plus `/v1`, which is
   already Contexto's Codex default (D22); it accepts its client key as `Authorization: Bearer`,
-  `X-Api-Key`, `X-Goog-Api-Key`, or `?key=`, and Contexto forwards all of them unchanged; model
+  `X-Api-Key`, `X-Goog-Api-Key`, `?key=`, or `?auth_token=`, and Contexto forwards all five
+  unchanged; model
   names reach it unchanged and it resolves them (aliases, prefixes); its errors, including 401
   bodies that are not in Anthropic's shape (`{"error":"Missing API key"}`), pass through unchanged
   (rule 7). One change in the proxy: CLIProxyAPI sends `: keep-alive` SSE comment events when
   `streaming.keepalive-seconds` is set, and the stream hold (contract PR #74) passed only `ping`
   events, so a heartbeat that arrived after a tool call started was held with the content. Comment
   events now pass at once, like `ping`: they carry no content, so the order of content events is
-  unchanged, and the CLI keeps receiving bytes while a long tool input is held. Measured on
+  unchanged, and the CLI keeps receiving bytes while a long tool input is held. A comment passes
+  at once only when it ends with its line ending; an unterminated one at end of stream is held
+  and released last, so no held event is glued onto it (reviewer-A). Two launcher changes from
+  the review (reviewer-B): the user settings file is `$CLAUDE_CONFIG_DIR/settings.json` when
+  `CLAUDE_CONFIG_DIR` is set, as in Claude Code, for both the upstream and the Codex key helper
+  (before, Contexto always read `~/.claude/settings.json`); and the Codex session line and
+  `proxy_start` event name where the Codex upstream came from (`codex-flag`, `codex-env`,
+  `chatgpt-default`, or `claude-<source>+/v1`), never the URL. Measured on
   2026-10-24 through Contexto's real engine, outcomes only: through the owner's proxy,
   `claude-haiku-5-5` `count_tokens`, a non-streaming message, and a streaming message each returned
   200 (both messages `end_turn`, with usage read), and one Codex Responses request on
   `gpt-5.6-luna` to `/responses` reached `/v1/responses` and returned 200 with `response.completed`
   and usage; the local CLIProxyAPI 7.3.12 binary, sent no key through Contexto, returned its 401,
-  relayed. The owner's proxy answered `X-Api-Key` with 401 and `Authorization: Bearer` with 200
+  relayed. Reviewer-B then ran the real CLIs as the guide says (outcomes only): Claude Code
+  2.1.302, `contexto run claude -p ... --model claude-haiku-5-5`, exit 0, `POST /v1/messages` 200
+  `end_turn` with usage; Codex 0.163.0, `contexto run --codex-key-helper ... codex exec -m
+  gpt-5.6-luna ...`, exit 0, `POST /responses` to `<root>/v1/responses` 200 `completed` with usage.
+  Claude Code's keyless startup `HEAD /api/hello` gets a 401, which is expected. The owner's
+  proxy answered `X-Api-Key` with 401 and `Authorization: Bearer` with 200
   on `/v1/models` and `count_tokens` (measured), so the guide recommends the bearer forms
   (`ANTHROPIC_AUTH_TOKEN` or `apiKeyHelper`). Tests: `tests/test_cliproxyapi.py`, a fake upstream
   built from CLIProxyAPI's routes, auth, error bodies, headers, keep-alives, and failure framing.

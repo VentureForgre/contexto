@@ -38,7 +38,8 @@ port) or `https://cpa.example.com`. CLIProxyAPI serves `/v1/messages`, `/v1/mess
 1. In CLIProxyAPI's `config.yaml`, list a client key under `api-keys:`, and log in to the providers
    you want it to serve (for example `cli-proxy-api -claude-login`), or add provider API keys.
 2. Point Claude Code at CLIProxyAPI's root and give it the client key. In a Claude Code settings
-   file (`~/.claude/settings.json`, or a project's `.claude/settings.local.json`):
+   file (`~/.claude/settings.json`, `$CLAUDE_CONFIG_DIR/settings.json` if you set
+   `CLAUDE_CONFIG_DIR`, or a project's `.claude/settings.local.json`):
 
    ```json
    {
@@ -67,7 +68,10 @@ port) or `https://cpa.example.com`. CLIProxyAPI serves `/v1/messages`, `/v1/mess
    ```
 
    The session line on stderr names where the upstream came from (`upstream flag`, or
-   `upstream settings:user`, and so on), never the URL.
+   `upstream settings:user`, and so on), never the URL. Contexto reads the same settings files as
+   Claude Code, including `$CLAUDE_CONFIG_DIR/settings.json` in place of `~/.claude/settings.json`
+   when `CLAUDE_CONFIG_DIR` is set (before D35 it always read `~/.claude/settings.json`; with an
+   older Contexto, use project settings or `--upstream`).
 
 Do not add `/v1` to `ANTHROPIC_BASE_URL` or `--upstream`: Claude Code adds it, and
 `<root>/v1/v1/messages` is a 404.
@@ -75,14 +79,19 @@ Do not add `/v1` to `ANTHROPIC_BASE_URL` or `--upstream`: Claude Code adds it, a
 ## Codex
 
 ```sh
-contexto run --codex-key-helper '/bin/cat /path/to/cliproxyapi-client-key' codex
+contexto run --codex-key-helper '/bin/cat /path/to/cliproxyapi-client-key' codex -m gpt-5.6-luna
 ```
+
+Name a model CLIProxyAPI serves (see [Models](#models)); Codex's own default may not be one of them.
+The session line on stderr ends with where the upstream came from, for example
+`upstream claude-settings:local+/v1` (Claude Code's upstream plus `/v1`), `upstream codex-flag`, or
+`upstream codex-env`. The session log's `proxy_start` event carries the same label.
 
 - Upstream: with no `--codex-upstream`, Contexto uses Claude Code's upstream plus `/v1`, so with the
   settings above Codex goes to `http://127.0.0.1:8317/v1`. To set it on its own, pass
   `--codex-upstream http://127.0.0.1:8317/v1` or set `CONTEXTO_CODEX_UPSTREAM`. Keep the `/v1`:
-  Codex sends `POST /responses`, and CLIProxyAPI answers `<root>/responses` with
-  `404 page not found`.
+  Codex sends `POST /responses`, and CLIProxyAPI answers `<root>/responses` with a 404 and an
+  empty body.
 - Key: Codex runs the helper and sends the key as `Authorization: Bearer`. Without
   `--codex-key-helper` or `CONTEXTO_CODEX_KEY_HELPER`, Contexto uses the `apiKeyHelper` from your
   Claude Code settings, so the setup above serves both CLIs with one key. If Claude Code gets its
@@ -99,8 +108,9 @@ key lists what it serves. A model no configured provider serves comes back as a 
 
 ## What Contexto passes through
 
-- Every request header except hop-by-hop headers, including `Authorization`, `X-Api-Key`, and
-  `anthropic-beta`, and the query string (CLIProxyAPI also accepts `?key=`). For the rewritten
+- Every request header except hop-by-hop headers, including `Authorization`, `X-Api-Key`,
+  `X-Goog-Api-Key`, and `anthropic-beta`, and the query string (CLIProxyAPI also accepts `?key=`
+  and `?auth_token=`). The session log records the path without the query. For the rewritten
   endpoints Contexto asks for an uncompressed response (`Accept-Encoding: identity`).
 - Every response header except hop-by-hop headers, including `X-Cpa-Trace-Id` and `Retry-After`.
 - Error bodies and status codes, unchanged and never retried. CLIProxyAPI's own auth errors are not
@@ -115,13 +125,17 @@ key lists what it serves. A model no configured provider serves comes back as a 
 
 ## Troubleshooting
 
+**A 401 on `HEAD /api/hello` at startup.** Expected. It is Claude Code's connectivity check, sent
+without a key, and the session log records it as `upstream_4xx` next to the 200s of the real
+requests. Only a 401 on `POST /v1/messages` or `/responses` means a key problem.
+
 **401 `Missing API key`.** The CLI sent no key. Check `apiKeyHelper` or `ANTHROPIC_AUTH_TOKEN` for
 Claude Code, and the key helper for Codex.
 
 **401 `Invalid API key`.** The key is not in CLIProxyAPI's `api-keys`, or a gateway in front of it
 does not accept the header the CLI used. Switch to `apiKeyHelper` or `ANTHROPIC_AUTH_TOKEN`.
 
-**404 `page not found` from Codex.** The Codex upstream lacks `/v1`.
+**A 404 with an empty body from Codex.** The Codex upstream lacks `/v1`.
 
 **502 `contexto proxy: upstream unreachable (...)`.** Contexto could not connect. Check that
 CLIProxyAPI is running (`lsof -iTCP:8317 -sTCP:LISTEN`) and the URL scheme: `http://` for a plain
@@ -142,11 +156,22 @@ tested with Contexto.
 ## What was tested
 
 - `tests/test_cliproxyapi.py` runs Contexto's real rewrite engine against a fake upstream built
-  from CLIProxyAPI v7.3.12's source: its routes, client-key checks (all four ways), error bodies,
-  response headers, keep-alive comments, and failure framing for both APIs.
-- Live, 2026-10-24, outcomes only: through a CLIProxyAPI deployment, `claude-haiku-5-5`
-  `count_tokens`, a non-streaming message, and a streaming message each returned 200 (both messages
-  ended `end_turn`, with usage read), and one Codex Responses request on `gpt-5.6-luna` returned 200
-  with `response.completed` and usage. A local CLIProxyAPI 7.3.12, sent no key, returned its 401
-  through Contexto unchanged. Claude Code and Codex themselves were not run in this check; the
-  requests had the shapes they send.
+  from CLIProxyAPI's v7.2.142 source and checked against a running 7.3.12 binary: its routes,
+  client-key checks (all five ways), error bodies, response headers, keep-alive comments, and
+  failure framing for both APIs.
+- Live, 2026-10-24, outcomes only, through a CLIProxyAPI deployment:
+  - Claude Code 2.1.302, set up as this guide says (a project `.claude/settings.local.json` with
+    `ANTHROPIC_BASE_URL` and `apiKeyHelper`): `contexto run claude -p "Reply with the word ok"
+    --model claude-haiku-5-5` exited 0; `POST /v1/messages` returned 200, streamed, ended
+    `end_turn`, with usage read; the session line said `upstream settings:local`.
+  - Codex 0.163.0: `contexto run --codex-key-helper '<helper>' codex exec -m gpt-5.6-luna "Reply
+    with the word ok"` exited 0; `POST /responses` reached `<root>/v1/responses` (the Claude
+    upstream plus `/v1`) and returned 200 with `response.completed` and usage, and two
+    `GET /models` returned 200. Without `--codex-key-helper`, the same helper is found in the
+    project settings.
+  - Direct requests in the shapes those CLIs send: `claude-haiku-5-5` `count_tokens`, a
+    non-streaming message, and a streaming message each returned 200, and one Responses request
+    on `gpt-5.6-luna` returned 200 with `response.completed`.
+  - A local CLIProxyAPI 7.3.12, sent no key, returned its 401 through Contexto unchanged.
+  - The key appeared in no file under the Contexto home and in no captured output.
+- Not tested: CLIProxyAPI's cloak modes `always` and `strict-mode`.
