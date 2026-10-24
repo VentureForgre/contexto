@@ -505,6 +505,72 @@ the owner's delegation. Open decisions are listed at the end with the options an
   single pages inside a live session (pages are cited by id from the ledger and the rendered index;
   out of scope here).
 
+- **D38. Contexto names the CLI versions it was tested with and warns about others, without
+  blocking.** Intake, 2026-10-24. Contexto recognises Claude Code's session start by its
+  `# Environment` heading (D33), its context blocks by their first lines (D32), and Codex's session
+  context by its section tags. A CLI update that changes that text fails silently: the message falls
+  into another class and can be paged. What changed: (1) `TESTED_VERSIONS` in
+  `src/contexto/cliversions.py` is the single list: Claude Code 2.1.302; Codex 0.154.0 (shapes,
+  acceptance) and 0.163.0 (MCP launch, missing-tools check). A test keeps
+  `SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION`, `CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION` and
+  `CONTEXT_SECTIONS_CODEX_VERSION` equal to the newest tested version of their CLI. The Codex
+  constant moves from 0.154.0 to 0.163.0. The routine (5) asks for its steps 1, 2 and 4 before that
+  bump: the first check, the shape probe, and the suite. All three ran on 0.163.0, at zero spend.
+  The first check (`spikes/m2/cliversion/check.sh`) showed the same six section openings, with
+  `<environment_context>` last in the lead. `spikes/m2/codex/probe.sh`, re-run on 0.163.0 over its
+  five auth and provider scenarios, matched the 0.154.0 table in `docs/research/M2-codex-adapter.md`:
+  POST-only full input, `store: false`, no `previous_response_id`, 6 POSTs on a 401 with the custom
+  providers in API-key mode, 2 POSTs and 2 `GET /models` in ChatGPT mode, and 7 WebSocket upgrades
+  before 6 POSTs on the built-in provider, with the same section tags in every scenario. Codex now sends more header names (`x-client-request-id` and
+  `x-codex-*`); none of them is read. Step 3 (`smoke.sh preflight`, the MCP launch) also ran: no
+  `mcp_tools_missing`, version 0.163.0 tested. The AGENTS.md header was not exercised; (2)
+  `contexto run claude|codex` runs `<cli> --version` after the session line and, for an untested
+  version, prints one stderr line naming the version, the tested versions, what may break, where to
+  report it, and `contexto run --no-version-check <cli>` (the flag goes before the CLI's name, or
+  it is passed to the CLI). The command runs in its own process group with stdin closed. At most
+  4 KB of output is read, until a line with a version, end of file, or 3 seconds, and then the group
+  is killed. So neither endless output nor a child that keeps the pipe open can hold the launch
+  (reviewer A measured 6.5 s and 20 GB with a `--version` that ran `yes`, before this). It never
+  blocks the launch; a CLI that does not answer is logged, not warned about. Ctrl+C during the
+  check exits 130 through the launcher's normal cleanup, with no traceback and without starting the
+  CLI. `CONTEXTO_NO_VERSION_CHECK=1` also skips the check. Logged as `cli_version_check`; (3) the
+  proxy reads each request's `User-Agent` (measured, zero spend:
+  `claude-cli/2.1.302 (external, sdk-cli)` and `codex_exec/0.163.0 (...)`; other `codex_` surfaces
+  are matched by the prefix, unmeasured), logs each distinct version once (`cli_version`, at most 8)
+  and the first untested one as `cli_version_untested`; (4) it checks, once, that the session start
+  was recognised, on the first request that has a tool list (any Codex request) and carries the
+  CLI's injected context (Claude Code: a role `system` message or a `<system-reminder>` block;
+  Codex: a developer item in the lead). That is the main conversation's first request: Claude
+  Code's title, topic, and quota side requests have no tool list, and subagents start from a main
+  turn's tool call. The engine's own main (`publishes`) is not used. When a tool-less side request
+  comes first, it stays main through the real conversation's first turn, and the check then landed
+  on a resumed subagent, which has a `<system-reminder>` but no `# Environment` (reviewer A). A
+  request with a tool list but no injected context leaves the check open, for up to 8 of them.
+  Recognised means: for Claude Code, a role `system` message with the signature or a context
+  block of kind `environment`, which every main request of the 13 reminders-spike runs on 2.1.302
+  has; for Codex, a user message of context sections in the lead. Otherwise the proxy logs one
+  `session_start_unrecognised`. The check reads only the first 4,096 characters of each content
+  block (a role `system` message is matched whole, and returns at the first match). Runtime events go
+  to the session log only, since a TUI can draw over a mid-run line; (5) `docs/cli-updates.md` is the
+  routine for a new version. It says how to set up (a `.venv` at the repository root) and which steps
+  each constant needs: for the two Claude Code constants, the first check, the reminders spike, and
+  the suite; for the Codex section constant, the first check, `probe.sh`, and the suite. The list and
+  the constants change in one commit. Options considered: refuse to launch an untested version
+  (rejected: most updates do not touch the text Contexto reads, and a refusal would stop users for
+  no change); warn on a different minor or major version only (rejected: Claude Code ships patch
+  versions often, and the tested text was measured on one patch version); warn on
+  stderr at runtime too (rejected: drawn over by the interactive CLI, and the launch line already
+  says it); check every request for the session start (rejected: one scan of a large history per
+  request for an answer that does not change within a process); judge the engine's main
+  conversation (rejected: wrong when a tool-less side request comes first, above); compare the
+  system prompt's hash (rejected: it changes with the user's tools, MCP servers, and settings, so
+  every session would warn). Limitations: a CLI that keeps its version but changes its text is not
+  caught by the version checks; the session-start check sees only the first judged request, so it
+  misses text that changes later in a session (a new reminder kind on a later turn); a CLI that
+  injected no context at all is not judged; whether Claude Code's subagent requests carry the
+  environment message is not measured, and the check relies on the main conversation's first
+  request coming before any subagent's.
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.

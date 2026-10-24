@@ -339,6 +339,13 @@ class FakeLauncher:
     def report_missing_tools(self, proxy):
         self.calls["reported_after_stop"] = proxy.stopped
 
+    EXIT_INTERRUPTED = 130
+    interrupted = False
+
+    def check_cli_version(self, cli, binary, store, *, enabled=True, stderr=None):
+        self.calls["version_check"] = (cli, binary, enabled)
+        return not self.interrupted
+
     def run_child(self, argv, env, *, stderr=None):
         home = env.get("CODEX_HOME")
         self.calls.update(argv=argv, home_existed=bool(home) and os.path.isdir(home), home=home)
@@ -429,9 +436,26 @@ def test_run_codex_with_the_real_launcher_helpers(tmp_path, monkeypatch):
 
 
 
+def test_run_codex_checks_the_codex_binary_unless_silenced(tmp_path, monkeypatch):
+    # D38: after the session line, before Codex starts; --no-version-check turns it off.
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    for enabled in (True, False):
+        args = parse("--codex-key-helper", "/synthetic/helper", "codex", "exec", "hi")
+        if not enabled:
+            args.no_version_check = True
+        fake = FakeLauncher()
+        assert run_codex(args, launcher=fake, stderr=io.StringIO()) == 0
+        assert fake.calls["version_check"] == ("codex", "codex", enabled)
+    fake = FakeLauncher()
+    fake.interrupted = True  # Ctrl+C during the check: codex never runs, the proxy still stops
+    assert run_codex(parse("--codex-key-helper", "/synthetic/helper", "codex", "exec", "hi"), launcher=fake,
+                     stderr=io.StringIO()) == 130
+    assert "argv" not in fake.calls and fake.proxy.stopped and fake.calls["reported_after_stop"]
+
+
 def test_tag_leading_user_prompts_stay_turn_starts():
     from contexto.codex import CONTEXT_SECTIONS_CODEX_VERSION
-    assert CONTEXT_SECTIONS_CODEX_VERSION == "0.154.0"
+    assert CONTEXT_SECTIONS_CODEX_VERSION == "0.163.0"  # measured on 0.154.0, rechecked on 0.163.0 (D38)
     d = ResponsesDialect()
     for text in ("<div>fix this layout</div>", "<template>synthetic</template>", "<T>generic question",
                  "<environment_context_extra>not measured", "# AGENTS.md is a file name I mention"):

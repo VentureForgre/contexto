@@ -53,7 +53,11 @@ TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
 # 0.154.0 (spikes/m2/codex/probe.sh: skills_instructions, permissions instructions, collaboration_mode,
 # multi_agent_role, multi_agent_mode, environment_context) and the AGENTS.md header from the 0.154.0
 # source. A user prompt that merely starts with another tag (such as <div>) stays a turn start.
-CONTEXT_SECTIONS_CODEX_VERSION = "0.154.0"
+# Rechecked on 0.163.0 for D38, with zero spend against loopback stubs: spikes/m2/cliversion/check.sh
+# (one `codex exec`) and spikes/m2/codex/probe.sh (five auth and provider scenarios) showed the same
+# six openings in every scenario, the environment_context message last in the lead; the AGENTS.md
+# header was not exercised.
+CONTEXT_SECTIONS_CODEX_VERSION = "0.163.0"
 CONTEXT_SECTION = re.compile(
     r"\s*(?:<(?:skills_instructions|permissions instructions|collaboration_mode|multi_agent_role|"
     r"multi_agent_mode|environment_context)>|# AGENTS\.md instructions for )")
@@ -169,6 +173,23 @@ class ResponsesDialect(Dialect):
 
     def usage_tokens(self, usage: dict) -> int:
         return usage.get("input_tokens") or 0  # cached_tokens is a subset of input_tokens
+
+    def judges_session_start(self, request: dict) -> bool:
+        return True  # Codex's main requests carry no top-level tools in code mode; every request has the lead
+
+    def session_start_seen(self, items: list[dict]) -> bool | None:
+        """D38: True when the lead holds a user message made only of context sections (on 0.154.0 and
+        0.163.0, ``<environment_context>``). False when the lead holds Codex's developer items but no
+        such message: a Codex that changed its section tags makes that message a turn start, and it
+        would be paged. None when the lead has no developer or system message (not Codex's shape)."""
+        lead = items[: self.lead_count(items)]
+        if any(_is_message(i) and i.get("role") == "user" and self.is_system_like(i) for i in lead):
+            return True
+        return False if any(_is_message(i) and i.get("role") in ("developer", "system") for i in lead) else None
+
+    @property
+    def session_start_version(self) -> str:
+        return CONTEXT_SECTIONS_CODEX_VERSION
 
 
 def item_is_text_only(item: dict) -> bool:
@@ -444,6 +465,9 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             print(f"contexto: {note}", file=stderr)
         print(f"contexto: session {session_id}, engine {engine_name}, codex auth {args.codex_auth}, "
               f"upstream {source}", file=stderr)
+        if not launcher.check_cli_version("codex", plan.argv[0], store,
+                                          enabled=not getattr(args, "no_version_check", False), stderr=stderr):
+            return launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started
         return launcher.run_child(plan.argv, plan.env, stderr=stderr)
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)

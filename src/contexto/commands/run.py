@@ -19,7 +19,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                     "that keeps the upstream prompt under --bound. Contexto options go before "
                     "'claude'; everything after 'claude' is passed to Claude Code unchanged.",
         epilog="Exit codes: Claude Code's own code; 128+N if it died from signal N; 2 usage error; "
-               "1 proxy failed to start; 127 'claude' not found on PATH.")
+               "1 proxy failed to start; 127 'claude' not found on PATH; 130 Ctrl+C during the version check.")
     parser.add_argument("--bound", type=int, default=DEFAULT_BOUND,
                         help=f"upstream prompt bound in tokens (default {DEFAULT_BOUND:,}; "
                              f"above {BOUND_GUARD:,} needs --allow-large-bound)")
@@ -35,6 +35,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--observe-thinking", action="store_true",
                         help="add the thinking-binding beta so dropped thinking is reported and logged "
                              "(changes the request: one extra anthropic-beta flag)")
+    parser.add_argument("--no-version-check", action="store_true",
+                        help="do not compare the CLI's --version with the versions Contexto was tested with "
+                             "(also CONTEXTO_NO_VERSION_CHECK=1)")
     parser.add_argument("cli", choices=["claude", "codex"], help="the CLI to run")
     parser.add_argument("cli_args", nargs=argparse.REMAINDER, help="arguments passed to the CLI unchanged")
     try:
