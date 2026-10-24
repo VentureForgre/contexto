@@ -26,6 +26,7 @@ class SessionInfo:
     pages: int
     records: int | None  # None when the ledger cannot be read
     last_activity: str
+    size_bytes: int  # disk space the session directory uses, symlinks not followed
 
 
 def _iso(ts: float) -> str:
@@ -42,6 +43,31 @@ def _times(path: Path) -> tuple[float, float]:
         if p.exists():
             last = max(last, p.stat().st_mtime)
     return created, last
+
+
+def last_activity(path: Path) -> float:
+    """When a session directory last changed, from file times: the newest of the directory itself,
+    ``log.jsonl``, ``ledger.jsonl``, and ``pages/`` (metadata writes replace ``meta.json``, which
+    changes the directory's time)."""
+    return _times(path)[1]
+
+
+def disk_usage(path: Path) -> int:
+    """Bytes ``path`` and everything under it occupy on disk (allocated blocks, so it is the space a
+    delete frees). Symlinks are counted as links and never followed; entries that vanish while
+    walking are skipped."""
+    total = 0
+    for root, dirs, files in os.walk(path, followlinks=False):
+        # Each directory is counted once, as the root of its own step; a symlink to a directory is
+        # listed in ``dirs`` but not walked, so it is counted here with the files.
+        links = [d for d in dirs if os.path.islink(os.path.join(root, d))]
+        for p in [root, *(os.path.join(root, n) for n in [*files, *links])]:
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            total += st.st_blocks * 512 if hasattr(st, "st_blocks") else st.st_size
+    return total
 
 
 def session_ids(home: Path) -> list[str]:
@@ -68,7 +94,7 @@ def session_info(home: Path, session_id: str) -> SessionInfo:
         records = len(store.ledger.records())
     except LedgerError:
         records = None
-    return SessionInfo(session_id, _iso(created), pages, records, _iso(last))
+    return SessionInfo(session_id, _iso(created), pages, records, _iso(last), disk_usage(store.dir))
 
 
 def list_sessions(home: Path) -> list[SessionInfo]:

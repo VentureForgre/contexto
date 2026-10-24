@@ -392,6 +392,39 @@ the owner's delegation. Open decisions are listed at the end with the options an
   consistent with quarantine, with a crash between the page and the manifest write, and with
   stub-rule changes such as `current_stub`, to save one read of every page after a proxy restart).
 
+- **D37. `contexto sessions prune` deletes whole sessions, dry run by default, and never one in
+  use.** Intake, 2026-10-24, from the 2026-10-16 report that session folders grow without limit and
+  could only be freed by deleting files by hand. Contract change: a new subcommand, a new store file,
+  and a new `sessions list` field. What changed: (1) `contexto sessions prune` selects sessions by
+  `--older-than DURATION` (a positive whole number with `s`, `m`, `h`, `d`, or `w`), `--keep N` (keep
+  the N with the most recent activity, ranked over all sessions), and `--session ID`; every given
+  condition must hold, and at least one is required (exit 2 otherwise). Age is idle time since the
+  session's last activity, the same value `sessions list` shows: the newest modification time of the
+  session directory, `log.jsonl`, `ledger.jsonl`, and `pages/`. Without `--yes` it prints each
+  selected session with its size and the total, and changes nothing, not even a lock file; with
+  `--yes` it deletes them; (2) liveness: the store had no reliable signal (the ledger and metadata
+  locks are held only for one write, and `mcp_listed_at` is a time, not a holder), so every writable
+  `SessionStore` (proxy, launcher, MCP server) now holds a shared `flock` on the session's
+  `live.lock` for the life of the object, and the kernel drops it when the process exits, crash
+  included. Prune takes the exclusive lock without waiting and skips the session if that fails. It
+  holds the lock while it deletes and removes `live.lock` last; a store opening the session at that
+  moment waits on the lock, sees afterwards that its file was unlinked, and recreates the session
+  directory before going on, so it never writes into a half-deleted one. A process from before D37
+  holds no lock, so prune also skips any session active in the last 10 minutes (fixed, no override;
+  a partly failed delete changes the directory, so a retry waits out the same 10 minutes); (3) path
+  safety: a session is deleted only when its entry is a real directory, not a symlink, whose
+  resolved path is directly inside the resolved `sessions/`, which must itself resolve inside the
+  resolved home; symlinks inside a session are removed as links and never followed; (4) errors are
+  per session: prune reports each failure on stderr, goes on with the rest, and exits 1 if any
+  failed. Skipping a session in use is not a failure, except when `--session` named it (exit 1);
+  (5) `sessions list` gains a SIZE column, a total line, and `size_bytes` in `--json`: the
+  allocated blocks under the directory, symlinks counted as links, which is the space a delete frees.
+  Rejected: refusing only by recent activity (a proxy idle for an hour while the user reads is still
+  live); a pid file (pids are reused and a crashed process leaves the file behind); moving the
+  session to a trash directory before deleting (a failed delete would leave data `sessions list`
+  cannot see and prune cannot reach); pruning single pages inside a live session (pages are cited by
+  id from the ledger and the rendered index; out of scope here).
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.

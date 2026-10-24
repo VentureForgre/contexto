@@ -15,6 +15,9 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
   (recorded by lane A's engine with ``set_window``; recall sizes chunks from them). Writers
   serialize on ``meta.lock``; the file is replaced atomically, so readers never see a partial file.
 - ``log.jsonl``: the session log, one canonical JSON event per line.
+- ``live.lock``: every writable ``SessionStore`` (the proxy, the launcher, the MCP server) holds a
+  shared ``flock`` on it for as long as the store object lives, so ``contexto sessions prune`` can
+  tell a session in use from an idle one (D37). The kernel drops the lock when the process exits.
 
 Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``) come from
 ``contexto.store.records.LedgerOps``; see that module for the API the MCP server uses.
@@ -30,6 +33,7 @@ import os
 import re
 import secrets
 import time
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -57,6 +61,35 @@ def check_page_id(page_id: Any) -> str:
     return page_id
 
 KEY_BYTES = 32
+
+LIVE_LOCK = "live.lock"
+
+
+def hold_live(session_path: Path) -> int:
+    """Take a shared ``flock`` on ``session_path/live.lock`` and return its descriptor (D37).
+
+    Blocks while ``sessions prune`` holds the exclusive lock. Prune deletes the directory under that
+    lock, so after waiting the descriptor can name an unlinked file: the loop then recreates the
+    directory and locks the new file, and returns only once the lock is on the file at the path.
+    """
+    path = Path(session_path) / LIVE_LOCK
+    while True:
+        private_dir(path.parent)
+        try:
+            fd = open_private(path, os.O_RDWR)
+        except FileNotFoundError:  # the directory was removed between the mkdir and the open
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            held, current = os.fstat(fd), os.stat(path)
+            if (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino):
+                return fd
+        except FileNotFoundError:
+            pass
+        except BaseException:
+            os.close(fd)
+            raise
+        os.close(fd)
 
 _SECRET_KEYS = {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"}
 
@@ -301,6 +334,8 @@ class SessionStore(LedgerOps):
         private_dir(Path(home))
         private_dir(Path(home) / "sessions")
         private_dir(self.dir)
+        live = hold_live(self.dir)  # before anything else is created, so prune cannot remove it under us
+        weakref.finalize(self, os.close, live)
         private_dir(self.pages_dir)
         self._key_cache = self._load_key()
         self.ledger = Ledger(self.dir)
