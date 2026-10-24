@@ -18,20 +18,38 @@ Contexto sends no extra model calls. It reads and rewrites the requests your CLI
 ## Install
 
 Contexto needs Python 3.12 or later and has no runtime dependencies. Install the wheel from the
-latest release, [v0.2.8](https://github.com/VentureForgre/contexto/releases/tag/v0.2.8). It has two
-assets: `contexto-0.2.8-py3-none-any.whl` and `contexto-0.2.8.tar.gz`. The repository is private, so
-download with a `gh` login that can read it:
+latest release, [v0.4.0](https://github.com/VentureForgre/contexto/releases/tag/v0.4.0). It has two
+assets: `contexto-0.4.0-py3-none-any.whl` and `contexto-0.4.0.tar.gz`. It is not on PyPI: the
+PyPI package named `contexto` is an unrelated project, so `pip install contexto` installs the wrong
+thing. Use the release URL or the downloaded wheel.
+
+Straight from the release URL, with no GitHub login (this needs the repository to be public):
 
 ```sh
-gh release download v0.2.8 --repo VentureForgre/contexto --pattern 'contexto-0.2.8-py3-none-any.whl'
-uv tool install ./contexto-0.2.8-py3-none-any.whl     # or: pipx install ./contexto-0.2.8-py3-none-any.whl
-contexto --version                                    # contexto 0.2.8
+pipx install https://github.com/VentureForgre/contexto/releases/download/v0.4.0/contexto-0.4.0-py3-none-any.whl
+contexto --version                                    # contexto 0.4.0
+```
+
+`pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment.
+
+Or download it first with the GitHub CLI (needed while the repository is private; `gh` must be
+logged in to an account that can read it):
+
+```sh
+gh release download v0.4.0 --repo VentureForgre/contexto --pattern 'contexto-0.4.0-py3-none-any.whl'
+uv tool install ./contexto-0.4.0-py3-none-any.whl     # or: pipx install ./contexto-0.4.0-py3-none-any.whl
 ```
 
 `pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`. To
 install from a checkout instead, run `uv tool install .` in the repository root.
 
 You also need `claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
+
+### Platforms
+
+Tested on macOS and Linux with Python 3.12. Windows is not supported: the store locks files with
+`fcntl`, the launcher forwards POSIX signals (`SIGHUP`), and the store relies on POSIX file modes
+(0700 directories, 0600 files).
 
 ## Quickstart
 
@@ -255,7 +273,7 @@ server's memory for the life of the process (about the UTF-8 size of the page te
 at 6,000 synthetic pages), and the first search of each MCP process reads every page once (0.74 s at
 6,000 pages). Each query word scans that text once, so a long query with matches costs more. The
 full list is in
-[STATUS.md, "Known limitations (v0.2.8)"](STATUS.md#known-limitations-v028).
+[STATUS.md, "Known limitations (v0.4.0)"](STATUS.md#known-limitations-v040).
 
 ## Exit codes
 
@@ -271,3 +289,4 @@ full list is in
 | any | 2 | Unknown command or option, or a missing argument (`contexto` with no command prints help and exits 2) |
 
 Development, tests, and releases: see [CONTRIBUTING.md](CONTRIBUTING.md).
+Reporting a vulnerability, and what the session store holds: see [SECURITY.md](SECURITY.md).
