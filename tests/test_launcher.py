@@ -41,6 +41,12 @@ FAKE_CLAUDE = r'''
 import json, os, signal, sys, time, urllib.request
 
 args = sys.argv[1:]
+if args == ["--version"]:  # contexto run's version check (D38)
+    if os.environ.get("FAKE_VERSION_HANG"):
+        open(os.environ["FAKE_VERSION_HANG"], "w").close()  # the marker: --version is running
+        time.sleep(30)
+    print(os.environ.get("FAKE_VERSION", "2.1.302 (Claude Code)"))
+    sys.exit(0)
 record = {"argv": args, "pid": os.getpid(), "env_base_url": os.environ.get("ANTHROPIC_BASE_URL")}
 for flag, key in (("--settings", "settings"), ("--mcp-config", "mcp")):
     path = args[args.index(flag) + 1]
@@ -192,6 +198,69 @@ def test_request_entry_is_logged_before_the_cli_sees_the_response_end(env, upstr
     assert "request" in kinds and kinds.index("request") < kinds.index("proxy_stop")
 
 
+def test_untested_claude_version_gets_one_warning_line_and_the_launch_goes_on(env, upstream, tmp_path):
+    # D38: claude --version at start; an untested version is one stderr line, logged, never a refusal.
+    env["FAKE_VERSION"] = "2.1.400 (Claude Code)"
+    env.pop("CONTEXTO_NO_VERSION_CHECK", None)
+    proc = launch(env, "--upstream", upstream, "--session", "v1", "claude", "-p", "hi", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    warnings = [line for line in err.splitlines() if "2.1.400" in line]
+    assert len(warnings) == 1 and warnings[0].startswith("contexto: warning: Claude Code 2.1.400 ")
+    assert "tested: 2.1.302" in warnings[0]
+    assert err.index("contexto: session v1") < err.index(warnings[0])
+    assert Path(env["FAKE_RECORD"]).exists()  # claude ran
+    check = [e for e in session_log(env, "v1") if e["event"] == "cli_version_check"]
+    assert check == [dict(check[0], cli="claude", version="2.1.400", tested=False)]
+
+
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_version_check_is_silenced_by_the_flag_or_the_env(env, upstream, tmp_path, how):
+    env["FAKE_VERSION"] = "2.1.400 (Claude Code)"
+    flags = ["--no-version-check"] if how == "flag" else []
+    if how == "env":
+        env["CONTEXTO_NO_VERSION_CHECK"] = "1"
+    proc = launch(env, "--upstream", upstream, "--session", "v2", *flags, "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert "2.1.400" not in err and "warning" not in err
+    check = [e for e in session_log(env, "v2") if e["event"] == "cli_version_check"]
+    assert check == [{**check[0], "cli": "claude", "skipped": True}]
+
+
+def test_ctrl_c_during_the_version_check_exits_130_without_a_traceback(env, upstream, tmp_path):
+    # D38: claude --version hangs; Ctrl+C reaches the launcher (the check runs --version in its own
+    # process group, so the hanging command does not get it). The launcher stops the proxy, logs the
+    # exit, and never starts claude.
+    marker = tmp_path / "version-running"
+    env["FAKE_VERSION_HANG"] = str(marker)
+    env.pop("CONTEXTO_NO_VERSION_CHECK", None)
+    proc = launch(env, "--upstream", upstream, "--session", "v4", "claude", cwd=tmp_path)
+    assert proc.stderr is not None
+    line = proc.stderr.readline()
+    assert "contexto: session v4" in line, line
+    wait_for(marker)  # inside the version check: its 3 s window has just started
+    proc.send_signal(signal.SIGINT)
+    rest = proc.communicate(timeout=30)[1]
+    assert proc.returncode == 130, rest
+    assert "Traceback" not in rest and "KeyboardInterrupt" not in rest and "contexto: interrupted" in rest
+    assert not Path(env["FAKE_RECORD"]).exists()  # claude never ran
+    events = session_log(env, "v4")
+    assert [e for e in events if e["event"] == "cli_version_check"][0]["error"] == "interrupted"
+    assert events[-1]["event"] == "exit" and events[-1]["code"] == 130
+    assert "proxy_stop" in [e["event"] for e in events]
+
+
+def test_tested_claude_version_prints_nothing(env, upstream, tmp_path):
+    env.pop("CONTEXTO_NO_VERSION_CHECK", None)
+    proc = launch(env, "--upstream", upstream, "--session", "v3", "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert "warning" not in err
+    check = [e for e in session_log(env, "v3") if e["event"] == "cli_version_check"]
+    assert len(check) == 1 and check[0]["version"] == "2.1.302" and check[0]["tested"] is True
+
+
 def test_exit_code_is_propagated(env, upstream, tmp_path):
     env["FAKE_EXIT"] = "7"
     proc = launch(env, "--upstream", upstream, "--session", "s2", "claude", cwd=tmp_path)
@@ -211,6 +280,19 @@ def test_upstream_is_resolved_from_settings_before_the_proxy_starts(env, upstrea
     assert Upstream.seen == [("POST", "/v1/messages", "fake-key")]
     launch_event = next(e for e in session_log(env, "s3") if e["event"] == "launch")
     assert launch_event["upstream_source"] == "settings:local"
+
+
+@pytest.mark.parametrize("config_dir", ["~nosuchuser-contexto-test/cfg", "~/cfg", " "])
+def test_an_odd_claude_config_dir_does_not_stop_the_launch(env, upstream, tmp_path, config_dir):
+    """reviewer-A, round 2: an unknown ~user in CLAUDE_CONFIG_DIR raised out of `contexto run`."""
+    env["CLAUDE_CONFIG_DIR"] = config_dir
+    env["FAKE_REQUEST"] = "1"
+    env["ANTHROPIC_BASE_URL"] = upstream  # no settings file sets one, so the environment is used
+    proc = launch(env, "--session", "s3c", "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0 and "Traceback" not in err, err
+    launch_event = next(e for e in session_log(env, "s3c") if e["event"] == "launch")
+    assert launch_event["upstream_source"] == "env"
 
 
 def test_sigterm_is_forwarded_to_claude_and_everything_is_cleaned_up(env, upstream, tmp_path):

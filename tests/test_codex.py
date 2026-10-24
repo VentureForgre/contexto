@@ -267,7 +267,7 @@ def test_chatgpt_mode_uses_overrides_only(tmp_path):
     assert "requires_openai_auth=true" in argv and "supports_websockets=false" in argv
     assert "model_provider=contexto" in argv and "features.enable_request_compression=false" in argv
     assert launch.argv[-2:] == ["exec", "hi"] and launch.upstream == CHATGPT_UPSTREAM
-    assert any("O4" in note for note in launch.notes)
+    assert any("D35" in note and "provider's terms" in note for note in launch.notes)
     overrides = dict(launch.argv[i + 1].split("=", 1) for i, a in enumerate(launch.argv) if a == "-c")
     approval = overrides["mcp_servers.contexto.default_tools_approval_mode"]
     assert tomllib.loads(f"v = {approval}")["v"] == "approve"  # a valid TOML value, as codex parses -c
@@ -333,10 +333,18 @@ class FakeLauncher:
 
     def start_proxy(self, store, upstream_url, upstream_source, config, observe_thinking, *, stderr=None):
         self.calls["upstream"] = upstream_url
+        self.calls["upstream_source"] = upstream_source
         return self.proxy, "rewrite"
 
     def report_missing_tools(self, proxy):
         self.calls["reported_after_stop"] = proxy.stopped
+
+    EXIT_INTERRUPTED = 130
+    interrupted = False
+
+    def check_cli_version(self, cli, binary, store, *, enabled=True, stderr=None):
+        self.calls["version_check"] = (cli, binary, enabled)
+        return not self.interrupted
 
     def run_child(self, argv, env, *, stderr=None):
         home = env.get("CODEX_HOME")
@@ -365,12 +373,28 @@ def test_run_codex_api_key_mode_runs_and_cleans_up(tmp_path, monkeypatch):
     err = io.StringIO()
     assert run_codex(args, launcher=fake, stderr=err) == 7
     assert fake.calls["upstream"] == "https://owner-proxy.invalid/v1" and fake.calls["session"] == "S9"
+    assert fake.calls["upstream_source"] == "claude-flag+/v1"  # D35: where the URL came from, never the URL
+    assert "upstream claude-flag+/v1" in err.getvalue() and "owner-proxy" not in err.getvalue()
     assert fake.calls["argv"] == ["codex", "exec", "hi"] and fake.calls["home_existed"]
     home = fake.calls["home"]
     assert home.endswith(os.path.join("sessions", "S9", "codex-home"))  # under the Contexto session dir
     assert os.path.isdir(home) and not os.path.exists(os.path.join(home, "config.toml"))  # rollouts kept
     assert fake.proxy.stopped and fake.calls["reported_after_stop"]
     assert "session S9" in err.getvalue()
+
+
+def test_run_codex_survives_an_odd_claude_config_dir(tmp_path, monkeypatch):
+    """reviewer-A, round 2: run_codex resolves Claude's upstream even with --codex-upstream, so an
+    unknown ~user in CLAUDE_CONFIG_DIR must not raise out of it."""
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~nosuchuser-contexto-test/cfg")
+    monkeypatch.chdir(tmp_path)
+    args = parse("--codex-upstream", "https://cpa.invalid/v1", "--codex-key-helper", "/synthetic/helper",
+                 "codex", "exec", "hi")
+    fake = FakeLauncher()
+    err = io.StringIO()
+    assert run_codex(args, launcher=fake, stderr=err) == 0
+    assert fake.calls["upstream"] == "https://cpa.invalid/v1" and fake.calls["upstream_source"] == "codex-flag"
 
 
 def test_run_codex_chatgpt_mode_and_errors(tmp_path, monkeypatch):
@@ -380,9 +404,10 @@ def test_run_codex_chatgpt_mode_and_errors(tmp_path, monkeypatch):
     err = io.StringIO()
     assert run_codex(args, launcher=fake, stderr=err) == 0
     assert fake.calls["upstream"] == "https://chatgpt.com/backend-api/codex"
+    assert fake.calls["upstream_source"] == "chatgpt-default"
     assert "requires_openai_auth=true" in " ".join(fake.calls["argv"])
     assert fake.calls["home"] == os.environ.get("CODEX_HOME")  # the user's own CODEX_HOME, untouched
-    assert "O4" in err.getvalue()
+    assert "D35" in err.getvalue() and "CLIProxyAPI" in err.getvalue()
     refused = FakeLauncher(bound_error="bound too large")
     assert run_codex(parse("codex"), launcher=refused, stderr=io.StringIO()) == 2
 
@@ -411,9 +436,26 @@ def test_run_codex_with_the_real_launcher_helpers(tmp_path, monkeypatch):
 
 
 
+def test_run_codex_checks_the_codex_binary_unless_silenced(tmp_path, monkeypatch):
+    # D38: after the session line, before Codex starts; --no-version-check turns it off.
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    for enabled in (True, False):
+        args = parse("--codex-key-helper", "/synthetic/helper", "codex", "exec", "hi")
+        if not enabled:
+            args.no_version_check = True
+        fake = FakeLauncher()
+        assert run_codex(args, launcher=fake, stderr=io.StringIO()) == 0
+        assert fake.calls["version_check"] == ("codex", "codex", enabled)
+    fake = FakeLauncher()
+    fake.interrupted = True  # Ctrl+C during the check: codex never runs, the proxy still stops
+    assert run_codex(parse("--codex-key-helper", "/synthetic/helper", "codex", "exec", "hi"), launcher=fake,
+                     stderr=io.StringIO()) == 130
+    assert "argv" not in fake.calls and fake.proxy.stopped and fake.calls["reported_after_stop"]
+
+
 def test_tag_leading_user_prompts_stay_turn_starts():
     from contexto.codex import CONTEXT_SECTIONS_CODEX_VERSION
-    assert CONTEXT_SECTIONS_CODEX_VERSION == "0.154.0"
+    assert CONTEXT_SECTIONS_CODEX_VERSION == "0.163.0"  # measured on 0.154.0, rechecked on 0.163.0 (D38)
     d = ResponsesDialect()
     for text in ("<div>fix this layout</div>", "<template>synthetic</template>", "<T>generic question",
                  "<environment_context_extra>not measured", "# AGENTS.md is a file name I mention"):

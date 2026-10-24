@@ -111,7 +111,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
   and the only mode the team runs live under D12): a temporary `CODEX_HOME` whose provider reads the
   rig key with `auth.command`. ChatGPT mode (behind `--codex-auth chatgpt`): the user's own
   `CODEX_HOME` with `-c` overrides only, credentials passed through unchanged; tested only with
-  synthetic credentials. Its end-user terms stay with O4.
+  synthetic credentials. Its end-user terms stayed with O4, settled by D35.
 - **D23. Direct requests identify honestly.** Intake, 2026-10-16. Any request the team sends
   directly, rather than through the real CLI, uses a user agent naming the harness and never carries
   another product's client marker such as a `claude-code-*` beta. In the acceptance harness a shared
@@ -393,6 +393,60 @@ the owner's delegation. Open decisions are listed at the end with the options an
   written by `page_out` for both processes (rejected for now: a new store file that must stay
   consistent with quarantine, with a crash between the page and the manifest write, and with
   stub-rule changes such as `current_stub`, to save one read of every page after a proxy restart).
+- **D35. Supported upstreams for people who run Contexto themselves: the vendor API with an API key,
+  or a CLIProxyAPI instance; this settles O4.** Owner, 2026-10-24: "this project should work with
+  CLIProxyAPI" (https://github.com/router-for-me/CLIProxyAPI, a local or hosted proxy that serves
+  Claude Code, Codex, and others through subscription logins and API keys). The owner already runs
+  Contexto through a CLIProxyAPI deployment (the rig proxy, D11). What it means: (1) Contexto
+  supports two kinds of upstream for end users: the vendor's API with the user's API key
+  (Anthropic for Claude Code, OpenAI for Codex), or a CLIProxyAPI instance reached with one of its
+  client keys; (2) a subscription login (claude.ai, ChatGPT) lives in CLIProxyAPI or in the
+  vendor's own CLI, never in Contexto. Contexto forwards the credential the CLI sends and never
+  stores or logs it. `--codex-auth chatgpt`, in which Codex keeps its own ChatGPT login and the
+  proxy passes it to the ChatGPT backend, stays as it is, tested only with synthetic credentials;
+  its launch note and help now give this guidance instead of pointing at O4; (3) users must follow
+  their providers' terms, including any terms on subscription use through a proxy; Contexto does
+  not decide that for them. Compatibility, read
+  from CLIProxyAPI's source (local checkout, v7.2.142; the running binary is 7.3.12) and checked
+  against the code: its
+  `/v1/messages`, `/v1/messages/count_tokens`, and `/v1/responses` sit under the root that
+  `ANTHROPIC_BASE_URL` names, so Claude Code needs the root and Codex the root plus `/v1`, which is
+  already Contexto's Codex default (D22); it accepts its client key as `Authorization: Bearer`,
+  `X-Api-Key`, `X-Goog-Api-Key`, `?key=`, or `?auth_token=`, and Contexto forwards all five
+  unchanged; model
+  names reach it unchanged and it resolves them (aliases, prefixes); its errors, including 401
+  bodies that are not in Anthropic's shape (`{"error":"Missing API key"}`), pass through unchanged
+  (rule 7). One change in the proxy: CLIProxyAPI sends `: keep-alive` SSE comment events when
+  `streaming.keepalive-seconds` is set, and the stream hold (contract PR #74) passed only `ping`
+  events, so a heartbeat that arrived after a tool call started was held with the content. Comment
+  events now pass at once, like `ping`: they carry no content, so the order of content events is
+  unchanged, and the CLI keeps receiving bytes while a long tool input is held. A comment passes
+  at once only when it ends with its line ending; an unterminated one at end of stream is held
+  and released last, so no held event is glued onto it (reviewer-A). Two launcher changes from
+  the review (reviewer-B): the user settings file is `$CLAUDE_CONFIG_DIR/settings.json` when
+  `CLAUDE_CONFIG_DIR` is set, as in Claude Code (used as given, without `~` expansion; empty
+  counts as unset), for both the upstream and the Codex key helper
+  (before, Contexto always read `~/.claude/settings.json`); and the Codex session line and
+  `proxy_start` event name where the Codex upstream came from (`codex-flag`, `codex-env`,
+  `chatgpt-default`, or `claude-<source>+/v1`), never the URL. Measured on
+  2026-10-24 through Contexto's real engine, outcomes only: through the owner's proxy,
+  `claude-haiku-5-5` `count_tokens`, a non-streaming message, and a streaming message each returned
+  200 (both messages `end_turn`, with usage read), and one Codex Responses request on
+  `gpt-5.6-luna` to `/responses` reached `/v1/responses` and returned 200 with `response.completed`
+  and usage; the local CLIProxyAPI 7.3.12 binary, sent no key through Contexto, returned its 401,
+  relayed. Reviewer-B then ran the real CLIs as the guide says (outcomes only): Claude Code
+  2.1.302, `contexto run claude -p ... --model claude-haiku-5-5`, exit 0, `POST /v1/messages` 200
+  `end_turn` with usage; Codex 0.163.0, `contexto run --codex-key-helper ... codex exec -m
+  gpt-5.6-luna ...`, exit 0, `POST /responses` to `<root>/v1/responses` 200 `completed` with usage.
+  Claude Code's keyless startup `HEAD /api/hello` gets a 401, which is expected. The owner's
+  proxy answered `X-Api-Key` with 401 and `Authorization: Bearer` with 200
+  on `/v1/models` and `count_tokens` (measured), so the guide recommends the bearer forms
+  (`ANTHROPIC_AUTH_TOKEN` or `apiKeyHelper`). Tests: `tests/test_cliproxyapi.py`, a fake upstream
+  built from CLIProxyAPI's routes, auth, error bodies, headers, keep-alives, and failure framing.
+  Setup guide: `docs/cliproxyapi.md`. Options considered: API key only (rejected by the owner's
+  decision); supporting subscription logins inside Contexto (rejected: credentials would live in
+  Contexto, and CLIProxyAPI already handles login, refresh, and rotation).
+
 - **D36. Each request carries a stable session signal a routing proxy can pin to one upstream
   credential: the CLI's own signals plus Contexto's salted `X-Session-Affinity`; on the proxy side,
   consistent-hash affinity; this settles O6.** Owner request ("improve this"), 2026-10-24,
@@ -450,6 +504,129 @@ the owner's delegation. Open decisions are listed at the end with the options an
   failure mode for the same result); an unsalted hash of the session id (rejected: a guessable name
   could be checked against the key); Contexto rewriting `X-Claude-Code-Session-Id` to its own key
   (rejected: it changes a header the CLI owns and that upstream also reads).
+- **D37. `contexto sessions prune` deletes whole sessions, dry run by default, and never one in
+  use.** Intake, 2026-10-24, from the 2026-10-16 report that session folders grow without limit and
+  could only be freed by deleting files by hand. Contract change: a new subcommand, a new store file,
+  and a new `sessions list` field. What changed: (1) `contexto sessions prune` selects sessions by
+  `--older-than DURATION` (a positive whole number with `s`, `m`, `h`, `d`, or `w`), `--keep N` (keep
+  the N with the most recent activity, ranked over all sessions), and `--session ID`; every given
+  condition must hold, and at least one is required (exit 2 otherwise). Age is idle time since the
+  session's last activity, the same value `sessions list` shows: the newest modification time of the
+  session directory, `log.jsonl`, `ledger.jsonl`, and `pages/`. Without `--yes` it prints each
+  selected session with its size and the total, and changes nothing, not even a lock file; with
+  `--yes` it deletes them. `--json` prints `dry_run`, `total_bytes` (would be freed, or freed), and
+  each selected session with `status` (`would_remove`, `removed`, `skipped`, `failed`) and `reason`;
+  (2) liveness: the store had no reliable signal (the ledger and metadata locks are held only for
+  one write, and `mcp_listed_at` is a time, not a holder), so every writable `SessionStore` (proxy,
+  launcher, MCP server) now holds a shared `flock` on the session's `live.lock` for the life of the
+  object. Several processes share it (a proxy and its MCP servers), the descriptor is not inherited
+  by children (`claude` cannot keep a session pinned), and the kernel drops it when the process
+  exits, crash included. Prune opens the lock read-write (so `flock` works on NFS too), never through
+  a symlink and without blocking, refuses one that is not a regular file, takes the exclusive lock
+  without waiting, and skips the session if that fails. It holds the lock while it deletes and
+  removes `live.lock` last. A store opening the session at that moment (a resume with `--session ID`)
+  waits on the lock, sees afterwards that its file was unlinked, recreates the session directory
+  empty, logs `pruned_while_opening`, and prints ``contexto: warning: session ID was deleted by
+  `contexto sessions prune` while it was being opened; it starts empty`` to stderr. A missing file
+  counts as a prune only when the session entry itself is gone; any other (a session entry that is a
+  symlink to a missing target, say) fails at once, and retries stop after 8 attempts with a short
+  backoff. `contexto proxy`, `contexto mcp`, and `contexto run codex` report a session that cannot
+  be opened as an error line (`cannot start` or `cannot open session`), not a traceback, as
+  `contexto run claude` already did. A store that opens
+  in the instant after `live.lock` is unlinked and before the final `rmdir` keeps its new files; prune
+  then reports the session as skipped ("opened again while it was being deleted"). A process from
+  before D37 holds no lock, so prune also skips any session active in the last 10 minutes (fixed, no
+  override; a partly failed delete changes the directory, so a retry waits out the same 10 minutes);
+  (3) path safety. The home is opened once (it may be a symlink); `sessions/` must be a real
+  directory in it, and each session a real directory in `sessions/`. Every later step goes through
+  those open directory descriptors, not paths: the session is opened with `O_NOFOLLOW` and must be
+  the same inode (`st_dev`, `st_ino`) as the entry that was listed and selected, and its contents are
+  deleted with `unlink` and `shutil.rmtree` relative to its descriptor (`rmtree`'s
+  symlink-attack-safe mode; prune refuses to delete on a platform without it). Symlinks inside a
+  session are removed as links and never followed. Guarantee: even if another process swaps
+  `sessions/<id>` or `sessions/` for a symlink at any moment, prune deletes nothing outside the
+  directory it checked and creates nothing there; if the entry no longer names that directory just
+  before the final `rmdir`, prune stops with an error and leaves the entry. Not guaranteed: if
+  the session directory itself is moved elsewhere after the check, its own contents are still
+  removed, because they are the session that was selected; (4) errors are per session: prune
+  reports each failure on stderr, goes on with the rest, and exits 1 if any failed. Skipping a
+  session in use is not a failure, except when `--session` named it: then it exits 1 with
+  `contexto: error: session ID: <reason>` on stderr. With `--json`, an error before any session is
+  selected (an unknown or unsafe `--session`, a symlinked `sessions/`) also prints `{"error": ...}`
+  on stdout, so stdout always parses; (5) `sessions list` gains a SIZE column, a
+  total line, and `size_bytes` in `--json`: the allocated blocks under the directory, symlinks
+  counted as links, which is the space a delete frees. Rejected: refusing only by recent activity (a
+  proxy idle for an hour while the user reads is still live); a pid file (pids are reused and a
+  crashed process leaves the file behind); moving the session to a trash directory before deleting
+  (a failed delete would leave data `sessions list` cannot see and prune cannot reach); pruning
+  single pages inside a live session (pages are cited by id from the ledger and the rendered index;
+  out of scope here).
+
+- **D38. Contexto names the CLI versions it was tested with and warns about others, without
+  blocking.** Intake, 2026-10-24. Contexto recognises Claude Code's session start by its
+  `# Environment` heading (D33), its context blocks by their first lines (D32), and Codex's session
+  context by its section tags. A CLI update that changes that text fails silently: the message falls
+  into another class and can be paged. What changed: (1) `TESTED_VERSIONS` in
+  `src/contexto/cliversions.py` is the single list: Claude Code 2.1.302; Codex 0.154.0 (shapes,
+  acceptance) and 0.163.0 (MCP launch, missing-tools check). A test keeps
+  `SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION`, `CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION` and
+  `CONTEXT_SECTIONS_CODEX_VERSION` equal to the newest tested version of their CLI. The Codex
+  constant moves from 0.154.0 to 0.163.0. The routine (5) asks for its steps 1, 2 and 4 before that
+  bump: the first check, the shape probe, and the suite. All three ran on 0.163.0, at zero spend.
+  The first check (`spikes/m2/cliversion/check.sh`) showed the same six section openings, with
+  `<environment_context>` last in the lead. `spikes/m2/codex/probe.sh`, re-run on 0.163.0 over its
+  five auth and provider scenarios, matched the 0.154.0 table in `docs/research/M2-codex-adapter.md`:
+  POST-only full input, `store: false`, no `previous_response_id`, 6 POSTs on a 401 with the custom
+  providers in API-key mode, 2 POSTs and 2 `GET /models` in ChatGPT mode, and 7 WebSocket upgrades
+  before 6 POSTs on the built-in provider, with the same section tags in every scenario. Codex now sends more header names (`x-client-request-id` and
+  `x-codex-*`); none of them is read. Step 3 (`smoke.sh preflight`, the MCP launch) also ran: no
+  `mcp_tools_missing`, version 0.163.0 tested. The AGENTS.md header was not exercised; (2)
+  `contexto run claude|codex` runs `<cli> --version` after the session line and, for an untested
+  version, prints one stderr line naming the version, the tested versions, what may break, where to
+  report it, and `contexto run --no-version-check <cli>` (the flag goes before the CLI's name, or
+  it is passed to the CLI). The command runs in its own process group with stdin closed. At most
+  4 KB of output is read, until a line with a version, end of file, or 3 seconds, and then the group
+  is killed. So neither endless output nor a child that keeps the pipe open can hold the launch
+  (reviewer A measured 6.5 s and 20 GB with a `--version` that ran `yes`, before this). It never
+  blocks the launch; a CLI that does not answer is logged, not warned about. Ctrl+C during the
+  check exits 130 through the launcher's normal cleanup, with no traceback and without starting the
+  CLI. `CONTEXTO_NO_VERSION_CHECK=1` also skips the check. Logged as `cli_version_check`; (3) the
+  proxy reads each request's `User-Agent` (measured, zero spend:
+  `claude-cli/2.1.302 (external, sdk-cli)` and `codex_exec/0.163.0 (...)`; other `codex_` surfaces
+  are matched by the prefix, unmeasured), logs each distinct version once (`cli_version`, at most 8)
+  and the first untested one as `cli_version_untested`; (4) it checks, once, that the session start
+  was recognised, on the first request that has a tool list (any Codex request) and carries the
+  CLI's injected context (Claude Code: a role `system` message or a `<system-reminder>` block;
+  Codex: a developer item in the lead). That is the main conversation's first request: Claude
+  Code's title, topic, and quota side requests have no tool list, and subagents start from a main
+  turn's tool call. The engine's own main (`publishes`) is not used. When a tool-less side request
+  comes first, it stays main through the real conversation's first turn, and the check then landed
+  on a resumed subagent, which has a `<system-reminder>` but no `# Environment` (reviewer A). A
+  request with a tool list but no injected context leaves the check open, for up to 8 of them.
+  Recognised means: for Claude Code, a role `system` message with the signature or a context
+  block of kind `environment`, which every main request of the 13 reminders-spike runs on 2.1.302
+  has; for Codex, a user message of context sections in the lead. Otherwise the proxy logs one
+  `session_start_unrecognised`. The check reads only the first 4,096 characters of each content
+  block (a role `system` message is matched whole, and returns at the first match). Runtime events go
+  to the session log only, since a TUI can draw over a mid-run line; (5) `docs/cli-updates.md` is the
+  routine for a new version. It says how to set up (a `.venv` at the repository root) and which steps
+  each constant needs: for the two Claude Code constants, the first check, the reminders spike, and
+  the suite; for the Codex section constant, the first check, `probe.sh`, and the suite. The list and
+  the constants change in one commit. Options considered: refuse to launch an untested version
+  (rejected: most updates do not touch the text Contexto reads, and a refusal would stop users for
+  no change); warn on a different minor or major version only (rejected: Claude Code ships patch
+  versions often, and the tested text was measured on one patch version); warn on
+  stderr at runtime too (rejected: drawn over by the interactive CLI, and the launch line already
+  says it); check every request for the session start (rejected: one scan of a large history per
+  request for an answer that does not change within a process); judge the engine's main
+  conversation (rejected: wrong when a tool-less side request comes first, above); compare the
+  system prompt's hash (rejected: it changes with the user's tools, MCP servers, and settings, so
+  every session would warn). Limitations: a CLI that keeps its version but changes its text is not
+  caught by the version checks; the session-start check sees only the first judged request, so it
+  misses text that changes later in a session (a new reminder kind on a later turn); a CLI that
+  injected no context at all is not judged; whether Claude Code's subagent requests carry the
+  environment message is not measured, and the check relies on the main conversation's first
+  request coming before any subagent's.
 
 ## Repository and process
 
@@ -480,8 +657,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **Terms analysis removed on purpose.** The vendor terms quotes and the inferred terms reading
     in `docs/research/M0-interception.md` section 6, and the summaries of them elsewhere, were
     removed. They are public vendor text, but here they were applied to the owner's own use. The
-    repository makes no claim about terms compliance. End-user auth guidance stays open as O4,
-    and the README tells users to follow their providers' terms for the credentials they use.
+    repository makes no claim about terms compliance. End-user auth guidance was left to O4, which
+    D35 settles: the vendor API with an API key or a CLIProxyAPI instance, logins in CLIProxyAPI or
+    the vendor's own CLI, and users follow their providers' terms for the credentials they use.
   - **History is not rewritten** (owner decision). Old commits, pull request diffs and pull request
     comments keep the proxy hostname, one home-directory path, the owner's commit email, the
     runner's machine name and billing notes. A rewrite would need force pushes, which the ruleset
@@ -511,9 +689,9 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   encrypted reasoning item returns 200, and whether the reasoning was used is not observable.
   Lean: strip all thinking at rotation, pending the strip-thinking arm's accuracy numbers.
 - **O3. Working-window bound.** Settled by D31 (150,000, including for seats).
-- **O4. End-user authentication guidance.** API key only, or also subscription logins, for people
-  who run Contexto themselves. Needs the terms question answered in the product docs. Owner
-  decision, because it bears on what may be shared beyond this repository.
+- **O4. End-user authentication guidance.** Resolved by D35 (the vendor API with an API key, or a
+  CLIProxyAPI instance; logins live in CLIProxyAPI or the vendor's own CLI, never in Contexto;
+  users follow their providers' terms).
 - **O5. First real release.** Settled by D29 (v0.1.0 after M2 acceptance).
 - **O6. Upstream affinity on the owner's proxy.** Resolved by D36 (a proposed consistent-hash
   session affinity option for CLIProxyAPI, not deployed, and Contexto's `X-Session-Affinity`); kept

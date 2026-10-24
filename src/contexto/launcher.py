@@ -34,10 +34,13 @@ plus pins and index). Once the engine measures ``F``, a ``bound_too_small`` even
 budget under 25,000 is shown on stderr once. So is a main conversation running without Contexto's
 MCP tools (``contexto.toolcheck``): neither CLI reports an MCP server that fails to start, so the
 proxy checks and the launcher warns, during the run or at exit, and once more after the CLI exits if
-the session ended still without them. stderr stays quiet otherwise.
+the session ended still without them. So is a CLI version Contexto was not tested with
+(``contexto.cliversions``, D38: ``<cli> --version`` at start; ``contexto run --no-version-check
+<cli>`` or ``CONTEXTO_NO_VERSION_CHECK=1`` skips it). stderr stays quiet otherwise.
 
 Exit codes: claude's own code; 128 + N if claude died from signal N; 2 for a usage error such as
-a bound above the guard; 1 if the proxy cannot start; 127 if ``claude`` is not on PATH.
+a bound above the guard; 1 if the proxy cannot start; 127 if ``claude`` is not on PATH; 130 for a
+Ctrl+C during the version check, before claude starts.
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from contexto.cliversions import launch_check
 from contexto.paths import contexto_home
 from contexto.private import affinity_salt
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform
@@ -71,6 +75,7 @@ BOUND_GUARD = 170_000  # below Claude Code's idle compaction (200,000) with room
 EXIT_USAGE = 2
 EXIT_PROXY = 1
 EXIT_NOT_FOUND = 127
+EXIT_INTERRUPTED = 130  # 128 + SIGINT: Ctrl+C before the CLI started
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
@@ -91,6 +96,7 @@ class LaunchOptions:
     window_fraction: float | None = None
     headroom_floor: int | None = None
     claude_bin: str = "claude"
+    version_check: bool = True
 
 
 def check_user_args(claude_args: list[str]) -> None:
@@ -252,7 +258,8 @@ def options_from_args(args: Any) -> LaunchOptions:
     return LaunchOptions(
         claude_args=list(getattr(args, "cli_args", None) or []), bound=args.bound, session_id=args.session,
         upstream=args.upstream, observe_thinking=args.observe_thinking, allow_large_bound=args.allow_large_bound,
-        window_fraction=args.window_fraction, headroom_floor=args.headroom_floor)
+        window_fraction=args.window_fraction, headroom_floor=args.headroom_floor,
+        version_check=not getattr(args, "no_version_check", False))
 
 
 def check_options(options: LaunchOptions) -> None:
@@ -305,6 +312,29 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     if engine_name == "identity":
         store.log({"event": "engine_unavailable", "detail": "contexto.rewrite not installed; identity transform"})
     return proxy, engine_name
+
+
+def check_cli_version(cli: str, binary: str, store: Any, *, enabled: bool = True, stderr=None) -> bool:
+    """D38: log the installed CLI's version (``<binary> --version``, a few seconds at most) and print one
+    warning line when Contexto was not tested with it. Never raises; a CLI whose version cannot be read
+    is logged, not warned about. Returns False only when the user pressed Ctrl+C during the check: the
+    caller then exits ``EXIT_INTERRUPTED`` through its normal cleanup, without starting the CLI and
+    without a traceback. Shared by claude and codex."""
+    out = stderr or sys.stderr
+    try:
+        event, warning = launch_check(cli, binary, enabled=enabled)
+    except KeyboardInterrupt:  # the check killed its --version process group before this
+        event, warning = {"event": "cli_version_check", "cli": cli, "error": "interrupted"}, None
+    try:
+        store.log(event)
+    except Exception:  # a diagnostic record; never stop a launch for it
+        pass
+    if event.get("error") == "interrupted":
+        print("contexto: interrupted", file=out, flush=True)
+        return False
+    if warning:
+        print(f"contexto: {warning}", file=out, flush=True)
+    return True
 
 
 def report_missing_tools(proxy: ContextoProxy) -> None:
@@ -380,6 +410,9 @@ def _run(options: LaunchOptions, stderr) -> int:
                    "affinity_header": proxy.affinity_header is not None})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
+        if not check_cli_version("claude", claude, store, enabled=options.version_check, stderr=stderr):
+            code = EXIT_INTERRUPTED
+            return code
         warning = start_warning(options.bound, options.headroom_floor, assumed_overhead())
         if warning:
             print(f"contexto: {warning}", file=stderr, flush=True)
