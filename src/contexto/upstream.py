@@ -7,7 +7,8 @@ Order per the M2 contract, "Upstream resolution" (PR #20 head bf1c7ad), first ma
    in a linked git worktree the MAIN checkout's ``.claude/settings.local.json`` (measured in M0,
    docs/research/M0-proxy-measurements.md finding 1a: it is loaded and its value wins), then the
    project's ``.claude/settings.local.json``, ``.claude/settings.json``, and the user's
-   ``~/.claude/settings.json``.
+   ``~/.claude/settings.json``, or ``$CLAUDE_CONFIG_DIR/settings.json`` when ``CLAUDE_CONFIG_DIR``
+   is set, because Claude Code then reads its user settings from that directory (D35).
 3. ``ANTHROPIC_BASE_URL`` in the process environment. M0 measured that a settings-file value
    overrides the process environment (finding 1), so the environment only counts when no
    settings file sets one.
@@ -32,6 +33,7 @@ from typing import Mapping
 
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 BASE_URL_KEY = "ANTHROPIC_BASE_URL"
+CONFIG_DIR_KEY = "CLAUDE_CONFIG_DIR"
 
 
 @dataclass(frozen=True)
@@ -69,7 +71,15 @@ def project_root(directory: Path) -> Path:
     return Path(out.stdout.strip() or directory)
 
 
-def claude_settings_order(cwd: Path, home: Path) -> list[tuple[str, Path]]:
+def user_settings_path(home: Path, env: Mapping[str, str] | None = None) -> Path:
+    """Claude Code's user settings file: ``$CLAUDE_CONFIG_DIR/settings.json`` when ``env`` sets
+    ``CLAUDE_CONFIG_DIR``, else ``~/.claude/settings.json``. ``env`` None means no override (callers
+    pass the process environment explicitly, so a test's ``home`` is never redirected)."""
+    config_dir = (env or {}).get(CONFIG_DIR_KEY, "").strip()
+    return Path(config_dir).expanduser() / "settings.json" if config_dir else home / ".claude" / "settings.json"
+
+
+def claude_settings_order(cwd: Path, home: Path, env: Mapping[str, str] | None = None) -> list[tuple[str, Path]]:
     """(kind, path) for each settings file that can set the base URL, highest precedence first."""
     order: list[tuple[str, Path]] = []
     main = main_checkout(cwd)
@@ -79,7 +89,7 @@ def claude_settings_order(cwd: Path, home: Path) -> list[tuple[str, Path]]:
     order += [
         ("local", root / ".claude" / "settings.local.json"),
         ("project", root / ".claude" / "settings.json"),
-        ("user", home / ".claude" / "settings.json"),
+        ("user", user_settings_path(home, env)),
     ]
     return order
 
@@ -98,11 +108,12 @@ def resolve_upstream(explicit: str | None = None, *, env: Mapping[str, str] | No
                      cwd: Path | None = None, home: Path | None = None) -> Upstream:
     if explicit:
         return Upstream(explicit, "flag")
-    for kind, path in claude_settings_order(cwd or Path.cwd(), home or Path.home()):
+    env = os.environ if env is None else env
+    for kind, path in claude_settings_order(cwd or Path.cwd(), home or Path.home(), env):
         value = _settings_base_url(path)
         if value:
             return Upstream(value, f"settings:{kind}")
-    value = (os.environ if env is None else env).get(BASE_URL_KEY, "").strip()
+    value = env.get(BASE_URL_KEY, "").strip()
     if value:
         return Upstream(value, "env")
     return Upstream(DEFAULT_UPSTREAM, "default")

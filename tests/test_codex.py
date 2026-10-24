@@ -333,6 +333,7 @@ class FakeLauncher:
 
     def start_proxy(self, store, upstream_url, upstream_source, config, observe_thinking, *, stderr=None):
         self.calls["upstream"] = upstream_url
+        self.calls["upstream_source"] = upstream_source
         return self.proxy, "rewrite"
 
     def report_missing_tools(self, proxy):
@@ -365,6 +366,8 @@ def test_run_codex_api_key_mode_runs_and_cleans_up(tmp_path, monkeypatch):
     err = io.StringIO()
     assert run_codex(args, launcher=fake, stderr=err) == 7
     assert fake.calls["upstream"] == "https://owner-proxy.invalid/v1" and fake.calls["session"] == "S9"
+    assert fake.calls["upstream_source"] == "claude-flag+/v1"  # D35: where the URL came from, never the URL
+    assert "upstream claude-flag+/v1" in err.getvalue() and "owner-proxy" not in err.getvalue()
     assert fake.calls["argv"] == ["codex", "exec", "hi"] and fake.calls["home_existed"]
     home = fake.calls["home"]
     assert home.endswith(os.path.join("sessions", "S9", "codex-home"))  # under the Contexto session dir
@@ -380,6 +383,7 @@ def test_run_codex_chatgpt_mode_and_errors(tmp_path, monkeypatch):
     err = io.StringIO()
     assert run_codex(args, launcher=fake, stderr=err) == 0
     assert fake.calls["upstream"] == "https://chatgpt.com/backend-api/codex"
+    assert fake.calls["upstream_source"] == "chatgpt-default"
     assert "requires_openai_auth=true" in " ".join(fake.calls["argv"])
     assert fake.calls["home"] == os.environ.get("CODEX_HOME")  # the user's own CODEX_HOME, untouched
     assert "D35" in err.getvalue() and "CLIProxyAPI" in err.getvalue()

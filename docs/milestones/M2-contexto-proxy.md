@@ -44,7 +44,8 @@ order (measured in M0, PR #16 findings 1 and 1a: a settings-file `env.ANTHROPIC_
 overrides the process environment, and in a git worktree the main checkout's
 `settings.local.json` wins): explicit `--upstream`; else the first settings file that sets
 `env.ANTHROPIC_BASE_URL`, in Claude Code's precedence (in a worktree the main checkout's
-`.claude/settings.local.json` first, then the local, project, and user settings files); else
+`.claude/settings.local.json` first, then the local, project, and user settings files, the user's
+being `$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35); else
 `ANTHROPIC_BASE_URL` in the process environment; else `https://api.anthropic.com`. The launcher's
 own flag-level `--settings` outranks all of these, which is what makes the proxy attachment work.
 Organization-managed settings still outrank `--settings`; document that limit.

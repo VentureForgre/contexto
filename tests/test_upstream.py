@@ -110,3 +110,29 @@ def test_source_label_never_contains_url_or_path(repo_with_worktree, home):
     write_settings(main / ".claude" / "settings.local.json", "http://secret-host.invalid")
     up = resolve_upstream(env={}, cwd=tree, home=home)
     assert "secret-host" not in up.source and str(main) not in up.source
+
+
+def test_claude_config_dir_replaces_the_user_settings_file(tmp_path, home):
+    # Claude Code reads its user settings from $CLAUDE_CONFIG_DIR when that is set (D35, reviewer-B).
+    config_dir = tmp_path / "claude-config"
+    write_settings(config_dir / "settings.json", "http://configdir.invalid", apiKeyHelper="/from/config/dir")
+    write_settings(home / ".claude" / "settings.json", "http://home.invalid")
+    env = {"CLAUDE_CONFIG_DIR": str(config_dir)}
+    up = resolve_upstream(env=env, cwd=tmp_path, home=home)
+    assert (up.url, up.source) == ("http://configdir.invalid", "settings:user")
+    assert resolve_upstream(env={}, cwd=tmp_path, home=home).url == "http://home.invalid"
+    assert resolve_upstream(env={"CLAUDE_CONFIG_DIR": "  "}, cwd=tmp_path, home=home).url == "http://home.invalid"
+    from contexto.codex import claude_api_key_helper
+
+    assert claude_api_key_helper(tmp_path, home, env) == "/from/config/dir"
+    assert claude_api_key_helper(tmp_path, home) is None  # no env: no override, and home has no helper
+
+
+def test_claude_config_dir_ranks_below_project_settings(tmp_path, home):
+    config_dir = tmp_path / "claude-config"
+    write_settings(config_dir / "settings.json", "http://configdir.invalid")
+    write_settings(tmp_path / ".claude" / "settings.json", "http://project.invalid")
+    up = resolve_upstream(env={"CLAUDE_CONFIG_DIR": str(config_dir)}, cwd=tmp_path, home=home)
+    assert (up.url, up.source) == ("http://project.invalid", "settings:project")
+    order = claude_settings_order(tmp_path, home, {"CLAUDE_CONFIG_DIR": str(config_dir)})
+    assert order[-1] == ("user", config_dir / "settings.json")
