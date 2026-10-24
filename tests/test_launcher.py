@@ -309,7 +309,7 @@ def test_sigterm_is_forwarded_to_claude_and_everything_is_cleaned_up(env, upstre
     assert session_log(env, "s4")[-1]["event"] == "exit"
 
 
-def test_ctrl_c_reaches_claude_and_does_not_kill_the_launcher(env, upstream, tmp_path, sigint_default):
+def test_ctrl_c_reaches_claude_and_does_not_kill_the_launcher(env, upstream, tmp_path):
     # The fake sleeps far past the deadline below, so only the interrupt can end it in time.
     env["FAKE_SLEEP"] = "300"
     proc = launch(env, "--upstream", upstream, "--session", "s5", "claude", cwd=tmp_path, start_new_session=True)

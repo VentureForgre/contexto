@@ -45,7 +45,7 @@ def first_line(stream, timeout: float) -> str:
     return lines[0].strip() if lines else ""
 
 
-def test_proxy_command_serves_and_logs_to_the_session(tmp_path: Path, sigint_default):
+def test_proxy_command_serves_and_logs_to_the_session(tmp_path: Path):
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), Hello)
     threading.Thread(target=upstream.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     env = dict(os.environ, CONTEXTO_HOME=str(tmp_path / "home"))
