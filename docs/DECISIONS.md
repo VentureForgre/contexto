@@ -111,7 +111,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
   and the only mode the team runs live under D12): a temporary `CODEX_HOME` whose provider reads the
   rig key with `auth.command`. ChatGPT mode (behind `--codex-auth chatgpt`): the user's own
   `CODEX_HOME` with `-c` overrides only, credentials passed through unchanged; tested only with
-  synthetic credentials. Its end-user terms stay with O4.
+  synthetic credentials. Its end-user terms stayed with O4, settled by D35.
 - **D23. Direct requests identify honestly.** Intake, 2026-10-16. Any request the team sends
   directly, rather than through the real CLI, uses a user agent naming the harness and never carries
   another product's client marker such as a `claude-code-*` beta. In the acceptance harness a shared
@@ -393,6 +393,59 @@ the owner's delegation. Open decisions are listed at the end with the options an
   written by `page_out` for both processes (rejected for now: a new store file that must stay
   consistent with quarantine, with a crash between the page and the manifest write, and with
   stub-rule changes such as `current_stub`, to save one read of every page after a proxy restart).
+- **D35. Supported upstreams for people who run Contexto themselves: the vendor API with an API key,
+  or a CLIProxyAPI instance; this settles O4.** Owner, 2026-10-24: "this project should work with
+  CLIProxyAPI" (https://github.com/router-for-me/CLIProxyAPI, a local or hosted proxy that serves
+  Claude Code, Codex, and others through subscription logins and API keys). The owner already runs
+  Contexto through a CLIProxyAPI deployment (the rig proxy, D11). What it means: (1) Contexto
+  supports two kinds of upstream for end users: the vendor's API with the user's API key
+  (Anthropic for Claude Code, OpenAI for Codex), or a CLIProxyAPI instance reached with one of its
+  client keys; (2) a subscription login (claude.ai, ChatGPT) lives in CLIProxyAPI or in the
+  vendor's own CLI, never in Contexto. Contexto forwards the credential the CLI sends and never
+  stores or logs it. `--codex-auth chatgpt`, in which Codex keeps its own ChatGPT login and the
+  proxy passes it to the ChatGPT backend, stays as it is, tested only with synthetic credentials;
+  its launch note and help now give this guidance instead of pointing at O4; (3) users must follow
+  their providers' terms, including any terms on subscription use through a proxy; Contexto does
+  not decide that for them. Compatibility, read
+  from CLIProxyAPI's source (local checkout, v7.2.142; the running binary is 7.3.12) and checked
+  against the code: its
+  `/v1/messages`, `/v1/messages/count_tokens`, and `/v1/responses` sit under the root that
+  `ANTHROPIC_BASE_URL` names, so Claude Code needs the root and Codex the root plus `/v1`, which is
+  already Contexto's Codex default (D22); it accepts its client key as `Authorization: Bearer`,
+  `X-Api-Key`, `X-Goog-Api-Key`, `?key=`, or `?auth_token=`, and Contexto forwards all five
+  unchanged; model
+  names reach it unchanged and it resolves them (aliases, prefixes); its errors, including 401
+  bodies that are not in Anthropic's shape (`{"error":"Missing API key"}`), pass through unchanged
+  (rule 7). One change in the proxy: CLIProxyAPI sends `: keep-alive` SSE comment events when
+  `streaming.keepalive-seconds` is set, and the stream hold (contract PR #74) passed only `ping`
+  events, so a heartbeat that arrived after a tool call started was held with the content. Comment
+  events now pass at once, like `ping`: they carry no content, so the order of content events is
+  unchanged, and the CLI keeps receiving bytes while a long tool input is held. A comment passes
+  at once only when it ends with its line ending; an unterminated one at end of stream is held
+  and released last, so no held event is glued onto it (reviewer-A). Two launcher changes from
+  the review (reviewer-B): the user settings file is `$CLAUDE_CONFIG_DIR/settings.json` when
+  `CLAUDE_CONFIG_DIR` is set, as in Claude Code (used as given, without `~` expansion; empty
+  counts as unset), for both the upstream and the Codex key helper
+  (before, Contexto always read `~/.claude/settings.json`); and the Codex session line and
+  `proxy_start` event name where the Codex upstream came from (`codex-flag`, `codex-env`,
+  `chatgpt-default`, or `claude-<source>+/v1`), never the URL. Measured on
+  2026-10-24 through Contexto's real engine, outcomes only: through the owner's proxy,
+  `claude-haiku-5-5` `count_tokens`, a non-streaming message, and a streaming message each returned
+  200 (both messages `end_turn`, with usage read), and one Codex Responses request on
+  `gpt-5.6-luna` to `/responses` reached `/v1/responses` and returned 200 with `response.completed`
+  and usage; the local CLIProxyAPI 7.3.12 binary, sent no key through Contexto, returned its 401,
+  relayed. Reviewer-B then ran the real CLIs as the guide says (outcomes only): Claude Code
+  2.1.302, `contexto run claude -p ... --model claude-haiku-5-5`, exit 0, `POST /v1/messages` 200
+  `end_turn` with usage; Codex 0.163.0, `contexto run --codex-key-helper ... codex exec -m
+  gpt-5.6-luna ...`, exit 0, `POST /responses` to `<root>/v1/responses` 200 `completed` with usage.
+  Claude Code's keyless startup `HEAD /api/hello` gets a 401, which is expected. The owner's
+  proxy answered `X-Api-Key` with 401 and `Authorization: Bearer` with 200
+  on `/v1/models` and `count_tokens` (measured), so the guide recommends the bearer forms
+  (`ANTHROPIC_AUTH_TOKEN` or `apiKeyHelper`). Tests: `tests/test_cliproxyapi.py`, a fake upstream
+  built from CLIProxyAPI's routes, auth, error bodies, headers, keep-alives, and failure framing.
+  Setup guide: `docs/cliproxyapi.md`. Options considered: API key only (rejected by the owner's
+  decision); supporting subscription logins inside Contexto (rejected: credentials would live in
+  Contexto, and CLIProxyAPI already handles login, refresh, and rotation).
 
 ## Repository and process
 
@@ -423,8 +476,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **Terms analysis removed on purpose.** The vendor terms quotes and the inferred terms reading
     in `docs/research/M0-interception.md` section 6, and the summaries of them elsewhere, were
     removed. They are public vendor text, but here they were applied to the owner's own use. The
-    repository makes no claim about terms compliance. End-user auth guidance stays open as O4,
-    and the README tells users to follow their providers' terms for the credentials they use.
+    repository makes no claim about terms compliance. End-user auth guidance was left to O4, which
+    D35 settles: the vendor API with an API key or a CLIProxyAPI instance, logins in CLIProxyAPI or
+    the vendor's own CLI, and users follow their providers' terms for the credentials they use.
   - **History is not rewritten** (owner decision). Old commits, pull request diffs and pull request
     comments keep the proxy hostname, one home-directory path, the owner's commit email, the
     runner's machine name and billing notes. A rewrite would need force pushes, which the ruleset
@@ -454,9 +508,9 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   encrypted reasoning item returns 200, and whether the reasoning was used is not observable.
   Lean: strip all thinking at rotation, pending the strip-thinking arm's accuracy numbers.
 - **O3. Working-window bound.** Settled by D31 (150,000, including for seats).
-- **O4. End-user authentication guidance.** API key only, or also subscription logins, for people
-  who run Contexto themselves. Needs the terms question answered in the product docs. Owner
-  decision, because it bears on what may be shared beyond this repository.
+- **O4. End-user authentication guidance.** Resolved by D35 (the vendor API with an API key, or a
+  CLIProxyAPI instance; logins live in CLIProxyAPI or the vendor's own CLI, never in Contexto;
+  users follow their providers' terms).
 - **O5. First real release.** Settled by D29 (v0.1.0 after M2 acceptance).
 - **O6. Upstream affinity on the owner's proxy.** Measured: full cache misses with byte-identical
   prefixes (4 of 14 eligible throwaway calls) and thinking dropped on every request

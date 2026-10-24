@@ -542,6 +542,13 @@ def sse_event_type(raw: bytes) -> str | None:
     return None
 
 
+def sse_is_comment(raw: bytes) -> bool:
+    """True when one raw SSE event is only comment lines (each non-blank line starts with ``:``),
+    such as CLIProxyAPI's ``: keep-alive`` heartbeat. A browser ignores it; it carries no content."""
+    lines = [line for line in sse_lines(raw) if line]
+    return bool(lines) and all(line.startswith(b":") for line in lines)
+
+
 def _sse_payload(raw: bytes) -> dict[str, Any]:
     data = sse_data(raw)
     try:
@@ -563,7 +570,10 @@ class StreamHold:
     - Responses: the hold starts at the first ``response.output_item.added`` whose item type is a
       tool call (``*_call``: ``custom_tool_call``, ``function_call``, and others) and ends at
       ``response.completed``, ``response.incomplete``, ``response.failed``, an error, or end of stream.
-    - ``ping`` keepalives pass during the hold (they are not content, so content order is unchanged).
+    - Keepalives pass during the hold: ``ping`` events, and comment-only events such as the
+      ``: keep-alive`` lines CLIProxyAPI sends when its ``streaming.keepalive-seconds`` is set (D35).
+      They are not content, so content order is unchanged, and the CLI keeps seeing bytes while a
+      long tool input is held.
     - Held bytes are bounded by one response: everything after the first tool call of that response.
 
     ``on_trigger`` is called once, at the first ``message_delta`` or terminal ``response.*`` event,
@@ -609,7 +619,9 @@ class StreamHold:
             return self._release() + [raw]
         if self._is_error(kind):
             return self._release_untriggered() + [raw]
-        if kind == "ping":
+        # A comment passes at once only when it ends with its line ending: a tail without one (a stream
+        # cut after ": keep-alive") is held and released last, so no held event is glued onto it.
+        if kind == "ping" or (sse_is_comment(raw) and raw.endswith((b"\n", b"\r"))):
             return [raw]
         if not self.holding and self._starts_hold(kind, raw):
             self.holding = True
