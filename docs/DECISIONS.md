@@ -396,9 +396,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
 
 - **D39. The MCP server holds search text up to a budget, 64 MB by default, newest pages first.**
   Assigned 2026-10-24 from the STATUS known limitation; the contract change is recorded here for
-  review. D34's page cache kept every page's folded
-  text in the MCP server for the life of the process, so a long session's server grew without
-  limit (peak RSS 290 MB at 6,000 synthetic pages, 193 MB of it text). What changed: (1) the server
+  review. D34's page cache kept every page's folded text in the MCP server for the life of the
+  process, so a long session's server grew without limit (peak RSS 290 MB at 6,000 synthetic pages, 193 MB of it text). What changed: (1) the server
   holds text for at most `CONTEXTO_SEARCH_CACHE_MB` megabytes (1 MB = 1,048,576 bytes; default 64;
   `0` holds none), or `contexto mcp --search-cache-mb`, which overrides it. `contexto run` passes the
   variable to the server's environment for Claude Code and Codex when it is set (Codex starts MCP
