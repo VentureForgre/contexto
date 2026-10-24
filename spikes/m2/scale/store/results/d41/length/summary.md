@@ -16,6 +16,7 @@
 | spike | 17 | page b=0.3 | 71 | 21 | 0 | 30 | 61 |
 | spike | 17 | page b=0 | 71 | 21 | 0 | 30 | 61 |
 | spike | 17 | d41 | 71 | 21 | 0 | 30 | 61 |
+| spike | 17 | cap3 | 71 | 21 | 0 | 30 | 61 |
 | spike | 17 | texts b=0.75 | 71 | 21 | 0 | 30 | 61 |
 | spike | 17 | fields b=0.75 | 71 | 21 | 0 | 30 | 61 |
 | spike | 17 | fields b=0.3 | 71 | 21 | 0 | 30 | 61 |
@@ -25,6 +26,7 @@
 | spike | 1,000 | page b=0.3 | 63 | 21 | 0 | 29 | 57 |
 | spike | 1,000 | page b=0 | 63 | 21 | 0 | 29 | 57 |
 | spike | 1,000 | d41 | 63 | 21 | 0 | 29 | 57 |
+| spike | 1,000 | cap3 | 63 | 21 | 0 | 29 | 57 |
 | spike | 1,000 | texts b=0.75 | 60 | 20 | 0 | 29 | 54 |
 | spike | 1,000 | fields b=0.75 | 63 | 21 | 0 | 29 | 57 |
 | spike | 1,000 | fields b=0.3 | 63 | 21 | 0 | 29 | 57 |
@@ -34,6 +36,7 @@
 | spike | 3,000 | page b=0.3 | 60 | 21 | 0 | 29 | 54 |
 | spike | 3,000 | page b=0 | 60 | 21 | 0 | 29 | 54 |
 | spike | 3,000 | d41 | 60 | 21 | 0 | 29 | 54 |
+| spike | 3,000 | cap3 | 60 | 21 | 0 | 29 | 54 |
 | spike | 3,000 | texts b=0.75 | 55 | 19 | 0 | 29 | 49 |
 | spike | 3,000 | fields b=0.75 | 57 | 21 | 0 | 29 | 51 |
 | spike | 3,000 | fields b=0.3 | 59 | 21 | 0 | 29 | 53 |
@@ -43,6 +46,7 @@
 | spike | 6,000 | page b=0.3 | 57 | 20 | 0 | 29 | 51 |
 | spike | 6,000 | page b=0 | 58 | 20 | 0 | 29 | 52 |
 | spike | 6,000 | d41 | 58 | 20 | 0 | 29 | 52 |
+| spike | 6,000 | cap3 | 58 | 20 | 0 | 29 | 52 |
 | spike | 6,000 | texts b=0.75 | 51 | 17 | 0 | 29 | 46 |
 | spike | 6,000 | fields b=0.75 | 53 | 20 | 0 | 29 | 47 |
 | spike | 6,000 | fields b=0.3 | 54 | 20 | 0 | 29 | 48 |
@@ -52,6 +56,7 @@
 | calibration | 17 | page b=0.3 | 71 | 21 | 0 | 30 | 62 |
 | calibration | 17 | page b=0 | 71 | 21 | 0 | 30 | 62 |
 | calibration | 17 | d41 | 71 | 21 | 0 | 30 | 62 |
+| calibration | 17 | cap3 | 71 | 21 | 0 | 30 | 62 |
 | calibration | 17 | texts b=0.75 | 71 | 21 | 0 | 30 | 62 |
 | calibration | 17 | fields b=0.75 | 71 | 21 | 0 | 30 | 62 |
 | calibration | 17 | fields b=0.3 | 71 | 21 | 0 | 30 | 62 |
@@ -61,6 +66,7 @@
 | calibration | 1,000 | page b=0.3 | 63 | 21 | 0 | 29 | 57 |
 | calibration | 1,000 | page b=0 | 63 | 21 | 0 | 29 | 57 |
 | calibration | 1,000 | d41 | 63 | 21 | 0 | 29 | 57 |
+| calibration | 1,000 | cap3 | 63 | 21 | 0 | 29 | 57 |
 | calibration | 1,000 | texts b=0.75 | 60 | 20 | 0 | 29 | 54 |
 | calibration | 1,000 | fields b=0.75 | 63 | 21 | 0 | 29 | 57 |
 | calibration | 1,000 | fields b=0.3 | 63 | 21 | 0 | 29 | 57 |
@@ -70,6 +76,7 @@
 | calibration | 3,000 | page b=0.3 | 59 | 21 | 0 | 29 | 53 |
 | calibration | 3,000 | page b=0 | 60 | 21 | 0 | 29 | 54 |
 | calibration | 3,000 | d41 | 60 | 21 | 0 | 29 | 54 |
+| calibration | 3,000 | cap3 | 60 | 21 | 0 | 29 | 54 |
 | calibration | 3,000 | texts b=0.75 | 55 | 19 | 0 | 29 | 49 |
 | calibration | 3,000 | fields b=0.75 | 57 | 21 | 0 | 29 | 51 |
 | calibration | 3,000 | fields b=0.3 | 59 | 21 | 0 | 29 | 53 |
@@ -79,6 +86,7 @@
 | calibration | 6,000 | page b=0.3 | 54 | 19 | 2 | 28 | 47 |
 | calibration | 6,000 | page b=0 | 58 | 20 | 0 | 29 | 52 |
 | calibration | 6,000 | d41 | 58 | 20 | 0 | 29 | 52 |
+| calibration | 6,000 | cap3 | 58 | 20 | 0 | 29 | 52 |
 | calibration | 6,000 | texts b=0.75 | 48 | 13 | 3 | 27 | 43 |
 | calibration | 6,000 | fields b=0.75 | 53 | 20 | 0 | 29 | 47 |
 | calibration | 6,000 | fields b=0.3 | 54 | 20 | 0 | 29 | 48 |
@@ -93,6 +101,7 @@ Reviewer-2's 13-turn cases (detailed turns for `max_retries`; ok: turn 10, the c
 | page b=0.3 | 13, 6, 5 (no) | 13, 6, 4 (no) | 13, 12, 8 (no) | 13, 10, 4 | 1 |
 | page b=0 | 13, 10, 6 | 13, 10, 6 | 13, 12, 10 | 13, 10, 4 | 4 |
 | d41 | 13, 10, 6 | 13, 10, 6 | 13, 12, 10 | 13, 10, 4 | 4 |
+| cap3 | 13, 10, 6 | 13, 10, 6 | 13, 12, 10 | 13, 10, 4 | 4 |
 | texts b=0.75 | 13, 10, 6 | 13, 10, 6 | 13, 12, 10 | 13, 10, 4 | 4 |
 | fields b=0.75 | 13, 10, 6 | 13, 10, 6 | 13, 12, 10 | 13, 10, 4 | 4 |
 | fields b=0.3 | 13, 10, 6 | 13, 10, 6 | 13, 12, 10 | 13, 10, 4 | 4 |

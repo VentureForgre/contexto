@@ -592,8 +592,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   many times scores at most 2.2 times a page with one such text. Measured cost (D41): an old turn
   whose prompt, command, output, and reply all name a key still outranks a newer one-line reply that
   states its new value, and once a passing mention follows that reply, it can leave the 3 best pages
-  (in a simulation from this repository's own tool output, one-line statements reached the 3 best in
-  38 of 122 sessions where D34 reached 64). Relevance is multiplied by a recency prior `1 + 0.5 r`, where `r`
+  (in a simulation built from this repository's own tool output, a one-line reply reached the 3 best
+  in 38 of 122 such sessions where D34 reached 64; where only the old turn's command and output name
+  the key, 61 of 132 against 65, and stale-only results fell from 158 to 121 of 500 overall).
+  Relevance is multiplied by a recency prior `1 + 0.5 r`, where `r`
   runs from 0 for the oldest matching page to 1 for the newest, so a newer page wins unless an older
   one is clearly more about the query;
   ties go to the newer page. The newest matching turn page (the newest matching page when no turn

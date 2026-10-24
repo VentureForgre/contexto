@@ -322,7 +322,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   is about the words (reviewer-2); they stay searchable and recallable. A Codex developer page has
   no searchable text (search reads Responses items through `as_message`, which drops system-like
   items, B23), so in practice the group holds Claude Code pages only. Within each group pages rank by BM25 (k1 1.2,
-  b 0.75) over the words and the whole query, times a recency prior `1 + 0.5 r`, `r` the page's
+  b 0.75; D41 changed b to 0 and counts a term once per text that holds it) over the words and the
+  whole query, times a recency prior `1 + 0.5 r`, `r` the page's
   position among the matches from 0 (oldest) to 1 (newest): a newer page wins unless an older one is
   clearly more about the query, and the oldest needs 1.5 times the newest's relevance; (3) the
   newest matching turn page always takes one of the 3 detailed places (the third, if it ranked
@@ -335,7 +336,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   With mentions at turns 6 and 13 only, it is worse: an older short page that states an old value
   is shown in detail while the long turn with the current value is only listed (detailed 13, 6,
   and 4, so 3 is shown and 7 is not; the old newest-first search showed 13, 10, and 6). The cheap
-  fixes fail: b 0 (no length discount) brings back the bias toward long old log dumps; a second
+  fixes fail: b 0 (no length discount) brings back the bias toward long old log dumps (D41 measured
+  this and pairs b 0 with counting a term once per text); a second
   recency place fails when four later short mentions follow the statement (6, 8, 12, 13); a length
   cap helps only near the average length, which is b 0 again. Follow-up, both zero spend: choose b
   on a harness variant that draws page sizes from the real turn sizes in
@@ -719,69 +721,97 @@ the owner's delegation. Open decisions are listed at the end with the options an
   outside it at each search; the first search compresses what the budget keeps; raise the budget
   when search time matters more than memory.
 
-- **D41. Search drops BM25's length term (b 0), so a long turn that states the current value is not
-  buried by short older pages.** The follow-up D34 (3) left open, zero spend, under the owner's
-  2026-10-18 approval to fix what the 30M measurement found; it changes the ranking rule in the
-  contract. The problem: D34 ranked by BM25 with b 0.75 over the whole page, and a turn's length is
-  mostly its tool output. In reviewer-2's 13-turn cases (turn 4 "Set max_retries to 3", the long
-  turn 10 "max_retries is now 7" after 900 lines of output that never name the key, short passing
-  mentions elsewhere) the detailed pages were 13, 6, 5 (mentions at 5, 6, 13), 13, 6, 4 (mentions at
-  6 and 13: only the old value shown), and 13, 12, 8 (mentions at 6, 8, 12, 13); only the case with
-  one mention, at 13, showed 7. The store harness could not show it, since every synthetic page was
-  19,000 to 30,000 tokens. Measured (`spikes/m2/scale/store/README.md`, `results/d41/`): (1)
-  `scale_bench.py --page-sizes calibration` draws each turn's size from a lognormal fitted to
-  `calibration.json`'s real turn sizes (median 1,947 tokens; sigma 1.98 from the 90th and 95th
-  percentiles, 24,649 and 50,840; capped at the largest, 566,461). The pages come out 112 to
-  571,844 tokens, median 5,509 at 6,000 pages, higher than the real median because every turn holds
-  at least one tool call and each plant and distractor gets its own. The harness now also counts
-  "stale only" queries: an older value among the detailed pages and the latest not. (2)
-  `scale_length.py` runs the 86 probes under each ranking on both page-size models. Top 3 (of 86),
-  latest first (of 24), and stale only, D34 then D41: spike-size pages 63/21/0 and 63/21/0 at 1,000,
-  60/21/0 and 60/21/0 at 3,000, 56/20/0 and 58/20/0 at 6,000; real-size pages 61/20/0 and 63/21/0,
-  57/20/0 and 60/21/0, 53/17/3 and 58/20/0; facts found 29 of 30 for D41 at every size (D34 28 at
-  6,000 real-size pages). With the 0.2 percent topic floor at 6,000: spike-size 41/17/0 and 44/19/0,
-  real-size 29/15/2 and 44/19/0 (facts 17 and 24). D41 is never worse than D34 in any column of any
-  row, and all four 13-turn cases now show 7 first (13, 10, 6; 13, 10, 6; 13, 12, 10; 13, 10, 4), the
-  pages the old newest-first search showed. Options measured, all with D34's matching, groups,
-  recency prior, and newest-page place: b 0.5 and 0.3 on whole pages (no 13-turn case fixed; at
-  6,000 real-size pages 55 and 54, stale only 2); a larger recency weight, 2 or 10 (no 13-turn case
-  fixed: turn 10 is 42,550 bytes against a mean page of 3,320, so its relevance is a small fraction
-  of a short page's; a scratch check, not kept); length taken from the texts that hold a query word,
-  against its mean over the matching pages, the plain reading of D34's follow-up (fixes the four
-  cases but 51 and 48 at 6,000, stale only 3 on real sizes: a plant that shows its value inside a
-  long tool output loses to one-line distractors); BM25F over the page's texts against the store's mean text length
-  (fixes them; 53 and 53 at 6,000: a text shorter than the mean is boosted, so one mention in a short
-  text nearly saturates and the count stops mattering; 54 and 54 at b 0.3); the same BM25F with each
-  text's length counted as at least the mean (fixes them; 56 and 56 at 6,000, 59 at 3,000 on both
-  models, so 1 to 2 below b 0 there, and equal to it with the topic floor); length of the whole page
-  minus tool outputs that hold no query word (a scratch prototype at 1,000 pages, not kept: fails
-  the cases, because turn 10's prompt and command still make it 2.5 to 3 times as long as the
-  one-line pages). Every variant with a length term lost hits as b rose, on both models. Why b 0 is
-  acceptable: k1 1.2 still caps what repetition earns at 2.2 times one mention, so an old page that
-  repeats a word 30 times outranks the newest page that says it once (2.12 against 1.5 with the
-  recency prior) but not one that says it three times (2.36); the newest matching turn still always
-  takes a detailed place, and the best pages are still shown newest first (D28). D34 rejected b 0
-  because it "brings back the bias toward long old log dumps". That is the case above, and this
-  harness does not measure it: each distractor is one line, and `calibration.json` records how many
-  turns hold a query, not how often a turn repeats it. Under D34 such a page lost much of its score
-  only when it was many times the mean page length (30 mentions on a page 3 times the mean scored
-  2.0 against 2.12 with b 0; on a page 15 times the mean, 1.5); on real-size pages what b 0.75 mainly
-  did in the harness was favour short pages. The newest-page place (D34 (3)) stays: older pages that say the word more often can still
-  outrank the turn that states the new value once. Cost: the length term and the mean page length
-  are gone from `rank`; nothing else changes, and nothing is added to the store or the caches.
-  Speed, one pass each, back to back on one machine (`results/d41/before_*`, `after_*`): on
-  spike-size pages unchanged within noise (6,000 pages: rare, common, multi-word 0.093, 0.158,
-  0.233 s before and 0.098, 0.170, 0.235 after; peak memory 290 and 291 MB). On real-size pages rare
-  and multi-word queries are unchanged, but a word on every page (`self`, `return`, `import`) takes
-  longer (0.077 to 0.101 s at 3,000 pages, 0.148 to 0.166 at 6,000) and the MCP server's peak memory
-  is higher (118 to 155 MB at 3,000, 204 to 237 at 6,000): the 3 detailed pages for such a word are
-  now the long pages that say it most (for `return` at 3,000 pages the largest shown went from 72,118
-  to 164,431 tokens), and they cost more to read and render. The reply stays within its 32,000
-  characters. Tuning: the same 86 probes informed D34 and D41, so there is no held-out set, and the
-  variants were compared on them; the probes and plants are unchanged. Limitations: synthetic pages and distractors; how often real turns repeat a query
-  word is unknown, so the cost of b 0 on log-heavy sessions is not measured; a value shown only
-  inside a long tool output, with three or more newer passing mentions, can still miss the detailed
-  pages, as before D34.
+- **D41. Search counts a term once per text that holds it and drops BM25's length term (b 0), so
+  neither a long turn nor a dump that repeats a key buries the turn that states its current value.**
+  The follow-up D34 (3) left open, zero spend, under the owner's 2026-10-18 approval to fix what the
+  30M measurement found; it changes the ranking rule in the contract. Problem: D34 ranked by BM25 with
+  b 0.75 over the whole page, and a turn's length is mostly its tool output. In reviewer-2's 13-turn
+  cases (turn 4 "Set max_retries to 3", the long turn 10 "max_retries is now 7" after 900 lines of
+  output that never name the key, short passing mentions elsewhere) the detailed pages were 13, 6, 5
+  (mentions at 5, 6, 13), 13, 6, 4 (mentions at 6 and 13: only the old value shown), and 13, 12, 8
+  (mentions at 6, 8, 12, 13); only the case with one mention, at 13, showed 7. What changed: (1)
+  BM25's b is 0, so page length does not count; (2) a term's frequency on a page is the number of the
+  page's texts that hold it, not its number of occurrences. A text is one stub field or one text,
+  tool input, or tool output of the turn; a page's search text joins its texts with the byte 0xFF,
+  which UTF-8 never holds (`search.TEXT_SEP`), so `rank` counts them with no offsets and no change
+  to the cache's size or format (D39), and a word matches exactly where it did (a word holds no
+  whitespace, so it never spanned two texts; a phrase that holds a newline no longer matches across
+  two). k1 1.2 still saturates: a page whose texts hold a word many times scores at most 2.2 times a
+  page with one such text. PR #216 first shipped (1) alone; reviewer A then measured what D34 had
+  rejected b 0 for, and (2) is the fix that measured best.
+
+  Measured, all zero spend (`spikes/m2/scale/store/README.md`, `results/d41/`). (a) The store
+  harness on pages sized like real turns: `scale_bench.py --page-sizes calibration` draws each
+  turn's token goal from a lognormal fitted to `calibration.json` (median 1,947; sigma 1.98 from the
+  90th and 95th percentiles, 24,649 and 50,840; capped at 566,461). Only the upper half of the pages
+  matches real turns: one synthetic tool step is about 2,770 tokens, so the 37 percent of goals under
+  1,000 tokens come out at a median of 2,772, and the pages at 6,000 have a median of 5,509 (real
+  1,947), a mean of 15,178 (10,431), p90 25,755 (24,649), p95 50,557 (50,840); 54 of the 6,000 have
+  no tool call. A real store has more tiny pages than this one, which makes b 0.75's bias toward
+  short pages larger, not smaller. The harness also counts "stale only": an older value among the
+  detailed pages and the latest not. Top 3 (of 86), latest first (of 24), and stale only, D34 then
+  D41: spike-size pages 63/21/0 and 63/21/0 at 1,000, 60/21/0 and 60/21/0 at 3,000, 56/20/0 and
+  58/20/0 at 6,000; real-size pages 61/20/0 and 63/21/0, 57/20/0 and 60/21/0, 53/17/3 and 58/20/0;
+  facts 29 of 30 for D41 at every size (D34 28 at 6,000 real-size). With the 0.2 percent topic floor
+  at 6,000: spike-size 41/17/0 and 44/19/0, real-size 29/15/2 and 44/19/0 (facts 17 and 24).
+  Counting per text changes none of these against (1) alone. All four 13-turn cases show 7 first
+  (13, 10, 6; 13, 10, 6; 13, 12, 10; 13, 10, 4), the pages the old newest-first search showed. (b)
+  Reviewer A's simulation (`scale_dumps.py`, `scale_dumps_gen.sh`): 1,000 sessions of 40 to 600
+  turns built only from this repository's text, where 1, 2, or 4 old tool outputs repeat a key
+  (`grep -rn`, `grep -C3`, pytest tracebacks after changing the key, JSON dumps; a dump's most
+  mentions have a median of 15 and reach 241) before the turn that states its new value, with 0 to 3
+  passing mentions after it. Statement among the 3 detailed pages / an old dump ranked above it /
+  stale only, of 500, D34, then (1) alone, then D41: when the dump turn's prompt and reply also name
+  the key ("loud"), 300/272/171, 305/339/195, 316/260/184; when only its command and output do
+  ("quiet"), 308/235/158, 325/284/170, 363/131/121. By the statement's kind, statement shown, D34 then
+  D41: a one-line reply 64 and 38 of 122 (loud), 65 and 61 of 132 (quiet); an Edit 118 and 118, 135
+  and 135; an Edit then pytest 78 and 122, 76 and 121; a long output then a one-line reply 40 and 38,
+  32 and 46. With (1) alone a one-line reply was shown 38 and 44 times and an Edit 117 and 129.
+
+  Options measured, all with D34's matching, groups, recency prior, and newest-page place: b 0.5 and
+  0.3 on whole pages (no 13-turn case fixed; at 6,000 real-size pages 55 and 54 in the top 3, stale
+  only 2); a larger recency weight, 2 or 10 (no 13-turn case fixed: turn 10 is 42,550 bytes against a
+  mean page of 3,320); length taken from the texts that hold a query word (fixes the four cases; 51
+  and 48 at 6,000, stale only 3 on real sizes: a plant that shows its value in a long tool output
+  loses to one-line distractors); BM25F over the page's texts (fixes them; 53 and 53 at 6,000: a text
+  shorter than the mean is boosted, so one mention in a short line nearly saturates); the same BM25F
+  with each text at least the mean (56 and 56); whole page minus tool outputs that hold no query word
+  (a scratch prototype at 1,000 pages: fails the cases, turn 10's prompt and command still make it 2.5
+  to 3 times the one-line pages); (1) alone (the first version of this decision: best on the probes,
+  but per (b) it shows only a stale value more often than D34, 195 against 171 loud and 170 against
+  158 quiet); (1) with each page's count capped at 3 (reviewer A's option: ties (1) on the probes,
+  brings back every Edit case, loud 316/260/184 and quiet 333/210/162, but leaves the one-line reply
+  at 38 and 44); (1) with k1 0.5 or 0.8, or 1 + ln tf (reviewer A: 55 of 86 at 6,000 on both
+  page-size models, against 58); (2) with each text's count capped at 2 or 3 (as the page cap: quiet
+  333/201/162 and 333/210/162). No b above 0 beat b 0 on top 3 at any size (b 0.5 tied it at
+  6,000 spike-size pages, 58, with latest first 21 against 20).
+
+  The newest-page place (D34 (3)) stays, and it covers the statement only while the statement is the
+  newest mention: in (b) the newest mention was among the detailed pages in all 1,000 sessions under
+  every variant, and a statement that was the newest mention was always shown, but a later passing
+  mention takes that place. Residual cost, measured in (b): an old turn whose prompt, command,
+  output, and reply all name a key holds the key in 4 or 5 texts against a one-line reply's 1, so
+  with a passing mention after the reply, the reply leaves the detailed pages more often than under
+  D34 (one-line replies shown 38 of 122 against 64, loud), and stale only is 184 against D34's 171
+  in loud sessions; with one passing mention after the reply, it is shown in 69 of 125 loud
+  sessions against 88. When only the old turn's command and output name the key, D41 is better than
+  D34 overall and for every kind of statement but one-line replies (shown 61 against 65 of 132, stale
+  only 60 against 48). Cost
+  elsewhere: on real-size pages a word on every page (`self`, `return`, `import`) now shows long
+  pages that hold it in many texts, which `contexto_search` reads for each of the 53 pages it shows
+  (`get_page`, 3 in detail and 50 listed). With D39's 64 MB budget on, one pass each, back to back
+  (`results/d41/before_*` at main 01cf3fe, `after_*`): on spike-size pages search is unchanged or
+  faster (common words 0.307 to 0.255 s at 6,000; peak RSS 134 and 134 MB); on real-size pages rare
+  and multi-word queries are unchanged, common words take 0.040 to 0.075 s at 1,000 pages, 0.076 to
+  0.125 at 3,000, and 0.232 to 0.273 at 6,000, and the MCP server's peak RSS is 64 to 80, 112 to 147,
+  and 112 to 145 MB. `rank` itself is faster for those words (0.015 against 0.047 s for `self` at
+  3,000 real-size pages); the 53 pages shown are 11.8 to 13.3 MB of page JSON against 2.1 to 3.1
+  (in-process checks, `self`, `return`, `import`). Tuning: the 86 probes informed D34 and D41, and the
+  variants were compared on them and on (b), which reviewer A wrote for this review; there is no
+  held-out set. Limitations: synthetic pages and distractors; (b)'s sessions are built from one
+  repository; how often real turns repeat a key is still not measured from real sessions; a value
+  shown only inside a long tool output, with three or more newer passing mentions, can still miss
+  the detailed pages, as before D34.
 
 ## Repository and process
 
