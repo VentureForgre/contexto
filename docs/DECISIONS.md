@@ -447,6 +447,68 @@ the owner's delegation. Open decisions are listed at the end with the options an
   decision); supporting subscription logins inside Contexto (rejected: credentials would live in
   Contexto, and CLIProxyAPI already handles login, refresh, and rotation).
 
+- **D36. Each request carries a stable session signal a routing proxy can pin to one upstream
+  credential: the CLI's own signals plus Contexto's salted `X-Session-Affinity`; on the proxy side,
+  consistent-hash affinity; this settles O6.** Owner request ("improve this"), 2026-10-24, including
+  the contract change. Cause: the owner's CLIProxyAPI deployment runs several CLIProxyAPI replicas
+  behind one load balancer, each rotating credentials on its own (`routing.strategy: round-robin`,
+  no session affinity), so a session's requests reach whichever credential each replica's counter
+  points at. That gives O6's classes. CLIProxyAPI's own `routing.session-affinity` does not fix it
+  alone (read in the source): bindings live in each process, and a new session binds to that
+  replica's next round-robin credential, so N replicas can bind one session N ways (reproduced by
+  `TestSessionAffinityPerReplicaCacheSplitsSessionsAcrossReplicas` in the proposed CLIProxyAPI
+  change, `sdk/cliproxy/auth/session_affinity_consistent_hash_test.go`). What changed: (1) on the
+  proxy, a CLIProxyAPI option proposed for upstream and not yet submitted there,
+  `routing.session-affinity-consistent-hash`: each session is routed by rendezvous hashing of its
+  root session id and each available credential id (the root when the request names it, otherwise
+  the parent), so every replica picks the same credential with no shared state; a credential in
+  cooldown moves only its own sessions, each to its next-ranked credential, and they return when it
+  recovers. It is not deployed. (2) In Contexto, the proxy adds `X-Session-Affinity: contexto-<key>`
+  to every request whose upstream host name is not an Anthropic, OpenAI (including Azure OpenAI,
+  `*.openai.azure.com`, and Azure AI Foundry, `*.services.ai.azure.com`), or ChatGPT host, unless
+  the CLI sent one (contract, Stack). The host is IDNA-normalized first, as the socket layer does
+  when it connects, so a name such as `api.anthro<soft hyphen>pic.com` counts as Anthropic's; a name
+  that cannot be normalized gets no header. Matching is by name: an IP literal upstream gets the
+  header, even a vendor's address, because Contexto cannot tell a vendor IP from a local proxy's.
+  The key is the first 32 hex digits of HMAC-SHA-256 of the session id under a random 32-byte salt
+  written once per install at `$CONTEXTO_HOME/affinity.salt` (0600), so it is the same after a
+  restart and on a resume, and the session id, even a guessable `--session` name, cannot be checked
+  against it without the salt. The salt is created only when a header will be sent (never for a
+  vendor upstream) and read without following a symlink or blocking on a FIFO; if it cannot be read,
+  the session runs without the header and logs `affinity_salt_unavailable`. The proxy routes Claude
+  Code on the CLI's own session id first. `claude --resume` keeps that id (measured), so routing
+  survives a resume; only a fresh launch or `--fork-session` gets a new id, which can land on
+  another credential and miss the cache once. Measured with a local stand-in upstream (zero spend):
+  Claude Code 2.1.302 sends `X-Claude-Code-Session-Id` and `metadata.user_id` with the same
+  `session_id` on every Messages request; Codex sends `session-id` and `prompt_cache_key`
+  (`docs/research/M2-codex-adapter.md`). In CLIProxyAPI's order, `X-Claude-Code-Session-Id`,
+  Claude's `metadata.user_id`, and Codex's `session-id` header rank above `X-Session-Affinity`;
+  `prompt_cache_key` ranks below it. So both CLIs' requests route on the CLI's own id, which
+  Contexto forwards unchanged, as long as Codex keeps sending `session-id`. CLIProxyAPI labels a
+  request it routes on `X-Session-Affinity` as client type `opencode`, which only names the signal.
+  What is pinned: each distinct session signal maps to one credential. The CLI's id and Contexto's
+  key are different identities and generally hash to different credentials, so a request of the
+  session that carries no CLI signal gets a stable credential of its own, not necessarily the
+  session's. That is harmless for cache and thinking, since such a request shares no prefix with the
+  conversation; in practice the key decides routing only for black-box checks. Subagents and side
+  requests share the session's key on purpose, as they go through the same Contexto proxy, and
+  CLIProxyAPI's consistent hash sends Claude Code subagents to their root session's credential. They
+  share the system and tools prefix, so one credential keeps that cache warm. The cost: parallel
+  subagents load one credential's rate limit, and a 429 there moves the whole session, main
+  conversation included, to the next credential until the first recovers, with one cache miss and
+  dropped thinking at each move. Verification once deployed: 10 byte-identical requests with one
+  `X-Session-Affinity` should show 1 cache write and 9 reads, and with `--observe-thinking` no
+  `end_user_binding_mismatch`. Limits: a replica that has not yet seen a credential's failure keeps
+  sending that credential's sessions to it until its own request fails over; requests with no
+  session signal at all still use CLIProxyAPI's per-process prefix matcher; all replicas must hold
+  the same credentials. Options considered: enabling `session-affinity` alone (rejected: per-replica
+  bindings, above); `fill-first` with affinity (config-only and the same on every replica, rejected:
+  every session lands on one account until it cools down); sticky cookies at the load balancer (the
+  CLIs keep no cookies); client-IP affinity at the load balancer (every request reaches the replicas
+  from the same ingress); a shared binding store such as Redis (a new dependency and failure mode
+  for the same result); an unsalted hash of the session id (rejected: a guessable name could be
+  checked against the key); Contexto rewriting `X-Claude-Code-Session-Id` to its own key (rejected:
+  it changes a header the CLI owns and that upstream also reads).
 - **D37. `contexto sessions prune` deletes whole sessions, dry run by default, and never one in
   use.** Intake, 2026-10-24, from the 2026-10-16 report that session folders grow without limit and
   could only be freed by deleting files by hand. Contract change: a new subcommand, a new store file,
@@ -504,6 +566,158 @@ the owner's delegation. Open decisions are listed at the end with the options an
   (a failed delete would leave data `sessions list` cannot see and prune cannot reach); pruning
   single pages inside a live session (pages are cited by id from the ledger and the rendered index;
   out of scope here).
+
+- **D38. Contexto names the CLI versions it was tested with and warns about others, without
+  blocking.** Intake, 2026-10-24. Contexto recognises Claude Code's session start by its
+  `# Environment` heading (D33), its context blocks by their first lines (D32), and Codex's session
+  context by its section tags. A CLI update that changes that text fails silently: the message falls
+  into another class and can be paged. What changed: (1) `TESTED_VERSIONS` in
+  `src/contexto/cliversions.py` is the single list: Claude Code 2.1.302; Codex 0.154.0 (shapes,
+  acceptance) and 0.163.0 (MCP launch, missing-tools check). A test keeps
+  `SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION`, `CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION` and
+  `CONTEXT_SECTIONS_CODEX_VERSION` equal to the newest tested version of their CLI. The Codex
+  constant moves from 0.154.0 to 0.163.0. The routine (5) asks for its steps 1, 2 and 4 before that
+  bump: the first check, the shape probe, and the suite. All three ran on 0.163.0, at zero spend.
+  The first check (`spikes/m2/cliversion/check.sh`) showed the same six section openings, with
+  `<environment_context>` last in the lead. `spikes/m2/codex/probe.sh`, re-run on 0.163.0 over its
+  five auth and provider scenarios, matched the 0.154.0 table in `docs/research/M2-codex-adapter.md`:
+  POST-only full input, `store: false`, no `previous_response_id`, 6 POSTs on a 401 with the custom
+  providers in API-key mode, 2 POSTs and 2 `GET /models` in ChatGPT mode, and 7 WebSocket upgrades
+  before 6 POSTs on the built-in provider, with the same section tags in every scenario. Codex now sends more header names (`x-client-request-id` and
+  `x-codex-*`); none of them is read. Step 3 (`smoke.sh preflight`, the MCP launch) also ran: no
+  `mcp_tools_missing`, version 0.163.0 tested. The AGENTS.md header was not exercised; (2)
+  `contexto run claude|codex` runs `<cli> --version` after the session line and, for an untested
+  version, prints one stderr line naming the version, the tested versions, what may break, where to
+  report it, and `contexto run --no-version-check <cli>` (the flag goes before the CLI's name, or
+  it is passed to the CLI). The command runs in its own process group with stdin closed. At most
+  4 KB of output is read, until a line with a version, end of file, or 3 seconds, and then the group
+  is killed. So neither endless output nor a child that keeps the pipe open can hold the launch
+  (reviewer A measured 6.5 s and 20 GB with a `--version` that ran `yes`, before this). It never
+  blocks the launch; a CLI that does not answer is logged, not warned about. Ctrl+C during the
+  check exits 130 through the launcher's normal cleanup, with no traceback and without starting the
+  CLI. `CONTEXTO_NO_VERSION_CHECK=1` also skips the check. Logged as `cli_version_check`; (3) the
+  proxy reads each request's `User-Agent` (measured, zero spend:
+  `claude-cli/2.1.302 (external, sdk-cli)` and `codex_exec/0.163.0 (...)`; other `codex_` surfaces
+  are matched by the prefix, unmeasured), logs each distinct version once (`cli_version`, at most 8)
+  and the first untested one as `cli_version_untested`; (4) it checks, once, that the session start
+  was recognised, on the first request that has a tool list (any Codex request) and carries the
+  CLI's injected context (Claude Code: a role `system` message or a `<system-reminder>` block;
+  Codex: a developer item in the lead). That is the main conversation's first request: Claude
+  Code's title, topic, and quota side requests have no tool list, and subagents start from a main
+  turn's tool call. The engine's own main (`publishes`) is not used. When a tool-less side request
+  comes first, it stays main through the real conversation's first turn, and the check then landed
+  on a resumed subagent, which has a `<system-reminder>` but no `# Environment` (reviewer A). A
+  request with a tool list but no injected context leaves the check open, for up to 8 of them.
+  Recognised means: for Claude Code, a role `system` message with the signature or a context
+  block of kind `environment`, which every main request of the 13 reminders-spike runs on 2.1.302
+  has; for Codex, a user message of context sections in the lead. Otherwise the proxy logs one
+  `session_start_unrecognised`. The check reads only the first 4,096 characters of each content
+  block (a role `system` message is matched whole, and returns at the first match). Runtime events go
+  to the session log only, since a TUI can draw over a mid-run line; (5) `docs/cli-updates.md` is the
+  routine for a new version. It says how to set up (a `.venv` at the repository root) and which steps
+  each constant needs: for the two Claude Code constants, the first check, the reminders spike, and
+  the suite; for the Codex section constant, the first check, `probe.sh`, and the suite. The list and
+  the constants change in one commit. Options considered: refuse to launch an untested version
+  (rejected: most updates do not touch the text Contexto reads, and a refusal would stop users for
+  no change); warn on a different minor or major version only (rejected: Claude Code ships patch
+  versions often, and the tested text was measured on one patch version); warn on
+  stderr at runtime too (rejected: drawn over by the interactive CLI, and the launch line already
+  says it); check every request for the session start (rejected: one scan of a large history per
+  request for an answer that does not change within a process); judge the engine's main
+  conversation (rejected: wrong when a tool-less side request comes first, above); compare the
+  system prompt's hash (rejected: it changes with the user's tools, MCP servers, and settings, so
+  every session would warn). Limitations: a CLI that keeps its version but changes its text is not
+  caught by the version checks; the session-start check sees only the first judged request, so it
+  misses text that changes later in a session (a new reminder kind on a later turn); a CLI that
+  injected no context at all is not judged; whether Claude Code's subagent requests carry the
+  environment message is not measured, and the check relies on the main conversation's first
+  request coming before any subagent's.
+
+- **D39. The MCP server holds search text up to a budget, 64 MB by default: the newest pages as they
+  are, older pages compressed.** Assigned 2026-10-24 from the STATUS known limitation; the contract
+  change is recorded here for review, and the compressed tier was added on reviewer-2's measurement
+  in the PR #215 review. D34's page cache kept every page's folded text in the MCP server for the
+  life of the process, so a long session's server grew without limit (peak RSS 290 MB at 6,000
+  synthetic pages, 184 MiB of it text). What changed: (1) the server holds text for at most
+  `CONTEXTO_SEARCH_CACHE_MB` megabytes (1 MB = 1,048,576 bytes; default 64; `0` holds none), or
+  `contexto mcp --search-cache-mb`, which overrides it. `contexto run` passes the variable to the
+  server's environment for Claude Code and Codex when it is set (Codex starts MCP servers with a
+  restricted environment). An invalid variable is logged `search_cache_invalid` and the default
+  used: neither CLI reports an MCP server that fails to start, so refusing to start would silently
+  remove every Contexto tool. An invalid flag is a usage error; (2) the budget counts the bytes of
+  text held, as it is or compressed (zlib level 1). A page read during a search is held as it is;
+  while the held bytes exceed the budget, the oldest text held as it is, by (turn, id), is
+  compressed, and once none is left the oldest compressed text is let go. So a store whose
+  compressed text fits keeps every page, the newest as they are, and a larger store keeps its
+  newest pages compressed and reads the rest from their files at each search. A page that would be
+  compressed and then let go first (every held text is compressed and it is older than all of
+  them) is not held, so a search over a large store does not compress what it will drop, and
+  neither is a page larger than the budget even compressed, which would let every other text go
+  first (reviewer-1). When the
+  store's text does not fit the budget as it is (estimated from the listed pages' file sizes and the
+  text per file byte of the pages read so far), at most a quarter of the budget is held as it is:
+  text held as it is and compressed later leaves its memory with the allocator, and at 6,000 pages
+  peak RSS was 185 MB with no limit on that share, 145 MB with half, and 124 MB with a quarter,
+  with the same pages left uncompressed at the end (292). The quarter costs something when the
+  budget is raised above the store's compressed size but below its uncompressed size: part of the
+  budget stays unused and search is slower (reviewer-2, 128 MB on this store: 80 of 128 MiB held,
+  1,044 pages uncompressed instead of 3,337, 0.31 s instead of 0.25 s, for 140 MB of peak RSS
+  instead of 232). Without it peak RSS reached 1.8 times the budget, so the budget would not bound
+  memory. On this store zlib level 1 makes text 3.2
+  times smaller; compressing a 32 KB page takes about 137 us once, decompressing it 27 us per
+  search, against about 110 us to read, parse, and fold it again (reviewer-2's measurements). Not
+  LRU: every search reads every page (a word matches as a substring, so no index can skip a page),
+  in the same order, so with a store larger than the budget LRU would evict each page just before
+  the next search needed it and save no read; (3) `rank` takes a page at a time and keeps of it only
+  which words it holds, its length, and, for a match, its term counts, so a page read or
+  decompressed for a search is not held for the length of the query. Results are unchanged: each
+  word's page count, the average length, and the scores come from the same integers in the same
+  order. (D41 later dropped the length and the average length from `rank` and counts, for a match,
+  the texts holding each term; the page-at-a-time loop is unchanged.) Narrowing keeps D34's property that a query reads no page twice when no page holds every
+  word; when some page does, the pages that lacked an earlier word are read again for the
+  frequencies of the later words, except that a page just read is tested for every word at once
+  when the query has at most 6 words (a read costs about as much as 6 failing substring tests on a
+  32 KB page: 92 us against 15 us) or a match is already known. A page removed while a search runs
+  is left out whatever the budget: held text would still rank it and a read would not, so when a
+  listed file is gone at the end the search runs again on a new listing, up to 3 passes; if a page
+  is removed during each of them, the third pass's result is returned, and it can still depend on
+  the budget (reviewer-1). A page whose
+  id is not a string or whose turn is not an integer is damaged: it is logged `page_unreadable` and
+  left out, rather than breaking the ordering of every search (reviewer-1); (4) besides held text,
+  the server keeps each page's id, turn, and whether it holds only context blocks: 695 bytes per
+  page, and about 210 more for each held page (object headers and its heap item), outside the
+  budget (`tracemalloc`: 4.2 MB at 6,000 pages with budget 0, 5.4 MB beyond the 67.1 MB counted at
+  64 MB). It no longer keeps the page stub (2.4 KB per page), which only the index reads and the
+  server never builds; a process that builds the index reads it as before. Measured on the store
+  harness at 6,000 pages (`spikes/m2/scale/store/README.md`, `results/d39/`; before is main
+  18b9955): `quality.csv` is byte-identical before and after at 64 MB, unlimited, and 0, and every
+  stdio search reply has the same length; `tests/test_search_cache.py` compares budgets of 4 KB, an
+  eighth and a third of the text, and 0 with no budget and with a reference ranking on random
+  stores. Search (rare / common / multi-word) and peak RSS of the MCP child: before 0.100 / 0.174 /
+  0.243 s, 290 MB; at 64 MB 0.263 / 0.334 / 0.405 s, 134 MB (every page held, 292 as they are,
+  5,708 compressed); at 0 0.799 / 0.880 / 0.908 s, 47 MB; unlimited 0.100 / 0.171 / 0.246 s, 278
+  MB, so the rewritten ranking costs nothing when every page is held. Without the compressed tier
+  (this PR's first head, 8a96500) 64 MB gave 0.548 / 0.633 / 0.693 s at 129 MB: compression removes
+  about 64 percent of the time the budget added. The first search of a process takes 1.6 s at 64 MB
+  (0.8 s before), because it compresses most pages once. 64 MiB holds 2,085 of these pages as they
+  are (32.1 KB of folded text each, about 48M tokens of history), and about 3.2 times that
+  compressed; a 30M-token session (1,616 pages in `docs/research/M2-scale-30m.md`) is about 40 MiB
+  of text at this store's 1.4 bytes per token, so it is held as it is and searches as fast as
+  before. Options considered: LRU (rejected, above); every held page compressed (measured by
+  reviewer-2: 0.24 / 0.29 / 0.37 s for the whole store in 57.8 MiB; the newest pages as they are
+  save the decompression where the budget has room); compressed text with no cap (rejected: memory
+  still grows with the store); an exact prefilter that skips pages lacking a word's trigrams or
+  tokens (rejected: building it in Python took 0.7 ms per page, so 4 s more on a first search at
+  6,000 pages, and a per-page vocabulary string is 18 percent of the text on the synthetic pages,
+  more on real ones, held for every page, so it grows with the store); a per-term posting cache
+  (rejected by reviewer-2: it helps only queries that repeat a word, and a common word still needs
+  every page's counts); folded text written beside the pages for fast re-reads (rejected: a new
+  store file to keep consistent with quarantine and crashes, and about 75 percent more disk); a
+  larger default (not chosen: 64 MB, the size the task suggested, holds a 30M-token session as it
+  is and 6,000 synthetic pages compressed). Limitations: the 3.2 ratio is from synthetic text and
+  real text is unmeasured; a store larger than the budget's compressed capacity reads every page
+  outside it at each search; the first search compresses what the budget keeps; raise the budget
+  when search time matters more than memory.
 
 - **D41. Search drops BM25's length term (b 0), so a long turn that states the current value is not
   buried by short older pages.** The follow-up D34 (3) left open, zero spend, under the owner's
@@ -634,15 +848,18 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   CLIProxyAPI instance; logins live in CLIProxyAPI or the vendor's own CLI, never in Contexto;
   users follow their providers' terms).
 - **O5. First real release.** Settled by D29 (v0.1.0 after M2 acceptance).
-- **O6. Upstream affinity on the owner's proxy.** Measured: full cache misses with byte-identical
+- **O6. Upstream affinity on the owner's proxy.** Resolved by D36 (a proposed consistent-hash
+  session affinity option for CLIProxyAPI, not deployed, and Contexto's `X-Session-Affinity`); kept
+  here for its evidence. Measured: full cache misses with byte-identical
   prefixes (4 of 14 eligible throwaway calls) and thinking dropped on every request
   (`end_user_binding_mismatch`) through the owner's proxy. Lane 1's black-box test (L1-e,
   81,319 tokens): over 10 haiku requests the keep/drop pattern falls into exactly 3 consistent
   classes, and a byte-identical series shows exactly 3 cache writes before steady reads (counts
   measured; reported by manager-1, doc pending in lane 1's L1-f PR). Inferred: the route spreads
   requests across at least 3 upstream identities, and each byte-identical miss is the first request
-  to reach an identity. Opus over 5 requests kept all thinking (inconclusive). Fix is a per-session upstream affinity setting on the owner's
-  infrastructure. Owner decision; intake does not touch the proxy (D11).
+  to reach an identity. Opus over 5 requests kept all thinking (inconclusive). At the time the fix
+  was left to the owner, since intake did not touch the proxy (D11); D36's owner request covers the
+  proxy-side work.
 - **O7. OpenRig context-usage clock bug.** Measured by lane 1: every seat's context usage reads
   `stale_generation` because tenure boot times are stored in UTC without `Z` and parsed as local
   time (UTC-5), blinding `rig ps`, `whoami`, and compaction planning for about 5 hours after boot.

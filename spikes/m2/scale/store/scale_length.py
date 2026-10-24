@@ -66,6 +66,7 @@ from contexto.store.pages import _texts, is_context_page  # noqa: E402
 import scale_bench  # noqa: E402
 
 D34_REF = "4b87ec2"  # main after PR #204 (D34)
+HOLD_ALL_MB = "1048576"  # a search text budget (D39) that holds every store here as it is
 K1 = 1.2
 VARIANTS = (("page", 0.75), ("page", 0.5), ("page", 0.3), ("page", 0.0), ("d41", 0.0), ("cap3", 0.0),
             ("texts", 0.75), ("fields", 0.75), ("fields", 0.3), ("floored", 0.75))
@@ -221,7 +222,7 @@ def rank_capped(entries: Sequence[Entry], query: str, cap: int) -> list[str]:
     return _rank_with(entries, query, relevance)
 
 
-def ranker(d34: ModuleType | None, kind: str, b: float) -> Callable[..., list[str]]:
+def _rank_of(d34: ModuleType | None, kind: str, b: float) -> Callable[[Sequence[Any], str], list[str]]:
     if kind == "d41":
         return search_now.rank
     if kind == "cap3":
@@ -240,6 +241,20 @@ def ranker(d34: ModuleType | None, kind: str, b: float) -> Callable[..., list[st
             return d34.rank(entries, query)
         finally:
             d34.B = saved
+    return rank
+
+
+def ranker(d34: ModuleType | None, kind: str, b: float) -> Callable[..., list[str]]:
+    """A ``rank(entries, query, fetch=None)`` as ``SessionStore.search`` calls it (D39). An entry whose text
+    is not held is read through ``fetch`` first, so every variant sees every page; ``main`` holds all text
+    (``HOLD_ALL_MB``), so this happens only if a page cannot be held."""
+    inner = _rank_of(d34, kind, b)
+
+    def rank(entries: Sequence[Any], query: str, fetch: Callable[[int], Any] | None = None) -> list[str]:
+        if any(e.text is None for e in entries):
+            got = [e if e.text is not None else (fetch(i) if fetch is not None else None) for i, e in enumerate(entries)]
+            entries = [e for e in got if e is not None and e.text is not None]
+        return inner(entries, query)
     return rank
 
 
@@ -338,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
     d34 = load_d34(args.d34_ref)
+    scale_bench.SEARCH_CACHE_MB = HOLD_ALL_MB  # the prototypes read each page's text ends from the held entry
     original = (store_module.rank, memory_module.rank, catalog_module.search_entry, memory_module.search_entry)
     home = Path(tempfile.mkdtemp(prefix="contexto-length-"))
     rows: list[dict[str, Any]] = []

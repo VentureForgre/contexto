@@ -350,6 +350,7 @@ def redact(event: Any) -> Any:
 class SessionStore(LedgerOps):
     def __init__(self, home: Path, session_id: str) -> None:
         self.session_id = session_id
+        self.home = Path(home)
         self.dir = session_dir(home, session_id)
         self.pages_dir = self.dir / "pages"
         # Narrow an existing wide CONTEXTO_HOME and sessions/ too, not only directories we create.
@@ -615,6 +616,7 @@ class SessionStore(LedgerOps):
             raise SessionNotFoundError(f"no session {session_id!r} under {Path(home) / 'sessions'}")
         store = cls.__new__(cls)
         store.session_id = session_id
+        store.home = Path(home)
         store.dir = path
         store.pages_dir = path / "pages"
         store._key_cache = None
@@ -705,11 +707,16 @@ class SessionStore(LedgerOps):
 
     @property
     def _catalog(self) -> PageCatalog:
-        """This process's cache of what search and the index read from each page (D34)."""
+        """This process's cache of what search and the index read from each page (D34, D39)."""
         catalog = self.__dict__.get("_page_catalog")
         if catalog is None:
             catalog = self.__dict__["_page_catalog"] = PageCatalog(self.pages_dir, self.log)
         return catalog
+
+    def set_search_cache(self, budget_bytes: int | None) -> None:
+        """Hold at most ``budget_bytes`` of page text for search in this process (None: no limit; D39).
+        Search results do not depend on it: a page whose text is not held is read again when searched."""
+        self._catalog.set_text_budget(budget_bytes)
 
     def get_page(self, page_id: str) -> dict[str, Any] | None:
         """The page record for ``page_id``, or None if this store has no such page."""
@@ -726,7 +733,15 @@ class SessionStore(LedgerOps):
 
     def search(self, query: str) -> list[str]:
         """Ids of pages holding every word of ``query`` (case-insensitive, any order), best first (D34)."""
-        return rank([e.search for e in self._catalog.entries(texts=True)], query)
+        # A page removed while a search runs is left out whatever the budget: a held page would still be
+        # ranked, a page read from its file would not, so the search is run again on a new listing
+        # (D39, reviewer-1 on PR #215). Three tries, then the last result.
+        for _ in range(3):
+            entries, fetch, names = self._catalog.search_entries()
+            found = rank(entries, query, fetch)
+            if self._catalog.all_present(names):
+                break
+        return found
 
     def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
         salient = lists_identifiers(self.recall_variant(variant))

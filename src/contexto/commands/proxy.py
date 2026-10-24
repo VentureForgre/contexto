@@ -29,6 +29,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 def run(args: argparse.Namespace) -> int:
     from contexto.paths import contexto_home
+    from contexto.launcher import session_affinity_key
     from contexto.proxy import ContextoProxy
     from contexto.store import SessionStore
     from contexto.upstream import resolve_upstream
@@ -38,7 +39,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         store = SessionStore(contexto_home(), session_id)
         proxy = ContextoProxy(upstream.url, store, observe_thinking=args.observe_thinking,
-                              upstream_source=upstream.source)
+                              upstream_source=upstream.source, affinity_key=session_affinity_key(store, upstream.url))
         port = proxy.start(args.port)
     except (OSError, ValueError) as exc:
         print(f"contexto proxy: cannot start: {exc}", file=sys.stderr)

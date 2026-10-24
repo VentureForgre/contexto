@@ -23,6 +23,23 @@ same design after Claude Code works.
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
   stores or logs them.
+- - Upstream affinity (D36). The CLI's session signals reach upstream unchanged: Claude Code's
+  `X-Claude-Code-Session-Id` header and `metadata.user_id`, Codex's `session-id` header and
+  `prompt_cache_key`. When the upstream host name, IDNA-normalized, is not `anthropic.com`,
+  `openai.com`, `chatgpt.com`, `openai.azure.com`, `services.ai.azure.com`, or a subdomain of one,
+  the proxy also adds `X-Session-Affinity: contexto-<first 32 hex digits of HMAC-SHA-256(salt,
+  "contexto-affinity\0" + session id)>` to every request it forwards, unless the CLI sent that
+  header itself. The salt is 32 random bytes in `$CONTEXTO_HOME/affinity.salt` (0600), written once
+  per install, only when the header will be sent, and read without following a symlink or blocking
+  on a FIFO, so the key is the same across restarts and resumes. Claude Code's own session id, which
+  the proxy routes on first, survives `--resume` and is new at a fresh launch or with
+  `--fork-session`. A name that cannot be IDNA-normalized gets no header; an IP literal upstream
+  gets it. When the salt cannot be read, the header is left out and `affinity_salt_unavailable` is
+  logged. The key is one per Contexto session: the main conversation, subagents, and side requests
+  all carry it. A routing proxy can pin each session signal to one upstream credential. The CLI's id
+  and Contexto's key are different signals and may map to different credentials, so the key pins
+  only requests that carry no CLI signal. The launch event records `affinity_header` (true when the
+  header is sent).
 
 ## Architecture
 
@@ -567,14 +584,21 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   holding only paged context blocks (system messages and Codex `developer` items, or user messages
   made only of `<system-reminder>` blocks, D32; recognised from the messages, whatever the stub),
   which stay searchable and recallable. Within each group pages rank by BM25 relevance over the words
-  and the whole query (k1 1.2, inverse document frequency over all pages of the store) with no
-  length term (b 0, D41): a page's length does not count, so a long turn that states a value once
-  scores as a short page that states it once, and a page that repeats a word scores at most 2.2
-  times a page that says it once. Relevance is multiplied by a recency prior `1 + 0.5 r`, where `r`
+  and the whole query (k1 1.2, inverse document frequency over all pages of the store) with two
+  changes (D41). A term's frequency on a page is the number of the page's texts that hold it (a
+  text is one stub field or one text, tool input, or tool output of the turn), so a grep or a log
+  that repeats a key many times counts once. And there is no length term (b 0): a long turn that
+  states a value once scores as a short page that states it once. A page whose texts hold a word
+  many times scores at most 2.2 times a page with one such text. Measured cost (D41): an old turn
+  whose prompt, command, output, and reply all name a key still outranks a newer one-line reply that
+  states its new value, and once a passing mention follows that reply, it can leave the 3 best pages
+  (in a simulation from this repository's own tool output, one-line statements reached the 3 best in
+  38 of 122 sessions where D34 reached 64). Relevance is multiplied by a recency prior `1 + 0.5 r`, where `r`
   runs from 0 for the oldest matching page to 1 for the newest, so a newer page wins unless an older
   one is clearly more about the query;
   ties go to the newer page. The newest matching turn page (the newest matching page when no turn
-  page matches) is always one of the 3 best: if it ranks lower it takes the third place. The
+  page matches) is always one of the 3 best: if it ranks lower it takes the third place. This
+  covers the turn that states a value only while it is the newest mention. The
   reply's paged part opens with `[best matching pages by relevance, shown newest first:]`. In both
   the 3 best pages and the next 50, turn pages come first, newest first (for superseded facts the
   newest statement among them is the current one), then context-block pages, newest first, after
@@ -635,15 +659,35 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   analysis, builder-3, zero spend): 4 of H1's 5 extra chain misses had a newer link in the retained
   window, but the model answered from a search reply whose newest paged hit looked current.
   Results are charged against the per-turn room. No embeddings and no similarity matching
-  (owner: not RAG): only the query's own words, ranked lexically (D34). Speed (D34): the MCP
-  server keeps each page's folded searchable text in memory for its lifetime, as UTF-8 bytes, and
-  the proxy keeps each page's id, turn, stub, and index line, each process listing `pages/` on
-  every call to pick up new pages and drop quarantined ones (a file is read again only if its
-  inode, size, or modification time changed); pages stay immutable and the store format is
-  unchanged. Limitations: the MCP server's memory grows with the store (about the UTF-8 size of the
-  page text, with no cap); the first search of each MCP process reads every page once; pages are
+  (owner: not RAG): only the query's own words, ranked lexically (D34). Speed and memory (D34,
+  D39): each process lists `pages/` on every call to pick up new pages and drop quarantined ones (a
+  file is read again only if its inode, size, or modification time changed); pages stay immutable
+  and the store format is unchanged. The proxy keeps each page's id, turn, stub, and index line.
+  The MCP server keeps each page's id, turn, and whether it holds only context blocks (about 700
+  bytes per page, and about 210 more per held page, outside the budget), and holds folded
+  searchable text, as UTF-8 bytes, up to a budget: `CONTEXTO_SEARCH_CACHE_MB` megabytes of
+  1,048,576 bytes (default 64; `0` holds none), or `contexto mcp --search-cache-mb`, which
+  overrides it. `contexto run` passes the variable to the MCP server for both CLIs when it is set;
+  an invalid value is logged `search_cache_invalid` and the default used, so the server still
+  starts. The budget counts held text as it is or compressed (zlib level 1): a page read for a
+  search is held as it is, and while the held bytes exceed the budget the oldest uncompressed text
+  (by turn, then id) is compressed, then the oldest compressed text let go. So a store whose
+  compressed text fits keeps every page, the newest uncompressed while room allows, and a larger
+  store keeps its newest pages compressed, none uncompressed. When the store's text does not fit the
+  budget as it is, at most a quarter of the budget is held uncompressed. A page that is not held is
+  read from its file at each search and let go after it; a page that would be compressed and let go
+  first, or that is larger than the budget even compressed, is not held. A page removed while a
+  search runs is left out (the search runs again on a new listing when a listed file is gone at its
+  end, up to 3 passes, then returns the last result), and a page whose id is
+  not a string or whose turn is not an integer is logged `page_unreadable` and left out. Search
+  results do not depend on the budget. Limitations: a store larger than the budget's compressed
+  capacity reads every page outside it at each search; at 6,000 synthetic pages (184 MiB of text,
+  all held compressed at 64 MB) a search takes 0.26 to 0.41 s at 64 MB against 0.10 to 0.25 s with
+  every page held as it is, and 0.80 to 0.91 s at 0; the first search of each MCP process reads
+  every page once and compresses what the budget keeps (1.6 s at 6,000 pages and 64 MB); pages are
   narrowed word by word, so a query stops scanning as soon as no page holds every word so far, but
-  a query with matches scans the text once per word.
+  a query with matches scans the text once per word, and reads a page outside the budget a second
+  time when the query has more than 6 words and the page came before the first match.
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
@@ -691,6 +735,36 @@ seconds). The launcher prints the warning on stderr, naming the likely cause and
 it is first reported and once more after the CLI exits for a repeated exit event, because a TUI can
 draw over a line printed mid-run. If the check itself raises, the engine logs `toolcheck_error` with
 the exception's type name only and keeps the request's rewrite.
+
+**CLI versions (D38).** The CLI versions Contexto was tested with are one list, `TESTED_VERSIONS` in
+`src/contexto/cliversions.py`; the measured-on constants of the session-start signature, the
+context-block kinds, and the Codex context sections equal the newest tested version of their CLI.
+`contexto run` runs `<cli> --version` after the session line, in its own process group with stdin
+closed. It reads at most 4,096 bytes of output, until a line with a version, end of file, or 3
+seconds, and then kills the group. For a version not in the list it prints one stderr line naming
+it, the tested versions, what may break, where to report it, and `contexto run --no-version-check
+<cli>`, and the launch goes on. A CLI that does not answer is logged, not warned about.
+`--no-version-check` (before the CLI's name) or `CONTEXTO_NO_VERSION_CHECK=1` skips the check.
+Ctrl+C during the check exits 130 through the launcher's cleanup, without a traceback and without
+starting the CLI. The log gets `cli_version_check` (`cli`, `version`, `tested`, `tested_versions`, and
+`error` or `skipped`; `error` is `interrupted` for a Ctrl+C). The engine reads each request's
+`User-Agent` (`claude-cli/<v>`, `codex_<surface>/<v>`) and logs `cli_version` (`cli`, `client`,
+`version`, `tested`, `tested_versions`) once per distinct version, at most 8, and
+`cli_version_untested` once for the first untested one. It judges the session start once, on the
+first request that has a tool list (for the Responses API, any request) and carries the CLI's
+injected context (a role `system` message or a `<system-reminder>` block; for Codex, a developer item
+in the lead). That is the main conversation's first request: side requests have no tool list, and
+subagents start from a main turn's tool call. The engine's `publishes` choice of main is not used,
+because a tool-less side request that arrives first stays main through the real conversation's first
+turn. A request with a tool list and no injected context leaves the judgement open, for at most 8
+such requests. Recognised: a role `system` message with the step 1 signature or a context block of
+kind `environment` (Messages API), or a user message of context sections in the lead (Responses
+API). Otherwise the engine logs `session_start_unrecognised` (`dialect`, `signature_version`,
+`cli_version`, `tested_versions`). It reads only the first 4,096 characters of each content block; a
+role `system` message is matched whole. These events go on the request's `transform_events`, before
+the engine's request event, and never to stderr; if the check raises, the engine logs
+`cli_version_error` with the exception's type name and keeps the rewrite. `count_tokens` is not
+checked. The routine for testing a new version is `docs/cli-updates.md`.
 
 ## CLI
 

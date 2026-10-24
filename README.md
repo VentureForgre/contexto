@@ -67,8 +67,9 @@ The session id is printed on stderr at start. The launcher:
    `127.0.0.1:<free port>`;
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets only
    `env.ANTHROPIC_BASE_URL` to the proxy, and an `--mcp-config` file that starts Contexto's MCP
-   server (`python -P -m contexto mcp --session <id>` with the same Python, and `CONTEXTO_HOME` in
-   its environment; `-P` keeps your project directory off the import path);
+   server (`python -P -m contexto mcp --session <id>` with the same Python, and `CONTEXTO_HOME`, plus
+   `CONTEXTO_SEARCH_CACHE_MB` when set, in its environment; `-P` keeps your project directory off the
+   import path);
 4. runs `claude --settings <file> --mcp-config <file> [your args]` in your terminal and returns its
    exit code.
 
@@ -94,7 +95,8 @@ writes a `config.toml` there (mode 0600) that:
 - turns request compression off (`features.enable_request_compression = false`);
 - adds the MCP server `contexto` (`python -P -m contexto mcp --session <id>` with the same Python)
   with `default_tools_approval_mode = "approve"`, so recall works in `codex exec` too, and `CONTEXTO_HOME`
-  in its `env` table, because Codex starts MCP servers with a restricted environment.
+  (plus `CONTEXTO_SEARCH_CACHE_MB` when set) in its `env` table, because Codex starts MCP servers with a
+  restricted environment.
 
 On exit the `config.toml` is deleted and the directory is kept, so Codex can resume its rollouts.
 Because `CODEX_HOME` is new, your own `~/.codex` configuration is not loaded in this mode.
@@ -143,6 +145,7 @@ tested: [docs/cliproxyapi.md](docs/cliproxyapi.md).
 | `--codex-auth MODE` | `apikey` | `apikey` or `chatgpt` (see Quickstart). |
 | `--codex-key-helper CMD` | see Quickstart | Command that prints the API key (Codex, API-key mode). |
 | `--codex-upstream URL` | see Quickstart | Upstream for Codex requests, including its version path. |
+| `--no-version-check` | off | Skip the check of `claude --version` or `codex --version` against the versions Contexto was tested with. |
 
 **Tip for Haiku 5.5:** on Haiku 5.5, `--bound 125000` keeps requests at turn start below the 100K price
 tier, above which every rate is 5x. Replaying live run #3 at that bound with the model's behavior held
@@ -164,9 +167,11 @@ Environment variables:
 | `CONTEXTO_SESSION` | `recall`, `state` | Session to read when `--session` is not given. |
 | `CONTEXTO_CODEX_KEY_HELPER` | `run codex` | Key helper command when `--codex-key-helper` is not given. |
 | `CONTEXTO_CODEX_UPSTREAM` | `run codex` | Codex upstream when `--codex-upstream` is not given. |
+| `CONTEXTO_SEARCH_CACHE_MB` | `mcp` | Page text the MCP server holds in memory for `contexto_search`, in MB (default 64; `0` holds none). It holds the newest pages' text as it is and older pages' text compressed; pages that do not fit are read from the store at each search, so a larger value makes search in a large store faster and a smaller one uses less memory. Results do not change. `contexto run` passes it to the MCP server for both Claude Code and Codex; `contexto mcp --search-cache-mb` overrides it. |
 | `CONTEXTO_RECALL_VARIANT` | new sessions | `default` or `legacy` recall guidance text. `legacy` is kept for diagnosis. A session keeps the variant it started with. |
 | `ANTHROPIC_BASE_URL` | `run`, `proxy` | Upstream, when no settings file sets one (see Troubleshooting). |
 | `OPENRIG_SESSION_NAME` | `run` | When set, the start-up window check assumes 92,000 tokens of fixed overhead instead of 55,000. |
+| `CONTEXTO_NO_VERSION_CHECK` | `run` | `1` skips the CLI version check, like `--no-version-check`. |
 
 At start, `contexto run` warns on stderr when the bound leaves a window budget under 25,000 tokens
 (bound minus headroom floor minus the assumed fixed overhead) and suggests a larger `--bound`. It
@@ -286,6 +291,15 @@ never names MCP tools in its requests, so for Codex the MCP server records in th
 answers Codex's tool list request, and the proxy checks for that record. For Codex, a server that
 crashes after it answered cannot be detected: the record stays.
 
+**"warning: Claude Code X is not a version Contexto was tested with".** Contexto recognises parts of
+Claude Code's and Codex's requests by text the CLI writes, and was tested with the versions the line
+names. A newer CLI usually works, but if it changed that text, Contexto can page context it should
+keep, and nothing else says so. The launch goes on. Look for a newer Contexto, or report the version
+at https://github.com/VentureForgre/contexto/issues. `contexto run --no-version-check claude` (the
+flag goes before `claude` or `codex`) or `CONTEXTO_NO_VERSION_CHECK=1` silences it. During the run
+the session log records the version each request names (`cli_version`) and
+`session_start_unrecognised` if the session start was not recognised. [docs/cli-updates.md](docs/cli-updates.md) is how a new version gets tested.
+
 **"window budget about N tokens ... is below 25,000".** The bound leaves little room for turns after
 the fixed overhead, so rotations page often. Start again with the suggested `--bound`.
 
@@ -299,6 +313,19 @@ is a Contexto bug; please report it.
 **415 "cannot read a request body with Content-Encoding ...".** The proxy decodes gzip and deflate
 (and zstd on Python 3.14+) and refuses other encodings. Run the CLI through `contexto run`, which
 turns Codex's request compression off.
+
+**Cache misses or dropped thinking through a proxy with several accounts.** A proxy that spreads one
+session's requests over several upstream accounts loses the prompt cache and the thinking blocks on
+each switch. Contexto forwards the CLI's own session signals unchanged (Claude Code's
+`X-Claude-Code-Session-Id` and `metadata.user_id`, Codex's `session-id` and `prompt_cache_key`) and
+adds `X-Session-Affinity: contexto-<salted hash of the session id>` to requests for any upstream
+other than Anthropic, OpenAI (including Azure OpenAI), Azure AI Foundry, and ChatGPT hosts. The
+proxy has to route on one of them. CLIProxyAPI does with `routing.session-affinity: true`; see
+[docs/cliproxyapi.md](docs/cliproxyapi.md#troubleshooting) for the settings. Claude Code keeps its
+session id on `--resume`, so routing survives a resume; a fresh launch or `--fork-session` starts a
+new one. Several replicas behind one load balancer also need consistent hashing,
+`routing.session-affinity-consistent-hash: true`, proposed for upstream CLIProxyAPI and not yet
+submitted there (D36 in `docs/DECISIONS.md`).
 
 **`count_tokens` returns 403.** Errors from the upstream pass through unchanged. Some proxies refuse
 `/v1/messages/count_tokens`; Claude Code calls it only around compaction.
@@ -327,6 +354,7 @@ full list is in
 | `run` | 1 | The proxy could not start |
 | `run` | 2 | Usage error, for example `--bound` above 170,000, a `--settings` after `claude`, or no Codex key helper or upstream |
 | `run` | 127 | `claude` or `codex` is not on `PATH` |
+| `run` | 130 | Ctrl+C during the version check, before the CLI started |
 | `sessions`, `recall`, `state` | 0 | Success (an empty session list is a success) |
 | `sessions`, `recall`, `state` | 1 | Unknown or invalid session id, unknown page id, an offset past the end of the page, or an unreadable ledger |
 | `sessions prune` | 1 | A session could not be deleted, or the session named by `--session` was skipped (in use, active in the last 10 minutes, or unsafe to delete) |
