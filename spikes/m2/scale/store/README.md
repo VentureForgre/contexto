@@ -563,14 +563,20 @@ loud / quiet / many calls / split output / refactor, of 500, 500, 300, 300, 300.
 | 3, none | 58 / 20 / 0 | 58 / 20 / 0 | 0 | 4 | yes | yes | 184 / 162 / 119 / 103 / 116 | 684 |
 | D34 (b 0.75) | 56 / 20 / 0 | 53 / 17 / 3 | 4 | 1 | yes | yes | 171 / 158 / 127 / 125 / 143 | 724 |
 
-With the stub's repeats of the prompt and paths dropped (`table.md`), every cell is lower on 4 to 6
+The dump sets read pytest outputs that `scale_dumps_gen.sh` writes with durations and paths, so a
+regenerated set can differ by a session or two in the cells with no cap (reviewers saw "old dump
+above" move 149 to 151 for text cap 1, no page cap, and D34's split-output row 190 to 191); the
+capped cells, including D41's, reproduced exactly on both reviewers' machines.
+
+With the stub's repeats of the prompt and paths dropped (`table.md`, rows marked "repeats dropped"),
+every cell is lower on 4 to 6
 probe rows (55 or 56 of 86 at 6,000 on both models, against 58), so D41 keeps them. Main's
 scenarios come out the same as
 with the repeats kept, and stale only sums to 614 to 716.
 
 Statement in detail / an old dump ranked above it / stale only, D34 then D41 (text cap 1, page cap
 3): loud 300 / 272 / 171 and 316 / 260 / 184; quiet 308 / 235 / 158 and 363 / 131 / 121; many calls
-173 / 195 / 127 and 197 / 153 / 103; split output 171 / 190 / 125 and 202 / 140 / 98; refactor
+173 / 195 / 127 and 197 / 153 / 103; split output 171 / 190 / 125 and 202 / 140 / 98 (171 / 191 / 125 on reviewer A's machine); refactor
 157 / 205 / 143 and 191 / 151 / 109. One-line replies shown, D34 then D41: 64 and 38 of 122 (loud),
 65 and 61 of 132 (quiet), 37 and 28 of 85 (many calls), 27 and 20 of 74 (split output), 22 and 18
 of 68 (refactor). Edits and Edit-then-pytest statements are shown in every session under D41.

@@ -699,12 +699,15 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   (b 0): a long turn that states a value once scores as a short page that states it once. A page
   with the term in 3 or more texts scores 1.57 times a page with it in one. Relevance is multiplied
   by a recency prior `1 + 0.5 r`, where `r` runs from 0 for the oldest matching page to 1 for the
-  newest, so a newer page wins unless an older one holds the query in more texts; repetition inside
+  newest. Against the newest match, the oldest needs the term in 3 texts to the newest page's 1
+  (1.57 against 1.5); 2 texts (1.375) outrank a one-line page unless it is about 0.75 or more of the
+  way newer among the matches. Repetition inside
   one text does not count, so a reply or a file that discusses a key at length weighs as one passing
   mention, and a newer passing mention outranks it (D41 records this loss against D34: a reply that
   says "rate limit" in 4 lines is no longer shown above 30 newer one-line mentions). Measured cost
-  (D41): an old turn that names a key in 3 or more texts outranks a newer one-line reply that states
-  its new value, and once a passing mention follows that reply, it can leave the 3 best pages (in a
+  (D41): an old turn that names a key in 2 or more texts (a prompt that names it counts twice)
+  usually outranks a newer one-line reply that states its new value, and once a passing mention
+  follows that reply, it can leave the 3 best pages (in a
   simulation built from this repository's own tool output, a one-line reply reached the 3 best in 38
   of 122 sessions where D34 reached 64, 61 of 132 against 65 where only the old turn's command and
   output name the key, and 28 of 85 against 37 where the old turn runs a grep per file; stale-only
@@ -802,7 +805,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   a query with matches scans the text once per word, and reads a page outside the budget a second
   time when the query has more than 6 words and the page came before the first match. The budget
   bounds the text held between searches, not what one search reads to answer: `contexto_search`
-  reads and renders each of the up to 53 pages it shows, with no cap on their size (D41).
+  reads and renders each of the up to 53 pages it shows, with no cap on their size (D41; a per-search
+  byte budget is a tracked follow-up).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.

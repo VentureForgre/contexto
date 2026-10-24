@@ -25,10 +25,13 @@ query; with b 0.75 a long turn that states a value once ranked below short older
 old one. Frequency saturates (``K1``): a page with the term in 3 or more texts scores 1.57 times a
 page with it in one, and a word that occurs on fewer pages weighs more (inverse document frequency).
 Relevance is then multiplied by a recency prior, ``1 + RECENCY_WEIGHT * r``, where ``r`` is the
-page's position among the matching pages from 0 (oldest) to 1 (newest). So a newer page wins unless
-an older one holds the query in more texts: with ``RECENCY_WEIGHT`` 0.5 the oldest match needs one
-and a half times the relevance of the newest to rank above it, which only a page with the term in 3
-texts against the newest page's 1 has (1.57 against 1.5). Repetition inside one text does not count:
+page's position among the matching pages from 0 (oldest) to 1 (newest). With ``RECENCY_WEIGHT`` 0.5
+the oldest match needs one and a half times the relevance of the newest to rank above it, which only
+a page with the term in 3 texts against the newest page's 1 has (1.57 against 1.5). A page with it
+in 2 texts (1.375; a prompt that names it counts twice, since the stub repeats the prompt) outranks
+a one-line page unless that page is about 0.75 or more of the way newer among the matches, so once a
+passing mention follows a one-line reply, an older page with 2 texts usually outranks the reply.
+Repetition inside one text does not count:
 a reply or a file that discusses a key at length weighs as one passing mention, so a newer passing
 mention outranks it (D41 records this loss against D34). Ties go to the newer page. Last, the newest
 matching turn page (the newest matching page when no turn page matches) is moved up to the last of

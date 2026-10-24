@@ -51,13 +51,15 @@ def main(argv: list[str]) -> int:
           "| newest of equal statements | stale only: " + " / ".join(DUMPS) + " | sum |")
     print("|---|---|---|---:|---:|---|---|---|---:|")
     for variant, q in quality.items():
+        label = variant if full or not variant.startswith("text cap") or "(0ff1bfe)" in variant \
+            else f"{variant}, repeats dropped"
         worse = sum(1 for k, (top, latest, st) in q.items()
                     if top < base[k][0] or latest < base[k][1] or st > base[k][2])
         s = stale.get(variant, {})
         cells = " / ".join(str(s.get(d, "-")) for d in DUMPS)
         total = sum(s.values()) if len(s) == len(DUMPS) else "-"
         fmt = lambda k, q=q: "{} / {} / {}".format(*q.get(k, ("-", "-", "-")))  # noqa: E731
-        print(f"| {variant} | {fmt(('spike', '6,000'))} | {fmt(('calibration', '6,000'))} | {worse} | "
+        print(f"| {label} | {fmt(('spike', '6,000'))} | {fmt(('calibration', '6,000'))} | {worse} | "
               f"{turns.get(variant, '-')} | {scenarios.get(variant, ('-', '-'))[0]} | "
               f"{scenarios.get(variant, ('-', '-'))[1]} | {cells} | {total} |")
     return 0

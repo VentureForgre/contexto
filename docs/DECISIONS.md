@@ -905,7 +905,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   in blocks of 5, 20, or 50 lines), and refactor (3, 6, or 12 Edits whose strings name the key).
   Statement among the 3 detailed pages / an old dump ranked above it / stale only, D34 then D41: loud
   300/272/171 and 316/260/184, quiet 308/235/158 and 363/131/121, many calls 173/195/127 and
-  197/153/103, split output 171/190/125 and 202/140/98, refactor 157/205/143 and 191/151/109.
+  197/153/103, split output 171/190/125 and 202/140/98 (D34 is 171/191/125 on reviewer A's machine:
+  cells with no cap can move by a session or two with the regenerated pytest outputs), refactor
+  157/205/143 and 191/151/109.
 
   (c) The grid (`results/d41/grid/`, `scale_grid.py`): each text counts the term up to c times (c 1,
   2, 3) and the page up to p (p 2, 3, none), each with the stub's repeats of the prompt and paths kept
@@ -944,34 +946,41 @@ the owner's delegation. Open decisions are listed at the end with the options an
   as tests that pin the new outcome: in the first, turn 1 is not shown (detailed 31, 30, 29; D34 31,
   30, 1); in the second, `timeout` and `client timeout` show 60, 56, 52 and no value (D34 showed 45
   first), while `HTTP_TIMEOUT_S`, which only the statements hold, still shows 45, 30, 8. (ii) An old
-  turn that names the key in 3 or more texts outranks a newer one-line reply that states its value
-  (1.57 against 1.5 when the old turn is the oldest match), and once a passing mention follows the
-  reply, the reply leaves the detailed pages more often than under D34: one-line replies shown 38 of
-  122 against D34's 64 (loud), 61 of 132 against 65 (quiet), and in the three sets built against
-  per-text counting 28 of 85 against 37 (many calls), 20 of 74 against 27 (split output), 18 of 68
-  against 22 (refactor). Many separate tool calls that name the key are the shape that still costs
-  most: the page cap holds them to 3, but stale only stays at 103 of 300 (D34 127). The newest-page
-  place (D34 (3)) stays and covers a statement only while it is the newest mention: in (b) the newest
-  mention was among the detailed pages in every session under every variant, and a statement that was
-  the newest mention was always shown (241 of 241 in loud and quiet), but a later passing mention
-  takes that place. (iii) Memory and time per search: `contexto_search` reads and renders each of the
-  up to 53 pages it shows (`get_page`, 3 in detail and 50 listed), and that read has no cap: D39
-  bounds the text held between searches, not the pages one search reads. With no length term, a query
-  of common words can show the long pages: at 3,000 real-size pages (in-process, scratch checks)
-  `failed with exit code` shows 18.5 MB of page JSON with a 28.1 MB allocation peak, against 0.5 and
-  1.5 MB under D34; one-word queries on every page (`self`, `return`, `import`) show 2.0 to 3.3 MB, as
-  under D34, because the page cap ties those pages and recency orders them. A store whose matching
-  pages are near the 566,461-token maximum can take several times these figures. With D39's 64 MB
-  budget on, one pass each, back to back (`results/d41/before_*` at main cb1986f, `after_*`):
-  spike-size pages are unchanged or faster (common words 0.303 to 0.222 s at 6,000; peak RSS 134 and
-  134 MB); on real-size pages rare and multi-word medians are unchanged, common words are faster
-  (0.037 to 0.034 s at 1,000, 0.072 to 0.042 at 3,000, 0.231 to 0.158 at 6,000), and the MCP server's
-  peak RSS is higher, 65 to 80, 112 to 142, and 112 to 136 MB, in line with that multi-word query's
-  reads. Tuning: the 86 probes informed D34 and D41, and the variants and the grid were compared on
-  them and on (b), which reviewer A wrote for this review; there is no held-out set. Limitations:
-  synthetic pages and distractors; (b)'s sessions are built from one repository; how often real turns
-  repeat a key is still not measured from real sessions; a value shown only inside a long tool output,
-  with three or more newer passing mentions, can still miss the detailed pages, as before D34.
+  turn that names the key in 2 or more texts (a prompt that names it counts twice, since the stub
+  repeats the prompt) usually outranks a newer one-line reply that states its value: 2 texts score
+  1.375 against the reply's 1, which wins unless the reply is about 0.75 or more of the way newer
+  among the matches; 3 texts outrank it even from the oldest position against the newest match (1.57
+  against 1.5). So once a passing mention follows the reply, the reply leaves the detailed pages more
+  often than under D34: one-line replies shown 38 of 122 against D34's 64 (loud), 61 of 132 against 65
+  (quiet), and in the three sets built against per-text counting 28 of 85 against 37 (many calls), 20
+  of 74 against 27 (split output), 18 of 68 against 22 (refactor). Many separate tool calls that name
+  the key are the shape that still costs most: the page cap holds them to 3, but stale only stays at
+  103 of 300 (D34 127). The newest-page place (D34 (3)) stays and covers a statement only while it is
+  the newest mention: in (b) the newest mention was among the detailed pages in every session under
+  every variant, and a statement that was the newest mention was always shown (241 of 241 in loud and
+  quiet), but a later passing mention takes that place. (iii) Memory and time per search:
+  `contexto_search` reads and renders each of the up to 53 pages it shows (`get_page`, 3 in detail and
+  50 listed), and that read has no cap: D39 bounds the text held between searches, not the pages one
+  search reads. With no length term, a query of common words can show the long pages: at 3,000
+  real-size pages (in-process, scratch checks) `failed with exit code` shows 18.5 MB of page JSON with
+  a 28.1 MB allocation peak, against 0.5 and 1.5 MB under D34; one-word queries on every page (`self`,
+  `return`, `import`) show 2.0 to 3.3 MB, as under D34, because the page cap ties those pages and
+  recency orders them. A store whose matching pages are near the 566,461-token maximum can take
+  several times these figures. With D39's 64 MB budget on, one pass each, back to back
+  (`results/d41/before_*` at main cb1986f, `after_*`): spike-size pages are unchanged or faster
+  (common words 0.303 to 0.222 s at 6,000; peak RSS 134 and 134 MB); on real-size pages rare and
+  multi-word medians are unchanged, common words are faster (0.037 to 0.034 s at 1,000, 0.072 to 0.042
+  at 3,000, 0.231 to 0.158 at 6,000), and the MCP server's peak RSS is higher, 65 to 80, 112 to 142,
+  and 112 to 136 MB, in line with that multi-word query's reads. Follow-up (tracked in STATUS): a byte
+  budget per search on the pages it reads, for example reading the 50 listed rows' offsets from the
+  held search text rather than parsing whole pages, or listing fewer rows once the budget is spent.
+  Owner's call (tracked in STATUS): the default is text cap 1; text cap 3 with page cap 3 restores
+  main's two D34 scenarios at 41 more stale only, all in the quiet set (162 against 121). Tuning: the
+  86 probes informed D34 and D41, and the variants and the grid were compared on them and on (b),
+  which reviewer A wrote for this review; there is no held-out set. Limitations: synthetic pages and
+  distractors; (b)'s sessions are built from one repository; how often real turns repeat a key is
+  still not measured from real sessions; a value shown only inside a long tool output, with three or
+  more newer passing mentions, can still miss the detailed pages, as before D34.
 
 ## Repository and process
 
