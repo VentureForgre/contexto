@@ -44,10 +44,13 @@ order (measured in M0, PR #16 findings 1 and 1a: a settings-file `env.ANTHROPIC_
 overrides the process environment, and in a git worktree the main checkout's
 `settings.local.json` wins): explicit `--upstream`; else the first settings file that sets
 `env.ANTHROPIC_BASE_URL`, in Claude Code's precedence (in a worktree the main checkout's
-`.claude/settings.local.json` first, then the local, project, and user settings files); else
+`.claude/settings.local.json` first, then the local, project, and user settings files, the user's
+being `$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35); else
 `ANTHROPIC_BASE_URL` in the process environment; else `https://api.anthropic.com`. The launcher's
 own flag-level `--settings` outranks all of these, which is what makes the proxy attachment work.
 Organization-managed settings still outrank `--settings`; document that limit.
+Supported upstreams for end users (D35): the vendor API with an API key, or a CLIProxyAPI
+instance (its root for Claude Code, the root plus `/v1` for Codex); setup in `docs/cliproxyapi.md`.
 
 ## Rewrite engine (normative)
 
@@ -503,7 +506,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     already read (`message_start`'s, for Messages), so that publish also comes before any held
     event; the held events are still released, because rule 8 forwards what upstream sent and the
     CLI decides what a stream without its terminator means. A tool call
-    therefore always sees the current turn's room. Keepalive pings may be sent during a hold.
+    therefore always sees the current turn's room. Keepalives pass during a hold as they arrive:
+    `ping` events and comment-only events such as CLIProxyAPI's `: keep-alive` (D35).
   - `contexto_recall`, `contexto_search`, and `contexto_state` charge the tokens they return
     against the room for the current turn id, converted with the same ratio as the per-call limit,
     with an atomic, locked read-modify-write so parallel calls cannot overspend. The charge

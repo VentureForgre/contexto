@@ -116,6 +116,17 @@ ChatGPT login mode (`--codex-auth chatgpt`) uses your own `CODEX_HOME` with `-c`
 is tested only with synthetic credentials, never live. Follow your provider's terms for whatever
 credentials you use with Contexto.
 
+### Upstreams and CLIProxyAPI
+
+If you run Contexto yourself, the supported upstreams are the vendor's API with your own API key, or
+a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance reached with one of its client
+keys (D35). Subscription logins live in CLIProxyAPI or the vendor's own CLI, never in Contexto, and
+you must follow your providers' terms. For CLIProxyAPI, set Claude Code's `ANTHROPIC_BASE_URL` to its
+root (for example `http://127.0.0.1:8317`, no `/v1`) and its `apiKeyHelper` to a command that prints
+the client key; `contexto run claude` and `contexto run codex` then both go through it. With the key
+in `ANTHROPIC_AUTH_TOKEN` instead, Codex also needs `--codex-key-helper`. Setup, checks, and what was
+tested: [docs/cliproxyapi.md](docs/cliproxyapi.md).
+
 ## Bound and configuration
 
 `contexto run` options (all go before `claude` or `codex`):
@@ -237,7 +248,8 @@ character ranges, never the text.
 **Which upstream does `contexto run` use?** The first of: `--upstream`; `env.ANTHROPIC_BASE_URL` from
 the first Claude Code settings file that sets it (in a git worktree, the main checkout's
 `.claude/settings.local.json` first, then the project's `.claude/settings.local.json`, then
-`.claude/settings.json`, then `~/.claude/settings.json`); `ANTHROPIC_BASE_URL` in the environment;
+`.claude/settings.json`, then `~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json` when
+`CLAUDE_CONFIG_DIR` is set); `ANTHROPIC_BASE_URL` in the environment;
 `https://api.anthropic.com`. The session log records which source won, never the URL.
 
 **Requests bypass the proxy.** Organization-managed Claude Code settings outrank the launcher's
