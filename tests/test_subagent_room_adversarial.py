@@ -313,3 +313,60 @@ def test_probe_notification_for_another_id_and_one_twin_stopping(tmp_path):
     main, c2 = main_turn(engine, main, assistant("y"), idle_notification("toolu_Z", "completed"))  # another task
     _, charged = recall(store, big_page(store))
     assert c1 == c2 == [] and charged <= room_for(120_000, 1_000)
+
+
+def _run2_open(tmp_path):
+    """Run 1 of background agent X ends; main resumes it (measured SendMessage shapes); run 2 opens
+    its room (4,000) before main sees anything."""
+    from test_rewrite import tool_result, tool_use
+    from test_subagent_room import resumed_run
+    store, engine, main, clock = _bg(tmp_path)
+    done = request(conversation("subagent", 1) + [tool_use("s"), tool_result("s")])
+    engine(done, {}, MESSAGES)
+    respond(engine, done, 121_000, 50, tool_calls=False)
+    resumed_run(engine)
+    assert len(store.side_rooms()) == 1
+    return store, engine, main
+
+
+def test_probe_measured_resume_late_notice(tmp_path):
+    from test_rewrite import tool_result, tool_use
+    from test_subagent_room import loop_notification, main_turn, send_message
+    store, engine, main = _run2_open(tmp_path)
+    send = send_message("toolu_S")
+    send[0]["content"].append({"type": "tool_use", "id": "toolu_bash", "name": "Bash", "input": {"command": "sleep 30"}})
+    send[1]["content"].append({"type": "tool_result", "tool_use_id": "toolu_bash", "content": ""})
+    main, closed = main_turn(engine, main, *send, loop_notification("toolu_A", "completed"))
+    _, charged = recall(store, big_page(store))
+    assert charged <= room_for(120_000, 1_000)
+
+
+def test_probe_run_one_notice_delivered_twice(tmp_path):
+    """If the CLI ever delivers one stop twice (a system message in main's loop, then the same notice
+    again as an idle reminder), the count reaches 2 and run 2's live room closes."""
+    from test_subagent_room import idle_notification, loop_notification, main_turn, send_message
+    store, engine, main = _run2_open(tmp_path)
+    main, c1 = main_turn(engine, main, *send_message("toolu_S"), loop_notification("toolu_A", "completed"))
+    main, c2 = main_turn(engine, main, assistant("noted"), idle_notification("toolu_A", "completed"))
+    _, charged = recall(store, big_page(store))
+    assert charged <= room_for(120_000, 1_000)
+
+
+def test_probe_hand_back_plus_notice_for_one_foreground_stop(tmp_path):
+    """If a foreground agent's stop gives both a hand-back and a notice for the same Agent call, a
+    resumed run 2 starts with two stops counted and its room closes at main's next request."""
+    from test_rewrite import tool_result, tool_use
+    from test_subagent_room import (delegated, hand_back, loop_notification, main_turn, resumed_run,
+                                    send_message)
+    store = SessionStore(tmp_path, "s1")
+    engine, main, clock = delegated(store, background=False)
+    done = request(conversation("subagent", 1) + [tool_use("s"), tool_result("s")])
+    engine(done, {}, MESSAGES)
+    respond(engine, done, 121_000, 50, tool_calls=False)
+    main, _ = main_turn(engine, main, hand_back("toolu_A"), loop_notification("toolu_A", "completed", agent="adae0d2e"))
+    resumed_run(engine)
+    main, closed = main_turn(engine, main, *send_message("toolu_S", agent="adae0d2e"))
+    _, charged = recall(store, big_page(store))
+    assert charged <= room_for(120_000, 1_000)
+
+

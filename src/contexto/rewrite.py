@@ -1602,16 +1602,18 @@ def _result_text(block: dict) -> str:
 
 def agent_runs(messages: list[dict]) -> tuple[dict[str, list[str | None]], dict[str, int]]:
     """D40: main's ``Agent`` calls by prompt (prompt -> each call's tool-use id, or None while the
-    call has no result or its result has an unknown shape), and how many times each call's agent has
-    stopped: one per foreground hand-back, plus one per ``<task-notification>`` in a measured notice
-    shape that names the call's tool-use id, or the id of a ``SendMessage`` call whose result says it
-    resumed that call's ``agentId`` (a resumed run's notice names the ``SendMessage``). A call whose
-    result is an error started no agent and is left out."""
+    call has no result or its result has an unknown shape), and how many of each call's agent's runs
+    have stopped. Each run stops under its own call id: the ``Agent`` call for the first run, and the
+    ``SendMessage`` call whose result says it resumed that ``agentId`` for each later run (a resumed
+    run's notice names the ``SendMessage``). So the count is the number of those call ids with stop
+    evidence (a foreground hand-back, or a ``<task-notification>`` in a measured notice shape naming
+    the id), however often one stop is reported. A call whose result is an error started no agent
+    and is left out."""
     calls: dict[str, str] = {}  # Agent tool-use id -> prompt
     agents: dict[str, str | None] = {}  # Agent tool-use id -> agentId, None when not known
     sends: set[str] = set()  # SendMessage tool-use ids
     resumes: dict[str, str] = {}  # SendMessage tool-use id -> the agentId it resumed
-    stops: dict[str, int] = {}  # tool-use id (Agent or SendMessage) -> stops recorded under it
+    stopped: set[str] = set()  # tool-use ids (Agent or SendMessage) with stop evidence
     for message in messages:
         for block in _blocks(message):
             if not isinstance(block, dict):
@@ -1639,12 +1641,12 @@ def agent_runs(messages: list[dict]) -> tuple[dict[str, list[str | None]], dict[
                     agents[call_id] = found.group(1)
                 elif found and text.startswith(HAND_BACK):
                     agents[call_id] = found.group(1)
-                    stops[call_id] = stops.get(call_id, 0) + 1
+                    stopped.add(call_id)
         for text in _notice_texts(message):
             for notice in TASK_NOTIFICATION.findall(text):
                 named = NOTIFIED_CALL.search(notice)
                 if named:
-                    stops[named.group(1)] = stops.get(named.group(1), 0) + 1
+                    stopped.add(named.group(1))
     by_prompt: dict[str, list[str | None]] = {}
     totals: dict[str, int] = {}
     for call_id, prompt in calls.items():
@@ -1653,8 +1655,8 @@ def agent_runs(messages: list[dict]) -> tuple[dict[str, list[str | None]], dict[
         agent = agents[call_id]
         by_prompt.setdefault(prompt, []).append(call_id if agent is not None else None)
         if agent is not None:
-            totals[call_id] = stops.get(call_id, 0) + sum(
-                stops.get(send, 0) for send, resumed in resumes.items() if resumed == agent)
+            totals[call_id] = (call_id in stopped) + sum(
+                send in stopped for send, resumed in resumes.items() if resumed == agent)
     return by_prompt, totals
 
 

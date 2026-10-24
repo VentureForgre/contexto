@@ -713,6 +713,26 @@ def test_an_untested_cli_version_only_expires_rooms(kind, tmp_path):
     assert store.side_rooms() == {}
 
 
+UNTESTED = {"User-Agent": "claude-cli/2.1.303 (external, sdk-cli)"}
+
+
+@pytest.mark.parametrize("first, then, closes", [
+    (CLAUDE, CLAUDE, True),
+    ({}, {}, False),  # no User-Agent at all: no version seen, rooms only expire
+    ({"User-Agent": "curl/8.0"}, {"User-Agent": "curl/8.0"}, False),  # not Claude Code
+    (CLAUDE, {}, True),  # the gate reads the latest Claude Code version seen in the session
+    (CLAUDE, UNTESTED, False),  # the CLI updated mid-session: the latest version is untested
+    (UNTESTED, CLAUDE, True),
+])
+def test_the_gate_reads_the_latest_claude_code_version_seen(kind, tmp_path, first, then, closes):
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store, headers=first)
+    body = request(main["messages"] + [assistant("waiting"), idle_notification("toolu_A")])
+    _, _, events = engine(body, then, MESSAGES)
+    assert bool([e for e in events if e["event"] == "side_room_closed"]) is closes
+    assert len(store.side_rooms()) == (0 if closes else 1)
+
+
 def test_a_failed_close_is_logged_and_does_not_degrade(kind, tmp_path):
     store = make_store(kind, tmp_path)
     engine, main, _ = delegated(store)
