@@ -128,11 +128,10 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar, NamedTuple, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json
-from contexto.store import (SIDE_ROOM_IDLE_S, KeyFileError, PageConflictError, PageNotFoundError,
-                            SessionNotFoundError, side_room_live)
+from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import render_page
 from contexto.tokens import TokenEstimator
@@ -1475,6 +1474,79 @@ def anchor_hash(hashes: tuple[str, ...] | list[str]) -> str:
     return hashlib.sha256("\n".join(hashes).encode("utf-8")).hexdigest()
 
 
+# D40: Claude Code's subagents, as measured on 2.1.302 against a scripted stub (zero spend). Main
+# launches one with an ``Agent`` tool call (``Task`` in earlier releases); the subagent's first user
+# message carries a ``<system-reminder>`` block and then the call's ``prompt`` as its own text block.
+AGENT_TOOLS = frozenset({"Agent", "Task"})
+ASYNC_LAUNCH = "Async agent launched successfully."  # the tool result of a background launch
+TASK_NOTIFICATION = "<task-notification>"
+NOTIFIED_CALL = re.compile(r"<tool-use-id>([^<\s]+)</tool-use-id>")
+
+
+class _SideRoom(NamedTuple):
+    """D40: what the engine remembers about a side room it opened."""
+
+    owner: str  # the conversation key
+    n: int  # the publishing request's message count
+    anchor: str  # its anchor hash over those messages
+    at: float  # the publish time, on the store's clock
+    ids: frozenset[str]  # the client tool-call ids its response held
+    prompt: str | None  # the conversation's first prompt, to match main's Agent call (Messages only)
+    main_len: int  # main's message count at the publish
+
+
+def _texts(message: dict) -> list[str]:
+    content = message.get("content")
+    if isinstance(content, str):
+        return [content]
+    return [b["text"] for b in _blocks(message) if isinstance(b, dict) and isinstance(b.get("text"), str)]
+
+
+def first_prompt(messages: list[dict]) -> str | None:
+    """A Messages conversation's first prompt: its first user message's text blocks that are not
+    injected context, joined by newlines; None when it has none."""
+    for message in messages:
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                return content or None
+            parts = [b["text"] for b in _blocks(message) if isinstance(b, dict) and b.get("type") == "text"
+                     and isinstance(b.get("text"), str) and not _anthropic_is_context_block(b)]
+            return "\n".join(parts) or None
+    return None
+
+
+def agent_stops(messages: list[dict]) -> tuple[dict[str, list[str]], dict[str, int]]:
+    """D40: main's ``Agent`` calls by prompt (prompt -> tool-use ids), and the calls whose agent has
+    stopped, each with the index of the latest message that says so: a result that is not the
+    asynchronous launch receipt (a foreground hand-back, completed or interrupted), or a
+    ``<task-notification>`` naming the call (Claude Code sends one, in a ``system`` message during
+    main's tool loop or a ``<system-reminder>`` user message while main is idle, each time a
+    background agent or command stops)."""
+    prompts: dict[str, list[str]] = {}
+    stopped: dict[str, int] = {}
+    for i, message in enumerate(messages):
+        for block in _blocks(message):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") in AGENT_TOOLS:
+                prompt = (block.get("input") or {}).get("prompt")
+                if isinstance(prompt, str) and isinstance(block.get("id"), str):
+                    prompts.setdefault(prompt, []).append(block["id"])
+            elif block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
+                content = block.get("content")
+                text = content if isinstance(content, str) else "".join(
+                    b.get("text", "") for b in content or [] if isinstance(b, dict))
+                if not text.lstrip().startswith(ASYNC_LAUNCH):
+                    stopped.setdefault(block["tool_use_id"], i)  # the hand-back of a foreground agent
+        for text in _texts(message):
+            if TASK_NOTIFICATION in text:
+                for call_id in NOTIFIED_CALL.findall(text):
+                    stopped[call_id] = i
+    agent_ids = {i for ids in prompts.values() for i in ids}
+    return prompts, {call_id: i for call_id, i in stopped.items() if call_id in agent_ids}
+
+
 def preamble_sha256(config: Config, pinned_text: str, index_text: str) -> str:
     return hashlib.sha256(compose_preamble(config, pinned_text, index_text).encode("utf-8")).hexdigest()
 
@@ -1564,8 +1636,8 @@ class RewriteEngine:
         # Are Contexto's MCP tools reaching the main conversation? (contexto.toolcheck)
         self.tools = ToolCheck(self.store)
         # D40: open side rooms by id -> (conversation key, message count, anchor hash, publish time)
-        self._side_rooms: dict[str, tuple[str, int, str, float, frozenset[str]]] = {}  # + call ids
-        self._main_turn: tuple[str, float] | None = None  # main's turn id and when it was first seen
+        self._side_rooms: dict[str, _SideRoom] = {}  # D40: the side rooms this engine opened, by id
+        self._main_len = 0  # D40: the message count of main's latest request
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -1611,7 +1683,7 @@ class RewriteEngine:
         events[-1].update(main=main, conversations=len(self.states))  # content-free, for side requests
         if main and endpoint != COUNT_TOKENS:
             closes: list[dict] = []
-            self._close_idle_side_rooms(request.get(dialect.field) or [], dialect, closes)
+            self._close_finished_side_rooms(request.get(dialect.field) or [], dialect, closes)
             events[-1:-1] = closes  # the engine's request event stays last
         # Per-turn recall budget, request-time publish (contract PR #69, kept by 367916a): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
@@ -1804,37 +1876,38 @@ class RewriteEngine:
         clock = getattr(self.store, "clock", None)  # the store's clock, which expires its rooms
         return clock() if callable(clock) else time.time()
 
-    def _close_idle_side_rooms(self, messages: list[dict], dialect: Dialect, events: list[dict]) -> None:
-        """D40: called for each main request. Main's turn id changes only at a turn start, a user
-        prompt, so the time a new id is first seen is when a human started this main turn. A side
-        room published before that and idle for more than ``SIDE_ROOM_IDLE_S`` is closed with
-        ``side_room_closed`` (reason ``idle_at_main_turn``): a live subagent republishes at every
-        step, so such a room almost always belongs to a subagent the user interrupted. A background
-        subagent from an earlier turn that waits longer than that on one tool loses its room (its late
-        call is then charged against the other rooms only). Only rooms this engine opened are
-        checked; rooms from before a restart expire."""
-        tid = turn_id(messages, dialect)
-        if self._main_turn is None or self._main_turn[0] != tid:
-            # With no side room open when the turn starts, every room is published after it and none
-            # can be closed this way during it, so the start time is only read when one is open.
-            self._main_turn = (tid, self._now() if self._side_rooms else float("-inf"))
-        started = self._main_turn[1]
-        if not self._side_rooms or started == float("-inf"):
+    def _close_finished_side_rooms(self, messages: list[dict], dialect: Dialect, events: list[dict]) -> None:
+        """D40: called for each main request. A side room closes early only on evidence in main's own
+        history that the subagent holding it has stopped. The subagent is matched by its first
+        prompt, which Claude Code 2.1.302 sends exactly as the ``prompt`` of main's ``Agent`` (or
+        ``Task``) call. The evidence (``agent_stops``) is a result for that call that is not the
+        asynchronous launch receipt (a foreground hand-back, completed or interrupted), or a
+        ``<task-notification>`` naming the call's tool-use id (sent when the agent stops: completed,
+        failed, or killed). The evidence must come after the room's publish (at a message index at
+        least main's message count then), so an agent resumed after an earlier stop keeps its new
+        room, and every ``Agent`` call with that prompt must have stopped (twins). Rooms matching no
+        call, and agents still running in the background, keep the 15-minute expiry. Logged as
+        ``side_room_closed`` with reason ``agent_stopped``."""
+        self._main_len = len(messages)
+        if not self._side_rooms or dialect.name != "anthropic":
+            return
+        prompts, stopped = agent_stops(messages)
+        doomed = []
+        for room_id, room in self._side_rooms.items():
+            ids = prompts.get(room.prompt) if room.prompt else None
+            if ids and all(i in stopped for i in ids) and max(stopped[i] for i in ids) >= room.main_len:
+                doomed.append(room_id)
+        if not doomed:
             return
         now = self._now()
-        if not any(at < started and now - at > SIDE_ROOM_IDLE_S for _, _, _, at, _ in self._side_rooms.values()):
-            return
-        close = getattr(self.store, "close_idle_side_rooms", None)
-        if not callable(close):
-            return
-        try:
-            closed = close(started, SIDE_ROOM_IDLE_S)
-        except STORE_FAILURES as error:
-            events.append({"event": "side_room_close_failed", "error": type(error).__name__})
-            return
-        for room_id, age in closed:
-            self._side_rooms.pop(room_id, None)
-            events.append({"event": "side_room_closed", "reason": "idle_at_main_turn", "age_s": age})
+        for room_id in doomed:
+            try:
+                self.store.set_side_room(room_id, None)
+            except STORE_FAILURES as error:  # the room expires instead; not degraded mode
+                events.append({"event": "side_room_close_failed", "error": type(error).__name__})
+                continue
+            age = int(now - self._side_rooms.pop(room_id).at)
+            events.append({"event": "side_room_closed", "reason": "agent_stopped", "age_s": age})
 
     def _publish_side_room(self, calls: StoreCalls, key: str, messages: list[dict], dialect: Dialect,
                            room: int | None, call_ids: tuple[str, ...], events: list[dict]) -> None:
@@ -1842,36 +1915,39 @@ class RewriteEngine:
 
         Rooms are per request lineage, not per conversation key: two subagents launched with the same
         prompt, or a side request that forks one, share a key but must not share a room. Each room
-        remembers the request that published it (its message count and anchor hash) and the ids of
-        the client tool calls its response held (``call_ids``, from the proxy). A request continues a
-        room when it extends that room's request, adds no turn start, and (for a room recorded with
-        ids) returns a result (``tool_result``, ``*_call_output``) for one of those ids. A twin
-        carries its own ids and cannot match. A fork that copies results for the room's calls does
-        match; that is harmless once those calls finished, but a fork that closes a still-running
-        call with a placeholder result and asks its question inside that result message cannot be
-        told apart from the next step (documented). Exactly one room must match: when two or more
-        tie, the request continues none of them, they keep their spend until they expire, and it
-        opens its own room (or with ``room`` None changes nothing). The lineage is kept in memory and
-        forgotten once the room has expired in the store (``SIDE_ROOM_TTL_S``)."""
+        remembers the request that published it (its message count and anchor hash), the ids of the
+        client tool calls its response held (``call_ids``, from the proxy), the conversation's first
+        prompt (to match main's ``Agent`` call, see ``_close_finished_side_rooms``), and main's
+        message count at the publish. A request continues a room when it extends that room's
+        request, adds no turn start, and (for a room recorded with ids) returns a result
+        (``tool_result``, ``*_call_output``) for one of those ids. A twin carries its own ids and
+        cannot match. A fork that copies results for the room's calls does match; that is harmless
+        once those calls finished, but a fork that closes a still-running call with a placeholder
+        result and asks its question inside that result message cannot be told apart from the next
+        step (documented). Exactly one room must match: when two or more tie, the request continues
+        none of them, they keep their spend until they expire, and it opens its own room (or with
+        ``room`` None changes nothing). The lineage is kept in memory and forgotten once the room has
+        expired in the store (``SIDE_ROOM_TTL_S``)."""
         token = _DIALECT.set(dialect)
         try:
             hashes = [message_hash(m) for m in messages]
         finally:
             _DIALECT.reset(token)
         now = self._now()
-        self._side_rooms = {r: v for r, v in self._side_rooms.items() if side_room_live(v[3], now)}
+        self._side_rooms = {r: v for r, v in self._side_rooms.items() if side_room_live(v.at, now)}
         results: dict[str, int] = {}  # tool-call id -> the last index of a message returning its result
         for i, item in enumerate(messages):
             for call_id in dialect.result_ids(item):
                 results[call_id] = i
         by_id: list[str] = []
         by_lineage: list[tuple[int, str]] = []
-        for room_id, (owner, n, anchor, _, ids) in self._side_rooms.items():
-            if (owner != key or n >= len(messages) or anchor_hash(hashes[:n]) != anchor
+        for room_id, entry in self._side_rooms.items():
+            n = entry.n
+            if (entry.owner != key or n >= len(messages) or anchor_hash(hashes[:n]) != entry.anchor
                     or any(dialect.is_turn_start(m) for m in messages[n:])):
                 continue
-            if ids:
-                if any(results.get(call_id, -1) >= n for call_id in ids):
+            if entry.ids:
+                if any(results.get(call_id, -1) >= n for call_id in entry.ids):
                     by_id.append(room_id)
             else:
                 by_lineage.append((n, room_id))
@@ -1885,12 +1961,14 @@ class RewriteEngine:
         if room is None:
             if continued is not None:
                 calls.set_side_room(continued, None)
-                age = int(now - self._side_rooms.pop(continued)[3])
+                age = int(now - self._side_rooms.pop(continued).at)
                 events.append({"event": "side_room_closed", "reason": "no_tool_call", "age_s": age})
             return
         room_id = continued or f"{key}#{secrets.token_hex(4)}"
         calls.set_side_room(room_id, room)
-        self._side_rooms[room_id] = (key, len(messages), anchor_hash(hashes), now, frozenset(call_ids))
+        prompt = first_prompt(messages) if dialect.name == "anthropic" else None
+        self._side_rooms[room_id] = _SideRoom(key, len(messages), anchor_hash(hashes), now, frozenset(call_ids),
+                                              prompt, self._main_len)
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:

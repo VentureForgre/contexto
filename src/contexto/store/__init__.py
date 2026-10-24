@@ -261,10 +261,6 @@ def read_turn_room(meta: dict[str, Any]) -> tuple[str | None, int | None, int]:
 # holder that stopped holds main's recall down for at most this long; ``limited_by: side`` on
 # ``mcp_call`` shows it. A live holder republishes at its next response.
 SIDE_ROOM_TTL_S = 900.0
-# D40: during a main turn that a human prompt started, a side room published before that turn and
-# not republished for this long is closed: a live subagent republishes at every step, so a room idle
-# this long across a human prompt is almost always one the user interrupted (Esc during its tool).
-SIDE_ROOM_IDLE_S = 120.0
 
 # room id -> (room tokens, tokens spent since its publish, publish time on the store's clock)
 SideRooms = dict[str, tuple[int, int, float]]
@@ -612,28 +608,6 @@ class SessionStore(LedgerOps):
         self._modify_meta(update)
         self._log_side_events(expired)
         return summary[0] if summary else None
-
-    def close_idle_side_rooms(self, published_before: float, idle_s: float) -> list[tuple[str, int]]:
-        """Close the side rooms last published before ``published_before`` and more than ``idle_s``
-        seconds ago (D40: the engine calls this during a main turn that a human prompt started, for
-        a subagent interrupted mid-tool). Returns (room id, age in seconds) for each room closed."""
-        now = self.clock()
-        closed: list[tuple[str, int]] = []
-        expired: list[dict[str, Any]] = []
-
-        def change(meta: dict[str, Any]) -> dict[str, Any] | None:
-            recorded = read_side_rooms(meta)
-            expired[:] = expired_side_room_events(recorded, now)
-            rooms = live_side_rooms(recorded, now)
-            closed[:] = [(r, int(now - at)) for r, (_, _, at) in rooms.items()
-                         if at < published_before and now - at > idle_s]
-            for room_id, _ in closed:
-                del rooms[room_id]
-            return {"side_rooms": side_rooms_record(rooms)} if rooms != recorded else None
-
-        self._modify_meta(change)
-        self._log_side_events(expired)
-        return closed
 
     def _log_side_events(self, events: list[dict[str, Any]]) -> None:
         for event in events:

@@ -18,8 +18,8 @@ import pytest
 
 from contexto import mcp
 from contexto.proxy import ContextoProxy, StreamHold, UsageReader, _takes_keyword, is_client_call
-from contexto.rewrite import MESSAGES, Config, RewriteEngine
-from contexto.store import SIDE_ROOM_IDLE_S, SIDE_ROOM_TTL_S, SessionStore
+from contexto.rewrite import MESSAGES, Config, RewriteEngine, agent_stops, first_prompt
+from contexto.store import SIDE_ROOM_TTL_S, SessionStore
 from contexto.store.memory import MemoryStore
 
 from test_codex import call as codex_call
@@ -478,67 +478,190 @@ def test_a_charge_records_which_room_limited_it(tmp_path):
     assert "limiting_age_s" in calls_logged[0] and "limiting_age_s" not in calls_logged[1]
 
 
-def interrupted(store):
-    """Main (turn 3) and a subagent near its bound whose response released a tool call, after which
-    the user pressed Esc: the subagent never sends its next request. Returns the engine and main's
-    request; the subagent's room is 4,000 and main's 104,000."""
+# Closing a stopped subagent's room early (D40). The message shapes are the ones Claude Code 2.1.302
+# sent to a scripted stub upstream (zero spend); the long CLI texts are shortened.
+
+NOTICE = ("[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event, NOT a message "
+          "from the user.\n\n")
+
+
+def agent_call(call_id, prompt, background=True):
+    return {"role": "assistant", "content": [{"type": "tool_use", "id": call_id, "name": "Agent", "input": {
+        "description": "the agent", "prompt": prompt, "subagent_type": "general-purpose",
+        "run_in_background": background}}]}
+
+
+def launch_receipt(call_id, agent="a4f9ecd55b4309f21"):
+    return {"role": "user", "content": [{"tool_use_id": call_id, "type": "tool_result", "content": [{
+        "type": "text", "text": f"Async agent launched successfully. (This tool result is internal metadata.)\n"
+                                f"agentId: {agent} (internal ID - do not mention to user.)\nThe agent is working "
+                                "in the background. You will be notified automatically when it completes."}]}]}
+
+
+def hand_back(call_id):
+    return {"role": "user", "content": [{"tool_use_id": call_id, "type": "tool_result", "content": [{
+        "type": "text", "text": "[Subagent hand-back] The text below is the final report of a subagent this "
+                                "session delegated to. The report follows:\n  subagent result\nagentId: adae0d2e"}]}]}
+
+
+def notification(call_id, status="killed", agent="a4f9ecd55b4309f21"):
+    return (NOTICE + f"<task-notification>\n<task-id>{agent}</task-id>\n<tool-use-id>{call_id}</tool-use-id>\n"
+            f"<output-file>/tmp/tasks/{agent}.output</output-file>\n<status>{status}</status>\n"
+            f"<summary>Agent \"the agent\" was stopped</summary>\n</task-notification>")
+
+
+def idle_notification(call_id, status="killed"):
+    """While main is idle the notification is a new user message, one <system-reminder> text block."""
+    return {"role": "user", "content": [{"type": "text", "text": f"<system-reminder>\n{notification(call_id, status)}"
+                                                                 "\n</system-reminder>"}]}
+
+
+def loop_notification(call_id, status="completed"):
+    """During main's tool loop it is a system message."""
+    return {"role": "system", "content": notification(call_id, status) + "\n\n<total_tokens>1 tokens left</total_tokens>"}
+
+
+def delegated(store, prompt="subagent", background=True, sub_input=120_000):
+    """Main delegates with an Agent call; the subagent's first response holds a tool call."""
     store.clock = clock = Clock()
     engine = RewriteEngine(store, config=CONFIG)
-    main = request(conversation("main", 3))
+    main = request(conversation("main", 3) + [agent_call("toolu_A", prompt, background)])
     engine(main, {}, MESSAGES)
-    respond(engine, main, 20_000)
-    sub = request(conversation("subagent", 1))
+    respond(engine, main, 20_000, tool_calls=True)
+    if background:
+        main = request(main["messages"] + [launch_receipt("toolu_A")])
+        engine(main, {}, MESSAGES)
+        respond(engine, main, 20_500)
+    sub = request(conversation(prompt, 1))
     engine(sub, {}, MESSAGES)
-    respond(engine, sub, 120_000, tool_calls=True, tool_call_ids=("toolu_s",))
+    respond(engine, sub, sub_input, tool_calls=True, tool_call_ids=("toolu_s",))
     store.set_window(200_000, 2.0)
     return engine, main, clock
 
 
-def main_step(engine, body, events=None):
-    _, _, request_events = engine(body, {}, MESSAGES)
-    if events is not None:
-        events += request_events
+def main_turn(engine, body, *added):
+    body = request(body["messages"] + list(added))
+    _, _, events = engine(body, {}, MESSAGES)
     respond(engine, body, 20_000)
+    return body, [e for e in events if str(e.get("event", "")).startswith("side_room")]
 
 
-def test_an_interrupted_subagents_room_closes_two_minutes_into_the_next_human_turn(kind, tmp_path):
-    """Esc during a subagent's tool leaves its room live. Once the human types and main's turn runs,
-    a main request made more than SIDE_ROOM_IDLE_S after that room's last publish closes it, so main's
-    recall is not held down for the whole expiry."""
+def test_the_subagents_first_prompt_matches_mains_agent_call():
+    sub = conversation("SUB-FG do the foreground thing", 1)
+    assert first_prompt(sub) == "SUB-FG do the foreground thing"  # after its <system-reminder> block
+    prompts, stopped = agent_stops([agent_call("toolu_1", "SUB-FG do the foreground thing"), launch_receipt("toolu_1")])
+    assert prompts == {"SUB-FG do the foreground thing": ["toolu_1"]} and stopped == {}  # a launch is no stop
+
+
+def test_a_stopped_background_agent_closes_its_room(kind, tmp_path):
+    """The user (or main) stops a background agent mid-tool: its room would otherwise hold main's
+    recall down for the expiry. The kill notification closes it at main's next request."""
     store = make_store(kind, tmp_path)
-    engine, main, clock = interrupted(store)
-    clock.now += 30
-    turn = request(main["messages"] + [assistant("stopped"), user("never mind, do this instead")])
-    events: list[dict] = []
-    main_step(engine, turn, events)  # the human typed 30 s after the interrupt: the room stays
-    assert len(store.side_rooms()) == 1 and recall(store, big_page(store))[1] <= 4_000
-    clock.now += SIDE_ROOM_IDLE_S - 29  # main's next step in that turn, 121 s after the publish
-    step = request(turn["messages"] + [tool_use(1), tool_result(1)])
-    main_step(engine, step, events)
+    engine, main, clock = delegated(store)
+    assert recall(store, big_page(store))[1] <= room_for(120_000, 1_000)
+    clock.now += 40
+    main, closed = main_turn(engine, main, assistant("waiting"), idle_notification("toolu_A"))
+    assert closed == [{"event": "side_room_closed", "reason": "agent_stopped", "age_s": 40}]
+    assert store.side_rooms() == {} and recall(store, big_page(store, 61_000))[1] > 4_000
+
+
+def test_a_notification_inside_mains_tool_loop_closes_it_too(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store)
+    main, closed = main_turn(engine, main, tool_use(1), tool_result(1), loop_notification("toolu_A", "failed"))
+    assert [e["reason"] for e in closed] == ["agent_stopped"] and store.side_rooms() == {}
+
+
+def test_a_foreground_hand_back_closes_its_room(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store, background=False)
+    main, closed = main_turn(engine, main, hand_back("toolu_A"))
+    assert [e["reason"] for e in closed] == ["agent_stopped"] and store.side_rooms() == {}
+
+
+def test_a_running_background_agent_keeps_its_room(kind, tmp_path):
+    """Notifications for other tasks, a new human prompt, and main's own steps leave a background
+    agent's room alone: only its own stop closes it early."""
+    store = make_store(kind, tmp_path)
+    engine, main, clock = delegated(store)
+    clock.now += 300
+    main, closed = main_turn(engine, main, assistant("started"), idle_notification("toolu_other", "completed"))
+    main, closed2 = main_turn(engine, main, assistant("ok"), user("a new question from the human"))
+    main, closed3 = main_turn(engine, main, tool_use(2), tool_result(2))
+    assert closed == closed2 == closed3 == [] and len(store.side_rooms()) == 1
+
+
+def test_an_unmatched_room_keeps_the_expiry(kind, tmp_path):
+    """A subagent whose prompt matches no Agent call in main's history (reviewer B's Esc shape, or
+    a session resumed by a new proxy) is never closed early, whatever main receives."""
+    store = make_store(kind, tmp_path)
+    engine, main, clock = delegated(store, prompt="subagent")
+    sub = request(conversation("some other subagent", 1))
+    engine(sub, {}, MESSAGES)
+    respond(engine, sub, 60_000, tool_calls=True, tool_call_ids=("toolu_o",))
+    main, closed = main_turn(engine, main, assistant("waiting"), idle_notification("toolu_A"))
+    assert len(store.side_rooms()) == 1  # only the matched one closed
+    clock.now += SIDE_ROOM_TTL_S + 1
     assert store.side_rooms() == {}
-    [closed] = [e for e in events if e["event"] == "side_room_closed"]
-    assert closed["reason"] == "idle_at_main_turn" and closed["age_s"] == int(SIDE_ROOM_IDLE_S) + 1
-    assert recall(store, big_page(store, 61_000))[1] > 4_000  # main's own room bounds main again
 
 
-def test_idle_rooms_stay_open_inside_the_turn_that_started_them(kind, tmp_path):
-    """A subagent working while main waits in the same turn (a foreground Task, or a background
-    agent started this turn) keeps its room however long its tool runs; only a later human turn
-    can close it early."""
+def test_twins_close_only_when_every_call_with_their_prompt_has_stopped(kind, tmp_path):
     store = make_store(kind, tmp_path)
-    engine, main, clock = interrupted(store)
-    clock.now += 600  # a 10-minute Bash
-    step = request(main["messages"] + [tool_use(1), tool_result(1)])  # main's loop, same turn
-    main_step(engine, step)
-    assert len(store.side_rooms()) == 1
-    clock.now += 10
-    late = request(conversation("background agent", 1))  # opened after the turn started
-    engine(late, {}, MESSAGES)
-    respond(engine, late, 30_000, tool_calls=True, tool_call_ids=("toolu_b",))
-    clock.now += 20
-    turn = request(step["messages"] + [assistant("done"), user("next")])
-    main_step(engine, turn)  # a new human turn: the 630-second-idle room closes, the new one stays
-    assert [room for room, _ in store.side_rooms().values()] == [room_for(30_000, 1_000)]
+    engine, main, _ = delegated(store, prompt="same prompt")
+    main, _ = main_turn(engine, main, agent_call("toolu_B", "same prompt"), launch_receipt("toolu_B"))
+    twin = request(conversation("same prompt", 1))
+    engine(twin, {}, MESSAGES)
+    respond(engine, twin, 30_000, tool_calls=True, tool_call_ids=("toolu_t",))
+    main, closed = main_turn(engine, main, assistant("one done"), idle_notification("toolu_A", "completed"))
+    assert closed == [] and len(store.side_rooms()) == 2  # which twin stopped is unknown
+    main, closed = main_turn(engine, main, assistant("both done"), idle_notification("toolu_B", "completed"))
+    assert len(closed) == 2 and store.side_rooms() == {}
+
+
+def test_a_resumed_agent_keeps_its_new_room(kind, tmp_path):
+    """An agent stopped once and resumed (SendMessage) opens a new room after the old notification;
+    that notification predates the room and does not close it."""
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store)
+    main, closed = main_turn(engine, main, assistant("waiting"), idle_notification("toolu_A", "completed"))
+    assert len(closed) == 1
+    resumed = request(conversation("subagent", 1) + [tool_use(5), tool_result(5), user("continue please")])
+    engine(resumed, {}, MESSAGES)
+    respond(engine, resumed, 40_000, tool_calls=True, tool_call_ids=("toolu_r",))
+    main, closed = main_turn(engine, main, tool_use(3), tool_result(3))
+    assert closed == [] and len(store.side_rooms()) == 1
+
+
+def test_a_failed_close_is_logged_and_does_not_degrade(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store)
+    real = store.set_side_room
+
+    def failing(room_id, room_tokens):
+        if room_tokens is None:
+            raise OSError("synthetic disk full")
+        return real(room_id, room_tokens)
+
+    store.set_side_room = failing
+    main, closed = main_turn(engine, main, assistant("waiting"), idle_notification("toolu_A"))
+    assert closed == [{"event": "side_room_close_failed", "error": "OSError"}]
+    assert not any(s.degraded for s in engine.states.values()) and len(store.side_rooms()) == 1
+
+
+def test_reviewer_bs_esc_run_recovers_once_the_stop_is_notified(tmp_path):
+    """Reviewer B's Esc simulation with the shapes the CLI actually sends: Esc does not stop a
+    background agent (measured), so main's recall recovers when the agent's stop is notified."""
+    store = SessionStore(tmp_path, "s1")
+    engine, main, clock = delegated(store, sub_input=60_000)
+    limits = []
+    for step in range(4):
+        clock.now += 30
+        added = [tool_use(10 + step), tool_result(10 + step)] if step != 2 else [
+            tool_use(10 + step), tool_result(10 + step), loop_notification("toolu_A", "killed")]
+        main, _ = main_turn(engine, main, *added)
+        recall(store, big_page(store, 70_000 + step))
+        limits.append([e.get("limited_by") for e in logged(store) if e.get("event") == "mcp_call"][-1])
+    assert limits[:2] == ["side", "side"] and limits[2:] == ["main", "main"]
 
 
 def test_a_subagent_that_finishes_logs_its_close(kind, tmp_path):

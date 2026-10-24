@@ -85,16 +85,6 @@ class MemoryStore(LedgerOps):
     def side_rooms(self) -> dict[str, tuple[int, int]]:
         return {r: (t, s) for r, (t, s, _) in live_side_rooms(self._side_rooms, self.clock()).items()}
 
-    def close_idle_side_rooms(self, published_before: float, idle_s: float) -> list[tuple[str, int]]:
-        now = self.clock()
-        with self._room_lock:  # see SessionStore.close_idle_side_rooms
-            self._drop_expired(now)
-            closed = [(r, int(now - at)) for r, (_, _, at) in self._side_rooms.items()
-                      if at < published_before and now - at > idle_s]
-            for room_id, _ in closed:
-                del self._side_rooms[room_id]
-        return closed
-
     def _drop_expired(self, now: float) -> None:
         """Drop expired side rooms, logging ``side_room_expired`` for each (caller holds the lock)."""
         for event in expired_side_room_events(self._side_rooms, now):

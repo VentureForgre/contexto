@@ -5,7 +5,9 @@ The stale-room probe originally made 40 main recalls at one instant. Side rooms 
 checks that the stale room still bounds main while it is live. The round-2 Bash probe used Claude
 Code's default 2-minute Bash timeout; it is kept with the 10-minute maximum, and a second test pins
 the documented limit for a call that starts after the expiry. Of the round-3 placeholder-fork
-probes, the first passes and the second is a documented limitation (strict xfail).
+probes, the first passes and the second is a documented limitation (strict xfail). The round-4
+probe (a CLI-injected turn closing a running background subagent's room) passes since rooms close
+early only on evidence that their own agent stopped.
 """
 
 from __future__ import annotations
@@ -229,3 +231,31 @@ def test_probe_legit_next_step_continues_by_id(tmp_path):
     engine(nxt, {}, MESSAGES)
     respond(engine, nxt, 121_000, 1_000, tool_calls=True, tool_call_ids=("toolu_10",))
     assert len(store.side_rooms()) == 1
+
+
+def test_probe_idle_close_takes_a_running_background_subagents_room(tmp_path):
+    """Background subagent B's response holds [Bash (3 minutes), contexto_recall]. Meanwhile main
+    gets a new turn start that no human typed (Claude Code's notification that another background
+    agent finished) and keeps working past B's 2-minute idle mark. B's room is closed while its
+    recall is still queued behind the Bash."""
+    store = SessionStore(tmp_path, "s1")
+    store.clock = clock = Clock()
+    engine = RewriteEngine(store, config=CONFIG)
+    main = request(conversation("main", 3))
+    engine(main, {}, MESSAGES)
+    respond(engine, main, 20_000)
+    store.set_window(200_000, 2.0)
+    b = request(conversation("background B", 1))
+    engine(b, {}, MESSAGES)
+    respond(engine, b, 120_000, 1_000, tool_calls=True, tool_call_ids=("toolu_b1", "toolu_b2"))  # B: 4,000
+    clock.now += 30
+    notified = request(main["messages"] + [assistant("started both agents"),
+                                           user("<task-notification>agent C completed</task-notification>")])
+    engine(notified, {}, MESSAGES)  # main's new turn, no human
+    respond(engine, notified, 21_000)
+    clock.now += 95  # 125 s after B's publish; B's Bash still runs
+    step = request(notified["messages"] + [assistant("reading C's report")])
+    engine(step, {}, MESSAGES)
+    clock.now += 60  # B's Bash ends at 3 minutes; its recall starts
+    _, charged = recall(store, big_page(store))
+    assert charged <= room_for(120_000, 1_000)
