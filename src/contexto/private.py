@@ -14,6 +14,8 @@ from pathlib import Path
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
+AFFINITY_SALT_FILE = "affinity.salt"
+AFFINITY_SALT_BYTES = 32
 
 
 def private_dir(path: Path) -> Path:
@@ -68,3 +70,21 @@ def write_new(path: Path, data: bytes) -> bool:
         return False
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def affinity_salt(home: Path) -> bytes:
+    """The install's random salt for upstream affinity keys (D36), ``home/affinity.salt`` (0600),
+    created atomically on first use and the same for every later session and resume. ValueError if
+    the file is not a hex salt of the right size."""
+    path = Path(home) / AFFINITY_SALT_FILE
+    if not path.exists():
+        private_dir(Path(home))
+        # A losing racer's write_new returns False and reads the winner's complete salt below.
+        write_new(path, secrets.token_bytes(AFFINITY_SALT_BYTES).hex().encode("ascii"))
+    try:
+        salt = bytes.fromhex(path.read_text(encoding="ascii").strip())
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path} is not a hex salt") from exc
+    if len(salt) != AFFINITY_SALT_BYTES:
+        raise ValueError(f"{path} holds a {len(salt)}-byte salt, expected {AFFINITY_SALT_BYTES}")
+    return salt

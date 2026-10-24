@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from contexto.paths import contexto_home
+from contexto.private import affinity_salt
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform
 from contexto.store import SessionStore
 from contexto.toolcheck import missing_tools_message
@@ -263,6 +264,20 @@ def check_options(options: LaunchOptions) -> None:
                           EXIT_USAGE)
 
 
+def session_affinity_key(store: Any) -> str | None:
+    """The store's ``X-Session-Affinity`` value (D36), salted by the install's ``affinity.salt`` in
+    the store's home; None for a store without a home (in memory) or when the salt cannot be read,
+    which is logged and only costs the header."""
+    home, session_id = getattr(store, "home", None), getattr(store, "session_id", None)
+    if home is None or not isinstance(session_id, str):
+        return None
+    try:
+        return affinity_key(session_id, affinity_salt(home))
+    except (OSError, ValueError) as exc:
+        store.log({"event": "affinity_salt_unavailable", "error": type(exc).__name__})
+        return None
+
+
 def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dict[str, int | float],
                 observe_thinking: bool, *, stderr=None) -> tuple[ContextoProxy, str]:
     """Build the rewrite engine for ``store`` and start the proxy on 127.0.0.1 with a free port.
@@ -276,12 +291,11 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     except Exception:  # a diagnostic record; never stop a launch for it
         pass
     transform, observe_usage, engine_name = build_engine(store, config)
-    session_id = getattr(store, "session_id", None)
+    key = session_affinity_key(store)
     try:
         proxy = ContextoProxy(upstream_url, NoticeLog(store, stderr or sys.stderr), transform,
                               observe_usage=observe_usage, observe_thinking=observe_thinking,
-                              upstream_source=upstream_source,
-                              affinity_key=affinity_key(session_id) if isinstance(session_id, str) else None)
+                              upstream_source=upstream_source, affinity_key=key)
     except ValueError as exc:
         raise LaunchError(f"invalid upstream: {exc}", EXIT_USAGE) from exc
     try:

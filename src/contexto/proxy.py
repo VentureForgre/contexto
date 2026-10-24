@@ -49,18 +49,21 @@ the CLI unchanged (rule 6). Upstream errors are forwarded unchanged and never re
 ``anthropic-beta`` so that silently dropped thinking blocks are reported back as
 ``input_transformations`` and logged. It changes the request: one more beta flag upstream.
 
-Upstream affinity (D36): with ``affinity_key`` set and an upstream that is not a vendor API host
-(``VENDOR_HOSTS``), every forwarded request carries ``X-Session-Affinity: <affinity_key>`` unless the
-CLI already sent that header. A routing proxy such as CLIProxyAPI uses it to send every request of a
-session to one upstream credential when the request has no stronger session signal; the CLI's own
-signals (Claude Code's ``X-Claude-Code-Session-Id`` and ``metadata.user_id``, Codex's ``session-id`` and
-``prompt_cache_key``) are forwarded unchanged and rank first. ``affinity_key(session_id)`` derives the
-value from a hash, so a chosen session name never leaves the machine.
+Upstream affinity (D36): with ``affinity_key`` set and an upstream whose host name is not a vendor
+API host (``VENDOR_HOSTS``, compared after IDNA normalization), every forwarded request carries
+``X-Session-Affinity: <affinity_key>`` unless the CLI already sent that header. A routing proxy such
+as CLIProxyAPI uses it to send every request of a session to one upstream credential when the request
+has no stronger session signal; the CLI's own signals (Claude Code's ``X-Claude-Code-Session-Id`` and
+``metadata.user_id``, Codex's ``session-id`` and ``prompt_cache_key``) are forwarded unchanged.
+``affinity_key(session_id, salt)`` is an HMAC of the session id under a random per-install salt
+(``contexto.private.affinity_salt``), so the session id is not sent and cannot be recovered from the
+key by guessing names.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import http.client
 import json
 import re
@@ -104,9 +107,10 @@ HOP_BY_HOP = frozenset({
 })
 USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 AFFINITY_HEADER = "X-Session-Affinity"
-# Hosts (and their subdomains) that serve the vendor APIs directly: they have one identity per
-# key, so the affinity header is not sent to them (D36).
-VENDOR_HOSTS = ("anthropic.com", "openai.com", "chatgpt.com")
+# Host names (and their subdomains) that serve the vendor APIs directly, including Azure OpenAI:
+# each has one identity per key, so the affinity header is not sent to them (D36). Matching is by
+# host name only; an IP literal upstream gets the header.
+VENDOR_HOSTS = ("anthropic.com", "openai.com", "chatgpt.com", "openai.azure.com")
 
 Headers = dict[str, str]
 TransformResult = tuple[dict[str, Any], Headers, list[dict[str, Any]]]
@@ -195,15 +199,22 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def affinity_key(session_id: str) -> str:
-    """The ``X-Session-Affinity`` value for a Contexto session: stable for the session id, and a
-    hash, so the id (which may be a name the user chose) is not sent."""
-    digest = hashlib.sha256(b"contexto-affinity\0" + session_id.encode("utf-8")).hexdigest()
+def affinity_key(session_id: str, salt: bytes) -> str:
+    """The ``X-Session-Affinity`` value for a Contexto session: stable for the session id under one
+    install's ``salt`` (across restarts and resumes), and an HMAC, so neither the id (which may be a
+    name the user chose) nor a guess of it can be checked against the key without the salt."""
+    digest = hmac.new(salt, b"contexto-affinity\0" + session_id.encode("utf-8"), hashlib.sha256).hexdigest()
     return "contexto-" + digest[:32]
 
 
 def is_vendor_host(host: str) -> bool:
-    host = host.lower().rstrip(".")
+    """True for a vendor API host name or a subdomain of one. The name is IDNA-normalized first, as
+    the socket layer does when it connects (a soft hyphen in ``api.anthro\xadpic.com`` maps away); a
+    name that cannot be normalized counts as a vendor host, so it gets no header."""
+    try:
+        host = host.rstrip(".").encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return True
     return any(host == vendor or host.endswith("." + vendor) for vendor in VENDOR_HOSTS)
 
 
