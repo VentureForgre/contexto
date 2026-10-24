@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from contexto.rewrite import ANTHROPIC, MESSAGES, Config, RewriteEngine, keyed
 from contexto.store.memory import MemoryStore
-
 from test_rewrite import FILL, assistant, history, names, request, tool_result, tool_use, user
 
 
@@ -107,8 +106,8 @@ def test_a_second_usage_for_the_same_request_is_not_paired_again():
 
 def test_a_degraded_forward_of_the_original_is_paired_with_the_original_bytes():
     """Rule 14's terminal step sends the CLI's request unchanged; its usage measures exactly those bytes."""
-    from test_rewrite import FaultyStore
     from contexto.store import PageConflictError
+    from test_rewrite import FaultyStore
 
     store = FaultyStore()
     engine = RewriteEngine(store, config=Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=200))

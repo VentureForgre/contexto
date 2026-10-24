@@ -155,14 +155,17 @@ def series_a(base, key, out, cap):
                                                    "binding": OPTS["binding"], "user_id_set": OPTS["user_id"],
                                                    "replayed_thinking_blocks": replayed,
                                                    "turns_in_request": len(messages)})
-        out.write(json.dumps(rec) + "\n"); out.flush()
+        out.write(json.dumps(rec) + "\n")
+        out.flush()
         if status != 200:
-            print(f"A{i}: status {status} {rec['error_type']}; stopping series"); return
+            print(f"A{i}: status {status} {rec['error_type']}; stopping series")
+            return
         messages.append({"role": "assistant", "content": payload["content"]})  # replay verbatim
         spent += sum(x or 0 for x in (rec["input"], rec["cache_creation"], rec["cache_read"], rec["output"]))
         print(f"A{i}: status 200 spent={spent}")
         if spent > cap:
-            print("cap reached; stopping"); return
+            print("cap reached; stopping")
+            return
         time.sleep(5)
 
 
@@ -176,13 +179,16 @@ def series_b(base, key, out, cap):
     for i in range(1, 11):
         status, headers, payload = call(base, key, body)
         rec = record(i, status, headers, payload, {"series": "B", "model_requested": MODEL})
-        out.write(json.dumps(rec) + "\n"); out.flush()
+        out.write(json.dumps(rec) + "\n")
+        out.flush()
         if status != 200:
-            print(f"B{i}: status {status} {rec['error_type']}; stopping series"); return
+            print(f"B{i}: status {status} {rec['error_type']}; stopping series")
+            return
         spent += sum(x or 0 for x in (rec["input"], rec["cache_creation"], rec["cache_read"], rec["output"]))
         print(f"B{i}: status 200 spent={spent}")
         if spent > cap:
-            print("cap reached; stopping"); return
+            print("cap reached; stopping")
+            return
         time.sleep(5)
 
 

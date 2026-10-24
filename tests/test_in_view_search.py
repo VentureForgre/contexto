@@ -127,7 +127,7 @@ def test_more_in_view_matches_than_shown_are_counted(store):
     lines = body.split("\n")
     assert lines[1:4] == ["> in view (turn 14): NEEDLE 4", "> in view (turn 13): NEEDLE 3",
                           "> in view (turn 12): NEEDLE 2"]
-    assert lines[4] == f"  [2 more matching lines in view]" and mcp.IN_VIEW_LIMIT == 3
+    assert lines[4] == "  [2 more matching lines in view]" and mcp.IN_VIEW_LIMIT == 3
 
 
 def test_a_tool_input_in_view_matches_through_its_escaped_form(store):

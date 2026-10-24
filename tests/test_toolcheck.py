@@ -48,8 +48,9 @@ def claude_request(tool_names: list[str], *, deferred: list[str] | None = None, 
     tools = [tool(n) for n in tool_names]
     if deferred is not None:
         tools += [tool("ToolSearch"), tool("DeferredToolPlaceholder", defer_loading=True)]
-        listing = ("# Environment\n...\nThe following deferred tools are now available via ToolSearch. Their schemas are "
-                   "NOT loaded. Use ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before "
+        listing = ("# Environment\n...\nThe following deferred tools are now available via ToolSearch. "
+                   "Their schemas are NOT loaded. Use ToolSearch with query \"select:<name>[,<name>...]\" "
+                   "to load tool schemas before "
                    "calling them:\n" + "\n".join(deferred) + "\n\nAvailable agent types for the Agent tool:\n- claude")
         messages.append({"role": "system", "content": [{"type": "text", "text": listing}]})
     return {"model": "claude-opus-5-5", "max_tokens": 32000, "stream": True,
@@ -76,7 +77,8 @@ def codex_request(prompt: str = "say ok") -> dict:
                        "content": [{"type": "input_text", "text": "base instructions"}]},
                       {"type": "message", "id": "m2", "role": "user",
                        "content": [{"type": "input_text", "text": "<environment_context>x</environment_context>"}]},
-                      {"type": "message", "id": "m3", "role": "user", "content": [{"type": "input_text", "text": prompt}]}]}
+                      {"type": "message", "id": "m3", "role": "user",
+                       "content": [{"type": "input_text", "text": prompt}]}]}
 
 
 class Clock:
@@ -529,7 +531,8 @@ def test_mcp_server_records_its_first_tools_list(tmp_path: Path):
     store = Recording()
     out = io.StringIO()
     server = Server(store, out, io.StringIO())
-    init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}'
+    init = ('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18",'
+            '"capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')
     listing = '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
     server.serve([init, listing, listing.replace('"id":2', '"id":3')])
     assert store.mcp_listed_at() is not None and Recording.calls == 1

@@ -15,10 +15,11 @@ for p in (ROOT / "spikes" / "m2", ROOT / "src"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from contexto import rewrite  # noqa: E402
-from contexto.proxy import SSEEventSplitter, StreamHold, UsageReader  # noqa: E402
 from scale.proxy import summarize, synth  # noqa: E402
 from scale.proxy.upstream import FakeUpstream, reply_events  # noqa: E402
+
+from contexto import rewrite  # noqa: E402
+from contexto.proxy import SSEEventSplitter, StreamHold, UsageReader  # noqa: E402
 
 SHAPE = synth.Shape(head_tokens=20_000, turn_tokens=8_000)
 

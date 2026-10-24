@@ -11,8 +11,14 @@ from datetime import UTC, datetime
 from contexto.commands._common import EXIT_ERROR, EXIT_OK, fail
 from contexto.paths import contexto_home
 from contexto.store import SessionNotFoundError
-from contexto.store.prune import (ACTIVE_GRACE_S, SessionLiveError, check_not_live, parse_duration,
-                                  remove_session, select)
+from contexto.store.prune import (
+    ACTIVE_GRACE_S,
+    SessionLiveError,
+    check_not_live,
+    parse_duration,
+    remove_session,
+    select,
+)
 from contexto.store.sessions import list_sessions, session_summary
 
 
@@ -194,7 +200,8 @@ def run_show(args: argparse.Namespace) -> int:
     for key, label in labels:
         value = summary[key]
         print(f"{label}: {'?' if value is None else value}")
-    print(f"Last epoch: {json.dumps(summary['last_epoch'], sort_keys=True) if summary['last_epoch'] else 'none logged'}")
+    last_epoch = summary["last_epoch"]
+    print(f"Last epoch: {json.dumps(last_epoch, sort_keys=True) if last_epoch else 'none logged'}")
     problems = summary["ledger_problems"]
     print(f"Ledger: {'intact' if not problems else '; '.join(problems)}")
     return EXIT_OK

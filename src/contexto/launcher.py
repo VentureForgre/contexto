@@ -53,9 +53,10 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlsplit
 
 from contexto.cliversions import launch_check
@@ -207,7 +208,8 @@ def open_session(home: Path, session_id: str, workdir: Path) -> Any:
     return store
 
 
-def build_engine(store: Any, config: dict[str, int | float]) -> tuple[Callable[..., Any], Callable[..., Any] | None, str]:
+def build_engine(store: Any,
+                 config: dict[str, int | float]) -> tuple[Callable[..., Any], Callable[..., Any] | None, str]:
     """The A2 rewrite engine as (transform, observe_usage, name); identity when it is not installed."""
     try:
         from contexto.rewrite import Config, RewriteEngine

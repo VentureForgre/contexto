@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Spend meter for the L1-d run: sums total_tokens of requests from <first_turn> on.
 Usage: meter.py <usage.csv> <first_turn> <cap>  -> prints spend, last context, next-turn estimate, GO/STOP"""
-import csv, sys
+import csv
+import sys
+
 path, first, cap = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 rs = [r for r in csv.DictReader(open(path)) if int(r["turn"]) >= first]
 spend = sum(int(r["total_tokens"]) for r in rs)

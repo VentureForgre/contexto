@@ -30,7 +30,7 @@ import subprocess
 import sys
 import threading
 import tomllib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -205,7 +205,7 @@ def child_env(base_url_var: str | None, proxy_url: str) -> dict[str, str]:
 
 class Run:
     def __init__(self, cli: str, args: argparse.Namespace, upstream: str) -> None:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         self.dir = SPIKE_ROOT / f"{cli}-{stamp}"
         self.scratch = self.dir / "scratch"
         self.scratch.mkdir(parents=True)

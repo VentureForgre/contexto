@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contexto.rewrite import ANTHROPIC, COUNT_TOKENS, MESSAGES, Config, RewriteEngine, turn_id
 from contexto.store.memory import MemoryStore
-
 from test_rewrite import assistant, history, request, system, tool_result, tool_use, user
 
 CONFIG = Config(bound=150_000, headroom_floor=25_000)

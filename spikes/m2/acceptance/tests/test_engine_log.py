@@ -21,9 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 proxy_mod = pytest.importorskip("contexto.proxy")
 rewrite = pytest.importorskip("contexto.rewrite")
-from contexto.store import SessionStore  # noqa: E402
-
 from acceptance import detectors  # noqa: E402
+
+from contexto.store import SessionStore  # noqa: E402
 
 PLANT = "cfg billing-core.retention_days=amber-1234"
 

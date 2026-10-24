@@ -13,20 +13,20 @@ from contexto.canonical import canonical_bytes
 from contexto.rewrite import (
     ANTHROPIC,
     COUNT_TOKENS,
-    retained_entries,
-    EpochState,
-    StoreCalls,
-    store_failure,
     MESSAGES,
     THINKING_OMITTED,
     Config,
+    EpochState,
     RewriteEngine,
+    StoreCalls,
     at_turn_start,
+    classify_system,
     is_turn_start,
     keyed,
     message_hash,
-    classify_system,
+    retained_entries,
     rewrite,
+    store_failure,
     window_tokens,
 )
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, SessionStore
@@ -137,7 +137,8 @@ def test_first_epoch_passes_everything_through_unchanged():
     for field in ("stream", "thinking", "metadata", "model", "max_tokens"):
         assert up[field] == req[field]
     assert st.k == 0 and names(ev) == ["request"]
-    assert all(isinstance(v, (int, float, bool)) or (isinstance(v, str) and len(v) < 40) for e in ev for v in e.values())
+    assert all(isinstance(v, (int, float, bool)) or (isinstance(v, str) and len(v) < 40)
+               for e in ev for v in e.values())
 
 
 # Rules 3 and 4: rotation ------------------------------------------------------------------------
@@ -148,7 +149,8 @@ def test_rotation_at_turn_start_pages_turns_and_merges_preamble():
     assert "rotation" in names(ev) and "page_out" in names(ev)
     first = up["messages"][0]
     assert first["role"] == "user" and is_turn_start(msgs[st.k])
-    expected = "\n\n".join(t for t in (store.pinned_text(CONFIG.pin_budget), store.index_text(CONFIG.index_budget)) if t)
+    expected = "\n\n".join(t for t in (store.pinned_text(CONFIG.pin_budget), store.index_text(CONFIG.index_budget))
+                           if t)
     assert first["content"][0] == {"type": "text", "text": expected} and expected  # the preamble block first (V2)
     assert first["content"][1] == ctx_block()  # then the carried context
     assert first["content"][2:] == msgs[st.k]["content"]  # then its own content
@@ -293,7 +295,8 @@ def test_measured_form_change_and_moving_cache_control_are_not_mismatches():
     later = copy.deepcopy(msgs)
     later[1] = {"role": "system", "content": later[1]["content"][0]["text"], "output_config": {"effort": "medium"}}
     later[-1] = {"role": "user", "content": "new prompt"}  # single text block became a string
-    later.append({**assistant("reply"), "content": [{"type": "text", "text": "reply", "cache_control": {"type": "ephemeral"}}]})
+    later.append({**assistant("reply"),
+                  "content": [{"type": "text", "text": "reply", "cache_control": {"type": "ephemeral"}}]})
     _, st2, ev2, _ = run(later, state=st, store=store)
     assert "resync" not in names(ev2) and st2.epoch == st.epoch
     assert message_hash(msgs[1]) == message_hash(later[1])
@@ -359,7 +362,8 @@ def test_head_change_waits_for_next_turn_start_and_never_rewrites_head():
     req = request(msgs)
     est = TokenEstimator()
     _, st, _ = rewrite(req, None, store, big, est)
-    loop = request(msgs + [tool_use(1), tool_result(1)], tools=[*request([])["tools"], {"name": "mcp__contexto__recall", "input_schema": {"type": "object"}}])
+    recall = {"name": "mcp__contexto__recall", "input_schema": {"type": "object"}}
+    loop = request(msgs + [tool_use(1), tool_result(1)], tools=[*request([])["tools"], recall])
     up, st2, ev = rewrite(loop, st, store, big, est)
     assert "head_changed" in names(ev) and "rotation" not in names(ev) and up["tools"] is loop["tools"]
     nxt = request(loop["messages"] + [assistant("done"), user("next")], tools=loop["tools"])
@@ -489,7 +493,8 @@ def test_initial_carried_size_is_not_over_budget():
     for t in range(1, 6):
         msgs += [user(f"prompt {t} {FILL}"), assistant(f"a{t} {FILL}")]
     msgs.append(user("new prompt"))
-    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config(bound=14_000, headroom_floor=500, carried_budget=1_000))
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32),
+                           config=Config(bound=14_000, headroom_floor=500, carried_budget=1_000))
     engine(request(msgs[:2]), {}, MESSAGES)
     _, _, ev = engine(request(msgs), {}, MESSAGES)
     assert "rotation" in names(ev) and "carried_over_budget" not in names(ev)
@@ -500,7 +505,8 @@ def test_initial_carried_size_is_not_over_budget():
 def test_rotation_events_carry_fixed_overhead_and_window_budget():
     _, _, ev, _ = run(history(6) + [user("new prompt")])
     rotation = next(e for e in ev if e["event"] == "rotation")
-    assert rotation["fixed_overhead"] > 0 and rotation["window_budget"] == CONFIG.bound - CONFIG.headroom_floor - rotation["fixed_overhead"]
+    assert rotation["fixed_overhead"] > 0
+    assert rotation["window_budget"] == CONFIG.bound - CONFIG.headroom_floor - rotation["fixed_overhead"]
 
 
 def test_rotation_that_keeps_k_is_a_noop():
@@ -579,8 +585,8 @@ def test_seat_sized_head_does_not_thrash():
 def hook_system(t):
     # Measured on Claude Code 2.1.301 (live_probe.sh hook case): text only, no output_config, right
     # after the prompt, wrapped as "UserPromptSubmit hook additional context: <payload>".
-    return {"role": "system", "content": [{"type": "text",
-                                           "text": f"UserPromptSubmit hook additional context: Synthetic hook context {t}"}]}
+    text = f"UserPromptSubmit hook additional context: Synthetic hook context {t}"
+    return {"role": "system", "content": [{"type": "text", "text": text}]}
 
 
 def post_tool_hook(t, tool="Read"):
@@ -653,7 +659,8 @@ def test_paged_change_resync_reports_kept_inflight_thinking():
     store = MemoryStore(key=b"k" * 32)
     msgs = history(6) + [user("new prompt")]
     _, st, _, _ = run(msgs, store=store)
-    changed = [user(f"replaced {FILL}", context=True), system()] + msgs[2:] + [tool_use(7, think="live"), tool_result(7)]
+    changed = ([user(f"replaced {FILL}", context=True), system()] + msgs[2:]
+               + [tool_use(7, think="live"), tool_result(7)])
     _, _, ev, _ = run(changed, state=st, store=store)
     resync = next(e for e in ev if e["event"] == "resync")
     assert resync["kind"] == "paged_changed" and resync["inflight_thinking_kept"] is True

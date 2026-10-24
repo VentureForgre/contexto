@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -62,6 +63,24 @@ def test_quarantining_twice_keeps_both_copies(tmp_path):
     b = store.quarantine_page(pid)
     assert a != b and a.exists() and b.exists()
     assert store.quarantine_page(pid) == b  # the most recent
+
+
+def test_quarantine_names_sort_in_call_order_across_a_second_boundary(tmp_path, monkeypatch):
+    """The stamp's seconds and nanoseconds come from one clock reading. Read separately, a call
+    just before a second boundary and one just after it could name the later copy lower, so the
+    lookup returned the older copy (seen once on CI, Python 3.14)."""
+    store = SessionStore(tmp_path, "s1")
+    [pid] = store.page_out([TURN], 1)
+    second = 1_793_000_000 * 1_000_000_000
+    monkeypatch.setattr(time, "time_ns", lambda: second - 1)
+    a = store.quarantine_page(pid)
+    monkeypatch.undo()
+    store.page_out([TURN], 1)
+    monkeypatch.setattr(time, "time_ns", lambda: second + 1)
+    b = store.quarantine_page(pid)
+    monkeypatch.undo()
+    assert a.name < b.name
+    assert store.quarantine_page(pid) == b
 
 
 @pytest.mark.parametrize("bad", ["../pages/x", "pg_123", "pg_" + "A" * 16, "pg_" + "0" * 16 + ".json",

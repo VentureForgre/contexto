@@ -291,16 +291,16 @@ def main() -> None:
                       f"{r['system_msgs']} / {tok(r['system_msgs_bytes'])} | {r['carried_tokens']} | "
                       f"{r['carried_k']} / {r['carried_after_fallback']} | {r['carried_blocks_k']} | "
                       f"{r['session_start_msgs_k']} / {r['carried_session_start_k']} | {r['carried_unpageable_k']} |")
-        f, l = turns[min(1, len(turns) - 1)], turns[-1]  # from turn 2: the first turn with k > 0
-        span = max(1, l["turn"] - f["turn"])
-        rate = lambda col, conv=tok: (conv(l[col]) - conv(f[col])) / span  # noqa: E731
+        first, last = turns[min(1, len(turns) - 1)], turns[-1]  # from turn 2: the first turn with k > 0
+        span = max(1, last["turn"] - first["turn"])
+        rate = lambda col, conv=tok: (conv(last[col]) - conv(first[col])) / span  # noqa: E731, B023 - called at once
         ident = lambda x: x  # noqa: E731
-        print(f"  per-turn growth, turn {f['turn']} to {l['turn']}: later turn-start reminders "
+        print(f"  per-turn growth, turn {first['turn']} to {last['turn']}: later turn-start reminders "
               f"{rate('ts_later_bytes'):.0f} tok/turn; role-system messages {rate('system_msgs_bytes'):.0f} tok/turn; "
               f"Contexto carried_tokens {rate('carried_tokens', ident):.0f}/turn; carried at k after fallback "
               f"{rate('carried_after_fallback', ident):.0f}/turn; context blocks at k {rate('carried_blocks_k', ident):.0f}/turn; "
               f"not pageable at k {rate('carried_unpageable_k', ident):.0f}/turn; "
-              f"ts_embedded {l['ts_embedded_n']}, reminder-only user msgs {l['user_only_n']}, next to tool_result {l['next_to_tr_n']}")
+              f"ts_embedded {last['ts_embedded_n']}, reminder-only user msgs {last['user_only_n']}, next to tool_result {last['next_to_tr_n']}")
     if turn_rows:
         with open(out / "turns.csv", "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=list(turn_rows[0].keys()))

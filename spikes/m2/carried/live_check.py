@@ -45,7 +45,8 @@ def send(base, key, out, label, body, betas):
     u = payload.get("usage") or {}
     spent += sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"))
     rec["spent_total"] = spent
-    out.write(json.dumps(rec) + "\n"); out.flush()
+    out.write(json.dumps(rec) + "\n")
+    out.flush()
     print(f"{label} betas={rec['betas']}: status {status} {rec['error_type'] or ''} spent={spent}")
     return status, payload
 
@@ -53,7 +54,8 @@ def send(base, key, out, label, body, betas):
 def case(base, key, out, cap, label, body, feature_betas=()):
     """Send one case once; ``feature_betas`` are only the betas the case itself tests."""
     if spent > cap - 2000:
-        print(f"{label}: skipped, cap"); return None, {}
+        print(f"{label}: skipped, cap")
+        return None, {}
     return send(base, key, out, label, body, list(feature_betas))
 
 
@@ -82,10 +84,12 @@ def main():
                    "messages": [q1, {"role": "system", "content": SYSTEM_TEXT}]}
         status, payload = case(base, key, out, cap, "R12-turn1", t1_body, binding)
         if status != 200:
-            print("R12: turn 1 failed; stopping"); return
+            print("R12: turn 1 failed; stopping")
+            return
         types = [b.get("type") for b in payload.get("content") or []]
         if "thinking" not in types:
-            print(f"R12: turn 1 produced no thinking block ({types}); stopping"); return
+            print(f"R12: turn 1 produced no thinking block ({types}); stopping")
+            return
         q2 = {"role": "user", "content": "What is 52 times 61? Answer with the number only."}
         assistant = {"role": "assistant", "content": payload["content"]}
         for label, sys_msg in (("R12-turn2-system-kept", {"role": "system", "content": SYSTEM_TEXT}),

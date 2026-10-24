@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from acceptance import seat_bound as sb  # noqa: E402
+
 from contexto.rewrite import Config  # noqa: E402
 
 

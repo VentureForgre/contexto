@@ -1,10 +1,31 @@
 """Responses API dialect tests (M2 A5). Item shapes come from codex-cli 0.154.0 with gpt-6-astra as
 measured with zero-spend probes (spikes/m2/codex/); all content is synthetic."""
 
+import argparse
 import copy
+import io
+import json
+import os
+import stat
+import sys
+import tomllib
+from pathlib import Path
+
+import pytest
 
 from contexto.canonical import canonical_bytes
-from contexto.codex import RESPONSES, ResponsesDialect
+from contexto.codex import (
+    CHATGPT_MODE,
+    CHATGPT_UPSTREAM,
+    KEY_HELPER_ENV,
+    RESPONSES,
+    CodexLaunchError,
+    ResponsesDialect,
+    add_arguments,
+    claude_api_key_helper,
+    plan_codex,
+    run_codex,
+)
 from contexto.rewrite import MESSAGES, Config, RewriteEngine, rewrite
 from contexto.store.memory import MemoryStore
 from contexto.tokens import TokenEstimator
@@ -54,7 +75,8 @@ def output(i, text="synthetic output"):
 def history(turns):
     items = lead()
     for t in range(turns):
-        items += [prompt(f"prompt {t} {FILL}"), reasoning(t), call(t), output(t, f"out {t} {FILL}"), answer(f"answer {t}")]
+        items += [prompt(f"prompt {t} {FILL}"), reasoning(t), call(t), output(t, f"out {t} {FILL}"),
+                  answer(f"answer {t}")]
     return items
 
 
@@ -184,18 +206,6 @@ def test_engine_dispatches_responses_paths_with_separate_state():
 
 # Launch planning (D22) ------------------------------------------------------------------------------
 
-import json
-import os
-import stat
-import sys
-import tomllib
-from pathlib import Path
-
-import pytest
-
-from contexto.codex import (CHATGPT_MODE, CHATGPT_UPSTREAM, KEY_HELPER_ENV, CodexLaunchError,
-                            claude_api_key_helper, plan_codex)
-
 PROXY = "http://127.0.0.1:43210"
 
 
@@ -239,7 +249,8 @@ def test_key_helper_resolution_order(tmp_path):
     env = {KEY_HELPER_ENV: "/from/env"}
     launch = plan_codex([], PROXY, "S", env=env, cwd=tmp_path, home=home, upstream="https://u.invalid/v1")
     try:
-        assert tomllib.loads((launch.codex_home / "config.toml").read_text())["model_providers"]["contexto"]["auth"]["command"] == "/from/env"
+        assert (tomllib.loads((launch.codex_home / "config.toml").read_text())
+                ["model_providers"]["contexto"]["auth"]["command"] == "/from/env")
     finally:
         launch.cleanup()
     explicit = plan_codex([], PROXY, "S", env=env, cwd=tmp_path, home=home, upstream="https://u.invalid/v1",
@@ -286,11 +297,6 @@ def test_config_never_contains_a_key(tmp_path):
 
 
 # run_codex with a fake launcher (builder-1's contexto.launcher API) ---------------------------------
-
-import argparse
-import io
-
-from contexto.codex import add_arguments, run_codex
 
 
 class FakeLaunchError(Exception):
@@ -355,7 +361,8 @@ class FakeLauncher:
 def parse(*argv):
     parser = argparse.ArgumentParser()
     for name, kw in (("--bound", {"type": int, "default": 150_000}), ("--allow-large-bound", {"action": "store_true"}),
-                     ("--window-fraction", {"type": float, "default": None}), ("--headroom-floor", {"type": int, "default": None}),
+                     ("--window-fraction", {"type": float, "default": None}),
+                     ("--headroom-floor", {"type": int, "default": None}),
                      ("--session", {"default": None}), ("--upstream", {"default": None}),
                      ("--observe-thinking", {"action": "store_true"})):
         parser.add_argument(name, **kw)
@@ -580,7 +587,8 @@ def test_chatgpt_mode_mcp_home_is_absolute_for_a_relative_contexto_home(tmp_path
     launch = plan_codex(["exec", "hi"], PROXY, "S2", auth_mode=CHATGPT_MODE, env={"CONTEXTO_HOME": "rel-home"},
                         cwd=tmp_path, home=tmp_path)
     overrides = dict(launch.argv[i + 1].split("=", 1) for i, a in enumerate(launch.argv) if a == "-c")
-    assert tomllib.loads(f"v = {overrides['mcp_servers.contexto.env.CONTEXTO_HOME']}")["v"] == str(tmp_path / "rel-home")
+    assert (tomllib.loads(f"v = {overrides['mcp_servers.contexto.env.CONTEXTO_HOME']}")["v"]
+            == str(tmp_path / "rel-home"))
 
 
 def test_mcp_server_ignores_a_contexto_package_in_the_working_directory(tmp_path):

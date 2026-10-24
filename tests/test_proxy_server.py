@@ -10,13 +10,12 @@ import socket
 import struct
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 import pytest
 
 import contexto.proxy as proxy_module
-from contexto.store.memory import MemoryStore
 from contexto.proxy import (
     END_ALLOWLISTS,
     THINKING_BINDING_BETA,
@@ -26,6 +25,7 @@ from contexto.proxy import (
     identity_transform,
     serialize_request,
 )
+from contexto.store.memory import MemoryStore
 
 SECRET = "test-key-not-real-0123456789"
 CONTENT = "PRIVATE-PROMPT-TEXT"
@@ -233,33 +233,6 @@ class Upstream(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-@pytest.fixture
-def upstream():
-    Upstream.received = []
-    Upstream.mode = "sse"
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
-    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
-    yield f"http://127.0.0.1:{server.server_address[1]}/base"
-    server.shutdown()
-    server.server_close()
-
-
-@pytest.fixture
-def make_proxy(upstream):
-    started = []
-
-    def make(**kwargs) -> tuple[ContextoProxy, MemoryLog]:
-        log = MemoryLog()
-        proxy = ContextoProxy(kwargs.pop("upstream", upstream), log, **kwargs)
-        proxy.start()
-        started.append(proxy)
-        return proxy, log
-
-    yield make
-    for proxy in started:
-        proxy.stop()
-
-
 def call(proxy: ContextoProxy, method: str, path: str, body: bytes = b"", headers: dict | None = None):
     conn = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=10)
     conn.request(method, path, body=body or None, headers=headers or {})
@@ -335,6 +308,18 @@ def test_other_paths_pass_through_untouched(make_proxy):
     assert Upstream.received[2][3] == REQUEST_BYTES
     assert engine.calls == []
     assert [e["path"] for e in log.requests(3)] == ["/api/hello", "/v1/models", "/v1/other"]
+
+
+def test_start_makes_no_hostname_lookup(make_proxy, monkeypatch):
+    """http.server names a server with socket.getfqdn, which took 35 s per process on a macOS CI
+    runner and so delayed every launch; the proxy binds without it."""
+    def no_lookup(*args):
+        raise AssertionError("the proxy looked up a hostname")
+
+    monkeypatch.setattr(socket, "getfqdn", no_lookup)
+    proxy, _ = make_proxy()
+    response, _ = call(proxy, "HEAD", "/api/hello")
+    assert response.status == 200 and proxy.url == f"http://127.0.0.1:{proxy.port}"
 
 
 # SSE relay and usage
@@ -511,7 +496,8 @@ def read_request(sock: socket.socket, got: bytearray) -> None:
     while b"\r\n\r\n" not in got:
         got += sock.recv(65536)
     head = bytes(got).split(b"\r\n\r\n", 1)[0].decode()
-    length = int(next(line.split(":", 1)[1] for line in head.split("\r\n") if line.lower().startswith("content-length")))
+    length = int(next(line.split(":", 1)[1] for line in head.split("\r\n")
+                      if line.lower().startswith("content-length")))
     while len(got) < len(head) + 4 + length:
         got += sock.recv(1 << 20)
 
@@ -1463,7 +1449,8 @@ def test_responses_stream_end_is_recorded(events, want):
     assert ending("responses", sse_body(*events)) == want
 
 
-@pytest.mark.parametrize("stop_reason", ["end_turn", "tool_use", "max_tokens", "refusal", "stop_sequence", "pause_turn"])
+@pytest.mark.parametrize("stop_reason",
+                         ["end_turn", "tool_use", "max_tokens", "refusal", "stop_sequence", "pause_turn"])
 def test_messages_stop_reason_is_recorded(stop_reason):
     body = sse_body({"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
                     {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": SECRET_TEXT},
@@ -1494,8 +1481,9 @@ def test_every_allowed_value_passes_through(field):
         assert reader.ending == {field: value}
 
 
-@pytest.mark.parametrize("value", ["eu-west", "a" * 60, "content-filter", SECRET_TEXT, "Content_Filter", "CONTENT_FILTER",
-                                   "x" * 65, 42, True, ["content_filter"], {"reason": "content_filter"}])
+@pytest.mark.parametrize("value", ["eu-west", "a" * 60, "content-filter", SECRET_TEXT, "Content_Filter",
+                                   "CONTENT_FILTER", "x" * 65, 42, True, ["content_filter"],
+                                   {"reason": "content_filter"}])
 def test_any_other_value_logs_as_other(value):
     # Packet A26: an unlisted lowercase token is no longer admitted; the field stays, so a stop rule
     # keyed on "present and not completed" still stops.
@@ -1522,7 +1510,8 @@ def serve_sse(body: bytes):
         while b"\r\n\r\n" not in got:
             got += sock.recv(65536)
         head = bytes(got).split(b"\r\n\r\n", 1)[0].decode()
-        length = int(next(line.split(":", 1)[1] for line in head.split("\r\n") if line.lower().startswith("content-length")))
+        length = int(next(line.split(":", 1)[1] for line in head.split("\r\n")
+                          if line.lower().startswith("content-length")))
         while len(got) < len(head) + 4 + length:
             got += sock.recv(1 << 20)
         sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
@@ -1537,7 +1526,8 @@ def serve_sse(body: bytes):
     ("/responses", sse_body(responses_end("incomplete", status="incomplete",
                                           incomplete_details={"reason": "content_filter"})),
      {"end_event": "incomplete", "response_status": "incomplete", "incomplete_reason": "content_filter"}),
-    ("/responses", sse_body({"type": "response.created", "response": {"status": "in_progress"}}), {"end_event": "none"}),
+    ("/responses", sse_body({"type": "response.created", "response": {"status": "in_progress"}}),
+     {"end_event": "none"}),
     ("/v1/messages", sse_body({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}}),
      {"stop_reason": "max_tokens"}),
 ])

@@ -73,7 +73,8 @@ def test_legacy_initialize_negotiates_version(server):
     assert result["protocolVersion"] == "2025-06-18"
     assert result["capabilities"]["tools"] == {"listChanged": False}
     assert result["serverInfo"]["name"] == "contexto"
-    assert call(server, "initialize", {"protocolVersion": "2099-01-01"})["result"]["protocolVersion"] == mcp.LEGACY_VERSIONS[0]
+    assert (call(server, "initialize", {"protocolVersion": "2099-01-01"})["result"]["protocolVersion"]
+            == mcp.LEGACY_VERSIONS[0])
 
 
 def test_modern_discover_and_version_check(server):
@@ -184,7 +185,8 @@ def test_search_matches_words_case_insensitively(server, stores):
     assert f"> {offset}: Remember: the staging port is garnet-4821." in lines  # the line, at its offset
     assert all(line.startswith(("> ", "  ")) for line in lines)
     assert tool(server, "contexto_search", {"query": "GARNET-4821"})["result"]["content"][0]["text"] == text  # D34
-    assert tool(server, "contexto_search", {"query": "staging garnet-4821"})["result"]["content"][0]["text"].startswith(f"{BEST}{a}")
+    assert (tool(server, "contexto_search", {"query": "staging garnet-4821"})["result"]["content"][0]["text"]
+            .startswith(f"{BEST}{a}"))
     assert (tool(server, "contexto_search", {"query": "garnet-4821 absent-word"})["result"]["content"][0]["text"]
             == "No paged-out turn contains every word of that query.")
     assert tool(server, "contexto_search", {"query": "x"})["result"]["content"][0]["text"].startswith(f"{BEST}{b}")
@@ -219,7 +221,8 @@ def test_render_page_survives_malformed_blocks():
 
 def test_pin_through_mcp_appears_in_pinned_text_and_state_matches(server, stores):
     store, a, _ = stores
-    decision = tool(server, "contexto_pin", {"kind": "decision", "text": "use port garnet-4821", "epistemic": "verified",
+    decision = tool(server, "contexto_pin", {"kind": "decision", "text": "use port garnet-4821",
+                                             "epistemic": "verified",
                                              "provenance": [{"type": "page", "locator": a}]})["result"]
     assert decision["isError"] is False
     obligation = tool(server, "contexto_pin", {"kind": "obligation", "text": "rotate the staging key"})["result"]
@@ -253,7 +256,8 @@ def test_supersession_through_mcp_replaces_the_pinned_decision(server, stores):
     ({"kind": "decision", "text": "x", "epistemic": "verified"}, "Not recorded"),  # the store needs provenance
     ({"kind": "decision", "text": "x", "supersedes": "rec_1"}, "supersedes must be a list"),
     ({"kind": "decision", "text": "x", "provenance": [{"type": "page"}]}, "provenance must be a list"),
-    ({"kind": "decision", "text": "x", "provenance": [{"type": "page", "locator": "pg_ffffffffffffffff"}]}, "unknown page"),
+    ({"kind": "decision", "text": "x", "provenance": [{"type": "page", "locator": "pg_ffffffffffffffff"}]},
+     "unknown page"),
 ])
 def test_pin_validation_errors_are_tool_errors(server, args, needle):
     result = tool(server, "contexto_pin", args)["result"]
@@ -281,17 +285,19 @@ def test_contexto_mcp_cli_round_trip_and_stdout_carries_only_frames(tmp_path):
     seeded = SessionStore(tmp_path, "cli-test")
     (pid,) = seeded.page_out([TURN_A], first_turn=1)
     requests = [
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {},
-                                                                         "clientInfo": {"name": "t", "version": "0"}}},
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": MODERN}},
-        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "contexto_recall", "arguments": {"page_id": pid}}},
-        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "contexto_pin",
-                                                                         "arguments": {"kind": "obligation", "text": "ship it"}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+         "params": {"name": "contexto_recall", "arguments": {"page_id": pid}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+         "params": {"name": "contexto_pin", "arguments": {"kind": "obligation", "text": "ship it"}}},
         {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "contexto_state", "arguments": {}}},
-        {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "contexto_search", "arguments": {"query": "port"}}},
-        {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "contexto_close",
-                                                                         "arguments": {"obligation_id": "rec_x", "note": "n"}}},
+        {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+         "params": {"name": "contexto_search", "arguments": {"query": "port"}}},
+        {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+         "params": {"name": "contexto_close", "arguments": {"obligation_id": "rec_x", "note": "n"}}},
     ]
     lines = "".join(json.dumps(r) + "\n" for r in requests) + "{broken\n"
     proc = subprocess.run([sys.executable, "-m", "contexto", "mcp", "--session", "cli-test", "--home", str(tmp_path)],

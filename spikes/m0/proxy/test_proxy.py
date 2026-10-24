@@ -6,18 +6,22 @@ import copy
 import gzip
 import http.client
 import json
+import socket
+import struct
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-
 from extract import (
     SUMMARY_FIELDS,
     StreamDecoder,
-    header_facts,
     UsageCollector,
+    WsFrameParser,
+    header_facts,
     normalize_usage,
+    permessage_deflate,
     request_metrics,
     summary_row,
 )
@@ -345,12 +349,6 @@ def test_control_turn_and_cap_refusal(upstream, tmp_path):
 
 
 # WebSocket tunnel: fake upstream speaking RFC 6455 with permessage-deflate.
-
-import socket
-import struct
-import zlib
-
-from extract import WsFrameParser, permessage_deflate
 
 
 def deflate(message):

@@ -14,7 +14,7 @@ import sys
 
 
 def main() -> None:
-    rows = [json.loads(l) for l in open(sys.argv[1])]
+    rows = [json.loads(line) for line in open(sys.argv[1])]
     producers = {}  # message index -> request number that produced a thinking block there
     same, diff = set(), set()
     for r in rows:
