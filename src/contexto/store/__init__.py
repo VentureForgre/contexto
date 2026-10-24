@@ -28,6 +28,7 @@ Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``) 
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -65,6 +66,7 @@ def check_page_id(page_id: Any) -> str:
 KEY_BYTES = 32
 
 LIVE_LOCK = "live.lock"
+LIVE_ATTEMPTS = 8  # hold_live: tries before giving up on a session that keeps being deleted
 
 
 def hold_live(session_path: Path) -> tuple[int, bool]:
@@ -75,15 +77,26 @@ def hold_live(session_path: Path) -> tuple[int, bool]:
     Prune deletes the directory under that lock, so after waiting the descriptor can name an unlinked
     file: the loop then recreates the directory and locks the new file, and returns only once the lock
     is on the file at the path. The lock file is never followed through a symlink.
+
+    A missing file counts as a prune only when the session entry itself is gone (``lstat``); anything
+    else, such as a session entry that is a symlink to a missing target, raises at once. Retries are
+    capped at ``LIVE_ATTEMPTS`` with a short backoff, then TimeoutError.
     """
     path = Path(session_path) / LIVE_LOCK
     pruned = False
-    while True:
+    for attempt in range(LIVE_ATTEMPTS):
+        if attempt:
+            time.sleep(min(0.01 * 2 ** (attempt - 1), 0.25))
         try:
             private_dir(path.parent)
             fd = open_private(path, os.O_RDWR | os.O_NOFOLLOW)
-        except FileNotFoundError:  # prune removed the directory between the mkdir, the chmod, or the open
-            pruned = True
+        except FileNotFoundError as e:
+            if os.path.lexists(path.parent):  # not removed by prune: retrying cannot fix it
+                if path.parent.is_symlink():
+                    raise FileNotFoundError(errno.ENOENT, "session directory is a symlink to a missing target",
+                                            str(path.parent)) from e
+                raise
+            pruned = True  # prune removed the directory between the mkdir, the chmod, or the open
             continue
         try:
             fcntl.flock(fd, fcntl.LOCK_SH)
@@ -96,7 +109,9 @@ def hold_live(session_path: Path) -> tuple[int, bool]:
             os.close(fd)
             raise
         os.close(fd)
-        pruned = True
+        pruned = True  # prune unlinked the lock file while this process waited for it
+    raise TimeoutError(f"could not open session directory {path.parent}: it was deleted while opening, "
+                       f"{LIVE_ATTEMPTS} times")
 
 _SECRET_KEYS = {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"}
 

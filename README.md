@@ -209,7 +209,8 @@ contexto sessions prune --session 7f3a --yes      # delete one session
   it checked, even if a path is swapped for a link while it runs.
 - If one session cannot be deleted, prune reports it on stderr, goes on with the rest, and exits 1.
 - `--json` prints `dry_run`, `total_bytes`, and each selected session with its `status`
-  (`would_remove`, `removed`, `skipped`, or `failed`) and `reason`.
+  (`would_remove`, `removed`, `skipped`, or `failed`) and `reason`. If prune fails before selecting
+  anything (for example an unknown `--session`), it prints `{"error": ...}` instead and exits 1.
 - If you resume a session with `contexto run --session ID` while prune is deleting it, the resume
   waits, then starts the session empty and prints a warning.
 

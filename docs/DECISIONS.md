@@ -416,8 +416,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
   without waiting, and skips the session if that fails. It holds the lock while it deletes and
   removes `live.lock` last. A store opening the session at that moment (a resume with `--session ID`)
   waits on the lock, sees afterwards that its file was unlinked, recreates the session directory
-  empty, logs `pruned_while_opening`, and prints `contexto: warning: session ID was deleted by
-  contexto sessions prune while it was being opened; it starts empty` to stderr. A store that opens
+  empty, logs `pruned_while_opening`, and prints ``contexto: warning: session ID was deleted by
+  `contexto sessions prune` while it was being opened; it starts empty`` to stderr. A missing file
+  counts as a prune only when the session entry itself is gone; any other (a session entry that is a
+  symlink to a missing target, say) fails at once, and retries stop after 8 attempts with a short
+  backoff. `contexto proxy`, `contexto mcp`, and `contexto run codex` report a session that cannot
+  be opened as an error line (`cannot start` or `cannot open session`), not a traceback, as
+  `contexto run claude` already did. A store that opens
   in the instant after `live.lock` is unlinked and before the final `rmdir` keeps its new files; prune
   then reports the session as skipped ("opened again while it was being deleted"). A process from
   before D37 holds no lock, so prune also skips any session active in the last 10 minutes (fixed, no
@@ -431,13 +436,14 @@ the owner's delegation. Open decisions are listed at the end with the options an
   session are removed as links and never followed. Guarantee: even if another process swaps
   `sessions/<id>` or `sessions/` for a symlink at any moment, prune deletes nothing outside the
   directory it checked and creates nothing there; if the entry no longer names that directory just
-  before the final `rmdir`, prune stops with an error and leaves the entry (reviewer A reproduced the
-  swap against the first, path-based version, which emptied the link's target). Not guaranteed: if
+  before the final `rmdir`, prune stops with an error and leaves the entry. Not guaranteed: if
   the session directory itself is moved elsewhere after the check, its own contents are still
   removed, because they are the session that was selected; (4) errors are per session: prune
   reports each failure on stderr, goes on with the rest, and exits 1 if any failed. Skipping a
   session in use is not a failure, except when `--session` named it: then it exits 1 with
-  `contexto: error: session ID: <reason>` on stderr; (5) `sessions list` gains a SIZE column, a
+  `contexto: error: session ID: <reason>` on stderr. With `--json`, an error before any session is
+  selected (an unknown or unsafe `--session`, a symlinked `sessions/`) also prints `{"error": ...}`
+  on stdout, so stdout always parses; (5) `sessions list` gains a SIZE column, a
   total line, and `size_bytes` in `--json`: the allocated blocks under the directory, symlinks
   counted as links, which is the space a delete frees. Rejected: refusing only by recent activity (a
   proxy idle for an hour while the user reads is still live); a pid file (pids are reused and a

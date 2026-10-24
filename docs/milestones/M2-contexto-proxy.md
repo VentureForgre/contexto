@@ -698,7 +698,8 @@ prune` (D37) deletes whole session directories. It selects by `--older-than DURA
 idle time since the last activity `sessions list` shows), `--keep N` (keep the N most recently
 active), and `--session ID`; all given conditions must hold and at least one is required. Without
 `--yes` it only prints the selection with sizes and a total, and writes nothing. `--json` prints
-`dry_run`, `total_bytes`, and each selected session's `status` and `reason`. It never deletes a
+`dry_run`, `total_bytes`, and each selected session's `status` and `reason`, or `{"error": ...}`
+when selection fails. It never deletes a
 session whose `live.lock` another process holds, one whose `live.lock` is a symlink or not a regular
 file, or one active in the last 10 minutes. `sessions/` and each session must be real directories,
 and every step after the check works through open directory descriptors (`O_NOFOLLOW`, inode

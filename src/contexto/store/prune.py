@@ -44,6 +44,8 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _LOCK_FLAGS = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK  # read-write so flock works on NFS too
 _LINK_ERRNOS = {errno.ELOOP, errno.EMLINK, errno.ENOTDIR}  # what O_NOFOLLOW gives for a symlink
 IN_USE = "in use by a running Contexto proxy or MCP server"
+_LOCK_LINK = f"{LIVE_LOCK} is a symlink; prune never follows links"
+_LOCK_NOT_FILE = f"{LIVE_LOCK} is not a regular file; remove the session by hand"
 
 Ident = tuple[int, int]  # (st_dev, st_ino)
 
@@ -159,6 +161,17 @@ def _open_lock(fd: int, *, create: bool) -> int | None:
     """``live.lock`` in the session ``fd``, never through a symlink and never blocking on a FIFO; None
     when it is absent and ``create`` is false. UnsafeSessionPathError unless it is a regular file."""
     try:
+        st = os.stat(LIVE_LOCK, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        st = None
+    if st is not None:  # the type decides the message; the open below checks the file it gets again
+        if stat.S_ISLNK(st.st_mode):
+            raise UnsafeSessionPathError(_LOCK_LINK)
+        if not stat.S_ISREG(st.st_mode):
+            raise UnsafeSessionPathError(_LOCK_NOT_FILE)
+    elif not create:
+        return None
+    try:
         lock = os.open(LIVE_LOCK, _LOCK_FLAGS | (os.O_CREAT if create else 0), FILE_MODE, dir_fd=fd)
     except FileNotFoundError:
         if create:
@@ -166,11 +179,13 @@ def _open_lock(fd: int, *, create: bool) -> int | None:
         return None
     except OSError as e:
         if e.errno in _LINK_ERRNOS:
-            raise UnsafeSessionPathError(f"{LIVE_LOCK} is a symlink; prune never follows links") from None
+            raise UnsafeSessionPathError(_LOCK_LINK) from None
+        if e.errno in (errno.EISDIR, errno.ENXIO, errno.EOPNOTSUPP):  # replaced since the stat above
+            raise UnsafeSessionPathError(_LOCK_NOT_FILE) from None
         raise
     if not stat.S_ISREG(os.fstat(lock).st_mode):
         os.close(lock)
-        raise UnsafeSessionPathError(f"{LIVE_LOCK} is not a regular file; remove the session by hand")
+        raise UnsafeSessionPathError(_LOCK_NOT_FILE)
     return lock
 
 
@@ -212,7 +227,13 @@ def _delete_contents(fd: int) -> None:
         if entry.name == LIVE_LOCK:
             continue
         if entry.is_dir(follow_symlinks=False):
-            shutil.rmtree(entry.name, dir_fd=fd)  # refuses a symlink, even one swapped in now
+            try:
+                shutil.rmtree(entry.name, dir_fd=fd)  # refuses a symlink, even one swapped in now
+            except OSError as e:
+                if e.errno is None:  # rmtree's own "Cannot call rmtree on a symbolic link"
+                    raise UnsafeSessionPathError(f"{entry.name} became a symlink while it was being deleted; "
+                                                 "stopped without following it") from e
+                raise
         else:
             os.unlink(entry.name, dir_fd=fd)  # a symlink is removed as a link
     try:

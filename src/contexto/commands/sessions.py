@@ -107,6 +107,8 @@ def run_prune(args: argparse.Namespace) -> int:
     try:
         chosen = select(home, older_than=args.older_than, keep=args.keep, session_id=args.session, now=now)
     except (SessionNotFoundError, ValueError, OSError) as e:  # UnsafeSessionPathError is a ValueError
+        if args.json:  # stdout stays parseable: a script reads {"error": ...} and the exit code
+            print(json.dumps({"error": str(e)}, indent=2, sort_keys=True))
         return fail(str(e))
     named = args.session is not None
     results: list[dict] = []

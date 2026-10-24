@@ -596,3 +596,130 @@ def test_json_dry_run_and_delete(three, capsys, monkeypatch):
     assert code == 0 and {s["id"]: s["status"] for s in data["sessions"]} == {"old": "removed", "mid": "removed"}
     assert data["total_bytes"] == sum(s["size_bytes"] for s in data["sessions"])
     assert remaining(three) == ["new"]
+
+
+# opening a session that cannot be opened (review round 2)
+
+
+DANGLE = ("import sys, pathlib\nfrom contexto.store import SessionStore\n"
+          "try:\n    SessionStore(pathlib.Path(sys.argv[1]), 'dang')\n"
+          "except FileNotFoundError as e:\n    print(e)\n    sys.exit(3)\n")
+
+
+def dangling(home, tmp_path):
+    (home / "sessions").mkdir(parents=True)
+    (home / "sessions" / "dang").symlink_to(tmp_path / "unmounted-disk", target_is_directory=True)
+
+
+def test_dangling_session_symlink_fails_at_once(home, tmp_path):
+    """Reviewer B: the FileNotFoundError from chmod through a dangling link is not a prune; no retry loop."""
+    dangling(home, tmp_path)
+    started = time.monotonic()
+    r = subprocess.run([sys.executable, "-c", DANGLE, str(home)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 3, r.stderr
+    assert "session directory is a symlink to a missing target" in r.stdout
+    assert time.monotonic() - started < 20
+    assert not (tmp_path / "unmounted-disk").exists()
+
+
+def test_hold_live_gives_up_after_capped_retries(tmp_path, monkeypatch):
+    import contexto.store as store_mod
+    calls = []
+
+    def never_there(path):  # the directory keeps vanishing: always gone, never created
+        calls.append(path)
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+
+    monkeypatch.setattr(store_mod, "private_dir", never_there)
+    monkeypatch.setattr(store_mod.time, "sleep", lambda s: None)
+    with pytest.raises(TimeoutError, match="deleted while opening"):
+        store_mod.hold_live(tmp_path / "sessions" / "s")
+    assert len(calls) == store_mod.LIVE_ATTEMPTS
+
+
+def test_proxy_and_mcp_report_an_unopenable_session_without_a_traceback(home, tmp_path, capsys):
+    dangling(home, tmp_path)
+    code, out, err = run(capsys, "proxy", "--session", "dang", "--upstream", "http://127.0.0.1:9")
+    assert code == 1 and "Traceback" not in err
+    assert err.startswith("contexto proxy: cannot start: ") and "symlink to a missing target" in err
+    code, out, err = run(capsys, "mcp", "--session", "dang")
+    assert code == 1 and out == "" and "Traceback" not in err
+    assert err.startswith("contexto mcp: cannot start: ") and "symlink to a missing target" in err
+
+
+def test_codex_reports_an_unopenable_session(home, tmp_path):
+    import argparse
+    import io
+
+    from contexto import launcher
+    from contexto.codex import add_arguments, run_codex
+
+    dangling(home, tmp_path)
+    parser = argparse.ArgumentParser()
+    for name, kw in (("--bound", {"type": int, "default": 150_000}), ("--allow-large-bound", {"action": "store_true"}),
+                     ("--window-fraction", {"type": float, "default": None}),
+                     ("--headroom-floor", {"type": int, "default": None}), ("--session", {"default": None}),
+                     ("--upstream", {"default": None}), ("--observe-thinking", {"action": "store_true"})):
+        parser.add_argument(name, **kw)
+    add_arguments(parser)
+    parser.add_argument("cli")
+    parser.add_argument("cli_args", nargs=argparse.REMAINDER)
+    args = parser.parse_args(["--session", "dang", "--upstream", "https://u.invalid", "--codex-auth", "chatgpt",
+                              "codex", "exec", "hi"])
+    err = io.StringIO()
+    assert run_codex(args, launcher=launcher, stderr=err) == 2
+    assert "contexto: cannot open session 'dang':" in err.getvalue()
+    assert "symlink to a missing target" in err.getvalue()
+
+
+# prune messages (review round 2)
+
+
+def test_json_selection_error_is_json_on_stdout(home, capsys):
+    make(home, "s", 40)
+    code, out, err = run(capsys, "sessions", "prune", "--session", "ghost", "--json")
+    assert code == 1 and "contexto: error: no session 'ghost'" in err
+    assert "no session 'ghost'" in json.loads(out)["error"]
+
+
+@pytest.mark.parametrize("kind", ["fifo", "dir", "socket"])
+def test_non_regular_live_lock_has_one_message(home, monkeypatch, capsys, kind):
+    import socket
+    path = make(home, "s", 40)
+    (path / LIVE_LOCK).unlink()
+    if kind == "fifo":
+        os.mkfifo(path / LIVE_LOCK)
+    elif kind == "dir":
+        (path / LIVE_LOCK).mkdir()
+    else:
+        monkeypatch.chdir(path)  # AF_UNIX paths are length-limited; bind the short relative name
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(LIVE_LOCK)
+        sock.close()
+        monkeypatch.chdir(home)
+    age(path, time.time() - 40 * DAY)
+    for flags in ([], ["--yes"]):
+        code, out, _ = run(capsys, "sessions", "prune", "--older-than", "1d", *flags)
+        assert code == 0 and "skip s: live.lock is not a regular file; remove the session by hand" in out
+    assert remaining(home) == ["s"]
+
+
+def test_subfolder_becoming_a_symlink_mid_delete_reads_clearly(home, tmp_path, monkeypatch):
+    """Reviewer A: rmtree's own refusal is an OSError with no errno; prune names the folder instead."""
+    import shutil
+    import types
+    path = make(home, "s1", 40)
+    outside = victim(tmp_path)
+
+    def swap_then_rmtree(name, *, dir_fd):
+        os.rename(name, "moved-pages", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        os.symlink(outside, name, target_is_directory=True, dir_fd=dir_fd)
+        return shutil.rmtree(name, dir_fd=dir_fd)
+
+    swap_then_rmtree.avoids_symlink_attacks = shutil.rmtree.avoids_symlink_attacks
+    monkeypatch.setattr(prune_mod, "shutil", types.SimpleNamespace(rmtree=swap_then_rmtree))
+    with pytest.raises(prune_mod.UnsafeSessionPathError,
+                       match="pages became a symlink while it was being deleted; stopped without following it"):
+        prune_mod.remove_session(home, "s1", now=time.time())
+    assert victim_intact(outside)
+    assert (path / "pages").is_symlink()
