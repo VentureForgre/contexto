@@ -131,6 +131,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, ClassVar, NamedTuple, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json
+from contexto.cliversions import ClientVersions
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import render_page
@@ -411,6 +412,18 @@ class Dialect:
     def usage_tokens(self, usage: dict) -> int:
         return sum(usage.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
 
+    def judges_session_start(self, request: dict) -> bool:
+        """D38: Claude Code's title, topic, and quota side requests have no tool list and no session start."""
+        return bool(request.get("tools"))
+
+    def session_start_seen(self, items: list[dict]) -> bool | None:
+        return _anthropic_session_start_seen(items)
+
+    @property
+    def session_start_version(self) -> str:
+        """The CLI version the session-start recognition was measured on (D38's warning names it)."""
+        return SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION
+
 
 ANTHROPIC = Dialect()
 _DIALECT: ContextVar[Dialect | None] = ContextVar("contexto_rewrite_dialect", default=None)
@@ -579,6 +592,41 @@ def is_session_start(message: dict) -> bool:
     """D33: text-only content whose first line is the session-start signature (``# Environment``,
     optionally inside ``<system-reminder>``), with or without settings fields."""
     return is_text_only(message) and bool(SESSION_START_SIGNATURE.match(message_text(message)))
+
+
+SESSION_START_SCAN_CHARS = 4096  # D38: a block's first line is all session_start_seen needs
+
+
+def _anthropic_session_start_seen(messages: list[dict]) -> bool | None:
+    """D38: does this request carry a session start Contexto recognises? True for a role ``system``
+    message with the session-start signature (5.x ids) or a context block of kind ``environment``
+    (4.x ids, in ``messages[0]``): measured on Claude Code 2.1.302, every main request of the 13
+    reminders-spike runs has one of the two. False when the request carries the CLI's injected
+    context (a role ``system`` message or a ``<system-reminder>`` block) but neither, which is what a
+    CLI that changed its ``# Environment`` text would send. None when it carries no injected context,
+    so it cannot tell (a client other than Claude Code). Only each block's head is read."""
+    injected = False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "system":
+            injected = True
+            if is_session_start(message):
+                return True
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not (isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)):
+                continue
+            head = block["text"][:SESSION_START_SCAN_CHARS]
+            if not head.lstrip().startswith(CONTEXT_TAG):
+                continue
+            injected = True
+            if context_block_kind({"text": head}) == "environment":
+                return True
+    return False if injected else None
 
 
 def _anthropic_classify_system(messages: list[dict], i: int) -> str:
@@ -1635,7 +1683,8 @@ class RewriteEngine:
         self._resumed = False
         # Are Contexto's MCP tools reaching the main conversation? (contexto.toolcheck)
         self.tools = ToolCheck(self.store)
-        # D40: open side rooms by id -> (conversation key, message count, anchor hash, publish time)
+        # D38: which CLI version sends the requests, and was the session start recognised?
+        self.clients = ClientVersions()
         self._side_rooms: dict[str, _SideRoom] = {}  # D40: the side rooms this engine opened, by id
         self._main_len = 0  # D40: the message count of main's latest request
 
@@ -1679,6 +1728,10 @@ class RewriteEngine:
             checked = self.tools.observe(request, dialect.name, main=main)
         except Exception as exc:
             checked = [{"event": "toolcheck_error", "error": type(exc).__name__}]  # content-free
+        try:
+            checked = [*checked, *self.clients.observe(request, headers, dialect)]
+        except Exception as exc:  # a diagnostic, like the tool check
+            checked = [*checked, {"event": "cli_version_error", "error": type(exc).__name__}]
         events[-1:-1] = checked
         events[-1].update(main=main, conversations=len(self.states))  # content-free, for side requests
         if main and endpoint != COUNT_TOKENS:

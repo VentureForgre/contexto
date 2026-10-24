@@ -35,8 +35,8 @@ def run(args: argparse.Namespace) -> int:
 
     session_id = args.session or uuid.uuid4().hex
     upstream = resolve_upstream(args.upstream, cwd=Path.cwd())
-    store = SessionStore(contexto_home(), session_id)
     try:
+        store = SessionStore(contexto_home(), session_id)
         proxy = ContextoProxy(upstream.url, store, observe_thinking=args.observe_thinking,
                               upstream_source=upstream.source)
         port = proxy.start(args.port)

@@ -44,13 +44,15 @@ def test_sessions_list_text_and_json_most_recent_first(home, capsys):
     code, out, _ = run(capsys, "sessions", "list")
     assert code == 0
     lines = out.splitlines()
-    assert lines[0].split() == ["ID", "CREATED", "PAGES", "RECORDS", "LAST", "ACTIVITY"]
-    assert [ln.split()[0] for ln in lines[1:]] == ["newer", "older"]
+    assert lines[0].split() == ["ID", "CREATED", "PAGES", "RECORDS", "LAST", "ACTIVITY", "SIZE"]
+    assert [ln.split()[0] for ln in lines[1:-1]] == ["newer", "older"]
+    assert lines[-1].startswith("Total: ") and lines[-1].endswith(" in 2 sessions")
     code, out, _ = run(capsys, "sessions", "list", "--json")
     data = json.loads(out)
     assert [d["id"] for d in data] == ["newer", "older"]
     assert data[0]["pages"] == 1 and data[0]["records"] == 2 and data[1]["records"] == 0
-    assert set(data[0]) == {"id", "created", "pages", "records", "last_activity"}
+    assert set(data[0]) == {"id", "created", "pages", "records", "last_activity", "size_bytes"}
+    assert data[0]["size_bytes"] > 0
 
 
 def test_sessions_list_ties_sort_by_id(home, capsys):

@@ -445,6 +445,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   and builder-2's unpushed ledger work at commit 1ab5f29 (readable from the shared object store),
   append-only JSONL with a hash chain and crash-truncation repair. File sources require `sha256`;
   a missing file counts as stale. Records may cite pages as provenance (`type: page`).
+- **Live lock (D37):** every process that opens a session for writing (proxy, launcher, MCP server)
+  holds a shared `flock` on `live.lock` in the session directory until it exits; the descriptor is
+  not inherited by child processes. A session whose lock another process holds is in use, and
+  `contexto sessions prune` never deletes it. Stores never follow a symlinked `live.lock`.
 - **Pinned text** starts with fixed instruction lines, then lists open obligations, active
   decisions, then verified facts, newest first, each with its id, capped at `pin_budget` (default
   6,000 tokens). The instruction lines must say that earlier turns are paged out and how to reach
@@ -781,11 +785,58 @@ it is first reported and once more after the CLI exits for a repeated exit event
 draw over a line printed mid-run. If the check itself raises, the engine logs `toolcheck_error` with
 the exception's type name only and keeps the request's rewrite.
 
+**CLI versions (D38).** The CLI versions Contexto was tested with are one list, `TESTED_VERSIONS` in
+`src/contexto/cliversions.py`; the measured-on constants of the session-start signature, the
+context-block kinds, and the Codex context sections equal the newest tested version of their CLI.
+`contexto run` runs `<cli> --version` after the session line, in its own process group with stdin
+closed. It reads at most 4,096 bytes of output, until a line with a version, end of file, or 3
+seconds, and then kills the group. For a version not in the list it prints one stderr line naming
+it, the tested versions, what may break, where to report it, and `contexto run --no-version-check
+<cli>`, and the launch goes on. A CLI that does not answer is logged, not warned about.
+`--no-version-check` (before the CLI's name) or `CONTEXTO_NO_VERSION_CHECK=1` skips the check.
+Ctrl+C during the check exits 130 through the launcher's cleanup, without a traceback and without
+starting the CLI. The log gets `cli_version_check` (`cli`, `version`, `tested`, `tested_versions`, and
+`error` or `skipped`; `error` is `interrupted` for a Ctrl+C). The engine reads each request's
+`User-Agent` (`claude-cli/<v>`, `codex_<surface>/<v>`) and logs `cli_version` (`cli`, `client`,
+`version`, `tested`, `tested_versions`) once per distinct version, at most 8, and
+`cli_version_untested` once for the first untested one. It judges the session start once, on the
+first request that has a tool list (for the Responses API, any request) and carries the CLI's
+injected context (a role `system` message or a `<system-reminder>` block; for Codex, a developer item
+in the lead). That is the main conversation's first request: side requests have no tool list, and
+subagents start from a main turn's tool call. The engine's `publishes` choice of main is not used,
+because a tool-less side request that arrives first stays main through the real conversation's first
+turn. A request with a tool list and no injected context leaves the judgement open, for at most 8
+such requests. Recognised: a role `system` message with the step 1 signature or a context block of
+kind `environment` (Messages API), or a user message of context sections in the lead (Responses
+API). Otherwise the engine logs `session_start_unrecognised` (`dialect`, `signature_version`,
+`cli_version`, `tested_versions`). It reads only the first 4,096 characters of each content block; a
+role `system` message is matched whole. These events go on the request's `transform_events`, before
+the engine's request event, and never to stderr; if the check raises, the engine logs
+`cli_version_error` with the exception's type name and keeps the rewrite. `count_tokens` is not
+checked. The routine for testing a new version is `docs/cli-updates.md`.
+
 ## CLI
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run
 the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
-`contexto recall <page id>`, `contexto state`. Exit codes and `--help` documented in README.
+`contexto sessions prune`, `contexto recall <page id>`, `contexto state`. Exit codes and `--help`
+documented in README.
+
+`contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated
+blocks under the session directory, symlinks counted as links) and a total. `contexto sessions
+prune` (D37) deletes whole session directories. It selects by `--older-than DURATION` (`30d`, `12h`;
+idle time since the last activity `sessions list` shows), `--keep N` (keep the N most recently
+active), and `--session ID`; all given conditions must hold and at least one is required. Without
+`--yes` it only prints the selection with sizes and a total, and writes nothing. `--json` prints
+`dry_run`, `total_bytes`, and each selected session's `status` and `reason`, or `{"error": ...}`
+when selection fails. It never deletes a
+session whose `live.lock` another process holds, one whose `live.lock` is a symlink or not a regular
+file, or one active in the last 10 minutes. `sessions/` and each session must be real directories,
+and every step after the check works through open directory descriptors (`O_NOFOLLOW`, inode
+checked against the selected entry), so a symlink swapped in at any moment cannot make prune delete
+or create anything outside the checked directory. Failures are per session; the exit code is 1 if
+any failed or if the session named by `--session` was skipped, with `contexto: error:` on stderr.
+A store resumed while prune deletes its session waits, starts empty, and prints a warning.
 
 ## Lanes
 
