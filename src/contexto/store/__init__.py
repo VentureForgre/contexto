@@ -436,6 +436,7 @@ def redact(event: Any) -> Any:
 class SessionStore(LedgerOps):
     def __init__(self, home: Path, session_id: str) -> None:
         self.session_id = session_id
+        self.home = Path(home)
         # Side-room publish times and expiry (D40): wall-clock, since the proxy and the MCP server are
         # separate processes; see side_room_live for a clock stepped back.
         self.clock: Callable[[], float] = time.time
@@ -767,6 +768,7 @@ class SessionStore(LedgerOps):
             raise SessionNotFoundError(f"no session {session_id!r} under {Path(home) / 'sessions'}")
         store = cls.__new__(cls)
         store.session_id = session_id
+        store.home = Path(home)
         store.dir = path
         store.pages_dir = path / "pages"
         store._key_cache = None
