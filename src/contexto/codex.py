@@ -186,7 +186,9 @@ RESPONSES = ResponsesDialect()
 # config 0600, removed on exit) whose custom provider points at the proxy and gets its bearer token
 # from ``auth.command`` running the existing key helper. The config names the helper command only,
 # never a key. ChatGPT mode (``--codex-auth chatgpt``): the user's own CODEX_HOME with ``-c`` overrides
-# only and ``requires_openai_auth``; its end-user terms question is open as O4. Both keep Codex on
+# only and ``requires_openai_auth``: Codex keeps its own login and the proxy passes it through. Under
+# D35 logins belong in CLIProxyAPI (reached in API-key mode) or the vendor's own CLI, never in
+# Contexto, and users follow their providers' terms. Both keep Codex on
 # HTTP (custom providers have no WebSocket transport) and turn request compression off, because the
 # proxy cannot transform compressed bodies. Some Codex calls (rate limits, usage, a remote MCP
 # connection) go to chatgpt.com directly and bypass the proxy by design.
@@ -197,8 +199,9 @@ KEY_HELPER_ENV = "CONTEXTO_CODEX_KEY_HELPER"
 UPSTREAM_ENV = "CONTEXTO_CODEX_UPSTREAM"
 CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
 PROVIDER_ID = "contexto"
-CHATGPT_MODE_HELP = ("ChatGPT login: route the user's own Codex ChatGPT credentials through the local proxy. "
-                     "Whether end users may do this under OpenAI's terms is an open owner question (O4).")
+CHATGPT_MODE_HELP = ("ChatGPT login: route the user's own Codex ChatGPT credentials through the local proxy, "
+                     "tested only with synthetic credentials. Logins belong in CLIProxyAPI or the vendor's own "
+                     "CLI, never in Contexto, and you must follow your provider's terms (D35, docs/cliproxyapi.md).")
 
 
 class CodexLaunchError(RuntimeError):

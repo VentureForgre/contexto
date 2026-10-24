@@ -267,7 +267,7 @@ def test_chatgpt_mode_uses_overrides_only(tmp_path):
     assert "requires_openai_auth=true" in argv and "supports_websockets=false" in argv
     assert "model_provider=contexto" in argv and "features.enable_request_compression=false" in argv
     assert launch.argv[-2:] == ["exec", "hi"] and launch.upstream == CHATGPT_UPSTREAM
-    assert any("O4" in note for note in launch.notes)
+    assert any("D35" in note and "provider's terms" in note for note in launch.notes)
     overrides = dict(launch.argv[i + 1].split("=", 1) for i, a in enumerate(launch.argv) if a == "-c")
     approval = overrides["mcp_servers.contexto.default_tools_approval_mode"]
     assert tomllib.loads(f"v = {approval}")["v"] == "approve"  # a valid TOML value, as codex parses -c
@@ -382,7 +382,7 @@ def test_run_codex_chatgpt_mode_and_errors(tmp_path, monkeypatch):
     assert fake.calls["upstream"] == "https://chatgpt.com/backend-api/codex"
     assert "requires_openai_auth=true" in " ".join(fake.calls["argv"])
     assert fake.calls["home"] == os.environ.get("CODEX_HOME")  # the user's own CODEX_HOME, untouched
-    assert "O4" in err.getvalue()
+    assert "D35" in err.getvalue() and "CLIProxyAPI" in err.getvalue()
     refused = FakeLauncher(bound_error="bound too large")
     assert run_codex(parse("codex"), launcher=refused, stderr=io.StringIO()) == 2
 
