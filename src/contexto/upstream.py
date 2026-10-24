@@ -74,9 +74,17 @@ def project_root(directory: Path) -> Path:
 def user_settings_path(home: Path, env: Mapping[str, str] | None = None) -> Path:
     """Claude Code's user settings file: ``$CLAUDE_CONFIG_DIR/settings.json`` when ``env`` sets
     ``CLAUDE_CONFIG_DIR``, else ``~/.claude/settings.json``. ``env`` None means no override (callers
-    pass the process environment explicitly, so a test's ``home`` is never redirected)."""
-    config_dir = (env or {}).get(CONFIG_DIR_KEY, "").strip()
-    return Path(config_dir).expanduser() / "settings.json" if config_dir else home / ".claude" / "settings.json"
+    pass the process environment explicitly, so a test's ``home`` is never redirected).
+
+    The value is used as given, like Claude Code does: no ``~`` expansion, so a literal ``~/cfg``
+    names ``./~/cfg`` for both, and a ``~user`` that does not exist cannot raise. A relative value
+    resolves against the working directory, which the CLI inherits. An empty or whitespace-only
+    value is treated as unset (Claude Code is inconsistent there; falling back to ``~/.claude`` is
+    the reading that cannot point at a stray ``./settings.json``)."""
+    config_dir = (env or {}).get(CONFIG_DIR_KEY) or ""
+    if not config_dir.strip():
+        return home / ".claude" / "settings.json"
+    return Path(config_dir) / "settings.json"
 
 
 def claude_settings_order(cwd: Path, home: Path, env: Mapping[str, str] | None = None) -> list[tuple[str, Path]]:
@@ -97,7 +105,7 @@ def claude_settings_order(cwd: Path, home: Path, env: Mapping[str, str] | None =
 def _settings_base_url(path: Path) -> str | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # unreadable or not JSON: as if the file were absent
         return None
     env = data.get("env") if isinstance(data, dict) else None
     value = env.get(BASE_URL_KEY) if isinstance(env, dict) else None

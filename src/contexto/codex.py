@@ -235,7 +235,7 @@ def claude_api_key_helper(cwd: Path, home: Path, env: dict[str, str] | None = No
     for _kind, path in claude_settings_order(cwd, home, env):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):  # unreadable or not JSON: skipped, as if absent
             continue
         value = data.get("apiKeyHelper") if isinstance(data, dict) else None
         if isinstance(value, str) and value.strip():

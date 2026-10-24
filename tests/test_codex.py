@@ -376,6 +376,20 @@ def test_run_codex_api_key_mode_runs_and_cleans_up(tmp_path, monkeypatch):
     assert "session S9" in err.getvalue()
 
 
+def test_run_codex_survives_an_odd_claude_config_dir(tmp_path, monkeypatch):
+    """reviewer-A, round 2: run_codex resolves Claude's upstream even with --codex-upstream, so an
+    unknown ~user in CLAUDE_CONFIG_DIR must not raise out of it."""
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~nosuchuser-contexto-test/cfg")
+    monkeypatch.chdir(tmp_path)
+    args = parse("--codex-upstream", "https://cpa.invalid/v1", "--codex-key-helper", "/synthetic/helper",
+                 "codex", "exec", "hi")
+    fake = FakeLauncher()
+    err = io.StringIO()
+    assert run_codex(args, launcher=fake, stderr=err) == 0
+    assert fake.calls["upstream"] == "https://cpa.invalid/v1" and fake.calls["upstream_source"] == "codex-flag"
+
+
 def test_run_codex_chatgpt_mode_and_errors(tmp_path, monkeypatch):
     monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
     args = parse("--codex-auth", "chatgpt", "--upstream", "https://u.invalid", "codex", "exec", "hi")
