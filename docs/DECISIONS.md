@@ -447,6 +447,64 @@ the owner's delegation. Open decisions are listed at the end with the options an
   decision); supporting subscription logins inside Contexto (rejected: credentials would live in
   Contexto, and CLIProxyAPI already handles login, refresh, and rotation).
 
+- **D37. `contexto sessions prune` deletes whole sessions, dry run by default, and never one in
+  use.** Intake, 2026-10-24, from the 2026-10-16 report that session folders grow without limit and
+  could only be freed by deleting files by hand. Contract change: a new subcommand, a new store file,
+  and a new `sessions list` field. What changed: (1) `contexto sessions prune` selects sessions by
+  `--older-than DURATION` (a positive whole number with `s`, `m`, `h`, `d`, or `w`), `--keep N` (keep
+  the N with the most recent activity, ranked over all sessions), and `--session ID`; every given
+  condition must hold, and at least one is required (exit 2 otherwise). Age is idle time since the
+  session's last activity, the same value `sessions list` shows: the newest modification time of the
+  session directory, `log.jsonl`, `ledger.jsonl`, and `pages/`. Without `--yes` it prints each
+  selected session with its size and the total, and changes nothing, not even a lock file; with
+  `--yes` it deletes them. `--json` prints `dry_run`, `total_bytes` (would be freed, or freed), and
+  each selected session with `status` (`would_remove`, `removed`, `skipped`, `failed`) and `reason`;
+  (2) liveness: the store had no reliable signal (the ledger and metadata locks are held only for
+  one write, and `mcp_listed_at` is a time, not a holder), so every writable `SessionStore` (proxy,
+  launcher, MCP server) now holds a shared `flock` on the session's `live.lock` for the life of the
+  object. Several processes share it (a proxy and its MCP servers), the descriptor is not inherited
+  by children (`claude` cannot keep a session pinned), and the kernel drops it when the process
+  exits, crash included. Prune opens the lock read-write (so `flock` works on NFS too), never through
+  a symlink and without blocking, refuses one that is not a regular file, takes the exclusive lock
+  without waiting, and skips the session if that fails. It holds the lock while it deletes and
+  removes `live.lock` last. A store opening the session at that moment (a resume with `--session ID`)
+  waits on the lock, sees afterwards that its file was unlinked, recreates the session directory
+  empty, logs `pruned_while_opening`, and prints ``contexto: warning: session ID was deleted by
+  `contexto sessions prune` while it was being opened; it starts empty`` to stderr. A missing file
+  counts as a prune only when the session entry itself is gone; any other (a session entry that is a
+  symlink to a missing target, say) fails at once, and retries stop after 8 attempts with a short
+  backoff. `contexto proxy`, `contexto mcp`, and `contexto run codex` report a session that cannot
+  be opened as an error line (`cannot start` or `cannot open session`), not a traceback, as
+  `contexto run claude` already did. A store that opens
+  in the instant after `live.lock` is unlinked and before the final `rmdir` keeps its new files; prune
+  then reports the session as skipped ("opened again while it was being deleted"). A process from
+  before D37 holds no lock, so prune also skips any session active in the last 10 minutes (fixed, no
+  override; a partly failed delete changes the directory, so a retry waits out the same 10 minutes);
+  (3) path safety. The home is opened once (it may be a symlink); `sessions/` must be a real
+  directory in it, and each session a real directory in `sessions/`. Every later step goes through
+  those open directory descriptors, not paths: the session is opened with `O_NOFOLLOW` and must be
+  the same inode (`st_dev`, `st_ino`) as the entry that was listed and selected, and its contents are
+  deleted with `unlink` and `shutil.rmtree` relative to its descriptor (`rmtree`'s
+  symlink-attack-safe mode; prune refuses to delete on a platform without it). Symlinks inside a
+  session are removed as links and never followed. Guarantee: even if another process swaps
+  `sessions/<id>` or `sessions/` for a symlink at any moment, prune deletes nothing outside the
+  directory it checked and creates nothing there; if the entry no longer names that directory just
+  before the final `rmdir`, prune stops with an error and leaves the entry. Not guaranteed: if
+  the session directory itself is moved elsewhere after the check, its own contents are still
+  removed, because they are the session that was selected; (4) errors are per session: prune
+  reports each failure on stderr, goes on with the rest, and exits 1 if any failed. Skipping a
+  session in use is not a failure, except when `--session` named it: then it exits 1 with
+  `contexto: error: session ID: <reason>` on stderr. With `--json`, an error before any session is
+  selected (an unknown or unsafe `--session`, a symlinked `sessions/`) also prints `{"error": ...}`
+  on stdout, so stdout always parses; (5) `sessions list` gains a SIZE column, a
+  total line, and `size_bytes` in `--json`: the allocated blocks under the directory, symlinks
+  counted as links, which is the space a delete frees. Rejected: refusing only by recent activity (a
+  proxy idle for an hour while the user reads is still live); a pid file (pids are reused and a
+  crashed process leaves the file behind); moving the session to a trash directory before deleting
+  (a failed delete would leave data `sessions list` cannot see and prune cannot reach); pruning
+  single pages inside a live session (pages are cited by id from the ledger and the rendered index;
+  out of scope here).
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
