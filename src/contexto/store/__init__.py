@@ -17,7 +17,8 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
 - ``log.jsonl``: the session log, one canonical JSON event per line.
 - ``live.lock``: every writable ``SessionStore`` (the proxy, the launcher, the MCP server) holds a
   shared ``flock`` on it for as long as the store object lives, so ``contexto sessions prune`` can
-  tell a session in use from an idle one (D37). The kernel drops the lock when the process exits.
+  tell a session in use from an idle one (D37). The lock file is never opened through a symlink, the
+  descriptor is not inherited by child processes, and the kernel drops the lock when the process exits.
 
 Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``) come from
 ``contexto.store.records.LedgerOps``; see that module for the API the MCP server uses.
@@ -32,6 +33,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import time
 import weakref
 from collections.abc import Callable
@@ -65,31 +67,36 @@ KEY_BYTES = 32
 LIVE_LOCK = "live.lock"
 
 
-def hold_live(session_path: Path) -> int:
-    """Take a shared ``flock`` on ``session_path/live.lock`` and return its descriptor (D37).
+def hold_live(session_path: Path) -> tuple[int, bool]:
+    """Take a shared ``flock`` on ``session_path/live.lock``; return its descriptor and whether a prune
+    deleted the session while it was being opened (D37).
 
-    Blocks while ``sessions prune`` holds the exclusive lock. Prune deletes the directory under that
-    lock, so after waiting the descriptor can name an unlinked file: the loop then recreates the
-    directory and locks the new file, and returns only once the lock is on the file at the path.
+    Creates the session directory if needed. Blocks while ``sessions prune`` holds the exclusive lock.
+    Prune deletes the directory under that lock, so after waiting the descriptor can name an unlinked
+    file: the loop then recreates the directory and locks the new file, and returns only once the lock
+    is on the file at the path. The lock file is never followed through a symlink.
     """
     path = Path(session_path) / LIVE_LOCK
+    pruned = False
     while True:
-        private_dir(path.parent)
         try:
-            fd = open_private(path, os.O_RDWR)
-        except FileNotFoundError:  # the directory was removed between the mkdir and the open
+            private_dir(path.parent)
+            fd = open_private(path, os.O_RDWR | os.O_NOFOLLOW)
+        except FileNotFoundError:  # prune removed the directory between the mkdir, the chmod, or the open
+            pruned = True
             continue
         try:
             fcntl.flock(fd, fcntl.LOCK_SH)
-            held, current = os.fstat(fd), os.stat(path)
+            held, current = os.fstat(fd), os.stat(path, follow_symlinks=False)
             if (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino):
-                return fd
+                return fd, pruned
         except FileNotFoundError:
             pass
         except BaseException:
             os.close(fd)
             raise
         os.close(fd)
+        pruned = True
 
 _SECRET_KEYS = {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"}
 
@@ -333,13 +340,19 @@ class SessionStore(LedgerOps):
         # Narrow an existing wide CONTEXTO_HOME and sessions/ too, not only directories we create.
         private_dir(Path(home))
         private_dir(Path(home) / "sessions")
-        private_dir(self.dir)
-        live = hold_live(self.dir)  # before anything else is created, so prune cannot remove it under us
+        # Creates the session directory and locks it before anything else is created in it, so prune
+        # cannot remove it under us.
+        live, pruned = hold_live(self.dir)
         weakref.finalize(self, os.close, live)
         private_dir(self.pages_dir)
         self._key_cache = self._load_key()
         self.ledger = Ledger(self.dir)
         self._repair_ledger()
+        if pruned:
+            # A resume (--session ID) raced `contexto sessions prune` and lost: the old contents are gone.
+            self.log({"event": "pruned_while_opening"})
+            print(f"contexto: warning: session {session_id} was deleted by `contexto sessions prune` while "
+                  "it was being opened; it starts empty", file=sys.stderr)
 
     def _repair_ledger(self) -> None:
         if not self.ledger.path.exists():

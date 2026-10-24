@@ -12,7 +12,7 @@ from contexto.commands._common import EXIT_ERROR, EXIT_OK, fail
 from contexto.paths import contexto_home
 from contexto.store import SessionNotFoundError
 from contexto.store.prune import (ACTIVE_GRACE_S, SessionLiveError, check_not_live, parse_duration,
-                                  remove_session, safe_session_path, select)
+                                  remove_session, select)
 from contexto.store.sessions import list_sessions, session_summary
 
 
@@ -63,6 +63,8 @@ def register(subparsers) -> None:
                        help="keep the N sessions with the most recent activity; select the rest")
     prune.add_argument("--session", metavar="ID", help="select this one session")
     prune.add_argument("--yes", action="store_true", help="delete; without it nothing is deleted")
+    prune.add_argument("--json", action="store_true",
+                       help="print JSON: dry_run, total_bytes, and each selected session with its status")
     prune.set_defaults(func=run_prune, prune_parser=prune)
 
 
@@ -104,49 +106,75 @@ def run_prune(args: argparse.Namespace) -> int:
     now = time.time()
     try:
         chosen = select(home, older_than=args.older_than, keep=args.keep, session_id=args.session, now=now)
-    except (SessionNotFoundError, ValueError) as e:  # UnsafeSessionPathError is a ValueError
+    except (SessionNotFoundError, ValueError, OSError) as e:  # UnsafeSessionPathError is a ValueError
         return fail(str(e))
-    removable, skipped = [], []
+    named = args.session is not None
+    results: list[dict] = []
+    failed = refused = 0
+
+    def record(c, status: str, reason: str | None = None, size: int | None = None) -> None:
+        results.append({"id": c.id, "last_activity": _iso(c.last_activity), "status": status, "reason": reason,
+                        "size_bytes": c.size_bytes if size is None else size})
+
+    def skip(c, why: str) -> None:
+        nonlocal refused
+        record(c, "skipped", why)
+        if named:  # refusing the one session the user named is a failure
+            refused += 1
+            print(f"contexto: error: session {c.id}: {why}", file=sys.stderr)
+        elif not args.json:  # skipping part of a broad selection is not
+            print(f"skip {c.id}: {why}")
+
+    removable = []
     for c in chosen:
         try:
-            check_not_live(safe_session_path(home, c.id), now=now)
+            check_not_live(home, c.id, now=now, expect=c.ident)
         except (SessionLiveError, SessionNotFoundError, ValueError, OSError) as e:
-            skipped.append((c, str(e)))
+            skip(c, str(e))
             continue
         removable.append(c)
-    for c, why in skipped:
-        print(f"skip {c.id}: {why}")
-    # Refusing the one session the user named is a failure; skipping part of a broad selection is not.
-    code = EXIT_ERROR if args.session is not None and skipped else EXIT_OK
-    if not removable:
-        print("No sessions to remove.")
-        return code
-    total = sum(c.size_bytes for c in removable)
     if not args.yes:
-        print(f"Would remove {_plural(len(removable))}, {human_size(total)}:")
-        rows = [("ID", "LAST ACTIVITY", "SIZE")]
-        rows += [(c.id, _iso(c.last_activity), human_size(c.size_bytes)) for c in removable]
-        _table(rows, indent="  ")
-        print("Dry run: nothing was deleted. Rerun with --yes to delete.")
-        return code
-    freed, removed, failed = 0, 0, 0
-    for c in removable:
-        try:
-            size = remove_session(home, c.id, now=time.time())
-        except SessionLiveError as e:  # opened since the check above; nothing was deleted
-            print(f"skip {c.id}: {e}")
-            if args.session is not None:
-                code = EXIT_ERROR
-            continue
-        except (SessionNotFoundError, ValueError, OSError) as e:
-            failed += 1
-            print(f"contexto: error: could not remove session {c.id}: {e}", file=sys.stderr)
-            continue
-        removed += 1
-        freed += size
-        print(f"removed {c.id} ({human_size(size)})")
-    print(f"Removed {_plural(removed)}, {human_size(freed)} freed" + (f"; {failed} failed." if failed else "."))
-    return EXIT_ERROR if failed else code
+        for c in removable:
+            record(c, "would_remove")
+        total = sum(c.size_bytes for c in removable)
+        if args.json:
+            pass
+        elif removable:
+            print(f"Would remove {_plural(len(removable))}, {human_size(total)}:")
+            rows = [("ID", "LAST ACTIVITY", "SIZE")]
+            rows += [(c.id, _iso(c.last_activity), human_size(c.size_bytes)) for c in removable]
+            _table(rows, indent="  ")
+            print("Dry run: nothing was deleted. Rerun with --yes to delete.")
+        elif not refused:
+            print("No sessions to remove.")
+    else:
+        total = removed = 0
+        for c in removable:
+            try:
+                size = remove_session(home, c.id, now=time.time(), expect=c.ident)
+            except SessionLiveError as e:  # opened since the check above
+                skip(c, str(e))
+                continue
+            except (SessionNotFoundError, ValueError, OSError) as e:
+                failed += 1
+                record(c, "failed", str(e))
+                print(f"contexto: error: could not remove session {c.id}: {e}", file=sys.stderr)
+                continue
+            removed += 1
+            total += size
+            record(c, "removed", size=size)
+            if not args.json:
+                print(f"removed {c.id} ({human_size(size)})")
+        if args.json:
+            pass
+        elif removable:
+            print(f"Removed {_plural(removed)}, {human_size(total)} freed" + (f"; {failed} failed." if failed else "."))
+        elif not refused:
+            print("No sessions to remove.")
+    if args.json:
+        print(json.dumps({"dry_run": not args.yes, "total_bytes": total, "sessions": results},
+                         indent=2, sort_keys=True))
+    return EXIT_ERROR if failed or refused else EXIT_OK
 
 
 def run_show(args: argparse.Namespace) -> int:

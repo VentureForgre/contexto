@@ -185,9 +185,16 @@ contexto sessions prune --session 7f3a --yes      # delete one session
   the last activity that `sessions list` shows. When several options are given, a session must
   match all of them.
 - A session in use by a running `contexto run`, `contexto proxy`, or `contexto mcp` is skipped, and
-  so is any session active in the last 10 minutes. Stop the session first.
-- Only real directories inside `$CONTEXTO_HOME/sessions/` are deleted. Symlinks are never followed.
-- If one session cannot be deleted, prune reports it, goes on with the rest, and exits 1.
+  so is any session active in the last 10 minutes. Stop the session first. If you name it with
+  `--session`, prune exits 1 with the reason on stderr.
+- `sessions/` and each session must be real directories. Prune deletes through open directory
+  handles and never follows a symlink, so it does not delete or create anything outside the session
+  it checked, even if a path is swapped for a link while it runs.
+- If one session cannot be deleted, prune reports it on stderr, goes on with the rest, and exits 1.
+- `--json` prints `dry_run`, `total_bytes`, and each selected session with its `status`
+  (`would_remove`, `removed`, `skipped`, or `failed`) and `reason`.
+- If you resume a session with `contexto run --session ID` while prune is deleting it, the resume
+  waits, then starts the session empty and prints a warning.
 
 ## MCP tools the model gets
 
@@ -292,7 +299,7 @@ full list is in
 | `run` | 127 | `claude` or `codex` is not on `PATH` |
 | `sessions`, `recall`, `state` | 0 | Success (an empty session list is a success) |
 | `sessions`, `recall`, `state` | 1 | Unknown or invalid session id, unknown page id, an offset past the end of the page, or an unreadable ledger |
-| `sessions prune` | 1 | A session could not be deleted, or the session named by `--session` is in use or was active in the last 10 minutes |
+| `sessions prune` | 1 | A session could not be deleted, or the session named by `--session` was skipped (in use, active in the last 10 minutes, or unsafe to delete) |
 | any | 2 | Unknown command or option, or a missing argument (`contexto` with no command prints help and exits 2) |
 
 Development, tests, and releases: see [CONTRIBUTING.md](CONTRIBUTING.md).

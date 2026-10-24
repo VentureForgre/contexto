@@ -402,28 +402,47 @@ the owner's delegation. Open decisions are listed at the end with the options an
   session's last activity, the same value `sessions list` shows: the newest modification time of the
   session directory, `log.jsonl`, `ledger.jsonl`, and `pages/`. Without `--yes` it prints each
   selected session with its size and the total, and changes nothing, not even a lock file; with
-  `--yes` it deletes them; (2) liveness: the store had no reliable signal (the ledger and metadata
-  locks are held only for one write, and `mcp_listed_at` is a time, not a holder), so every writable
-  `SessionStore` (proxy, launcher, MCP server) now holds a shared `flock` on the session's
-  `live.lock` for the life of the object, and the kernel drops it when the process exits, crash
-  included. Prune takes the exclusive lock without waiting and skips the session if that fails. It
-  holds the lock while it deletes and removes `live.lock` last; a store opening the session at that
-  moment waits on the lock, sees afterwards that its file was unlinked, and recreates the session
-  directory before going on, so it never writes into a half-deleted one. A process from before D37
-  holds no lock, so prune also skips any session active in the last 10 minutes (fixed, no override;
-  a partly failed delete changes the directory, so a retry waits out the same 10 minutes); (3) path
-  safety: a session is deleted only when its entry is a real directory, not a symlink, whose
-  resolved path is directly inside the resolved `sessions/`, which must itself resolve inside the
-  resolved home; symlinks inside a session are removed as links and never followed; (4) errors are
-  per session: prune reports each failure on stderr, goes on with the rest, and exits 1 if any
-  failed. Skipping a session in use is not a failure, except when `--session` named it (exit 1);
-  (5) `sessions list` gains a SIZE column, a total line, and `size_bytes` in `--json`: the
-  allocated blocks under the directory, symlinks counted as links, which is the space a delete frees.
-  Rejected: refusing only by recent activity (a proxy idle for an hour while the user reads is still
-  live); a pid file (pids are reused and a crashed process leaves the file behind); moving the
-  session to a trash directory before deleting (a failed delete would leave data `sessions list`
-  cannot see and prune cannot reach); pruning single pages inside a live session (pages are cited by
-  id from the ledger and the rendered index; out of scope here).
+  `--yes` it deletes them. `--json` prints `dry_run`, `total_bytes` (would be freed, or freed), and
+  each selected session with `status` (`would_remove`, `removed`, `skipped`, `failed`) and `reason`;
+  (2) liveness: the store had no reliable signal (the ledger and metadata locks are held only for
+  one write, and `mcp_listed_at` is a time, not a holder), so every writable `SessionStore` (proxy,
+  launcher, MCP server) now holds a shared `flock` on the session's `live.lock` for the life of the
+  object. Several processes share it (a proxy and its MCP servers), the descriptor is not inherited
+  by children (`claude` cannot keep a session pinned), and the kernel drops it when the process
+  exits, crash included. Prune opens the lock read-write (so `flock` works on NFS too), never through
+  a symlink and without blocking, refuses one that is not a regular file, takes the exclusive lock
+  without waiting, and skips the session if that fails. It holds the lock while it deletes and
+  removes `live.lock` last. A store opening the session at that moment (a resume with `--session ID`)
+  waits on the lock, sees afterwards that its file was unlinked, recreates the session directory
+  empty, logs `pruned_while_opening`, and prints `contexto: warning: session ID was deleted by
+  contexto sessions prune while it was being opened; it starts empty` to stderr. A store that opens
+  in the instant after `live.lock` is unlinked and before the final `rmdir` keeps its new files; prune
+  then reports the session as skipped ("opened again while it was being deleted"). A process from
+  before D37 holds no lock, so prune also skips any session active in the last 10 minutes (fixed, no
+  override; a partly failed delete changes the directory, so a retry waits out the same 10 minutes);
+  (3) path safety. The home is opened once (it may be a symlink); `sessions/` must be a real
+  directory in it, and each session a real directory in `sessions/`. Every later step goes through
+  those open directory descriptors, not paths: the session is opened with `O_NOFOLLOW` and must be
+  the same inode (`st_dev`, `st_ino`) as the entry that was listed and selected, and its contents are
+  deleted with `unlink` and `shutil.rmtree` relative to its descriptor (`rmtree`'s
+  symlink-attack-safe mode; prune refuses to delete on a platform without it). Symlinks inside a
+  session are removed as links and never followed. Guarantee: even if another process swaps
+  `sessions/<id>` or `sessions/` for a symlink at any moment, prune deletes nothing outside the
+  directory it checked and creates nothing there; if the entry no longer names that directory just
+  before the final `rmdir`, prune stops with an error and leaves the entry (reviewer A reproduced the
+  swap against the first, path-based version, which emptied the link's target). Not guaranteed: if
+  the session directory itself is moved elsewhere after the check, its own contents are still
+  removed, because they are the session that was selected; (4) errors are per session: prune
+  reports each failure on stderr, goes on with the rest, and exits 1 if any failed. Skipping a
+  session in use is not a failure, except when `--session` named it: then it exits 1 with
+  `contexto: error: session ID: <reason>` on stderr; (5) `sessions list` gains a SIZE column, a
+  total line, and `size_bytes` in `--json`: the allocated blocks under the directory, symlinks
+  counted as links, which is the space a delete frees. Rejected: refusing only by recent activity (a
+  proxy idle for an hour while the user reads is still live); a pid file (pids are reused and a
+  crashed process leaves the file behind); moving the session to a trash directory before deleting
+  (a failed delete would leave data `sessions list` cannot see and prune cannot reach); pruning
+  single pages inside a live session (pages are cited by id from the ledger and the rendered index;
+  out of scope here).
 
 ## Repository and process
 
