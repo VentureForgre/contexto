@@ -13,7 +13,7 @@ from contexto.private import AFFINITY_SALT_FILE, affinity_salt
 from contexto.proxy import AFFINITY_HEADER, ContextoProxy, affinity_key, is_vendor_host
 from contexto.store import SessionStore
 from contexto.store.memory import MemoryStore
-from test_proxy_server import (  # noqa: F401
+from test_proxy_server import (
     AUTH,
     REQUEST,
     REQUEST_BYTES,
@@ -22,8 +22,6 @@ from test_proxy_server import (  # noqa: F401
     StubEngine,
     Upstream,
     call,
-    make_proxy,
-    upstream,
 )
 
 SALT = bytes(range(32))

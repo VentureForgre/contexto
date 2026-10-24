@@ -10,7 +10,7 @@ import socket
 import struct
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 import pytest
@@ -231,33 +231,6 @@ class Upstream(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-
-
-@pytest.fixture
-def upstream():
-    Upstream.received = []
-    Upstream.mode = "sse"
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
-    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
-    yield f"http://127.0.0.1:{server.server_address[1]}/base"
-    server.shutdown()
-    server.server_close()
-
-
-@pytest.fixture
-def make_proxy(upstream):
-    started = []
-
-    def make(**kwargs) -> tuple[ContextoProxy, MemoryLog]:
-        log = MemoryLog()
-        proxy = ContextoProxy(kwargs.pop("upstream", upstream), log, **kwargs)
-        proxy.start()
-        started.append(proxy)
-        return proxy, log
-
-    yield make
-    for proxy in started:
-        proxy.stop()
 
 
 def call(proxy: ContextoProxy, method: str, path: str, body: bytes = b"", headers: dict | None = None):
