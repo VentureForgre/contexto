@@ -223,12 +223,12 @@ Each item is a separate pull request or owner task; none is on `main` yet.
   (3)). Choose b on a harness variant that draws page sizes from
   `spikes/m2/scale/store/calibration.json`'s real turn sizes, or take BM25's length from the
   messages that hold a match rather than the whole page.
-- CLIProxyAPI support as an upstream (O4; the owner decided on 2026-10-24 to support it).
+- CLIProxyAPI support as an upstream (D35, O4; the owner decided on 2026-10-24 to support it).
 - Per-session upstream affinity on the owner's proxy (O6; the owner decided on 2026-10-24 to fix
   it).
-- Making the repository public: README install from the public release URL, `SECURITY.md`, and
-  the self-hosted runner question under "Needs the owner". There is no license file yet; that is
-  the owner's decision.
+- Making the repository public: README install from the public release URL, `SECURITY.md`, fork
+  pull requests needing approval, and CI on GitHub-hosted runners (under "Needs the owner"). There
+  is no license file yet; that is the owner's decision.
 
 ## What is left (as of 2026-10-24)
 
@@ -255,10 +255,11 @@ Needs the owner:
 - GitHub billing: the org's hosted Actions minutes are blocked by a failed payment or spending
   limit; CI and releases now run on the self-hosted runner `ubuntu-final-middle`, one job at a
   time.
-- The self-hosted runner group allows public repositories. A public repository's pull requests
-  could run code on the homelab runner; restricting the group to private repositories (or
-  requiring approval for outside contributors' workflow runs) is an owner setting, needed before
-  the repository goes public.
+- The self-hosted runner group allows public repositories, so a public repository's pull requests
+  could run code on the homelab runner. Decided: when the repository goes public, the owner sets
+  "Require approval for all external contributors" for workflow runs on fork pull requests, and
+  CI moves to GitHub-hosted runners (the CI pull request is in progress). The org's runner group
+  stays as it is, because other public repositories in the org use it.
 - GitHub private vulnerability reporting, which `SECURITY.md` points to, is off while the
   repository is private; turn it on in the repository's security settings once it is public.
 
@@ -267,8 +268,10 @@ Needs the owner:
 - O3: settled by D31: the default bound stays 150,000, including for OpenRig seats, because a
   larger bound lowers the largest single turn that stays under Claude Code's 200,000 idle-compaction
   minimum (about 87k at 150,000 against 67k at 170,000 on a 92k head, modeled).
-- O4: decided by the owner on 2026-10-24: support CLIProxyAPI as an upstream; the work is in
-  progress.
+- O4: answered by D35 (owner, 2026-10-24; CLIProxyAPI support in progress). People who run
+  Contexto themselves use either a vendor API key or a CLIProxyAPI instance. Subscription logins
+  live in CLIProxyAPI or the vendor's own CLI, never in Contexto, and users follow their
+  providers' terms.
 - O5: settled by D29. v0.1.0 was cut from f990703 (tag and GitHub Release on this private
   repository, sdist and wheel attached, no package registry).
 - O6: decided by the owner on 2026-10-24: fix per-session upstream affinity on the owner's proxy
@@ -287,15 +290,17 @@ Needs the owner:
   the store rebuilds such a stub from the page's messages each time it reads the page, so
   their index lines show user text, tools, and paths. The page file is not rewritten and its id is
   unchanged; anything reading page files directly still sees the empty stub.
-- Codex: HTTP is forced through a custom
-  provider (no WebSocket). Contexto's tools sit behind Codex tool search and need
-  `default_tools_approval_mode = approve`, which `contexto run codex` sets. Only API-key mode is
-  live-tested; ChatGPT login mode is tested with synthetic credentials and its terms question is
-  open (O4). In ChatGPT login mode some Codex calls (rate limits, usage, a remote MCP
-  connection) go to chatgpt.com directly and bypass the proxy by design. By default Codex also connects to chatgpt.com (analytics) and github.com (plugin
-  sync) outside the proxy; `-c analytics.enabled=false` and `-c features.plugins=false` stop them
-  in network samples, and `contexto run codex` leaves both to the user. `preamble_first` is
-  on but unmeasured there.
+- Codex: HTTP is forced through a custom provider (no WebSocket). Contexto's tools sit behind Codex
+  tool search and need `default_tools_approval_mode = approve`, which `contexto run codex` sets.
+  Only API-key mode is live-tested; ChatGPT login mode is tested with synthetic credentials. On
+  its terms, D35 answers O4 (CLIProxyAPI support, in progress): people who run Contexto
+  themselves use a vendor API key or a CLIProxyAPI instance, subscription logins live in
+  CLIProxyAPI or the vendor's own CLI, never in Contexto, and users follow their providers' terms.
+  In ChatGPT login mode some Codex calls (rate limits, usage, a remote MCP connection) go to
+  chatgpt.com directly and bypass the proxy by design. By default Codex also connects to
+  chatgpt.com (analytics) and github.com (plugin sync) outside the proxy;
+  `-c analytics.enabled=false` and `-c features.plugins=false` stop them in network samples, and
+  `contexto run codex` leaves both to the user. `preamble_first` is on but unmeasured there.
 - One turn that needs more evidence than its recall room holds cannot get it all (D27); the room
   per turn is the bound minus the request's usage (input plus output) minus a 25,000-token
   headroom floor; the engine rotates at a turn start when that would leave less than 12,000
@@ -399,5 +404,6 @@ no package registry release.
   exact-head verdicts as PR comments before a merge. Before that, only intake ran in the main
   checkout and every other seat worked in its own worktree.
 - Direct API requests identify honestly and carry no other product's client marker (D23).
-- PR approvals are not enforced by GitHub (one shared account); two exact-head reviewer verdicts
-  per PR are a team rule. Ruleset `main: require pull request` (id 25202810) is active.
+- The project has one owner, and the builder and reviewer agents post from the owner's account,
+  so GitHub cannot count their approvals; two exact-head reviewer verdicts per PR are a project
+  rule. Ruleset `main: require pull request` (id 25202810) is active.

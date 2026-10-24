@@ -21,8 +21,8 @@ verdicts as PR comments. A pull request merges only after both reviewers approve
 push needs new verdicts. The project has one owner, and the builder and reviewer agents post from
 the owner's account, so GitHub cannot count their approvals; the two verdicts are a project rule.
 
-Pull requests from outside contributors are welcome. CI does not run on a pull request from a fork
-until a maintainer approves the workflow run, and the same two-verdict review applies before merge.
+Pull requests from forks go through the same review. Workflow runs on pull requests from forks
+need a maintainer's approval (the repository requires approval for all external contributors).
 
 Before 2026-10-17 the work ran on an OpenRig rig (an intake lead, two managers, four builders, and
 two reviewers, each in its own worktree). That rig was taken down; older records in `docs/` and
@@ -60,9 +60,10 @@ configuration, `uv run --with pytest pytest`, and `uv build`. The `ci` job requi
 - Stage files by explicit path and check `git diff --stat origin/main...HEAD` before pushing.
 - Do not commit proxy keys, tokens, local Claude or Codex settings, raw private transcripts, or
   generated runtime state such as `~/.contexto` session data.
-- Report security problems privately, not in a pull request or issue: see [SECURITY.md](SECURITY.md).
+- Report security problems privately, not in a pull request or issue: see
+  [SECURITY.md](SECURITY.md).
 
 ## Releases
 
-Releases are automated from Conventional Commits on `main`. [RELEASING.md](RELEASING.md) describes the
-workflow, the version rules, and recovery.
+Releases are automated from Conventional Commits on `main`. [RELEASING.md](RELEASING.md)
+describes the workflow, the version rules, and recovery.
