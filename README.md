@@ -99,6 +99,16 @@ ChatGPT login mode (`--codex-auth chatgpt`) uses your own `CODEX_HOME` with `-c`
 is tested only with synthetic credentials, never live, and whether end users may route ChatGPT
 credentials this way under OpenAI's terms is an open question.
 
+### Upstreams and CLIProxyAPI
+
+If you run Contexto yourself, the supported upstreams are the vendor's API with your own API key, or
+a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance reached with one of its client
+keys (D35). Subscription logins live in CLIProxyAPI or the vendor's own CLI, never in Contexto, and
+you must follow your providers' terms. For CLIProxyAPI, set Claude Code's `ANTHROPIC_BASE_URL` to its
+root (for example `http://127.0.0.1:8317`, no `/v1`) and its `apiKeyHelper` or
+`ANTHROPIC_AUTH_TOKEN` to the client key; `contexto run claude` and `contexto run codex` then both go
+through it. Setup, checks, and what was tested: [docs/cliproxyapi.md](docs/cliproxyapi.md).
+
 ## Bound and configuration
 
 `contexto run` options (all go before `claude` or `codex`):
