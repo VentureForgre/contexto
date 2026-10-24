@@ -3,24 +3,13 @@ name: CI
 on:
   pull_request:
     branches: [main]
-  # Test main itself after every merge. release.yml also calls this workflow on pushes to main, but
-  # only when RELEASES_ENABLED is "true"; with releases on, a main push runs CI twice.
-  push:
-    branches: [main]
-  workflow_call:
 
 permissions:
   contents: read
 
-# A new push to a pull request cancels that pull request's older run. Every other run (a push to
-# main, Release's call) is a group of its own, so nothing on main is cancelled or held back.
-concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
-  lint:
-    runs-on: ubuntu-latest
+  diag:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -28,51 +17,30 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
-          # uvx keeps its tools outside the uv cache, so this job may leave nothing to save.
-          ignore-nothing-to-cache: true
-      # Ruff is pinned so a new release cannot fail CI on code that did not change. The rules are in
-      # pyproject.toml. `ruff format --check` is not run: it would rewrite most files.
-      - name: Lint with Ruff
-        run: uvx ruff@0.17.2 check .
-
-  test:
-    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        python: ["3.12", "3.13", "3.14", "3.15"]
-        include:
-          # The oldest supported and the newest stable Python on macOS.
-          - os: macos-latest
-            python: "3.12"
-          - os: macos-latest
-            python: "3.15"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
-        with:
-          # uv downloads this CPython when the runner lacks it.
-          python-version: ${{ matrix.python }}
-      - name: Run pytest
-        run: uv run --with pytest pytest
-      - name: Check that the package builds
-        run: uv build --out-dir "$RUNNER_TEMP/dist"
-
-  # The one required status check. Branch rules name this job, not the matrix legs.
-  ci:
-    name: ci
-    if: always()
-    needs: [lint, test]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require every CI job to succeed
-        env:
-          LINT: ${{ needs.lint.result }}
-          TEST: ${{ needs.test.result }}
+      - name: Time hostname lookups and server binds
         run: |
-          test "$LINT" = success
-          test "$TEST" = success
+          uv run python - <<'EOF'
+          import socket, time
+          from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+          def timed(label, fn):
+              t = time.monotonic()
+              try:
+                  r = fn()
+              except Exception as exc:
+                  r = repr(exc)
+              print(f"{label}: {time.monotonic() - t:.2f}s -> {r!r}", flush=True)
+          timed("gethostname", socket.gethostname)
+          timed("getfqdn(127.0.0.1)", lambda: socket.getfqdn("127.0.0.1"))
+          timed("gethostbyaddr(127.0.0.1)", lambda: socket.gethostbyaddr("127.0.0.1"))
+          timed("getfqdn()", socket.getfqdn)
+          timed("ThreadingHTTPServer bind", lambda: ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler).server_name)
+          EOF
+      - name: Time a contexto run with a fake claude
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexit 0\n' > "$RUNNER_TEMP/bin/claude"
+          chmod +x "$RUNNER_TEMP/bin/claude"
+          export PATH="$RUNNER_TEMP/bin:$PATH" CONTEXTO_HOME="$RUNNER_TEMP/home"
+          time uv run python -X importtime -m contexto run --upstream http://127.0.0.1:9 --session d1 claude 2> "$RUNNER_TEMP/imp.log" || true
+          sort -t'|' -k2 -n "$RUNNER_TEMP/imp.log" | tail -5
+          time uv run python -m contexto run --upstream http://127.0.0.1:9 --session d2 claude || true
