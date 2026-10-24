@@ -39,8 +39,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
 sys.path.insert(0, str(HERE.parent / "cli"))
-from harness import (CLAUDE_BIN, claude_env, free_port, inet_sockets, non_loopback,  # noqa: E402
-                     run_claude, tree_pids)
+from harness import CLAUDE_BIN, claude_env, free_port, inet_sockets, non_loopback, run_claude, tree_pids  # noqa: E402
 
 MODEL = "claude-opus-5-5"  # overridden by --model
 # Task tools (TaskCreate/TaskUpdate/TaskList in 2.1.302; TodoWrite is disabled on every model measured,
@@ -255,7 +254,7 @@ def run_stream(root: Path, proj: Path, env: dict, mcp: Path, turns: int) -> list
         t0 = time.time()
         send({"type": "user", "message": {"role": "user", "content": p["prompt"]}, "parent_tool_use_id": None,
               "session_id": sid})
-        ok = wait_until(lambda: n_results() > before, 180)
+        ok = wait_until(lambda: n_results() > before, 180)  # noqa: B023 - called at once
         out.append({**p, "how": "stream", "t0": t0, "t1": time.time(), "ok": ok, "controls": ctl})
         print(f"turn {t} stream mode={mode} effort={effort} ok={ok} ctl={ctl} lsof={samples[0]} bad={len(bad)}",
               flush=True)

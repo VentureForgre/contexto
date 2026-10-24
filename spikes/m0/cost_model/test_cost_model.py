@@ -2,9 +2,8 @@ import csv
 import json
 import math
 
-import pytest
-
 import cost_model as cm
+import pytest
 
 PRICES = cm.load_prices()
 OPUS = PRICES["parsed"]["claude-opus-5-5"]

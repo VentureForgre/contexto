@@ -16,7 +16,6 @@ from typing import Any
 import pytest
 
 import contexto.proxy as proxy_module
-from contexto.store.memory import MemoryStore
 from contexto.proxy import (
     END_ALLOWLISTS,
     THINKING_BINDING_BETA,
@@ -26,6 +25,7 @@ from contexto.proxy import (
     identity_transform,
     serialize_request,
 )
+from contexto.store.memory import MemoryStore
 
 SECRET = "test-key-not-real-0123456789"
 CONTENT = "PRIVATE-PROMPT-TEXT"
@@ -511,7 +511,8 @@ def read_request(sock: socket.socket, got: bytearray) -> None:
     while b"\r\n\r\n" not in got:
         got += sock.recv(65536)
     head = bytes(got).split(b"\r\n\r\n", 1)[0].decode()
-    length = int(next(line.split(":", 1)[1] for line in head.split("\r\n") if line.lower().startswith("content-length")))
+    length = int(next(line.split(":", 1)[1] for line in head.split("\r\n")
+                      if line.lower().startswith("content-length")))
     while len(got) < len(head) + 4 + length:
         got += sock.recv(1 << 20)
 
@@ -1463,7 +1464,8 @@ def test_responses_stream_end_is_recorded(events, want):
     assert ending("responses", sse_body(*events)) == want
 
 
-@pytest.mark.parametrize("stop_reason", ["end_turn", "tool_use", "max_tokens", "refusal", "stop_sequence", "pause_turn"])
+@pytest.mark.parametrize("stop_reason",
+                         ["end_turn", "tool_use", "max_tokens", "refusal", "stop_sequence", "pause_turn"])
 def test_messages_stop_reason_is_recorded(stop_reason):
     body = sse_body({"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
                     {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": SECRET_TEXT},
@@ -1494,8 +1496,9 @@ def test_every_allowed_value_passes_through(field):
         assert reader.ending == {field: value}
 
 
-@pytest.mark.parametrize("value", ["eu-west", "a" * 60, "content-filter", SECRET_TEXT, "Content_Filter", "CONTENT_FILTER",
-                                   "x" * 65, 42, True, ["content_filter"], {"reason": "content_filter"}])
+@pytest.mark.parametrize("value", ["eu-west", "a" * 60, "content-filter", SECRET_TEXT, "Content_Filter",
+                                   "CONTENT_FILTER", "x" * 65, 42, True, ["content_filter"],
+                                   {"reason": "content_filter"}])
 def test_any_other_value_logs_as_other(value):
     # Packet A26: an unlisted lowercase token is no longer admitted; the field stays, so a stop rule
     # keyed on "present and not completed" still stops.
@@ -1522,7 +1525,8 @@ def serve_sse(body: bytes):
         while b"\r\n\r\n" not in got:
             got += sock.recv(65536)
         head = bytes(got).split(b"\r\n\r\n", 1)[0].decode()
-        length = int(next(line.split(":", 1)[1] for line in head.split("\r\n") if line.lower().startswith("content-length")))
+        length = int(next(line.split(":", 1)[1] for line in head.split("\r\n")
+                          if line.lower().startswith("content-length")))
         while len(got) < len(head) + 4 + length:
             got += sock.recv(1 << 20)
         sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
@@ -1537,7 +1541,8 @@ def serve_sse(body: bytes):
     ("/responses", sse_body(responses_end("incomplete", status="incomplete",
                                           incomplete_details={"reason": "content_filter"})),
      {"end_event": "incomplete", "response_status": "incomplete", "incomplete_reason": "content_filter"}),
-    ("/responses", sse_body({"type": "response.created", "response": {"status": "in_progress"}}), {"end_event": "none"}),
+    ("/responses", sse_body({"type": "response.created", "response": {"status": "in_progress"}}),
+     {"end_event": "none"}),
     ("/v1/messages", sse_body({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}}),
      {"stop_reason": "max_tokens"}),
 ])

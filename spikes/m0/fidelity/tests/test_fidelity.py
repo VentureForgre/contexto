@@ -26,7 +26,7 @@ from fidelity.policy import (
     render_pinned,
     turn_tokens,
 )
-from fidelity.scoring import normalize, older_values, parse_answers, score
+from fidelity.scoring import normalize, parse_answers, score
 from fidelity.session import Probe, generate
 from fidelity.simulate import run_condition
 

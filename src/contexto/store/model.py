@@ -166,7 +166,7 @@ class Record:
         return d
 
 
-def check_new_sources(record: "Record") -> None:
+def check_new_sources(record: Record) -> None:
     """Rules applied when a record is appended, not when an existing ledger is read.
 
     Keeping them out of load-time validation means an older ledger that already holds such a record

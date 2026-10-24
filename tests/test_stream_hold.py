@@ -36,7 +36,8 @@ def tool_block(i: int) -> list[bytes]:
     return [ev({"type": "content_block_start", "index": i,
                 "content_block": {"type": "tool_use", "id": f"toolu_{i}", "name": "mcp__contexto__contexto_search",
                                   "input": {}}}),
-            ev({"type": "content_block_delta", "index": i, "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
+            ev({"type": "content_block_delta", "index": i,
+                "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
             ev({"type": "content_block_stop", "index": i})]
 
 
@@ -207,7 +208,8 @@ def test_a_cr_ending_a_read_waits_for_the_next_byte_then_dispatches():
 
 
 def test_mixed_line_endings_and_a_final_event_without_its_blank_line():
-    data = b"data: {\"type\":\"a\"}\r\n\ndata: {\"type\":\"b\"}\n\r\ndata: {\"type\":\"c\"}\r\r\ndata: {\"type\":\"d\"}\n"
+    data = (b"data: {\"type\":\"a\"}\r\n\ndata: {\"type\":\"b\"}\n\r\n"
+            b"data: {\"type\":\"c\"}\r\r\ndata: {\"type\":\"d\"}\n")
     events, tail = split_all(data, 1 << 16)
     assert [sse_event_type(e) for e in events] == ["a", "b", "c"]
     assert sse_event_type(tail) == "d" and b"".join(events) + tail == data

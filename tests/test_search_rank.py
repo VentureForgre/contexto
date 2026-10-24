@@ -309,7 +309,8 @@ def test_context_pages_are_recognised_by_their_content_whatever_their_stub():
     turn_start = [{"role": "user", "content": [rem(countdown(5)), {"type": "text", "text": "fix the build"}]},
                   {"role": "assistant", "content": [{"type": "text", "text": "done"}]}]
     for real in (page("the deploy config changed"), turn_start, [{"role": "user", "content": "hi"}],
-                 [{"role": "user", "content": [rem("x"), {"type": "tool_result", "tool_use_id": "t", "content": "y"}]}]):
+                 [{"role": "user",
+                   "content": [rem("x"), {"type": "tool_result", "tool_use_id": "t", "content": "y"}]}]):
         assert not is_context_page(build_page(key, real, 1)), real
 
 

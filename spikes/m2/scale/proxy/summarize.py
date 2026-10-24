@@ -78,7 +78,7 @@ def summarize(labels: list[str]) -> str:
             continue
 
         def cell(field: str, kind: str | None = None, rotated: str | None = None) -> str:
-            med, p, n = metric(runs, cp, field, kind, rotated)
+            med, p, n = metric(runs, cp, field, kind, rotated)  # noqa: B023 - called within the iteration
             return f"{fmt(med)} (p95 {fmt(p)}, n {n})" if n else "n/a"
 
         index_calls = []

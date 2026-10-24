@@ -2,7 +2,10 @@
 """Local stub upstream on 127.0.0.1: answers every request with 401 and logs
 method, path, header NAMES, body size, message structure (roles and block types),
 and synthetic MARKER-* test tokens. No other content, no header values."""
-import json, re, sys, time
+import json
+import re
+import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 LOG = sys.argv[2]

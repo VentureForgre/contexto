@@ -50,11 +50,12 @@ ROOT = HERE.parents[3]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "src"))
 
+import scale_synth  # noqa: E402
+from scale_probes import FACTS, LATENCY_QUERIES, all_queries, planted_turn  # noqa: E402
+
 from contexto import mcp  # noqa: E402
 from contexto.store import SessionStore  # noqa: E402
 from contexto.store.pages import _texts, page_matches  # noqa: E402
-from scale_probes import FACTS, LATENCY_QUERIES, all_queries, planted_turn  # noqa: E402
-import scale_synth  # noqa: E402
 
 SIZES = (17, 100, 500, 1000, 3000, 6000)
 INDEX_BUDGET = 4_000  # rewrite.Config.index_budget

@@ -11,12 +11,10 @@ import json
 
 import pytest
 
+import test_codex as codex
 from contexto.canonical import canonical_bytes
-from contexto.codex import RESPONSES
 from contexto.rewrite import Config, RewriteEngine, anchor_hash, message_hash
 from contexto.store.memory import MemoryStore
-
-import test_codex as codex
 from test_rewrite import FILL, history, request, tool_result, tool_use, user
 
 CONFIG = Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=300)

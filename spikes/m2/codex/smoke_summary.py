@@ -1,8 +1,10 @@
 """Per-request numbers from a Contexto session log (M2 A6 Codex smoke): status, real usage, the engine's
 request and rotation events. Numbers and event names only. Usage: smoke_summary.py <log.jsonl>"""
-import json, sys
+import json
+import sys
+
 path = sys.argv[1]
-rows = [json.loads(l) for l in open(path) if l.strip()]
+rows = [json.loads(line) for line in open(path) if line.strip()]
 total = 0
 for r in rows:
     ev = r.get("event")

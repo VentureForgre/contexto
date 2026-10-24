@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from acceptance import codex_budget, codex_driver, codex_live, script  # noqa: E402
+from acceptance import codex_budget, codex_driver, codex_live  # noqa: E402
 from acceptance.codex_stub import CodexStub, reply_items, stream_events  # noqa: E402
 
 KEY = "sk-synthetic-NOT-A-KEY-a22prep"  # what the test key helper prints; must never be recorded

@@ -8,10 +8,11 @@ from pathlib import Path
 import scale_bench
 import scale_calibrate
 import scale_synth
+from scale_probes import FACTS, LATENCY_QUERIES, planted_turn
+
 from contexto.store import SessionStore
 from contexto.store.pages import _texts
 from contexto.tokens import estimate_message_tokens
-from scale_probes import FACTS, LATENCY_QUERIES, planted_turn
 
 
 def text_of(turn: list[dict]) -> str:

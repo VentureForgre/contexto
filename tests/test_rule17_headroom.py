@@ -9,7 +9,6 @@ import pytest
 
 from contexto.rewrite import Config, EpochState, RewriteEngine, headroom
 from contexto.store.memory import MemoryStore
-
 from test_rewrite import FILL, assistant, request, tool_result, tool_use, user
 
 MESSAGES = "/v1/messages"

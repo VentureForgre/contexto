@@ -32,8 +32,9 @@ import base64
 import json
 import math
 import random
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any
 
 BYTES_PER_TOKEN = 1.83
 SESSION_START_CHARS = 8_470

@@ -60,8 +60,8 @@ def check(seat_settings: Path, timeout: float = 90.0) -> dict[str, Any]:
                     "x_api_key_present": bool(x_api_key),
                     "authorization_present": bool(auth),
                     "oauth_beta_header": "oauth" in beta,
-                    "key_matches_seat_helper": hmac.compare_digest(x_api_key, key)
-                    or hmac.compare_digest(auth, f"Bearer {key}"),
+                    "key_matches_seat_helper": hmac.compare_digest(x_api_key, key)  # noqa: F821 - closure; del runs later
+                    or hmac.compare_digest(auth, f"Bearer {key}"),  # noqa: F821
                 })
             self.rfile.read(int(self.headers.get("content-length") or 0))
             body = b'{"type":"error","error":{"type":"authentication_error","message":"stub"}}'

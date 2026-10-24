@@ -27,8 +27,17 @@ from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
 from contexto.store.pages import is_context_page
-from contexto.store.render import (MATCH_CONTEXT, MATCHES_PER_PAGE, MAX_CHARS_PER_TOKEN, RECALL_LIMIT, match_lines,
-                                   matching_line_starts, recall_chunk, recall_limit, render_page)
+from contexto.store.render import (
+    MATCH_CONTEXT,
+    MATCHES_PER_PAGE,
+    MAX_CHARS_PER_TOKEN,
+    RECALL_LIMIT,
+    match_lines,
+    matching_line_starts,
+    recall_chunk,
+    recall_limit,
+    render_page,
+)
 from contexto.store.search import SHOWN_IN_DETAIL, Query, text_matches
 
 SERVER_NAME = "contexto"
@@ -36,7 +45,8 @@ SERVER_VERSION = "0.1.0"
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
-SEARCH_LIMIT = SHOWN_IN_DETAIL  # the best pages, shown with their matching lines per contexto_search reply, newest first (B17, D34)
+# The best pages, shown with their matching lines per contexto_search reply, newest first (B17, D34).
+SEARCH_LIMIT = SHOWN_IN_DETAIL
 # The reply's first line about paged pages, so the model sees why a page that holds only the words can
 # sit above one that holds the whole query (reviewer-2 on PR #204). In the reply, not the tool
 # description, so the head the description adds to every request is unchanged.
@@ -180,7 +190,8 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "contexto_state",
-        "description": "Return the full pinned state (open obligations, active decisions, verified facts) with no size cap.",
+        "description": ("Return the full pinned state (open obligations, active decisions, verified facts) "
+                        "with no size cap."),
         "inputSchema": {"type": "object", "additionalProperties": False},
     },
     {
@@ -239,7 +250,8 @@ class Server:
             message = json.loads(line)
         except json.JSONDecodeError:
             return _error(None, PARSE_ERROR, "Parse error")
-        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or not isinstance(message.get("method"), str):
+        if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
+                or not isinstance(message.get("method"), str)):
             if isinstance(message, dict) and "method" not in message and ("result" in message or "error" in message):
                 return None  # a response from the client: nothing to answer
             return _error(message.get("id") if isinstance(message, dict) else None, INVALID_REQUEST, "Invalid request")
@@ -388,7 +400,8 @@ class Server:
         if epistemic not in EPISTEMICS:
             raise ToolError(f"epistemic must be one of {', '.join(EPISTEMICS)}")
         supersedes = args.get("supersedes")
-        if supersedes is not None and (not isinstance(supersedes, list) or not all(isinstance(s, str) for s in supersedes)):
+        if supersedes is not None and (not isinstance(supersedes, list)
+                                       or not all(isinstance(s, str) for s in supersedes)):
             raise ToolError("supersedes must be a list of record ids")
         provenance = args.get("provenance")
         if provenance is not None and (not isinstance(provenance, list) or not all(
@@ -652,7 +665,8 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     q = Query.parse(query)
     on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only
     shown, total = match_lines(text, q, last=True) if on_page else ([], 0)  # the LAST matching lines (B21)
-    rows += [(f"{'>' if is_match else ' '} {start}: {text}", (page_id, start, end)) for start, end, is_match, text in shown]
+    rows += [(f"{'>' if is_match else ' '} {start}: {text}", (page_id, start, end))
+             for start, end, is_match, text in shown]
     if not shown:  # the match is in the stub only: show the stub line as the matching line
         rows.append((f"> stub: {_stub_line(page.get('stub'))}", None))
     elif total > MATCHES_PER_PAGE:  # earlier statements stay reachable from the first match's offset

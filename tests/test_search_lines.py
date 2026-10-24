@@ -29,7 +29,8 @@ def credited(store, page_id, page_text, line):
     """Builder-4's acceptance 3 rule: the plant's whole line lies inside one logged returned span."""
     pos = page_text.index(line)
     return any(span["page_id"] == page_id and span["start"] <= pos and pos + len(line) <= span["end"]
-               for tool in ("contexto_search", "contexto_recall") for e in events(store, tool) for span in e["returned"])
+               for tool in ("contexto_search", "contexto_recall")
+               for e in events(store, tool) for span in e["returned"])
 
 
 def search(store, query):
@@ -59,7 +60,8 @@ def test_each_match_comes_with_its_bounded_context_and_exact_offsets():
     assert total == 1 and len(shown) == 2 * MATCH_CONTEXT + 1
     assert [is_match for _, _, is_match, _ in shown] == [False] * MATCH_CONTEXT + [True] + [False] * MATCH_CONTEXT
     for start, end, _, line in shown:
-        assert text[start:end] == line  # every span is exactly the line it shows  # every offset is where its line starts in the page
+        # every span is exactly the line it shows; every offset is where its line starts in the page
+        assert text[start:end] == line
     assert "cache.ttl_seconds=short" in shown[MATCH_CONTEXT][3]
 
 

@@ -29,8 +29,9 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from acceptance import budget, detectors, driver, script  # noqa: E402
 from fidelity.l2f import score  # noqa: E402  (script.py puts spikes/m0 on the path)
+
+from acceptance import budget, detectors, driver, script  # noqa: E402
 
 
 def compare(h1: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:

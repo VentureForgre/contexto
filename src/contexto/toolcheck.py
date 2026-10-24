@@ -45,7 +45,8 @@ from __future__ import annotations
 import re
 import sys
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 TOOL_PREFIX = "mcp__contexto__"
 SERVER = "contexto"  # the server's name in Claude Code's notices (mcp__<server>__ is the tool prefix)
@@ -245,9 +246,10 @@ def missing_tools_message(dialect: Any, server_listed: Any) -> str:
     server = f"{sys.executable} -P -m contexto mcp --help"
     if dialect == "responses":
         return ("Codex is running without Contexto's tools (contexto_search, contexto_recall): the contexto MCP "
-                "server did not answer Codex's tool list in time, and Codex reports no error for that, so paged-out turns "
-                f"cannot be recalled. Check that '{server}' runs; contexto before v0.2.8 started the server as a "
-                "bare 'contexto' command, which fails when it is not on PATH. See README, Troubleshooting.")
+                "server did not answer Codex's tool list in time, and Codex reports no error for that, so "
+                f"paged-out turns cannot be recalled. Check that '{server}' runs; contexto before v0.2.8 "
+                "started the server as a bare 'contexto' command, which fails when it is not on PATH. "
+                "See README, Troubleshooting.")
     if server_listed:
         return ("Claude Code started the contexto MCP server, but its tools are not available to the model, so "
                 "paged-out turns cannot be recalled. The server may have stopped after starting (check '/mcp' in "

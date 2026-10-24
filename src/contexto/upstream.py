@@ -26,9 +26,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 BASE_URL_KEY = "ANTHROPIC_BASE_URL"

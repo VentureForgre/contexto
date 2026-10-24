@@ -37,12 +37,12 @@ from typing import Any
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
-from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.catalog import PageCatalog
+from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, current_stub, render_index, same_content
-from contexto.store.search import rank
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
+from contexto.store.search import rank
 
 __all__ = ["SessionStore", "PageConflictError", "PageNotFoundError", "KeyFileError", "SessionNotFoundError",
            "redact"]
@@ -249,7 +249,8 @@ def read_turn_room(meta: dict[str, Any]) -> tuple[str | None, int | None, int]:
     return turn_id, tokens, spent
 
 
-def charge_room(current: tuple[str | None, int | None, int], charge: Callable[[int | None], int]) -> dict[str, Any] | None:
+def charge_room(current: tuple[str | None, int | None, int],
+                charge: Callable[[int | None], int]) -> dict[str, Any] | None:
     """Run ``charge(remaining)`` and return the updated record, or None when no room is published.
 
     ``charge`` gets the tokens left this turn (None when no room is published, which leaves the

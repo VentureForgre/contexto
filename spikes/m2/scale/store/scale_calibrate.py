@@ -17,16 +17,18 @@ import json
 import os
 import statistics
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[3] / "src"))
 
+from scale_probes import FACTS, LATENCY_QUERIES  # noqa: E402
+
 from contexto.store.pages import _texts  # noqa: E402  (the text search reads)
 from contexto.tokens import estimate_message_tokens  # noqa: E402
-from scale_probes import FACTS, LATENCY_QUERIES  # noqa: E402
 
 
 def turns_of(path: Path) -> Iterator[list[dict[str, Any]]]:

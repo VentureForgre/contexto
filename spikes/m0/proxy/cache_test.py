@@ -20,11 +20,11 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from extract import first_changed_block, total_tokens
+from extract import first_changed_block
 from proxy import SpikeProxy
 from run_session import REPO, SPIKE_ROOT, child_env, inherited_claude_base
 
@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     upstream = inherited_claude_base()
     if not upstream:
         sys.exit("no inherited ANTHROPIC_BASE_URL")
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run_dir = SPIKE_ROOT / f"cachetest-{args.condition}-{stamp}"
     scratch = run_dir / "scratch"
     scratch.mkdir(parents=True)

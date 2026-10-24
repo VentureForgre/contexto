@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from acceptance import headroom_outliers as ho  # noqa: E402
+
 from contexto import rewrite  # noqa: E402
 from contexto.rewrite import Config, EpochState, RewriteEngine  # noqa: E402
 from contexto.store.memory import MemoryStore  # noqa: E402

@@ -84,7 +84,8 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 - ``count_tokens`` (rule 11) gets the current epoch's transform with no side effects.
 - Transform failures (rule 14, PR #52; manager-1 2026-10-16 02:00Z): a ``PageConflictError`` is a
   ``page_conflict``; ``OSError``, ``LedgerError``, ``KeyFileError``, ``SessionNotFoundError`` and
-  ``PageNotFoundError`` (from ``quarantine_page``) are a ``store_error``. Either one at a turn start keeps the state from before the attempt and enters
+  ``PageNotFoundError`` (from ``quarantine_page``) are a ``store_error``. Either one at a turn start
+  keeps the state from before the attempt and enters
   degraded mode (``degraded_enter``): no paging, no rotation, the current epoch's transform extended
   append-only, and every request event marked ``degraded: true``. Each later turn start tries the
   store once (a read of the pinned and index text, then the normal rotation); success logs
@@ -159,7 +160,8 @@ class Config:
     bound: int = 150_000
     window_fraction: float = 0.5  # rule 4: retained window target as a share of the window budget W
     headroom_floor: int = 25_000
-    min_turn_room: int = 12_000  # A12 (contract PR #115; 12,000 per intake/m2-min-room-12k): a turn's minimum recall room
+    # A12 (contract PR #115; 12,000 per intake/m2-min-room-12k): a turn's minimum recall room
+    min_turn_room: int = 12_000
     headroom_factor: float = 1.25
     headroom_cap: float = 0.25  # rule 17: headroom at most this share of the bound
     headroom_decay: float = 0.5  # rule 17: max_turn_growth's weight per later turn start that measures growth
@@ -207,7 +209,8 @@ class EpochState:
     degraded: bool = False  # rule 14: the store failed; no paging and no rotation until a retry succeeds
     conflict_page: str | None = None  # page id of the page_conflict that entered degraded mode
     window_budget: int | None = None  # W at the latest rotation decision
-    published_window: tuple[int, float, str | None] | None = None  # (W, bytes per token, model) last given to set_window
+    # (W, bytes per token, model) last given to set_window
+    published_window: tuple[int, float, str | None] | None = None
     # Rule 3: (messages, hash of the last message) of the newest request sent whose usage has not arrived;
     # only that request's usage is paired with last_sent_bytes and last_estimate. Per-request, never recorded.
     pending_usage: tuple[int, str] | None = None
@@ -393,7 +396,8 @@ class Dialect:
         return 0
 
     def usage_tokens(self, usage: dict) -> int:
-        return sum(usage.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        return sum(usage.get(k) or 0
+                   for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
 
 
 ANTHROPIC = Dialect()
@@ -1230,7 +1234,8 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
 
     upstream = {**request, field_name: transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
-    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent, last_estimate=sent_estimate,
+    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
+                    last_estimate=sent_estimate,
                     last_window_tokens=window_tokens(upstream[field_name], estimator),
                     pending_usage=usage_identity(messages))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
@@ -1550,7 +1555,8 @@ class RewriteEngine:
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
 
-    def __call__(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
+    def __call__(self, request: dict, headers: dict[str, str],
+                 endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
         dialect = dialect_for(endpoint)
         with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
             return self._call(request, headers, endpoint)

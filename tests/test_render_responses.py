@@ -30,7 +30,8 @@ def codex_turn(planted="synthetic tool output"):
 ANTHROPIC_PAGE = {"turn": 4, "messages": [
     {"role": "user", "content": [{"type": "text", "text": "<system-reminder>synthetic context</system-reminder>"},
                                  {"type": "text", "text": "synthetic prompt"},
-                                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "c3ludA=="}}]},
+                                 {"type": "image",
+                                  "source": {"type": "base64", "media_type": "image/png", "data": "c3ludA=="}}]},
     {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "sig"},
                                       {"type": "text", "text": "synthetic answer"},
                                       {"type": "tool_use", "id": "t1", "name": "Read", "input": {"b": 2, "a": "é"}}]},

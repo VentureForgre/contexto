@@ -6,7 +6,6 @@ from contexto.canonical import canonical_bytes
 from contexto.rewrite import COUNT_TOKENS, MESSAGES, Config, RewriteEngine, is_turn_start, recall_knobs
 from contexto.store.memory import MemoryStore
 from contexto.tokens import TokenEstimator
-
 from test_rewrite import CONFIG, ctx_block, history, request, run, system, tool_result, tool_use, user
 
 RULE = "Earlier turns are paged out; search then recall before saying you do not know."

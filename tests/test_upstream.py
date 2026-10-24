@@ -46,7 +46,8 @@ def repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
 
 def test_explicit_flag_wins_over_everything(tmp_path, home):
     write_settings(tmp_path / ".claude" / "settings.local.json", "http://local.invalid")
-    up = resolve_upstream("http://flag.invalid", env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tmp_path, home=home)
+    up = resolve_upstream("http://flag.invalid", env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tmp_path,
+                          home=home)
     assert (up.url, up.source) == ("http://flag.invalid", "flag")
 
 

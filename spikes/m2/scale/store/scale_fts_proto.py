@@ -36,8 +36,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import scale_bench  # noqa: E402  (puts src/ on the path)
-from contexto.store import SessionStore  # noqa: E402
 from scale_probes import FACTS, LATENCY_QUERIES, planted_turn  # noqa: E402
+
+from contexto.store import SessionStore  # noqa: E402
 
 WORD = re.compile(r"\w+")
 
@@ -78,12 +79,12 @@ def main(argv: list[str] | None = None) -> int:
             turn_of = {pid: t for t, pid in enumerate(ids)}
 
             def row(what: str, query: str, seconds: float, **extra) -> None:
-                timing_rows.append({"n": n, "what": what, "query": query, "seconds": f"{seconds:.6f}", **extra})
+                timing_rows.append({"n": n, "what": what, "query": query, "seconds": f"{seconds:.6f}", **extra})  # noqa: B023
 
             # Current search, for reference and for the result-set check.
             current = {}
             for kind, q in queries:
-                s, current[q] = timed(lambda: store.search(q), args.reps)
+                s, current[q] = timed(lambda: store.search(q), args.reps)  # noqa: B023 - timed() calls it at once
                 row(f"current search ({kind})", q, s, hits=len(current[q]))
 
             # Text cache: load once, then scan in memory.
@@ -99,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             row("text cache: load all pages", "", load_s, bytes=mem)
             ordered = sorted(cache.items(), key=lambda kv: (kv[1][0], kv[0]), reverse=True)  # kept with the cache
             for kind, q in queries:
-                s, hits = timed(lambda: [pid for pid, (t, text) in ordered if q in text], args.reps)
+                s, hits = timed(lambda: [pid for pid, (t, text) in ordered if q in text], args.reps)  # noqa: B023
                 row(f"text cache search ({kind})", q, s, hits=len(hits), same=hits == current[q])
 
             # FTS5 trigram, case-sensitive: exact substring semantics, written at page time.
@@ -120,9 +121,9 @@ def main(argv: list[str] | None = None) -> int:
             db = sqlite3.connect(db_path)
             for kind, q in queries:
                 phrase = '"' + q.replace('"', '""') + '"'
-                s, hits = timed(lambda: [r[0] for r in db.execute(
+                s, hits = timed(lambda: [r[0] for r in db.execute(  # noqa: B023 - timed() calls it at once
                     "SELECT page_id FROM pages WHERE pages MATCH ? ORDER BY CAST(turn AS INTEGER) DESC",
-                    (phrase,))], args.reps)
+                    (phrase,))], args.reps)  # noqa: B023
                 row(f"fts5 trigram search ({kind})", q, s, hits=len(hits), same=hits == current[q])
             db.close()
 

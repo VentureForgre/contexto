@@ -5,10 +5,9 @@ Fixtures are synthetic: no content from a real session is committed.
 
 from __future__ import annotations
 
-import io
 import json
-import os
 import math
+import os
 import shutil
 import subprocess
 import sys

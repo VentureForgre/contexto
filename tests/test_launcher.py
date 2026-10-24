@@ -16,26 +16,26 @@ from pathlib import Path
 import pytest
 
 from contexto import launcher
-from contexto.paths import contexto_home
 from contexto.launcher import (
     ASSUMED_OVERHEAD_DEFAULT,
     ASSUMED_OVERHEAD_OPENRIG,
     BOUND_GUARD,
-    NoticeLog,
-    assumed_overhead,
-    open_session,
-    start_warning,
     EXIT_USAGE,
     LaunchError,
     LaunchOptions,
+    NoticeLog,
+    assumed_overhead,
     check_bound,
     check_user_args,
     engine_config,
     exit_code,
     mcp_payload,
+    open_session,
     settings_payload,
+    start_warning,
     write_private_json,
 )
+from contexto.paths import contexto_home
 
 FAKE_CLAUDE = r'''
 import json, os, signal, sys, time, urllib.request
@@ -53,7 +53,8 @@ if os.environ.get("FAKE_REQUEST"):
     payload = {"model": "claude-haiku-5-5", "max_tokens": 16,
                "messages": [{"role": "user", "content": [{"type": "text", "text": "synthetic"}]}]}
     if os.environ.get("FAKE_TOOLS"):  # the main conversation's tool list, as Claude Code sends it
-        payload["tools"] = [{"name": n, "input_schema": {"type": "object"}} for n in os.environ["FAKE_TOOLS"].split(",")]
+        payload["tools"] = [{"name": n, "input_schema": {"type": "object"}}
+                            for n in os.environ["FAKE_TOOLS"].split(",")]
     body = json.dumps(payload).encode()
     request = urllib.request.Request(base + "/v1/messages", data=body, method="POST",
                                      headers={"Content-Type": "application/json", "x-api-key": "fake-key"})
@@ -423,10 +424,11 @@ def test_run_child_returns_exit_codes_and_127_when_missing(tmp_path):
     assert launcher.run_child([sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"]) == (
         128 + signal.SIGTERM)
     err = io.StringIO()
-    assert launcher.run_child([str(tmp_path / "missing-binary")], stderr=err) == 127 and "cannot start" in err.getvalue()
+    assert launcher.run_child([str(tmp_path / "missing-binary")], stderr=err) == 127
+    assert "cannot start" in err.getvalue()
     env = dict(os.environ, CONTEXTO_CHILD_PROBE="7")
-    assert launcher.run_child([sys.executable, "-c", "import os; raise SystemExit(int(os.environ['CONTEXTO_CHILD_PROBE']))"],
-                              env) == 7
+    probe = "import os; raise SystemExit(int(os.environ['CONTEXTO_CHILD_PROBE']))"
+    assert launcher.run_child([sys.executable, "-c", probe], env) == 7
 
 
 def test_run_codex_without_the_codex_module_exits_2(monkeypatch, capsys):

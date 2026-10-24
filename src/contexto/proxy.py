@@ -2,8 +2,8 @@
 
 The proxy listens on 127.0.0.1 only. ``POST /v1/messages`` and ``POST /v1/messages/count_tokens``
 bodies go through a caller-supplied transform (contract rule 11, so the CLI's own counts match what
-is sent); every other path and method, such as ``HEAD /api/hello``, is forwarded unchanged. Auth headers are forwarded as
-received and are never stored or logged.
+is sent); every other path and method, such as ``HEAD /api/hello``, is forwarded unchanged. Auth
+headers are forwarded as received and are never stored or logged.
 
 Transform interface (the rewrite engine plugs in here)::
 
@@ -59,9 +59,10 @@ import ssl
 import threading
 import time
 import zlib
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
@@ -179,7 +180,7 @@ def same_wire(a: Any, b: Any) -> bool:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def add_beta(headers: Headers, beta: str) -> Headers:
@@ -321,9 +322,10 @@ class UsageReader:
     ``cache_write_tokens``, ``output_tokens``, and ``output_tokens_details.reasoning_tokens``.
 
     It also records how the response ended (packet A23), from enum fields only, each checked against
-    its allowlist (``END_ALLOWLISTS``, packet A26), never text or error messages: for Responses, the end event (completed, incomplete, failed, or none when
-    a stream ended without one), ``response.status``, ``incomplete_details.reason``, and
-    ``error.code``; for Messages, ``stop_reason`` and an ``error`` event's ``error.type``.
+    its allowlist (``END_ALLOWLISTS``, packet A26), never text or error messages: for Responses, the
+    end event (completed, incomplete, failed, or none when a stream ended without one),
+    ``response.status``, ``incomplete_details.reason``, and ``error.code``; for Messages,
+    ``stop_reason`` and an ``error`` event's ``error.type``.
     """
 
     def __init__(self, content_type: str | None, api: str = "messages") -> None:

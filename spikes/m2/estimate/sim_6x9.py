@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[3]
 for _p in (ROOT / "spikes" / "m2", ROOT / "spikes" / "m0", ROOT / "src"):
     sys.path.insert(0, str(_p))
 from acceptance import run  # noqa: E402
+
 from contexto import mcp, rewrite  # noqa: E402
 from contexto.canonical import canonical_bytes  # noqa: E402
 from contexto.store import SessionStore  # noqa: E402
@@ -336,7 +337,7 @@ def run_engine(head_bytes: int, chunks, usage_mode="estimate", verbose=True):
                 "rotations": sum(1 for _, e in sess.events if e["event"] == "rotation"),
                 "requests": sess.requests}
     ok, turn_rows, per_probe_ok = Counter(), [], {}
-    for k, chunk in enumerate(chunks, 1):
+    for _k, chunk in enumerate(chunks, 1):
         sess.start_probe_turn(chunk)
         tok = Counter()
         for p in chunk:

@@ -30,7 +30,6 @@ from contexto.codex import RESPONSES
 from contexto.proxy import ContextoProxy, same_wire, serialize_request
 from contexto.rewrite import ANTHROPIC, Config, RewriteEngine, message_hash, request_scope
 from contexto.store.memory import MemoryStore
-
 from test_rewrite import FILL, assistant, request, system, tool_result, tool_use, user
 
 CONFIG = Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=300)
@@ -61,7 +60,8 @@ HASH_CORPUS = [
     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "cache_control": {"type": "ephemeral"},
                                   "content": [{"type": "text", "text": "nested", "cache_control": {"x": 1}}]}]},
     {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "Write",
-                                       "input": {"cache_control": "a tool input key", "deep": [{"cache_control": 1}]}}]},
+                                       "input": {"cache_control": "a tool input key",
+                                                 "deep": [{"cache_control": 1}]}}]},
     {"role": "user", "content": [{"type": "text", "text": "non-ASCII: café, 日本語, emoji 😀"}]},
     {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "日本語 \\ud800 escaped"}]},
     {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "data": "AAAA"}}]},
@@ -110,7 +110,8 @@ def test_a_lone_surrogate_only_inside_cache_control_hashes_like_the_reference():
 
 def test_cache_control_and_string_conversion_still_hash_equal():
     plain = {"role": "user", "content": "the prompt"}
-    block = {"role": "user", "content": [{"type": "text", "text": "the prompt", "cache_control": {"type": "ephemeral"}}]}
+    block = {"role": "user",
+             "content": [{"type": "text", "text": "the prompt", "cache_control": {"type": "ephemeral"}}]}
     with request_scope([plain, block]):
         assert message_hash(plain) == message_hash(block)
     moved = copy.deepcopy(tool_result(1))

@@ -386,7 +386,8 @@ def add_arguments(parser) -> None:
                        help=f"how Codex authenticates (default {API_KEY_MODE}: a temporary CODEX_HOME whose provider "
                             f"runs the key helper). {CHATGPT_MODE}: {CHATGPT_MODE_HELP}")
     group.add_argument("--codex-key-helper", default=None,
-                       help=f"command that prints the API key (default ${KEY_HELPER_ENV}, else Claude Code's apiKeyHelper)")
+                       help=f"command that prints the API key (default ${KEY_HELPER_ENV}, "
+                            "else Claude Code's apiKeyHelper)")
     group.add_argument("--codex-upstream", default=None,
                        help=f"upstream for Codex requests, with its version path (default ${UPSTREAM_ENV}, else "
                             "the ChatGPT backend in chatgpt mode, else Claude Code's upstream plus /v1)")
