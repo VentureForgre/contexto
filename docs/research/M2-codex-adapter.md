@@ -22,8 +22,8 @@ that are not real); **[source]** Codex source at that tag, `S:<path>:<lines>` un
   history lives in the 0700 session-dir `CODEX_HOME` (same exposure as `~/.codex`).
 - **ChatGPT mode (`--codex-auth chatgpt`, a product feature):** the user's own `CODEX_HOME` with `-c`
   overrides only, a custom provider at the proxy with `requires_openai_auth = true`, credentials and
-  `/models` passed through unchanged. Tested only with synthetic credentials, never live on the
-  owner's login. Its end-user terms question stays open as O4, stated in `--help` and here.
+  `/models` passed through unchanged. Tested only with synthetic credentials, never with a live
+  login. End-user auth guidance stays open as O4.
 - **Bypass:** some Codex calls go to chatgpt.com directly (rate limits, usage, a remote MCP
   connection) and bypass the proxy by design.
 - **MCP:** registration with `-c mcp_servers.contexto` stays open until `tools/list` behavior for
@@ -80,8 +80,8 @@ auth path is kept as ChatGPT mode, and API-key mode follows the decision above.
   - the command prints a raw bearer token (cached 300 s, rerun on 401, 5 s timeout), but it cannot supply `ChatGPT-Account-ID`; adding that header through `http_headers` or `env_http_headers` disables Codex's own ChatGPT token refresh;
   - `auth.command` cannot be combined with `requires_openai_auth`;
   - a temporary `CODEX_HOME` has no `auth.json`, and keyring entries are keyed by a hash of the `CODEX_HOME` path, so the command would have to read the user's credential from their store at runtime, which is close to copying it.
-- **Owner or terms questions:**
-  1. ChatGPT-plan credentials pass through the local proxy (as with Claude subscription OAuth in M0, section 6 of `M0-interception.md`). The owner already runs `labcodex.subject` on the ChatGPT login; whether a product may route that token through a local proxy is the same Q5 decision.
+- **Owner questions:**
+  1. ChatGPT-login credentials pass through the local proxy (as with Claude subscription OAuth in M0, section 6 of `M0-interception.md`). The `labcodex.subject` seat already runs on a ChatGPT login; whether a product routes that token through a local proxy is the same Q5 decision.
   2. With ChatGPT login, the `/models` reply fetched through the proxy is cached in the user's `models_cache.json`, which is not keyed by provider [source]. The proxy must pass `/models` through unchanged. This writes Codex's own cache, not the user's config.
   3. The synthetic ChatGPT-mode probe also made Codex open a remote MCP connection that was not sent to the proxy and failed with 401 [measured; target not logged]. Rate-limit and usage calls go to chatgpt.com directly [source]. These bypass the proxy by design and carry the user's credential as they normally would.
 

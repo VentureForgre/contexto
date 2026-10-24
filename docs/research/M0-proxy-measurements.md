@@ -252,9 +252,9 @@ session JSONL with `sessionlog.py`. Those rows have usage, but no request bytes 
    is about 21,900 bytes. The extractor was corrected after capture. Header names include
    `chatgpt-account-id`, `session-id`, `thread-id`, and several `x-codex-*`; values are not
    recorded.
-5. **Auth (Q5 flag)** (**measured**): the proxy carries the owner's ChatGPT bearer token pass-through.
-   That is within the rules (inherited, forwarded unchanged, never logged), but it is subscription
-   traffic through a local proxy. Flagged to intake for Q5.
+5. **Auth (Q5 flag)** (**measured**): in ChatGPT-login mode the proxy passes the bearer token
+   through: inherited, forwarded unchanged, never logged. Flagged to intake for Q5 because it is
+   login traffic through a local proxy.
 
 Codex measurement continues on builder-2's `labcodex.subject` seat through session files.
 
