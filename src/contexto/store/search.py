@@ -39,7 +39,7 @@ from __future__ import annotations
 import bisect
 import json
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -102,62 +102,102 @@ class Query:
 
 class SearchEntry(NamedTuple):
     """What ``rank`` reads of a page: its id, turn, folded searchable text (``search_key``), and whether
-    it holds only paged context blocks (``contexto.store.pages.is_context_page``)."""
+    it holds only paged context blocks (``contexto.store.pages.is_context_page``). ``text`` is None for
+    a page whose text is not held in memory; ``rank`` then asks its ``fetch`` for the page (D39)."""
 
     id: str
     turn: int
-    text: bytes
+    text: bytes | None
     context: bool = False
 
 
-def rank(entries: Sequence[SearchEntry], query: str) -> list[str]:
+# A page read from the store costs about as much as 6 substring tests that fail on a 32 KB page (D39,
+# measured: 92 us against 15 us at 6,000 synthetic pages). So on a page just read, a query of up to
+# this many words tests every word at once, rather than reading the page again for its frequencies.
+EAGER_WORDS = 6
+
+
+def rank(entries: Sequence[SearchEntry], query: str,
+         fetch: Callable[[int], SearchEntry | None] | None = None) -> list[str]:
     """Ids of the matching entries, best first (see the module docstring).
 
     ``entries`` are every page of the store: all of them count for the inverse document frequency and
-    the average length, not only the matches. Pages are narrowed word by word, so a query stops reading
-    pages as soon as no page holds every word so far; the frequency of each word over the pages it was
-    not read on is counted only when some page matches.
+    the average length, not only the matches. An entry whose ``text`` is None is read through
+    ``fetch(i)``, ``i`` its index in ``entries``, which returns the whole entry, or None for a page
+    that cannot be read now (left out, as an unreadable page is). Each page is handled in turn and only
+    what ranking needs is kept of it (which words it holds, its length, and for a match its term
+    counts), so pages read through ``fetch`` are not held for the length of the query (D39).
+
+    Pages are narrowed word by word, so a page is not read further once it lacks a word, and a query
+    reads no page twice when no page holds every word. The frequency of each word over the pages it
+    was not read on is counted only when some page matches, in a second pass over those pages (a page
+    just read through ``fetch`` is tested for every word at once when the query has at most
+    ``EAGER_WORDS`` words or a match is already known, so it is rarely read twice).
     """
     q = Query.parse(query)
     if q is None or not entries:
         return []
-    texts = [e.text for e in entries]
-    n = len(texts)
     words = [search_key(w) for w in q.words]
-    candidates: Sequence[int] = range(n)
-    scans = []  # (word, the pages it was read on, the pages holding it)
-    for w in words:
-        holding = [i for i in candidates if w in texts[i]]  # `in` stops at the first occurrence
-        if not holding:
-            return []
-        scans.append((w, candidates, holding))
-        candidates = holding
-    matched = list(candidates)
-    df: dict[bytes, int] = {}
-    for w, read, holding in scans:
-        unread = () if len(read) == n else sorted(set(range(n)) - set(read))
-        df[w] = len(holding) + sum(1 for i in unread if w in texts[i])
+    count = len(words)
     phrase = search_key(q.phrase)
-    phrase_on = {i: (phrase in texts[i]) if q.multiword else True for i in matched}
     terms = words + ([phrase] if q.multiword else [])
-    if q.multiword:
-        df[phrase] = sum(phrase_on.values())
-    idf = {t: math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5)) for t in terms if df[t]}
-    avg = sum(map(len, texts)) / n or 1.0
-    by_age = sorted(matched, key=lambda i: (entries[i].turn, entries[i].id))
-    position = {i: (k / (len(by_age) - 1) if len(by_age) > 1 else 1.0) for k, i in enumerate(by_age)}
-    scored = []
-    for i in matched:
-        text = texts[i]
-        norm = K1 * (1 - B + B * len(text) / avg)
-        relevance = 0.0
-        for term, weight in idf.items():
-            if term == phrase and q.multiword and not phrase_on[i]:
+    df = [0] * count
+    n = total = 0
+    matched = []  # (id, turn, context, length, holds the phrase, count of each term)
+    pending = []  # (index, the first word not read on the page)
+    for i, entry in enumerate(entries):
+        text = entry.text
+        fetched = text is None
+        if fetched:
+            entry = fetch(i) if fetch is not None else None
+            if entry is None or entry.text is None:
                 continue
-            tf = text.count(term)
-            relevance += weight * tf * (K1 + 1) / (tf + norm)
-        score = relevance * (1 + RECENCY_WEIGHT * position[i])
-        scored.append((not entries[i].context, phrase_on[i], score, entries[i].turn, entries[i].id))
+            text = entry.text
+        n += 1
+        total += len(text)
+        j = 0
+        while j < count and words[j] in text:  # `in` stops at the first occurrence
+            df[j] += 1
+            j += 1
+        if j == count:
+            on = (phrase in text) if q.multiword else True
+            tf = tuple(text.count(t) if t != phrase or on else 0 for t in terms)
+            matched.append((entry.id, entry.turn, entry.context, len(text), on, tf))
+        elif j + 1 < count:
+            if fetched and (count <= EAGER_WORDS or matched):
+                for k in range(j + 1, count):
+                    df[k] += words[k] in text
+            else:
+                pending.append((i, j + 1))
+    if not matched:
+        return []
+    for i, first in pending:
+        text = entries[i].text
+        if text is None:
+            entry = fetch(i) if fetch is not None else None
+            if entry is None or entry.text is None:
+                continue  # gone since the first pass: counted as holding none of the remaining words
+            text = entry.text
+        for k in range(first, count):
+            df[k] += words[k] in text
+    freq = dict(zip(words, df))
+    if q.multiword:
+        freq[phrase] = sum(1 for m in matched if m[4])
+    idf = {t: math.log(1 + (n - freq[t] + 0.5) / (freq[t] + 0.5)) for t in terms if freq[t]}
+    weights = [idf.get(t) for t in terms]
+    avg = total / n or 1.0
+    by_age = sorted(range(len(matched)), key=lambda m: (matched[m][1], matched[m][0]))
+    position = {m: (k / (len(by_age) - 1) if len(by_age) > 1 else 1.0) for k, m in enumerate(by_age)}
+    scored = []
+    for m, (page_id, turn, context, length, on, tf) in enumerate(matched):
+        norm = K1 * (1 - B + B * length / avg)
+        relevance = 0.0
+        for weight, freq_in_page, term in zip(weights, tf, terms):
+            if weight is None or (term == phrase and q.multiword and not on):
+                continue
+            relevance += weight * freq_in_page * (K1 + 1) / (freq_in_page + norm)
+        score = relevance * (1 + RECENCY_WEIGHT * position[m])
+        scored.append((not context, on, score, turn, page_id))
     scored.sort(reverse=True)
     ranked = [page_id for *_, page_id in scored]
     # The newest matching page (a turn page when one matches) always takes one of the detailed places:
