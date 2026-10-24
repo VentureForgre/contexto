@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from contexto.paths import contexto_home
+from contexto.paths import contexto_home, mcp_env
 from contexto.proxy import ContextoProxy, identity_transform
 from contexto.store import SessionStore
 from contexto.toolcheck import missing_tools_message
@@ -229,7 +229,7 @@ def mcp_payload(session_id: str, home: Path) -> dict[str, Any]:
         "type": "stdio",
         "command": sys.executable,
         "args": ["-P", "-m", "contexto", "mcp", "--session", session_id],
-        "env": {"CONTEXTO_HOME": str(home)},
+        "env": mcp_env(home),
     }}}
 
 

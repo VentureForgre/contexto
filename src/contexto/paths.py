@@ -23,6 +23,20 @@ def contexto_home(env: Mapping[str, str] | None = None) -> Path:
     return absolute_home(home) if home else absolute_home(Path.home() / ".contexto")
 
 
+# Passed on to the MCP server when set: Codex starts MCP servers with a restricted environment (D39).
+SEARCH_CACHE_ENV = "CONTEXTO_SEARCH_CACHE_MB"
+
+
+def mcp_env(home: Path, env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment ``contexto run`` gives the MCP server: ``CONTEXTO_HOME``, always (packet A18), and
+    ``CONTEXTO_SEARCH_CACHE_MB`` when ``env`` (default the process environment) sets it."""
+    out = {"CONTEXTO_HOME": str(home)}
+    value = (os.environ if env is None else env).get(SEARCH_CACHE_ENV)
+    if value is not None:
+        out[SEARCH_CACHE_ENV] = value
+    return out
+
+
 def session_dir(home: Path, session_id: str) -> Path:
     """``home/sessions/<session_id>``; the id must be a single safe path segment."""
     if (not session_id or session_id in (".", "..") or any(c in session_id for c in "/\\\0")):
