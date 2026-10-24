@@ -13,8 +13,9 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
 - ``meta.json``: session metadata. ``workdir`` (the directory file sources are checked against,
   recorded by lane A's launcher with ``set_workdir``) and ``window_tokens`` and ``bytes_per_token``
   (recorded by lane A's engine with ``set_window``; recall sizes chunks from them), and the recall
-  rooms: ``turn_room`` (the main conversation's) and ``side_rooms`` (D40, one per side conversation
-  in a tool loop, keyed by the engine's conversation key, a hash). Writers
+  rooms: ``turn_room`` (the main conversation's) and ``side_rooms`` (D40, one per side request
+  lineage in a tool loop, keyed by an engine-chosen id, each with its publish time; expired after
+  ``SIDE_ROOM_TTL_S``). Writers
   serialize on ``meta.lock``; the file is replaced atomically, so readers never see a partial file.
 - ``log.jsonl``: the session log, one canonical JSON event per line.
 
@@ -251,55 +252,72 @@ def read_turn_room(meta: dict[str, Any]) -> tuple[str | None, int | None, int]:
     return turn_id, tokens, spent
 
 
-SideRooms = dict[str, tuple[int, int]]  # conversation -> (room tokens, tokens spent since its publish)
+# D40: a side room lives this long after its publish unless its holder republishes or closes it.
+# Claude Code starts an MCP call 5 to 16 ms after its tool_use block completes (contract, stream
+# hold), so a holder's own calls normally land within a second of its response; 120 s also covers a
+# call queued behind another tool of the same response, such as a Bash command running to Claude
+# Code's default 2-minute timeout. A live holder republishes at its next response.
+SIDE_ROOM_TTL_S = 120.0
+
+# room id -> (room tokens, tokens spent since its publish, publish time in seconds since the epoch)
+SideRooms = dict[str, tuple[int, int, float]]
 
 
-def check_conversation(conversation: Any) -> str:
-    """A side room's conversation id: 1 to 200 printable characters (the engine passes its key)."""
-    if not isinstance(conversation, str) or not 0 < len(conversation) <= 200 or not conversation.isprintable():
-        raise ValueError("conversation must be 1 to 200 printable characters")
-    return conversation
+def check_room_id(room_id: Any) -> str:
+    """A side room's id: 1 to 200 printable characters (the engine's conversation key and a suffix)."""
+    if not isinstance(room_id, str) or not 0 < len(room_id) <= 200 or not room_id.isprintable():
+        raise ValueError("room_id must be 1 to 200 printable characters")
+    return room_id
 
 
 def read_side_rooms(meta: dict[str, Any]) -> SideRooms:
-    """The open side rooms (D40) from session metadata; a malformed entry is skipped."""
+    """The side rooms (D40) recorded in session metadata, expired or not; a malformed entry is skipped."""
     rooms = meta.get("side_rooms")
     out: SideRooms = {}
     if not isinstance(rooms, dict):
         return out
-    for conversation, room in rooms.items():
+    for room_id, room in rooms.items():
         if not isinstance(room, dict):
             continue
-        tokens, spent = room.get("room_tokens"), room.get("spent_tokens", 0)
-        if not isinstance(tokens, int) or isinstance(tokens, bool):
+        tokens, spent, at = room.get("room_tokens"), room.get("spent_tokens", 0), room.get("published_at")
+        if (not isinstance(tokens, int) or isinstance(tokens, bool) or not isinstance(at, (int, float))
+                or isinstance(at, bool)):
             continue
         spent = spent if isinstance(spent, int) and not isinstance(spent, bool) and spent >= 0 else 0
-        out[conversation] = (tokens, spent)
+        out[room_id] = (tokens, spent, float(at))
     return out
 
 
-def side_rooms_record(rooms: SideRooms) -> dict[str, dict[str, int]]:
-    return {c: {"room_tokens": tokens, "spent_tokens": spent} for c, (tokens, spent) in rooms.items()}
+def live_side_rooms(rooms: SideRooms, now: float) -> SideRooms:
+    """The side rooms published at most ``SIDE_ROOM_TTL_S`` before ``now`` (a clock that went
+    backwards keeps a room live)."""
+    return {r: room for r, room in rooms.items() if now - room[2] <= SIDE_ROOM_TTL_S}
 
 
-def charge_rooms(main: tuple[str | None, int | None, int], sides: SideRooms,
-                 charge: Callable[[int | None], int]) -> tuple[dict[str, Any] | None, SideRooms] | None:
-    """Charge every open room at once (D40): the main conversation's and each open side room.
+def side_rooms_record(rooms: SideRooms) -> dict[str, dict[str, Any]]:
+    return {r: {"room_tokens": tokens, "spent_tokens": spent, "published_at": at}
+            for r, (tokens, spent, at) in rooms.items()}
+
+
+def charge_rooms(main: tuple[str | None, int | None, int], sides: SideRooms, charge: Callable[[int | None], int]
+                 ) -> tuple[dict[str, Any] | None, SideRooms, str] | None:
+    """Charge every open room at once (D40): the main conversation's and each live side room.
 
     ``charge`` gets the tokens left (None when no room is open, which leaves the call unbudgeted)
     and returns the tokens it used, between 0 and what remained. A tool call cannot be attributed
     to the conversation that made it, and its result lands in that conversation's window only, so
     ``charge`` gets the smallest remaining room of them all and what it uses is counted against
-    every one. Then no conversation receives more than its own room,
-    however the calls of several conversations interleave. Returns (the updated main record, or
-    None when main has no room; the updated side rooms), or None when no room is open at all, which
-    leaves the call unbudgeted as before.
+    every one. Then no conversation with a live room receives more than that room, however the
+    calls of several conversations interleave. ``sides`` must hold live rooms only (see
+    ``live_side_rooms``). Returns (the updated main record, or None when main has no room; the
+    updated side rooms; ``"main"`` or ``"side"``, the room that limited the call, main on a tie), or
+    None when no room is open at all.
     """
     turn_id, room_tokens, spent = main
     published = turn_id is not None and room_tokens is not None
-    left = [max(0, t - s) for t, s in sides.values()]
-    if published:
-        left.append(max(0, room_tokens - spent))
+    side_left = min((max(0, t - s) for t, s, _ in sides.values()), default=None)
+    main_left = max(0, room_tokens - spent) if published else None
+    left = [x for x in (main_left, side_left) if x is not None]
     if not left:
         charge(None)
         return None
@@ -308,7 +326,8 @@ def charge_rooms(main: tuple[str | None, int | None, int], sides: SideRooms,
     if not isinstance(used, int) or isinstance(used, bool) or not 0 <= used <= remaining:
         raise ValueError(f"a turn-room charge must be between 0 and {remaining} tokens, not {used!r}")
     record = {"turn_id": turn_id, "room_tokens": room_tokens, "spent_tokens": spent + used} if published else None
-    return record, {c: (t, s + used) for c, (t, s) in sides.items()}
+    limited_by = "main" if main_left is not None and main_left == remaining else "side"
+    return record, {r: (t, s + used, at) for r, (t, s, at) in sides.items()}, limited_by
 
 
 class SessionNotFoundError(LookupError):
@@ -340,6 +359,7 @@ def redact(event: Any) -> Any:
 class SessionStore(LedgerOps):
     def __init__(self, home: Path, session_id: str) -> None:
         self.session_id = session_id
+        self.clock: Callable[[], float] = time.time  # side-room publish times and expiry (D40)
         self.dir = session_dir(home, session_id)
         self.pages_dir = self.dir / "pages"
         # Narrow an existing wide CONTEXTO_HOME and sessions/ too, not only directories we create.
@@ -398,51 +418,46 @@ class SessionStore(LedgerOps):
         results returned so far, so keeping the counter would charge them twice. The write takes
         meta.lock, so a racing charge lands either before the reset or against the new room.
 
-        This is the main conversation's room. A publish for a new turn id also closes every side
-        room (D40): the side conversations of the previous turn are over, and one that is not
-        reopens at its next response.
+        This is the main conversation's room; side rooms (D40) are left as they are.
         """
         turn_id = check_turn_room(turn_id, room_tokens)
         # B19: stamped with this request's sequence only if this request's set_retained persisted it.
         stamp = getattr(self, "_retained_stamp", None)
+        self._update_meta({"turn_room": {"turn_id": turn_id, "room_tokens": room_tokens, "spent_tokens": 0,
+                                         "seq": stamp}})
 
-        def change(meta: dict[str, Any]) -> dict[str, Any]:
-            updates: dict[str, Any] = {"turn_room": {"turn_id": turn_id, "room_tokens": room_tokens,
-                                                     "spent_tokens": 0, "seq": stamp}}
-            if read_turn_room(meta)[0] != turn_id and "side_rooms" in meta:
-                updates["side_rooms"] = {}
-            return updates
-
-        self._modify_meta(change)
-
-    def set_side_room(self, conversation: str, room_tokens: int | None) -> None:
-        """Open, replace, or (with None) close a side conversation's room (D40).
+    def set_side_room(self, room_id: str, room_tokens: int | None) -> None:
+        """Open, replace, or (with None) close one side room (D40).
 
         Lane A's engine calls this for a conversation that is not main when its response's real
         usage arrives: with the room ``bound - (input + output) - headroom_floor`` when the response
-        holds a tool call (or may), with None when it holds none. Like ``set_turn_room``, a publish
-        resets that room's spend, since its input already holds that conversation's own results; the
-        other rooms keep theirs. The write takes meta.lock, as charges do.
+        holds a client tool call (or may), with None when it holds none. The engine picks the room
+        id: the room its request continues, else a new one. Like ``set_turn_room``, a publish resets
+        that room's spend, since its input already holds its own results, and restarts its
+        ``SIDE_ROOM_TTL_S``; the other rooms keep theirs. Expired rooms are dropped on the way. The
+        write takes meta.lock, as charges do.
         """
-        conversation = check_conversation(conversation)
+        room_id = check_room_id(room_id)
         if room_tokens is not None:
             check_turn_room("side", room_tokens)
+        now = self.clock()
 
         def change(meta: dict[str, Any]) -> dict[str, Any] | None:
-            rooms = read_side_rooms(meta)
+            recorded = read_side_rooms(meta)
+            rooms = live_side_rooms(recorded, now)
             if room_tokens is None:
-                if conversation not in rooms:
-                    return None
-                del rooms[conversation]
+                rooms.pop(room_id, None)
             else:
-                rooms[conversation] = (room_tokens, 0)
-            return {"side_rooms": side_rooms_record(rooms)}
+                rooms[room_id] = (room_tokens, 0, now)
+            if rooms == recorded and "side_rooms" in meta:
+                return None
+            return {"side_rooms": side_rooms_record(rooms)} if rooms or "side_rooms" in meta else None
 
         self._modify_meta(change)
 
-    def side_rooms(self) -> SideRooms:
-        """The open side rooms: conversation -> (room tokens, tokens spent since its publish)."""
-        return read_side_rooms(self._meta())
+    def side_rooms(self) -> dict[str, tuple[int, int]]:
+        """The live side rooms: room id -> (room tokens, tokens spent since its publish)."""
+        return {r: (t, s) for r, (t, s, _) in live_side_rooms(read_side_rooms(self._meta()), self.clock()).items()}
 
     def set_retained(self, epoch: int, k: int, turns: list[dict[str, Any]]) -> None:
         """Snapshot the retained window for search (contract PR #125, lane A's A14 calls this once per request).
@@ -537,24 +552,31 @@ class SessionStore(LedgerOps):
         """(turn id, room tokens, tokens spent this turn); (None, None, 0) until the engine publishes."""
         return read_turn_room(self._meta())
 
-    def charge_turn_room(self, charge: Callable[[int | None], int]) -> None:
+    def charge_turn_room(self, charge: Callable[[int | None], int]) -> str | None:
         """Charge this turn's room atomically: ``charge`` runs while meta.lock is held.
 
         See ``charge_rooms``. Parallel tool calls serialize here, so together they never spend
-        more than the smallest open room, and each charge counts against every open room (D40).
+        more than the smallest open room, and each charge counts against every live room (D40);
+        expired side rooms are dropped. Returns the room that limited the call (``"main"`` or
+        ``"side"``), or None when no room is open.
         """
+        now = self.clock()
+        limited: list[str] = []
+
         def update(meta: dict[str, Any]) -> dict[str, Any] | None:
-            sides = read_side_rooms(meta)
-            result = charge_rooms(read_turn_room(meta), sides, charge)
+            recorded = read_side_rooms(meta)
+            result = charge_rooms(read_turn_room(meta), live_side_rooms(recorded, now), charge)
             if result is None:
-                return None
-            record, charged = result
-            updates: dict[str, Any] = {"side_rooms": side_rooms_record(charged)} if sides else {}
+                return {"side_rooms": {}} if recorded else None  # every side room had expired
+            record, charged, limited_by = result
+            limited.append(limited_by)
+            updates: dict[str, Any] = {"side_rooms": side_rooms_record(charged)} if recorded else {}
             if record is not None:
                 updates["turn_room"] = {**record, "seq": read_room_stamp(meta)}
-            return updates
+            return updates or None
 
         self._modify_meta(update)
+        return limited[0] if limited else None
 
     def _write_atomic(self, path: Path, data: bytes) -> None:
         """Write ``path`` privately and atomically: a fsynced temp file renamed into place."""

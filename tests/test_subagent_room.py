@@ -17,13 +17,21 @@ from http.server import ThreadingHTTPServer
 import pytest
 
 from contexto import mcp
-from contexto.proxy import ContextoProxy, UsageReader, _takes_keyword
+from contexto.proxy import ContextoProxy, StreamHold, UsageReader, _takes_keyword
 from contexto.rewrite import MESSAGES, Config, RewriteEngine
-from contexto.store import SessionStore
+from contexto.store import SIDE_ROOM_TTL_S, SessionStore
 from contexto.store.memory import MemoryStore
 
-from test_rewrite import conversation, request
-from test_stream_hold import DELTA, START, STOP, Upstream, read_with_times, text_block, tool_block
+from test_codex import call as codex_call
+from test_codex import history as codex_history
+from test_codex import lead as codex_lead
+from test_codex import output as codex_output
+from test_codex import prompt as codex_prompt
+from test_codex import request as codex_request
+from test_rewrite import assistant, conversation, request, tool_result, tool_use, user
+from test_stream_hold import DELTA, START, STOP, Upstream, ev, read_with_times, text_block, tool_block
+
+RESPONSES_PATH = "/v1/responses"
 
 BOUND, FLOOR = 150_000, 25_000
 CONFIG = Config(bound=BOUND, headroom_floor=FLOOR)
@@ -199,16 +207,44 @@ def test_closing_a_side_room_and_main_turns(kind, tmp_path):
     store.set_turn_room("3", 10_000)
     store.set_side_room("anthropic:a", 0)
     seen = []
-    store.charge_turn_room(lambda remaining: seen.append(remaining) or 0)
+    assert store.charge_turn_room(lambda remaining: seen.append(remaining) or 0) == "side"
     store.set_side_room("anthropic:a", None)  # A's response held no tool call
     store.set_side_room("anthropic:never", None)  # closing an unknown room is a no-op
-    store.charge_turn_room(lambda remaining: seen.append(remaining) or 0)
+    assert store.charge_turn_room(lambda remaining: seen.append(remaining) or 0) == "main"
     assert seen == [0, 10_000] and store.side_rooms() == {}
     store.set_side_room("anthropic:b", 2_000)
-    store.set_turn_room("3", 9_000)  # the same main turn keeps side rooms open
+    store.set_turn_room("3", 9_000)
+    store.set_turn_room("4", 9_000)  # main's turns leave side rooms alone: only expiry or their holder ends them
     assert store.side_rooms() == {"anthropic:b": (2_000, 0)}
-    store.set_turn_room("4", 9_000)  # a new main turn closes them
-    assert store.side_rooms() == {}
+
+
+class Clock:
+    def __init__(self, now: float = 1_000_000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_a_side_room_expires_unless_republished(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    store.clock = clock = Clock()
+    store.set_turn_room("3", 10_000)
+    store.set_side_room("anthropic:a", 1_000)
+    store.set_side_room("anthropic:b", 3_000)
+    clock.now += SIDE_ROOM_TTL_S - 1
+    store.set_side_room("anthropic:b", 3_000)  # B's next response restarts its time
+    seen = []
+    store.charge_turn_room(lambda remaining: seen.append(remaining) or 100)
+    assert seen == [1_000]  # A still bounds the call just inside its time
+    clock.now += 2
+    store.charge_turn_room(lambda remaining: seen.append(remaining) or 0)
+    assert seen[-1] == 2_900 and store.side_rooms() == {"anthropic:b": (3_000, 100)}  # A expired
+    clock.now += SIDE_ROOM_TTL_S + 1
+    assert store.charge_turn_room(lambda remaining: seen.append(remaining) or 0) == "main"
+    assert seen[-1] == 9_900 and store.side_rooms() == {}
+    if kind == "session":
+        assert json.loads((store.dir / "meta.json").read_text())["side_rooms"] == {}  # dropped on the write
 
 
 def test_side_rooms_alone_still_budget_a_call(kind, tmp_path):
@@ -233,8 +269,10 @@ def test_malformed_side_rooms_are_skipped(tmp_path):
     store = SessionStore(tmp_path, "s1")
     store.set_side_room("anthropic:good", 3_000)
     meta = json.loads((store.dir / "meta.json").read_text())
-    meta["side_rooms"].update({"bad1": "x", "bad2": {"room_tokens": "9"},
-                               "bad3": {"room_tokens": 5, "spent_tokens": -1}})
+    at = meta["side_rooms"]["anthropic:good"]["published_at"]
+    meta["side_rooms"].update({"bad1": "x", "bad2": {"room_tokens": "9", "published_at": at},
+                               "bad3": {"room_tokens": 5, "spent_tokens": -1, "published_at": at},
+                               "bad4": {"room_tokens": 5}, "bad5": {"room_tokens": 5, "published_at": True}})
     (store.dir / "meta.json").write_text(json.dumps(meta))
     assert store.side_rooms() == {"anthropic:good": (3_000, 0), "bad3": (5, 0)}
     meta["side_rooms"] = []
@@ -267,12 +305,21 @@ def test_only_side_conversations_publish_side_rooms_and_close_them_without_a_too
     engine(sub, {}, MESSAGES)
     assert store.sides == []  # no request-time side publish: no tool call can arrive before the response
     respond(engine, sub, 120_000, tool_calls=True)
-    [(key, room)] = store.sides
-    assert key.startswith("anthropic:") and room == room_for(120_000, 1_000)
-    respond(engine, sub, 120_000)  # unknown: treated as a tool call
-    assert store.sides[-1] == (key, room)
-    respond(engine, sub, 120_000, tool_calls=False)
-    assert store.sides[-1] == (key, None) and store.side_rooms() == {}
+    [(room_id, room)] = store.sides
+    assert room_id.startswith("anthropic:") and "#" in room_id and room == room_for(120_000, 1_000)
+    step = loop(sub, 1)
+    engine(step, {}, MESSAGES)
+    respond(engine, step, 121_000)  # unknown: treated as a tool call; the loop's next step keeps the room
+    assert store.sides[-1] == (room_id, room_for(121_000, 1_000))
+    done = loop(step, 2)
+    engine(done, {}, MESSAGES)
+    respond(engine, done, 122_000, tool_calls=False)
+    assert store.sides[-1] == (room_id, None) and store.side_rooms() == {}
+
+
+def loop(body, i):
+    """The tool loop's next request: the response's tool call and its result appended."""
+    return request(body["messages"] + [tool_use(i), tool_result(i)])
 
 
 def test_a_closed_side_room_no_longer_limits_main():
@@ -287,8 +334,75 @@ def test_a_closed_side_room_no_longer_limits_main():
     store.set_window(200_000, 2.0)
     pid = big_page(store)
     assert recall(store, pid)[1] == 0  # nothing fits the subagent's window
-    respond(engine, sub, 140_000, tool_calls=False)  # the subagent finished
+    done = loop(sub, 1)
+    engine(done, {}, MESSAGES)
+    respond(engine, done, 141_000, tool_calls=False)  # the subagent finished
     assert recall(store, pid)[1] > 0
+
+
+def test_twins_and_forks_get_their_own_rooms(kind, tmp_path):
+    """Two subagents with the same prompt share a conversation key. Each publish opens its own room,
+    a step of one replaces only one room, and a fork (the same history plus a new user line)
+    neither continues nor closes either."""
+    store = make_store(kind, tmp_path)
+    engine = RewriteEngine(store, config=CONFIG)
+    main = request(conversation("main", 3))
+    engine(main, {}, MESSAGES)
+    respond(engine, main, 20_000)
+    twin = request(conversation("same prompt", 1))
+    for usage in (120_000, 10_000):  # twin 1, then twin 2, with the same request
+        engine(twin, {}, MESSAGES)
+        respond(engine, twin, usage, tool_calls=True)
+    assert sorted(room for room, _ in store.side_rooms().values()) == [4_000, 114_000]
+    step = loop(twin, 1)
+    engine(step, {}, MESSAGES)
+    respond(engine, step, 50_000, tool_calls=True)  # one twin's next step replaces one room only
+    assert len(store.side_rooms()) == 2
+    fork = request(twin["messages"] + [assistant("so far"), user("summarize in one line")])
+    engine(fork, {}, MESSAGES)
+    respond(engine, fork, 3_000, 20, tool_calls=False)  # adds a turn start: continues neither twin
+    assert len(store.side_rooms()) == 2
+    done = loop(step, 2)
+    engine(done, {}, MESSAGES)
+    respond(engine, done, 51_000, tool_calls=False)  # that twin finishes: the other's room stays
+    assert len(store.side_rooms()) == 1
+
+
+def test_the_engine_forgets_expired_lineages(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    store.clock = clock = Clock()
+    engine = RewriteEngine(store, config=CONFIG)
+    main = request(conversation("main", 3))
+    sub = request(conversation("subagent", 1))
+    engine(main, {}, MESSAGES)
+    respond(engine, main, 20_000)
+    engine(sub, {}, MESSAGES)
+    respond(engine, sub, 50_000, tool_calls=True)
+    [first] = store.side_rooms()
+    clock.now += SIDE_ROOM_TTL_S + 1  # the subagent's step outlived its room
+    step = loop(sub, 1)
+    engine(step, {}, MESSAGES)
+    respond(engine, step, 51_000, tool_calls=True)
+    [second] = store.side_rooms()
+    assert second != first and len(engine._side_rooms) == 1
+
+
+def test_a_charge_records_which_room_limited_it(tmp_path):
+    store = SessionStore(tmp_path, "s1")
+    session(store)
+    pid = big_page(store)
+    events: list[dict] = []
+    real_log = store.log
+    store.log = lambda event: (events.append(event), real_log(event))  # type: ignore[method-assign]
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    line = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "contexto_recall", "arguments": {"page_id": pid}}})
+    server.handle_line(line)
+    for room_id in store.side_rooms():
+        store.set_side_room(room_id, None)
+    server.handle_line(line)
+    del store.log
+    assert [e.get("limited_by") for e in events if e.get("event") == "mcp_call"] == ["side", "main"]
 
 
 def test_a_side_room_store_failure_is_a_store_error():
@@ -339,6 +453,38 @@ def test_the_proxy_tells_observe_usage_whether_the_response_holds_a_tool_call(to
     assert seen == [expected]
 
 
+def responses_stream(*item_types: str) -> list[bytes]:
+    items = [{"type": t, "id": f"it_{i}"} for i, t in enumerate(item_types)]
+    return ([ev({"type": "response.created", "response": {"status": "in_progress"}})]
+            + [ev({"type": "response.output_item.added", "output_index": i, "item": item})
+               for i, item in enumerate(items)]
+            + [ev({"type": "response.completed",
+                   "response": {"status": "completed", "output": items,
+                                "usage": {"input_tokens": 10, "output_tokens": 2}}})])
+
+
+@pytest.mark.parametrize("items, expected", [
+    (("reasoning", "custom_tool_call"), True),  # Codex's own tools, Contexto's among them
+    (("function_call",), True),
+    (("web_search_call", "message"), False),  # hosted: the server ran it, no MCP call can follow
+    (("image_generation_call",), False),
+    (("web_search_call", "function_call"), True),  # a client call after a hosted one still counts
+    (("message",), False),
+])
+def test_codex_hosted_calls_do_not_count_as_tool_calls(tool_call_proxy, items, expected):
+    proxy, seen = tool_call_proxy
+    Upstream.stream = responses_stream(*items)
+    read_with_times(proxy, path="/v1/responses")
+    assert seen == [expected]
+
+
+def test_a_hosted_call_still_holds_the_stream():
+    hold = StreamHold("responses", lambda: None)
+    stream = responses_stream("web_search_call", "message")
+    assert hold.feed(stream[0]) == [stream[0]] and hold.feed(stream[1]) == []  # held from the hosted call
+    assert hold.holding and not hold.client_calls
+
+
 def test_a_stream_cut_mid_hold_still_reports_its_tool_call(tool_call_proxy):
     proxy, seen = tool_call_proxy
     Upstream.stream = [START, *tool_block(1)]  # no message_delta: released at end of stream
@@ -353,10 +499,32 @@ def test_without_a_hold_the_stop_reason_decides():
         reader.feed(json.dumps(body).encode())
         reader.finish()
         assert reader.tool_calls() is expected
-    responses = UsageReader("application/json", api="responses")
-    responses.feed(json.dumps({"usage": {"input_tokens": 5}, "status": "completed"}).encode())
-    responses.finish()
-    assert responses.tool_calls() is None  # Responses tool calls are seen by the hold only
+    for body, expected in (({}, None), ({"output": [{"type": "web_search_call"}]}, False),
+                           ({"output": [{"type": "message"}, {"type": "function_call"}]}, True)):
+        responses = UsageReader("application/json", api="responses")
+        responses.feed(json.dumps({"usage": {"input_tokens": 5}, "status": "completed", **body}).encode())
+        responses.finish()
+        assert responses.tool_calls() is expected
+
+
+def test_codex_side_conversations_get_side_rooms():
+    """The D40 path on the Responses dialect: a Codex side conversation opens its own room on a
+    client call and closes it at the loop's end."""
+    store = SideStore()
+    engine = RewriteEngine(store, config=CONFIG)
+    main = codex_request(codex_history(3) + [codex_prompt("main question")])
+    side = codex_request(codex_lead() + [codex_prompt("side task")])
+    engine(main, {}, RESPONSES_PATH)
+    engine.observe_usage(RESPONSES_PATH, {"input_tokens": 20_000, "output_tokens": 1_000}, main, tool_calls=True)
+    engine(side, {}, RESPONSES_PATH)
+    engine.observe_usage(RESPONSES_PATH, {"input_tokens": 120_000, "output_tokens": 1_000}, side, tool_calls=True)
+    [(room_id, room)] = store.sides
+    assert room_id.startswith("responses:") and room == room_for(120_000, 1_000)
+    step = codex_request(side["input"] + [codex_call(1), codex_output(1)])
+    engine(step, {}, RESPONSES_PATH)
+    engine.observe_usage(RESPONSES_PATH, {"input_tokens": 121_000, "output_tokens": 500}, step, tool_calls=False)
+    assert store.sides[-1] == (room_id, None) and store.side_rooms() == {}
+    assert store.turn_room()[0] is not None  # main's room is the usual one
 
 
 def test_only_callbacks_that_take_the_keyword_get_it():

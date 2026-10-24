@@ -103,8 +103,7 @@ def test_a_failed_room_publish_after_a_good_snapshot_never_matches_the_old_room(
     store = SessionStore(tmp_path, "s1")
     request(store)
     store.set_retained(2, 9, ENTRIES)  # the next request's snapshot, stamp 2
-    # set_turn_room writes through _modify_meta: it reads the old turn id under the lock (D40)
-    monkeypatch.setattr(store, "_modify_meta", lambda change: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(store, "_update_meta", lambda updates: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(OSError):
         store.set_turn_room("6", 10_000)
     assert store.retained()[2] == 2 and store.room_stamp() == 1  # the old room's stamp: mismatch
@@ -142,7 +141,7 @@ def test_snapshot_write_and_room_publish_both_fail_never_serves_the_previous_win
     monkeypatch.setattr(store, "_write_atomic", lambda path, data: (_ for _ in ()).throw(OSError("ENOSPC")))
     with pytest.raises(OSError):
         store.set_retained(2, 9, ENTRIES)  # request N: sequence bumped to 2, snapshot write fails
-    monkeypatch.setattr(store, "_modify_meta", lambda change: (_ for _ in ()).throw(OSError("ENOSPC")))
+    monkeypatch.setattr(store, "_update_meta", lambda updates: (_ for _ in ()).throw(OSError("ENOSPC")))
     with pytest.raises(OSError):
         store.set_turn_room("6", 10_000)  # and its room publish fails too: the room stays stamped 1
     assert store.retained_current() is None

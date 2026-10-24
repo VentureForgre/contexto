@@ -569,7 +569,9 @@ class Server:
 
         With no room published only the per-call limit applies. If the engine is present (it has
         recorded the window) but published no room, a ``turn_room_missing`` event makes the missed
-        publish visible.
+        publish visible. A budgeted call's ``mcp_call`` event also says which room bounded it
+        (``limited_by``: ``main`` or ``side``, D40), so a side room holding main's recall down shows
+        in the log.
         """
         window_tokens, ratio = self._window()
         ratio = min(ratio, MAX_CHARS_PER_TOKEN) if ratio else UNMEASURED_CHARS_PER_TOKEN
@@ -589,10 +591,9 @@ class Server:
             return used
 
         charge_turn_room = getattr(self.store, "charge_turn_room", None)
-        if callable(charge_turn_room):
-            charge_turn_room(charge)
-        else:
-            charge(None)
+        limited_by = charge_turn_room(charge) if callable(charge_turn_room) else charge(None)
+        if limited_by in ("main", "side") and out["budget"]["turn_budget"] != "unbudgeted":
+            out["budget"]["limited_by"] = limited_by  # D40: whose room bounded this call, content-free
         if out["budget"]["turn_budget"] == "unbudgeted" and window_tokens is not None:
             try:
                 self.store.log({"event": "turn_room_missing", "tool": tool})

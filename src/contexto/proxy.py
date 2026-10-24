@@ -33,9 +33,10 @@ the transform (it is callable) and its ``observe_usage`` method (lane A packet A
 callable returns (real-usage ``over_bound``, ``estimate_error``, rule 14 store failures) are written,
 reduced to scalars, on that request's log entry as ``usage_events``, and a real ``over_bound`` sets the
 entry's ``over_bound``; this is the only place they are logged (packet A2e). A callable that takes a
-``tool_calls`` keyword also gets whether the response holds a tool call (D40): from the stream hold
-when there is one (a hold started), else from a Messages ``stop_reason`` (``tool_use`` or not), else
-None for unknown. Calls to the
+``tool_calls`` keyword also gets whether the response holds a tool call the client runs (D40): from
+the stream hold when there is one (whether a client call started it; a hosted Responses call such
+as ``web_search_call`` holds the stream but does not count), else from a Messages ``stop_reason`` or
+a Responses ``output`` list, else None for unknown. Calls to the
 transform are serialized under a lock, so a stateful engine sees one request at a time.
 
 Byte stability: the transformed request is serialized deterministically (original key order,
@@ -87,6 +88,10 @@ RESPONSES_PATHS = frozenset({"/responses", "/v1/responses"})
 TRANSFORMED_PATHS = frozenset({MESSAGES_PATH, COUNT_TOKENS_PATH}) | RESPONSES_PATHS
 USAGE_FEEDBACK_PATHS = frozenset({MESSAGES_PATH}) | RESPONSES_PATHS
 RESPONSE_END_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
+# D40: Responses tool calls that the client runs. Every other ``*_call`` item (``web_search_call``,
+# ``image_generation_call``, ``file_search_call``, a hosted ``mcp_call``) runs on the server, never
+# reaches Contexto's MCP server, and does not open a side room; the stream hold still holds on it.
+CLIENT_CALL_TYPES = frozenset({"function_call", "custom_tool_call", "local_shell_call"})
 THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 UPSTREAM_TIMEOUT_S = 900
 STOP_DRAIN_S = 2.0  # how long stop() waits for in-flight requests to finish and log
@@ -337,6 +342,7 @@ class UsageReader:
         self.input_transformations: list[Any] | None = None
         self.end_event: str | None = None  # Responses stream: completed, incomplete, or failed
         self.ending: dict[str, str] = {}  # response_status, incomplete_reason, error_code, stop_reason, error_type
+        self.responses_client_calls: bool | None = None  # D40: from a Responses output list, when read
         self._buffer = bytearray()
         self._events = SSEEventSplitter()
         self._overflow = False
@@ -403,9 +409,12 @@ class UsageReader:
                 self._keep("stop_reason", payload["delta"].get("stop_reason"))
 
     def tool_calls(self) -> bool | None:
-        """Whether the response holds a tool call, from a Messages ``stop_reason`` (D40); None when the
-        response has none or is a Responses one (its tool calls are seen by the stream hold only)."""
-        reason = self.ending.get("stop_reason") if self.api != "responses" else None
+        """Whether the response holds a call the client runs (D40), for a response without a stream
+        hold: from a Messages ``stop_reason`` (``tool_use`` or not), from a Responses ``output`` list
+        (a ``CLIENT_CALL_TYPES`` item or not), else None for unknown."""
+        if self.api == "responses":
+            return self.responses_client_calls
+        reason = self.ending.get("stop_reason")
         return None if reason is None else reason == "tool_use"
 
     def end_fields(self) -> dict[str, str]:
@@ -422,6 +431,10 @@ class UsageReader:
             self.ending[key] = value if isinstance(value, str) and value in END_ALLOWLISTS[key] else "other"
 
     def _take_responses_end(self, response: dict[str, Any]) -> None:
+        output = response.get("output")
+        if isinstance(output, list):
+            self.responses_client_calls = any(isinstance(item, dict) and item.get("type") in CLIENT_CALL_TYPES
+                                              for item in output)
         self._keep("response_status", response.get("status"))
         if isinstance(response.get("incomplete_details"), dict):
             self._keep("incomplete_reason", response["incomplete_details"].get("reason"))
@@ -600,17 +613,22 @@ class StreamHold:
         self.holding = False
         self.triggered = False
         self.held_events = 0
+        self.client_calls = False  # D40: the response holds a call the client runs (see CLIENT_CALL_TYPES)
 
-    def _starts_hold(self, kind: str | None, raw: bytes) -> bool:
+    def _call(self, kind: str | None, raw: bytes) -> str | None:
+        """``"client"`` or ``"hosted"`` for an event that starts a tool call, else None."""
         if self.api == "responses":
             if kind != "response.output_item.added":
-                return False
+                return None
             item = _sse_payload(raw).get("item")
-            return isinstance(item, dict) and str(item.get("type", "")).endswith("_call")
+            item_type = str(item.get("type", "")) if isinstance(item, dict) else ""
+            if not item_type.endswith("_call"):
+                return None
+            return "client" if item_type in CLIENT_CALL_TYPES else "hosted"
         if kind != "content_block_start":
-            return False
+            return None
         block = _sse_payload(raw).get("content_block")
-        return isinstance(block, dict) and block.get("type") == "tool_use"
+        return "client" if isinstance(block, dict) and block.get("type") == "tool_use" else None
 
     def _is_trigger(self, kind: str | None) -> bool:
         return kind == "message_delta" if self.api == "messages" else kind in RESPONSE_END_EVENTS
@@ -629,8 +647,11 @@ class StreamHold:
             return self._release_untriggered() + [raw]
         if kind == "ping":
             return [raw]
-        if not self.holding and self._starts_hold(kind, raw):
-            self.holding = True
+        if kind in ("content_block_start", "response.output_item.added") and not self.client_calls:
+            call = self._call(kind, raw)
+            if call is not None:
+                self.holding = True  # any call holds the stream, hosted ones included
+                self.client_calls = call == "client"
         if self.holding:
             self.held.append(raw)
             self.held_events += 1
@@ -1026,7 +1047,7 @@ class _Handler(BaseHTTPRequestHandler):
                 observed = True
                 # Packet A2e: the returned events go on this request's entry, logged once with it.
                 usage_events = self._observe_usage(entry["path"], reader.usage, original,
-                                                   hold.holding if hold is not None else reader.tool_calls())
+                                                   hold.client_calls if hold is not None else reader.tool_calls())
                 if usage_events:
                     entry["usage_events"] = [_scalar_summary(e) for e in usage_events]
                     entry["over_bound"] = bool(entry.get("over_bound")) or any(bool(e.get("over_bound"))

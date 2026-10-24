@@ -68,10 +68,11 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   sequence that both of the request's room publishes carry. A failed write logs ``retained_stale``
   (not degraded mode). Only the main conversation publishes the room and the snapshot: the first one
   seen, replaced at a turn start only by a conversation with strictly more turn starts. Every other
-  conversation (a subagent, a side request) publishes its own side room at each response instead
-  (D40): ``set_side_room(key, bound - (input + output) - headroom_floor)`` when the response may hold
-  a tool call, ``set_side_room(key, None)`` when it holds none. A tool call is charged against the
-  smallest open room and counted against all of them, since the MCP server cannot tell which
+  conversation (a subagent, a side request) publishes a side room at each response instead (D40):
+  ``set_side_room(room_id, bound - (input + output) - headroom_floor)`` when the response may hold a
+  client tool call, ``set_side_room(room_id, None)`` when it holds none, where ``room_id`` is the
+  room the request continues (``_publish_side_room``) or a new one. A tool call is charged against
+  the smallest live room and counted against all of them, since the MCP server cannot tell which
   conversation made it.
 - Thinking (rule 2): retained messages that existed when the epoch was created lose their thinking and
   redacted-thinking blocks on every request; an assistant message left empty gets one text block
@@ -122,13 +123,16 @@ import bisect
 import hashlib
 import math
 import re
+import secrets
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, ClassVar, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json
-from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError
+from contexto.store import (SIDE_ROOM_TTL_S, KeyFileError, PageConflictError, PageNotFoundError,
+                            SessionNotFoundError)
 from contexto.store.ledger import LedgerError
 from contexto.store.render import render_page
 from contexto.tokens import TokenEstimator
@@ -155,7 +159,7 @@ class Store(Protocol):
     def window(self) -> tuple[int | None, float | None]: ...
     def window_model(self) -> str | None: ...
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None: ...
-    # Optional (D40): set_side_room(conversation, room_tokens | None); without it side rooms are not published.
+    # Optional (D40): set_side_room(room_id, room_tokens | None); without it side rooms are not published.
     def quarantine_page(self, page_id: str) -> Any: ...
     def set_retained(self, epoch: int, k: int, turns: list[dict]) -> None: ...  # lane B PR #128, contract PR #125
 
@@ -1552,6 +1556,8 @@ class RewriteEngine:
         self._resumed = False
         # Are Contexto's MCP tools reaching the main conversation? (contexto.toolcheck)
         self.tools = ToolCheck(self.store)
+        # D40: open side rooms by id -> (conversation key, message count, anchor hash, publish time)
+        self._side_rooms: dict[str, tuple[str, int, str, float]] = {}
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -1782,6 +1788,42 @@ class RewriteEngine:
         except STORE_FAILURES as error:
             events.append({"event": "retained_stale", "epoch": state.epoch, "error": type(error).__name__})
 
+    def _publish_side_room(self, calls: StoreCalls, key: str, messages: list[dict], dialect: Dialect,
+                           room: int | None) -> None:
+        """D40: open, replace, or close the side room of the request ``messages``.
+
+        Rooms are per request lineage, not per conversation key: two subagents launched with the same
+        prompt, or a side request that forks one, share a key but must not share a room. A request
+        continues a room when it extends that room's request (the same first ``n`` messages) and adds
+        no turn start, as a tool loop's next request does (its response and the tool results). It
+        replaces or closes only that room, the longest such lineage, and the oldest of equal ones (a
+        twin's room is left for the twin); a request that continues none opens a new room, or with
+        ``room`` None changes nothing. The lineage is kept in memory and forgotten once the room has
+        expired in the store (``SIDE_ROOM_TTL_S``)."""
+        token = _DIALECT.set(dialect)
+        try:
+            hashes = [message_hash(m) for m in messages]
+        finally:
+            _DIALECT.reset(token)
+        clock = getattr(self.store, "clock", None)  # the store's clock, which expires its rooms
+        now = clock() if callable(clock) else time.time()
+        self._side_rooms = {r: v for r, v in self._side_rooms.items() if now - v[3] <= SIDE_ROOM_TTL_S}
+        best: tuple[int, str] | None = None
+        for room_id, (owner, n, anchor, _) in self._side_rooms.items():
+            if (owner == key and n < len(messages) and (best is None or n > best[0])
+                    and anchor_hash(hashes[:n]) == anchor
+                    and not any(dialect.is_turn_start(m) for m in messages[n:])):
+                best = (n, room_id)
+        continued = best[1] if best else None
+        if room is None:
+            if continued is not None:
+                calls.set_side_room(continued, None)
+                del self._side_rooms[continued]
+            return
+        room_id = continued or f"{key}#{secrets.token_hex(4)}"
+        calls.set_side_room(room_id, room)
+        self._side_rooms[room_id] = (key, len(messages), anchor_hash(hashes), now)
+
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None) -> list[dict]:
         dialect = dialect_for(endpoint)
         # preamble() must see the same knobs as the request did
@@ -1805,10 +1847,11 @@ class RewriteEngine:
           last real input, and the estimate checks are left alone. ``over_bound`` and the room still
           use it, since they describe what the model received.
 
-        ``tool_calls`` (D40) says whether the response holds a tool call: True or False from the
-        proxy's stream hold or the response's stop reason, None when unknown (treated as True). The
-        main conversation publishes its room either way; any other conversation publishes its own
-        side room (``set_side_room``) when the response may hold a tool call and closes it when not.
+        ``tool_calls`` (D40) says whether the response holds a tool call the client runs: True or
+        False from the proxy's stream hold when there is one, else from the response's stop reason
+        or output list, None when unknown (treated as True). The main conversation publishes its room
+        either way; any other conversation publishes the side room of its request lineage
+        (``_publish_side_room``) when the response may hold a client call and closes it when not.
         """
         dialect = dialect_for(endpoint)
         if dialect is None or endpoint == COUNT_TOKENS:
@@ -1871,7 +1914,8 @@ class RewriteEngine:
                 elif callable(getattr(self.store, "set_side_room", None)):
                     # D40: this conversation's own room, from its own usage, for the tool calls this
                     # response releases; every call is charged against it and main's room alike.
-                    calls.set_side_room(key, None if tool_calls is False else self.turn_room(real + output))
+                    room = None if tool_calls is False else self.turn_room(real + output)
+                    self._publish_side_room(calls, key, messages, dialect, room)
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;
             # the next turn start retries it. The event reaches the log with the others, via the proxy.
