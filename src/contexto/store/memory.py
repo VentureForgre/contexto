@@ -10,14 +10,27 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from contexto.store import (PageConflictError, PageNotFoundError, SideRooms, charge_rooms, check_epoch, check_model,
-                             check_page_id, check_retained, check_room_id, check_turn_room, check_window,
-                             expired_side_room_events, live_side_rooms, redact)
+from contexto.store import (
+    PageConflictError,
+    PageNotFoundError,
+    SideRooms,
+    charge_rooms,
+    check_epoch,
+    check_model,
+    check_page_id,
+    check_retained,
+    check_room_id,
+    check_turn_room,
+    check_window,
+    expired_side_room_events,
+    live_side_rooms,
+    redact,
+)
 from contexto.store.ledger import MemoryLedger
-from contexto.store.recall import lists_identifiers
 from contexto.store.pages import build_page, current_stub, render_index, same_content, search_entry
-from contexto.store.search import rank
+from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
+from contexto.store.search import rank
 
 
 class MemoryStore(LedgerOps):

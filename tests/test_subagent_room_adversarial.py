@@ -20,7 +20,6 @@ import pytest
 
 from contexto.rewrite import MESSAGES, RewriteEngine
 from contexto.store import SIDE_ROOM_TTL_S, SessionStore
-
 from test_rewrite import assistant, conversation, request, tool_result, tool_use, user
 from test_subagent_room import CONFIG, Clock, big_page, recall, respond, room_for, session
 
@@ -306,7 +305,7 @@ def test_probe_pasted_notification_closes_a_running_agents_room(tmp_path):
 
 
 def test_probe_notification_for_another_id_and_one_twin_stopping(tmp_path):
-    from test_subagent_room import agent_call, launch_receipt, main_turn, idle_notification
+    from test_subagent_room import agent_call, idle_notification, launch_receipt, main_turn
     store, engine, main, clock = _bg(tmp_path)
     main, _ = main_turn(engine, main, agent_call("toolu_B", "subagent"), launch_receipt("toolu_B"))
     main, c1 = main_turn(engine, main, assistant("x"), idle_notification("toolu_B", "completed"))  # the twin stops
@@ -330,11 +329,11 @@ def _run2_open(tmp_path):
 
 
 def test_probe_measured_resume_late_notice(tmp_path):
-    from test_rewrite import tool_result, tool_use
     from test_subagent_room import loop_notification, main_turn, send_message
     store, engine, main = _run2_open(tmp_path)
     send = send_message("toolu_S")
-    send[0]["content"].append({"type": "tool_use", "id": "toolu_bash", "name": "Bash", "input": {"command": "sleep 30"}})
+    send[0]["content"].append({"type": "tool_use", "id": "toolu_bash", "name": "Bash",
+                               "input": {"command": "sleep 30"}})
     send[1]["content"].append({"type": "tool_result", "tool_use_id": "toolu_bash", "content": ""})
     main, closed = main_turn(engine, main, *send, loop_notification("toolu_A", "completed"))
     _, charged = recall(store, big_page(store))
@@ -356,8 +355,7 @@ def test_probe_hand_back_plus_notice_for_one_foreground_stop(tmp_path):
     """If a foreground agent's stop gives both a hand-back and a notice for the same Agent call, a
     resumed run 2 starts with two stops counted and its room closes at main's next request."""
     from test_rewrite import tool_result, tool_use
-    from test_subagent_room import (delegated, hand_back, loop_notification, main_turn, resumed_run,
-                                    send_message)
+    from test_subagent_room import delegated, hand_back, loop_notification, main_turn, resumed_run, send_message
     store = SessionStore(tmp_path, "s1")
     engine, main, clock = delegated(store, background=False)
     done = request(conversation("subagent", 1) + [tool_use("s"), tool_result("s")])

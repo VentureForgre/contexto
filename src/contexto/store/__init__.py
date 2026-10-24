@@ -47,12 +47,12 @@ from typing import Any
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
-from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.catalog import PageCatalog
+from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, current_stub, render_index, same_content
-from contexto.store.search import rank
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
+from contexto.store.search import rank
 
 __all__ = ["SessionStore", "PageConflictError", "PageNotFoundError", "KeyFileError", "SessionNotFoundError",
            "redact"]
@@ -835,7 +835,8 @@ class SessionStore(LedgerOps):
         source = self.pages_dir / f"{page_id}.json"
         quarantine = self.dir / "quarantine"
         private_dir(quarantine)
-        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + f"{time.time_ns() % 1_000_000_000:09d}Z"
+        now = time.time_ns()  # one reading, so names sort in call order across a second boundary
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now // 1_000_000_000)) + f"{now % 1_000_000_000:09d}Z"
         target = quarantine / f"{page_id}.{stamp}.{secrets.token_hex(4)}.json"
         try:
             os.rename(source, target)  # atomic on one filesystem; the unique name never overwrites

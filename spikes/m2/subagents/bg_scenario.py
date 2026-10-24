@@ -1,7 +1,6 @@
 """Main launches a foreground subagent, a background subagent, and a background Bash, then keeps
 working with foreground Bash calls so background completions arrive while it runs."""
 
-import json
 
 
 def texts(message):

@@ -21,7 +21,6 @@ from contexto.proxy import ContextoProxy, StreamHold, UsageReader, _takes_keywor
 from contexto.rewrite import MESSAGES, Config, RewriteEngine, agent_runs, first_prompt
 from contexto.store import SIDE_ROOM_TTL_S, SessionStore
 from contexto.store.memory import MemoryStore
-
 from test_codex import call as codex_call
 from test_codex import history as codex_history
 from test_codex import lead as codex_lead
