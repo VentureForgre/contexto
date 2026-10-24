@@ -1,6 +1,6 @@
 # Milestone 2: Contexto proxy (context virtual memory)
 
-Status: contract, implemented on main (released from v0.1.0; latest v0.4.0). Owner: intake.lead under D0. Date: 2026-10-16.
+Status: contract, implemented on main (released from v0.1.0; latest v0.5.1). Owner: intake.lead under D0. Date: 2026-10-16.
 Why this design: `docs/research/M0-recommendation.md`. Decisions D16 to D21.
 
 ## Outcome
@@ -23,7 +23,7 @@ same design after Claude Code works.
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
   stores or logs them.
-- - Upstream affinity (D36). The CLI's session signals reach upstream unchanged: Claude Code's
+- Upstream affinity (D36). The CLI's session signals reach upstream unchanged: Claude Code's
   `X-Claude-Code-Session-Id` header and `metadata.user_id`, Codex's `session-id` header and
   `prompt_cache_key`. When the upstream host name, IDNA-normalized, is not `anthropic.com`,
   `openai.com`, `chatgpt.com`, `openai.azure.com`, `services.ai.azure.com`, or a subdomain of one,

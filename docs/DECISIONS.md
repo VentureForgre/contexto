@@ -11,8 +11,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   The owner's one limit: nothing is published outside this repository (no PyPI, npm, Homebrew,
   public repos, or public posts). (Superseded in part by D42: the repository itself goes public;
   the rest of the limit stands.) Intake added two limits of its own: user-level Claude and Codex
-  configuration on the owner's machine is not changed, and heavy spend on the ChatGPT plan the
-  team's Codex seats use waits for the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
+  configuration on the owner's machine is not changed, and heavy spend on the team's Codex seats
+  waits for the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
   including the M0 brief's Q5 gate (see D12).
 
 ## Product direction
@@ -460,12 +460,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
   replica's next round-robin credential, so N replicas can bind one session N ways (reproduced by
   `TestSessionAffinityPerReplicaCacheSplitsSessionsAcrossReplicas` in the proposed CLIProxyAPI
   change, `sdk/cliproxy/auth/session_affinity_consistent_hash_test.go`). What changed: (1) on the
-  proxy, a CLIProxyAPI option proposed for upstream and not yet submitted there,
+  proxy, a CLIProxyAPI option proposed upstream (router-for-me/CLIProxyAPI#6954),
   `routing.session-affinity-consistent-hash`: each session is routed by rendezvous hashing of its
   root session id and each available credential id (the root when the request names it, otherwise
   the parent), so every replica picks the same credential with no shared state; a credential in
   cooldown moves only its own sessions, each to its next-ranked credential, and they return when it
-  recovers. It is not deployed. (2) In Contexto, the proxy adds `X-Session-Affinity: contexto-<key>`
+  recovers. It is deployed on the owner's proxy since 2026-10-24 (below). (2) In Contexto, the proxy adds `X-Session-Affinity: contexto-<key>`
   to every request whose upstream host name is not an Anthropic, OpenAI (including Azure OpenAI,
   `*.openai.azure.com`, and Azure AI Foundry, `*.services.ai.azure.com`), or ChatGPT host, unless
   the CLI sent one (contract, Stack). The host is IDNA-normalized first, as the socket layer does
@@ -510,7 +510,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
   from the same ingress); a shared binding store such as Redis (a new dependency and failure mode
   for the same result); an unsalted hash of the session id (rejected: a guessable name could be
   checked against the key); Contexto rewriting `X-Claude-Code-Session-Id` to its own key (rejected:
-  it changes a header the CLI owns and that upstream also reads).
+  it changes a header the CLI owns and that upstream also reads). Deployed on the owner's
+  CLIProxyAPI deployment on 2026-10-24, with `session-affinity` and the consistent-hash option on.
+  Verified for cache reuse on the owner's proxy on 2026-10-24, measured by the deployer (no record
+  of the run is in this repository): a 10-request byte-identical claude-haiku-5-5 series using one
+  affinity key gave 1 cache write, then 9 reads, all served by one credential across several
+  replicas (before: 3 writes). Not yet run: the `--observe-thinking` check for dropped thinking.
 - **D37. `contexto sessions prune` deletes whole sessions, dry run by default, and never one in
   use.** Intake, 2026-10-24, from the 2026-10-16 report that session folders grow without limit and
   could only be freed by deleting files by hand. Contract change: a new subcommand, a new store file,
@@ -634,6 +639,95 @@ the owner's delegation. Open decisions are listed at the end with the options an
   injected no context at all is not judged; whether Claude Code's subagent requests carry the
   environment message is not measured, and the check relies on the main conversation's first
   request coming before any subagent's.
+- **D39. The MCP server holds search text up to a budget, 64 MB by default: the newest pages as they
+  are, older pages compressed.** Assigned 2026-10-24 from the STATUS known limitation; the contract
+  change is recorded here for review, and the compressed tier was added on reviewer-2's measurement
+  in the PR #215 review. D34's page cache kept every page's folded text in the MCP server for the
+  life of the process, so a long session's server grew without limit (peak RSS 290 MB at 6,000
+  synthetic pages, 184 MiB of it text). What changed: (1) the server holds text for at most
+  `CONTEXTO_SEARCH_CACHE_MB` megabytes (1 MB = 1,048,576 bytes; default 64; `0` holds none), or
+  `contexto mcp --search-cache-mb`, which overrides it. `contexto run` passes the variable to the
+  server's environment for Claude Code and Codex when it is set (Codex starts MCP servers with a
+  restricted environment). An invalid variable is logged `search_cache_invalid` and the default
+  used: neither CLI reports an MCP server that fails to start, so refusing to start would silently
+  remove every Contexto tool. An invalid flag is a usage error; (2) the budget counts the bytes of
+  text held, as it is or compressed (zlib level 1). A page read during a search is held as it is;
+  while the held bytes exceed the budget, the oldest text held as it is, by (turn, id), is
+  compressed, and once none is left the oldest compressed text is let go. So a store whose
+  compressed text fits keeps every page, the newest as they are, and a larger store keeps its
+  newest pages compressed and reads the rest from their files at each search. A page that would be
+  compressed and then let go first (every held text is compressed and it is older than all of
+  them) is not held, so a search over a large store does not compress what it will drop, and
+  neither is a page larger than the budget even compressed, which would let every other text go
+  first (reviewer-1). When the
+  store's text does not fit the budget as it is (estimated from the listed pages' file sizes and the
+  text per file byte of the pages read so far), at most a quarter of the budget is held as it is:
+  text held as it is and compressed later leaves its memory with the allocator, and at 6,000 pages
+  peak RSS was 185 MB with no limit on that share, 145 MB with half, and 124 MB with a quarter,
+  with the same pages left uncompressed at the end (292). The quarter costs something when the
+  budget is raised above the store's compressed size but below its uncompressed size: part of the
+  budget stays unused and search is slower (reviewer-2, 128 MB on this store: 80 of 128 MiB held,
+  1,044 pages uncompressed instead of 3,337, 0.31 s instead of 0.25 s, for 140 MB of peak RSS
+  instead of 232). Without it peak RSS reached 1.8 times the budget, so the budget would not bound
+  memory. On this store zlib level 1 makes text 3.2
+  times smaller; compressing a 32 KB page takes about 137 us once, decompressing it 27 us per
+  search, against about 110 us to read, parse, and fold it again (reviewer-2's measurements). Not
+  LRU: every search reads every page (a word matches as a substring, so no index can skip a page),
+  in the same order, so with a store larger than the budget LRU would evict each page just before
+  the next search needed it and save no read; (3) `rank` takes a page at a time and keeps of it only
+  which words it holds, its length, and, for a match, its term counts, so a page read or
+  decompressed for a search is not held for the length of the query. Results are unchanged: each
+  word's page count, the average length, and the scores come from the same integers in the same
+  order. (D41 later dropped the length and the average length from `rank` and counts, for a match,
+  the texts holding each term; the page-at-a-time loop is unchanged.) Narrowing keeps D34's property that a query reads no page twice when no page holds every
+  word; when some page does, the pages that lacked an earlier word are read again for the
+  frequencies of the later words, except that a page just read is tested for every word at once
+  when the query has at most 6 words (a read costs about as much as 6 failing substring tests on a
+  32 KB page: 92 us against 15 us) or a match is already known. A page removed while a search runs
+  is left out whatever the budget: held text would still rank it and a read would not, so when a
+  listed file is gone at the end the search runs again on a new listing, up to 3 passes; if a page
+  is removed during each of them, the third pass's result is returned, and it can still depend on
+  the budget (reviewer-1). A page whose
+  id is not a string or whose turn is not an integer is damaged: it is logged `page_unreadable` and
+  left out, rather than breaking the ordering of every search (reviewer-1); (4) besides held text,
+  the server keeps each page's id, turn, and whether it holds only context blocks: 695 bytes per
+  page, and about 210 more for each held page (object headers and its heap item), outside the
+  budget (`tracemalloc`: 4.2 MB at 6,000 pages with budget 0, 5.4 MB beyond the 67.1 MB counted at
+  64 MB). It no longer keeps the page stub (2.4 KB per page), which only the index reads and the
+  server never builds; a process that builds the index reads it as before. Measured on the store
+  harness at 6,000 pages (`spikes/m2/scale/store/README.md`, `results/d39/`; before is main
+  18b9955): `quality.csv` is byte-identical before and after at 64 MB, unlimited, and 0, and every
+  stdio search reply has the same length; `tests/test_search_cache.py` compares budgets of 4 KB, an
+  eighth and a third of the text, and 0 with no budget and with a reference ranking on random
+  stores. Search (rare / common / multi-word) and peak RSS of the MCP child: before 0.100 / 0.174 /
+  0.243 s, 290 MB; at 64 MB 0.263 / 0.334 / 0.405 s, 134 MB (every page held, 292 as they are,
+  5,708 compressed); at 0 0.799 / 0.880 / 0.908 s, 47 MB; unlimited 0.100 / 0.171 / 0.246 s, 278
+  MB, so the rewritten ranking costs nothing when every page is held. Without the compressed tier
+  (this PR's first head, 8a96500) 64 MB gave 0.548 / 0.633 / 0.693 s at 129 MB: compression removes
+  about 64 percent of the time the budget added. The first search of a process takes 1.6 s at 64 MB
+  (0.8 s before), because it compresses most pages once. 64 MiB holds 2,085 of these pages as they
+  are (32.1 KB of folded text each, about 48M tokens of history), and about 3.2 times that
+  compressed; a 30M-token session (1,616 pages in `docs/research/M2-scale-30m.md`) is about 40 MiB
+  of text at this store's 1.4 bytes per token, so it is held as it is and searches as fast as
+  before. Options considered: LRU (rejected, above); every held page compressed (measured by
+  reviewer-2: 0.24 / 0.29 / 0.37 s for the whole store in 57.8 MiB; the newest pages as they are
+  save the decompression where the budget has room); compressed text with no cap (rejected: memory
+  still grows with the store); an exact prefilter that skips pages lacking a word's trigrams or
+  tokens (rejected: building it in Python took 0.7 ms per page, so 4 s more on a first search at
+  6,000 pages, and a per-page vocabulary string is 18 percent of the text on the synthetic pages,
+  more on real ones, held for every page, so it grows with the store); a per-term posting cache
+  (rejected by reviewer-2: it helps only queries that repeat a word, and a common word still needs
+  every page's counts); folded text written beside the pages for fast re-reads (rejected: a new
+  store file to keep consistent with quarantine and crashes, and about 75 percent more disk); a
+  larger default (not chosen: 64 MB, the size the task suggested, holds a 30M-token session as it
+  is and 6,000 synthetic pages compressed). Limitations: the budget bounds the text held between
+  searches, not the pages one search reads and renders to answer (up to 53, with no cap on their
+  size; D41 measured 18.5 MB of page JSON for one multi-word query at 3,000 real-size pages); the
+  3.2 ratio is from synthetic text and
+  real text is unmeasured; a store larger than the budget's compressed capacity reads every page
+  outside it at each search; the first search compresses what the budget keeps; raise the budget
+  when search time matters more than memory.
+
 - **D40. Each side conversation in a tool loop has its own recall room, and a tool call is charged
   against every open room.** Claude, 2026-10-24, under D0; contract change. Since v0.1.0 only the
   main conversation published a room, so a subagent's `contexto_recall` was charged against main's
@@ -768,95 +862,6 @@ the owner's delegation. Open decisions are listed at the end with the options an
   longer); closing only foreground agents' rooms (not chosen: in interactive mode every launch ran
   in the background, so it would close nothing, while a notification is direct evidence of a stop).
 
-- **D39. The MCP server holds search text up to a budget, 64 MB by default: the newest pages as they
-  are, older pages compressed.** Assigned 2026-10-24 from the STATUS known limitation; the contract
-  change is recorded here for review, and the compressed tier was added on reviewer-2's measurement
-  in the PR #215 review. D34's page cache kept every page's folded text in the MCP server for the
-  life of the process, so a long session's server grew without limit (peak RSS 290 MB at 6,000
-  synthetic pages, 184 MiB of it text). What changed: (1) the server holds text for at most
-  `CONTEXTO_SEARCH_CACHE_MB` megabytes (1 MB = 1,048,576 bytes; default 64; `0` holds none), or
-  `contexto mcp --search-cache-mb`, which overrides it. `contexto run` passes the variable to the
-  server's environment for Claude Code and Codex when it is set (Codex starts MCP servers with a
-  restricted environment). An invalid variable is logged `search_cache_invalid` and the default
-  used: neither CLI reports an MCP server that fails to start, so refusing to start would silently
-  remove every Contexto tool. An invalid flag is a usage error; (2) the budget counts the bytes of
-  text held, as it is or compressed (zlib level 1). A page read during a search is held as it is;
-  while the held bytes exceed the budget, the oldest text held as it is, by (turn, id), is
-  compressed, and once none is left the oldest compressed text is let go. So a store whose
-  compressed text fits keeps every page, the newest as they are, and a larger store keeps its
-  newest pages compressed and reads the rest from their files at each search. A page that would be
-  compressed and then let go first (every held text is compressed and it is older than all of
-  them) is not held, so a search over a large store does not compress what it will drop, and
-  neither is a page larger than the budget even compressed, which would let every other text go
-  first (reviewer-1). When the
-  store's text does not fit the budget as it is (estimated from the listed pages' file sizes and the
-  text per file byte of the pages read so far), at most a quarter of the budget is held as it is:
-  text held as it is and compressed later leaves its memory with the allocator, and at 6,000 pages
-  peak RSS was 185 MB with no limit on that share, 145 MB with half, and 124 MB with a quarter,
-  with the same pages left uncompressed at the end (292). The quarter costs something when the
-  budget is raised above the store's compressed size but below its uncompressed size: part of the
-  budget stays unused and search is slower (reviewer-2, 128 MB on this store: 80 of 128 MiB held,
-  1,044 pages uncompressed instead of 3,337, 0.31 s instead of 0.25 s, for 140 MB of peak RSS
-  instead of 232). Without it peak RSS reached 1.8 times the budget, so the budget would not bound
-  memory. On this store zlib level 1 makes text 3.2
-  times smaller; compressing a 32 KB page takes about 137 us once, decompressing it 27 us per
-  search, against about 110 us to read, parse, and fold it again (reviewer-2's measurements). Not
-  LRU: every search reads every page (a word matches as a substring, so no index can skip a page),
-  in the same order, so with a store larger than the budget LRU would evict each page just before
-  the next search needed it and save no read; (3) `rank` takes a page at a time and keeps of it only
-  which words it holds, its length, and, for a match, its term counts, so a page read or
-  decompressed for a search is not held for the length of the query. Results are unchanged: each
-  word's page count, the average length, and the scores come from the same integers in the same
-  order. (D41 later dropped the length and the average length from `rank` and counts, for a match,
-  the texts holding each term; the page-at-a-time loop is unchanged.) Narrowing keeps D34's property that a query reads no page twice when no page holds every
-  word; when some page does, the pages that lacked an earlier word are read again for the
-  frequencies of the later words, except that a page just read is tested for every word at once
-  when the query has at most 6 words (a read costs about as much as 6 failing substring tests on a
-  32 KB page: 92 us against 15 us) or a match is already known. A page removed while a search runs
-  is left out whatever the budget: held text would still rank it and a read would not, so when a
-  listed file is gone at the end the search runs again on a new listing, up to 3 passes; if a page
-  is removed during each of them, the third pass's result is returned, and it can still depend on
-  the budget (reviewer-1). A page whose
-  id is not a string or whose turn is not an integer is damaged: it is logged `page_unreadable` and
-  left out, rather than breaking the ordering of every search (reviewer-1); (4) besides held text,
-  the server keeps each page's id, turn, and whether it holds only context blocks: 695 bytes per
-  page, and about 210 more for each held page (object headers and its heap item), outside the
-  budget (`tracemalloc`: 4.2 MB at 6,000 pages with budget 0, 5.4 MB beyond the 67.1 MB counted at
-  64 MB). It no longer keeps the page stub (2.4 KB per page), which only the index reads and the
-  server never builds; a process that builds the index reads it as before. Measured on the store
-  harness at 6,000 pages (`spikes/m2/scale/store/README.md`, `results/d39/`; before is main
-  18b9955): `quality.csv` is byte-identical before and after at 64 MB, unlimited, and 0, and every
-  stdio search reply has the same length; `tests/test_search_cache.py` compares budgets of 4 KB, an
-  eighth and a third of the text, and 0 with no budget and with a reference ranking on random
-  stores. Search (rare / common / multi-word) and peak RSS of the MCP child: before 0.100 / 0.174 /
-  0.243 s, 290 MB; at 64 MB 0.263 / 0.334 / 0.405 s, 134 MB (every page held, 292 as they are,
-  5,708 compressed); at 0 0.799 / 0.880 / 0.908 s, 47 MB; unlimited 0.100 / 0.171 / 0.246 s, 278
-  MB, so the rewritten ranking costs nothing when every page is held. Without the compressed tier
-  (this PR's first head, 8a96500) 64 MB gave 0.548 / 0.633 / 0.693 s at 129 MB: compression removes
-  about 64 percent of the time the budget added. The first search of a process takes 1.6 s at 64 MB
-  (0.8 s before), because it compresses most pages once. 64 MiB holds 2,085 of these pages as they
-  are (32.1 KB of folded text each, about 48M tokens of history), and about 3.2 times that
-  compressed; a 30M-token session (1,616 pages in `docs/research/M2-scale-30m.md`) is about 40 MiB
-  of text at this store's 1.4 bytes per token, so it is held as it is and searches as fast as
-  before. Options considered: LRU (rejected, above); every held page compressed (measured by
-  reviewer-2: 0.24 / 0.29 / 0.37 s for the whole store in 57.8 MiB; the newest pages as they are
-  save the decompression where the budget has room); compressed text with no cap (rejected: memory
-  still grows with the store); an exact prefilter that skips pages lacking a word's trigrams or
-  tokens (rejected: building it in Python took 0.7 ms per page, so 4 s more on a first search at
-  6,000 pages, and a per-page vocabulary string is 18 percent of the text on the synthetic pages,
-  more on real ones, held for every page, so it grows with the store); a per-term posting cache
-  (rejected by reviewer-2: it helps only queries that repeat a word, and a common word still needs
-  every page's counts); folded text written beside the pages for fast re-reads (rejected: a new
-  store file to keep consistent with quarantine and crashes, and about 75 percent more disk); a
-  larger default (not chosen: 64 MB, the size the task suggested, holds a 30M-token session as it
-  is and 6,000 synthetic pages compressed). Limitations: the budget bounds the text held between
-  searches, not the pages one search reads and renders to answer (up to 53, with no cap on their
-  size; D41 measured 18.5 MB of page JSON for one multi-word query at 3,000 real-size pages); the
-  3.2 ratio is from synthetic text and
-  real text is unmeasured; a store larger than the budget's compressed capacity reads every page
-  outside it at each search; the first search compresses what the budget keeps; raise the budget
-  when search time matters more than memory.
-
 - **D41. Search counts a term once per text that holds it, at most 3 per page, and drops BM25's length
   term (b 0), so neither a long turn nor a dump that repeats a key buries the turn that states its
   current value.** The follow-up D34 (3) left open, zero spend, under the owner's 2026-10-18 approval
@@ -986,9 +991,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
   (Private status superseded by D42; the PR-only rules stand.)
-  The personal account's plan reports `free` through the API, and branch rules are unavailable
-  for private repos on that plan; the org is on Team. Ruleset 25202810: PR required, no force-push, no deletion, no bypass, 0 required
-  approvals because all seats share one GitHub account. Exact-head review by a reviewer seat is a
+  Branch rules for the private repository needed the org's plan. Ruleset 25202810: PR required,
+  no force-push, no deletion, no bypass, 0 required approvals because every agent posts from one
+  account. Exact-head review by a reviewer seat is a
   team rule.
 - **D14. Releases follow discord-cli's Conventional Commit versioning, adapted.** Owner request,
   intake design, 2026-10-15. Versions come from tags, so CI never commits to `main` (which the
@@ -1004,8 +1009,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   npm, Homebrew) yet. This supersedes D0's "no public repos" limit for this repository and the
   private-only wording in D13, D14, D29 and `RELEASING.md`.
   - **Scrub at `HEAD`.** Before publishing, tracked files were scrubbed: the owner's proxy
-    hostname, statements about the owner's own accounts, plan usage and the organization's
-    billing, and the self-hosted runner's machine name were replaced with neutral wording that
+    hostname, another private repository's name, statements about the owner's own accounts and
+    plans, and the self-hosted runner's machine name were replaced with neutral wording that
     keeps the technical content (which auth modes, headers and endpoints were measured, and how
     they behaved).
   - **Terms analysis removed on purpose.** The vendor terms quotes and the inferred terms reading
@@ -1016,14 +1021,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     the vendor's own CLI, and users follow their providers' terms for the credentials they use.
   - **History is not rewritten** (owner decision). Old commits, pull request diffs and pull request
     comments keep the proxy hostname, one home-directory path, the owner's commit email, the
-    runner's machine name and billing notes. A rewrite would need force pushes, which the ruleset
+    runner's machine name and notes on plans. A rewrite would need force pushes, which the ruleset
     forbids, and would still leave the pull request comments.
-  - **CI on fork pull requests.** CI runs every job on the organization's self-hosted runner, so
-    a fork pull request on a public repository could run code on it. When the repository goes
-    public, the Actions approval policy for fork pull requests is set to "require approval for all
-    external contributors" at the same moment. CI moves to GitHub-hosted runners in the CI pull
-    request. The organization's runner group stays open to public repositories because other
-    public repositories in the organization use it.
+  - **CI on fork pull requests.** Since #213, CI and Release run on GitHub-hosted runners, and
+    workflow runs on fork pull requests need approval for all external contributors.
 
 ## Open decisions
 
@@ -1047,8 +1048,10 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   CLIProxyAPI instance; logins live in CLIProxyAPI or the vendor's own CLI, never in Contexto;
   users follow their providers' terms).
 - **O5. First real release.** Settled by D29 (v0.1.0 after M2 acceptance).
-- **O6. Upstream affinity on the owner's proxy.** Resolved by D36 (a proposed consistent-hash
-  session affinity option for CLIProxyAPI, not deployed, and Contexto's `X-Session-Affinity`); kept
+- **O6. Upstream affinity on the owner's proxy.** Resolved by D36 (a consistent-hash session
+  affinity option for CLIProxyAPI, proposed upstream and deployed on the owner's proxy 2026-10-24,
+  and Contexto's `X-Session-Affinity`; verified for cache reuse, the dropped-thinking check has
+  not been run); kept
   here for its evidence. Measured: full cache misses with byte-identical
   prefixes (4 of 14 eligible throwaway calls) and thinking dropped on every request
   (`end_user_binding_mismatch`) through the owner's proxy. Lane 1's black-box test (L1-e,
@@ -1059,8 +1062,10 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   to reach an identity. Opus over 5 requests kept all thinking (inconclusive). At the time the fix
   was left to the owner, since intake did not touch the proxy (D11); D36's owner request covers the
   proxy-side work.
-- **O7. OpenRig context-usage clock bug.** Measured by lane 1: every seat's context usage reads
-  `stale_generation` because tenure boot times are stored in UTC without `Z` and parsed as local
-  time (UTC-5), blinding `rig ps`, `whoami`, and compaction planning for about 5 hours after boot.
-  Upstream OpenRig fix; not Contexto code. Owner decision whether to report it.
+- **O7. OpenRig context-usage clock bug.** Resolved upstream: OpenRig fixed it in its PR #124
+  (commit 4a920dba), first released in v0.6.1, so no report is needed. The host's OpenRig predates
+  v0.6.1; upgrading it is the owner's to do. Not Contexto code. Kept here for its evidence. Measured by
+  lane 1: every seat's context usage reads `stale_generation` because tenure boot times are stored
+  in UTC without `Z` and parsed as local time (UTC-5), blinding `rig ps`, `whoami`, and compaction
+  planning for about 5 hours after boot.
 
