@@ -462,7 +462,9 @@ What the numbers show:
 
 `scale_compare.py results/d41/before_spike results/d41/after_spike`, and the same for
 `calibration`. One timing pass each, run back to back, so latency is a rough guide (the D34 runs used
-3 passes). Quality is the same as `scale_length.py`'s.
+3 passes). Quality is the same as `scale_length.py`'s. The before runs' `env.json` says commit
+`unknown` because they ran from the archive of 4b87ec2; the after runs ran at fe39f7b, before a
+rebase onto `main` that changed nothing search reads.
 
 | pages | N | dialect | run | top 3 | latest | facts | value shown | search rare / common / multi, s | first search, s | MCP peak RSS MB |
 |---|---:|---|---|---:|---:|---:|---:|---|---:|---:|
