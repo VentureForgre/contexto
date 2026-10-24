@@ -62,3 +62,18 @@ Reviewer-2's 13-turn cases (detailed turns for `max_retries`; ok: turn 10, the c
 | fields b=0.75 | 13, 10, 6 | 13, 10, 6 | 13, 12, 10 | 13, 10, 4 | 4 |
 | fields b=0.3 | 13, 10, 6 | 13, 10, 6 | 13, 12, 10 | 13, 10, 4 | 4 |
 | floored b=0.75 | 13, 10, 6 | 13, 10, 6 | 13, 12, 10 | 13, 10, 4 | 4 |
+
+D34's two scenarios as main's tests state them (`scenario_about`, `scenario_equal`):
+
+| variant | a page about the query is shown | the newest of equal statements comes first |
+|---|---|---|
+| page b=0.75 | yes | yes |
+| page b=0.5 | yes | yes |
+| page b=0.3 | yes | yes |
+| page b=0 | yes | yes |
+| d41 | no | no |
+| cap3 | yes | yes |
+| texts b=0.75 | yes | yes |
+| fields b=0.75 | yes | yes |
+| fields b=0.3 | yes | yes |
+| floored b=0.75 | yes | yes |

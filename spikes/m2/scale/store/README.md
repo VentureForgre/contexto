@@ -444,10 +444,12 @@ uncompressed, measured earlier the same day.
 The D34 runs above could not test BM25's length discount: every synthetic page is 19,000 to 30,000
 tokens. Reviewer-2's 13-turn unit cases showed it can bury the long turn that states the current
 value under short older pages (`tests/test_search_rank.py`). D41 (`docs/DECISIONS.md`) drops the
-length term (BM25 with b 0) and counts a term once per text of the page that holds it. The first
-version of PR #216 dropped the length term alone; reviewer A then measured the case D34 rejected b 0
-for, old tool output that repeats a key, and per-text counting is the fix that measured best. What
-was added to measure it:
+length term (BM25 with b 0) and counts a term once per text of the page that holds it, at most 3
+per page. A text is one stub field (the prompt's first 200 characters, each tool name, each path) or
+one text of the turn: each text block, each string field of a tool input, each tool output. PR #216
+went through three versions: b 0 alone; then one count per text, after reviewer A measured the case
+D34 rejected b 0 for (old tool output that repeats a key); then the page cap of 3, chosen on a grid
+after A's second review built dumps that defeat per-text counting. What was added to measure it:
 
 - `scale_bench.py --page-sizes calibration` (and `scale_synth.calibrated_goal`) draws each turn's
   token goal from a lognormal fitted to `calibration.json`'s real turn sizes: mu is the log of the
@@ -470,14 +472,22 @@ was added to measure it:
   text by text (a text is one stub field or one text, tool input, or tool output): `texts` (length
   of the texts holding a query word, against its mean over the matches), `fields` (BM25F against
   the store's mean text length), and `floored` (the same BM25F with each text at least the mean).
-  It also runs reviewer-2's 13-turn cases under each. It holds every page's text (a search budget
-  above any store here, D39), so the prototypes can read each page's text ends.
+  It also runs reviewer-2's 13-turn cases and main's two original D34 scenarios ("a page about the
+  query", "the newest of equally relevant statements") under each. `--grid` runs each text's count
+  up to 1, 2, or 3 and the page's up to 2, 3, or no cap with the stub's repeats of the prompt and
+  paths dropped (the change reviewer A suggested; D41 measured it and kept the repeats), `--grid-full`
+  the same cells with them kept. It holds every page's text (a search budget above any store here,
+  D39), so the prototypes can read each page's text ends.
 - `scale_dumps.py` and `scale_dumps_gen.sh` are reviewer A's simulation from PR #216: sessions
   built only from this repository's own text (Reads of its files, `git log --stat`, and real
   `grep -rn KEY`, `grep -rn -C3 KEY`, and pytest tracebacks after changing the key or making it a
   string), where 1, 2, or 4 old dumps of a key come before the turn that states its new value and 0
   to 3 passing mentions follow it. "Loud": the dump turn's prompt and reply also name the key;
-  "quiet": only its command and output do. Its own docstring has the details.
+  "quiet": only its command and output do. `--adversarial` gives A's three sets built to defeat
+  per-text counting: `many_calls` (5, 10, or 20 `grep -n KEY file` calls in one turn),
+  `split_output` (one tool result in blocks of 5, 20, or 50 lines), `edits` (3, 6, or 12 Edits whose
+  strings name the key). `--variants-full` ranks the grid cells with the stub's repeats kept. Its own
+  docstring has the details. `scale_grid.py` prints the grid table from both outputs.
 
 Commands (this machine, M5 Pro; quality is deterministic, so load does not matter for it):
 
@@ -487,10 +497,16 @@ Commands (this machine, M5 Pro; quality is deterministic, so load does not matte
     --out results/d41/length/floor_0.002
 git worktree add /tmp/cx-dumps-repo 4d30c34      # the tree the dump sessions are made of
 spikes/m2/scale/store/scale_dumps_gen.sh /tmp/cx-dumps-repo /tmp/cx-dumps .venv/bin/python
-.venv/bin/python spikes/m2/scale/store/scale_dumps.py --repo /tmp/cx-dumps-repo --dumps /tmp/cx-dumps \
-    --trials 500 --seed 7 > results/d41/dumps/loud.md
-.venv/bin/python spikes/m2/scale/store/scale_dumps.py --repo /tmp/cx-dumps-repo --dumps /tmp/cx-dumps \
-    --trials 500 --seed 11 --quiet > results/d41/dumps/quiet.md
+D="--repo /tmp/cx-dumps-repo --dumps /tmp/cx-dumps"
+.venv/bin/python spikes/m2/scale/store/scale_dumps.py $D --trials 500 --seed 7 > results/d41/grid/dumps_loud.md
+.venv/bin/python spikes/m2/scale/store/scale_dumps.py $D --trials 500 --seed 11 --quiet > results/d41/grid/dumps_quiet.md
+.venv/bin/python spikes/m2/scale/store/scale_dumps.py $D --trials 300 --seed 21 --quiet --adversarial many_calls \
+    > results/d41/grid/dumps_many_calls.md    # seed 22 split_output, seed 23 edits
+# each of the five again with --variants-full, into dumps_*_full.md
+.venv/bin/python spikes/m2/scale/store/scale_length.py --grid --sizes 1000,3000,6000 --out results/d41/grid/probes
+.venv/bin/python spikes/m2/scale/store/scale_length.py --grid-full --sizes 1000,3000,6000 \
+    --out results/d41/grid/probes_full
+.venv/bin/python spikes/m2/scale/store/scale_grid.py results/d41/grid --full   # table_full.md; without --full, table.md
 # before: a `git archive` of main at 01cf3fe (D34's ranking with D39's 64 MB search budget), with
 # this branch's spikes/m2/scale/store/*.py copied in; after: this branch. Default budget in both.
 <before>/spikes/m2/scale/store/scale_bench.py --sizes 17,1000,3000,6000 --responses-sizes 1000 --passes 1 \
@@ -527,23 +543,37 @@ variant at 17 pages, where every variant scores 71 / 21 / 0. With the 0.2 percen
 | real | 1,000 | 56 / 20 / 0 / 27 | 60 / 21 / 0 / 27 | 57 / 21 / 0 / 27 | 60 / 21 / 0 / 27 |
 | real | 6,000 | 29 / 15 / 2 / 17 | 44 / 19 / 0 / 24 | 34 / 19 / 0 / 20 | 44 / 19 / 0 / 24 |
 
-### Old dumps that repeat a key (`results/d41/dumps/`)
+### The grid (`results/d41/grid/`)
 
-500 sessions each. Statement in detail / an old dump ranked above it / stale only:
+Stub repeats kept (`table_full.md`). The probes at 6,000 pages are top 3 / latest first / stale
+only; "probe rows below" counts the rows at 1,000, 3,000, and 6,000 on both models where a cell is
+lower than D41 at 0ff1bfe (text cap 1, no page cap) in any of the three. Stale only is per dump set:
+loud / quiet / many calls / split output / refactor, of 500, 500, 300, 300, 300.
 
-| sessions | D34 | `page b=0` (first D41) | `cap3` | D41 |
-|---|---|---|---|---|
-| loud, all | 300 / 272 / 171 | 305 / 339 / 195 | 316 / 260 / 184 | 316 / 260 / 184 |
-| quiet, all | 308 / 235 / 158 | 325 / 284 / 170 | 333 / 210 / 162 | 363 / 131 / 121 |
+| text cap, page cap | spike 6,000 | real 6,000 | probe rows below | 13-turn (of 4) | page about the query | newest of equal statements | stale only | sum |
+|---|---|---|---:|---:|---|---|---|---:|
+| 1, 2 | 58 / 20 / 0 | 58 / 20 / 0 | 2 | 4 | no | no | 184 / 120 / 103 / 98 / 109 | 614 |
+| **1, 3 (D41)** | **58 / 20 / 0** | **58 / 20 / 0** | **0** | **4** | **no** | **no** | **184 / 121 / 103 / 98 / 109** | **615** |
+| 1, none (0ff1bfe) | 58 / 20 / 0 | 58 / 20 / 0 | 0 | 4 | no | no | 184 / 121 / 113 / 99 / 116 | 633 |
+| 2, 2 | 57 / 19 / 0 | 57 / 19 / 0 | 6 | 4 | no | yes | 184 / 161 / 103 / 98 / 109 | 655 |
+| 2, 3 | 58 / 20 / 0 | 58 / 20 / 0 | 0 | 4 | no | yes | 184 / 162 / 103 / 98 / 109 | 656 |
+| 2, none | 58 / 20 / 0 | 58 / 20 / 0 | 0 | 4 | no | yes | 184 / 162 / 119 / 99 / 116 | 680 |
+| 3, 2 | 57 / 19 / 0 | 57 / 19 / 0 | 6 | 4 | no | yes | 184 / 161 / 103 / 98 / 109 | 655 |
+| 3, 3 | 58 / 20 / 0 | 58 / 20 / 0 | 0 | 4 | yes | yes | 184 / 162 / 103 / 98 / 109 | 656 |
+| 3, none | 58 / 20 / 0 | 58 / 20 / 0 | 0 | 4 | yes | yes | 184 / 162 / 119 / 103 / 116 | 684 |
+| D34 (b 0.75) | 56 / 20 / 0 | 53 / 17 / 3 | 4 | 1 | yes | yes | 171 / 158 / 127 / 125 / 143 | 724 |
 
-Statement in detail, by the statement's kind (loud; quiet):
+With the stub's repeats of the prompt and paths dropped (`table.md`), every cell is lower on 4 to 6
+probe rows (55 or 56 of 86 at 6,000 on both models, against 58), so D41 keeps them. Main's
+scenarios come out the same as
+with the repeats kept, and stale only sums to 614 to 716.
 
-| statement | D34 | `page b=0` | `cap3` | D41 |
-|---|---|---|---|---|
-| one-line reply (122; 132) | 64; 65 | 38; 44 | 38; 44 | 38; 61 |
-| Edit, key 4 times (118; 135) | 118; 135 | 117; 129 | 118; 135 | 118; 135 |
-| Edit, then pytest (122; 121) | 78; 76 | 112; 119 | 122; 121 | 122; 121 |
-| long output, then a one-line reply (138; 112) | 40; 32 | 38; 33 | 38; 33 | 38; 46 |
+Statement in detail / an old dump ranked above it / stale only, D34 then D41 (text cap 1, page cap
+3): loud 300 / 272 / 171 and 316 / 260 / 184; quiet 308 / 235 / 158 and 363 / 131 / 121; many calls
+173 / 195 / 127 and 197 / 153 / 103; split output 171 / 190 / 125 and 202 / 140 / 98; refactor
+157 / 205 / 143 and 191 / 151 / 109. One-line replies shown, D34 then D41: 64 and 38 of 122 (loud),
+65 and 61 of 132 (quiet), 37 and 28 of 85 (many calls), 27 and 20 of 74 (split output), 22 and 18
+of 68 (refactor). Edits and Edit-then-pytest statements are shown in every session under D41.
 
 What the numbers show:
 
@@ -551,53 +581,48 @@ What the numbers show:
   pages 3 changing-value queries show an older value in detail and not the latest. D41 shows none,
   has 5 more queries in the top 3 (58 against 53) and 3 more latest-first (20 against 17). No b
   above 0 beat b 0 on top 3 at any size (b 0.5 tied it at 6,000 spike-size pages, with latest first
-  21 against 20). Taking length text by text fixes the 13-turn cases but costs elsewhere: with
-  BM25F a text shorter than the mean is boosted, so one mention in a short line nearly saturates and
-  saying the word in 2 or 3 places stops counting; every query it loses against D41 is a static fact
-  whose plant says the query in more than one place (`bucket`, `backup`, `flag`, `on-call`,
-  `shard map`, `ticket`).
+  21 against 20). Taking length text by text fixes the 13-turn cases but costs elsewhere (BM25F
+  boosts short texts, so saying the word in 2 or 3 places stops counting).
 - Counting every occurrence with b 0 (the first D41) showed only a stale value more often than D34
-  in the dump sessions (195 against 171 loud, 170 against 158 quiet): a grep or log that repeats a
-  key 15 to 241 times outranked the reply that states the new value. Counting per text removes most
-  of that: quiet sessions are better than D34 overall (363 / 131 / 121 against 308 / 235 / 158) and
-  for every kind of statement but one-line replies (shown 61 against 65, stale only 60 against 48),
-  and Edits are never lost. A cap of 3 on the page's count fixes the Edits but not the one-line
-  replies; capping each text at 2 or 3 does no better than the page cap (quiet 333 / 201 / 162 and
-  333 / 210 / 162, a scratch run). Lower k1 or 1 + ln tf (reviewer A) fall to 55 of 86 at 6,000.
-- What is left: when the old turn's prompt and reply also name the key, it holds the key in 4 or 5
-  texts against a one-line reply's 1. While the reply is the newest mention it is always shown (the
-  newest-page place; 241 of 241 sessions with no later mention, every variant). Once a passing
-  mention follows it, that mention takes the place, and the reply is shown less often than under
-  D34: 69 against 88 of 125 loud sessions with one later mention, one-line replies 38 against 64 in
-  all, and stale only 184 against 171.
+  in the dump sessions (195 against 171 loud, 170 against 158 quiet). Counting per text removes most
+  of that; the page cap of 3 then holds the many-calls, split-output, and refactor dumps to 3 texts
+  (stale only 113 to 103, 99 to 98, 116 to 109) and costs nothing on the probes.
+- What is left: a reply that discusses a key at length in one text counts as one mention, so main's
+  two D34 scenarios now fail (tests pin the new outcome), and keeping them (text cap 3) costs 41
+  stale only in the quiet set. An old turn with the key in 3 or more texts still outranks a newer
+  one-line reply (1.57 against 1.5); once a passing mention follows that reply, the reply is shown
+  less often than under D34 in every set. Many separate tool calls are the shape that costs most.
 
 ### Before and after on the main harness (`results/d41/before_*`, `results/d41/after_*`)
 
 `scale_compare.py results/d41/before_spike results/d41/after_spike`, and the same for
-`calibration`. Before is main at 01cf3fe (D34's ranking, D39's search budget); after is this branch
-(2d247db in its `env.json`; the later commits change only docs, tests, and this harness).
-Both use D39's default 64 MB budget. One timing pass each, run back to back, so latency is a rough
-guide. The before runs' `env.json` says commit `unknown` because they ran from an archive.
+`calibration`. Before is main at cb1986f (D34's ranking, with D39's search budget and #209 and #213)
+from a `git archive` with this branch's `spikes/m2/scale/store/*.py` copied in, so its `env.json`
+says commit `unknown`; after is this branch at e87f148, the code commit of the final rule (text cap
+1, page cap 3); the commits after it change docs, tests, and this harness, not `src/`. Both use
+D39's default 64 MB budget. One timing pass each, run back to back, so latency is a rough guide.
 
 | pages | N | dialect | run | top 3 | latest | facts | value shown | search rare / common / multi, s | first search, s | MCP peak RSS MB |
 |---|---:|---|---|---:|---:|---:|---:|---|---:|---:|
-| spike | 1,000 | messages | before / after | 63 / 63 | 21 / 21 | 29 / 29 | 57 / 57 | 0.015 / 0.042 / 0.037, 0.015 / 0.030 / 0.037 | 0.124, 0.128 | 75, 75 |
-| spike | 3,000 | messages | before / after | 60 / 60 | 21 / 21 | 29 / 29 | 54 / 54 | 0.111 / 0.151 / 0.176, 0.111 / 0.124 / 0.178 | 0.704, 0.718 | 90, 90 |
-| spike | 6,000 | messages | before / after | 56 / 58 | 20 / 20 | 29 / 29 | 50 / 52 | 0.243 / 0.307 / 0.376, 0.244 / 0.255 / 0.377 | 1.511, 1.595 | 134, 134 |
-| spike | 1,000 | responses | before / after | 63 / 63 | 21 / 21 | 29 / 29 | 54 / 54 | 0.015 / 0.041 / 0.038, 0.016 / 0.034 / 0.037 | 0.136, 0.141 | 74, 74 |
-| real | 1,000 | messages | before / after | 61 / 63 | 20 / 21 | 29 / 29 | 55 / 57 | 0.011 / 0.040 / 0.023, 0.011 / 0.075 / 0.023 | 0.094, 0.104 | 64, 80 |
-| real | 3,000 | messages | before / after | 57 / 60 | 20 / 21 | 29 / 29 | 51 / 54 | 0.036 / 0.076 / 0.070, 0.035 / 0.125 / 0.071 | 0.276, 0.292 | 112, 147 |
-| real | 6,000 | messages | before / after | 53 / 58 | 17 / 20 | 28 / 29 | 47 / 52 | 0.162 / 0.232 / 0.233, 0.161 / 0.273 / 0.233 | 1.073, 1.114 | 112, 145 |
-| real | 1,000 | responses | before / after | 61 / 63 | 20 / 21 | 29 / 29 | 52 / 54 | 0.011 / 0.043 / 0.023, 0.012 / 0.087 / 0.023 | 0.103, 0.114 | 65, 78 |
+| spike | 1,000 | messages | before / after | 63 / 63 | 21 / 21 | 29 / 29 | 57 / 57 | 0.014 / 0.040 / 0.037, 0.014 / 0.024 / 0.037 | 0.117, 0.123 | 74, 74 |
+| spike | 3,000 | messages | before / after | 60 / 60 | 21 / 21 | 29 / 29 | 54 / 54 | 0.110 / 0.149 / 0.177, 0.110 / 0.108 / 0.176 | 0.678, 0.699 | 91, 90 |
+| spike | 6,000 | messages | before / after | 56 / 58 | 20 / 20 | 29 / 29 | 50 / 52 | 0.240 / 0.303 / 0.372, 0.240 / 0.222 / 0.372 | 1.447, 1.494 | 134, 134 |
+| spike | 1,000 | responses | before / after | 63 / 63 | 21 / 21 | 29 / 29 | 54 / 54 | 0.015 / 0.040 / 0.037, 0.015 / 0.027 / 0.037 | 0.130, 0.136 | 74, 74 |
+| real | 1,000 | messages | before / after | 61 / 63 | 20 / 21 | 29 / 29 | 55 / 57 | 0.011 / 0.037 / 0.022, 0.011 / 0.034 / 0.023 | 0.094, 0.096 | 65, 80 |
+| real | 3,000 | messages | before / after | 57 / 60 | 20 / 21 | 29 / 29 | 51 / 54 | 0.033 / 0.072 / 0.068, 0.034 / 0.042 / 0.070 | 0.268, 0.284 | 112, 142 |
+| real | 6,000 | messages | before / after | 53 / 58 | 17 / 20 | 28 / 29 | 47 / 52 | 0.159 / 0.231 / 0.230, 0.159 / 0.158 / 0.229 | 1.048, 1.100 | 112, 136 |
+| real | 1,000 | responses | before / after | 61 / 63 | 20 / 21 | 29 / 29 | 52 / 54 | 0.011 / 0.042 / 0.023, 0.011 / 0.039 / 0.023 | 0.102, 0.112 | 64, 79 |
 
-On real-size pages a word on every page (the common latency queries `self`, `return`, `import`)
-now ranks first the long pages whose texts hold it most, and `contexto_search` reads every page it
-shows (`get_page` for the 3 detailed and the 50 listed). At 3,000 real-size pages (in-process,
-scratch checks) the 53 pages shown are 11.8 to 13.3 MB of page JSON against 2.1 to 3.1 MB before,
-and `rank` itself is faster for these words (0.015 s against 0.047 for `self`), so the extra
-0.04 to 0.05 s and 16 to 35 MB of peak RSS come from reading and rendering those pages. D39's budget
-bounds the text held between searches, not these reads, so the two add. Rare and multi-word
-queries, the kind the probes use, are unchanged. `index_text` does not rank and is unchanged.
+Common-word search is faster than before: the page cap ties every page that holds a word on every
+page, so recency orders them and the 53 pages shown are the newest, not the longest (at 3,000
+real-size pages, in-process scratch checks, 2.0 to 3.3 MB of page JSON for `self`, `return`, and
+`import`, against 2.1 to 3.1 under D34). The higher peak RSS on real-size pages matches one
+multi-word query's reads: `failed with exit code` shows 18.5 MB of page JSON with a 28.1 MB allocation peak
+against 0.5 and 1.5 MB under D34, because with no length term the long pages that hold its common
+words in 3 or more texts are no longer pushed down. The other 8 latency queries allocate at most
+0.2 MB more than under D34, except `import` (5.8 against 5.2 MB). `contexto_search` reads and
+renders every page it shows (`get_page` for the 3 detailed and the 50 listed), with no cap on their size; D39's budget
+bounds the text held between searches, not these reads. `index_text` does not rank and is unchanged.
 
 ## Files
 
@@ -612,11 +637,12 @@ queries, the kind the probes use, are unchanged. `index_text` does not rank and 
   reviewer-2's 13-turn cases (D41).
 - `scale_dumps.py`, `scale_dumps_gen.sh`: reviewer A's sessions of old tool-output dumps that repeat
   a key, built from this repository's own text (D41).
+- `scale_grid.py`: the D41 grid table from `scale_length.py --grid` and `scale_dumps.py` outputs.
 - `test_scale_store.py`: fast checks of the helpers (about 0.5 s, part of the default suite).
 - `results/`: `stores.csv`, `latency.csv` (every call), `quality.csv` (every probe query), `df.csv`,
   `profile_3000.txt`, `env.json`, `summary.md`, `fts_*`, and `floor_0.002/`; `d34_before/` and
   `d34_after/` (with `d34_after/floor_0.002/` and `long_query.txt`) are the same outputs from the D34 runs;
   `d39/` holds the D39 runs at 6,000 pages (`before`, `after_64`, `after_64_uncompressed`, `unlimited`,
   `zero`, `long_query.txt`); `d41/` holds `length/` (with `floor_0.002/`) from `scale_length.py`,
-  `dumps/` from `scale_dumps.py`, and the D41 before and after runs of `scale_bench.py` for each
-  page-size model.
+  `grid/` from `scale_dumps.py`, `scale_length.py --grid` and `--grid-full`, and `scale_grid.py`, and the D41
+  before and after runs of `scale_bench.py` for each page-size model.
