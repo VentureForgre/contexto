@@ -8,21 +8,24 @@ the real turn sizes in ``calibration.json``, ``scale_synth.calibrated_goal``) an
 one store with ``scale_bench.build_store``, then runs every probe query of ``scale_probes`` through
 ``contexto_search`` in-process once per ranking variant:
 
-- ``page b=X``: D34's ``rank``, BM25 with the length of the whole page against the mean page length,
-  read from ``--d34-ref`` with ``git show`` so the comparison does not depend on the working tree;
-  ``page b=0.75`` is D34 as merged;
-- ``d41``: the working tree's ``rank`` (D41: BM25 with b 0, no length term), which ranks as
-  ``page b=0`` does;
-- ``texts b=X``: a prototype of the plain reading of D34's follow-up: BM25 with the length of the
-  page's texts that hold a query word, against the mean of that length over the matching pages;
-- ``fields b=X``: a BM25F prototype: each text's count discounted by that text's length against the
-  mean text length of the store, summed over the page's texts, then saturated;
+- ``page b=X``: D34's ``rank``, BM25 counting every occurrence, with the length of the whole page
+  against the mean page length, read from ``--d34-ref`` with ``git show`` so the comparison does not
+  depend on the working tree. ``page b=0.75`` is D34 as merged; ``page b=0`` is D41's first version
+  (PR #216 at 4d30c34: no length term, every occurrence counted);
+- ``d41``: the working tree's ``rank`` (D41: b 0, and a term counted once per text that holds it);
+- ``cap3``: ``page b=0`` with each page's count of a term capped at 3 (reviewer A's option on PR #216);
+- ``texts b=X``: the plain reading of D34's follow-up: BM25 with the length of the page's texts that
+  hold a query word, against the mean of that length over the matching pages;
+- ``fields b=X``: BM25F: each text's count discounted by that text's length against the mean text
+  length of the store, summed over the page's texts, then saturated;
 - ``floored b=X``: the same BM25F with each text's length counted as at least the mean, so a text is
   discounted for being long but never boosted for being short.
 
-A text is one stub field or one text, tool input, or tool output of the turn (``pages._texts``): the
-prototypes read entries that also carry where each text ends (``entry_with_ends``), which the
-working tree's search does not keep. It also runs reviewer-2's 13-turn cases from PR #204
+D41 rejected every variant but ``d41``: Contexto ranks only as ``d41`` does, and ``cap3``, ``texts``,
+``fields``, and ``floored`` exist only in this script, for the record. A text is one stub field or one
+text, tool input, or tool output of the turn (``pages._texts``). The prototypes read entries that also
+carry where each text ends (``entry_with_ends``); the working tree's search finds texts by
+``search.TEXT_SEP``, which ``entry_with_ends`` also joins them with. It also runs reviewer-2's 13-turn cases from PR #204
 (``tests/test_search_rank.py``) under each variant. Outputs (numbers only) go to ``--out``:
 ``quality.csv`` (every probe query, with the variant and page-size model) and ``summary.md``.
 """
@@ -64,8 +67,8 @@ import scale_bench  # noqa: E402
 
 D34_REF = "4b87ec2"  # main after PR #204 (D34)
 K1 = 1.2
-VARIANTS = (("page", 0.75), ("page", 0.5), ("page", 0.3), ("page", 0.0), ("d41", 0.0), ("texts", 0.75),
-            ("fields", 0.75), ("fields", 0.3), ("floored", 0.75))
+VARIANTS = (("page", 0.75), ("page", 0.5), ("page", 0.3), ("page", 0.0), ("d41", 0.0), ("cap3", 0.0),
+            ("texts", 0.75), ("fields", 0.75), ("fields", 0.3), ("floored", 0.75))
 
 
 def load_d34(ref: str) -> ModuleType:
@@ -96,8 +99,8 @@ class Entry(NamedTuple):
 
 
 def entry_with_ends(page: dict[str, Any]) -> Entry:
-    """The page's searchable text as search holds it (the same bytes as ``pages.search_entry``), with the
-    end of each text. Each field is folded on its own, which folds the same as folding them joined."""
+    """The page's searchable text as search holds it (the same bytes as ``pages.search_entry``: the texts
+    joined by ``search.TEXT_SEP``), with the end of each text."""
     stub = page["stub"]
     fields = [stub["user_text"], stub.get("system_text", ""), stub.get("reminder_text", ""), *stub["tools"],
               *stub["paths"], *_texts(page["messages"])]
@@ -106,7 +109,7 @@ def entry_with_ends(page: dict[str, Any]) -> Entry:
     for key in keys:
         end += 1 + len(key)
         ends.append(end)
-    return Entry(page["id"], page["turn"], b"\n".join(keys), is_context_page(page), ends)
+    return Entry(page["id"], page["turn"], search_now.TEXT_SEP.join(keys), is_context_page(page), ends)
 
 
 def term_counts(text: bytes, ends: Sequence[int], term: bytes) -> Iterator[tuple[int, int, int]]:
@@ -205,9 +208,24 @@ def rank_fields(entries: Sequence[Entry], query: str, b: float, floored: bool) -
     return _rank_with(entries, query, relevance)
 
 
+def rank_capped(entries: Sequence[Entry], query: str, cap: int) -> list[str]:
+    """BM25 with b 0 counting every occurrence, each page's count of a term capped at ``cap``."""
+    def relevance(i: int, idf: dict[bytes, float], phrase: bytes, phrase_on: dict[int, bool]) -> float:
+        total = 0.0
+        for term, weight in idf.items():
+            if term == phrase and not phrase_on[i]:
+                continue
+            tf = min(entries[i].text.count(term), cap)
+            total += weight * tf * (K1 + 1) / (tf + K1)
+        return total
+    return _rank_with(entries, query, relevance)
+
+
 def ranker(d34: ModuleType | None, kind: str, b: float) -> Callable[..., list[str]]:
     if kind == "d41":
         return search_now.rank
+    if kind == "cap3":
+        return lambda entries, query: rank_capped(entries, query, 3)
     if kind == "texts":
         return lambda entries, query: rank_texts(entries, query, b)
     if kind in ("fields", "floored"):
@@ -277,7 +295,7 @@ def residual_ok(shown: list[int]) -> bool:
 
 
 def variants_named() -> list[tuple[str, tuple[str, float]]]:
-    return [(kind if kind == "d41" else f"{kind} b={b:g}", (kind, b)) for kind, b in VARIANTS]
+    return [(kind if kind in ("d41", "cap3") else f"{kind} b={b:g}", (kind, b)) for kind, b in VARIANTS]
 
 
 def summarize(rows: list[dict[str, Any]], residuals: dict[str, list[list[int]]],
