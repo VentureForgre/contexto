@@ -19,6 +19,11 @@ compaction never fires, and accuracy equals full context.
 - Latest release: v0.4.0 (main 4b87ec2, 2026-10-18). See "In progress" and "What is left" below
   for the remaining work and the items that need the owner.
 - Tests on main (4b87ec2, v0.4.0): 1694 passed, 1 skipped on macOS, Python 3.12 (local run, 2026-10-24).
+- Two "flaky" tests (launcher Ctrl+C, proxy command) failed whenever pytest ran as a background
+  job, which starts with SIGINT ignored; fixed in the tests (PR #213), not a timing problem.
+- The proxy no longer makes a reverse hostname lookup at start; on a GitHub macOS runner it took
+  35 seconds per launch (PR #213, fix).
+- Ruff lint is enforced in CI (`uvx ruff@0.17.2 check .`); `ruff format` is not.
 
 ## Acceptance, live run #3 (main fbb1303, claude-haiku-5-5, bound 150,000, owner's proxy)
 
@@ -252,13 +257,12 @@ Measured candidates deliberately not pursued (each would need a live run or new 
 Needs the owner:
 - Upgrade OpenRig on the host from 0.5.15 to 0.6.1 or later to get the clock fix (O7, resolved
   below).
-- CI and releases run on the organization's self-hosted runner (labels `self-hosted`, `Linux`,
-  `X64`), one job at a time, until the CI pull request moves them to GitHub-hosted runners. The
-  runner group allows public repositories, so a public repository's pull requests could run code
-  on that runner. Decided (D42): when the repository goes public, the owner sets
-  "Require approval for all external contributors" for workflow runs on fork pull requests, and
-  CI moves to GitHub-hosted runners (the CI pull request is in progress). The org's runner group
-  stays as it is, because other public repositories in the org use it.
+- CI and releases run on GitHub-hosted runners (PR #213): Python 3.12 to 3.15 on Ubuntu, 3.12 and
+  3.15 on macOS, and Ruff lint. Workflow runs on fork pull requests need approval for all
+  external contributors (D42). The org's runner group stays as it is; this repository no longer
+  uses it.
+- Add a required status check for the `ci` job (GitHub Actions) to the main ruleset. Until then a
+  red `ci` does not block a merge; the rule is planned for right after PR #213 merges.
 - GitHub private vulnerability reporting, which `SECURITY.md` points to, is off; turn it on in
   the repository's security settings when the repository goes public (D42).
 

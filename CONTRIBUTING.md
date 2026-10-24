@@ -51,9 +51,9 @@ The suite runs on macOS and Linux. Windows is not supported (see the README's Pl
 CI (`.github/workflows/ci.yml`) runs on GitHub-hosted runners. The lint job runs `ruff check` with
 the rules in `pyproject.toml` and the Ruff version pinned in the workflow; run
 `uvx ruff@0.17.2 check .` before pushing. `ruff format` is not enforced. The test job runs
-`uv run --with pytest pytest` and `uv build` on Python 3.12, 3.13, 3.14, and 3.15 on Ubuntu, and on
-3.12 and 3.15 on macOS. The `ci` job is the one required check: it passes only when lint and every
-test job pass.
+`uv run --with pytest==9.1.1 pytest` (pytest pinned like Ruff) and `uv build` on Python 3.12, 3.13,
+3.14, and 3.15 on Ubuntu, and on 3.12 and 3.15 on macOS. The `ci` job is the one required check:
+it passes only when lint and every test job pass.
 
 ## Pull requests
 
