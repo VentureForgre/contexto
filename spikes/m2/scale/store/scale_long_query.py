@@ -4,9 +4,11 @@ Zero spend, synthetic. Pages are 6,000 words each drawn from a Zipf vocabulary o
 (about 35 KB folded), so a query sentence drawn from the same distribution holds common and rare
 words, as a pasted sentence does. Each query of 1 to 120 words is timed with one absent word last,
 with it first, and with every word as drawn. ``--before`` is the commit whose ``search.py`` is the
-before case (37fc926, the head reviewer-1 timed); the after case is the working tree.
+before case (37fc926, the head reviewer-1 timed; 4b87ec2 for D39, whose rank must return the same
+list); the after case is the working tree.
 
     .venv/bin/python spikes/m2/scale/store/scale_long_query.py > results/d34_after/long_query.txt
+    .venv/bin/python spikes/m2/scale/store/scale_long_query.py --before 4b87ec2 > results/d39/long_query.txt
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ def load_before(commit: str):
 def timed(rank, entries, query: str) -> tuple[float, int]:
     start = time.perf_counter()
     hits = rank(entries, query)
-    return time.perf_counter() - start, len(hits)
+    return time.perf_counter() - start, hits
 
 
 def main() -> None:
@@ -55,7 +57,10 @@ def main() -> None:
     vocab = [f"w{i}x" for i in range(50_000)]
     weights = [1 / (i + 1) for i in range(len(vocab))]
     texts = [after.fold(" ".join(rng.choices(vocab, weights, k=6_000))) for _ in range(args.pages)]
-    old = [(f"pg_{i}", i, t) for i, t in enumerate(texts)]
+    if hasattr(before, "SearchEntry"):  # D34 and later: the same entries, and the same ranking expected
+        old = [before.SearchEntry(f"pg_{i}", i, before.search_key(t), False) for i, t in enumerate(texts)]
+    else:
+        old = [(f"pg_{i}", i, t) for i, t in enumerate(texts)]
     new = [after.SearchEntry(f"pg_{i}", i, after.search_key(t), False) for i, t in enumerate(texts)]
     print(f"{args.pages} pages, {sum(map(len, texts)) / 1e6:.0f} MB folded; before {args.before}, after the "
           "working tree; seconds per call (hits)")
@@ -68,7 +73,9 @@ def main() -> None:
             q = " ".join(query)
             t_old, h_old = timed(before.rank, old, q)
             t_new, h_new = timed(after.rank, new, q)
-            assert h_old == h_new, (q, h_old, h_new)
+            same = h_old == h_new if hasattr(before, "SearchEntry") else len(h_old) == len(h_new)
+            assert same, q
+            h_old, h_new = len(h_old), len(h_new)
             print(f"| {words} | {where} | {t_old:.2f} ({h_old}) | {t_new:.2f} ({h_new}) |", flush=True)
 
 

@@ -60,7 +60,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from contexto.cliversions import launch_check
-from contexto.paths import contexto_home
+from contexto.paths import contexto_home, mcp_env
 from contexto.private import affinity_salt
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import SessionStore
@@ -239,7 +239,7 @@ def mcp_payload(session_id: str, home: Path) -> dict[str, Any]:
         "type": "stdio",
         "command": sys.executable,
         "args": ["-P", "-m", "contexto", "mcp", "--session", session_id],
-        "env": {"CONTEXTO_HOME": str(home)},
+        "env": mcp_env(home),
     }}}
 
 
