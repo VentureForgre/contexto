@@ -27,13 +27,13 @@ because model quality degrades as context grows. This run never steered Codex to
 - Spend for this packet: 351,842 tokens over 9 requests (turns 2 to 6), 351,463 input of which
   337,664 were cache reads, 379 output [measured]. Turn 1 was the seat's OpenRig onboarding
   (58,985 tokens, section 1), recorded separately; including it, the session's total is 410,827.
-  Both are on the owner's ChatGPT plan. Billed to the owner's ChatGPT plan by owner
-  decision (decision record on queue row `qitem-20261015224601-10ad09bd`).
+  Both ran on the seat's ChatGPT login by owner decision (decision record on queue row
+  `qitem-20261015224601-10ad09bd`).
 
 ## 1. Setup
 
 - **Seat:** `labcodex.subject` (session `labcodex-subject@contexto`), worktree
-  `contexto-worktrees/lab-codex`, `gpt-6-astra`, owner's ChatGPT login (owner decision recorded on
+  `contexto-worktrees/lab-codex`, `gpt-6-astra`, ChatGPT login (owner decision recorded on
   queue row `qitem-20261015224601-10ad09bd`). No proxy.
   No configuration, model, or auth was changed.
 - **Rollout location:** found through the file the seat's Codex process holds open
@@ -43,7 +43,7 @@ because model quality degrades as context grows. This run never steered Codex to
   - Turn 1 was the seat's OpenRig startup at 23:08:59Z, not part of this packet: at launch OpenRig
     delivered the seat's `role.md` and `startup/context.md`, and the seat ran `rig whoami` and
     oriented (attribution by intake, relayed by manager-1). It cost 58,985 tokens over 2 requests
-    on the owner's ChatGPT plan [measured: rollout `token_count`]. It is recorded as seat
+    on the seat's ChatGPT login [measured: rollout `token_count`]. It is recorded as seat
     onboarding overhead, separate from the lane 1 budget, and doubles as a measurement of what
     OpenRig onboarding costs on Codex: after onboarding, 32,331 tokens of context were already in
     use before the first lab task (turn 2) arrived.

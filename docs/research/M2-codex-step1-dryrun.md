@@ -7,7 +7,7 @@ acceptance 1 and 3.
 Everything ran against `spikes/m2/acceptance/codex_stub.py` on 127.0.0.1:
 - scratch HOME, CODEX_HOME and CONTEXTO_HOME;
 - codex-cli 0.154.0, `gpt-6-astra` pinned, bound 64,000, 20 KB turns, seed 20261016;
-- never the owner's ChatGPT login or `~/.codex`.
+- never a live ChatGPT login or the user's `~/.codex`.
 
 Numbers only; no transcripts.
 
