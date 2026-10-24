@@ -60,6 +60,7 @@ SIZES = (17, 100, 500, 1000, 3000, 6000)
 INDEX_BUDGET = 4_000  # rewrite.Config.index_budget
 WINDOW, BYTES_PER_TOKEN, MODEL = 110_000, 2.1, "claude-sonnet-5"  # recall limit then binds at 32,000 chars
 ROOM = 10**9  # a room that never runs out: the per-call limit binds, as in a turn with room left
+SEARCH_CACHE_MB: str | None = None  # --search-cache-mb: the MCP server's search text budget (D39); None, its default
 DETAILED = re.compile(r"^(pg_[0-9a-f]{16}) \(turn (\d+)\)$")
 LISTED = re.compile(r"^(pg_[0-9a-f]{16}) \(turn (\d+)\) @")
 NOT_SHOWN = re.compile(r"^\[(\d+) more matching pages not shown")
@@ -121,6 +122,9 @@ class McpChild:
 
     def __init__(self, home: Path, session: str) -> None:
         env = {**os.environ, "CONTEXTO_HOME": str(home), "PYTHONPATH": str(ROOT / "src")}
+        env.pop("CONTEXTO_SEARCH_CACHE_MB", None)
+        if SEARCH_CACHE_MB is not None:
+            env["CONTEXTO_SEARCH_CACHE_MB"] = SEARCH_CACHE_MB
         start = time.perf_counter()
         self.proc = subprocess.Popen([sys.executable, "-m", "contexto", "mcp", "--session", session],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -163,6 +167,10 @@ class McpChild:
 class InProcess:
     def __init__(self, home: Path, session: str) -> None:
         self.store = SessionStore(home, session)
+        if SEARCH_CACHE_MB is not None:
+            from contexto.store.catalog import text_budget_bytes
+
+            self.store.set_search_cache(text_budget_bytes(SEARCH_CACHE_MB))
         self.server = mcp.Server(self.store, io.StringIO(), io.StringIO())
         self.next_id = 0
 
@@ -417,12 +425,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--out", type=Path, default=HERE / "results")
     parser.add_argument("--keep", action="store_true", help="keep the stores (printed path)")
+    parser.add_argument("--search-cache-mb", default=None,
+                        help="the MCP server's search text budget in MB (D39; default: the server's own)")
     args = parser.parse_args(argv)
+    global SEARCH_CACHE_MB
+    SEARCH_CACHE_MB = args.search_cache_mb
     args.out.mkdir(parents=True, exist_ok=True)
     home = Path(tempfile.mkdtemp(prefix="contexto-scale-"))
     env = {"commit": git_head(), "python": platform.python_version(), "machine": platform.machine(),
            "platform": platform.platform(), "cpus": os.cpu_count(), "floor": args.floor, "seed": args.seed,
-           "passes": args.passes, "reps": args.reps, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+           "passes": args.passes, "reps": args.reps,
+           "search_cache_mb": args.search_cache_mb, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "uptime_start": subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()}
     plan = [(n, "messages") for n in args.sizes] + [(n, "responses") for n in args.responses_sizes]
     real = scale_synth.calibration()

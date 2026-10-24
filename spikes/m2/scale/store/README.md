@@ -374,6 +374,64 @@ What the numbers show:
   scan stops when none is left. A query whose every word is on nearly every page still costs one
   scan per word (3 such words: 0.75 s before and after).
 
+## After D39: the MCP server holds search text up to a budget (2026-10-24)
+
+D39 caps the page text the MCP server holds for search (`CONTEXTO_SEARCH_CACHE_MB`, default 64).
+It holds the newest pages' text; at each search it reads the other pages from their files and lets
+them go. The 6,000-page store (`stores.csv`: 254.7 MB on disk, 193 MB of folded text) was measured
+with the server's text budget at 64 MB (the default), unlimited (100,000 MB), and 0:
+
+```
+# before: origin/main 4b87ec2, from a `git archive` copy so the MCP children import that code
+python spikes/m2/scale/store/scale_bench.py --sizes 6000 --responses-sizes= --profile-n 0 --out results/d39/before
+# after: this branch, once per budget
+python spikes/m2/scale/store/scale_bench.py --sizes 6000 --responses-sizes= --profile-n 0 --out results/d39/after_64
+python spikes/m2/scale/store/scale_bench.py --sizes 6000 --responses-sizes= --profile-n 0 \
+    --search-cache-mb 100000 --out results/d39/unlimited
+python spikes/m2/scale/store/scale_bench.py --sizes 6000 --responses-sizes= --profile-n 0 \
+    --search-cache-mb 0 --out results/d39/zero
+python spikes/m2/scale/store/scale_compare.py results/d39/before results/d39/after_64
+```
+
+`--search-cache-mb` sets the budget of the MCP child (through the environment variable) and of the
+in-process server, which the quality pass uses. The four runs went one after another on the same
+machine, with other builders' test suites running (load1 3.9 to 6.3, in each `summary.md`).
+
+| Budget | search rare / common / multi, s | first search, s | index_text warm / cold, s | MCP peak RSS MB |
+|---|---|---:|---|---:|
+| before D39 (no cap) | 0.096 / 0.175 / 0.248 | 0.83 | 0.031 / 0.609 | 290 |
+| unlimited | 0.095 / 0.167 / 0.239 | 0.79 | 0.032 / 0.583 | 277 |
+| 64 MB (default) | 0.548 / 0.633 / 0.693 | 0.85 | 0.035 / 0.613 | 129 |
+| 0 | 0.718 / 0.839 / 0.876 | 0.78 | 0.040 / 0.613 | 45 |
+
+- Results are the same. `quality.csv` is byte-identical in all four runs (86 probe queries: the
+  outcome, the rank shown, the matching page count, and whether the value is shown), and all 270
+  search replies over stdio have the same length as before. The 30 recall rows differ only because
+  each run's store has its own key, so its own page ids. `tests/test_search_cache.py` checks the
+  same on random stores, against a reference ranking with no narrowing.
+- Memory. Peak RSS falls from 290 MB to 129 MB at the default budget and to 45 MB at 0. What the
+  server keeps per page besides text is its id, turn, and whether it holds only context blocks:
+  4.0 MB at 6,000 pages (672 bytes per page, `tracemalloc` after a search with budget 0). The page
+  stub (2.4 KB per page, 14 MB at 6,000) is no longer kept by the MCP server, which never builds the
+  index. The 64 MB run's peak is 84 MB above the 45 MB floor: the 64 MB of text and the allocator's
+  share of the pages read during each search.
+- Speed. A page outside the budget costs one file read, JSON parse, and fold per search, about
+  0.1 ms (92 to 117 us measured on this store), so search at 6,000 pages takes 0.55 to
+  0.69 s at 64 MB, where 1/3 of the text is held, and 0.72 to 0.88 s at 0, about what it took before
+  D34 (0.66 to 0.72 s). Unlimited matches before D34's cache within noise, so the rewritten ranking
+  pass costs nothing when every page is held. The first search of a process still reads every page
+  once. `index_text` runs in the proxy and does not change.
+- Where the default stops mattering. 64 MB holds about 2,000 of these pages (about 33 KB of folded
+  text each, 46M tokens of history). A 30M-token session (`docs/research/M2-scale-30m.md`: 1,616
+  pages) has at most 30M tokens paged, about 42 MB of folded text at this store's 1.4 bytes per
+  token, so it keeps every page's text and searches as fast as before. Raise the budget for a larger
+  store if search time matters more than memory.
+- Long queries (`results/d39/long_query.txt`, `scale_long_query.py --before 4b87ec2`, every page
+  held): the same results and the same times as main, 0.05 to 0.33 s with one word absent and up to
+  120 words. With pages outside the budget a query reads each of them once, and a second time only
+  if some page matches, the query has more than 6 words, and the page came before the first match
+  in the listing (a page just read is tested for every word at once otherwise).
+
 ## Files
 
 - `scale_bench.py`: the harness (store build, stdio and in-process timing, quality, profile, summary).
@@ -381,9 +439,10 @@ What the numbers show:
 - `scale_probes.py`: the 30 facts, 86 probe queries, and 9 latency queries (fixed).
 - `scale_calibrate.py`, `calibration.json`: real-turn query frequencies and turn sizes (numbers only).
 - `scale_fts_proto.py`: the text-cache, FTS5 trigram, and BM25 prototypes.
-- `scale_compare.py`: the before and after table of D34 from two result directories.
+- `scale_compare.py`: the before and after table of D34 (and D39) from two result directories.
 - `scale_long_query.py`: `rank` before and after word-by-word narrowing, on queries of 1 to 120 words.
 - `test_scale_store.py`: fast checks of the helpers (about 0.5 s, part of the default suite).
 - `results/`: `stores.csv`, `latency.csv` (every call), `quality.csv` (every probe query), `df.csv`,
   `profile_3000.txt`, `env.json`, `summary.md`, `fts_*`, and `floor_0.002/`; `d34_before/` and
-  `d34_after/` (with `d34_after/floor_0.002/` and `long_query.txt`) are the same outputs from the D34 runs.
+  `d34_after/` (with `d34_after/floor_0.002/` and `long_query.txt`) are the same outputs from the D34 runs;
+  `d39/` holds the D39 runs at 6,000 pages (`before`, `after_64`, `unlimited`, `zero`, `long_query.txt`).
