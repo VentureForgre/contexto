@@ -1,0 +1,322 @@
+n,dialect,pass,load1,mode,kind,query,rep,seconds,chars
+6000,messages,1,10.93,stdio,startup,initialize,0,0.087603,0
+6000,messages,1,10.93,stdio,rare,E4127,0,1.140730,562
+6000,messages,1,10.93,stdio,rare,E4127,1,1.163163,562
+6000,messages,1,10.93,stdio,rare,E4127,2,1.105990,562
+6000,messages,1,10.93,stdio,rare,E4127,3,1.050352,562
+6000,messages,1,10.93,stdio,rare,E4127,4,0.951851,562
+6000,messages,1,10.93,stdio,rare,SUP-48213,0,0.904120,445
+6000,messages,1,10.93,stdio,rare,SUP-48213,1,0.907945,445
+6000,messages,1,10.93,stdio,rare,SUP-48213,2,1.265544,445
+6000,messages,1,10.93,stdio,rare,SUP-48213,3,1.329295,445
+6000,messages,1,10.93,stdio,rare,SUP-48213,4,1.103739,445
+6000,messages,1,10.93,stdio,rare,ctx-artifacts-euw3-7f2a,0,1.315458,536
+6000,messages,1,10.93,stdio,rare,ctx-artifacts-euw3-7f2a,1,1.115716,536
+6000,messages,1,10.93,stdio,rare,ctx-artifacts-euw3-7f2a,2,1.213357,536
+6000,messages,1,10.93,stdio,rare,ctx-artifacts-euw3-7f2a,3,1.086604,536
+6000,messages,1,10.93,stdio,rare,ctx-artifacts-euw3-7f2a,4,0.797988,536
+6000,messages,1,10.93,stdio,common,self,0,0.944750,4499
+6000,messages,1,10.93,stdio,common,self,1,0.920720,4499
+6000,messages,1,10.93,stdio,common,self,2,0.946282,4499
+6000,messages,1,10.93,stdio,common,self,3,0.930812,4499
+6000,messages,1,10.93,stdio,common,self,4,0.973928,4499
+6000,messages,1,10.93,stdio,common,return,0,0.956861,4823
+6000,messages,1,10.93,stdio,common,return,1,0.907728,4823
+6000,messages,1,10.93,stdio,common,return,2,0.879689,4823
+6000,messages,1,10.93,stdio,common,return,3,0.873706,4823
+6000,messages,1,10.93,stdio,common,return,4,0.926424,4823
+6000,messages,1,10.93,stdio,common,import,0,0.876944,4431
+6000,messages,1,10.93,stdio,common,import,1,0.932671,4431
+6000,messages,1,10.93,stdio,common,import,2,0.916077,4431
+6000,messages,1,10.93,stdio,common,import,3,0.908252,4431
+6000,messages,1,10.93,stdio,common,import,4,0.885246,4431
+6000,messages,1,10.93,stdio,multi,the staging DB port,0,0.963778,1569
+6000,messages,1,10.93,stdio,multi,the staging DB port,1,0.974584,1569
+6000,messages,1,10.93,stdio,multi,the staging DB port,2,0.949490,1569
+6000,messages,1,10.93,stdio,multi,the staging DB port,3,0.933104,1569
+6000,messages,1,10.93,stdio,multi,the staging DB port,4,0.938857,1569
+6000,messages,1,10.93,stdio,multi,failed with exit code,0,1.068064,3571
+6000,messages,1,10.93,stdio,multi,failed with exit code,1,1.055638,3571
+6000,messages,1,10.93,stdio,multi,failed with exit code,2,1.085462,3571
+6000,messages,1,10.93,stdio,multi,failed with exit code,3,1.064533,3571
+6000,messages,1,10.93,stdio,multi,failed with exit code,4,1.048017,3571
+6000,messages,1,10.93,stdio,multi,Renamed parse_header to,0,0.870052,410
+6000,messages,1,10.93,stdio,multi,Renamed parse_header to,1,0.848962,410
+6000,messages,1,10.93,stdio,multi,Renamed parse_header to,2,0.841693,410
+6000,messages,1,10.93,stdio,multi,Renamed parse_header to,3,0.832935,410
+6000,messages,1,10.93,stdio,multi,Renamed parse_header to,4,0.838329,410
+6000,messages,1,10.93,stdio,recall,pg_d01edbf409864ca1,0,0.000715,32132
+6000,messages,1,10.93,stdio,recall,pg_d01edbf409864ca1,1,0.000586,32132
+6000,messages,1,10.93,stdio,recall,pg_d01edbf409864ca1,2,0.000523,32132
+6000,messages,1,10.93,stdio,recall,pg_d01edbf409864ca1,3,0.000525,32132
+6000,messages,1,10.93,stdio,recall,pg_d01edbf409864ca1,4,0.000498,32132
+6000,messages,1,10.93,stdio,peak_rss,,0,,47349760
+6000,messages,1,10.93,inproc,rare,E4127,0,0.789771,562
+6000,messages,1,10.93,inproc,rare,E4127,1,0.809632,562
+6000,messages,1,10.93,inproc,rare,E4127,2,0.793549,562
+6000,messages,1,10.93,inproc,rare,E4127,3,0.792817,562
+6000,messages,1,10.93,inproc,rare,E4127,4,0.796938,562
+6000,messages,1,10.93,inproc,rare,SUP-48213,0,0.761707,445
+6000,messages,1,10.93,inproc,rare,SUP-48213,1,0.762086,445
+6000,messages,1,10.93,inproc,rare,SUP-48213,2,0.777731,445
+6000,messages,1,10.93,inproc,rare,SUP-48213,3,0.781551,445
+6000,messages,1,10.93,inproc,rare,SUP-48213,4,0.765308,445
+6000,messages,1,10.93,inproc,rare,ctx-artifacts-euw3-7f2a,0,0.746659,536
+6000,messages,1,10.93,inproc,rare,ctx-artifacts-euw3-7f2a,1,0.763269,536
+6000,messages,1,10.93,inproc,rare,ctx-artifacts-euw3-7f2a,2,0.764621,536
+6000,messages,1,10.93,inproc,rare,ctx-artifacts-euw3-7f2a,3,0.735046,536
+6000,messages,1,10.93,inproc,rare,ctx-artifacts-euw3-7f2a,4,0.782974,536
+6000,messages,1,10.93,inproc,common,self,0,0.868923,4499
+6000,messages,1,10.93,inproc,common,self,1,0.872818,4499
+6000,messages,1,10.93,inproc,common,self,2,0.866892,4499
+6000,messages,1,10.93,inproc,common,self,3,0.884094,4499
+6000,messages,1,10.93,inproc,common,self,4,0.875603,4499
+6000,messages,1,10.93,inproc,common,return,0,0.823743,4823
+6000,messages,1,10.93,inproc,common,return,1,0.837562,4823
+6000,messages,1,10.93,inproc,common,return,2,0.823139,4823
+6000,messages,1,10.93,inproc,common,return,3,0.824570,4823
+6000,messages,1,10.93,inproc,common,return,4,0.829920,4823
+6000,messages,1,10.93,inproc,common,import,0,0.836019,4431
+6000,messages,1,10.93,inproc,common,import,1,0.846686,4431
+6000,messages,1,10.93,inproc,common,import,2,0.858472,4431
+6000,messages,1,10.93,inproc,common,import,3,0.873871,4431
+6000,messages,1,10.93,inproc,common,import,4,0.888276,4431
+6000,messages,1,10.93,inproc,multi,the staging DB port,0,0.925961,1569
+6000,messages,1,10.93,inproc,multi,the staging DB port,1,0.929083,1569
+6000,messages,1,10.93,inproc,multi,the staging DB port,2,0.889825,1569
+6000,messages,1,10.93,inproc,multi,the staging DB port,3,0.902654,1569
+6000,messages,1,10.93,inproc,multi,the staging DB port,4,0.894958,1569
+6000,messages,1,10.93,inproc,multi,failed with exit code,0,1.024903,3571
+6000,messages,1,10.93,inproc,multi,failed with exit code,1,1.036752,3571
+6000,messages,1,10.93,inproc,multi,failed with exit code,2,1.080740,3571
+6000,messages,1,10.93,inproc,multi,failed with exit code,3,1.077484,3571
+6000,messages,1,10.93,inproc,multi,failed with exit code,4,1.081853,3571
+6000,messages,1,10.93,inproc,multi,Renamed parse_header to,0,0.873282,410
+6000,messages,1,10.93,inproc,multi,Renamed parse_header to,1,0.860089,410
+6000,messages,1,10.93,inproc,multi,Renamed parse_header to,2,0.816993,410
+6000,messages,1,10.93,inproc,multi,Renamed parse_header to,3,0.834298,410
+6000,messages,1,10.93,inproc,multi,Renamed parse_header to,4,0.831556,410
+6000,messages,1,10.93,inproc,recall,pg_d01edbf409864ca1,0,0.000460,32132
+6000,messages,1,10.93,inproc,recall,pg_d01edbf409864ca1,1,0.000472,32132
+6000,messages,1,10.93,inproc,recall,pg_d01edbf409864ca1,2,0.000418,32132
+6000,messages,1,10.93,inproc,recall,pg_d01edbf409864ca1,3,0.000446,32132
+6000,messages,1,10.93,inproc,recall,pg_d01edbf409864ca1,4,0.000436,32132
+6000,messages,1,10.93,inproc,index_text,4000,0,0.596002,13799
+6000,messages,1,10.93,inproc,index_text,4000,1,0.040683,13799
+6000,messages,1,10.93,inproc,index_text,4000,2,0.036526,13799
+6000,messages,1,10.93,inproc,index_text,4000,3,0.039758,13799
+6000,messages,1,10.93,inproc,index_text,4000,4,0.035477,13799
+6000,messages,2,11.68,stdio,startup,initialize,0,0.066053,0
+6000,messages,2,11.68,stdio,rare,E4127,0,0.777208,562
+6000,messages,2,11.68,stdio,rare,E4127,1,0.775844,562
+6000,messages,2,11.68,stdio,rare,E4127,2,0.799155,562
+6000,messages,2,11.68,stdio,rare,E4127,3,0.826751,562
+6000,messages,2,11.68,stdio,rare,E4127,4,0.802098,562
+6000,messages,2,11.68,stdio,rare,SUP-48213,0,0.770983,445
+6000,messages,2,11.68,stdio,rare,SUP-48213,1,0.736822,445
+6000,messages,2,11.68,stdio,rare,SUP-48213,2,0.734577,445
+6000,messages,2,11.68,stdio,rare,SUP-48213,3,0.763060,445
+6000,messages,2,11.68,stdio,rare,SUP-48213,4,0.766537,445
+6000,messages,2,11.68,stdio,rare,ctx-artifacts-euw3-7f2a,0,0.698787,536
+6000,messages,2,11.68,stdio,rare,ctx-artifacts-euw3-7f2a,1,0.712247,536
+6000,messages,2,11.68,stdio,rare,ctx-artifacts-euw3-7f2a,2,0.710948,536
+6000,messages,2,11.68,stdio,rare,ctx-artifacts-euw3-7f2a,3,0.741581,536
+6000,messages,2,11.68,stdio,rare,ctx-artifacts-euw3-7f2a,4,0.744816,536
+6000,messages,2,11.68,stdio,common,self,0,0.879657,4499
+6000,messages,2,11.68,stdio,common,self,1,0.889174,4499
+6000,messages,2,11.68,stdio,common,self,2,0.883810,4499
+6000,messages,2,11.68,stdio,common,self,3,0.859343,4499
+6000,messages,2,11.68,stdio,common,self,4,0.840868,4499
+6000,messages,2,11.68,stdio,common,return,0,0.783780,4823
+6000,messages,2,11.68,stdio,common,return,1,0.783077,4823
+6000,messages,2,11.68,stdio,common,return,2,0.783832,4823
+6000,messages,2,11.68,stdio,common,return,3,0.785880,4823
+6000,messages,2,11.68,stdio,common,return,4,0.803097,4823
+6000,messages,2,11.68,stdio,common,import,0,0.805323,4431
+6000,messages,2,11.68,stdio,common,import,1,0.810658,4431
+6000,messages,2,11.68,stdio,common,import,2,0.824730,4431
+6000,messages,2,11.68,stdio,common,import,3,0.791211,4431
+6000,messages,2,11.68,stdio,common,import,4,0.783096,4431
+6000,messages,2,11.68,stdio,multi,the staging DB port,0,0.852040,1569
+6000,messages,2,11.68,stdio,multi,the staging DB port,1,0.868976,1569
+6000,messages,2,11.68,stdio,multi,the staging DB port,2,0.869477,1569
+6000,messages,2,11.68,stdio,multi,the staging DB port,3,0.860114,1569
+6000,messages,2,11.68,stdio,multi,the staging DB port,4,0.865968,1569
+6000,messages,2,11.68,stdio,multi,failed with exit code,0,0.977578,3571
+6000,messages,2,11.68,stdio,multi,failed with exit code,1,0.978755,3571
+6000,messages,2,11.68,stdio,multi,failed with exit code,2,1.003810,3571
+6000,messages,2,11.68,stdio,multi,failed with exit code,3,1.029736,3571
+6000,messages,2,11.68,stdio,multi,failed with exit code,4,1.001787,3571
+6000,messages,2,11.68,stdio,multi,Renamed parse_header to,0,0.805879,410
+6000,messages,2,11.68,stdio,multi,Renamed parse_header to,1,0.820304,410
+6000,messages,2,11.68,stdio,multi,Renamed parse_header to,2,0.907920,410
+6000,messages,2,11.68,stdio,multi,Renamed parse_header to,3,1.804374,410
+6000,messages,2,11.68,stdio,multi,Renamed parse_header to,4,2.320515,410
+6000,messages,2,11.68,stdio,recall,pg_d01edbf409864ca1,0,0.001598,32132
+6000,messages,2,11.68,stdio,recall,pg_d01edbf409864ca1,1,0.001657,32132
+6000,messages,2,11.68,stdio,recall,pg_d01edbf409864ca1,2,0.001953,32132
+6000,messages,2,11.68,stdio,recall,pg_d01edbf409864ca1,3,0.001922,32132
+6000,messages,2,11.68,stdio,recall,pg_d01edbf409864ca1,4,0.001708,32132
+6000,messages,2,11.68,stdio,peak_rss,,0,,48136192
+6000,messages,2,11.68,inproc,rare,E4127,0,1.766649,562
+6000,messages,2,11.68,inproc,rare,E4127,1,1.513484,562
+6000,messages,2,11.68,inproc,rare,E4127,2,0.869504,562
+6000,messages,2,11.68,inproc,rare,E4127,3,0.790514,562
+6000,messages,2,11.68,inproc,rare,E4127,4,0.789286,562
+6000,messages,2,11.68,inproc,rare,SUP-48213,0,0.768931,445
+6000,messages,2,11.68,inproc,rare,SUP-48213,1,0.906467,445
+6000,messages,2,11.68,inproc,rare,SUP-48213,2,0.856592,445
+6000,messages,2,11.68,inproc,rare,SUP-48213,3,0.914990,445
+6000,messages,2,11.68,inproc,rare,SUP-48213,4,0.886379,445
+6000,messages,2,11.68,inproc,rare,ctx-artifacts-euw3-7f2a,0,0.854707,536
+6000,messages,2,11.68,inproc,rare,ctx-artifacts-euw3-7f2a,1,0.812321,536
+6000,messages,2,11.68,inproc,rare,ctx-artifacts-euw3-7f2a,2,0.776362,536
+6000,messages,2,11.68,inproc,rare,ctx-artifacts-euw3-7f2a,3,0.760875,536
+6000,messages,2,11.68,inproc,rare,ctx-artifacts-euw3-7f2a,4,0.762909,536
+6000,messages,2,11.68,inproc,common,self,0,0.832530,4499
+6000,messages,2,11.68,inproc,common,self,1,0.827447,4499
+6000,messages,2,11.68,inproc,common,self,2,0.826539,4499
+6000,messages,2,11.68,inproc,common,self,3,0.842590,4499
+6000,messages,2,11.68,inproc,common,self,4,0.937166,4499
+6000,messages,2,11.68,inproc,common,return,0,0.946164,4823
+6000,messages,2,11.68,inproc,common,return,1,0.843092,4823
+6000,messages,2,11.68,inproc,common,return,2,0.851915,4823
+6000,messages,2,11.68,inproc,common,return,3,0.836093,4823
+6000,messages,2,11.68,inproc,common,return,4,0.857434,4823
+6000,messages,2,11.68,inproc,common,import,0,0.791546,4431
+6000,messages,2,11.68,inproc,common,import,1,0.795216,4431
+6000,messages,2,11.68,inproc,common,import,2,0.819213,4431
+6000,messages,2,11.68,inproc,common,import,3,0.787674,4431
+6000,messages,2,11.68,inproc,common,import,4,0.795284,4431
+6000,messages,2,11.68,inproc,multi,the staging DB port,0,0.894588,1569
+6000,messages,2,11.68,inproc,multi,the staging DB port,1,0.887787,1569
+6000,messages,2,11.68,inproc,multi,the staging DB port,2,0.882359,1569
+6000,messages,2,11.68,inproc,multi,the staging DB port,3,0.863476,1569
+6000,messages,2,11.68,inproc,multi,the staging DB port,4,0.870093,1569
+6000,messages,2,11.68,inproc,multi,failed with exit code,0,0.943886,3571
+6000,messages,2,11.68,inproc,multi,failed with exit code,1,0.946504,3571
+6000,messages,2,11.68,inproc,multi,failed with exit code,2,0.952547,3571
+6000,messages,2,11.68,inproc,multi,failed with exit code,3,0.950165,3571
+6000,messages,2,11.68,inproc,multi,failed with exit code,4,0.948839,3571
+6000,messages,2,11.68,inproc,multi,Renamed parse_header to,0,0.767304,410
+6000,messages,2,11.68,inproc,multi,Renamed parse_header to,1,0.763227,410
+6000,messages,2,11.68,inproc,multi,Renamed parse_header to,2,0.757893,410
+6000,messages,2,11.68,inproc,multi,Renamed parse_header to,3,0.757541,410
+6000,messages,2,11.68,inproc,multi,Renamed parse_header to,4,0.756588,410
+6000,messages,2,11.68,inproc,recall,pg_d01edbf409864ca1,0,0.000408,32132
+6000,messages,2,11.68,inproc,recall,pg_d01edbf409864ca1,1,0.000383,32132
+6000,messages,2,11.68,inproc,recall,pg_d01edbf409864ca1,2,0.000383,32132
+6000,messages,2,11.68,inproc,recall,pg_d01edbf409864ca1,3,0.000423,32132
+6000,messages,2,11.68,inproc,recall,pg_d01edbf409864ca1,4,0.000386,32132
+6000,messages,2,11.68,inproc,index_text,4000,0,0.540525,13799
+6000,messages,2,11.68,inproc,index_text,4000,1,0.035892,13799
+6000,messages,2,11.68,inproc,index_text,4000,2,0.028659,13799
+6000,messages,2,11.68,inproc,index_text,4000,3,0.029346,13799
+6000,messages,2,11.68,inproc,index_text,4000,4,0.028550,13799
+6000,messages,3,11.4,stdio,startup,initialize,0,0.057590,0
+6000,messages,3,11.4,stdio,rare,E4127,0,0.730471,562
+6000,messages,3,11.4,stdio,rare,E4127,1,0.742305,562
+6000,messages,3,11.4,stdio,rare,E4127,2,0.827244,562
+6000,messages,3,11.4,stdio,rare,E4127,3,0.821377,562
+6000,messages,3,11.4,stdio,rare,E4127,4,0.851030,562
+6000,messages,3,11.4,stdio,rare,SUP-48213,0,0.802394,445
+6000,messages,3,11.4,stdio,rare,SUP-48213,1,0.748080,445
+6000,messages,3,11.4,stdio,rare,SUP-48213,2,0.730257,445
+6000,messages,3,11.4,stdio,rare,SUP-48213,3,0.728983,445
+6000,messages,3,11.4,stdio,rare,SUP-48213,4,0.701610,445
+6000,messages,3,11.4,stdio,rare,ctx-artifacts-euw3-7f2a,0,0.694230,536
+6000,messages,3,11.4,stdio,rare,ctx-artifacts-euw3-7f2a,1,0.691926,536
+6000,messages,3,11.4,stdio,rare,ctx-artifacts-euw3-7f2a,2,0.664752,536
+6000,messages,3,11.4,stdio,rare,ctx-artifacts-euw3-7f2a,3,0.662017,536
+6000,messages,3,11.4,stdio,rare,ctx-artifacts-euw3-7f2a,4,0.667858,536
+6000,messages,3,11.4,stdio,common,self,0,0.804797,4499
+6000,messages,3,11.4,stdio,common,self,1,0.925618,4499
+6000,messages,3,11.4,stdio,common,self,2,0.880954,4499
+6000,messages,3,11.4,stdio,common,self,3,0.929813,4499
+6000,messages,3,11.4,stdio,common,self,4,0.884337,4499
+6000,messages,3,11.4,stdio,common,return,0,0.795329,4823
+6000,messages,3,11.4,stdio,common,return,1,0.812717,4823
+6000,messages,3,11.4,stdio,common,return,2,0.808268,4823
+6000,messages,3,11.4,stdio,common,return,3,0.787853,4823
+6000,messages,3,11.4,stdio,common,return,4,0.809471,4823
+6000,messages,3,11.4,stdio,common,import,0,0.767605,4431
+6000,messages,3,11.4,stdio,common,import,1,0.764765,4431
+6000,messages,3,11.4,stdio,common,import,2,0.780254,4431
+6000,messages,3,11.4,stdio,common,import,3,0.755117,4431
+6000,messages,3,11.4,stdio,common,import,4,0.754292,4431
+6000,messages,3,11.4,stdio,multi,the staging DB port,0,0.830128,1569
+6000,messages,3,11.4,stdio,multi,the staging DB port,1,0.817794,1569
+6000,messages,3,11.4,stdio,multi,the staging DB port,2,0.847588,1569
+6000,messages,3,11.4,stdio,multi,the staging DB port,3,0.819359,1569
+6000,messages,3,11.4,stdio,multi,the staging DB port,4,0.814932,1569
+6000,messages,3,11.4,stdio,multi,failed with exit code,0,0.931881,3571
+6000,messages,3,11.4,stdio,multi,failed with exit code,1,0.961536,3571
+6000,messages,3,11.4,stdio,multi,failed with exit code,2,0.955782,3571
+6000,messages,3,11.4,stdio,multi,failed with exit code,3,0.948854,3571
+6000,messages,3,11.4,stdio,multi,failed with exit code,4,0.945832,3571
+6000,messages,3,11.4,stdio,multi,Renamed parse_header to,0,0.773365,410
+6000,messages,3,11.4,stdio,multi,Renamed parse_header to,1,0.784930,410
+6000,messages,3,11.4,stdio,multi,Renamed parse_header to,2,0.799514,410
+6000,messages,3,11.4,stdio,multi,Renamed parse_header to,3,0.826108,410
+6000,messages,3,11.4,stdio,multi,Renamed parse_header to,4,0.776451,410
+6000,messages,3,11.4,stdio,recall,pg_d01edbf409864ca1,0,0.000617,32132
+6000,messages,3,11.4,stdio,recall,pg_d01edbf409864ca1,1,0.000556,32132
+6000,messages,3,11.4,stdio,recall,pg_d01edbf409864ca1,2,0.000586,32132
+6000,messages,3,11.4,stdio,recall,pg_d01edbf409864ca1,3,0.000565,32132
+6000,messages,3,11.4,stdio,recall,pg_d01edbf409864ca1,4,0.000527,32132
+6000,messages,3,11.4,stdio,peak_rss,,0,,45727744
+6000,messages,3,11.4,inproc,rare,E4127,0,0.745345,562
+6000,messages,3,11.4,inproc,rare,E4127,1,0.750041,562
+6000,messages,3,11.4,inproc,rare,E4127,2,0.833971,562
+6000,messages,3,11.4,inproc,rare,E4127,3,0.843646,562
+6000,messages,3,11.4,inproc,rare,E4127,4,0.829719,562
+6000,messages,3,11.4,inproc,rare,SUP-48213,0,0.746014,445
+6000,messages,3,11.4,inproc,rare,SUP-48213,1,0.724024,445
+6000,messages,3,11.4,inproc,rare,SUP-48213,2,0.733053,445
+6000,messages,3,11.4,inproc,rare,SUP-48213,3,0.730768,445
+6000,messages,3,11.4,inproc,rare,SUP-48213,4,0.724622,445
+6000,messages,3,11.4,inproc,rare,ctx-artifacts-euw3-7f2a,0,0.696218,536
+6000,messages,3,11.4,inproc,rare,ctx-artifacts-euw3-7f2a,1,0.700810,536
+6000,messages,3,11.4,inproc,rare,ctx-artifacts-euw3-7f2a,2,0.714332,536
+6000,messages,3,11.4,inproc,rare,ctx-artifacts-euw3-7f2a,3,0.711944,536
+6000,messages,3,11.4,inproc,rare,ctx-artifacts-euw3-7f2a,4,0.696962,536
+6000,messages,3,11.4,inproc,common,self,0,0.824098,4499
+6000,messages,3,11.4,inproc,common,self,1,0.811310,4499
+6000,messages,3,11.4,inproc,common,self,2,0.799456,4499
+6000,messages,3,11.4,inproc,common,self,3,0.815903,4499
+6000,messages,3,11.4,inproc,common,self,4,0.866201,4499
+6000,messages,3,11.4,inproc,common,return,0,0.769939,4823
+6000,messages,3,11.4,inproc,common,return,1,0.791331,4823
+6000,messages,3,11.4,inproc,common,return,2,0.783149,4823
+6000,messages,3,11.4,inproc,common,return,3,0.749863,4823
+6000,messages,3,11.4,inproc,common,return,4,0.748410,4823
+6000,messages,3,11.4,inproc,common,import,0,0.762456,4431
+6000,messages,3,11.4,inproc,common,import,1,0.791085,4431
+6000,messages,3,11.4,inproc,common,import,2,0.875832,4431
+6000,messages,3,11.4,inproc,common,import,3,0.933496,4431
+6000,messages,3,11.4,inproc,common,import,4,0.860754,4431
+6000,messages,3,11.4,inproc,multi,the staging DB port,0,0.867161,1569
+6000,messages,3,11.4,inproc,multi,the staging DB port,1,0.852735,1569
+6000,messages,3,11.4,inproc,multi,the staging DB port,2,0.892089,1569
+6000,messages,3,11.4,inproc,multi,the staging DB port,3,0.868334,1569
+6000,messages,3,11.4,inproc,multi,the staging DB port,4,0.885820,1569
+6000,messages,3,11.4,inproc,multi,failed with exit code,0,1.015546,3571
+6000,messages,3,11.4,inproc,multi,failed with exit code,1,1.013559,3571
+6000,messages,3,11.4,inproc,multi,failed with exit code,2,1.025183,3571
+6000,messages,3,11.4,inproc,multi,failed with exit code,3,1.012876,3571
+6000,messages,3,11.4,inproc,multi,failed with exit code,4,1.012727,3571
+6000,messages,3,11.4,inproc,multi,Renamed parse_header to,0,0.838573,410
+6000,messages,3,11.4,inproc,multi,Renamed parse_header to,1,0.817299,410
+6000,messages,3,11.4,inproc,multi,Renamed parse_header to,2,0.810773,410
+6000,messages,3,11.4,inproc,multi,Renamed parse_header to,3,0.817022,410
+6000,messages,3,11.4,inproc,multi,Renamed parse_header to,4,0.804093,410
+6000,messages,3,11.4,inproc,recall,pg_d01edbf409864ca1,0,0.000407,32132
+6000,messages,3,11.4,inproc,recall,pg_d01edbf409864ca1,1,0.000412,32132
+6000,messages,3,11.4,inproc,recall,pg_d01edbf409864ca1,2,0.000369,32132
+6000,messages,3,11.4,inproc,recall,pg_d01edbf409864ca1,3,0.000377,32132
+6000,messages,3,11.4,inproc,recall,pg_d01edbf409864ca1,4,0.000360,32132
+6000,messages,3,11.4,inproc,index_text,4000,0,0.561069,13799
+6000,messages,3,11.4,inproc,index_text,4000,1,0.029874,13799
+6000,messages,3,11.4,inproc,index_text,4000,2,0.030828,13799
+6000,messages,3,11.4,inproc,index_text,4000,3,0.032195,13799
+6000,messages,3,11.4,inproc,index_text,4000,4,0.029183,13799
