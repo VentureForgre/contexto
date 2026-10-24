@@ -354,3 +354,51 @@ def test_engine_count_tokens_is_not_checked():
     _, _, events = engine(request, {"User-Agent": "claude-cli/2.1.400"}, "/v1/messages/count_tokens")
     assert names(events) == ["count_tokens"]
 
+
+# The launchers ---------------------------------------------------------------------------------------
+
+class ListStore:
+    def __init__(self):
+        self.events = []
+
+    def log(self, event):
+        self.events.append(event)
+
+
+def test_check_cli_version_logs_and_prints_one_line(tmp_path, monkeypatch):
+    from contexto import launcher
+
+    monkeypatch.delenv(NO_CHECK_ENV, raising=False)
+    newer = fake_cli(tmp_path, "print('2.1.400 (Claude Code)')")
+    store, err = ListStore(), io.StringIO()
+    launcher.check_cli_version("claude", str(newer), store, stderr=err)
+    assert err.getvalue() == f"contexto: {untested_warning('claude', '2.1.400')}\n"
+    assert store.events == [{"event": "cli_version_check", "cli": "claude", "version": "2.1.400", "tested": False,
+                             "tested_versions": "2.1.302"}]
+    err = io.StringIO()
+    launcher.check_cli_version("claude", str(newer), store, enabled=False, stderr=err)
+    assert err.getvalue() == "" and store.events[-1]["skipped"] is True
+
+    class Broken:
+        def log(self, event):
+            raise OSError("disk full")
+
+    launcher.check_cli_version("claude", str(newer), Broken(), stderr=io.StringIO())  # never raises
+
+
+def test_options_from_args_reads_no_version_check():
+    import argparse
+
+    from contexto import launcher
+
+    base = dict(cli="claude", cli_args=[], bound=150_000, allow_large_bound=False, window_fraction=None,
+                headroom_floor=None, session=None, upstream=None, observe_thinking=False)
+    assert launcher.options_from_args(argparse.Namespace(**base)).version_check is True
+    assert launcher.options_from_args(argparse.Namespace(**base, no_version_check=True)).version_check is False
+
+
+def test_run_parser_has_the_flag():
+    out = subprocess.run([sys.executable, "-m", "contexto", "run", "--help"], capture_output=True, text=True,
+                         timeout=60, env={**os.environ, "COLUMNS": "200"})
+    assert out.returncode == 0 and "--no-version-check" in out.stdout and NO_CHECK_ENV in out.stdout
+

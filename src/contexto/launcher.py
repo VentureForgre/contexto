@@ -34,7 +34,9 @@ plus pins and index). Once the engine measures ``F``, a ``bound_too_small`` even
 budget under 25,000 is shown on stderr once. So is a main conversation running without Contexto's
 MCP tools (``contexto.toolcheck``): neither CLI reports an MCP server that fails to start, so the
 proxy checks and the launcher warns, during the run or at exit, and once more after the CLI exits if
-the session ended still without them. stderr stays quiet otherwise.
+the session ended still without them. So is a CLI version Contexto was not tested with
+(``contexto.cliversions``, D38: ``<cli> --version`` at start; ``--no-version-check`` or
+``CONTEXTO_NO_VERSION_CHECK=1`` skips it). stderr stays quiet otherwise.
 
 Exit codes: claude's own code; 128 + N if claude died from signal N; 2 for a usage error such as
 a bound above the guard; 1 if the proxy cannot start; 127 if ``claude`` is not on PATH.
@@ -54,6 +56,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from contexto.cliversions import launch_check
 from contexto.paths import contexto_home
 from contexto.proxy import ContextoProxy, identity_transform
 from contexto.store import SessionStore
@@ -90,6 +93,7 @@ class LaunchOptions:
     window_fraction: float | None = None
     headroom_floor: int | None = None
     claude_bin: str = "claude"
+    version_check: bool = True
 
 
 def check_user_args(claude_args: list[str]) -> None:
@@ -251,7 +255,8 @@ def options_from_args(args: Any) -> LaunchOptions:
     return LaunchOptions(
         claude_args=list(getattr(args, "cli_args", None) or []), bound=args.bound, session_id=args.session,
         upstream=args.upstream, observe_thinking=args.observe_thinking, allow_large_bound=args.allow_large_bound,
-        window_fraction=args.window_fraction, headroom_floor=args.headroom_floor)
+        window_fraction=args.window_fraction, headroom_floor=args.headroom_floor,
+        version_check=not getattr(args, "no_version_check", False))
 
 
 def check_options(options: LaunchOptions) -> None:
@@ -289,6 +294,19 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     if engine_name == "identity":
         store.log({"event": "engine_unavailable", "detail": "contexto.rewrite not installed; identity transform"})
     return proxy, engine_name
+
+
+def check_cli_version(cli: str, binary: str, store: Any, *, enabled: bool = True, stderr=None) -> None:
+    """D38: log the installed CLI's version (``<binary> --version``, a few seconds at most) and print one
+    warning line when Contexto was not tested with it. Never raises and never stops the launch; a CLI
+    whose version cannot be read is logged, not warned about. Shared by claude and codex."""
+    event, warning = launch_check(cli, binary, enabled=enabled)
+    try:
+        store.log(event)
+    except Exception:  # a diagnostic record; never stop a launch for it
+        pass
+    if warning:
+        print(f"contexto: {warning}", file=stderr or sys.stderr, flush=True)
 
 
 def report_missing_tools(proxy: ContextoProxy) -> None:
@@ -363,6 +381,7 @@ def _run(options: LaunchOptions, stderr) -> int:
                    "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args)})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
+        check_cli_version("claude", claude, store, enabled=options.version_check, stderr=stderr)
         warning = start_warning(options.bound, options.headroom_floor, assumed_overhead())
         if warning:
             print(f"contexto: {warning}", file=stderr, flush=True)

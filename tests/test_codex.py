@@ -338,6 +338,9 @@ class FakeLauncher:
     def report_missing_tools(self, proxy):
         self.calls["reported_after_stop"] = proxy.stopped
 
+    def check_cli_version(self, cli, binary, store, *, enabled=True, stderr=None):
+        self.calls["version_check"] = (cli, binary, enabled)
+
     def run_child(self, argv, env, *, stderr=None):
         home = env.get("CODEX_HOME")
         self.calls.update(argv=argv, home_existed=bool(home) and os.path.isdir(home), home=home)
@@ -409,6 +412,18 @@ def test_run_codex_with_the_real_launcher_helpers(tmp_path, monkeypatch):
     err = io.StringIO()
     assert run_codex(bad, stderr=err) == 2 and "--window-fraction" in err.getvalue()
 
+
+
+def test_run_codex_checks_the_codex_binary_unless_silenced(tmp_path, monkeypatch):
+    # D38: after the session line, before Codex starts; --no-version-check turns it off.
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    for enabled in (True, False):
+        args = parse("--codex-key-helper", "/synthetic/helper", "codex", "exec", "hi")
+        if not enabled:
+            args.no_version_check = True
+        fake = FakeLauncher()
+        assert run_codex(args, launcher=fake, stderr=io.StringIO()) == 0
+        assert fake.calls["version_check"] == ("codex", "codex", enabled)
 
 
 def test_tag_leading_user_prompts_stay_turn_starts():

@@ -41,6 +41,11 @@ FAKE_CLAUDE = r'''
 import json, os, signal, sys, time, urllib.request
 
 args = sys.argv[1:]
+if args == ["--version"]:  # contexto run's version check (D38)
+    if os.environ.get("FAKE_VERSION_HANG"):
+        time.sleep(30)
+    print(os.environ.get("FAKE_VERSION", "2.1.302 (Claude Code)"))
+    sys.exit(0)
 record = {"argv": args, "pid": os.getpid(), "env_base_url": os.environ.get("ANTHROPIC_BASE_URL")}
 for flag, key in (("--settings", "settings"), ("--mcp-config", "mcp")):
     path = args[args.index(flag) + 1]
@@ -189,6 +194,46 @@ def test_request_entry_is_logged_before_the_cli_sees_the_response_end(env, upstr
     assert proc.returncode == 0, err
     kinds = [e["event"] for e in session_log(env, "s9")]
     assert "request" in kinds and kinds.index("request") < kinds.index("proxy_stop")
+
+
+def test_untested_claude_version_gets_one_warning_line_and_the_launch_goes_on(env, upstream, tmp_path):
+    # D38: claude --version at start; an untested version is one stderr line, logged, never a refusal.
+    env["FAKE_VERSION"] = "2.1.400 (Claude Code)"
+    env.pop("CONTEXTO_NO_VERSION_CHECK", None)
+    proc = launch(env, "--upstream", upstream, "--session", "v1", "claude", "-p", "hi", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    warnings = [line for line in err.splitlines() if "2.1.400" in line]
+    assert len(warnings) == 1 and warnings[0].startswith("contexto: warning: Claude Code 2.1.400 ")
+    assert "tested: 2.1.302" in warnings[0]
+    assert err.index("contexto: session v1") < err.index(warnings[0])
+    assert Path(env["FAKE_RECORD"]).exists()  # claude ran
+    check = [e for e in session_log(env, "v1") if e["event"] == "cli_version_check"]
+    assert check == [dict(check[0], cli="claude", version="2.1.400", tested=False)]
+
+
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_version_check_is_silenced_by_the_flag_or_the_env(env, upstream, tmp_path, how):
+    env["FAKE_VERSION"] = "2.1.400 (Claude Code)"
+    flags = ["--no-version-check"] if how == "flag" else []
+    if how == "env":
+        env["CONTEXTO_NO_VERSION_CHECK"] = "1"
+    proc = launch(env, "--upstream", upstream, "--session", "v2", *flags, "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert "2.1.400" not in err and "warning" not in err
+    check = [e for e in session_log(env, "v2") if e["event"] == "cli_version_check"]
+    assert check == [{**check[0], "cli": "claude", "skipped": True}]
+
+
+def test_tested_claude_version_prints_nothing(env, upstream, tmp_path):
+    env.pop("CONTEXTO_NO_VERSION_CHECK", None)
+    proc = launch(env, "--upstream", upstream, "--session", "v3", "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert "warning" not in err
+    check = [e for e in session_log(env, "v3") if e["event"] == "cli_version_check"]
+    assert len(check) == 1 and check[0]["version"] == "2.1.302" and check[0]["tested"] is True
 
 
 def test_exit_code_is_propagated(env, upstream, tmp_path):
