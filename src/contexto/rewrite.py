@@ -67,7 +67,12 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   messages), so lane B's search can list in-view lines first. The store stamps it with the request
   sequence that both of the request's room publishes carry. A failed write logs ``retained_stale``
   (not degraded mode). Only the main conversation publishes the room and the snapshot: the first one
-  seen, replaced at a turn start only by a conversation with strictly more turn starts.
+  seen, replaced at a turn start only by a conversation with strictly more turn starts. Every other
+  conversation (a subagent, a side request) publishes its own side room at each response instead
+  (D40): ``set_side_room(key, bound - (input + output) - headroom_floor)`` when the response may hold
+  a tool call, ``set_side_room(key, None)`` when it holds none. A tool call is charged against the
+  smallest open room and counted against all of them, since the MCP server cannot tell which
+  conversation made it.
 - Thinking (rule 2): retained messages that existed when the epoch was created lose their thinking and
   redacted-thinking blocks on every request; an assistant message left empty gets one text block
   ``[thinking omitted]``; other blocks keep their order.
@@ -150,6 +155,7 @@ class Store(Protocol):
     def window(self) -> tuple[int | None, float | None]: ...
     def window_model(self) -> str | None: ...
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None: ...
+    # Optional (D40): set_side_room(conversation, room_tokens | None); without it side rooms are not published.
     def quarantine_page(self, page_id: str) -> Any: ...
     def set_retained(self, epoch: int, k: int, turns: list[dict]) -> None: ...  # lane B PR #128, contract PR #125
 
@@ -1776,13 +1782,13 @@ class RewriteEngine:
         except STORE_FAILURES as error:
             events.append({"event": "retained_stale", "epoch": state.epoch, "error": type(error).__name__})
 
-    def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
+    def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None) -> list[dict]:
         dialect = dialect_for(endpoint)
         # preamble() must see the same knobs as the request did
         with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
-            return self._observe_usage(endpoint, usage, request)
+            return self._observe_usage(endpoint, usage, request, tool_calls)
 
-    def _observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
+    def _observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None) -> list[dict]:
         """Feed a response's real usage back (a transformed endpoint; never ``count_tokens``). Returns the
         content-free events it raised (packet A2b; contract rule 3 as amended by PR #44). The proxy writes
         them on that request's log entry (``usage_events``), the one place they are logged (A2e,
@@ -1798,6 +1804,11 @@ class RewriteEngine:
           still in flight), so it is not paired with that request's bytes or estimate: the ratio, the
           last real input, and the estimate checks are left alone. ``over_bound`` and the room still
           use it, since they describe what the model received.
+
+        ``tool_calls`` (D40) says whether the response holds a tool call: True or False from the
+        proxy's stream hold or the response's stop reason, None when unknown (treated as True). The
+        main conversation publishes its room either way; any other conversation publishes its own
+        side room (``set_side_room``) when the response may hold a tool call and closes it when not.
         """
         dialect = dialect_for(endpoint)
         if dialect is None or endpoint == COUNT_TOKENS:
@@ -1857,6 +1868,10 @@ class RewriteEngine:
                 if self.publishes(key, messages, dialect):
                     calls.set_turn_room(turn_id(messages, dialect), self.turn_room(real + output))
                     state = publish_window(calls, state, self.estimator, window_model_name(request))
+                elif callable(getattr(self.store, "set_side_room", None)):
+                    # D40: this conversation's own room, from its own usage, for the tool calls this
+                    # response releases; every call is charged against it and main's room alike.
+                    calls.set_side_room(key, None if tool_calls is False else self.turn_room(real + output))
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;
             # the next turn start retries it. The event reaches the log with the others, via the proxy.

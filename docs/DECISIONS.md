@@ -391,6 +391,41 @@ the owner's delegation. Open decisions are listed at the end with the options an
   written by `page_out` for both processes (rejected for now: a new store file that must stay
   consistent with quarantine, with a crash between the page and the manifest write, and with
   stub-rule changes such as `current_stub`, to save one read of every page after a proxy restart).
+- **D40. Each side conversation in a tool loop has its own recall room, and a tool call is charged
+  against every open room.** Claude, 2026-10-24, under D0; contract change. Since v0.1.0 only the
+  main conversation published a room, so a subagent's `contexto_recall` was charged against main's
+  room, which was measured from main's request, not the subagent's. Each conversation the CLI runs
+  (main, each subagent, each side request) is its own upstream request with its own context: the
+  engine keeps state per conversation key, and a tool result lands only in the window of the
+  conversation that called the tool. The overspend is therefore per request, not a race on a
+  shared counter: the charge was already an atomic, locked read-modify-write. Reproduced at zero
+  spend (`tests/test_subagent_room.py` on `main` at 4b87ec2): with main's room at 104,000 and a
+  subagent's own room at 4,000 (input 120,000, bound 150,000), one recall put 21,422 tokens into
+  the subagent's window; six concurrent recalls from that subagent took 54,506. What changed: (1)
+  every conversation that is not main publishes its own side room
+  (`SessionStore.set_side_room(key, room)`) when its response's real usage arrives, with the same
+  formula `bound - (input + output) - headroom_floor`, if the response holds a tool call, and closes
+  it (`set_side_room(key, None)`) if it holds none. The proxy tells the engine which: the stream
+  hold started (a tool call), else the Messages `stop_reason`, else unknown, treated as a tool
+  call. There is no request-time side publish, since the hold makes every tool call wait for its
+  response's publish; (2) the MCP server cannot tell which conversation made a call, so a charge
+  gets the smallest remaining room among main's and every open side room and is counted against
+  all of them, under the same lock. However calls of several conversations interleave, none
+  receives more than its own room; (3) a publish resets only its own room's spend, since that
+  conversation's input now holds its own results but none of the others'; (4) main's room is
+  unchanged, and a main publish for a new turn id closes every side room, so a subagent abandoned
+  mid-loop cannot hold recall down past main's turn. Cost: concurrent conversations slow each
+  other's recall, since one conversation's charge also spends the others' rooms. Limitations: a
+  background subagent whose call runs just after main starts a new turn is charged against main's
+  room only, until its next response reopens its room; a side conversation in degraded mode keeps
+  its last side room; search's "in view" still means main's window. Options considered: a
+  per-subagent share of main's room (rejected: main's room says nothing about a subagent's
+  window, so a share can still overflow it); a stronger lock on the shared room (rejected: the
+  room was already locked; the fault is what it was measured from); attributing each MCP call to
+  its conversation by matching it to the tool calls seen in the held stream (rejected for now: the
+  MCP request carries no conversation id that Contexto can rely on, and two conversations can make
+  identical calls); expiring side rooms by age (rejected: a tool loop can wait minutes on a slow
+  tool, so no age fits).
 
 ## Repository and process
 

@@ -10,8 +10,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from contexto.store import (PageConflictError, PageNotFoundError, charge_room, check_epoch, check_model,
-                             check_page_id, check_retained, check_turn_room, check_window, redact)
+from contexto.store import (PageConflictError, PageNotFoundError, SideRooms, charge_rooms, check_conversation,
+                             check_epoch, check_model, check_page_id, check_retained, check_turn_room, check_window,
+                             redact)
 from contexto.store.ledger import MemoryLedger
 from contexto.store.recall import lists_identifiers
 from contexto.store.pages import build_page, current_stub, render_index, same_content, search_entry
@@ -30,6 +31,7 @@ class MemoryStore(LedgerOps):
         self._workdir: Path | None = None
         self._turn_room: tuple[str | None, int | None, int] = (None, None, 0)
         self._room_stamp: int | None = None
+        self._side_rooms: SideRooms = {}  # D40: conversation -> (room tokens, spent since its publish)
         self._request_seq = 0
         self._retained_stamp: int | None = None
         self._retained: tuple[int, int, int, list[dict[str, Any]]] | None = None
@@ -64,8 +66,23 @@ class MemoryStore(LedgerOps):
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None:
         turn_id = check_turn_room(turn_id, room_tokens)
         with self._room_lock:  # every publish resets what was spent (see SessionStore.set_turn_room)
+            if self._turn_room[0] != turn_id:
+                self._side_rooms = {}  # a new main turn closes the side rooms (D40)
             self._turn_room = (turn_id, room_tokens, 0)
             self._room_stamp = self._retained_stamp
+
+    def set_side_room(self, conversation: str, room_tokens: int | None) -> None:
+        conversation = check_conversation(conversation)
+        if room_tokens is not None:
+            check_turn_room("side", room_tokens)
+        with self._room_lock:  # see SessionStore.set_side_room
+            if room_tokens is None:
+                self._side_rooms.pop(conversation, None)
+            else:
+                self._side_rooms[conversation] = (room_tokens, 0)
+
+    def side_rooms(self) -> SideRooms:
+        return dict(self._side_rooms)
 
     def set_retained(self, epoch: int, k: int, turns: list[dict[str, Any]]) -> None:
         entries = check_retained(epoch, k, turns)
@@ -96,7 +113,10 @@ class MemoryStore(LedgerOps):
 
     def charge_turn_room(self, charge: Callable[[int | None], int]) -> None:
         with self._room_lock:
-            record = charge_room(self._turn_room, charge)
+            result = charge_rooms(self._turn_room, self._side_rooms, charge)
+            if result is None:
+                return
+            record, self._side_rooms = result
             if record is not None:
                 self._turn_room = (record["turn_id"], record["room_tokens"], record["spent_tokens"])
 

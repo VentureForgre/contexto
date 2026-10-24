@@ -536,11 +536,24 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     budget does not apply and only the per-call limit holds. With an engine present but no room
     published for the call's turn, the same applies and the store logs `turn_room_missing`, so a
     missed publish shows up in acceptance logs.
-  - Known limitation (since v0.1.0): subagents and side requests launched by the CLI share the
-    session's store. Only the main conversation publishes the room (packet A14; see
-    `contexto_search` below), so their tool calls are charged against the main conversation's
-    room, which was not measured from their requests, and concurrent subagents can overspend it;
-    keying the room by conversation is the later fix.
+  - Side rooms (D40). Subagents and side requests launched by the CLI share the session's store,
+    but each is its own request with its own context, and a tool result lands only in the window
+    of the conversation that called the tool. The room above is the main conversation's (packet
+    A14; see `contexto_search` below). Every other conversation publishes its own side room
+    through `SessionStore.set_side_room(conversation, room_tokens)` when its response's real usage
+    arrives (the same formula, from its own usage; the conversation is the engine's conversation
+    key, a hash) if the response holds a tool call, and closes it with `room_tokens` None if it
+    holds none. The proxy passes `tool_calls` to `observe_usage` when the callable takes that
+    keyword: True when the stream hold started, else from a Messages `stop_reason` (`tool_use` or
+    not), else None, which the engine treats as True. There is no request-time side publish: the
+    hold makes every tool call wait for its response's publish. The MCP server cannot tell which
+    conversation made a call, so `charge_turn_room` gives the call the smallest remaining room
+    among the main room and every open side room, and counts what it returns against all of them,
+    in the same locked read-modify-write. A publish resets only its own room's spend. A main
+    publish for a new turn id closes every side room. With no main room published but a side room
+    open, the side rooms alone bound the call. Limitations: one conversation's charges also spend
+    the others' rooms; a background subagent whose call runs just after main starts a new turn is
+    charged against main's room only until its next response reopens its room.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
@@ -605,9 +618,9 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   starts, re-evaluated at each turn start: it changes only when another conversation has strictly
   more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
   stay main. The choice is made before the request is transformed, so a request that fails after
-  its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them, so their tool calls see the
-  main conversation's room and snapshot, and for a subagent "in view" refers to the main
-  conversation's window (part of the documented subagent limitation); the MCP
+  its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them (they publish side rooms instead, D40, see the per-turn
+  recall budget), so their tool calls see the main conversation's snapshot, and for a subagent
+  "in view" refers to the main conversation's window (a documented subagent limitation); the MCP
   server cannot tell which conversation issued a call. Matches in the
   snapshot (a retained entry matches as a page does: every word of the query in its text, and its
   matching lines chosen by the same rule) are listed first, labeled in view, newest first, as the matching line only, at most 3

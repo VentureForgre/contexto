@@ -32,7 +32,10 @@ estimator (rule 4) uses it. The launcher passes a ``contexto.rewrite.RewriteEngi
 the transform (it is callable) and its ``observe_usage`` method (lane A packet A2). The events the
 callable returns (real-usage ``over_bound``, ``estimate_error``, rule 14 store failures) are written,
 reduced to scalars, on that request's log entry as ``usage_events``, and a real ``over_bound`` sets the
-entry's ``over_bound``; this is the only place they are logged (packet A2e). Calls to the
+entry's ``over_bound``; this is the only place they are logged (packet A2e). A callable that takes a
+``tool_calls`` keyword also gets whether the response holds a tool call (D40): from the stream hold
+when there is one (a hold started), else from a Messages ``stop_reason`` (``tool_use`` or not), else
+None for unknown. Calls to the
 transform are serialized under a lock, so a stateful engine sees one request at a time.
 
 Byte stability: the transformed request is serialized deterministically (original key order,
@@ -53,6 +56,7 @@ the CLI unchanged (rule 6). Upstream errors are forwarded unchanged and never re
 from __future__ import annotations
 
 import http.client
+import inspect
 import json
 import re
 import ssl
@@ -398,6 +402,12 @@ class UsageReader:
             if isinstance(payload.get("delta"), dict):
                 self._keep("stop_reason", payload["delta"].get("stop_reason"))
 
+    def tool_calls(self) -> bool | None:
+        """Whether the response holds a tool call, from a Messages ``stop_reason`` (D40); None when the
+        response has none or is a Responses one (its tool calls are seen by the stream hold only)."""
+        reason = self.ending.get("stop_reason") if self.api != "responses" else None
+        return None if reason is None else reason == "tool_use"
+
     def end_fields(self) -> dict[str, str]:
         """How the response ended, for the request's log entry (packet A23): enum strings only."""
         out = dict(self.ending)
@@ -546,6 +556,17 @@ def _sse_payload(raw: bytes) -> dict[str, Any]:
     except ValueError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _takes_keyword(callback: Callable[..., Any] | None, name: str) -> bool:
+    """Whether ``callback`` accepts the keyword argument ``name`` (or any keyword)."""
+    if callback is None:
+        return False
+    try:
+        parameters = inspect.signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.kind is p.VAR_KEYWORD or (p.name == name and p.kind is not p.POSITIONAL_ONLY) for p in parameters)
 
 
 class StreamHold:
@@ -1004,7 +1025,8 @@ class _Handler(BaseHTTPRequestHandler):
             if feedback and not observed and reader.usage:
                 observed = True
                 # Packet A2e: the returned events go on this request's entry, logged once with it.
-                usage_events = self._observe_usage(entry["path"], reader.usage, original)
+                usage_events = self._observe_usage(entry["path"], reader.usage, original,
+                                                   hold.holding if hold is not None else reader.tool_calls())
                 if usage_events:
                     entry["usage_events"] = [_scalar_summary(e) for e in usage_events]
                     entry["over_bound"] = bool(entry.get("over_bound")) or any(bool(e.get("over_bound"))
@@ -1130,14 +1152,18 @@ class _Handler(BaseHTTPRequestHandler):
         self.owner.log({"event": "transform_error", "level": "error", "error": error, "stage": stage,
                         "endpoint": endpoint, "epoch": self.owner.last_epoch})
 
-    def _observe_usage(self, endpoint: str, usage: dict[str, Any], original: dict[str, Any]) -> list[dict[str, Any]]:
+    def _observe_usage(self, endpoint: str, usage: dict[str, Any], original: dict[str, Any],
+                       tool_calls: bool | None = None) -> list[dict[str, Any]]:
         """Run the usage callback; return the dict events it reports (anything else is ignored)."""
         callback = self.owner.observe_usage
         if callback is None:
             return []
         try:
             with self.owner.transform_lock:
-                events = callback(endpoint, dict(usage), original)
+                if _takes_keyword(callback, "tool_calls"):  # D40
+                    events = callback(endpoint, dict(usage), original, tool_calls=tool_calls)
+                else:
+                    events = callback(endpoint, dict(usage), original)
         except Exception as exc:
             self.owner.log({"event": "observe_usage_error", "error": type(exc).__name__})
             return []
