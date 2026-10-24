@@ -689,6 +689,36 @@ it is first reported and once more after the CLI exits for a repeated exit event
 draw over a line printed mid-run. If the check itself raises, the engine logs `toolcheck_error` with
 the exception's type name only and keeps the request's rewrite.
 
+**CLI versions (D38).** The CLI versions Contexto was tested with are one list, `TESTED_VERSIONS` in
+`src/contexto/cliversions.py`; the measured-on constants of the session-start signature, the
+context-block kinds, and the Codex context sections equal the newest tested version of their CLI.
+`contexto run` runs `<cli> --version` after the session line, in its own process group with stdin
+closed. It reads at most 4,096 bytes of output, until a line with a version, end of file, or 3
+seconds, and then kills the group. For a version not in the list it prints one stderr line naming
+it, the tested versions, what may break, where to report it, and `contexto run --no-version-check
+<cli>`, and the launch goes on. A CLI that does not answer is logged, not warned about.
+`--no-version-check` (before the CLI's name) or `CONTEXTO_NO_VERSION_CHECK=1` skips the check.
+Ctrl+C during the check exits 130 through the launcher's cleanup, without a traceback and without
+starting the CLI. The log gets `cli_version_check` (`cli`, `version`, `tested`, `tested_versions`, and
+`error` or `skipped`; `error` is `interrupted` for a Ctrl+C). The engine reads each request's
+`User-Agent` (`claude-cli/<v>`, `codex_<surface>/<v>`) and logs `cli_version` (`cli`, `client`,
+`version`, `tested`, `tested_versions`) once per distinct version, at most 8, and
+`cli_version_untested` once for the first untested one. It judges the session start once, on the
+first request that has a tool list (for the Responses API, any request) and carries the CLI's
+injected context (a role `system` message or a `<system-reminder>` block; for Codex, a developer item
+in the lead). That is the main conversation's first request: side requests have no tool list, and
+subagents start from a main turn's tool call. The engine's `publishes` choice of main is not used,
+because a tool-less side request that arrives first stays main through the real conversation's first
+turn. A request with a tool list and no injected context leaves the judgement open, for at most 8
+such requests. Recognised: a role `system` message with the step 1 signature or a context block of
+kind `environment` (Messages API), or a user message of context sections in the lead (Responses
+API). Otherwise the engine logs `session_start_unrecognised` (`dialect`, `signature_version`,
+`cli_version`, `tested_versions`). It reads only the first 4,096 characters of each content block; a
+role `system` message is matched whole. These events go on the request's `transform_events`, before
+the engine's request event, and never to stderr; if the check raises, the engine logs
+`cli_version_error` with the exception's type name and keeps the rewrite. `count_tokens` is not
+checked. The routine for testing a new version is `docs/cli-updates.md`.
+
 ## CLI
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run
