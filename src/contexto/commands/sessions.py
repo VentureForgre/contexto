@@ -11,8 +11,14 @@ from datetime import UTC, datetime
 from contexto.commands._common import EXIT_ERROR, EXIT_OK, fail
 from contexto.paths import contexto_home
 from contexto.store import SessionNotFoundError
-from contexto.store.prune import (ACTIVE_GRACE_S, SessionLiveError, check_not_live, parse_duration,
-                                  remove_session, select)
+from contexto.store.prune import (
+    ACTIVE_GRACE_S,
+    SessionLiveError,
+    check_not_live,
+    parse_duration,
+    remove_session,
+    select,
+)
 from contexto.store.sessions import list_sessions, session_summary
 
 
