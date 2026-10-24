@@ -624,15 +624,24 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   analysis, builder-3, zero spend): 4 of H1's 5 extra chain misses had a newer link in the retained
   window, but the model answered from a search reply whose newest paged hit looked current.
   Results are charged against the per-turn room. No embeddings and no similarity matching
-  (owner: not RAG): only the query's own words, ranked lexically (D34). Speed (D34): the MCP
-  server keeps each page's folded searchable text in memory for its lifetime, as UTF-8 bytes, and
-  the proxy keeps each page's id, turn, stub, and index line, each process listing `pages/` on
-  every call to pick up new pages and drop quarantined ones (a file is read again only if its
-  inode, size, or modification time changed); pages stay immutable and the store format is
-  unchanged. Limitations: the MCP server's memory grows with the store (about the UTF-8 size of the
-  page text, with no cap); the first search of each MCP process reads every page once; pages are
-  narrowed word by word, so a query stops scanning as soon as no page holds every word so far, but
-  a query with matches scans the text once per word.
+  (owner: not RAG): only the query's own words, ranked lexically (D34). Speed and memory (D34,
+  D39): each process lists `pages/` on every call to pick up new pages and drop quarantined ones (a
+  file is read again only if its inode, size, or modification time changed); pages stay immutable
+  and the store format is unchanged. The proxy keeps each page's id, turn, stub, and index line.
+  The MCP server keeps each page's id, turn, and whether it holds only context blocks (about 700
+  bytes per page), and holds folded searchable text, as UTF-8 bytes, for the newest pages (by turn)
+  up to a budget: `CONTEXTO_SEARCH_CACHE_MB` megabytes of 1,048,576 bytes (default 64; `0` holds
+  none), or `contexto mcp --search-cache-mb`, which overrides it. `contexto run` passes the
+  variable to the MCP server for both CLIs when it is set; an invalid value is logged
+  `search_cache_invalid` and the default used, so the server still starts. A page read for a search
+  is held if its text is newer than the oldest held text, which is let go to make room; otherwise it
+  is let go after the search. Search results do not depend on the budget. Limitations: a store
+  larger than the budget reads every page outside it from its file at each search (6,000
+  synthetic pages, 193 MB of text: 0.55 to 0.69 s per search at 64 MB, 0.10 to 0.24 s with every
+  page held); the first search of each MCP process reads every page once; pages are narrowed word
+  by word, so a query stops scanning as soon as no page holds every word so far, but a query with
+  matches scans the text once per word, and reads a page outside the budget a second time when the
+  query has more than 6 words and the page came before the first match.
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.

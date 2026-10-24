@@ -392,6 +392,56 @@ the owner's delegation. Open decisions are listed at the end with the options an
   consistent with quarantine, with a crash between the page and the manifest write, and with
   stub-rule changes such as `current_stub`, to save one read of every page after a proxy restart).
 
+- **D39. The MCP server holds search text up to a budget, 64 MB by default, newest pages first.**
+  Assigned 2026-10-24 from the STATUS known limitation; the contract change is recorded here for
+  review. D34's page cache kept every page's folded
+  text in the MCP server for the life of the process, so a long session's server grew without
+  limit (peak RSS 290 MB at 6,000 synthetic pages, 193 MB of it text). What changed: (1) the server
+  holds text for at most `CONTEXTO_SEARCH_CACHE_MB` megabytes (1 MB = 1,048,576 bytes; default 64;
+  `0` holds none), or `contexto mcp --search-cache-mb`, which overrides it. `contexto run` passes the
+  variable to the server's environment for Claude Code and Codex when it is set (Codex starts MCP
+  servers with a restricted environment). An invalid variable is logged `search_cache_invalid` and
+  the default used: neither CLI reports an MCP server that fails to start, so refusing to start
+  would silently remove every Contexto tool. An invalid flag is a usage error; (2) it holds the newest
+  pages' text, by (turn, id): a page read during a search is held, and the oldest held text is let go
+  until the held bytes fit. A page whose text is not held is read from its file during each search
+  and let go after it. Not LRU: every search reads every page (a word matches as a substring, so no
+  index can skip a page), in the same order, so with a store larger than the budget LRU would evict
+  each page just before the next search needed it and save no read; a fixed newest set saves the
+  reads of the pages it holds; (3) `rank` takes a page at a time and keeps of it only which words it
+  holds, its length, and, for a match, its term counts, so a page read for a search is not held for
+  the length of the query. Results are unchanged: each word's page count, the average length, and
+  the scores come from the same integers in the same order. Narrowing keeps D34's property that a query reads no page twice when no page holds every
+  word; when some page does, the pages that lacked an earlier word are read again for the
+  frequencies of the later words, except that a page just read is tested for every word at once
+  when the query has at most 6 words (a read costs about as much as 6 failing substring tests on a
+  32 KB page: 92 us against 15 us) or a match is already known; (4) the server keeps, besides text,
+  each page's id, turn, and whether it holds only context blocks (672 bytes per page, 4.0 MB at
+  6,000). It no longer keeps the page stub (2.4 KB per page), which only the index reads and the
+  server never builds; a process that builds the index reads it as before. Measured on the store
+  harness at 6,000 pages (`spikes/m2/scale/store/README.md`, `results/d39/`): `quality.csv` is
+  byte-identical before and after at 64 MB, unlimited, and 0, and every stdio search reply has the
+  same length; `tests/test_search_cache.py` compares a 4 KB budget, budget 0, and no budget with a
+  reference ranking on random stores. Peak RSS of the MCP child: 290 MB before, 129 MB at 64 MB, 45
+  MB at 0, 277 MB unlimited. Search (rare / common / multi-word): 0.096 / 0.175 / 0.248 s before,
+  0.548 / 0.633 / 0.693 at 64 MB (a third of the text held), 0.718 / 0.839 / 0.876 at 0, and 0.095 /
+  0.167 / 0.239 unlimited, so the rewritten ranking costs nothing when every page is held; a page
+  outside the budget costs about 0.1 ms per search to read, parse, and fold. The first search of a
+  process is 0.78 to 0.85 s in every run. The 64 MB default holds about 2,000 of these pages (46M
+  tokens of history); a 30M-token session (1,616 pages in `docs/research/M2-scale-30m.md`) is about
+  42 MB of text at this store's 1.4 bytes per token, so it searches as fast as before. Options
+  considered: LRU (rejected, above); no cap with a smaller representation, such as zlib-compressed
+  text (rejected: memory still grows with the store, by a constant factor); an exact prefilter that
+  skips pages lacking a word's trigrams or tokens (rejected: building it in Python took 0.7 ms per
+  page, so 4 s more on a first search at 6,000 pages, and a per-page vocabulary string is 18 percent
+  of the text on the synthetic pages, more on real ones, held for every page, so it grows with the
+  store); folded text written beside the pages for fast re-reads (rejected: a new store file to keep
+  consistent with quarantine and crashes, and about 75 percent more disk); a larger default (not
+  chosen: 64 MB, the size the task suggested, already holds a 30M-token session).
+  Limitation: a store larger than the budget pays the read of every page outside it at each search,
+  0.55 to 0.69 s at 6,000 pages with the default; raise the budget when search time matters more
+  than memory.
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.

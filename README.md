@@ -50,8 +50,9 @@ The session id is printed on stderr at start. The launcher:
    `127.0.0.1:<free port>`;
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets only
    `env.ANTHROPIC_BASE_URL` to the proxy, and an `--mcp-config` file that starts Contexto's MCP
-   server (`python -P -m contexto mcp --session <id>` with the same Python, and `CONTEXTO_HOME` in
-   its environment; `-P` keeps your project directory off the import path);
+   server (`python -P -m contexto mcp --session <id>` with the same Python, and `CONTEXTO_HOME`, plus
+   `CONTEXTO_SEARCH_CACHE_MB` when set, in its environment; `-P` keeps your project directory off the
+   import path);
 4. runs `claude --settings <file> --mcp-config <file> [your args]` in your terminal and returns its
    exit code.
 
@@ -136,6 +137,7 @@ Environment variables:
 | `CONTEXTO_SESSION` | `recall`, `state` | Session to read when `--session` is not given. |
 | `CONTEXTO_CODEX_KEY_HELPER` | `run codex` | Key helper command when `--codex-key-helper` is not given. |
 | `CONTEXTO_CODEX_UPSTREAM` | `run codex` | Codex upstream when `--codex-upstream` is not given. |
+| `CONTEXTO_SEARCH_CACHE_MB` | `mcp` | Page text the MCP server holds in memory for `contexto_search`, in MB (default 64; `0` holds none). It holds the newest pages' text; older pages are read from the store at each search, so a larger value makes search in a large store faster and a smaller one uses less memory. Results do not change. `contexto run` passes it to the MCP server for both Claude Code and Codex; `contexto mcp --search-cache-mb` overrides it. |
 | `CONTEXTO_RECALL_VARIANT` | new sessions | `default` or `legacy` recall guidance text. `legacy` is kept for diagnosis. A session keeps the variant it started with. |
 | `ANTHROPIC_BASE_URL` | `run`, `proxy` | Upstream, when no settings file sets one (see Troubleshooting). |
 | `OPENRIG_SESSION_NAME` | `run` | When set, the start-up window check assumes 92,000 tokens of fixed overhead instead of 55,000. |
