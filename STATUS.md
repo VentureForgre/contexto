@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-18 07:26Z by claude (D32 to D34 and the 30M fixes). Decisions taken and still open, with reasons:
+Updated 2026-10-24 by claude (docs for v0.4.0 and the public repository). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -16,9 +16,9 @@ compaction never fires, and accuracy equals full context.
   fbb1303), and **Codex passed criteria 1 to 3** (D30), below.
   On Claude Code, Contexto answered 51 of 54 probes against 48 for the full-context baseline, with zero
   compaction and every request under the bound.
-- Latest release: v0.2.8. See "What is left" below for the remaining work and the items that need
-  the owner.
-- Tests on main (0a8e4c3, v0.2.8): 1448 passed, 15 skipped (CI on the self-hosted runner).
+- Latest release: v0.4.0 (main 4b87ec2, 2026-10-18). See "In progress" and "What is left" below
+  for the remaining work and the items that need the owner.
+- Tests on main (4b87ec2, v0.4.0): 1694 passed, 1 skipped on macOS, Python 3.12 (local run, 2026-10-24).
 
 ## Acceptance, live run #3 (main fbb1303, claude-haiku-5-5, bound 150,000, owner's proxy)
 
@@ -206,32 +206,40 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
 - D34: search matches every word in any case, ranks by BM25 with a recency prior (paged context
   blocks after every turn, in rank and in the reply), and both processes cache page reads.
 
-## What is left (as of 2026-10-18)
+## In progress (2026-10-24)
+
+Each item is a separate pull request or owner task; none is on `main` yet.
+
+- CI: a Python 3.12 to 3.15 matrix on Linux and macOS, and a Ruff configuration so the lint job
+  runs.
+- A session prune command for old session folders under `$CONTEXTO_HOME` (nothing deletes them
+  today).
+- A CLI version check at launch (the context-block and session-start rules were measured on
+  Claude Code 2.1.302).
+- A cap on the MCP server's page-text cache (no cap in v0.4.0; see "Known limitations").
+- A recall budget for subagents, which today share the main conversation's room.
+- The D34 ranking follow-up, zero spend: BM25's length discount can show an older short page that
+  states an old value in detail while the long turn with the current value is only listed (D34
+  (3)). Choose b on a harness variant that draws page sizes from
+  `spikes/m2/scale/store/calibration.json`'s real turn sizes, or take BM25's length from the
+  messages that hold a match rather than the whole page.
+- CLIProxyAPI support as an upstream (O4).
+- Per-session upstream affinity on the owner's proxy (O6).
+- The OpenRig context-usage clock bug report (O7).
+- Making the repository public: README install from the public release URL, `SECURITY.md`, and
+  the self-hosted runner question under "Needs the owner". There is no license file yet; that is
+  the owner's decision.
+
+## What is left (as of 2026-10-24)
 
 Definition of done for this project: M2 acceptance passed on both CLIs (done), every release
 published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
 
-In progress: nothing. The owner approved on 2026-10-18 fixing everything the 30M measurement found;
-steps 1 to 4 of the plan below are done (#203, #204, #205), and the missing-tools warning (#202)
-landed with them, each with two reviewers. The D34 follow-up below is open.
-
-This week, within the seats' weekly limit (90 percent used, resets 2026-10-22):
-- Keep STATUS, README, and the contract in step with `main`.
-- No live model runs. Zero-spend work toward 30M-token sessions, in order
-  (`docs/research/M2-scale-30m.md`):
-  - (1) Stop carried growth: done in D32 and D33 (PR #203). Session-start is recognised by its
-    `# Environment` first line, so effort changes no longer grow it and the claude-sonnet-5 and
-    claude-fable-5 environment message is never paged; the bounded fallback pages later turn
-    starts' context blocks, keeping the first message's blocks and the latest of each kind.
-  - (2) Rank search results (BM25 with a recency term): done in D34 (PR #204).
-  - (3) Cache page text in the MCP server: done in D34 (PR #204); the `index_text` manifest was
-    rejected there (a cache keyed by file metadata does the work without a new store file).
-  - (4) Hash each message once in the proxy: done (#205).
-  - Follow-up to D34, zero spend: BM25's length discount can show an older short page that states
-    an old value in detail while the long turn with the current value is only listed (D34 (3)).
-    Choose b on a harness variant that draws page sizes from
-    `spikes/m2/scale/store/calibration.json`'s real turn sizes, or take BM25's length from the
-    messages that hold a match rather than the whole page.
+The 30M plan the owner approved on 2026-10-18 is done, each step with two reviewers: carried
+growth stopped (D32, D33, #203, v0.4.0), search ranked by BM25 with a recency prior and page reads
+cached (D34, #204, v0.4.0; the `index_text` manifest was rejected there), each message hashed once
+in the proxy (#205, v0.2.9), and the missing-tools warning (#202, v0.3.0). That plan ran with no
+live model runs while the seats' weekly limit was 90 percent used; the limit reset on 2026-10-22.
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
@@ -242,16 +250,20 @@ Measured candidates deliberately not pursued (each would need a live run or new 
   revisit only if a seat shows a recall cost).
 
 Needs the owner:
-- O4: end-user authentication guidance (API key only, or subscription logins too).
+- O4: end-user authentication guidance (API key only, or subscription logins too); CLIProxyAPI
+  support is in progress.
 - O6: per-session upstream affinity on the owner's proxy (the remaining cache misses and dropped
-  thinking come from the proxy spreading requests across identities).
-- O7: whether to report the OpenRig context-usage clock bug upstream.
+  thinking come from the proxy spreading requests across identities); in progress.
+- O7: whether to report the OpenRig context-usage clock bug upstream; the report is in progress.
 - GitHub billing: the org's hosted Actions minutes are blocked by a failed payment or spending
   limit; CI and releases now run on the self-hosted runner `ubuntu-final-middle`, one job at a
   time.
 - The self-hosted runner group allows public repositories. A public repository's pull requests
-  could run code on the homelab runner; restricting the group to private repositories is an owner
-  setting.
+  could run code on the homelab runner; restricting the group to private repositories (or
+  requiring approval for outside contributors' workflow runs) is an owner setting, needed before
+  the repository goes public.
+- GitHub private vulnerability reporting, which `SECURITY.md` points to, is off while the
+  repository is private; turn it on in the repository's security settings once it is public.
 
 ## Open decisions (details in DECISIONS.md)
 
@@ -265,7 +277,7 @@ Needs the owner:
   thinking traced to the proxy spreading requests across identities).
 - O7 (owner): OpenRig context-usage clock bug (UTC parsed as local time).
 
-## Known limitations (v0.2.8)
+## Known limitations (v0.4.0)
 
 - Claude acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's
   proxy; Codex acceptance on gpt-6-astra at bound 64,000. The default bound 150,000 is untested
@@ -288,7 +300,7 @@ Needs the owner:
   headroom floor; the engine rotates at a turn start when that would leave less than 12,000
   (`min_turn_room`).
 - Subagents and side requests share the main conversation's recall room and in-view snapshot;
-  concurrent subagents can overspend the room.
+  concurrent subagents can overspend the room (a subagent budget is in progress).
 - Usage refines the estimate only for the request it measured (rule 3): with two requests of one
   conversation in flight, only the newer one's usage counts (`usage_unattributed` for the other),
   and after a request without usage the next estimate is a full one (`usage_missing`).
@@ -306,7 +318,7 @@ Needs the owner:
   states an old value among the 3 detailed pages while the long turn with the current value is only
   listed: with turn 4 "Set max_retries to 3", the long turn 10 "max_retries is now 7", and passing
   mentions at turns 6 and 13, the detailed pages are 13, 6, and 4 (the newest-first search showed
-  13, 10, and 6). The follow-up is under "What is left".
+  13, 10, and 6). The follow-up and a cache cap are under "In progress".
 - Carried content after D32 and D33 (#203, measured on Claude Code 2.1.302's captured bodies in
   `spikes/m2/scale/reminders/`, Contexto's estimator): at turn 48 the content the fallback cannot
   page is 3,557 to 3,794 tokens on sonnet-4-6 (was 5,452 to 22,953) and 4,897 to 5,643 on
@@ -320,8 +332,10 @@ Needs the owner:
   and 692 to 0, the largest request from 288,309 to 134,203 tokens, and F at 30M from 259,155 to
   74,240; the store holds 1,616 pages at 30M instead of 1,138. Session-start recognition depends on
   Claude Code's own `# Environment` text, and the kinds of context block on 2.1.302's first lines:
-  re-run the reminders spike when the CLI changes. Resuming an epoch record written by v0.2.8 can
-  carry one message the old code had paged (logged as `carried_reclassified`).
+  re-run the reminders spike when the CLI changes. Resuming an epoch record written before v0.4.0
+  can carry one message the old code had paged (logged as `carried_reclassified`).
+- Windows is not supported: the store relies on POSIX file modes (`os.fchmod`, 0700 and 0600).
+  Tested on macOS and Linux with Python 3.12.
 - Cache efficiency depends on the upstream route (O6): 29 of 31 and 36 of 37 in the live runs.
 - Organization-managed Claude Code settings outrank the launcher's `--settings`; a user-supplied
   `--settings` is refused (exit 2); a user `--mcp-config` is allowed.
@@ -358,8 +372,12 @@ Needs the owner:
 | v0.2.6 | 56e4551 | #197: one SSE grammar (CRLF, LF, CR) for the hold splitter and the usage reader, so usage is read on CR-terminated streams, and a final `message_delta` without its blank line is read before the hold publishes, so its output tokens reach the engine |
 | v0.2.7 | 4525388 | #196: after a request whose usage never arrived, the next estimate covers the whole request, so a needed rotation is no longer skipped (`usage_missing`); usage for a request other than the one the engine last sent (after a transform error, or with two in flight) no longer feeds the estimate or the bytes-per-token ratio (`usage_unattributed`); a conversation is recorded as main before its turn start's rotation publishes the window, so a failed request cannot leave the old main recorded |
 | v0.2.8 | 0a8e4c3 | #200: `contexto run codex` starts its MCP server as this Python by absolute path (`-P -m contexto`) instead of a bare `contexto` on `PATH`, so Codex no longer runs silently without the Contexto tools when `contexto` is not on `PATH`; both launchers pass `-P`, so a project's own `contexto` package cannot run in place of the server (the Claude path was exposed from v0.1.0) |
+| v0.2.9 | 62b02a1 | #205: the proxy hashes each message once and drops the request copy and reference serialization, to cut per-request time on long histories (the fast hash falls back to normalise-then-hash when a message cannot be encoded). #199: the 30M scale harnesses and record (`spikes/m2/scale/`, `docs/research/M2-scale-30m.md`) |
+| v0.3.0 | c023c87 | #202: the proxy warns on stderr and logs `mcp_tools_missing` when the main conversation runs without Contexto's MCP tools, and `mcp_tools_found` when they appear later |
+| v0.4.0 | 4b87ec2 | #203 (D32, D33): the bounded fallback pages later turn starts' context blocks, and session-start is recognised by its `# Environment` first line, so carried content stops growing; `carried_reclassified` on resuming an older record. #204 (D34): search matches every word in any case, ranks by BM25 with a recency prior (paged context blocks last), and both processes cache page reads |
 
-Each is a tag and a GitHub Release on this private repository with the wheel and sdist attached.
+Each is a tag and a GitHub Release on this repository with the wheel and sdist attached; there is
+no package registry release.
 
 ## Process notes
 
