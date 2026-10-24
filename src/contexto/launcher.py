@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from contexto.paths import contexto_home
-from contexto.proxy import ContextoProxy, identity_transform
+from contexto.proxy import ContextoProxy, affinity_key, identity_transform
 from contexto.store import SessionStore
 from contexto.toolcheck import missing_tools_message
 from contexto.upstream import resolve_upstream
@@ -276,10 +276,12 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     except Exception:  # a diagnostic record; never stop a launch for it
         pass
     transform, observe_usage, engine_name = build_engine(store, config)
+    session_id = getattr(store, "session_id", None)
     try:
         proxy = ContextoProxy(upstream_url, NoticeLog(store, stderr or sys.stderr), transform,
                               observe_usage=observe_usage, observe_thinking=observe_thinking,
-                              upstream_source=upstream_source)
+                              upstream_source=upstream_source,
+                              affinity_key=affinity_key(session_id) if isinstance(session_id, str) else None)
     except ValueError as exc:
         raise LaunchError(f"invalid upstream: {exc}", EXIT_USAGE) from exc
     try:
@@ -360,7 +362,8 @@ def _run(options: LaunchOptions, stderr) -> int:
         mcp = write_private_json(tmp, "mcp.json", mcp_payload(session_id, home))
         store.log({"event": "launch", "cli": "claude", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": upstream.source,
-                   "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args)})
+                   "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args),
+                   "affinity_header": proxy.affinity_header is not None})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
         warning = start_warning(options.bound, options.headroom_floor, assumed_overhead())

@@ -168,6 +168,7 @@ def test_run_wires_settings_mcp_and_args_and_cleans_up(env, upstream, tmp_path):
     launch_event = next(e for e in events if e["event"] == "launch")
     assert launch_event["upstream_source"] == "flag" and launch_event["config"] == {"bound": 150_000}
     assert launch_event["user_arg_count"] == 4 and launch_event["engine"] == "rewrite"  # A2 is on main
+    assert launch_event["affinity_header"] is True  # a local upstream is not a vendor host (D36)
     assert not any(e["event"] == "engine_unavailable" for e in events)
     request = next(e for e in events if e["event"] == "request")
     assert request["path"] == "/v1/messages" and request["status"] == 200
