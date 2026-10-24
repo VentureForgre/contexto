@@ -13,21 +13,24 @@ Ranking. Pages fall in three groups, in this order: turn pages that hold the who
 hold only paged context blocks (``<system-reminder>`` text the proxy paged on its own, PR #203),
 which repeat the same words at every turn and would otherwise outrank the turn that is about them;
 they stay searchable and recallable. Within each group a page's relevance is BM25 over the query's
-words, plus the whole query as one more term when it has more than one word: term frequency
-saturates (``K1``), so a page that says a word many times scores at most ``K1 + 1`` (2.2) times a
-page that says it once, and a word that occurs on fewer pages weighs more (inverse document
-frequency). Page length does not count (BM25's b is 0, D41): a turn's length is mostly its tool
-output, which says little about how much the turn is about the query. With the usual b 0.75 a long
-turn that states a value once ranked below short older pages that state an old one, and on pages
-sized like real turns (median 1,947 tokens, largest 566,461) the store harness showed an old value
-without the current one more often. Relevance is then multiplied by a recency
+words, plus the whole query as one more term when it has more than one word, with two changes (D41).
+A term's frequency on a page is the number of the page's texts that hold it, not the number of times
+it occurs: a text is one stub field or one text, tool input, or tool output of the turn
+(``search_text``), so a grep or a log that repeats a key hundreds of times counts once, as the
+one-line reply that states its new value does. And page length does not count (BM25's b is 0): a
+turn's length is mostly its tool output, which says little about how much the turn is about the
+query; with b 0.75 a long turn that states a value once ranked below short older pages that state an
+old one. Frequency saturates (``K1``), so a page whose texts hold a word many times scores at most
+``K1 + 1`` (2.2) times a page with one such text, and a word that occurs on fewer pages weighs more
+(inverse document frequency). Relevance is then multiplied by a recency
 prior, ``1 + RECENCY_WEIGHT * r``, where ``r`` is the page's position among the matching pages from
 0 (oldest) to 1 (newest). So a newer page wins unless an older one is clearly more about the query:
 with ``RECENCY_WEIGHT`` 0.5 the oldest match needs one and a half times the relevance of the newest
 to rank above it, and two matches next to each other in time are ordered by relevance almost alone.
 Ties go to the newer page. Last, the newest matching turn page (the newest matching page when no turn
 page matches) is moved up to the last of the ``SHOWN_IN_DETAIL`` places if it ranked below them:
-older pages that say the word more often can outrank the turn that states a new value once.
+older pages that say the word in more texts can outrank the turn that states a new value once. That
+place covers a statement only while it is the newest mention; a later passing mention takes it.
 
 ``contexto_search`` shows the 3 best pages in detail and lists the next 50. In each part turn pages
 come first, newest first, so among the turn pages it shows the newest statement comes first (D28)
@@ -49,6 +52,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 K1 = 1.2  # BM25 term-frequency saturation (the usual value); BM25's b is 0, no length term (D41)
+TEXT_SEP = b"\xff"  # joins a page's texts in its search text; UTF-8 never holds this byte (D41)
 RECENCY_WEIGHT = 0.5  # the newest match's relevance is multiplied by 1.5, the oldest's by 1
 SHOWN_IN_DETAIL = 3  # contexto_search shows this many of the best pages in detail (mcp.SEARCH_LIMIT)
 
@@ -105,8 +109,9 @@ class Query:
 
 
 class SearchEntry(NamedTuple):
-    """What ``rank`` reads of a page: its id, turn, folded searchable text (``search_key``), and whether
-    it holds only paged context blocks (``contexto.store.pages.is_context_page``)."""
+    """What ``rank`` reads of a page: its id, turn, folded searchable text (``search_text``: its texts
+    joined by ``TEXT_SEP``), and whether it holds only paged context blocks
+    (``contexto.store.pages.is_context_page``)."""
 
     id: str
     turn: int
@@ -156,7 +161,7 @@ def rank(entries: Sequence[SearchEntry], query: str) -> list[str]:
         for term, weight in idf.items():
             if term == phrase and q.multiword and not phrase_on[i]:
                 continue
-            tf = text.count(term)
+            tf = texts_holding(text, term)
             relevance += weight * tf * (K1 + 1) / (tf + K1)  # BM25 with b 0: no length term (D41)
         score = relevance * (1 + RECENCY_WEIGHT * position[i])
         scored.append((not entries[i].context, phrase_on[i], score, entries[i].turn, entries[i].id))
@@ -243,3 +248,26 @@ def text_matches(text: str, query: Query) -> bool:
 def searchable(fields: Iterable[str]) -> str:
     """The folded searchable text of a page from its stub fields and texts."""
     return fold("\n".join(fields))
+
+
+def search_text(fields: Iterable[str]) -> bytes:
+    """A page's search text as ``rank`` reads it: each field folded and encoded (``search_key``), joined
+    by ``TEXT_SEP`` so ``rank`` can count the texts that hold a term (D41). UTF-8 never holds that byte,
+    so no query word or phrase can match across two texts, and a word matches exactly where it matches
+    in ``searchable``'s text: a word holds no whitespace, so it never spanned the newline there either.
+    A field is folded on its own, which folds as folding the joined text does (``fold`` lowers one
+    character at a time)."""
+    return TEXT_SEP.join(search_key(fold(f)) for f in fields)
+
+
+def texts_holding(text: bytes, term: bytes) -> int:
+    """How many of the texts in ``text`` (``search_text``) hold ``term``: after each occurrence the scan
+    jumps to the next text, so a text that repeats the term costs one search."""
+    found, pos = 0, text.find(term)
+    while pos != -1:
+        found += 1
+        end = text.find(TEXT_SEP, pos + len(term))
+        if end == -1:
+            break
+        pos = text.find(term, end + 1)
+    return found

@@ -11,7 +11,7 @@ from contexto.store import SessionStore
 from contexto.store.memory import MemoryStore
 from contexto.store.pages import _texts
 from contexto.store.render import match_lines
-from contexto.store.search import RECENCY_WEIGHT, Query, SearchEntry, fold, rank, search_key
+from contexto.store.search import RECENCY_WEIGHT, Query, SearchEntry, fold, rank, search_key, search_text
 
 FILLER = "\n".join(f"step {i}: ran the build and checked the output, nothing unusual" for i in range(40))
 
@@ -178,13 +178,29 @@ def test_pages_holding_the_whole_query_rank_above_pages_holding_only_its_words(s
     assert detailed(search(store, "flaky test"))[-1] == 1  # among the best three, still shown newest first
 
 
+def said(*texts, prompt="continue"):
+    """A turn whose reply is ``texts``, each its own text block (a text is what search counts, D41)."""
+    return [{"role": "user", "content": prompt},
+            {"role": "assistant", "content": [{"type": "text", "text": t} for t in texts]}]
+
+
 def test_a_page_about_the_query_outranks_newer_pages_that_mention_it_once(store):
-    about = "\n".join(["The rate limit is 40 requests per minute per key.", "Raised the rate limit warning threshold.",
-                       "rate limit headers: X-RateLimit-Remaining", "The rate limit resets every 60 seconds."])
-    [target] = store.page_out([page(FILLER + "\n" + about)], 1)
+    about = ["The rate limit is 40 requests per minute per key.", "Raised the rate limit warning threshold.",
+             "rate limit headers: X-RateLimit-Remaining", "The rate limit resets every 60 seconds."]
+    [target] = store.page_out([said(FILLER, *about)], 1)
     store.page_out([page(FILLER + "\nwe may hit a rate limit here") for _ in range(30)], 2)
     assert store.search("rate limit")[0] == target
     assert 1 in detailed(search(store, "rate limit"))  # today's newest-first order would bury it
+
+
+def edit_turn(t):
+    """The turn that sets the timeout: an Edit of the constant, then a one-line reply."""
+    return [{"role": "user", "content": "raise the client timeout"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{t}", "name": "Edit", "input": {
+                "file_path": "src/app/http.py", "old_string": "HTTP_TIMEOUT_S = 10",
+                "new_string": f"HTTP_TIMEOUT_S = {t}"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{t}", "content": "updated"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": f"Set the HTTP client timeout to {t} seconds."}]}]
 
 
 def test_the_newest_of_equally_relevant_statements_is_shown_first(store):
@@ -193,7 +209,7 @@ def test_the_newest_of_equally_relevant_statements_is_shown_first(store):
     turns = {}
     for t in range(1, 61):
         if t in (8, 30, 45):
-            turns[t] = page(FILLER + f"\nSet the HTTP client timeout to {t} seconds.\nHTTP_TIMEOUT_S = {t}")
+            turns[t] = edit_turn(t)
         else:
             turns[t] = page(FILLER + ("\na client timeout surfaces as a 504" if t % 4 == 0 else ""))
     ids = {t: store.page_out([turn], t)[0] for t, turn in turns.items()}
@@ -215,7 +231,7 @@ def test_the_best_three_and_the_next_fifty_are_each_shown_newest_first():
     store.set_window(200_000, 2.0)
     for t in range(1, 81):
         mentions = 4 if t % 10 == 3 else 1  # turns 3, 13, ..., 73 are about the key
-        store.page_out([page(FILLER + "\nkey.alpha=on" * mentions)], t)
+        store.page_out([said(FILLER, *["key.alpha=on"] * mentions)], t)
     reply = search(store, "key.alpha")
     assert detailed(reply) == [80, 73, 63]  # the newest match (turn 80) takes the third place
     more = listed(reply)
@@ -227,15 +243,15 @@ def test_the_best_three_and_the_next_fifty_are_each_shown_newest_first():
 def test_the_recency_prior_is_bounded():
     """Relevance and recency combine as relevance x (1 + RECENCY_WEIGHT x position among the matches)."""
     assert RECENCY_WEIGHT == 0.5
-    texts = {"old": "k " * 8 + "x " * 200, "new": "k " + "x " * 207}  # the same length
-    ranked = rank([entry("old", 1, texts["old"]), entry("new", 2, texts["new"])], "k")
-    assert ranked == ["old", "new"]  # 8 mentions beat 1 even at the far end of the session
-    ranked = rank([entry("old", 1, "k k " + "x " * 206), entry("new", 2, "k " + "x " * 207)], "k")
-    assert ranked == ["new", "old"]  # 2 mentions against 1 do not
+    ranked = rank([entry("old", 1, ["k"] * 8 + ["x " * 200]), entry("new", 2, ["k", "x " * 207])], "k")
+    assert ranked == ["old", "new"]  # 8 texts holding it beat 1 even at the far end of the session
+    ranked = rank([entry("old", 1, ["k", "k", "x " * 206]), entry("new", 2, ["k", "x " * 207])], "k")
+    assert ranked == ["new", "old"]  # 2 texts against 1 do not
 
 
 def entry(page_id, turn, text, context=False):
-    return SearchEntry(page_id, turn, search_key(fold(text)), context)
+    """A search entry of one text (a string) or of several (a list), as ``search_text`` joins them."""
+    return SearchEntry(page_id, turn, search_text([text] if isinstance(text, str) else text), context)
 
 
 SOAK_OUTPUT = "\n".join(f"{i:04d} INFO worker {i % 7} processed batch {i} in {i % 13} ms" for i in range(900))
@@ -253,14 +269,14 @@ def soak_turn():
 
 
 def test_the_newest_matching_page_is_always_shown_in_detail(store):
-    """Older pages that say the key more often outrank the newest turn, which states the current value
+    """Older pages that say the key in more texts outrank the newest turn, which states the current value
     once, but the newest matching page always takes one of the three detailed places, so the current
     value is shown (D28; after reviewer-2's repro for PR #204)."""
-    older = ["Set max_retries to 3 in the client config; max_retries is read once.",
-             "note: max_retries is read once at startup, and max_retries applies per request",
-             "max_retries applies per request; max_retries=3 in config.toml",
-             "the max_retries default stays in config.toml (max_retries = 3)"]
-    ids = [store.page_out([page(text)], t)[0] for t, text in enumerate(older, 1)]
+    older = [("Set max_retries to 3 in the client config.", "max_retries is read once."),
+             ("note: max_retries is read once at startup", "and max_retries applies per request"),
+             ("max_retries applies per request;", "max_retries=3 in config.toml"),
+             ("the max_retries default stays in config.toml", "(max_retries = 3)")]
+    ids = [store.page_out([said(*texts)], t)[0] for t, texts in enumerate(older, 1)]
     [current] = store.page_out([soak_turn()], 5)
     for t in range(6, 9):
         store.page_out([page("ran the linter, no findings")], t)
@@ -293,26 +309,56 @@ def test_a_long_turn_stating_the_current_value_beats_an_older_short_statement(st
     assert [t for t in shown if t in (4, 10)][0] == 10, shown
 
 
-def test_page_length_does_not_count_and_repetition_gains_at_most_k1_plus_one():
-    """BM25's b is 0 (D41): two pages that say the word as often score alike however long they are, so
-    recency orders them. A page that says it many times scores at most K1 + 1 = 2.2 times one that says it
-    once: an old log that repeats it 30 times outranks the newest single mention (2.12 against 1.5), but
-    not the newest page that says it three times (1.57 x 1.5 = 2.36)."""
-    assert rank([entry("long", 1, "retry_budget ok\n" + SOAK_OUTPUT), entry("short", 2, "retry_budget ok")],
+def test_a_term_counts_once_per_text_and_page_length_does_not_count():
+    """D41: a term's frequency is the number of the page's texts that hold it, and BM25's b is 0. Two
+    pages whose texts hold the word as often score alike however long they are, so recency orders them.
+    An old grep whose output repeats the word 30 times counts twice, for the command and the output, so
+    the newest one-line statement outranks it (1.5 against 1.38); counted per occurrence the grep would
+    win (2.12 against 1.5). A page with the word in 3 texts still outranks a newer page with it in one (1.57 against 1.5),
+    and 8 texts score at most K1 + 1 = 2.2 times one."""
+    assert rank([entry("long", 1, ["retry_budget ok", SOAK_OUTPUT]), entry("short", 2, "retry_budget ok")],
                 "retry_budget") == ["short", "long"]
-    assert rank([entry("short", 1, "retry_budget ok"), entry("long", 2, "retry_budget ok\n" + SOAK_OUTPUT)],
+    assert rank([entry("short", 1, "retry_budget ok"), entry("long", 2, ["retry_budget ok", SOAK_OUTPUT])],
                 "retry_budget") == ["long", "short"]
     log = "\n".join(f"{i:04d} retry_budget ok" if i % 30 == 0 else f"{i:04d} INFO tick {i}" for i in range(900))
-    assert rank([entry("log", 1, log), entry("set", 2, "retry_budget is now 5")], "retry_budget") == ["log", "set"]
-    thrice = "retry_budget is now 5 (retry_budget was 3; see retry_budget.md)"
-    assert rank([entry("log", 1, log), entry("set", 2, thrice)], "retry_budget") == ["set", "log"]
+    assert rank([entry("log", 1, ["grep -rn retry_budget", log]), entry("set", 2, "retry_budget is now 5")],
+                "retry_budget") == ["set", "log"]
+    thrice = ["set retry_budget to 3", "retry_budget = 3", "retry_budget is 3 now"]
+    assert rank([entry("old", 1, thrice), entry("set", 2, "retry_budget is now 5")], "retry_budget") == ["old", "set"]
+
+
+def test_texts_holding_counts_each_text_once():
+    from contexto.store.search import TEXT_SEP, texts_holding
+    text = search_text(["k k k", "", "x", "K and k", "kk"])
+    assert text == TEXT_SEP.join([b"k k k", b"", b"x", b"k and k", b"kk"])
+    assert texts_holding(text, b"k") == 3 and texts_holding(text, b"kk") == 1 and texts_holding(text, b"y") == 0
+    assert texts_holding(search_key(fold("k k\nk")), b"k") == 1  # one text: newlines do not split it
+
+
+def test_a_page_entry_holds_the_texts_page_matches_reads():
+    """``search_entry`` folds the page's texts one by one and joins them with ``TEXT_SEP``; with the
+    separator read as a newline it is the text ``page_matches`` folds whole, including characters that
+    lower to two and capital sigma at the end of a word."""
+    from contexto.store.pages import search_entry, searchable_text
+    from contexto.store.search import TEXT_SEP
+    store = MemoryStore("s1")
+    [pid] = store.page_out([[{"role": "user", "content": "İstanbul ΟΔΟΣ"},
+                             {"role": "assistant", "content": [{"type": "text", "text": "ΑΣ then Σ"},
+                                                               {"type": "tool_use", "id": "t", "name": "Read",
+                                                                "input": {"file_path": "/tmp/ΣΑ.txt"}}]},
+                             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
+                                                           "content": "line one\nline ΟΔΟΣ two"}]}]], 1)
+    page_record = store.get_page(pid)
+    found = search_entry(page_record)
+    assert found.text.replace(TEXT_SEP, b"\n") == search_key(searchable_text(page_record))
+    assert found.text.count(TEXT_SEP) >= 5
 
 
 def test_the_newest_page_takes_the_third_place_only_when_it_is_not_already_shown():
-    texts = {1: "k k k k", 2: "k k k k", 3: "k k k k", 4: "y", 5: "k " + "x " * 400}
+    texts = {1: ["k"] * 4, 2: ["k"] * 4, 3: ["k"] * 4, 4: "y", 5: "k " + "x " * 400}
     ranked = rank([entry(f"t{t}", t, text) for t, text in texts.items()], "k")
     assert ranked == ["t3", "t2", "t5", "t1"]
-    texts[5] = "k k k k k"
+    texts[5] = ["k"] * 5
     ranked = rank([entry(f"t{t}", t, text) for t, text in texts.items()], "k")
     assert ranked[0] == "t5" and ranked[1:3] == ["t3", "t2"]  # already first: nothing moves
 
