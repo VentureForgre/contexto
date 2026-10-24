@@ -408,49 +408,65 @@ the owner's delegation. Open decisions are listed at the end with the options an
   not main publishes a side room (`SessionStore.set_side_room(room_id, room)`) when its response's
   real usage arrives, with the same formula `bound - (input + output) - headroom_floor`, if the
   response holds a tool call the client runs, and closes it (`room` None) if it holds none. The
-  proxy tells the engine which: when there is a stream hold, whether a client call started it
-  (hosted Responses calls such as `web_search_call` hold the stream but run on the server and do not
-  count); without one, the Messages `stop_reason` or the Responses `output` list; else unknown,
-  treated as a call. There is no request-time side publish, since the hold, when it runs, makes
-  every tool call wait for its response's publish; (2) a room belongs to a request lineage, not to a
-  conversation key. Reviewer A showed that keying by the first message's hash lets two subagents
-  with the same prompt share a room (the second's publish reset the first's 4,000 to 114,000) and
-  lets a fork close a running subagent's room. The request carries no conversation id Contexto can
-  rely on, so the engine gives each room an id and remembers the request that published it: a
-  request continues a room when it extends that request and adds no turn start, as a tool loop's
-  next step does, and it replaces or closes only that room (the oldest of equal ones, so a twin's
-  room stays for the twin); any other request opens its own; (3) the MCP server cannot tell which
-  conversation made a call, so a charge gets the smallest remaining room among main's and every
-  live side room and is counted against all of them, under the same lock. However calls of several
-  conversations interleave, none with a live room receives more than that room. The call's
-  `mcp_call` event records which room limited it (`limited_by: main` or `side`); (4) a publish
-  resets only its own room's spend, since that conversation's input now holds its own results but
-  none of the others'; (5) a side room expires 120 seconds after its publish unless its holder
-  publishes again. Inside a main turn, main's room resets at each main response but a side room
-  does not, so a side room whose holder stopped (a subagent that failed after a tool call, a
-  stopped background agent, an unknown signal) spends down with every charge, main's included, and
-  can hold main's recall at nothing; both reviewers measured this lasting the whole turn, which in
-  an autonomous run can be hours. Expiry bounds it to 120 seconds. Claude Code starts an MCP call 5
-  to 16 ms after its `tool_use` block completes, so a holder's own calls normally land within a
-  second of its response; 120 seconds also covers a call queued behind another tool of the same
-  response, such as a Bash command running to Claude Code's default 2-minute timeout, and a live
-  holder republishes at each step. The first version closed every side room when main started a
-  new turn. Expiry made that unnecessary, and it was the one path that left a live background
-  subagent's call charged against main only, so it was dropped. Cost: concurrent conversations slow
-  each other's recall, for up to 120 seconds after a holder stops. Limitations: main's room is the
-  only bound for a side conversation's calls when it has no room of its own: the hold was skipped
+  proxy tells the engine which: when there is a stream hold, whether a client call started it;
+  without one, the Messages `stop_reason` or the Responses `output` list; else unknown, treated as
+  a call. Hosted Responses calls (`web_search_call`, `file_search_call`, `image_generation_call`,
+  `code_interpreter_call`, the hosted `mcp_call`) hold the stream but run on OpenAI's servers and
+  do not count; any other `*_call` type, known or not, counts as the client's, so a new type fails
+  safe. There is no request-time side publish, since the hold, when it runs, makes every tool call
+  wait for its response's publish; (2) a room belongs to a request lineage, not to a conversation
+  key. Reviewer A showed that keying by the first message's hash lets two subagents with the same
+  prompt share a room (the second's publish reset the first's 4,000 to 114,000) and lets a fork
+  close a running subagent's room; in round 2 that a lineage rule alone still lets twins take each
+  other's rooms, because after their first responses both rooms have the same lineage and whichever
+  twin steps first would continue the other's. The request carries no conversation id Contexto can
+  rely on, but each response's tool calls have ids that only that conversation's next request
+  returns. So the proxy passes the client calls' ids (`tool_use` ids, Responses `call_id`s), the
+  engine records them with the room, and a request continues a room only if it extends the room's
+  request and returns a result for one of those ids. A room recorded without ids (no hold saw
+  them) is continued by a request that extends it and adds no turn start. When two or more rooms
+  still tie, the request continues none: it opens its own room and the tied ones keep their spend
+  until they expire. A fork of main has main's key and is treated as main, so it uses main's room;
+  (3) the MCP server cannot tell which conversation made a call, so a charge gets the smallest
+  remaining room among main's and every live side room and is counted against all of them, under
+  the same lock. However calls of several conversations interleave, none with a live room receives
+  more than that room. The call's `mcp_call` event records which room limited it (`limited_by: main`
+  or `side`); (4) a publish resets only its own room's spend, since that conversation's input now
+  holds its own results but none of the others'; (5) a side room expires 15 minutes after its
+  publish unless its holder publishes again. Inside a main turn, main's room resets at each main
+  response but a side room does not, so a side room whose holder stopped (a subagent that failed
+  after a tool call, a stopped background agent, an unknown signal, tied rooms) spends down with
+  every charge, main's included, and can hold main's recall at nothing; both reviewers measured
+  this lasting the whole turn, which in an autonomous run can be hours. Expiry bounds it. The
+  first version used 120 seconds on the reasoning that it covered a call queued behind a Bash
+  command at Claude Code's default 2-minute timeout; both reviewers showed it does not (the call
+  starts after the Bash command is killed, past expiry), and Bash's timeout can be raised to 10
+  minutes. Claude Code starts an MCP call 5 to 16 ms after its `tool_use` block completes, so a
+  holder's own calls normally land within a second, but a call can wait behind another tool of the
+  same response; 15 minutes covers the 10-minute Bash maximum with margin. A call held longer, most
+  often by a permission prompt the user has not answered, finds its room expired; that limit is
+  kept and documented. The trade-off: over the bound is the worse failure, and a long starvation
+  is visible as `limited_by: side`, so the expiry errs long. The session store's times are
+  wall-clock, because the proxy and the MCP server are separate processes; a publish time more
+  than 15 minutes in the future (a clock stepped back) counts as expired, and `MemoryStore` uses a
+  monotonic clock. The first version also closed every side room when main started a new turn.
+  Expiry made that unnecessary, and it was the one path that left a live background subagent's
+  call charged against main only, so it was dropped. Cost: concurrent conversations slow each
+  other's recall, for up to 15 minutes after a holder stops. Limitations: main's room is the only
+  bound for a side conversation's calls when it has no room of its own: the hold was skipped
   (`hold_skipped`), its transform failed, it entered degraded mode (or its `set_side_room` failed)
-  before its first publish, or its call starts more than 120 seconds after its response's publish;
+  before its first publish, or its call starts more than 15 minutes after its response's publish;
   a degraded side conversation keeps the last room it opened until expiry; search's "in view" still
   means main's window. Options considered: a per-subagent share of main's room (rejected: main's
   room says nothing about a subagent's window, so a share can still overflow it); a stronger lock on
   the shared room (rejected: the room was already locked; the fault is what it was measured from);
-  attributing each MCP call to its conversation by matching it to the tool calls seen in the held
-  stream (rejected for now: the MCP request carries no conversation id that Contexto can rely on,
-  and two conversations can make identical calls); resetting a side room's spend at main's
-  publishes (rejected: the holder's own unmeasured results would be forgotten while it is still
-  live); closing side rooms only when their holder closes them (rejected: a holder that stops
-  never does).
+  attributing each MCP call to its conversation (rejected for now: the MCP request carries no
+  conversation id that Contexto can rely on, and two conversations can make identical calls; the
+  tool-call ids above attribute a request to a room, not an MCP call); a tie-break by room age
+  (rejected: reviewer A showed each order fails for one twin); resetting a side room's spend at
+  main's publishes (rejected: the holder's own unmeasured results would be forgotten while it is
+  still live); closing side rooms only when their holder closes them (rejected: a holder that
+  stops never does).
 
 ## Repository and process
 

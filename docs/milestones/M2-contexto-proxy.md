@@ -547,46 +547,58 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     it does not are listed below).
     - Tool-call signal. The proxy passes `tool_calls` to `observe_usage` when the callable takes
       that keyword. When the response has a stream hold, the hold decides: True if a client call
-      started (a Messages `tool_use`; a Responses `function_call`, `custom_tool_call`, or
-      `local_shell_call`), False otherwise. Hosted Responses calls (`web_search_call`,
-      `image_generation_call`, and any other `*_call` item) still start the hold but run on the
-      server, never reach the MCP server, and do not count. With no hold, a Messages `stop_reason`
-      decides (`tool_use` or not), or the client call types in a Responses `output` list; else the
-      value is None, which the engine treats as True.
+      started, False otherwise. Hosted Responses calls (`web_search_call`, `file_search_call`,
+      `image_generation_call`, `code_interpreter_call`, and the hosted remote-MCP `mcp_call`) still
+      start the hold but run on OpenAI's servers, never reach Contexto's MCP server, and do not
+      count. Every other call counts as a client call: a Messages `tool_use`, and any other
+      Responses `*_call` item, known (`function_call`, `custom_tool_call`, `local_shell_call`,
+      `computer_call`) or not, so a new type fails safe. With no hold, a Messages `stop_reason`
+      decides (`tool_use` or not), or the client calls in a Responses `output` list; else the value
+      is None, which the engine treats as True. A callable that takes `tool_call_ids` also gets the
+      ids of the client calls the proxy saw in the response: `tool_use` ids, Responses `call_id`s.
     - Room per request lineage. Two subagents launched with the same prompt, or a side request
-      that forks one, have the same conversation key, so a room is not keyed by it. The engine
-      gives each room an id (the conversation key and a random suffix) and remembers the request
-      that published it (its message count and anchor hash). A request continues a room when it
-      extends that room's request and adds no turn start, as a tool loop's next request does; it
-      replaces or closes only that room (the longest such lineage, the oldest of equal ones, so a
-      twin's room is left for the twin). Any other request opens a new room, or with no tool call
-      changes nothing.
+      that forks one, have the same conversation key, so a room is not keyed by it. A fork of the
+      main conversation shares main's key and is treated as main (`publishes`), so it uses main's
+      room, not a side room. The engine gives each side room an id (the conversation key and a
+      random suffix) and remembers the request that published it (its message count and anchor
+      hash) and the tool-call ids its response held. A request continues a room only if it extends
+      that room's request and returns a result (`tool_result`, a Responses `*_output` item) for one
+      of the room's recorded ids, the response's own calls, which no twin or fork carries. A room
+      recorded without ids (the proxy saw none) is continued by a request that extends it and adds
+      no turn start. Exactly one room must match: when two or more tie, the request continues none,
+      the tied rooms keep their spend until they expire, and the request opens its own room. A
+      continued room is replaced (with a tool call) or closed (without); any other request opens a
+      new room, or with no tool call changes nothing.
     - Charging. The MCP server cannot tell which conversation made a call, so `charge_turn_room`
       gives the call the smallest remaining room among the main room and every live side room,
       counts what it returns against all of them in the same locked read-modify-write, and returns
       which room limited it (`main`, also on a tie, or `side`); the call's `mcp_call` event records
       it as `limited_by`. A publish resets only its own room's spend. With no main room published but
       a side room live, the side rooms alone bound the call.
-    - Expiry. A side room lives 120 seconds (`SIDE_ROOM_TTL_S`) after its publish; its holder's next
-      response restarts that time. Claude Code starts an MCP call 5 to 16 ms after its `tool_use`
-      block completes, so a holder's own calls normally land within a second of its response; 120
-      seconds also covers a call queued behind another tool of the same response, such as a Bash
-      command running to Claude Code's default 2-minute timeout. Expired rooms are dropped at the
-      next charge or side publish. Main's turns do not close side rooms.
+    - Expiry. A side room lives 15 minutes (`SIDE_ROOM_TTL_S`, 900 seconds) after its publish; its
+      holder's next response restarts that time. Claude Code starts an MCP call 5 to 16 ms after its
+      `tool_use` block completes, so a holder's own calls normally land within a second of its
+      response. A call can also wait behind another tool of the same response: a Bash command can
+      run to Claude Code's 10-minute maximum timeout, and 15 minutes leaves margin over that. A call
+      held longer, most often by a permission prompt the user has not answered, finds its room
+      expired (see below). The session store's times are wall-clock, because the proxy publishes and
+      the MCP server charges from separate processes; a publish time more than 15 minutes in the
+      future (a clock stepped back) counts as expired. `MemoryStore` uses a monotonic clock. Expired
+      rooms are dropped at the next charge or side publish. Main's turns do not close side rooms.
     - Inside a main turn. Main's room resets at each main publish; a side room resets only at its
       holder's publish. While a side room is live, every charge, main's own included, also spends
       it, so main's recall can be held below main's own room, down to nothing, by a side room whose
       holder has stopped (a subagent that failed after a tool call, a stopped background agent, a
-      response whose signal was unknown). This lasts at most 120 seconds after that room's last
-      publish; `limited_by: side` on the calls shows it.
+      response whose signal was unknown, tied rooms that no request continues). This lasts at most
+      15 minutes after that room's last publish; `limited_by: side` on the calls shows it.
     - When main's room is the only bound. A side conversation's calls are charged only against
       main's room (and any other live side room), as before D40, when it has no room of its own:
       the hold was skipped (`hold_skipped`: encoded or unchunked SSE), so its tool calls reach the
       CLI before the publish; its request failed in the transform (`transform_error`), so the engine
       has no state for it; it entered degraded mode before its first publish, or its `set_side_room`
       failed (rule 14 makes it degraded), so no room was opened (a degraded conversation keeps the
-      last room it opened, until expiry); or its call starts more than 120 seconds after its
-      response's publish.
+      last room it opened, until expiry); or its call starts more than 15 minutes after its
+      response's publish, for example after a permission prompt.
     - Limitations: one conversation's charges also spend the others' rooms; for a subagent, search's
       "in view" still means the main conversation's window.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
