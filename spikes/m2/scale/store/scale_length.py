@@ -12,7 +12,7 @@ one store with ``scale_bench.build_store``, then runs every probe query of ``sca
   against the mean page length, read from ``--d34-ref`` with ``git show`` so the comparison does not
   depend on the working tree. ``page b=0.75`` is D34 as merged; ``page b=0`` is D41's first version
   (PR #216 at 4d30c34: no length term, every occurrence counted);
-- ``d41``: the working tree's ``rank`` (D41: b 0, and a term counted once per text that holds it);
+- ``d41``: the working tree's ``rank`` (D41: b 0, and a term counted once per text that holds it, at most 3 per page);
 - ``cap3``: ``page b=0`` with each page's count of a term capped at 3 (reviewer A's option on PR #216);
 - ``texts b=X``: the plain reading of D34's follow-up: BM25 with the length of the page's texts that
   hold a query word, against the mean of that length over the matching pages;
@@ -95,8 +95,11 @@ def load_d34(ref: str) -> ModuleType:
 
 class Entry(NamedTuple):
     """``contexto.store.search.SearchEntry`` plus what the other variants read: ``full``, every stub field
-    and text of the page joined by ``search.TEXT_SEP`` (what D34 searched: the stub fields are not dropped
-    when the turn's texts hold them), and ``ends``, the offset in ``full`` where each of them ends."""
+    and text of the page joined by ``search.TEXT_SEP`` (the same bytes as ``text``, which this tree's
+    search reads, and what D34 searched), ``ends``, the offset in ``full`` where each of them ends, and
+    ``dropped``, the same without the stub fields a text of the turn already holds (the prompt's first
+    200 characters, the paths, a system or reminder first line; reviewer A's note on PR #216), which
+    the ``grid:`` cells read. D41 measured it and kept the repeats."""
 
     id: str
     turn: int
@@ -104,6 +107,7 @@ class Entry(NamedTuple):
     context: bool
     ends: array
     full: bytes
+    dropped: bytes
 
 
 def entry_with_ends(page: dict[str, Any]) -> Entry:
@@ -117,8 +121,11 @@ def entry_with_ends(page: dict[str, Any]) -> Entry:
     for key in keys:
         end += 1 + len(key)
         ends.append(end)
+    texts = list(_texts(page["messages"]))
+    body = "\n".join(texts)
+    kept = [f for f in fields[:len(fields) - len(texts)] if f and f not in body] + texts
     return Entry(page["id"], page["turn"], search_now.search_text(_search_fields(page)), is_context_page(page), ends,
-                 search_now.TEXT_SEP.join(keys))
+                 search_now.TEXT_SEP.join(keys), search_now.search_text(kept))
 
 
 def term_counts(text: bytes, ends: Sequence[int], term: bytes) -> Iterator[tuple[int, int, int]]:
@@ -243,7 +250,7 @@ def rank_grid(entries: Sequence[Any], query: str, text_cap: int, page_cap: int |
 def _rank_of(d34: ModuleType | None, kind: str, b: float) -> Callable[[Sequence[Any], str], list[str]]:
     if kind == "d41":
         return search_now.rank
-    if kind.startswith(("grid:", "gridfull:")):  # grid:TEXT_CAP:PAGE_CAP; gridfull reads ``full``
+    if kind.startswith(("grid:", "gridfull:")):  # grid:TEXT_CAP:PAGE_CAP reads ``dropped``; gridfull ``text``
         _, c, p = kind.split(":")
         return lambda entries, query: rank_grid(entries, query, int(c), None if p == "none" else int(p))
     if kind == "cap3":
@@ -271,13 +278,15 @@ def ranker(d34: ModuleType | None, kind: str, b: float) -> Callable[..., list[st
     (``HOLD_ALL_MB``), so this happens only if a page cannot be held. The variants that are not this
     tree's ``rank`` read each page's ``full`` text, as D34 searched it."""
     inner = _rank_of(d34, kind, b)
-    own = kind == "d41" or kind.startswith("grid:")  # gridfull reads ``full``, as the tree at 0ff1bfe did
+    own = kind == "d41" or kind.startswith("gridfull:")
 
     def rank(entries: Sequence[Any], query: str, fetch: Callable[[int], Any] | None = None) -> list[str]:
         if any(e.text is None for e in entries):
             got = [e if e.text is not None else (fetch(i) if fetch is not None else None) for i, e in enumerate(entries)]
             entries = [e for e in got if e is not None and e.text is not None]
-        if not own:
+        if kind.startswith("grid:"):
+            entries = [e._replace(text=e.dropped) if isinstance(e, Entry) else e for e in entries]
+        elif not own:
             entries = [e._replace(text=e.full) if isinstance(e, Entry) else e for e in entries]
         return inner(entries, query)
     return rank
