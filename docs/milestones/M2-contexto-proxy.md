@@ -637,19 +637,27 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   file is read again only if its inode, size, or modification time changed); pages stay immutable
   and the store format is unchanged. The proxy keeps each page's id, turn, stub, and index line.
   The MCP server keeps each page's id, turn, and whether it holds only context blocks (about 700
-  bytes per page), and holds folded searchable text, as UTF-8 bytes, for the newest pages (by turn)
-  up to a budget: `CONTEXTO_SEARCH_CACHE_MB` megabytes of 1,048,576 bytes (default 64; `0` holds
-  none), or `contexto mcp --search-cache-mb`, which overrides it. `contexto run` passes the
-  variable to the MCP server for both CLIs when it is set; an invalid value is logged
-  `search_cache_invalid` and the default used, so the server still starts. A page read for a search
-  is held if its text is newer than the oldest held text, which is let go to make room; otherwise it
-  is let go after the search. Search results do not depend on the budget. Limitations: a store
-  larger than the budget reads every page outside it from its file at each search (6,000
-  synthetic pages, 193 MB of text: 0.55 to 0.69 s per search at 64 MB, 0.10 to 0.24 s with every
-  page held); the first search of each MCP process reads every page once; pages are narrowed word
-  by word, so a query stops scanning as soon as no page holds every word so far, but a query with
-  matches scans the text once per word, and reads a page outside the budget a second time when the
-  query has more than 6 words and the page came before the first match.
+  bytes per page, and about 210 more per held page, outside the budget), and holds folded
+  searchable text, as UTF-8 bytes, up to a budget: `CONTEXTO_SEARCH_CACHE_MB` megabytes of
+  1,048,576 bytes (default 64; `0` holds none), or `contexto mcp --search-cache-mb`, which
+  overrides it. `contexto run` passes the variable to the MCP server for both CLIs when it is set;
+  an invalid value is logged `search_cache_invalid` and the default used, so the server still
+  starts. The budget counts held text as it is or compressed (zlib level 1): the newest pages (by
+  turn, then id) are held as they are, and while the held bytes exceed the budget the oldest
+  uncompressed text is compressed, then the oldest compressed text let go. When the store's text
+  does not fit the budget as it is, at most a quarter of the budget is held uncompressed. A page
+  that is not held is read from its file at each search and let go after it; a page that would be
+  compressed and let go first is not held. A page removed while a search runs is left out (the
+  search runs again on a new listing when a listed file is gone at its end), and a page whose id is
+  not a string or whose turn is not an integer is logged `page_unreadable` and left out. Search
+  results do not depend on the budget. Limitations: a store larger than the budget's compressed
+  capacity reads every page outside it at each search; at 6,000 synthetic pages (184 MiB of text,
+  all held compressed at 64 MB) a search takes 0.26 to 0.41 s at 64 MB against 0.10 to 0.25 s with
+  every page held as it is, and 0.80 to 0.91 s at 0; the first search of each MCP process reads
+  every page once and compresses what the budget keeps (1.6 s at 6,000 pages and 64 MB); pages are
+  narrowed word by word, so a query stops scanning as soon as no page holds every word so far, but
+  a query with matches scans the text once per word, and reads a page outside the budget a second
+  time when the query has more than 6 words and the page came before the first match.
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
