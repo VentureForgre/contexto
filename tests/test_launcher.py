@@ -279,6 +279,19 @@ def test_upstream_is_resolved_from_settings_before_the_proxy_starts(env, upstrea
     assert launch_event["upstream_source"] == "settings:local"
 
 
+@pytest.mark.parametrize("config_dir", ["~nosuchuser-contexto-test/cfg", "~/cfg", " "])
+def test_an_odd_claude_config_dir_does_not_stop_the_launch(env, upstream, tmp_path, config_dir):
+    """reviewer-A, round 2: an unknown ~user in CLAUDE_CONFIG_DIR raised out of `contexto run`."""
+    env["CLAUDE_CONFIG_DIR"] = config_dir
+    env["FAKE_REQUEST"] = "1"
+    env["ANTHROPIC_BASE_URL"] = upstream  # no settings file sets one, so the environment is used
+    proc = launch(env, "--session", "s3c", "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0 and "Traceback" not in err, err
+    launch_event = next(e for e in session_log(env, "s3c") if e["event"] == "launch")
+    assert launch_event["upstream_source"] == "env"
+
+
 def test_sigterm_is_forwarded_to_claude_and_everything_is_cleaned_up(env, upstream, tmp_path):
     env["FAKE_SLEEP"] = "30"
     proc = launch(env, "--upstream", upstream, "--session", "s4", "claude", cwd=tmp_path)

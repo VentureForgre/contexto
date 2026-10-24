@@ -7,7 +7,8 @@ Order per the M2 contract, "Upstream resolution" (PR #20 head bf1c7ad), first ma
    in a linked git worktree the MAIN checkout's ``.claude/settings.local.json`` (measured in M0,
    docs/research/M0-proxy-measurements.md finding 1a: it is loaded and its value wins), then the
    project's ``.claude/settings.local.json``, ``.claude/settings.json``, and the user's
-   ``~/.claude/settings.json``.
+   ``~/.claude/settings.json``, or ``$CLAUDE_CONFIG_DIR/settings.json`` when ``CLAUDE_CONFIG_DIR``
+   is set, because Claude Code then reads its user settings from that directory (D35).
 3. ``ANTHROPIC_BASE_URL`` in the process environment. M0 measured that a settings-file value
    overrides the process environment (finding 1), so the environment only counts when no
    settings file sets one.
@@ -32,6 +33,7 @@ from typing import Mapping
 
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 BASE_URL_KEY = "ANTHROPIC_BASE_URL"
+CONFIG_DIR_KEY = "CLAUDE_CONFIG_DIR"
 
 
 @dataclass(frozen=True)
@@ -69,7 +71,23 @@ def project_root(directory: Path) -> Path:
     return Path(out.stdout.strip() or directory)
 
 
-def claude_settings_order(cwd: Path, home: Path) -> list[tuple[str, Path]]:
+def user_settings_path(home: Path, env: Mapping[str, str] | None = None) -> Path:
+    """Claude Code's user settings file: ``$CLAUDE_CONFIG_DIR/settings.json`` when ``env`` sets
+    ``CLAUDE_CONFIG_DIR``, else ``~/.claude/settings.json``. ``env`` None means no override (callers
+    pass the process environment explicitly, so a test's ``home`` is never redirected).
+
+    The value is used as given, like Claude Code does: no ``~`` expansion, so a literal ``~/cfg``
+    names ``./~/cfg`` for both, and a ``~user`` that does not exist cannot raise. A relative value
+    resolves against the working directory, which the CLI inherits. An empty or whitespace-only
+    value is treated as unset (Claude Code is inconsistent there; falling back to ``~/.claude`` is
+    the reading that cannot point at a stray ``./settings.json``)."""
+    config_dir = (env or {}).get(CONFIG_DIR_KEY) or ""
+    if not config_dir.strip():
+        return home / ".claude" / "settings.json"
+    return Path(config_dir) / "settings.json"
+
+
+def claude_settings_order(cwd: Path, home: Path, env: Mapping[str, str] | None = None) -> list[tuple[str, Path]]:
     """(kind, path) for each settings file that can set the base URL, highest precedence first."""
     order: list[tuple[str, Path]] = []
     main = main_checkout(cwd)
@@ -79,7 +97,7 @@ def claude_settings_order(cwd: Path, home: Path) -> list[tuple[str, Path]]:
     order += [
         ("local", root / ".claude" / "settings.local.json"),
         ("project", root / ".claude" / "settings.json"),
-        ("user", home / ".claude" / "settings.json"),
+        ("user", user_settings_path(home, env)),
     ]
     return order
 
@@ -87,7 +105,7 @@ def claude_settings_order(cwd: Path, home: Path) -> list[tuple[str, Path]]:
 def _settings_base_url(path: Path) -> str | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # unreadable or not JSON: as if the file were absent
         return None
     env = data.get("env") if isinstance(data, dict) else None
     value = env.get(BASE_URL_KEY) if isinstance(env, dict) else None
@@ -98,11 +116,12 @@ def resolve_upstream(explicit: str | None = None, *, env: Mapping[str, str] | No
                      cwd: Path | None = None, home: Path | None = None) -> Upstream:
     if explicit:
         return Upstream(explicit, "flag")
-    for kind, path in claude_settings_order(cwd or Path.cwd(), home or Path.home()):
+    env = os.environ if env is None else env
+    for kind, path in claude_settings_order(cwd or Path.cwd(), home or Path.home(), env):
         value = _settings_base_url(path)
         if value:
             return Upstream(value, f"settings:{kind}")
-    value = (os.environ if env is None else env).get(BASE_URL_KEY, "").strip()
+    value = env.get(BASE_URL_KEY, "").strip()
     if value:
         return Upstream(value, "env")
     return Upstream(DEFAULT_UPSTREAM, "default")

@@ -267,7 +267,7 @@ def test_chatgpt_mode_uses_overrides_only(tmp_path):
     assert "requires_openai_auth=true" in argv and "supports_websockets=false" in argv
     assert "model_provider=contexto" in argv and "features.enable_request_compression=false" in argv
     assert launch.argv[-2:] == ["exec", "hi"] and launch.upstream == CHATGPT_UPSTREAM
-    assert any("O4" in note for note in launch.notes)
+    assert any("D35" in note and "provider's terms" in note for note in launch.notes)
     overrides = dict(launch.argv[i + 1].split("=", 1) for i, a in enumerate(launch.argv) if a == "-c")
     approval = overrides["mcp_servers.contexto.default_tools_approval_mode"]
     assert tomllib.loads(f"v = {approval}")["v"] == "approve"  # a valid TOML value, as codex parses -c
@@ -333,6 +333,7 @@ class FakeLauncher:
 
     def start_proxy(self, store, upstream_url, upstream_source, config, observe_thinking, *, stderr=None):
         self.calls["upstream"] = upstream_url
+        self.calls["upstream_source"] = upstream_source
         return self.proxy, "rewrite"
 
     def report_missing_tools(self, proxy):
@@ -372,12 +373,28 @@ def test_run_codex_api_key_mode_runs_and_cleans_up(tmp_path, monkeypatch):
     err = io.StringIO()
     assert run_codex(args, launcher=fake, stderr=err) == 7
     assert fake.calls["upstream"] == "https://owner-proxy.invalid/v1" and fake.calls["session"] == "S9"
+    assert fake.calls["upstream_source"] == "claude-flag+/v1"  # D35: where the URL came from, never the URL
+    assert "upstream claude-flag+/v1" in err.getvalue() and "owner-proxy" not in err.getvalue()
     assert fake.calls["argv"] == ["codex", "exec", "hi"] and fake.calls["home_existed"]
     home = fake.calls["home"]
     assert home.endswith(os.path.join("sessions", "S9", "codex-home"))  # under the Contexto session dir
     assert os.path.isdir(home) and not os.path.exists(os.path.join(home, "config.toml"))  # rollouts kept
     assert fake.proxy.stopped and fake.calls["reported_after_stop"]
     assert "session S9" in err.getvalue()
+
+
+def test_run_codex_survives_an_odd_claude_config_dir(tmp_path, monkeypatch):
+    """reviewer-A, round 2: run_codex resolves Claude's upstream even with --codex-upstream, so an
+    unknown ~user in CLAUDE_CONFIG_DIR must not raise out of it."""
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~nosuchuser-contexto-test/cfg")
+    monkeypatch.chdir(tmp_path)
+    args = parse("--codex-upstream", "https://cpa.invalid/v1", "--codex-key-helper", "/synthetic/helper",
+                 "codex", "exec", "hi")
+    fake = FakeLauncher()
+    err = io.StringIO()
+    assert run_codex(args, launcher=fake, stderr=err) == 0
+    assert fake.calls["upstream"] == "https://cpa.invalid/v1" and fake.calls["upstream_source"] == "codex-flag"
 
 
 def test_run_codex_chatgpt_mode_and_errors(tmp_path, monkeypatch):
@@ -387,9 +404,10 @@ def test_run_codex_chatgpt_mode_and_errors(tmp_path, monkeypatch):
     err = io.StringIO()
     assert run_codex(args, launcher=fake, stderr=err) == 0
     assert fake.calls["upstream"] == "https://chatgpt.com/backend-api/codex"
+    assert fake.calls["upstream_source"] == "chatgpt-default"
     assert "requires_openai_auth=true" in " ".join(fake.calls["argv"])
     assert fake.calls["home"] == os.environ.get("CODEX_HOME")  # the user's own CODEX_HOME, untouched
-    assert "O4" in err.getvalue()
+    assert "D35" in err.getvalue() and "CLIProxyAPI" in err.getvalue()
     refused = FakeLauncher(bound_error="bound too large")
     assert run_codex(parse("codex"), launcher=refused, stderr=io.StringIO()) == 2
 
