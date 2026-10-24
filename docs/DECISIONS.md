@@ -476,50 +476,73 @@ the owner's delegation. Open decisions are listed at the end with the options an
   rely on, but each response's tool calls have ids that only that conversation's next request
   returns. So the proxy passes the client calls' ids (`tool_use` ids, Responses `call_id`s), the
   engine records them with the room, and a request continues a room only if it extends the room's
-  request and returns a result for one of those ids. A room recorded without ids (no hold saw
-  them) is continued by a request that extends it and adds no turn start. When two or more rooms
-  still tie, the request continues none: it opens its own room and the tied ones keep their spend
-  until they expire. A fork of main has main's key and is treated as main, so it uses main's room;
-  (3) the MCP server cannot tell which conversation made a call, so a charge gets the smallest
+  request, adds no turn start, and returns a result for one of those ids. A twin carries only its
+  own ids. A fork that copies results for the room's calls does continue it, which is harmless once
+  those calls have finished: the holder has nothing in flight, and its next response opens a fresh
+  room. Reviewer A's round-3 probes showed a fork made while a call still runs, closing that call
+  with a placeholder result: one that then adds its own user prompt is now refused by the turn-start
+  rule; one that asks inside the placeholder's message cannot be told apart from a system reminder
+  appended to real results, so it can replace or close the room. That is a documented limitation;
+  no Claude Code path is known to fork a running subagent that way. A room recorded without ids (no
+  hold saw them) is continued by a request that extends it and adds no turn start. When two or more
+  rooms still tie, the request continues none: it opens its own room and the tied ones keep their
+  spend until they expire. A fork of main has main's key and is treated as main, so it uses main's
+  room; (3) the MCP server cannot tell which conversation made a call, so a charge gets the smallest
   remaining room among main's and every live side room and is counted against all of them, under
   the same lock. However calls of several conversations interleave, none with a live room receives
   more than that room. The call's `mcp_call` event records which room limited it (`limited_by: main`
-  or `side`); (4) a publish resets only its own room's spend, since that conversation's input now
-  holds its own results but none of the others'; (5) a side room expires 15 minutes after its
+  or `side`), the number of live side rooms (`side_rooms`), and for a side limit that room's
+  seconds since its last publish (`limiting_age_s`), so a stale room can be told from a live
+  subagent; a room dropped at expiry logs `side_room_expired`, and a closed one `side_room_closed`
+  with its reason; (4) a publish resets only its own room's spend, since that conversation's input
+  now holds its own results but none of the others'; (5) a side room expires 15 minutes after its
   publish unless its holder publishes again. Inside a main turn, main's room resets at each main
-  response but a side room does not, so a side room whose holder stopped (a subagent that failed
-  after a tool call, a stopped background agent, an unknown signal, tied rooms) spends down with
-  every charge, main's included, and can hold main's recall at nothing; both reviewers measured
-  this lasting the whole turn, which in an autonomous run can be hours. Expiry bounds it. The
-  first version used 120 seconds on the reasoning that it covered a call queued behind a Bash
-  command at Claude Code's default 2-minute timeout; both reviewers showed it does not (the call
-  starts after the Bash command is killed, past expiry), and Bash's timeout can be raised to 10
-  minutes. Claude Code starts an MCP call 5 to 16 ms after its `tool_use` block completes, so a
-  holder's own calls normally land within a second, but a call can wait behind another tool of the
-  same response; 15 minutes covers the 10-minute Bash maximum with margin. A call held longer, most
-  often by a permission prompt the user has not answered, finds its room expired; that limit is
-  kept and documented. The trade-off: over the bound is the worse failure, and a long starvation
-  is visible as `limited_by: side`, so the expiry errs long. The session store's times are
-  wall-clock, because the proxy and the MCP server are separate processes; a publish time more
-  than 15 minutes in the future (a clock stepped back) counts as expired, and `MemoryStore` uses a
-  monotonic clock. The first version also closed every side room when main started a new turn.
-  Expiry made that unnecessary, and it was the one path that left a live background subagent's
-  call charged against main only, so it was dropped. Cost: concurrent conversations slow each
-  other's recall, for up to 15 minutes after a holder stops. Limitations: main's room is the only
-  bound for a side conversation's calls when it has no room of its own: the hold was skipped
-  (`hold_skipped`), its transform failed, it entered degraded mode (or its `set_side_room` failed)
-  before its first publish, or its call starts more than 15 minutes after its response's publish;
-  a degraded side conversation keeps the last room it opened until expiry; search's "in view" still
-  means main's window. Options considered: a per-subagent share of main's room (rejected: main's
-  room says nothing about a subagent's window, so a share can still overflow it); a stronger lock on
-  the shared room (rejected: the room was already locked; the fault is what it was measured from);
+  response but a side room does not, so a side room whose holder stopped (a subagent the user
+  interrupted, one that failed after a tool call, a stopped background agent, an unknown signal,
+  tied rooms) spends down with every charge, main's included, and can hold main's recall at
+  nothing; both reviewers measured this lasting the whole turn, which in an autonomous run can be
+  hours. Expiry bounds it. The first version used 120 seconds on the reasoning that it covered a
+  call queued behind a Bash command at Claude Code's default 2-minute timeout; both reviewers showed
+  it does not (the call starts after the Bash command is killed, past expiry), and Bash's timeout
+  can be raised to 10 minutes. Claude Code starts an MCP call 5 to 16 ms after its `tool_use` block
+  completes, so a holder's own calls normally land within a second, but a call can wait behind
+  another tool of the same response; 15 minutes covers the 10-minute Bash maximum with margin. A
+  call held longer, most often by a permission prompt the user has not answered, finds its room
+  expired; that limit is kept and documented. The trade-off: over the bound is the worse failure,
+  and a long starvation is visible as `limited_by: side` with a large `limiting_age_s`, so the
+  expiry errs long. The session store's times are wall-clock, because the proxy and the MCP server
+  are separate processes; a publish time more than 15 minutes in the future (a clock stepped back)
+  counts as expired, and `MemoryStore` uses a monotonic clock; (6) reviewer B measured the common
+  interactive case: Esc during a subagent's tool leaves its room live, and main's recall halved
+  each minute to nothing, from minute 8 to minute 15. So during a main turn that a human prompt
+  started (main's turn id changes only at a user prompt), each main request closes side rooms
+  published before that turn and not republished for more than 2 minutes (`SIDE_ROOM_IDLE_S`). A
+  live subagent republishes at every step, so a room idle that long across a human prompt is almost
+  always an interrupted one. Checking at every main request of the turn, not only at its first,
+  covers the user who presses Esc and types within 2 minutes. A room opened during the current main
+  turn is never closed this way, so a foreground subagent on a 10-minute Bash command, which main
+  waits for inside the same turn, keeps its room. Residual risk: a background subagent from an
+  earlier turn that waits more than 2 minutes on one tool while the human's new turn runs loses its
+  room, and a call it makes after that is charged against the other rooms only. The first version
+  closed every side room at a new main turn, which also hit live background subagents mid-step;
+  this closes only rooms idle for 2 minutes. Cost: concurrent conversations slow each other's
+  recall; a stopped holder holds it down for up to 2 minutes into the next human turn, or 15 minutes
+  otherwise. Limitations: main's room is the only bound for a side conversation's calls when it
+  has no room of its own: the hold was skipped (`hold_skipped`), its transform failed, it entered
+  degraded mode (or its `set_side_room` failed) before its first publish, its call starts more than
+  15 minutes after its response's publish, or its room was closed at a human turn; a degraded side
+  conversation keeps the last room it opened until expiry; search's "in view" still means main's
+  window. Options considered: a per-subagent share of main's room (rejected: main's room says
+  nothing about a subagent's window, so a share can still overflow it); a stronger lock on the
+  shared room (rejected: the room was already locked; the fault is what it was measured from);
   attributing each MCP call to its conversation (rejected for now: the MCP request carries no
   conversation id that Contexto can rely on, and two conversations can make identical calls; the
   tool-call ids above attribute a request to a room, not an MCP call); a tie-break by room age
   (rejected: reviewer A showed each order fails for one twin); resetting a side room's spend at
   main's publishes (rejected: the holder's own unmeasured results would be forgotten while it is
   still live); closing side rooms only when their holder closes them (rejected: a holder that
-  stops never does).
+  stops never does); closing idle rooms only at the first request of a human turn (rejected: a user
+  who types right after Esc would wait the full 15 minutes).
 
 ## Repository and process
 

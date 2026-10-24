@@ -552,33 +552,42 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     - Tool-call signal. The proxy passes `tool_calls` to `observe_usage` when the callable takes
       that keyword. When the response has a stream hold, the hold decides: True if a client call
       started, False otherwise. Hosted Responses calls (`web_search_call`, `file_search_call`,
-      `image_generation_call`, `code_interpreter_call`, and the hosted remote-MCP `mcp_call`) still
-      start the hold but run on OpenAI's servers, never reach Contexto's MCP server, and do not
-      count. Every other call counts as a client call: a Messages `tool_use`, and any other
-      Responses `*_call` item, known (`function_call`, `custom_tool_call`, `local_shell_call`,
-      `computer_call`) or not, so a new type fails safe. With no hold, a Messages `stop_reason`
-      decides (`tool_use` or not), or the client calls in a Responses `output` list; else the value
-      is None, which the engine treats as True. A callable that takes `tool_call_ids` also gets the
-      ids of the client calls the proxy saw in the response: `tool_use` ids, Responses `call_id`s.
+      `image_generation_call`, `code_interpreter_call`, the hosted remote-MCP `mcp_call`, and a
+      `tool_search_call` whose `execution` is not `client`) still start the hold but run on OpenAI's
+      servers, never reach Contexto's MCP server, and do not count. Every other call counts as a
+      client call: a Messages `tool_use`, and any other Responses `*_call` item, known
+      (`function_call`, `custom_tool_call`, `local_shell_call`, `computer_call`) or not, so a new
+      type fails safe. With no hold, a Messages `stop_reason` decides (`tool_use` or not), or the
+      client calls in a Responses `output` list; else the value is None, which the engine treats as
+      True. A callable that takes `tool_call_ids` also gets the ids of the client calls the proxy saw
+      in the response: `tool_use` ids, Responses `call_id`s.
     - Room per request lineage. Two subagents launched with the same prompt, or a side request
       that forks one, have the same conversation key, so a room is not keyed by it. A fork of the
       main conversation shares main's key and is treated as main (`publishes`), so it uses main's
       room, not a side room. The engine gives each side room an id (the conversation key and a
       random suffix) and remembers the request that published it (its message count and anchor
       hash) and the tool-call ids its response held. A request continues a room only if it extends
-      that room's request and returns a result (`tool_result`, a Responses `*_output` item) for one
-      of the room's recorded ids, the response's own calls, which no twin or fork carries. A room
-      recorded without ids (the proxy saw none) is continued by a request that extends it and adds
-      no turn start. Exactly one room must match: when two or more tie, the request continues none,
-      the tied rooms keep their spend until they expire, and the request opens its own room. A
-      continued room is replaced (with a tool call) or closed (without); any other request opens a
-      new room, or with no tool call changes nothing.
+      that room's request, adds no turn start, and returns a result (`tool_result`, a Responses
+      `*_output` item) for one of the room's recorded ids. A twin carries only its own ids and
+      cannot match. A fork that copies results for the room's calls does continue the room; that is
+      harmless once those calls have finished, since the holder has nothing in flight and its next
+      response opens a fresh room. A fork made while a call is still running, which answers that
+      call with a placeholder result and asks its question inside the same message, cannot be told
+      apart from the next step and can replace or close the room (a limitation; no Claude Code path
+      is known to fork a running subagent). A room recorded without ids (the proxy saw none) is
+      continued by a request that extends it and adds no turn start. Exactly one room must match:
+      when two or more tie, the request continues none, the tied rooms keep their spend until they
+      expire, and the request opens its own room. A continued room is replaced (with a tool call)
+      or closed (without, logged `side_room_closed` with reason `no_tool_call`); any other request
+      opens a new room, or with no tool call changes nothing.
     - Charging. The MCP server cannot tell which conversation made a call, so `charge_turn_room`
       gives the call the smallest remaining room among the main room and every live side room,
       counts what it returns against all of them in the same locked read-modify-write, and returns
-      which room limited it (`main`, also on a tie, or `side`); the call's `mcp_call` event records
-      it as `limited_by`. A publish resets only its own room's spend. With no main room published but
-      a side room live, the side rooms alone bound the call.
+      a content-free summary that the call's `mcp_call` event records: `limited_by` (`main`, also on
+      a tie, or `side`), `side_rooms` (the number of live side rooms), and for a side limit
+      `limiting_age_s` (that room's seconds since its last publish). A publish resets only its own
+      room's spend. With no main room published but a side room live, the side rooms alone bound the
+      call.
     - Expiry. A side room lives 15 minutes (`SIDE_ROOM_TTL_S`, 900 seconds) after its publish; its
       holder's next response restarts that time. Claude Code starts an MCP call 5 to 16 ms after its
       `tool_use` block completes, so a holder's own calls normally land within a second of its
@@ -588,21 +597,34 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
       expired (see below). The session store's times are wall-clock, because the proxy publishes and
       the MCP server charges from separate processes; a publish time more than 15 minutes in the
       future (a clock stepped back) counts as expired. `MemoryStore` uses a monotonic clock. Expired
-      rooms are dropped at the next charge or side publish. Main's turns do not close side rooms.
+      rooms are dropped at the next charge or side publish, each logged `side_room_expired` with its
+      age, room, and spend.
+    - Closing at a human turn. Main's turn id changes only at a turn start, a user prompt, so the
+      time the engine first sees a new id is when a human started that main turn. At each main
+      request in that turn, a side room published before it and not republished for more than 2
+      minutes (`SIDE_ROOM_IDLE_S`) is closed, logged `side_room_closed` with reason
+      `idle_at_main_turn`. A live subagent republishes at every step, so such a room almost always
+      belongs to a subagent the user interrupted (Esc during its tool). A room opened during the
+      current main turn is never closed this way, however long its tool runs. Residual risk: a
+      background subagent from an earlier turn that waits more than 2 minutes on one tool (a long
+      Bash command) while the human's new turn runs loses its room, and a call it makes after that
+      is charged against the other rooms only.
     - Inside a main turn. Main's room resets at each main publish; a side room resets only at its
       holder's publish. While a side room is live, every charge, main's own included, also spends
       it, so main's recall can be held below main's own room, down to nothing, by a side room whose
-      holder has stopped (a subagent that failed after a tool call, a stopped background agent, a
-      response whose signal was unknown, tied rooms that no request continues). This lasts at most
-      15 minutes after that room's last publish; `limited_by: side` on the calls shows it.
+      holder has stopped: a subagent the user interrupted (Esc during its tool) until 2 minutes into
+      the next human turn; within the same main turn, or for a subagent that failed after a tool
+      call, a stopped background agent, a response whose signal was unknown, or tied rooms that no
+      request continues, up to 15 minutes after that room's last publish. `limited_by: side` with a
+      large `limiting_age_s` on the calls shows it.
     - When main's room is the only bound. A side conversation's calls are charged only against
       main's room (and any other live side room), as before D40, when it has no room of its own:
       the hold was skipped (`hold_skipped`: encoded or unchunked SSE), so its tool calls reach the
       CLI before the publish; its request failed in the transform (`transform_error`), so the engine
       has no state for it; it entered degraded mode before its first publish, or its `set_side_room`
       failed (rule 14 makes it degraded), so no room was opened (a degraded conversation keeps the
-      last room it opened, until expiry); or its call starts more than 15 minutes after its
-      response's publish, for example after a permission prompt.
+      last room it opened, until expiry); its call starts more than 15 minutes after its response's
+      publish, for example after a permission prompt; or its room was closed at a human turn.
     - Limitations: one conversation's charges also spend the others' rooms; for a subagent, search's
       "in view" still means the main conversation's window.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
@@ -792,7 +814,8 @@ a no-replayed-thinking baseline.
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
    `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`,
-   `epoch_record_stale`, `mcp_tools_missing`, `toolcheck_error`, or `unclassified_system_message`.
+   `epoch_record_stale`, `mcp_tools_missing`, `toolcheck_error`, `side_room_close_failed` (D40), or
+   `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the
