@@ -350,6 +350,7 @@ def redact(event: Any) -> Any:
 class SessionStore(LedgerOps):
     def __init__(self, home: Path, session_id: str) -> None:
         self.session_id = session_id
+        self.home = Path(home)
         self.dir = session_dir(home, session_id)
         self.pages_dir = self.dir / "pages"
         # Narrow an existing wide CONTEXTO_HOME and sessions/ too, not only directories we create.
@@ -615,6 +616,7 @@ class SessionStore(LedgerOps):
             raise SessionNotFoundError(f"no session {session_id!r} under {Path(home) / 'sessions'}")
         store = cls.__new__(cls)
         store.session_id = session_id
+        store.home = Path(home)
         store.dir = path
         store.pages_dir = path / "pages"
         store._key_cache = None
