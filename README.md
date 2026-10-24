@@ -96,8 +96,8 @@ Codex requests go to `--codex-upstream`, else `$CONTEXTO_CODEX_UPSTREAM`, else (
 upstream Claude Code would use plus `/v1`, or (ChatGPT mode) the ChatGPT Codex backend.
 
 ChatGPT login mode (`--codex-auth chatgpt`) uses your own `CODEX_HOME` with `-c` overrides instead. It
-is tested only with synthetic credentials, never live, and whether end users may route ChatGPT
-credentials this way under OpenAI's terms is an open question.
+is tested only with synthetic credentials, never live. Follow your provider's terms for whatever
+credentials you use with Contexto.
 
 ## Bound and configuration
 

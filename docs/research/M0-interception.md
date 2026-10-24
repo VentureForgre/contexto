@@ -19,8 +19,8 @@ Every claim carries one tag:
 
 Phase 1 rules apply: spike code only observes, nothing here rewrites live traffic, and no content,
 credential, or header value was logged. One deviation is disclosed in section 8: two early
-non-isolated runs sent the owner's Claude subscription credential to the owner-operated rig proxy,
-which rejected them.
+non-isolated runs fell back to a claude.ai login credential instead of the rig key and sent it to
+the owner-operated rig proxy, which rejected them.
 
 ## Summary
 
@@ -44,9 +44,8 @@ which rejected them.
    version of (documented, observed in the request params).
 5. **A recall tool is far simpler as a tool the CLI declares (an MCP server) than as a tool only the
    proxy knows about** (section 5, inferred).
-6. **Auth:** both CLIs send their subscription credential to a custom base URL. Anthropic and OpenAI
-   terms both restrict intermediating subscription credentials. Owner decisions are listed in
-   section 10.
+6. **Auth:** both CLIs send their subscription credential to a custom base URL. Section 6 lists
+   which auth headers pass through. Owner decisions are listed in section 10.
 
 ## Owner principle and how H2, H3, H4 measure against it
 
