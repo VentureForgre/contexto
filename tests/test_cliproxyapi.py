@@ -1,14 +1,15 @@
 """Contexto in front of a CLIProxyAPI upstream (D35). Synthetic fixtures only, zero spend.
 
-``FakeCLIProxyAPI`` copies what CLIProxyAPI v7.3.12 does at its HTTP edge, read from its source
+``FakeCLIProxyAPI`` copies what CLIProxyAPI does at its HTTP edge, read from its v7.2.142 source
 (internal/api/server_routes.go, internal/access/config_access/provider.go,
 sdk/api/handlers/claude/code_handlers.go, sdk/api/handlers/stream_forwarder.go,
-sdk/api/handlers/openai/openai_responses_handlers.go) and checked against a running instance:
+sdk/api/handlers/openai/openai_responses_handlers.go) and checked against a running 7.3.12 binary:
 
 - Routes: ``POST /v1/messages``, ``POST /v1/messages/count_tokens``, ``POST /v1/responses``,
   ``GET /v1/models``, and the Codex alias ``POST /backend-api/codex/responses``; anything else is
-  gin's plain-text ``404 page not found``.
-- Client keys: ``Authorization: Bearer``, ``X-Api-Key``, ``X-Goog-Api-Key``, or ``?key=``. No key is
+  a 404 with an empty body (``NoRoute`` aborts with the status only; measured on 7.3.12).
+- Client keys: ``Authorization: Bearer``, ``X-Api-Key``, ``X-Goog-Api-Key``, ``?key=``, or
+  ``?auth_token=``. No key is
   a 401 ``{"error":"Missing API key"}``, a wrong one a 401 ``{"error":"Invalid API key"}``: not the
   Anthropic error shape.
 - A model no provider serves is a 400 ``unknown provider for model`` (measured on the owner's
@@ -34,8 +35,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from contexto import launcher
-from contexto.codex import API_KEY_MODE, plan_codex, resolve_codex_upstream
-from contexto.proxy import StreamHold, sse_is_comment
+from contexto.codex import API_KEY_MODE, codex_upstream_with_source, plan_codex, resolve_codex_upstream
+from contexto.proxy import SSEEventSplitter, StreamHold, sse_is_comment
 from contexto.store.memory import MemoryStore
 from contexto.upstream import resolve_upstream
 
@@ -189,12 +190,9 @@ class FakeCLIProxyAPI(BaseHTTPRequestHandler):
         ])
 
     def _not_found(self) -> None:
-        body = b"404 page not found"
         self.send_response(404)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", "0")
         self.end_headers()
-        self.wfile.write(body)
 
 
 @pytest.fixture
@@ -296,11 +294,13 @@ def test_non_streaming_messages_and_count_tokens(cpa, contexto):
     assert [e["status"] for e in requests_logged(store, 2)] == [200, 200]
 
 
-def test_query_key_and_models_list_pass_through(cpa, contexto):
-    proxy, _ = contexto(cpa)
-    response, raw = call(proxy, "GET", f"/v1/models?key={CLIENT_KEY}")
+@pytest.mark.parametrize("query", ["key", "auth_token"])
+def test_query_key_and_models_list_pass_through(cpa, contexto, query):
+    proxy, store = contexto(cpa)
+    response, raw = call(proxy, "GET", f"/v1/models?{query}={CLIENT_KEY}")
     assert response.status == 200 and len(json.loads(raw)["data"]) == len(SERVED_MODELS)
-    assert FakeCLIProxyAPI.received[-1]["path"] == f"/v1/models?key={CLIENT_KEY}"
+    assert FakeCLIProxyAPI.received[-1]["path"] == f"/v1/models?{query}={CLIENT_KEY}"
+    assert CLIENT_KEY not in json.dumps(requests_logged(store))  # the logged path drops the query
 
 
 @pytest.mark.parametrize("headers,status,body", [
@@ -380,6 +380,27 @@ def test_hold_passes_keepalive_comments_and_keeps_content_order():
     assert [r for r in released if r != KEEPALIVE] == [r for r in tool_stream() if r != KEEPALIVE]
 
 
+@pytest.mark.parametrize("tail", [b": keep-alive", b": keep-alive\r\n:"])
+def test_an_unterminated_comment_tail_stays_held_and_last(tail):
+    """A stream that ends on a comment without its line ending (reviewer-A): passing it at once and
+    releasing the held events after it would glue the next event onto the comment line."""
+    stream = b"".join(tool_stream()[:3]) + tail
+    splitter = SSEEventSplitter()
+    hold = StreamHold("messages", lambda: None)
+    out = [raw for event in splitter.feed(stream) for raw in hold.feed(event)]
+    assert b"tool_use" not in b"".join(out)
+    out += hold.feed(splitter.flush())
+    assert b"tool_use" not in b"".join(out)  # the tail is held behind the tool call, not passed
+    out += hold.eof()
+    assert b"".join(out) == stream  # the bytes upstream sent, in order
+
+
+def test_a_terminated_comment_after_crlf_passes_during_the_hold():
+    hold = StreamHold("messages", lambda: None)
+    assert hold.feed(tool_stream()[1]) == []
+    assert hold.feed(b": keep-alive\r\n\r\n") == [b": keep-alive\r\n\r\n"]
+
+
 def test_keepalive_reaches_the_cli_while_a_tool_call_is_held(cpa, contexto):
     """CLIProxyAPI's heartbeat reaches the CLI during a hold, before the held tool call is released.
     The fake waits after its keep-alive until the client has read it; a held comment would time out."""
@@ -414,6 +435,14 @@ def test_keepalive_reaches_the_cli_while_a_tool_call_is_held(cpa, contexto):
 def test_codex_default_upstream_is_the_cliproxyapi_v1_path(cpa):
     assert resolve_codex_upstream(API_KEY_MODE, None, {}, cpa) == cpa + "/v1"
     assert resolve_codex_upstream(API_KEY_MODE, None, {}, cpa + "/") == cpa + "/v1"
+
+
+def test_codex_upstream_source_names_where_the_url_came_from(cpa):
+    assert codex_upstream_with_source(API_KEY_MODE, None, {}, cpa, "settings:local") == (
+        cpa + "/v1", "claude-settings:local+/v1")
+    assert codex_upstream_with_source(API_KEY_MODE, cpa + "/v1", {}, None) == (cpa + "/v1", "codex-flag")
+    assert codex_upstream_with_source(API_KEY_MODE, None, {"CONTEXTO_CODEX_UPSTREAM": cpa + "/v1"}, cpa) == (
+        cpa + "/v1", "codex-env")
 
 
 def test_codex_api_key_mode_uses_the_key_helper_for_cliproxyapi(tmp_path):
@@ -467,4 +496,4 @@ def test_codex_upstream_without_v1_gets_cliproxyapi_404(cpa, contexto):
     """The documented mistake: --codex-upstream without /v1 sends Codex to a path CLIProxyAPI lacks."""
     proxy, _ = contexto(cpa)
     response, raw = call(proxy, "POST", "/responses", RESPONSES_REQUEST, {"Authorization": f"Bearer {CLIENT_KEY}"})
-    assert (response.status, raw) == (404, b"404 page not found")
+    assert (response.status, raw) == (404, b"")

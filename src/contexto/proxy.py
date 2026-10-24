@@ -616,7 +616,9 @@ class StreamHold:
             return self._release() + [raw]
         if self._is_error(kind):
             return self._release_untriggered() + [raw]
-        if kind == "ping" or sse_is_comment(raw):
+        # A comment passes at once only when it ends with its line ending: a tail without one (a stream
+        # cut after ": keep-alive") is held and released last, so no held event is glued onto it.
+        if kind == "ping" or (sse_is_comment(raw) and raw.endswith((b"\n", b"\r"))):
             return [raw]
         if not self.holding and self._starts_hold(kind, raw):
             self.holding = True
