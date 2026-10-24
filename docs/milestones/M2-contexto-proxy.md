@@ -23,6 +23,13 @@ same design after Claude Code works.
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
   stores or logs them.
+- Upstream affinity (D36). The CLI's session signals reach upstream unchanged: Claude Code's
+  `X-Claude-Code-Session-Id` header and `metadata.user_id`, Codex's `session-id` header and
+  `prompt_cache_key`. When the upstream host is not `anthropic.com`, `openai.com`, `chatgpt.com`, or
+  a subdomain of one, the proxy also adds `X-Session-Affinity: contexto-<first 32 hex digits of
+  SHA-256("contexto-affinity\0" + session id)>` to every request it forwards, unless the CLI sent
+  that header itself. A routing proxy uses these to keep one session on one upstream credential.
+  The launch event records `affinity_header` (true when the header is sent).
 
 ## Architecture
 
