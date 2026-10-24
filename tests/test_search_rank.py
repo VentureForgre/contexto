@@ -328,12 +328,58 @@ def test_a_term_counts_once_per_text_and_page_length_does_not_count():
     assert rank([entry("old", 1, thrice), entry("set", 2, "retry_budget is now 5")], "retry_budget") == ["old", "set"]
 
 
-def test_texts_holding_counts_each_text_once():
-    from contexto.store.search import TEXT_SEP, texts_holding
-    text = search_text(["k k k", "", "x", "K and k", "kk"])
-    assert text == TEXT_SEP.join([b"k k k", b"", b"x", b"k and k", b"kk"])
-    assert texts_holding(text, b"k") == 3 and texts_holding(text, b"kk") == 1 and texts_holding(text, b"y") == 0
-    assert texts_holding(search_key(fold("k k\nk")), b"k") == 1  # one text: newlines do not split it
+def test_term_frequency_counts_texts_up_to_the_caps(monkeypatch):
+    """D41's frequency: each text counts a term up to TEXT_CAP times, the page up to PAGE_CAP (the grid in
+    results/d41/grid chose 1 and 3)."""
+    from contexto.store import search as search_module
+    from contexto.store.search import PAGE_CAP, TEXT_CAP, TEXT_SEP, term_frequency
+    assert (TEXT_CAP, PAGE_CAP) == (1, 3)
+    text = search_text(["k k k", "", "x", "K and k", "kk", "k"])
+    assert text == TEXT_SEP.join([b"k k k", b"", b"x", b"k and k", b"kk", b"k"])
+    assert term_frequency(text, b"k") == 3 and term_frequency(text, b"kk") == 1 and term_frequency(text, b"y") == 0
+    assert term_frequency(search_text(["k", "x", "k"]), b"k") == 2
+    assert term_frequency(search_key(fold("k k\nk")), b"k") == 1  # one text: newlines do not split it
+    monkeypatch.setattr(search_module, "PAGE_CAP", None)
+    assert term_frequency(text, b"k") == 4  # one per text holding it
+    monkeypatch.setattr(search_module, "TEXT_CAP", 2)
+    assert term_frequency(text, b"k") == 2 + 2 + 2 + 1
+
+
+def test_a_page_that_holds_a_term_in_more_than_three_texts_counts_three():
+    """Many separate tool calls that each name a key (a grep per file) count 3, so a newer page with the key
+    in 2 texts outranks an older one with it in 40 (2.06 against 1.57; with no page cap the greps would
+    score 2.14 and win; reviewer A's many-calls dumps)."""
+    greps = ["grep -n retry_budget src/a.py", "12:retry_budget = 3"] * 20
+    assert rank([entry("greps", 1, greps), entry("two", 2, ["set retry_budget", "retry_budget = 5"])],
+                "retry_budget") == ["two", "greps"]
+    assert rank([entry("greps", 1, greps), entry("one", 2, "retry_budget is now 5")], "retry_budget") == \
+        ["greps", "one"]  # 1.57 against 1.5: the page cap does not make one text beat three
+
+
+def test_a_page_about_the_query_in_one_text_now_ranks_like_a_passing_mention(store):
+    """Main's D34 scenario, kept unchanged to pin what D41 gives up: turn 1's reply says "rate limit" in 4
+    lines of one text, and 30 newer pages say it once. D34 showed turn 1 (detailed 31, 30, 1); D41 counts
+    the reply as one text, so recency puts the newer passing mentions first and turn 1 is not shown."""
+    about = "\n".join(["The rate limit is 40 requests per minute per key.", "Raised the rate limit warning threshold.",
+                       "rate limit headers: X-RateLimit-Remaining", "The rate limit resets every 60 seconds."])
+    store.page_out([page(FILLER + "\n" + about)], 1)
+    store.page_out([page(FILLER + "\nwe may hit a rate limit here") for _ in range(30)], 2)
+    assert detailed(search(store, "rate limit")) == [31, 30, 29]
+
+
+def test_equal_statements_in_one_reply_now_lose_to_newer_passing_mentions(store):
+    """Main's D34 scenario, kept unchanged to pin what D41 gives up: turns 8, 30, 45 set the timeout in one
+    reply that says it twice, and every 4th turn mentions it in passing. D34 showed 45 first for each query;
+    D41 counts each reply as one text, so for "timeout" and "client timeout" the newest passing mentions
+    take the detailed places. The identifier, which only the statements hold, still finds 45 first."""
+    for t in range(1, 61):
+        if t in (8, 30, 45):
+            store.page_out([page(FILLER + f"\nSet the HTTP client timeout to {t} seconds.\nHTTP_TIMEOUT_S = {t}")], t)
+        else:
+            store.page_out([page(FILLER + ("\na client timeout surfaces as a 504" if t % 4 == 0 else ""))], t)
+    assert detailed(search(store, "timeout")) == [60, 56, 52]
+    assert detailed(search(store, "client timeout")) == [60, 56, 52]
+    assert detailed(search(store, "HTTP_TIMEOUT_S")) == [45, 30, 8]
 
 
 def test_a_page_entry_holds_the_texts_page_matches_reads():

@@ -217,7 +217,12 @@ def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int) -> dict
 
 
 def _search_fields(page: dict[str, Any]) -> list[str]:
-    """The texts search reads on a page: the stub fields, then every text of the page's turn."""
+    """The texts search reads on a page, each counted on its own by ``rank`` (D41): the stub fields
+    (``user_text``, ``system_text``, ``reminder_text``, each tool name, each path), then every text of the
+    turn (``_texts``: each text block, each string field of a tool input, each tool output). The stub
+    repeats the prompt's first 200 characters and the paths, so a prompt or a path that names a key
+    counts as two texts. Dropping those repeats was measured and lost 2 of 86 probes from the top 3 at
+    6,000 pages, on both page-size models, so they are kept (reviewer A on PR #216)."""
     stub = page["stub"]
     return [stub["user_text"], stub.get("system_text", ""), stub.get("reminder_text", ""), *stub["tools"],
             *stub["paths"], *_texts(page["messages"])]

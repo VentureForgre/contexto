@@ -14,23 +14,27 @@ hold only paged context blocks (``<system-reminder>`` text the proxy paged on it
 which repeat the same words at every turn and would otherwise outrank the turn that is about them;
 they stay searchable and recallable. Within each group a page's relevance is BM25 over the query's
 words, plus the whole query as one more term when it has more than one word, with two changes (D41).
-A term's frequency on a page is the number of the page's texts that hold it, not the number of times
-it occurs: a text is one stub field or one text, tool input, or tool output of the turn
-(``search_text``), so a grep or a log that repeats a key hundreds of times counts once, as the
-one-line reply that states its new value does. And page length does not count (BM25's b is 0): a
-turn's length is mostly its tool output, which says little about how much the turn is about the
+A term's frequency on a page is the number of the page's texts that hold it, up to 3 (``TEXT_CAP``
+1, ``PAGE_CAP`` 3), not the number of times it occurs. A text is one stub field (the prompt's first
+200 characters, each tool name, each path) or one text of the turn: each text block, each string
+field of a tool input, each tool output (``search_text``, ``pages._search_fields``). So a grep or a
+log that repeats a key hundreds of times counts once, as the one-line reply that states the key's new
+value does, and a turn that runs many greps counts 3. And page length does not count (BM25's b is 0):
+a turn's length is mostly its tool output, which says little about how much the turn is about the
 query; with b 0.75 a long turn that states a value once ranked below short older pages that state an
-old one. Frequency saturates (``K1``), so a page whose texts hold a word many times scores at most
-``K1 + 1`` (2.2) times a page with one such text, and a word that occurs on fewer pages weighs more
-(inverse document frequency). Relevance is then multiplied by a recency
-prior, ``1 + RECENCY_WEIGHT * r``, where ``r`` is the page's position among the matching pages from
-0 (oldest) to 1 (newest). So a newer page wins unless an older one is clearly more about the query:
-with ``RECENCY_WEIGHT`` 0.5 the oldest match needs one and a half times the relevance of the newest
-to rank above it, and two matches next to each other in time are ordered by relevance almost alone.
-Ties go to the newer page. Last, the newest matching turn page (the newest matching page when no turn
-page matches) is moved up to the last of the ``SHOWN_IN_DETAIL`` places if it ranked below them:
-older pages that say the word in more texts can outrank the turn that states a new value once. That
-place covers a statement only while it is the newest mention; a later passing mention takes it.
+old one. Frequency saturates (``K1``): a page with the term in 3 or more texts scores 1.57 times a
+page with it in one, and a word that occurs on fewer pages weighs more (inverse document frequency).
+Relevance is then multiplied by a recency prior, ``1 + RECENCY_WEIGHT * r``, where ``r`` is the
+page's position among the matching pages from 0 (oldest) to 1 (newest). So a newer page wins unless
+an older one holds the query in more texts: with ``RECENCY_WEIGHT`` 0.5 the oldest match needs one
+and a half times the relevance of the newest to rank above it, which only a page with the term in 3
+texts against the newest page's 1 has (1.57 against 1.5). Repetition inside one text does not count:
+a reply or a file that discusses a key at length weighs as one passing mention, so a newer passing
+mention outranks it (D41 records this loss against D34). Ties go to the newer page. Last, the newest
+matching turn page (the newest matching page when no turn page matches) is moved up to the last of
+the ``SHOWN_IN_DETAIL`` places if it ranked below them: older pages that say the word in more texts
+can outrank the turn that states a new value once. That place covers a statement only while it is
+the newest mention; a later passing mention takes it.
 
 ``contexto_search`` shows the 3 best pages in detail and lists the next 50. In each part turn pages
 come first, newest first, so among the turn pages it shows the newest statement comes first (D28)
@@ -53,6 +57,10 @@ from typing import NamedTuple
 
 K1 = 1.2  # BM25 term-frequency saturation (the usual value); BM25's b is 0, no length term (D41)
 TEXT_SEP = b"\xff"  # joins a page's texts in its search text; UTF-8 never holds this byte (D41)
+# A term's frequency on a page: each text counts it at most TEXT_CAP times, the page at most PAGE_CAP
+# (None: no cap). Chosen on a grid of 1 to 3 and 2, 3, none (D41, spikes/m2/scale/store/results/d41/grid).
+TEXT_CAP = 1
+PAGE_CAP: int | None = 3
 RECENCY_WEIGHT = 0.5  # the newest match's relevance is multiplied by 1.5, the oldest's by 1
 SHOWN_IN_DETAIL = 3  # contexto_search shows this many of the best pages in detail (mcp.SEARCH_LIMIT)
 
@@ -169,7 +177,7 @@ def rank(entries: Sequence[SearchEntry], query: str,
             j += 1
         if j == count:
             on = (phrase in text) if q.multiword else True
-            tf = tuple(texts_holding(text, t) if t != phrase or on else 0 for t in terms)
+            tf = tuple(term_frequency(text, t) if t != phrase or on else 0 for t in terms)
             matched.append((entry.id, entry.turn, entry.context, on, tf))
         elif j + 1 < count:
             if fetched and (count <= EAGER_WORDS or matched):
@@ -299,14 +307,25 @@ def search_text(fields: Iterable[str]) -> bytes:
     return TEXT_SEP.join(search_key(fold(f)) for f in fields)
 
 
-def texts_holding(text: bytes, term: bytes) -> int:
-    """How many of the texts in ``text`` (``search_text``) hold ``term``: after each occurrence the scan
-    jumps to the next text, so a text that repeats the term costs one search."""
-    found, pos = 0, text.find(term)
+def term_frequency(text: bytes, term: bytes) -> int:
+    """A term's frequency on a page (D41): over the page's texts in ``text`` (``search_text``), the sum of
+    each text's count of ``term`` up to ``TEXT_CAP``, the sum itself at most ``PAGE_CAP`` (None: no cap).
+    After each text the scan jumps to the next text holding the term, and it stops once the page cap is
+    reached, so a text or a page that repeats the term costs little."""
+    text_cap, page_cap = TEXT_CAP, PAGE_CAP
+    found, size, pos = 0, len(text), text.find(term)
     while pos != -1:
-        found += 1
         end = text.find(TEXT_SEP, pos + len(term))
         if end == -1:
+            end = size
+        if text_cap == 1:
+            found += 1
+        else:
+            start = text.rfind(TEXT_SEP, 0, pos) + 1
+            found += min(text_cap, text.count(term, start, end))
+        if page_cap is not None and found >= page_cap:
+            return page_cap
+        if end == size:
             break
         pos = text.find(term, end + 1)
     return found
