@@ -458,22 +458,27 @@ the owner's delegation. Open decisions are listed at the end with the options an
   to that replica's next round-robin credential, so N replicas can bind one session N ways
   (reproduced by `TestSessionAffinityPerReplicaCacheSplitsSessionsAcrossReplicas` in the proposed
   CLIProxyAPI change, `sdk/cliproxy/auth/session_affinity_consistent_hash_test.go`). What changed:
-  (1) on the proxy, a proposed upstream CLIProxyAPI option, `routing.session-affinity-consistent-hash`:
+  (1) on the proxy, a CLIProxyAPI option proposed for upstream and not yet submitted there,
+  `routing.session-affinity-consistent-hash`:
   each session is routed by rendezvous hashing of its root session id and each available credential
-  id, so every replica picks the same credential with no shared state; a credential in cooldown
-  moves only its own sessions, each to its next-ranked credential, and they return when it recovers.
-  It is under review and not deployed. (2) In Contexto, the proxy adds `X-Session-Affinity:
+  id (the root when the request names it, otherwise the parent), so every replica picks the same
+  credential with no shared state; a credential in cooldown moves only its own sessions, each to its
+  next-ranked credential, and they return when it recovers. It is not deployed. (2) In Contexto, the proxy adds `X-Session-Affinity:
   contexto-<key>` to every request whose upstream host name is not an Anthropic, OpenAI (including
-  Azure OpenAI, `*.openai.azure.com`), or ChatGPT host, unless the CLI sent one (contract, Stack).
+  Azure OpenAI, `*.openai.azure.com`, and Azure AI Foundry, `*.services.ai.azure.com`), or ChatGPT
+  host, unless the CLI sent one (contract, Stack).
   The host is IDNA-normalized first, as the socket layer does when it connects, so a name such as
   `api.anthro<soft hyphen>pic.com` counts as Anthropic's; a name that cannot be normalized gets no
   header. Matching is by name: an IP literal upstream gets the header, even a vendor's address,
   because Contexto cannot tell a vendor IP from a local proxy's. The key is the first 32 hex digits
   of HMAC-SHA-256 of the session id under a random 32-byte salt written once per install at
   `$CONTEXTO_HOME/affinity.salt` (0600), so it is the same after a restart and on a resume, and the
-  session id, even a guessable `--session` name, cannot be checked against it without the salt. If
-  the salt cannot be read, the session runs without the header and logs
-  `affinity_salt_unavailable`. Measured with a local stand-in upstream (zero spend): Claude Code
+  session id, even a guessable `--session` name, cannot be checked against it without the salt. The
+  salt is created only when a header will be sent (never for a vendor upstream) and read without
+  following a symlink; if it cannot be read, the session runs without the header and logs
+  `affinity_salt_unavailable`. A stable key does not make routing stable across launches: Claude
+  Code starts a new session id at each launch and the proxy routes on that, so routing is per
+  launch, and a resumed session can land on another credential and miss the cache once. Measured with a local stand-in upstream (zero spend): Claude Code
   2.1.302 sends `X-Claude-Code-Session-Id` and `metadata.user_id` with the same `session_id` on
   every Messages request; Codex sends `session-id` and `prompt_cache_key`
   (`docs/research/M2-codex-adapter.md`). In CLIProxyAPI's order, `X-Claude-Code-Session-Id`,

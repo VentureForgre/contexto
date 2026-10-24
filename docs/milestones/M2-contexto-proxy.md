@@ -26,11 +26,13 @@ same design after Claude Code works.
 - Upstream affinity (D36). The CLI's session signals reach upstream unchanged: Claude Code's
   `X-Claude-Code-Session-Id` header and `metadata.user_id`, Codex's `session-id` header and
   `prompt_cache_key`. When the upstream host name, IDNA-normalized, is not `anthropic.com`,
-  `openai.com`, `chatgpt.com`, `openai.azure.com`, or a subdomain of one, the proxy also adds
+  `openai.com`, `chatgpt.com`, `openai.azure.com`, `services.ai.azure.com`, or a subdomain of one,
+  the proxy also adds
   `X-Session-Affinity: contexto-<first 32 hex digits of HMAC-SHA-256(salt, "contexto-affinity\0" +
   session id)>` to every request it forwards, unless the CLI sent that header itself. The salt is 32
-  random bytes in `$CONTEXTO_HOME/affinity.salt` (0600), written once per install, so the key is the
-  same across restarts and resumes. A name that cannot be IDNA-normalized gets no header; an IP
+  random bytes in `$CONTEXTO_HOME/affinity.salt` (0600), written once per install, only when the
+  header will be sent, and read without following a symlink, so the key is the same across restarts
+  and resumes (Claude Code's own session id, which the proxy routes on first, is new at each launch). A name that cannot be IDNA-normalized gets no header; an IP
   literal upstream gets it. When the salt cannot be read, the header is left out and
   `affinity_salt_unavailable` is logged. The key is one per Contexto session: the main
   conversation, subagents, and side requests all carry it. A routing proxy can pin each session

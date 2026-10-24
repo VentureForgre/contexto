@@ -146,8 +146,15 @@ Python's default trust store. For a self-signed certificate, point `SSL_CERT_FIL
 
 **Answers lose earlier thinking, or the prompt cache misses.** CLIProxyAPI can spread requests over
 several upstream credentials (`routing.strategy`). Each credential has its own cache, and thinking
-signed for one may be dropped by another (O6 in `docs/DECISIONS.md`). That costs tokens, not
-correctness of the bound.
+signed for one may be dropped by another. That costs tokens, not correctness of the bound. Turn on
+`routing.session-affinity: true` so CLIProxyAPI keeps each session on one credential. It routes on
+the CLI's own session id (Claude Code's `X-Claude-Code-Session-Id` and `metadata.user_id`, Codex's
+`session-id`), which Contexto forwards unchanged; Contexto's `X-Session-Affinity` covers requests
+without one. Claude Code starts a new session id at each launch, so routing is per launch: a
+resumed Contexto session can land on another credential and miss the cache once. With several
+CLIProxyAPI replicas behind one load balancer, per-process affinity still splits sessions; a
+consistent-hash option, `routing.session-affinity-consistent-hash`, is proposed for upstream
+CLIProxyAPI and not in a release yet (D36 in `docs/DECISIONS.md`).
 
 **Cloaking.** CLIProxyAPI rewrites requests from clients it does not recognise as Claude Code when
 its cloak mode says so. Contexto forwards Claude Code's own headers, so the default `auto` mode
