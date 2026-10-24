@@ -15,19 +15,33 @@ can be inspected with `contexto sessions`, `contexto recall`, and `contexto stat
 
 Contexto sends no extra model calls. It reads and rewrites the requests your CLI already makes.
 
+What it includes:
+
+- Claude Code and Codex (API-key mode) through `contexto run`.
+- Upstreams: the vendor's API with your own key, or a CLIProxyAPI instance
+  ([below](#upstreams-and-cliproxyapi)).
+- A per-session `X-Session-Affinity` header for proxies that spread requests over several accounts,
+  so a session's prompt cache stays on one ([Troubleshooting](#troubleshooting)).
+- Search over paged-out turns that a long turn or a repeated tool dump cannot bury, with the search
+  text held in memory up to a budget (`CONTEXTO_SEARCH_CACHE_MB`, 64 MB by default).
+- A separate recall budget for each subagent, so subagents cannot overspend the main conversation's
+  room.
+- `contexto sessions list`, `show`, and `prune` to see sessions and delete old ones.
+- A warning when Claude Code or Codex is a version Contexto was not tested with.
+
 ## Install
 
 Contexto needs Python 3.12 or later and has no runtime dependencies. Install the wheel from the
-latest release, [v0.4.0](https://github.com/VentureForgre/contexto/releases/tag/v0.4.0). It has two
-assets: `contexto-0.4.0-py3-none-any.whl` and `contexto-0.4.0.tar.gz`. It is not on PyPI: the
+latest release, [v0.5.1](https://github.com/VentureForgre/contexto/releases/tag/v0.5.1). It has two
+assets: `contexto-0.5.1-py3-none-any.whl` and `contexto-0.5.1.tar.gz`. It is not on PyPI: the
 PyPI package named `contexto` is an unrelated project, so `pip install contexto` installs the wrong
 thing. Use the release URL or the downloaded wheel.
 
 Straight from the release URL, with no GitHub login:
 
 ```sh
-pipx install https://github.com/VentureForgre/contexto/releases/download/v0.4.0/contexto-0.4.0-py3-none-any.whl
-contexto --version                                    # contexto 0.4.0
+pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.1/contexto-0.5.1-py3-none-any.whl
+contexto --version                                    # contexto 0.5.1
 ```
 
 `pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment.
@@ -35,8 +49,8 @@ contexto --version                                    # contexto 0.4.0
 Or download it first with the GitHub CLI:
 
 ```sh
-gh release download v0.4.0 --repo VentureForgre/contexto --pattern 'contexto-0.4.0-py3-none-any.whl'
-uv tool install ./contexto-0.4.0-py3-none-any.whl     # or: pipx install ./contexto-0.4.0-py3-none-any.whl
+gh release download v0.5.1 --repo VentureForgre/contexto --pattern 'contexto-0.5.1-py3-none-any.whl'
+uv tool install ./contexto-0.5.1-py3-none-any.whl     # or: pipx install ./contexto-0.5.1-py3-none-any.whl
 ```
 
 `pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`. To
@@ -46,7 +60,7 @@ You also need `claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
 
 ### Platforms
 
-Tested on macOS and Linux with Python 3.12. Windows is not supported: the store locks files with
+CI tests Python 3.12 to 3.15 on Linux and 3.12 and 3.15 on macOS. Windows is not supported: the store locks files with
 `fcntl`, the launcher forwards POSIX signals (`SIGHUP`), and the store relies on POSIX file modes
 (0700 directories, 0600 files).
 
@@ -237,7 +251,7 @@ not start it by hand.
 
 | Tool | What it does |
 |---|---|
-| `contexto_search(query)` | Finds turns holding every word of the query, in any case and any order (words match as substrings, so identifiers and paths work; no stemming, no fuzzy or similarity matching). Turns holding the whole query rank first, then by relevance (BM25) with newer turns preferred among similar ones; paged context blocks (`<system-reminder>` text paged on its own) rank after every turn. A query with no words finds nothing. Matching lines from the conversation still in view come first (at most 3, newest first), skipping the current turn's own user message. Then the 3 best matching paged-out turns (the newest matching turn is always one of them), newest first, each with its last 3 matching lines in page order and their offsets, then up to 50 more matching turns, newest first, as page id and the offsets of their first and last matches (`@first..last`, one offset when they are the same). In both parts, paged context blocks are shown after the turns, under their own line, because a block's turn number is when it was paged, not when it was sent. Each reply ends with a note on what was searched |
+| `contexto_search(query)` | Finds turns holding every word of the query, in any case and any order (words match as substrings, so identifiers and paths work; no stemming, no fuzzy or similarity matching). Turns holding the whole query rank first, then by relevance (BM25, where a word counts once per text of a turn, such as a reply, a tool input, or a tool output, at most 3 times per turn, and a turn's length does not count) with newer turns preferred among similar ones; paged context blocks (`<system-reminder>` text paged on its own) rank after every turn. A query with no words finds nothing. Matching lines from the conversation still in view come first (at most 3, newest first), skipping the current turn's own user message. Then the 3 best matching paged-out turns (the newest matching turn is always one of them), newest first, each with its last 3 matching lines in page order and their offsets, then up to 50 more matching turns, newest first, as page id and the offsets of their first and last matches (`@first..last`, one offset when they are the same). In both parts, paged context blocks are shown after the turns, under their own line, because a block's turn number is when it was paged, not when it was sent. Each reply ends with a note on what was searched |
 | `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
 | `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`. A verified event, artifact, or reference shows as a fact in the pinned state; decisions and obligations keep their own groups |
 | `contexto_close(obligation_id, note)` | Close an open obligation |
@@ -245,8 +259,11 @@ not start it by hand.
 
 Each turn has a recall budget: the bound minus the tokens the turn already uses minus the headroom
 floor. At a turn start the proxy rotates when needed to leave at least 12,000 tokens of it. Search,
-recall, and state replies are charged against it. Tool calls are logged with names, ids, sizes, and
-character ranges, never the text.
+recall, and state replies are charged against it. A subagent or side request in a tool loop has its
+own budget, measured from its own request; because the MCP server cannot tell which conversation
+made a call, each call gets the smallest live budget and is charged against all of them. A
+subagent's budget closes when it stops, or 15 minutes after its last response. Tool calls are logged
+with names, ids, sizes, and character ranges, never the text.
 
 ## Troubleshooting
 
@@ -324,8 +341,8 @@ proxy has to route on one of them. CLIProxyAPI does with `routing.session-affini
 [docs/cliproxyapi.md](docs/cliproxyapi.md#troubleshooting) for the settings. Claude Code keeps its
 session id on `--resume`, so routing survives a resume; a fresh launch or `--fork-session` starts a
 new one. Several replicas behind one load balancer also need consistent hashing,
-`routing.session-affinity-consistent-hash: true`, proposed for upstream CLIProxyAPI and not yet
-submitted there (D36 in `docs/DECISIONS.md`).
+`routing.session-affinity-consistent-hash: true`, proposed for upstream CLIProxyAPI in
+router-for-me/CLIProxyAPI#6954 and not in a CLIProxyAPI release yet (D36 in `docs/DECISIONS.md`).
 
 **`count_tokens` returns 403.** Errors from the upstream pass through unchanged. Some proxies refuse
 `/v1/messages/count_tokens`; Claude Code calls it only around compaction.
@@ -338,12 +355,14 @@ pinned records in `ledger.jsonl` in the same directory.
 
 Claude Code acceptance ran on one model, one bound, and one upstream. Codex passed acceptance
 criteria 1 to 3 on one model at bound 64,000; the default bound 150,000 is untested on Codex. Cache
-efficiency depends on the upstream route. Search keeps each page's searchable text in the MCP
-server's memory for the life of the process (about the UTF-8 size of the page text; peak RSS 293 MB
-at 6,000 synthetic pages), and the first search of each MCP process reads every page once (0.74 s at
-6,000 pages). Each query word scans that text once, so a long query with matches costs more. The
-full list is in
-[STATUS.md, "Known limitations (v0.4.0)"](STATUS.md#known-limitations-v040).
+efficiency depends on the upstream route. The MCP server holds search text up to
+`CONTEXTO_SEARCH_CACHE_MB` (64 MB by default; newest pages as they are, older ones compressed) and
+reads pages that do not fit from the store at each search; the first search of each MCP process
+reads every page once (1.6 s at 6,000 synthetic pages). Each query word scans that text once, so a
+long query with matches costs more, and the up to 53 pages one search shows are read in full with
+no size cap. Search counts a word once per text of a turn, so a reply that discusses a key at
+length weighs as one passing mention. The full list is in
+[STATUS.md, "Known limitations (v0.5.1)"](STATUS.md#known-limitations-v051).
 
 ## Exit codes
 

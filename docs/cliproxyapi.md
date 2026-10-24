@@ -154,7 +154,7 @@ without one. Claude Code keeps its session id on `--resume`, so routing survives
 launch or `--fork-session` gets a new id and can land on another credential, missing the cache once.
 With several CLIProxyAPI replicas behind one load balancer, per-process affinity still splits
 sessions; a consistent-hash option, `routing.session-affinity-consistent-hash`, is proposed for
-upstream CLIProxyAPI and not in a release yet (D36 in `docs/DECISIONS.md`).
+upstream CLIProxyAPI (router-for-me/CLIProxyAPI#6954) and not in a release yet (D36 in `docs/DECISIONS.md`).
 
 **Cloaking.** CLIProxyAPI rewrites requests from clients it does not recognise as Claude Code when
 its cloak mode says so. Contexto forwards Claude Code's own headers, so the default `auto` mode

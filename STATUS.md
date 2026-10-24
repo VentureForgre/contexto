@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-24 by claude (docs for v0.4.0 and the public repository). Decisions taken and still open, with reasons:
+Updated 2026-10-24 by claude (docs for v0.5.1: D35 to D42, O6 deployed). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -16,14 +16,28 @@ compaction never fires, and accuracy equals full context.
   fbb1303), and **Codex passed criteria 1 to 3** (D30), below.
   On Claude Code, Contexto answered 51 of 54 probes against 48 for the full-context baseline, with zero
   compaction and every request under the bound.
-- Latest release: v0.4.0 (main 4b87ec2, 2026-10-18). See "In progress" and "What is left" below
-  for the remaining work and the items that need the owner.
-- Tests on main (4b87ec2, v0.4.0): 1694 passed, 1 skipped on macOS, Python 3.12 (local run, 2026-10-24).
+- Latest release: v0.5.1 (main e864896, 2026-10-24). See "Open follow-ups" and "What is left"
+  below for the remaining work and the items that need the owner.
+- Tests on main (e864896, v0.5.1): 2065 passed, 1 skipped, 1 xfailed on macOS, Python 3.12 (local run, 2026-10-24).
+- The repository is public (D42). GitHub Releases stay the only distribution; there is no package
+  registry release. Tracked files were scrubbed at `HEAD` of the proxy hostname, another private
+  repository's name, and statements about the owner's credentials; history was not rewritten.
+- CI and releases run on GitHub-hosted runners (PR #213): Python 3.12 to 3.15 on Ubuntu, 3.12 and
+  3.15 on macOS, and Ruff lint. `ci` is a required check in the main ruleset, and workflow runs on
+  fork pull requests need approval for all external contributors (D42). GitHub private
+  vulnerability reporting, which `SECURITY.md` points to, is on.
 - Two "flaky" tests (launcher Ctrl+C, proxy command) failed whenever pytest ran as a background
   job, which starts with SIGINT ignored; fixed in the tests (PR #213), not a timing problem.
 - The proxy no longer makes a reverse hostname lookup at start; on a GitHub macOS runner it took
-  35 seconds per launch (PR #213, fix).
+  35 seconds per launch (PR #213, fix). Quarantined pages are named from one clock reading (PR
+  #213, fix).
 - Ruff lint is enforced in CI (`uvx ruff@0.17.2 check .`); `ruff format` is not.
+- CLIProxyAPI compatibility (D35, PR #210): the stream hold passes terminated `: keep-alive`
+  comments like ping; the user settings file follows `CLAUDE_CONFIG_DIR`; the Codex session line
+  names its upstream source. Live through the owner's proxy: `contexto run claude -p` on
+  claude-haiku-5-5 and `contexto run codex exec -m gpt-5.6-luna` both exit 0 with 200 upstream.
+  Guide: `docs/cliproxyapi.md`.
+- Upstream affinity (D36, PR #212) is deployed on the owner's proxy and verified (see "O6" below).
 
 ## Acceptance, live run #3 (main fbb1303, claude-haiku-5-5, bound 150,000, owner's proxy)
 
@@ -183,12 +197,19 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   effort-change content adds to the same F. The fallback writes each paged message as its own
   page, so such a session would reach about 3,000 pages or more by 30M, most of them single small
   messages; the store spike's 3,000 to 6,000 rows (after D34: planted page in the 3 detailed
-  results for 60 and 56 of 86 queries, 0.04 to 0.22 s per search) are a rough guide for that shape.
-- Search (D34: every word in any case, BM25 with a recency prior, cached page text) takes 0.09 to
-  0.22 s at 6,000 pages, and the first search of an MCP process 0.74 s. The planted page reaches
-  the 3 detailed results for 71 of 86 queries at 17 pages, 63 at 1,000, 60 at 3,000, and 56 at
-  6,000 (before D34: 61, 50, 44, 39), and the latest value comes first for 20 of 24 at 6,000
-  (before: 12).
+  results for 60 and 56 of 86 queries, 0.04 to 0.22 s per search with every page's text held) are a
+  rough guide for that shape. Under D39 search time depends on the store's text bytes, not its page
+  count: many small pages stay within the 64 MB default.
+- Search (D34: every word in any case, BM25 with a recency prior, cached page text) takes 0.10 to
+  0.25 s at 6,000 pages when the MCP server holds every page's text uncompressed, and the first
+  search of an MCP process 0.8 s. With D39's default 64 MB (2,085 such pages uncompressed, about
+  48M tokens; the whole 6,000-page store compressed), it takes 0.26 to 0.41 s, the first search
+  1.6 s, and the server's peak RSS is 134 MB instead of 290. The planted page reaches
+  the 3 detailed results for 71 of 86 queries at 17 pages, 63 at 1,000, 60 at 3,000, and 58 at
+  6,000 (D41; 56 with D34's ranking; before D34: 61, 50, 44, 39), and the latest value comes first
+  for 20 of 24 at 6,000 (before D34: 12). On pages sized like real turns at 6,000, D41 puts the
+  planted page in the top 3 for 58 of 86 queries (53 with D34), the latest value first for 20 of
+  24 (17), and no query shows only an old value (3).
 
 ## Decisions taken in M2 and why (full text in DECISIONS.md)
 
@@ -210,30 +231,41 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   longer makes a reminder unpageable (5.x ids).
 - D34: search matches every word in any case, ranks by BM25 with a recency prior (paged context
   blocks after every turn, in rank and in the reply), and both processes cache page reads.
+- D35 (resolves O4): end users run Contexto against the vendor API with an API key, or a
+  CLIProxyAPI instance; logins live in CLIProxyAPI or the vendor's own CLI, never in Contexto;
+  users follow their providers' terms. Guide: `docs/cliproxyapi.md`.
+- D36 (resolves O6): upstream affinity. Contexto sends a salted per-session `X-Session-Affinity` to
+  non-vendor upstreams; the CLI's own session ids rank above it. On the proxy side, CLIProxyAPI's
+  `routing.session-affinity-consistent-hash` (proposed upstream as router-for-me/CLIProxyAPI#6954)
+  pins each session to one credential on every replica; deployed on the owner's proxy 2026-10-24.
+- D37: `contexto sessions prune` deletes whole sessions by `--older-than`, `--keep`, `--session`;
+  dry run unless `--yes`; `--json` available. Writable stores hold a shared flock on `live.lock`,
+  and prune never deletes a session whose lock is held or that was active in the last 10 minutes.
+  It deletes through open directory descriptors, so a swapped-in symlink cannot redirect it.
+  `sessions list` shows size on disk and a total.
+- D38: `contexto run` warns once on stderr when Claude Code or Codex is a version Contexto was not
+  tested with, and still launches; the proxy logs each request's CLI version and
+  `session_start_unrecognised`.
+- D39: the MCP server holds search text up to `CONTEXTO_SEARCH_CACHE_MB` (default 64), the newest
+  pages uncompressed and older ones compressed, and reads the rest from the store at each search;
+  results do not change.
+- D40: each subagent and side request in a tool loop has its own recall room, and a tool call is
+  charged against every live room, because the MCP server cannot tell which conversation made it.
+- D41: search counts a term once per text that holds it, at most 3 per page, and drops BM25's length
+  term (b 0), so neither a long turn nor an old dump that repeats a key buries the turn that states
+  its value; chosen on a measured grid (probes, 13-turn cases, five dump sets).
+- D42: the repository goes public (2026-10-24); GitHub Releases stay the only distribution (no
+  package registry). D0, D13, and D14 are marked superseded in place.
 
-## In progress (2026-10-24)
+## Open follow-ups
 
-Each item is a separate pull request or owner task; none is on `main` yet.
+Not started; each would be its own pull request.
 
-- CI: a Python 3.12 to 3.15 matrix on Linux and macOS, and a Ruff configuration so the lint job
-  runs.
-- A session prune command for old session folders under `$CONTEXTO_HOME` (nothing deletes them
-  today).
-- A CLI version check at launch (the context-block and session-start rules were measured on
-  Claude Code 2.1.302).
-- A cap on the MCP server's page-text cache (no cap in v0.4.0; see "Known limitations").
-- A recall budget for subagents, which today share the main conversation's room.
-- The D34 ranking follow-up, zero spend: BM25's length discount can show an older short page that
-  states an old value in detail while the long turn with the current value is only listed (D34
-  (3)). Choose b on a harness variant that draws page sizes from
-  `spikes/m2/scale/store/calibration.json`'s real turn sizes, or take BM25's length from the
-  messages that hold a match rather than the whole page.
-- CLIProxyAPI support as an upstream (D35, O4; the owner decided on 2026-10-24 to support it).
-- Per-session upstream affinity on the owner's proxy (O6; the owner decided on 2026-10-24 to fix
-  it).
-- Making the repository public: README install from the public release URL, `SECURITY.md`, fork
-  pull requests needing approval, and CI on GitHub-hosted runners (under "Needs the owner"). There
-  is no license file yet; that is the owner's decision.
+- A byte budget per search on the pages `contexto_search` reads (D41 follow-up): it reads and
+  renders up to 53 pages per search with no cap on their size (18.5 MB of page JSON for one
+  multi-word query at 3,000 pages sized like real turns; at most 53 times the largest page). For
+  example, read the 50 listed rows' offsets from the held search text instead of parsing whole
+  pages, or list fewer rows once the budget is spent.
 
 ## What is left (as of 2026-10-24)
 
@@ -246,45 +278,74 @@ cached (D34, #204, v0.4.0; the `index_text` manifest was rejected there), each m
 in the proxy (#205, v0.2.9), and the missing-tools warning (#202, v0.3.0). That plan ran with no
 live model runs.
 
+The 2026-10-24 work is merged and released: CLIProxyAPI support (D35, #210), upstream affinity
+(D36, #212, deployed on the owner's proxy), sessions prune (D37, #208), the CLI version check (D38,
+#211), the MCP search-text budget (D39, #215), subagent recall rooms (D40, #209), hosted CI (#213),
+the public repository (D42, #206, #207), all in v0.5.0, and the search ranking fix (D41, #216) in
+v0.5.1.
+
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
   cheaper in replays, but it shows the model less, so it needs an accuracy run first (A28).
 - A Haiku default bound of 125,000 (B27): only a README tip; accuracy at that bound unmeasured.
 - A search "follow" option for multihop chains (B26): the hops come from synthetic probes.
-- The default bound 150,000 on Codex, and a live check of 150,000 on an OpenRig seat (D31 says
-  revisit only if a seat shows a recall cost).
+- A live check of 150,000 on an OpenRig seat (D31 says revisit only if a seat shows a recall
+  cost). Codex at 150,000 is under "Needs the owner".
 
 Needs the owner:
+- A license. The repository is public with no `LICENSE` file, so others have no stated right to
+  use, copy, or change the code. Which license is the owner's choice.
 - Upgrade OpenRig on the host from 0.5.15 to 0.6.1 or later to get the clock fix (O7, resolved
-  below).
-- CI and releases run on GitHub-hosted runners (PR #213): Python 3.12 to 3.15 on Ubuntu, 3.12 and
-  3.15 on macOS, and Ruff lint. Workflow runs on fork pull requests need approval for all
-  external contributors (D42). The org's runner group stays as it is; this repository no longer
-  uses it.
-- Add a required status check for the `ci` job (GitHub Actions) to the main ruleset. Until then a
-  red `ci` does not block a merge; the rule is planned for right after PR #213 merges.
-- GitHub private vulnerability reporting, which `SECURITY.md` points to, is off; turn it on in
-  the repository's security settings when the repository goes public (D42).
+  upstream in OpenRig #124).
+- Search ranking (D41): search ships with text cap 1, page cap 3. Text cap 3, page cap 3 restores
+  main's two D34 scenarios (a reply that discusses a key in one text outranks newer passing
+  mentions; the newest of equal one-reply statements is shown first) at 41 more stale-only
+  results, all in the quiet dump set (162 against 121), with no other measured change. The
+  default stands until the owner chooses.
+- An acceptance run on Opus 5.5 (claude-opus-5-5), the model the owner's seats run. Claude
+  acceptance has only run on claude-haiku-5-5. It costs seat tokens (live run #3 used 6,382,449
+  on Haiku), so it needs the owner's approval.
+- Codex acceptance at the default bound 150,000. Codex passed at 64,000 (D30); 150,000 is
+  untested on Codex.
+- Optional, for O6: an `--observe-thinking` session through the owner's proxy, to confirm no
+  `end_user_binding_mismatch` (dropped thinking) now that affinity is deployed. It was not run.
 
 ## Open decisions (details in DECISIONS.md)
 
 - O3: settled by D31: the default bound stays 150,000, including for OpenRig seats, because a
   larger bound lowers the largest single turn that stays under Claude Code's 200,000 idle-compaction
   minimum (about 87k at 150,000 against 67k at 170,000 on a 92k head, modeled).
-- O4: answered by D35 (owner, 2026-10-24; CLIProxyAPI support in progress). People who run
-  Contexto themselves use either a vendor API key or a CLIProxyAPI instance. Subscription logins
-  live in CLIProxyAPI or the vendor's own CLI, never in Contexto, and users follow their
+- O4: settled by D35 (owner, 2026-10-24; CLIProxyAPI support shipped in v0.5.0, #210). People who
+  run Contexto themselves use either a vendor API key or a CLIProxyAPI instance. Subscription
+  logins live in CLIProxyAPI or the vendor's own CLI, never in Contexto, and users follow their
   providers' terms.
 - O5: settled by D29. v0.1.0 was cut from f990703 (tag and GitHub Release on this
   repository, sdist and wheel attached, no package registry).
-- O6: decided by the owner on 2026-10-24: fix per-session upstream affinity on the owner's proxy
-  (cache misses and dropped thinking traced to the proxy spreading requests across identities);
-  the work is in progress.
+- O6: resolved by D36, deployed on the owner's proxy 2026-10-24 and verified (section below). Cache
+  misses and dropped thinking were traced to the proxy spreading one session's requests across
+  credentials.
 - O7: resolved upstream. OpenRig fixed the context-usage clock bug (UTC parsed as local time) in
-  its PR #124 (commit 4a920dba), first released in v0.6.1. The host runs 0.5.15 and needs only an
-  upgrade; no report is needed.
+  its PR #124 (commit 4a920dba), first released in v0.6.1. The host still runs 0.5.15; upgrading
+  it is under "Needs the owner". No report is needed.
 
-## Known limitations (v0.4.0)
+## O6 (upstream affinity), resolved by D36: deployed 2026-10-24
+
+- Live: the owner's CLIProxyAPI deployment runs routing.session-affinity,
+  session-affinity-consistent-hash, ttl 1h (cliproxy-cluster #10), image sha256:6be56ec3… from
+  f78c897 (v7.3.12 + patches 0001-0005). Rendezvous hashing of the session id, so every replica
+  picks the same credential; nested subagents rank with their root. Upstream proposal:
+  router-for-me/CLIProxyAPI#6954. Contexto #212 sends a salted per-session X-Session-Affinity to
+  non-vendor upstreams; the CLI's own ids rank above it.
+- Verified: rollout 4/4 ready; check_config_rollout.sh exit 0 (after one same-second stale pod was
+  replaced); 3 routing keys; no backend errors, no 5xx. A 10-request byte-identical
+  claude-haiku-5-5 series with one key: 1 write (13,654), then 9 reads of 13,654, all 200, across
+  4 pods on 1 credential (before the fix: 3 writes). Not run: the --observe-thinking check for
+  dropped thinking.
+- Rollback: revert cliproxy-cluster #10 (Flux restores image and config; the revision annotation
+  rolls the pods), or reseal with consistent-hash false. Never `kubectl rollout restart` (Flux
+  reverts it and rolls again); delete stale pods one at a time.
+
+## Known limitations (v0.5.1)
 
 - Claude acceptance ran on one model (claude-haiku-5-5), one bound (150,000), and the owner's
   proxy; Codex acceptance on gpt-6-astra at bound 64,000. The default bound 150,000 is untested
@@ -296,9 +357,9 @@ Needs the owner:
 - Codex: HTTP is forced through a custom provider (no WebSocket). Contexto's tools sit behind Codex
   tool search and need `default_tools_approval_mode = approve`, which `contexto run codex` sets.
   Only API-key mode is live-tested; ChatGPT login mode is tested with synthetic credentials. On
-  its terms, D35 answers O4 (CLIProxyAPI support, in progress): people who run Contexto
-  themselves use a vendor API key or a CLIProxyAPI instance, subscription logins live in
-  CLIProxyAPI or the vendor's own CLI, never in Contexto, and users follow their providers' terms.
+  its terms, D35 answers O4: people who run Contexto themselves use a vendor API key or a
+  CLIProxyAPI instance, subscription logins live in CLIProxyAPI or the vendor's own CLI, never in
+  Contexto, and users follow their providers' terms.
   In ChatGPT login mode some Codex calls (rate limits, usage, a remote MCP connection) go to
   chatgpt.com directly and bypass the proxy by design. By default Codex also connects to
   chatgpt.com (analytics) and github.com (plugin sync) outside the proxy;
@@ -308,8 +369,16 @@ Needs the owner:
   per turn is the bound minus the request's usage (input plus output) minus a 25,000-token
   headroom floor; the engine rotates at a turn start when that would leave less than 12,000
   (`min_turn_room`).
-- Subagents and side requests share the main conversation's recall room and in-view snapshot;
-  concurrent subagents can overspend the room (a subagent budget is in progress).
+- Subagents and side requests have their own recall room while in a tool loop (D40): a tool call
+  gets the smallest live room and is charged against every live room, because the MCP server
+  cannot tell which conversation made it. A side room expires 15 minutes after its last publish,
+  or earlier when main's history shows its agent stopped (a task notification or a foreground
+  hand-back). A subagent that stopped without one can hold main's recall down until the expiry
+  (`limited_by: side` with `limiting_age_s` in the log). Main's room is the only bound for a
+  subagent's calls when the stream hold is skipped, its transform failed, it went degraded before
+  its first publish, or its call starts more than 15 minutes after its response (for example after
+  a permission prompt). Search's "in view" for a subagent still means the main conversation's
+  window.
 - Usage refines the estimate only for the request it measured (rule 3): with two requests of one
   conversation in flight, only the newer one's usage counts (`usage_unattributed` for the other),
   and after a request without usage the next estimate is a full one (`usage_missing`).
@@ -320,14 +389,22 @@ Needs the owner:
   budget is under 25,000; at 42,000 with a 16,000 head nearly every turn rotates. Use a larger
   bound for OpenRig seat-sized heads (O3).
 - Very large single turns can still exceed the bound inside a tool loop (logged `over_bound`).
-- Search (D34) keeps each page's searchable text in the MCP server's memory for the life of the
-  process, with no cap (peak RSS 293 MB at 6,000 synthetic pages), and the first search of each MCP
-  process reads every page once (0.74 s at 6,000). Single common words can still bury a fact at
-  6,000 pages (5 of 86 probe queries). BM25's length discount can put an older short page that
-  states an old value among the 3 detailed pages while the long turn with the current value is only
-  listed: with turn 4 "Set max_retries to 3", the long turn 10 "max_retries is now 7", and passing
-  mentions at turns 6 and 13, the detailed pages are 13, 6, and 4 (the newest-first search showed
-  13, 10, and 6). The follow-up and a cache cap are under "In progress".
+- Search (D34, D39) holds page text in the MCP server up to `CONTEXTO_SEARCH_CACHE_MB` (default
+  64 MB; the newest pages uncompressed, older ones compressed). A store whose compressed text does
+  not fit reads every page outside it at each search, and the first search of each MCP process
+  reads every page once and compresses what it keeps (1.6 s at 6,000 synthetic pages, which all fit
+  compressed: 0.26 to 0.41 s per search against 0.10 to 0.25 s with every page uncompressed; peak
+  RSS 134 MB instead of 290). The 3.2 compression ratio is from synthetic text. Single common
+  words can still bury a fact at 6,000 pages (5 of 86 probe queries, measured under D34).
+  Search (D41) counts a term once per text, at most 3, with no length term. A reply or file that
+  discusses a key at length in one text weighs as one passing mention, so a newer passing mention
+  outranks it. An old turn that names a key in 2 or more texts (a prompt that names it counts twice)
+  usually outranks a newer one-line reply that states its value (3 texts outrank it even from the
+  oldest position), and once a passing mention follows that reply, the reply leaves the 3 detailed
+  pages more often than under D34 (38 of 122 against 64 in a repo-text simulation); many separate
+  greps cost most. The pages one search shows are read in full with no cap (18.5 MB of page JSON for
+  one multi-word query at 3,000 pages sized like real turns); a per-search budget is under
+  "Open follow-ups".
 - Carried content after D32 and D33 (#203, measured on Claude Code 2.1.302's captured bodies in
   `spikes/m2/scale/reminders/`, Contexto's estimator): at turn 48 the content the fallback cannot
   page is 3,557 to 3,794 tokens on sonnet-4-6 (was 5,452 to 22,953) and 4,897 to 5,643 on
@@ -341,13 +418,32 @@ Needs the owner:
   and 692 to 0, the largest request from 288,309 to 134,203 tokens, and F at 30M from 259,155 to
   74,240; the store holds 1,616 pages at 30M instead of 1,138. Session-start recognition depends on
   Claude Code's own `# Environment` text, and the kinds of context block on 2.1.302's first lines:
-  re-run the reminders spike when the CLI changes. Resuming an epoch record written before v0.4.0
-  can carry one message the old code had paged (logged as `carried_reclassified`).
+  re-run the routine in `docs/cli-updates.md` when the CLI changes. Resuming an epoch record
+  written before v0.4.0 can carry one message the old code had paged (logged as
+  `carried_reclassified`).
+- CLI versions (D38): Contexto is tested with Claude Code 2.1.302 and codex-cli 0.154.0 and 0.163.0
+  (`TESTED_VERSIONS`, `src/contexto/cliversions.py`). `contexto run` warns once on stderr for any
+  other version and still launches (`contexto run --no-version-check <cli>` or
+  `CONTEXTO_NO_VERSION_CHECK=1` silences it). The proxy logs each request's CLI version
+  (`cli_version`) and `session_start_unrecognised` when the main conversation's first request carries
+  the CLI's context but no session start it recognises. A CLI that changes its text without changing
+  its version, or changes text only on later turns, is not caught. Re-test routine:
+  `docs/cli-updates.md`.
+- Session folders are never removed on their own. `contexto sessions prune` (D37) deletes whole
+  sessions only, skips any session in use or active in the last 10 minutes (a retry after a partly
+  failed delete waits out the same 10 minutes), and cannot remove pages inside a live session.
 - Windows is not supported: the store locks files with `fcntl` (`store/__init__.py`,
   `store/ledger.py`), the launcher forwards `SIGHUP` (`launcher.py`), and the store relies on
-  POSIX file modes (0700 and 0600), so neither imports there. Tested on macOS and Linux with
-  Python 3.12.
-- Cache efficiency depends on the upstream route (O6): 29 of 31 and 36 of 37 in the live runs.
+  POSIX file modes (0700 and 0600), so neither imports there. CI tests Python 3.12 to 3.15 on
+  Linux and 3.12 and 3.15 on macOS; live runs used Python 3.12.
+- Cache efficiency depends on the upstream route: 29 of 31 and 36 of 37 in the live runs, before
+  D36. A proxy with several upstream credentials has to pin each session to one (D36); on the
+  owner's proxy, since 2026-10-24, a byte-identical series read the cache 9 of 9 times after one
+  write. Subagents and side requests share the session's key and CLIProxyAPI sends Claude Code
+  subagents to their root session's credential, so parallel subagents load one credential's rate
+  limit, and a 429 there moves the whole session to the next credential, with one cache miss and
+  dropped thinking at each move. A fresh launch or `--fork-session` gets a new Claude Code session
+  id and can miss the cache once.
 - Organization-managed Claude Code settings outrank the launcher's `--settings`; a user-supplied
   `--settings` is refused (exit 2); a user `--mcp-config` is allowed.
 - The proxy never reuses upstream connections, and retries once, on a new connection, only for connect, TLS, or send failures (rule 8).
@@ -386,7 +482,8 @@ Needs the owner:
 | v0.2.9 | 62b02a1 | #205: the proxy hashes each message once and drops the request copy and reference serialization, to cut per-request time on long histories (the fast hash falls back to normalise-then-hash when a message cannot be encoded). #199: the 30M scale harnesses and record (`spikes/m2/scale/`, `docs/research/M2-scale-30m.md`) |
 | v0.3.0 | c023c87 | #202: the proxy warns on stderr and logs `mcp_tools_missing` when the main conversation runs without Contexto's MCP tools, and `mcp_tools_found` when they appear later |
 | v0.4.0 | 4b87ec2 | #203 (D32, D33): the bounded fallback pages later turn starts' context blocks, and session-start is recognised by its `# Environment` first line, so carried content stops growing; `carried_reclassified` on resuming an older record. #204 (D34): search matches every word in any case, ranks by BM25 with a recency prior (paged context blocks last), and both processes cache page reads |
-
+| v0.5.0 | cb1986f | #210 (D35): CLIProxyAPI as an upstream; SSE keep-alive comments pass the stream hold, the settings file follows `CLAUDE_CONFIG_DIR`. #212 (D36): a salted per-session `X-Session-Affinity` for non-vendor upstreams. #208 (D37): `contexto sessions prune` and session sizes in `sessions list`. #211 (D38): a warning for untested Claude Code or Codex versions. #215 (D39): the MCP server holds search text up to 64 MB by default. #209 (D40): each subagent gets its own recall room, and a tool call is charged against every live room. #213: the proxy starts without a reverse hostname lookup; quarantined pages are named from one clock reading |
+| v0.5.1 | e864896 | #216 (D41): search counts a term once per text that holds it, at most 3 per page, and drops BM25's length term, so neither a long turn nor an old dump that repeats a key buries the turn that states its value |
 Each is a tag and a GitHub Release on this repository with the wheel and sdist attached; there is
 no package registry release.
 
@@ -409,4 +506,7 @@ no package registry release.
 - Direct API requests identify honestly and carry no other product's client marker (D23).
 - The project has one owner, and the builder and reviewer agents post from the owner's account,
   so GitHub cannot count their approvals; two exact-head reviewer verdicts per PR are a project
-  rule. Ruleset `main: require pull request` (id 25202810) is active.
+  rule. Ruleset `main: require pull request` (id 25202810) is active, and since 2026-10-24 it
+  requires the `ci` check.
+- 2026-10-24: CI and releases moved back to GitHub-hosted runners (PR #213), and the repository
+  went public (D42).
