@@ -532,26 +532,27 @@ the owner's delegation. Open decisions are listed at the end with the options an
   recency prior, and newest-page place: b 0.5 and 0.3 on whole pages (no 13-turn case fixed; at
   6,000 real-size pages 55 and 54, stale only 2); a larger recency weight, 2 or 10 (no 13-turn case
   fixed: turn 10 is 42,550 bytes against a mean page of 3,320, so its relevance is a small fraction
-  of a short page's; a scratch check, not kept); length taken from the texts that hold a query word, against its
-  mean over the matching pages, the plain reading of D34's follow-up (fixes the four cases but 51
-  and 48 at 6,000, stale only 3 on real sizes: a plant that shows its value inside a long tool output
-  loses to one-line distractors); BM25F over the page's texts against the store's mean text length
+  of a short page's; a scratch check, not kept); length taken from the texts that hold a query word,
+  against its mean over the matching pages, the plain reading of D34's follow-up (fixes the four
+  cases but 51 and 48 at 6,000, stale only 3 on real sizes: a plant that shows its value inside a
+  long tool output loses to one-line distractors); BM25F over the page's texts against the store's mean text length
   (fixes them; 53 and 53 at 6,000: a text shorter than the mean is boosted, so one mention in a short
   text nearly saturates and the count stops mattering; 54 and 54 at b 0.3); the same BM25F with each
   text's length counted as at least the mean (fixes them; 56 and 56 at 6,000, 59 at 3,000 on both
   models, so 1 to 2 below b 0 there, and equal to it with the topic floor); length of the whole page
   minus tool outputs that hold no query word (a scratch prototype at 1,000 pages, not kept: fails
-  the cases, because turn 10's prompt and command still make it 2.5 to 3 times as long as
-  the one-line pages). Every variant with a length term lost hits as b rose, on both models. Why b 0 is
+  the cases, because turn 10's prompt and command still make it 2.5 to 3 times as long as the
+  one-line pages). Every variant with a length term lost hits as b rose, on both models. Why b 0 is
   acceptable: k1 1.2 still caps what repetition earns at 2.2 times one mention, so an old page that
   repeats a word 30 times outranks the newest page that says it once (2.12 against 1.5 with the
   recency prior) but not one that says it three times (2.36); the newest matching turn still always
   takes a detailed place, and the best pages are still shown newest first (D28). D34 rejected b 0
   because it "brings back the bias toward long old log dumps". That is the case above, and this
   harness does not measure it: each distractor is one line, and `calibration.json` records how many
-  turns hold a query, not how often a turn repeats it. Under D34 such a page was discounted little
-  anyway, since term frequency saturates; what b 0.75 mainly did on real-size pages was favour short
-  pages. The newest-page place (D34 (3)) stays: older pages that say the word more often can still
+  turns hold a query, not how often a turn repeats it. Under D34 such a page lost much of its score
+  only when it was many times the mean page length (30 mentions on a page 3 times the mean scored
+  2.0 against 2.12 with b 0; on a page 15 times the mean, 1.5); on real-size pages what b 0.75 mainly
+  did in the harness was favour short pages. The newest-page place (D34 (3)) stays: older pages that say the word more often can still
   outrank the turn that states the new value once. Cost: the length term and the mean page length
   are gone from `rank`; nothing else changes, and nothing is added to the store or the caches.
   Speed, one pass each, back to back on one machine (`results/d41/before_*`, `after_*`): on
@@ -562,9 +563,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   is higher (118 to 155 MB at 3,000, 204 to 237 at 6,000): the 3 detailed pages for such a word are
   now the long pages that say it most (for `return` at 3,000 pages the largest shown went from 72,118
   to 164,431 tokens), and they cost more to read and render. The reply stays within its 32,000
-  characters. Tuning: the same 86 probes informed D34
-  and D41, so there is no held-out set, and the variants were compared on them; the probes and plants
-  are unchanged. Limitations: synthetic pages and distractors; how often real turns repeat a query
+  characters. Tuning: the same 86 probes informed D34 and D41, so there is no held-out set, and the
+  variants were compared on them; the probes and plants are unchanged. Limitations: synthetic pages and distractors; how often real turns repeat a query
   word is unknown, so the cost of b 0 on log-heavy sessions is not measured; a value shown only
   inside a long tool output, with three or more newer passing mentions, can still miss the detailed
   pages, as before D34.
