@@ -63,12 +63,16 @@ ROOM = 10**9  # a room that never runs out: the per-call limit binds, as in a tu
 DETAILED = re.compile(r"^(pg_[0-9a-f]{16}) \(turn (\d+)\)$")
 LISTED = re.compile(r"^(pg_[0-9a-f]{16}) \(turn (\d+)\) @")
 NOT_SHOWN = re.compile(r"^\[(\d+) more matching pages not shown")
+QUALITY_FIELDS = ["n", "dialect", "fact", "kind", "query", "outcome", "rank_shown", "matching_pages",
+                  "query_on_planted_page", "value_shown", "casefold_on_page", "all_words_on_page", "latest_first",
+                  "stale_only"]
 
 
 # Store building
 
 
-def build_store(home: Path, session: str, n: int, *, dialect: str, floor: float, seed: int) -> dict[str, Any]:
+def build_store(home: Path, session: str, n: int, *, dialect: str, floor: float, seed: int,
+                sizes: str = "spike") -> dict[str, Any]:
     """Write an ``n``-page store the way the engine pages turns; return its manifest and size figures."""
     store = SessionStore(home, session)
     store.set_window(WINDOW, BYTES_PER_TOKEN, model=MODEL)
@@ -77,7 +81,7 @@ def build_store(home: Path, session: str, n: int, *, dialect: str, floor: float,
     ids, tokens, write_s = [], [], 0.0
     markers_ok = True
     for t in range(n):
-        turn = scale_synth.session_turn(t, n, seed=seed, floor=floor)
+        turn = scale_synth.session_turn(t, n, seed=seed, floor=floor, sizes=sizes)
         if dialect == "responses":
             turn = scale_synth.to_responses(turn)
         text = "\n".join(_texts(turn))
@@ -266,10 +270,13 @@ def quality(home: Path, session: str, n: int, dialect: str, ids: list[str], writ
                 rank = order.index(target) + 1
             value_shown = outcome == "detailed" and target_plant.marker in detailed_section(text, target)
             first_plant = next((pid for pid in reply["detailed"] if pid in plant_ids), None)
+            # an older value in detail while the latest value's page is not (D41)
+            stale_only = first_plant is not None and target not in reply["detailed"]
             r = {"n": n, "dialect": dialect, "fact": fact.id, "kind": fact.kind, "query": q, "outcome": outcome,
                  "rank_shown": rank, "matching_pages": reply["total"], "query_on_planted_page": on_page,
                  "value_shown": value_shown, "casefold_on_page": casefold, "all_words_on_page": all_words,
-                 "latest_first": (first_plant == target) if fact.kind == "changing" else ""}
+                 "latest_first": (first_plant == target) if fact.kind == "changing" else "",
+                 "stale_only": stale_only if fact.kind == "changing" else ""}
             writer.writerow(r)
             rows.append(r)
     return rows
@@ -415,13 +422,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile-n", type=int, default=3000)
     parser.add_argument("--floor", type=float, default=0.0, help="minimum per-page distractor rate per query")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--page-sizes", choices=("spike", "calibration"), default="spike",
+                        help="spike: every turn 19,000 to 30,000 tokens; calibration: drawn from the real turn sizes (D41)")
     parser.add_argument("--out", type=Path, default=HERE / "results")
     parser.add_argument("--keep", action="store_true", help="keep the stores (printed path)")
     args = parser.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
     home = Path(tempfile.mkdtemp(prefix="contexto-scale-"))
     env = {"commit": git_head(), "python": platform.python_version(), "machine": platform.machine(),
-           "platform": platform.platform(), "cpus": os.cpu_count(), "floor": args.floor, "seed": args.seed,
+           "platform": platform.platform(), "cpus": os.cpu_count(), "floor": args.floor, "seed": args.seed, "page_sizes": args.page_sizes,
            "passes": args.passes, "reps": args.reps, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "uptime_start": subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()}
     plan = [(n, "messages") for n in args.sizes] + [(n, "responses") for n in args.responses_sizes]
@@ -436,16 +445,15 @@ def main(argv: list[str] | None = None) -> int:
                                                        "markers_on_planted_pages"]),
             "latency": csv.DictWriter(files["latency"], ["n", "dialect", "pass", "load1", "mode", "kind", "query", "rep",
                                                          "seconds", "chars"]),
-            "quality": csv.DictWriter(files["quality"], ["n", "dialect", "fact", "kind", "query", "outcome", "rank_shown",
-                                                         "matching_pages", "query_on_planted_page", "value_shown",
-                                                         "casefold_on_page", "all_words_on_page", "latest_first"]),
+            "quality": csv.DictWriter(files["quality"], QUALITY_FIELDS),
         }
         for w in writers.values():
             w.writeheader()
         for n, dialect in plan:
             session = f"scale-{dialect}-{n}"
             print(f"[{time.strftime('%H:%M:%S')}] N={n} {dialect}: building", flush=True)
-            built = build_store(home, session, n, dialect=dialect, floor=args.floor, seed=args.seed)
+            built = build_store(home, session, n, dialect=dialect, floor=args.floor, seed=args.seed,
+                                sizes=args.page_sizes)
             if not built["markers_ok"]:
                 raise SystemExit(f"a planted marker is missing from its page at N={n} ({dialect})")
             writers["stores"].writerow(built["row"])

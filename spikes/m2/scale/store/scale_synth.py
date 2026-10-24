@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import random
 from functools import lru_cache
 from pathlib import Path
@@ -169,6 +170,28 @@ def calibration(path: str = str(HERE / "calibration.json")) -> dict[str, float]:
         raise SystemExit(f"cannot read calibration {path}: {e}; run scale_calibrate.py first") from e
 
 
+@lru_cache(maxsize=None)
+def turn_size_model(path: str = str(HERE / "calibration.json")) -> tuple[float, float, int]:
+    """A lognormal fit of the real turn sizes in ``calibration.json`` (D41): (mu, sigma, max tokens).
+    mu is the log of the median; sigma is the mean of the two fits through the 90th and 95th percentiles
+    (1.98 and 1.98 for the recorded corpus, so the shape is close to lognormal in its upper half)."""
+    try:
+        sizes = json.loads(Path(path).read_text(encoding="utf-8"))["turn_tokens"]
+        mu = math.log(sizes["median"])
+        sigma = ((math.log(sizes["p90"]) - mu) / 1.2816 + (math.log(sizes["p95"]) - mu) / 1.6449) / 2
+        return mu, sigma, int(sizes["max"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise SystemExit(f"cannot read turn sizes from {path}: {e}; run scale_calibrate.py first") from e
+
+
+def calibrated_goal(t: int, seed: int = 7) -> int:
+    """The token goal of turn ``t`` drawn from ``turn_size_model``, capped at the corpus maximum. A turn
+    still holds at least one tool call, and every plant and distractor gets its own, so a drawn goal under
+    about 1,000 tokens comes out larger."""
+    mu, sigma, top = turn_size_model()
+    return min(top, int(random.Random(f"size:{seed}:{t}").lognormvariate(mu, sigma)))
+
+
 def distractor_rate(query: str, floor: float = 0.0) -> float:
     return max(calibration().get(query, 0.0), floor)
 
@@ -266,10 +289,16 @@ def _thinking(rng: random.Random) -> dict[str, Any]:
 
 
 def session_turn(t: int, n_pages: int, *, seed: int = 7, floor: float = 0.0,
-                 target: tuple[int, int] = TARGET_TOKENS) -> list[dict[str, Any]]:
-    """Turn ``t`` (0-based) of an ``n_pages`` session, as the engine pages it (Messages API)."""
+                 target: tuple[int, int] = TARGET_TOKENS, sizes: str = "spike") -> list[dict[str, Any]]:
+    """Turn ``t`` (0-based) of an ``n_pages`` session, as the engine pages it (Messages API). ``sizes``
+    "spike" draws the token goal from ``target`` (the original spike); "calibration" from the real turn
+    sizes (``calibrated_goal``). The rest of the turn's random draws are the same either way."""
     rng = random.Random(f"turn:{seed}:{t}")
     goal = rng.randrange(*target)
+    if sizes == "calibration":
+        goal = calibrated_goal(t, seed)
+    elif sizes != "spike":
+        raise ValueError(f"unknown page sizes {sizes!r}")
     plants = plants_for(t, n_pages)
     near = near_sentences(t, floor, seed)
     mentions = rename_mentions(t, n_pages, seed)
