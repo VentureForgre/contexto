@@ -139,10 +139,10 @@ than the strategy choice in some settings:
    upstream identity per session would remove both the extra prefix writes and the thinking drop.
    Lane 1 PR #16 calls it an owner-side setting, and the proxy is the owner's infrastructure (D11),
    so it is the owner's call.
-4. **Auth and terms (Q5, lane 1).** Both vendors restrict intermediating subscription credentials
-   (`M0-interception.md`). D12 settles Q5 for development: rewriting runs only through the owner's
-   proxy, never on the owner's subscription logins. O4, the auth guidance for end users, stays open
-   for the owner.
+4. **Auth (Q5, lane 1).** Both CLIs send API-key and login credentials to a custom base URL
+   (`M0-interception.md`, section 6). D12 settles Q5 for development: rewriting runs only through
+   the owner's proxy with the rig key, never on a claude.ai or ChatGPT login. O4, the auth guidance
+   for end users, stays open for the owner.
 5. **Phase 2 rewriting prototype.** It is the only way to measure (iii) itself: its cost, the CLI's
    compaction under a bounded proxy, and the fidelity of paging and recall.
 6. **Smaller items for the owner:**
