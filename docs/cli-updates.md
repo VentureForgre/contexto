@@ -27,6 +27,11 @@ and not re-measured on 2.1.302.
 | `HOOK_SIGNATURES`, `HOOK_SIGNATURES_CLAUDE_CODE_VERSION` | `src/contexto/rewrite.py` | `spikes/m2/carried` (`live_probe.sh`, `hook_context.py`) |
 | deferred-tool listings and MCP notices | `src/contexto/toolcheck.py` | zero-spend captures described in its docstring |
 | `CONTEXT_SECTION` (Codex section tags), `CONTEXT_SECTIONS_CODEX_VERSION` | `src/contexto/codex.py` | `spikes/m2/codex/probe.sh` |
+| subagent shapes (`AGENT_TOOLS`, `ASYNC_LAUNCH`, `HAND_BACK`, `NOTICE_OPENINGS`, the `<task-notification>` and `resumedAgentId` patterns), gated by `SUBAGENT_SHAPES_TESTED` (D40) | `src/contexto/rewrite.py`, `src/contexto/cliversions.py` | `spikes/m2/subagents` |
+
+The subagent shapes are gated by version: for a Claude Code version not in `SUBAGENT_SHAPES_TESTED`,
+side rooms only expire (15 minutes) and none closes early. Re-run `spikes/m2/subagents` (`run.sh`
+with `esc_scenario.py` modes `fg` and `stop`, and `resume_scenario.py`) before adding a version.
 
 If the `# Environment` heading changes, the session-start message becomes a settings change or
 carried text and can be paged once superseded (D33). If a context block's first line changes, the

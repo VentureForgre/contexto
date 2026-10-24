@@ -604,24 +604,32 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
       rooms are dropped at the next charge or side publish, each logged `side_room_expired` with its
       age, room, and spend.
     - Closing when the agent stops. A side room closes before its expiry only on evidence in main's
-      own history that the subagent holding it has stopped (measured on Claude Code 2.1.302 against
-      a scripted stub, `spikes/m2/subagents/`). The subagent is matched by its first prompt: its
-      first user message carries a `<system-reminder>` block and then main's `Agent` (or `Task`)
-      call's `prompt`, unchanged. The evidence is a result for that call that is not the background
-      launch receipt (`Async agent launched successfully.`), that is a foreground hand-back
-      (completed or interrupted), or a `<task-notification>` naming the call's tool-use id, which the
-      CLI sends when a background agent stops (`completed`, `failed`, `killed`), in a `system`
-      message during main's tool loop or a `<system-reminder>` user message while main is idle.
-      The evidence must sit at a message index at least main's message count when the room was
-      published, so an agent stopped, resumed, and running again keeps its new room; and every
-      `Agent` call with that prompt must have stopped, so twins with one prompt close together. It
-      is checked at each main request, whatever started main's turn. The close is logged
-      `side_room_closed` with reason `agent_stopped`. A room matching no `Agent` call, a background
-      agent still running, and any room on the Responses dialect (Codex has no `Agent` tool) keep the
-      15-minute expiry. If the store cannot close the room, the engine logs
-      `side_room_close_failed` with the error's class and goes on: the room expires instead, and
-      the engine stays out of degraded mode (unlike a failed `set_side_room` publish, which is a
-      rule 14 `store_error`).
+      own history that every run of the subagent holding it has stopped (measured on Claude Code
+      2.1.302 against a scripted stub, `spikes/m2/subagents/`). The subagent is matched by its first
+      prompt: its first user message carries a `<system-reminder>` block and then main's `Agent`
+      (or `Task`) call's `prompt`, unchanged. A stop is one of two measured shapes: the call's
+      result is a foreground hand-back (it starts `[Subagent hand-back]`), or a
+      `<task-notification>` names the call's tool-use id, or the id of a `SendMessage` call whose
+      result says it resumed that call's agent (`resumedAgentId`; a resumed run's notice names the
+      `SendMessage`). A notice counts only where the CLI puts it: in a `system` message (during
+      main's tool loop), or in a user message whose content, or first text block, opens with the
+      `<system-reminder>` wrapper or `[SYSTEM NOTIFICATION - NOT USER INPUT]` (while main is idle).
+      A notice in assistant text, or pasted into a human message, never counts. The background
+      launch receipt (`Async agent launched successfully.`) is not a stop; an error result means the
+      call started no agent; any other result shape leaves the call unknown, so its prompt's rooms
+      only expire. Each resume adds a turn start to the subagent's own conversation, so a room's run
+      is the number of turn starts in the request that published it, and the room closes when its
+      agent's stops number at least that run: a late notice of an earlier run cannot close a later
+      run's room, whatever the order. Every `Agent` call with that prompt must be known and stopped
+      that often, so twins with one prompt close together. It is checked at each main request,
+      whatever started main's turn, and only while the CLI's `User-Agent` names a Claude Code version
+      in `SUBAGENT_SHAPES_TESTED` (`src/contexto/cliversions.py`, D38): for any other version, side
+      rooms only expire. The close is logged `side_room_closed` with reason `agent_stopped`. A room
+      matching no `Agent` call, a background agent still running, and any room on the Responses
+      dialect (Codex has no `Agent` tool) keep the 15-minute expiry. If the store cannot close the
+      room, the engine logs `side_room_close_failed` with the error's class and goes on: the room
+      expires instead, and the engine stays out of degraded mode (unlike a failed `set_side_room`
+      publish, which is a rule 14 `store_error`).
     - Inside a main turn. Main's room resets at each main publish; a side room resets only at its
       holder's publish. While a side room is live, every charge, main's own included, also spends
       it, so main's recall can be held below main's own room, down to nothing, by a side room whose
