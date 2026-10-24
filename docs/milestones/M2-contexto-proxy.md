@@ -681,6 +681,28 @@ it is first reported and once more after the CLI exits for a repeated exit event
 draw over a line printed mid-run. If the check itself raises, the engine logs `toolcheck_error` with
 the exception's type name only and keeps the request's rewrite.
 
+**CLI versions (D38).** The CLI versions Contexto was tested with are one list, `TESTED_VERSIONS` in
+`src/contexto/cliversions.py`; the measured-on constants of the session-start signature, the
+context-block kinds, and the Codex context sections equal the newest tested version of their CLI.
+`contexto run` runs `<cli> --version` (3 seconds at most, stdin closed) after the session line; for a
+version not in the list it prints one stderr line naming it, the tested versions, what may break,
+and where to report it, and the launch goes on. A CLI that does not answer is logged, not warned
+about. `--no-version-check` or `CONTEXTO_NO_VERSION_CHECK=1` skips the check. The log gets
+`cli_version_check` (`cli`, `version`, `tested`, `tested_versions`, and `error` or `skipped`). The
+engine reads each request's `User-Agent` (`claude-cli/<v>`, `codex_<surface>/<v>`) and logs
+`cli_version` (`cli`, `client`, `version`, `tested`, `tested_versions`) once per distinct version, at
+most 8, and `cli_version_untested` once for the first untested one. On the main conversation's first
+request with a tool list (for the Responses API, its first request) it judges the session start once:
+recognised when a role `system` message has the step 1 signature or a context block is of kind
+`environment` (Messages API), or when a user message of context sections is in the lead (Responses
+API); when the request carries the CLI's injected context (a role `system` message or a
+`<system-reminder>` block; for Codex, a developer item in the lead) but no recognised session start,
+the engine logs `session_start_unrecognised` (`dialect`, `signature_version`, `cli_version`,
+`tested_versions`). It reads only the first 4,096 characters of each block. These events go on the
+request's `transform_events`, before the engine's request event, and never to stderr; if the check
+raises, the engine logs `cli_version_error` with the exception's type name and keeps the rewrite.
+`count_tokens` is not checked. The routine for testing a new version is `docs/cli-updates.md`.
+
 ## CLI
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run

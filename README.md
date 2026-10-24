@@ -115,6 +115,7 @@ credentials this way under OpenAI's terms is an open question.
 | `--codex-auth MODE` | `apikey` | `apikey` or `chatgpt` (see Quickstart). |
 | `--codex-key-helper CMD` | see Quickstart | Command that prints the API key (Codex, API-key mode). |
 | `--codex-upstream URL` | see Quickstart | Upstream for Codex requests, including its version path. |
+| `--no-version-check` | off | Skip the check of `claude --version` or `codex --version` against the versions Contexto was tested with. |
 
 **Tip for Haiku 5.5:** on Haiku 5.5, `--bound 125000` keeps requests at turn start below the 100K price
 tier, above which every rate is 5x. Replaying live run #3 at that bound with the model's behavior held
@@ -139,6 +140,7 @@ Environment variables:
 | `CONTEXTO_RECALL_VARIANT` | new sessions | `default` or `legacy` recall guidance text. `legacy` is kept for diagnosis. A session keeps the variant it started with. |
 | `ANTHROPIC_BASE_URL` | `run`, `proxy` | Upstream, when no settings file sets one (see Troubleshooting). |
 | `OPENRIG_SESSION_NAME` | `run` | When set, the start-up window check assumes 92,000 tokens of fixed overhead instead of 55,000. |
+| `CONTEXTO_NO_VERSION_CHECK` | `run` | `1` skips the CLI version check, like `--no-version-check`. |
 
 At start, `contexto run` warns on stderr when the bound leaves a window budget under 25,000 tokens
 (bound minus headroom floor minus the assumed fixed overhead) and suggests a larger `--bound`. It
@@ -224,6 +226,15 @@ disconnected, so the proxy reads every system message in order and the latest no
 never names MCP tools in its requests, so for Codex the MCP server records in the session when it
 answers Codex's tool list request, and the proxy checks for that record. For Codex, a server that
 crashes after it answered cannot be detected: the record stays.
+
+**"warning: Claude Code X is not a version Contexto was tested with".** Contexto recognises parts of
+Claude Code's and Codex's requests by text the CLI writes, and was tested with the versions the line
+names. A newer CLI usually works, but if it changed that text, Contexto can page context it should
+keep, and nothing else says so. The launch goes on. Look for a newer Contexto, or report the version
+at https://github.com/VentureForgre/contexto/issues. `--no-version-check` or
+`CONTEXTO_NO_VERSION_CHECK=1` silences it. During the run the session log records the version each
+request names (`cli_version`) and `session_start_unrecognised` if the session start was not
+recognised. [docs/cli-updates.md](docs/cli-updates.md) is how a new version gets tested.
 
 **"window budget about N tokens ... is below 25,000".** The bound leaves little room for turns after
 the fixed overhead, so rotations page often. Start again with the suggested `--bound`.

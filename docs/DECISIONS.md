@@ -392,6 +392,47 @@ the owner's delegation. Open decisions are listed at the end with the options an
   consistent with quarantine, with a crash between the page and the manifest write, and with
   stub-rule changes such as `current_stub`, to save one read of every page after a proxy restart).
 
+- **D38. Contexto names the CLI versions it was tested with and warns about others, without
+  blocking.** Intake, 2026-10-24. Contexto recognises Claude Code's session start by its
+  `# Environment` heading (D33), its context blocks by their first lines (D32), and Codex's session
+  context by its section tags. A CLI update that changes that text fails silently: the message falls
+  into another class and can be paged. What changed: (1) `TESTED_VERSIONS` in
+  `src/contexto/cliversions.py` is the single list: Claude Code 2.1.302; Codex 0.154.0 (shapes,
+  acceptance) and 0.163.0 (MCP launch, missing-tools check). A test keeps
+  `SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION`, `CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION` and
+  `CONTEXT_SECTIONS_CODEX_VERSION` equal to the newest tested version of their CLI. The Codex
+  constant moves from 0.154.0 to 0.163.0: one zero-spend `codex exec` request to a loopback stub
+  showed the same six section openings, with `<environment_context>` last in the lead (AGENTS.md not
+  exercised; `spikes/m2/cliversion/`); (2) `contexto run claude|codex` runs `<cli> --version` (3 s
+  timeout, stdin closed) after the session line and, for an untested version, prints one stderr
+  line naming the version, the tested versions, what may break, and where to report it. It never
+  blocks or delays the launch past the timeout; a CLI that does not answer is logged, not warned
+  about. `--no-version-check` or `CONTEXTO_NO_VERSION_CHECK=1` skips it. Logged as
+  `cli_version_check`; (3) the proxy reads each request's `User-Agent` (measured, zero spend:
+  `claude-cli/2.1.302 (external, sdk-cli)` and `codex_exec/0.163.0 (...)`), logs each distinct
+  version once (`cli_version`, at most 8) and the first untested one as `cli_version_untested`; (4)
+  on the main conversation's first request with a tool list (Codex: its first request), it checks
+  that the session start was recognised: for Claude Code, a role `system` message with the
+  signature or a context block of kind `environment`, which every main request of the 13
+  reminders-spike runs on 2.1.302 has; for Codex, a user message of context sections in the lead.
+  When the request carries the CLI's injected context but no recognised session start, it logs one
+  `session_start_unrecognised`. The check reads only the first 4,096 characters of each block, once
+  per engine. Runtime events go to the session log only, since a TUI can draw over a mid-run line;
+  (5) `docs/cli-updates.md` is the routine for a new version: the first check
+  (`spikes/m2/cliversion/check.sh`), the reminders, carried, and Codex spikes, the suite, then the
+  list and the constants in one commit. Options considered: refuse to launch an untested version
+  (rejected: most updates do not touch the text Contexto reads, and a refusal would stop users for
+  no change); warn on a different minor or major version only (rejected: Claude Code ships patch
+  versions often, and the tested text was measured on one patch version); warn on
+  stderr at runtime too (rejected: drawn over by the interactive CLI, and the launch line already
+  says it); check every request for the session start (rejected: one scan of a large history per
+  request for an answer that does not change within a process); compare the system prompt's
+  hash (rejected: it changes with the user's tools, MCP servers, and settings, so every session
+  would warn). Limitations: a CLI that keeps its version but changes its text is not caught by the
+  version checks; the session-start check sees only the first judged request, so it misses text
+  that changes later in a session (a new reminder kind on a later turn), and a CLI that injected
+  no context at all is not judged.
+
 ## Repository and process
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.

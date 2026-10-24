@@ -41,6 +41,7 @@ from contexto.store.memory import MemoryStore
 
 CLAUDE_UA = "claude-cli/2.1.302 (external, sdk-cli)"
 CODEX_UA = "codex_exec/0.163.0 (Mac OS 26.6.1; arm64) dumb (codex_exec; 0.163.0)"
+REPO = Path(__file__).resolve().parents[1]
 
 
 # The single list and the constants that must follow it -----------------------------------------------
@@ -61,6 +62,17 @@ def test_measured_on_constants_name_the_newest_tested_version():
     assert CONTEXT_SECTIONS_CODEX_VERSION == TESTED_VERSIONS["codex"][-1]
     assert ANTHROPIC.session_start_version == SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION
     assert RESPONSES.session_start_version == CONTEXT_SECTIONS_CODEX_VERSION
+
+
+def test_the_update_routine_names_every_tested_version_and_the_constants():
+    doc = (REPO / "docs" / "cli-updates.md").read_text()
+    for versions in TESTED_VERSIONS.values():
+        for version in versions:
+            assert version in doc
+    for name in ("TESTED_VERSIONS", "SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION",
+                 "CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION", "CONTEXT_SECTIONS_CODEX_VERSION",
+                 "spikes/m2/scale/reminders", "spikes/m2/codex"):
+        assert name in doc, name
 
 
 # Parsing --------------------------------------------------------------------------------------------
