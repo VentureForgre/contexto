@@ -43,6 +43,7 @@ import json, os, signal, sys, time, urllib.request
 args = sys.argv[1:]
 if args == ["--version"]:  # contexto run's version check (D38)
     if os.environ.get("FAKE_VERSION_HANG"):
+        open(os.environ["FAKE_VERSION_HANG"], "w").close()  # the marker: --version is running
         time.sleep(30)
     print(os.environ.get("FAKE_VERSION", "2.1.302 (Claude Code)"))
     sys.exit(0)
@@ -230,13 +231,14 @@ def test_ctrl_c_during_the_version_check_exits_130_without_a_traceback(env, upst
     # D38: claude --version hangs; Ctrl+C reaches the launcher (the check runs --version in its own
     # process group, so the hanging command does not get it). The launcher stops the proxy, logs the
     # exit, and never starts claude.
-    env["FAKE_VERSION_HANG"] = "1"
+    marker = tmp_path / "version-running"
+    env["FAKE_VERSION_HANG"] = str(marker)
     env.pop("CONTEXTO_NO_VERSION_CHECK", None)
     proc = launch(env, "--upstream", upstream, "--session", "v4", "claude", cwd=tmp_path)
     assert proc.stderr is not None
     line = proc.stderr.readline()
     assert "contexto: session v4" in line, line
-    time.sleep(0.5)  # into the version check
+    wait_for(marker)  # inside the version check: its 3 s window has just started
     proc.send_signal(signal.SIGINT)
     rest = proc.communicate(timeout=30)[1]
     assert proc.returncode == 130, rest

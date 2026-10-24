@@ -261,9 +261,9 @@ Claude Code's and Codex's requests by text the CLI writes, and was tested with t
 names. A newer CLI usually works, but if it changed that text, Contexto can page context it should
 keep, and nothing else says so. The launch goes on. Look for a newer Contexto, or report the version
 at https://github.com/VentureForgre/contexto/issues. `contexto run --no-version-check claude` (the
-flag goes before `claude` or `codex`) or `CONTEXTO_NO_VERSION_CHECK=1` silences it. During the run the session log records the version each
-request names (`cli_version`) and `session_start_unrecognised` if the session start was not
-recognised. [docs/cli-updates.md](docs/cli-updates.md) is how a new version gets tested.
+flag goes before `claude` or `codex`) or `CONTEXTO_NO_VERSION_CHECK=1` silences it. During the run
+the session log records the version each request names (`cli_version`) and
+`session_start_unrecognised` if the session start was not recognised. [docs/cli-updates.md](docs/cli-updates.md) is how a new version gets tested.
 
 **"window budget about N tokens ... is below 25,000".** The bound leaves little room for turns after
 the fixed overhead, so rotations page often. Start again with the suggested `--bound`.

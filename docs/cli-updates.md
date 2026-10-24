@@ -73,8 +73,10 @@ python3.12 -m venv .venv
 export PATH="$PWD/.venv/bin:$PATH"
 ```
 
-The spikes drive the CLIs at `~/.local/bin/claude` and `~/.local/bin/codex` (`check.sh` takes other
-paths as arguments). They use temp homes, fake keys, and loopback stubs, so they read no credential
+`check.sh` runs the `claude` and `codex` first on `PATH`, falling back to `~/.local/bin`, or the paths
+you pass as arguments. `probe.sh` always drives `~/.local/bin/codex` and the reminders spike
+`~/.local/bin/claude`; `smoke.sh` finds `codex` on a `PATH` of `.venv/bin`, `~/.local/bin`, `/usr/bin`
+and `/bin`. They use temp homes, fake keys, and loopback stubs, so they read no credential
 and reach no model. The shell may print `Alarm clock` lines: the spikes stop a CLI that keeps
 retrying the stub's 401 with a timer, and that line is the timer firing, not a failure.
 
@@ -126,9 +128,9 @@ Everything here is zero spend unless marked.
    `.contexto/spikes/M2-A5/codex-shapes.jsonl`: one structure-only line per request, with the header
    names, the top-level keys, and each input item's role and part tags. Check it against the table in
    `docs/research/M2-codex-adapter.md`: `POST /v1/responses` only with the full input, `store: false`,
-   no `previous_response_id`, `prompt_cache_key` set, 6 tries on a 401; `GET /v1/models` in ChatGPT
-   mode; 7 WebSocket upgrades and then HTTP with the built-in provider; the same section tags in every
-   scenario.
+   no `previous_response_id`, `prompt_cache_key` set; on a 401, 6 POSTs with the custom providers in
+   API-key mode, and 2 POSTs plus 2 `GET /v1/models` in ChatGPT mode (0.163.0); 7 WebSocket upgrades
+   and then 6 POSTs with the built-in provider; the same section tags in every scenario.
 3. MCP launch: `spikes/m2/codex/smoke.sh preflight` (zero tokens: `contexto run codex` through the
    proxy to `responses_stub.py` with a dummy key helper). The newest session log under
    `.contexto/spikes/M2-A6/preflight-home/sessions/` should have no `mcp_tools_missing`, which shows the

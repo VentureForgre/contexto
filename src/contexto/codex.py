@@ -53,8 +53,10 @@ TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
 # 0.154.0 (spikes/m2/codex/probe.sh: skills_instructions, permissions instructions, collaboration_mode,
 # multi_agent_role, multi_agent_mode, environment_context) and the AGENTS.md header from the 0.154.0
 # source. A user prompt that merely starts with another tag (such as <div>) stays a turn start.
-# Rechecked on 0.163.0 for D38 (one zero-spend `codex exec` request to a loopback stub): the same six
-# openings, the environment_context message last in the lead; the AGENTS.md header was not exercised.
+# Rechecked on 0.163.0 for D38, with zero spend against loopback stubs: spikes/m2/cliversion/check.sh
+# (one `codex exec`) and spikes/m2/codex/probe.sh (five auth and provider scenarios) showed the same
+# six openings in every scenario, the environment_context message last in the lead; the AGENTS.md
+# header was not exercised.
 CONTEXT_SECTIONS_CODEX_VERSION = "0.163.0"
 CONTEXT_SECTION = re.compile(
     r"\s*(?:<(?:skills_instructions|permissions instructions|collaboration_mode|multi_agent_role|"

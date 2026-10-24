@@ -461,9 +461,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   The first check (`spikes/m2/cliversion/check.sh`) showed the same six section openings, with
   `<environment_context>` last in the lead. `spikes/m2/codex/probe.sh`, re-run on 0.163.0 over its
   five auth and provider scenarios, matched the 0.154.0 table in `docs/research/M2-codex-adapter.md`:
-  POST-only full input, `store: false`, no `previous_response_id`, 6 tries on a 401, `GET /models`
-  in ChatGPT mode, and 7 WebSocket upgrades before HTTP on the built-in provider, with the same
-  section tags in every scenario. Codex now sends more header names (`x-client-request-id` and
+  POST-only full input, `store: false`, no `previous_response_id`, 6 POSTs on a 401 with the custom
+  providers in API-key mode, 2 POSTs and 2 `GET /models` in ChatGPT mode, and 7 WebSocket upgrades
+  before 6 POSTs on the built-in provider, with the same section tags in every scenario. Codex now sends more header names (`x-client-request-id` and
   `x-codex-*`); none of them is read. Step 3 (`smoke.sh preflight`, the MCP launch) also ran: no
   `mcp_tools_missing`, version 0.163.0 tested. The AGENTS.md header was not exercised; (2)
   `contexto run claude|codex` runs `<cli> --version` after the session line and, for an untested
