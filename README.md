@@ -22,8 +22,11 @@ What it includes:
   ([below](#upstreams-and-cliproxyapi)).
 - A per-session `X-Session-Affinity` header for proxies that spread requests over several accounts,
   so a session's prompt cache stays on one ([Troubleshooting](#troubleshooting)).
-- Search over paged-out turns that a long turn or a repeated tool dump cannot bury, with the search
-  text held in memory up to a budget (`CONTEXTO_SEARCH_CACHE_MB`, 64 MB by default).
+- Search over paged-out turns that counts a word once per text of a turn, at most 3 times per
+  turn, so a long turn or a repeated tool dump weighs less. It is not immune: an old turn that names
+  a key in several texts can still outrank a newer one-line reply that states its value (see
+  [Known limitations](#known-limitations)). Search text is held in memory up to a budget
+  (`CONTEXTO_SEARCH_CACHE_MB`, 64 MB by default).
 - A separate recall budget for each subagent, so subagents cannot overspend the main conversation's
   room.
 - `contexto sessions list`, `show`, and `prune` to see sessions and delete old ones.
@@ -262,7 +265,8 @@ floor. At a turn start the proxy rotates when needed to leave at least 12,000 to
 recall, and state replies are charged against it. A subagent or side request in a tool loop has its
 own budget, measured from its own request; because the MCP server cannot tell which conversation
 made a call, each call gets the smallest live budget and is charged against all of them. A
-subagent's budget closes when it stops, or 15 minutes after its last response. Tool calls are logged
+subagent's budget closes early when the main conversation's history shows the subagent stopped,
+on tested Claude Code versions only; otherwise it expires 15 minutes after its last response. Tool calls are logged
 with names, ids, sizes, and character ranges, never the text.
 
 ## Troubleshooting
@@ -314,7 +318,7 @@ names. A newer CLI usually works, but if it changed that text, Contexto can page
 keep, and nothing else says so. The launch goes on. Look for a newer Contexto, or report the version
 at https://github.com/VentureForgre/contexto/issues. `contexto run --no-version-check claude` (the
 flag goes before `claude` or `codex`) or `CONTEXTO_NO_VERSION_CHECK=1` silences it. During the run
-the session log records the version each request names (`cli_version`) and
+the session log records each distinct version the requests name, once (`cli_version`), and
 `session_start_unrecognised` if the session start was not recognised. [docs/cli-updates.md](docs/cli-updates.md) is how a new version gets tested.
 
 **"window budget about N tokens ... is below 25,000".** The bound leaves little room for turns after

@@ -20,8 +20,9 @@ compaction never fires, and accuracy equals full context.
   below for the remaining work and the items that need the owner.
 - Tests on main (e864896, v0.5.1): 2065 passed, 1 skipped, 1 xfailed on macOS, Python 3.12 (local run, 2026-10-24).
 - The repository is public (D42). GitHub Releases stay the only distribution; there is no package
-  registry release. Tracked files were scrubbed at `HEAD` of the proxy hostname, another private
-  repository's name, and statements about the owner's credentials; history was not rewritten.
+  registry release. Tracked files were scrubbed at `HEAD` of the owner's proxy hostname, another
+  private repository's name, statements about the owner's own accounts and plans, and the
+  self-hosted runner's machine name; history was not rewritten.
 - CI and releases run on GitHub-hosted runners (PR #213): Python 3.12 to 3.15 on Ubuntu, 3.12 and
   3.15 on macOS, and Ruff lint. `ci` is a required check in the main ruleset, and workflow runs on
   fork pull requests need approval for all external contributors (D42). GitHub private
@@ -37,7 +38,8 @@ compaction never fires, and accuracy equals full context.
   names its upstream source. Live through the owner's proxy: `contexto run claude -p` on
   claude-haiku-5-5 and `contexto run codex exec -m gpt-5.6-luna` both exit 0 with 200 upstream.
   Guide: `docs/cliproxyapi.md`.
-- Upstream affinity (D36, PR #212) is deployed on the owner's proxy and verified (see "O6" below).
+- Upstream affinity (D36, PR #212) is deployed on the owner's proxy and verified for cache reuse;
+  the dropped-thinking check has not been run (see "O6" below).
 
 ## Acceptance, live run #3 (main fbb1303, claude-haiku-5-5, bound 150,000, owner's proxy)
 
@@ -244,8 +246,8 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   It deletes through open directory descriptors, so a swapped-in symlink cannot redirect it.
   `sessions list` shows size on disk and a total.
 - D38: `contexto run` warns once on stderr when Claude Code or Codex is a version Contexto was not
-  tested with, and still launches; the proxy logs each request's CLI version and
-  `session_start_unrecognised`.
+  tested with, and still launches; the proxy logs each distinct CLI version once (`cli_version`,
+  at most 8) and `session_start_unrecognised`.
 - D39: the MCP server holds search text up to `CONTEXTO_SEARCH_CACHE_MB` (default 64), the newest
   pages uncompressed and older ones compressed, and reads the rest from the store at each search;
   results do not change.
@@ -295,8 +297,8 @@ Measured candidates deliberately not pursued (each would need a live run or new 
 Needs the owner:
 - A license. The repository is public with no `LICENSE` file, so others have no stated right to
   use, copy, or change the code. Which license is the owner's choice.
-- Upgrade OpenRig on the host from 0.5.15 to 0.6.1 or later to get the clock fix (O7, resolved
-  upstream in OpenRig #124).
+- Upgrade the host's OpenRig, which predates v0.6.1, to v0.6.1 or later to get the clock fix (O7,
+  resolved upstream in OpenRig #124).
 - Search ranking (D41): search ships with text cap 1, page cap 3. Text cap 3, page cap 3 restores
   main's two D34 scenarios (a reply that discusses a key in one text outranks newer passing
   mentions; the newest of equal one-reply statements is shown first) at 41 more stale-only
@@ -321,12 +323,12 @@ Needs the owner:
   providers' terms.
 - O5: settled by D29. v0.1.0 was cut from f990703 (tag and GitHub Release on this
   repository, sdist and wheel attached, no package registry).
-- O6: resolved by D36, deployed on the owner's proxy 2026-10-24 and verified (section below). Cache
-  misses and dropped thinking were traced to the proxy spreading one session's requests across
-  credentials.
+- O6: resolved by D36, deployed on the owner's proxy 2026-10-24 and verified for cache reuse; the
+  dropped-thinking check has not been run (section below). Cache misses and dropped thinking were
+  traced to the proxy spreading one session's requests across credentials.
 - O7: resolved upstream. OpenRig fixed the context-usage clock bug (UTC parsed as local time) in
-  its PR #124 (commit 4a920dba), first released in v0.6.1. The host still runs 0.5.15; upgrading
-  it is under "Needs the owner". No report is needed.
+  its PR #124 (commit 4a920dba), first released in v0.6.1. The host's OpenRig predates v0.6.1;
+  upgrading it is under "Needs the owner". No report is needed.
 
 ## O6 (upstream affinity), resolved by D36: deployed 2026-10-24
 
@@ -335,10 +337,10 @@ Needs the owner:
   credential; nested subagents rank with their root session. Upstream proposal:
   router-for-me/CLIProxyAPI#6954. Contexto (#212) sends a salted per-session
   `X-Session-Affinity` to non-vendor upstreams; the CLI's own session ids rank above it.
-- Verified with a 10-request byte-identical claude-haiku-5-5 series using one affinity key: 1
-  cache write, then 9 reads, all served by one credential across several replicas (before: 3
-  writes).
-- Rollback is reverting the deployment change.
+- Verified for cache reuse with a 10-request byte-identical claude-haiku-5-5 series using one
+  affinity key: 1 cache write, then 9 reads, all served by one credential across several replicas
+  (before: 3 writes). Measured on the owner's proxy on 2026-10-24 by the deployer and recorded in
+  D36; no record of the run is in this repository.
 - Not yet run: the `--observe-thinking` check for dropped thinking.
 
 ## Known limitations (v0.5.1)
@@ -369,7 +371,9 @@ Needs the owner:
   gets the smallest live room and is charged against every live room, because the MCP server
   cannot tell which conversation made it. A side room expires 15 minutes after its last publish,
   or earlier when main's history shows its agent stopped (a task notification or a foreground
-  hand-back). A subagent that stopped without one can hold main's recall down until the expiry
+  hand-back). That early close works only on the Claude Code versions whose subagent shapes were
+  measured (`SUBAGENT_SHAPES_TESTED`, 2.1.302); on any other version side rooms only expire. A
+  subagent that stopped without one can hold main's recall down until the expiry
   (`limited_by: side` with `limiting_age_s` in the log). Main's room is the only bound for a
   subagent's calls when the stream hold is skipped, its transform failed, it went degraded before
   its first publish, or its call starts more than 15 minutes after its response (for example after
@@ -420,9 +424,9 @@ Needs the owner:
 - CLI versions (D38): Contexto is tested with Claude Code 2.1.302 and codex-cli 0.154.0 and 0.163.0
   (`TESTED_VERSIONS`, `src/contexto/cliversions.py`). `contexto run` warns once on stderr for any
   other version and still launches (`contexto run --no-version-check <cli>` or
-  `CONTEXTO_NO_VERSION_CHECK=1` silences it). The proxy logs each request's CLI version
-  (`cli_version`) and `session_start_unrecognised` when the main conversation's first request carries
-  the CLI's context but no session start it recognises. A CLI that changes its text without changing
+  `CONTEXTO_NO_VERSION_CHECK=1` silences it). The proxy logs each distinct CLI version once
+  (`cli_version`, at most 8) and `session_start_unrecognised` when the main conversation's first
+  request carries the CLI's context but no session start it recognises. A CLI that changes its text without changing
   its version, or changes text only on later turns, is not caught. Re-test routine:
   `docs/cli-updates.md`.
 - Session folders are never removed on their own. `contexto sessions prune` (D37) deletes whole
@@ -480,6 +484,7 @@ Needs the owner:
 | v0.4.0 | 4b87ec2 | #203 (D32, D33): the bounded fallback pages later turn starts' context blocks, and session-start is recognised by its `# Environment` first line, so carried content stops growing; `carried_reclassified` on resuming an older record. #204 (D34): search matches every word in any case, ranks by BM25 with a recency prior (paged context blocks last), and both processes cache page reads |
 | v0.5.0 | cb1986f | #210 (D35): CLIProxyAPI as an upstream; SSE keep-alive comments pass the stream hold, the settings file follows `CLAUDE_CONFIG_DIR`. #212 (D36): a salted per-session `X-Session-Affinity` for non-vendor upstreams. #208 (D37): `contexto sessions prune` and session sizes in `sessions list`. #211 (D38): a warning for untested Claude Code or Codex versions. #215 (D39): the MCP server holds search text up to 64 MB by default. #209 (D40): each subagent gets its own recall room, and a tool call is charged against every live room. #213: the proxy starts without a reverse hostname lookup; quarantined pages are named from one clock reading |
 | v0.5.1 | e864896 | #216 (D41): search counts a term once per text that holds it, at most 3 per page, and drops BM25's length term, so neither a long turn nor an old dump that repeats a key buries the turn that states its value |
+
 Each is a tag and a GitHub Release on this repository with the wheel and sdist attached; there is
 no package registry release.
 

@@ -11,8 +11,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   The owner's one limit: nothing is published outside this repository (no PyPI, npm, Homebrew,
   public repos, or public posts). (Superseded in part by D42: the repository itself goes public;
   the rest of the limit stands.) Intake added two limits of its own: user-level Claude and Codex
-  configuration on the owner's machine is not changed, and heavy spend on the ChatGPT plan the
-  team's Codex seats use waits for the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
+  configuration on the owner's machine is not changed, and heavy spend on the team's Codex seats
+  waits for the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
   including the M0 brief's Q5 gate (see D12).
 
 ## Product direction
@@ -512,9 +512,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
   checked against the key); Contexto rewriting `X-Claude-Code-Session-Id` to its own key (rejected:
   it changes a header the CLI owns and that upstream also reads). Deployed on the owner's
   CLIProxyAPI deployment on 2026-10-24, with `session-affinity` and the consistent-hash option on.
-  Verified with a 10-request byte-identical claude-haiku-5-5 series using one affinity key: 1 cache
-  write, then 9 reads, all served by one credential across several replicas (before: 3 writes).
-  Rollback is reverting the deployment change. Not yet run: the `--observe-thinking` check.
+  Verified for cache reuse on the owner's proxy on 2026-10-24, measured by the deployer (no record
+  of the run is in this repository): a 10-request byte-identical claude-haiku-5-5 series using one
+  affinity key gave 1 cache write, then 9 reads, all served by one credential across several
+  replicas (before: 3 writes). Not yet run: the `--observe-thinking` check for dropped thinking.
 - **D37. `contexto sessions prune` deletes whole sessions, dry run by default, and never one in
   use.** Intake, 2026-10-24, from the 2026-10-16 report that session folders grow without limit and
   could only be freed by deleting files by hand. Contract change: a new subcommand, a new store file,
@@ -990,9 +991,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
   (Private status superseded by D42; the PR-only rules stand.)
-  The personal account's plan reports `free` through the API, and branch rules are unavailable
-  for private repos on that plan; the org is on Team. Ruleset 25202810: PR required, no force-push, no deletion, no bypass, 0 required
-  approvals because all seats share one GitHub account. Exact-head review by a reviewer seat is a
+  Branch rules for the private repository needed the org's plan. Ruleset 25202810: PR required,
+  no force-push, no deletion, no bypass, 0 required approvals because every agent posts from one
+  account. Exact-head review by a reviewer seat is a
   team rule.
 - **D14. Releases follow discord-cli's Conventional Commit versioning, adapted.** Owner request,
   intake design, 2026-10-15. Versions come from tags, so CI never commits to `main` (which the
@@ -1008,8 +1009,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   npm, Homebrew) yet. This supersedes D0's "no public repos" limit for this repository and the
   private-only wording in D13, D14, D29 and `RELEASING.md`.
   - **Scrub at `HEAD`.** Before publishing, tracked files were scrubbed: the owner's proxy
-    hostname, statements about the owner's own accounts, plan usage and the organization's
-    billing, and the self-hosted runner's machine name were replaced with neutral wording that
+    hostname, another private repository's name, statements about the owner's own accounts and
+    plans, and the self-hosted runner's machine name were replaced with neutral wording that
     keeps the technical content (which auth modes, headers and endpoints were measured, and how
     they behaved).
   - **Terms analysis removed on purpose.** The vendor terms quotes and the inferred terms reading
@@ -1020,14 +1021,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     the vendor's own CLI, and users follow their providers' terms for the credentials they use.
   - **History is not rewritten** (owner decision). Old commits, pull request diffs and pull request
     comments keep the proxy hostname, one home-directory path, the owner's commit email, the
-    runner's machine name and billing notes. A rewrite would need force pushes, which the ruleset
+    runner's machine name and notes on plans. A rewrite would need force pushes, which the ruleset
     forbids, and would still leave the pull request comments.
-  - **CI on fork pull requests.** CI runs every job on the organization's self-hosted runner, so
-    a fork pull request on a public repository could run code on it. When the repository goes
-    public, the Actions approval policy for fork pull requests is set to "require approval for all
-    external contributors" at the same moment. CI moves to GitHub-hosted runners in the CI pull
-    request. The organization's runner group stays open to public repositories because other
-    public repositories in the organization use it.
+  - **CI on fork pull requests.** Since #213, CI and Release run on GitHub-hosted runners, and
+    workflow runs on fork pull requests need approval for all external contributors.
 
 ## Open decisions
 
@@ -1053,7 +1050,8 @@ All open decisions are intake's to make under D0 unless marked otherwise.
 - **O5. First real release.** Settled by D29 (v0.1.0 after M2 acceptance).
 - **O6. Upstream affinity on the owner's proxy.** Resolved by D36 (a consistent-hash session
   affinity option for CLIProxyAPI, proposed upstream and deployed on the owner's proxy 2026-10-24,
-  and Contexto's `X-Session-Affinity`); kept
+  and Contexto's `X-Session-Affinity`; verified for cache reuse, the dropped-thinking check has
+  not been run); kept
   here for its evidence. Measured: full cache misses with byte-identical
   prefixes (4 of 14 eligible throwaway calls) and thinking dropped on every request
   (`end_user_binding_mismatch`) through the owner's proxy. Lane 1's black-box test (L1-e,
@@ -1065,8 +1063,8 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   was left to the owner, since intake did not touch the proxy (D11); D36's owner request covers the
   proxy-side work.
 - **O7. OpenRig context-usage clock bug.** Resolved upstream: OpenRig fixed it in its PR #124
-  (commit 4a920dba), first released in v0.6.1, so no report is needed. The host still runs 0.5.15;
-  upgrading it is the owner's to do. Not Contexto code. Kept here for its evidence. Measured by
+  (commit 4a920dba), first released in v0.6.1, so no report is needed. The host's OpenRig predates
+  v0.6.1; upgrading it is the owner's to do. Not Contexto code. Kept here for its evidence. Measured by
   lane 1: every seat's context usage reads `stale_generation` because tenure boot times are stored
   in UTC without `Z` and parsed as local time (UTC-5), blinding `rig ps`, `whoami`, and compaction
   planning for about 5 hours after boot.
