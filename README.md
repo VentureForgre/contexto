@@ -176,13 +176,15 @@ warns again, once, if the measured overhead does the same.
 
 ## Inspecting sessions
 
-These commands read a session's store under `$CONTEXTO_HOME/sessions/<id>/` and never change it.
+These commands read a session's store under `$CONTEXTO_HOME/sessions/<id>/` and never change it
+(except `sessions prune`, below).
 `recall` and `state` pick the session from `--session ID`, else `CONTEXTO_SESSION`, else the session
 with the most recent activity, and print the choice to stderr (for example
 `session 7f3a (most recent)`), so stdout carries only the text.
 
 - `contexto sessions list [--json]`: one row per session, most recent activity first: id, created
-  time, page count, ledger record count (`?` if the ledger cannot be read), and last activity, in UTC.
+  time, page count, ledger record count (`?` if the ledger cannot be read), last activity in UTC, and
+  size on disk, then the total size. `--json` gives the size as `size_bytes`.
 - `contexto sessions show ID [--json]`: created and last activity times; page, record, active
   record, and open obligation counts; session-log event, over-bound turn, and upstream 4xx counts;
   the last epoch the proxy logged; and whether the ledger verifies. `--json` adds event counts by type.
@@ -194,6 +196,36 @@ with the most recent activity, and print the choice to stderr (for example
 - `contexto state [--session ID]`: the full pinned state, the same text as the MCP `contexto_state`
   tool but never cut by a recall budget. It hashes each file a record cites as provenance, inside the session's
   recorded working directory, to mark changed files `STALE`. It never writes there.
+
+### Removing old sessions
+
+Session directories hold the raw conversation and are never removed on their own.
+`contexto sessions prune` deletes whole sessions. It is the one `sessions` command that changes the
+store.
+
+```
+contexto sessions prune --older-than 30d          # list sessions idle for 30 days, with sizes
+contexto sessions prune --older-than 30d --yes    # delete them
+contexto sessions prune --keep 10 --yes           # keep the 10 most recently active, delete the rest
+contexto sessions prune --session 7f3a --yes      # delete one session
+```
+
+- Without `--yes` nothing is deleted: it prints each selected session, its size, and the total.
+- `--older-than` takes a whole number and a unit: `s`, `m`, `h`, `d`, or `w`. Age is the time since
+  the last activity that `sessions list` shows. When several options are given, a session must
+  match all of them.
+- A session in use by a running `contexto run`, `contexto proxy`, or `contexto mcp` is skipped, and
+  so is any session active in the last 10 minutes. Stop the session first. If you name it with
+  `--session`, prune exits 1 with the reason on stderr.
+- `sessions/` and each session must be real directories. Prune deletes through open directory
+  handles and never follows a symlink, so it does not delete or create anything outside the session
+  it checked, even if a path is swapped for a link while it runs.
+- If one session cannot be deleted, prune reports it on stderr, goes on with the rest, and exits 1.
+- `--json` prints `dry_run`, `total_bytes`, and each selected session with its `status`
+  (`would_remove`, `removed`, `skipped`, or `failed`) and `reason`. If prune fails before selecting
+  anything (for example an unknown `--session`), it prints `{"error": ...}` instead and exits 1.
+- If you resume a session with `contexto run --session ID` while prune is deleting it, the resume
+  waits, then starts the session empty and prints a warning.
 
 ## MCP tools the model gets
 
@@ -309,6 +341,7 @@ full list is in
 | `run` | 130 | Ctrl+C during the version check, before the CLI started |
 | `sessions`, `recall`, `state` | 0 | Success (an empty session list is a success) |
 | `sessions`, `recall`, `state` | 1 | Unknown or invalid session id, unknown page id, an offset past the end of the page, or an unreadable ledger |
+| `sessions prune` | 1 | A session could not be deleted, or the session named by `--session` was skipped (in use, active in the last 10 minutes, or unsafe to delete) |
 | any | 2 | Unknown command or option, or a missing argument (`contexto` with no command prints help and exits 2) |
 
 Development, tests, and releases: see [CONTRIBUTING.md](CONTRIBUTING.md).

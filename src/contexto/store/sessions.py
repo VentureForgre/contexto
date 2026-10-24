@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -26,10 +27,14 @@ class SessionInfo:
     pages: int
     records: int | None  # None when the ledger cannot be read
     last_activity: str
+    size_bytes: int  # disk space the session directory uses, symlinks not followed
 
 
 def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+ACTIVITY_NAMES = ("log.jsonl", "ledger.jsonl", "pages")  # with the directory itself: what "last activity" reads
 
 
 def _times(path: Path) -> tuple[float, float]:
@@ -37,11 +42,52 @@ def _times(path: Path) -> tuple[float, float]:
     key = path / "page.key"
     created = key.stat().st_mtime if key.exists() else path.stat().st_mtime
     last = path.stat().st_mtime
-    for name in ("log.jsonl", "ledger.jsonl", "pages"):
+    for name in ACTIVITY_NAMES:
         p = path / name
         if p.exists():
             last = max(last, p.stat().st_mtime)
     return created, last
+
+
+def last_activity(path: Path) -> float:
+    """When a session directory last changed, from file times: the newest of the directory itself,
+    ``log.jsonl``, ``ledger.jsonl``, and ``pages/`` (metadata writes replace ``meta.json``, which
+    changes the directory's time)."""
+    return _times(path)[1]
+
+
+def _allocated(st: os.stat_result) -> int:
+    return st.st_blocks * 512 if hasattr(st, "st_blocks") else st.st_size
+
+
+def disk_usage_fd(dir_fd: int) -> int:
+    """Bytes the open directory ``dir_fd`` and everything under it occupy on disk (allocated blocks,
+    so it is the space a delete frees). Symlinks are counted as links and never followed; entries
+    that vanish while walking are skipped."""
+    total = 0
+    for _, dirs, files, root_fd in os.fwalk(".", dir_fd=dir_fd):
+        total += _allocated(os.fstat(root_fd))  # each directory once, as the root of its own step
+        # A symlink to a directory is listed in ``dirs`` but not walked, so it is counted here.
+        for name in [*files, *dirs]:
+            try:
+                st = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if name in files or stat.S_ISLNK(st.st_mode):
+                total += _allocated(st)
+    return total
+
+
+def disk_usage(path: Path) -> int:
+    """``disk_usage_fd`` of the directory at ``path``; 0 when it cannot be opened."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return 0
+    try:
+        return disk_usage_fd(fd)
+    finally:
+        os.close(fd)
 
 
 def session_ids(home: Path) -> list[str]:
@@ -68,7 +114,7 @@ def session_info(home: Path, session_id: str) -> SessionInfo:
         records = len(store.ledger.records())
     except LedgerError:
         records = None
-    return SessionInfo(session_id, _iso(created), pages, records, _iso(last))
+    return SessionInfo(session_id, _iso(created), pages, records, _iso(last), disk_usage(store.dir))
 
 
 def list_sessions(home: Path) -> list[SessionInfo]:
