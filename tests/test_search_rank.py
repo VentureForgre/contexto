@@ -238,26 +238,74 @@ def entry(page_id, turn, text, context=False):
     return SearchEntry(page_id, turn, search_key(fold(text)), context)
 
 
+SOAK_OUTPUT = "\n".join(f"{i:04d} INFO worker {i % 7} processed batch {i} in {i % 13} ms" for i in range(900))
+PASSING = ["note: max_retries is read once at startup", "max_retries applies per request",
+           "the max_retries default stays in config.toml", "grep shows max_retries in two places"]
+
+
+def soak_turn():
+    """A long turn: 900 lines of tool output that never name the key, then the turn's own statement."""
+    return [{"role": "user", "content": "run the soak test and raise the retry limit"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t10", "name": "Bash",
+                                               "input": {"command": "./soak.sh"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t10", "content": SOAK_OUTPUT}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Soak test passed. max_retries is now 7"}]}]
+
+
 def test_the_newest_matching_page_is_always_shown_in_detail(store):
-    """A long newest turn that states the current value loses to short older ones on relevance (BM25
-    discounts long pages), but the newest matching page always takes one of the three detailed places,
-    so the current value is shown (D28; after reviewer-2's repro for PR #204)."""
-    output = "\n".join(f"{i:04d} INFO worker {i % 7} processed batch {i} in {i % 13} ms" for i in range(900))
-    older = ["Set max_retries to 3 in the client config.", "note: max_retries is read once at startup",
-             "max_retries applies per request", "the max_retries default stays in config.toml"]
+    """Older pages that say the key more often outrank the newest turn, which states the current value
+    once, but the newest matching page always takes one of the three detailed places, so the current
+    value is shown (D28; after reviewer-2's repro for PR #204)."""
+    older = ["Set max_retries to 3 in the client config; max_retries is read once.",
+             "note: max_retries is read once at startup, and max_retries applies per request",
+             "max_retries applies per request; max_retries=3 in config.toml",
+             "the max_retries default stays in config.toml (max_retries = 3)"]
     ids = [store.page_out([page(text)], t)[0] for t, text in enumerate(older, 1)]
-    newest = [{"role": "user", "content": "run the soak test and raise the retry limit"},
-              {"role": "assistant", "content": [{"type": "tool_use", "id": "t5", "name": "Bash",
-                                                 "input": {"command": "./soak.sh"}}]},
-              {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t5", "content": output}]},
-              {"role": "assistant", "content": [{"type": "text", "text": "Soak test passed. max_retries is now 7"}]}]
-    [current] = store.page_out([newest], 5)
+    [current] = store.page_out([soak_turn()], 5)
     for t in range(6, 9):
         store.page_out([page("ran the linter, no findings")], t)
     found = store.search("max_retries")
-    assert found.index(current) == 2 and set(found[:2]) <= set(ids)  # third: BM25 alone ranks it last
+    assert found.index(current) == 2 and set(found[:2]) <= set(ids)  # third: by relevance it ranks last
     reply = search(store, "max_retries")
     assert detailed(reply)[0] == 5 and "max_retries is now 7" in reply
+
+
+@pytest.mark.parametrize("mentions", [(5, 6, 13), (6, 13), (6, 8, 12, 13), (13,)])
+def test_a_long_turn_stating_the_current_value_beats_an_older_short_statement(store, mentions):
+    """Reviewer-2's 13-turn cases (PR #204, D41): turn 4 sets max_retries to 3, the long turn 10 sets it
+    to 7, and short turns mention it in passing. The current value is shown in detail and before the old
+    one, wherever the passing mentions fall. Before D41 BM25 discounted long pages (b 0.75), so the soak
+    output, which never names the key, buried turn 10 under the short pages (detailed 13, 6, 4 for
+    mentions 6 and 13: only the old value was shown)."""
+    for t in range(1, 14):
+        if t == 4:
+            turn = page("Set max_retries to 3 in the client config.")
+        elif t == 10:
+            turn = soak_turn()
+        elif t in mentions:
+            turn = page(PASSING[mentions.index(t) % len(PASSING)])
+        else:
+            turn = page("ran the linter, no findings")
+        store.page_out([turn], t)
+    reply = search(store, "max_retries")
+    shown = detailed(reply)
+    assert 10 in shown and "max_retries is now 7" in reply, shown
+    assert [t for t in shown if t in (4, 10)][0] == 10, shown
+
+
+def test_page_length_does_not_count_and_repetition_gains_at_most_k1_plus_one():
+    """BM25's b is 0 (D41): two pages that say the word as often score alike however long they are, so
+    recency orders them. A page that says it many times scores at most K1 + 1 = 2.2 times one that says it
+    once: an old log that repeats it 30 times outranks the newest single mention (2.12 against 1.5), but
+    not the newest page that says it three times (1.57 x 1.5 = 2.36)."""
+    assert rank([entry("long", 1, "retry_budget ok\n" + SOAK_OUTPUT), entry("short", 2, "retry_budget ok")],
+                "retry_budget") == ["short", "long"]
+    assert rank([entry("short", 1, "retry_budget ok"), entry("long", 2, "retry_budget ok\n" + SOAK_OUTPUT)],
+                "retry_budget") == ["long", "short"]
+    log = "\n".join(f"{i:04d} retry_budget ok" if i % 30 == 0 else f"{i:04d} INFO tick {i}" for i in range(900))
+    assert rank([entry("log", 1, log), entry("set", 2, "retry_budget is now 5")], "retry_budget") == ["log", "set"]
+    thrice = "retry_budget is now 5 (retry_budget was 3; see retry_budget.md)"
+    assert rank([entry("log", 1, log), entry("set", 2, thrice)], "retry_budget") == ["set", "log"]
 
 
 def test_the_newest_page_takes_the_third_place_only_when_it_is_not_already_shown():

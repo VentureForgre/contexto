@@ -566,10 +566,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   whole query as typed (case-insensitively), then turn pages holding only its words, then pages
   holding only paged context blocks (system messages and Codex `developer` items, or user messages
   made only of `<system-reminder>` blocks, D32; recognised from the messages, whatever the stub),
-  which stay searchable and recallable. Within each group pages rank by BM25 relevance over the words and the
-  whole query (k1 1.2, b 0.75, length in UTF-8 bytes, inverse document frequency over all pages of
-  the store) times a recency prior `1 + 0.5 r`, where `r` runs from 0 for the oldest matching page
-  to 1 for the newest, so a newer page wins unless an older one is clearly more about the query;
+  which stay searchable and recallable. Within each group pages rank by BM25 relevance over the words
+  and the whole query (k1 1.2, inverse document frequency over all pages of the store) with no
+  length term (b 0, D41): a page's length does not count, so a long turn that states a value once
+  scores as a short page that states it once, and a page that repeats a word scores at most 2.2
+  times a page that says it once. Relevance is multiplied by a recency prior `1 + 0.5 r`, where `r`
+  runs from 0 for the oldest matching page to 1 for the newest, so a newer page wins unless an older
+  one is clearly more about the query;
   ties go to the newer page. The newest matching turn page (the newest matching page when no turn
   page matches) is always one of the 3 best: if it ranks lower it takes the third place. The
   reply's paged part opens with `[best matching pages by relevance, shown newest first:]`. In both

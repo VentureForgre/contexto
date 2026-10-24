@@ -1,4 +1,4 @@
-"""How ``contexto_search`` matches and ranks pages, and which lines of a page it shows (D34).
+"""How ``contexto_search`` matches and ranks pages, and which lines of a page it shows (D34, D41).
 
 Matching. A query is split on whitespace into words; a query with no words (empty or whitespace
 only) matches nothing. A page matches when every word occurs in its searchable text (the stub and
@@ -14,15 +14,20 @@ hold only paged context blocks (``<system-reminder>`` text the proxy paged on it
 which repeat the same words at every turn and would otherwise outrank the turn that is about them;
 they stay searchable and recallable. Within each group a page's relevance is BM25 over the query's
 words, plus the whole query as one more term when it has more than one word: term frequency
-saturates (``K1``), long pages are discounted (``B``; length in UTF-8 bytes), and a word that occurs
-on fewer pages weighs more (inverse document frequency). Relevance is then multiplied by a recency
+saturates (``K1``), so a page that says a word many times scores at most ``K1 + 1`` (2.2) times a
+page that says it once, and a word that occurs on fewer pages weighs more (inverse document
+frequency). Page length does not count (BM25's b is 0, D41): a turn's length is mostly its tool
+output, which says little about how much the turn is about the query. With the usual b 0.75 a long
+turn that states a value once ranked below short older pages that state an old one, and on pages
+sized like real turns (median 1,947 tokens, largest 566,461) the store harness showed an old value
+without the current one more often. Relevance is then multiplied by a recency
 prior, ``1 + RECENCY_WEIGHT * r``, where ``r`` is the page's position among the matching pages from
 0 (oldest) to 1 (newest). So a newer page wins unless an older one is clearly more about the query:
 with ``RECENCY_WEIGHT`` 0.5 the oldest match needs one and a half times the relevance of the newest
 to rank above it, and two matches next to each other in time are ordered by relevance almost alone.
 Ties go to the newer page. Last, the newest matching turn page (the newest matching page when no turn
-page matches) is moved up to the last of the ``SHOWN_IN_DETAIL`` places if it ranked below them: the
-turn that states a new value is often a long one, which BM25 discounts.
+page matches) is moved up to the last of the ``SHOWN_IN_DETAIL`` places if it ranked below them:
+older pages that say the word more often can outrank the turn that states a new value once.
 
 ``contexto_search`` shows the 3 best pages in detail and lists the next 50. In each part turn pages
 come first, newest first, so among the turn pages it shows the newest statement comes first (D28)
@@ -43,8 +48,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
-K1 = 1.2  # BM25 term-frequency saturation (the usual value)
-B = 0.75  # BM25 length normalization (the usual value)
+K1 = 1.2  # BM25 term-frequency saturation (the usual value); BM25's b is 0, no length term (D41)
 RECENCY_WEIGHT = 0.5  # the newest match's relevance is multiplied by 1.5, the oldest's by 1
 SHOWN_IN_DETAIL = 3  # contexto_search shows this many of the best pages in detail (mcp.SEARCH_LIMIT)
 
@@ -113,8 +117,8 @@ class SearchEntry(NamedTuple):
 def rank(entries: Sequence[SearchEntry], query: str) -> list[str]:
     """Ids of the matching entries, best first (see the module docstring).
 
-    ``entries`` are every page of the store: all of them count for the inverse document frequency and
-    the average length, not only the matches. Pages are narrowed word by word, so a query stops reading
+    ``entries`` are every page of the store: all of them count for the inverse document frequency, not
+    only the matches. Pages are narrowed word by word, so a query stops reading
     pages as soon as no page holds every word so far; the frequency of each word over the pages it was
     not read on is counted only when some page matches.
     """
@@ -143,26 +147,24 @@ def rank(entries: Sequence[SearchEntry], query: str) -> list[str]:
     if q.multiword:
         df[phrase] = sum(phrase_on.values())
     idf = {t: math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5)) for t in terms if df[t]}
-    avg = sum(map(len, texts)) / n or 1.0
     by_age = sorted(matched, key=lambda i: (entries[i].turn, entries[i].id))
     position = {i: (k / (len(by_age) - 1) if len(by_age) > 1 else 1.0) for k, i in enumerate(by_age)}
     scored = []
     for i in matched:
         text = texts[i]
-        norm = K1 * (1 - B + B * len(text) / avg)
         relevance = 0.0
         for term, weight in idf.items():
             if term == phrase and q.multiword and not phrase_on[i]:
                 continue
             tf = text.count(term)
-            relevance += weight * tf * (K1 + 1) / (tf + norm)
+            relevance += weight * tf * (K1 + 1) / (tf + K1)  # BM25 with b 0: no length term (D41)
         score = relevance * (1 + RECENCY_WEIGHT * position[i])
         scored.append((not entries[i].context, phrase_on[i], score, entries[i].turn, entries[i].id))
     scored.sort(reverse=True)
     ranked = [page_id for *_, page_id in scored]
     # The newest matching page (a turn page when one matches) always takes one of the detailed places:
-    # BM25 discounts long pages, and the turn that states a new value is often the one with the long
-    # tool output (D28; reviewer-2 on PR #204).
+    # older pages that say the word more often can outrank the turn that states the new value once
+    # (D28; reviewer-2 on PR #204).
     real = [s for s in scored if s[0]] or scored
     newest = max(real, key=lambda s: (s[3], s[4]))[4]
     if ranked.index(newest) >= SHOWN_IN_DETAIL:
