@@ -67,7 +67,13 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   messages), so lane B's search can list in-view lines first. The store stamps it with the request
   sequence that both of the request's room publishes carry. A failed write logs ``retained_stale``
   (not degraded mode). Only the main conversation publishes the room and the snapshot: the first one
-  seen, replaced at a turn start only by a conversation with strictly more turn starts.
+  seen, replaced at a turn start only by a conversation with strictly more turn starts. Every other
+  conversation (a subagent, a side request) publishes a side room at each response instead (D40):
+  ``set_side_room(room_id, bound - (input + output) - headroom_floor)`` when the response may hold a
+  client tool call, ``set_side_room(room_id, None)`` when it holds none, where ``room_id`` is the
+  room the request continues (``_publish_side_room``) or a new one. A tool call is charged against
+  the smallest live room and counted against all of them, since the MCP server cannot tell which
+  conversation made it.
 - Thinking (rule 2): retained messages that existed when the epoch was created lose their thinking and
   redacted-thinking blocks on every request; an assistant message left empty gets one text block
   ``[thinking omitted]``; other blocks keep their order.
@@ -118,14 +124,16 @@ import bisect
 import hashlib
 import math
 import re
+import secrets
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar, NamedTuple, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json
-from contexto.cliversions import ClientVersions
-from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError
+from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
+from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import render_page
 from contexto.tokens import TokenEstimator
@@ -152,6 +160,7 @@ class Store(Protocol):
     def window(self) -> tuple[int | None, float | None]: ...
     def window_model(self) -> str | None: ...
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None: ...
+    # Optional (D40): set_side_room(room_id, room_tokens | None); without it side rooms are not published.
     def quarantine_page(self, page_id: str) -> Any: ...
     def set_retained(self, epoch: int, k: int, turns: list[dict]) -> None: ...  # lane B PR #128, contract PR #125
 
@@ -353,6 +362,13 @@ class Dialect:
 
     def is_system_like(self, item: dict) -> bool:
         return item.get("role") == "system"
+
+    def result_ids(self, item: dict) -> list[str]:
+        """D40: the tool-call ids this item returns results for (its ``tool_result`` blocks)."""
+        if item.get("role") != "user":
+            return []
+        return [b["tool_use_id"] for b in _blocks(item) if isinstance(b, dict) and b.get("type") == "tool_result"
+                and isinstance(b.get("tool_use_id"), str)]
 
     def retained_blocks(self, item: dict) -> list[tuple[str, dict]]:
         """A14: the item's searchable blocks as (role, Messages API block): text that is not an injected
@@ -1511,6 +1527,144 @@ def anchor_hash(hashes: tuple[str, ...] | list[str]) -> str:
     return hashlib.sha256("\n".join(hashes).encode("utf-8")).hexdigest()
 
 
+# D40: Claude Code's subagents, as measured on 2.1.302 against a scripted stub (zero spend,
+# spikes/m2/subagents/). Main launches one with an ``Agent`` tool call (``Task`` in earlier releases);
+# the subagent's first user message carries a ``<system-reminder>`` block and then the call's
+# ``prompt`` as its own text block. The call's result is a background launch receipt or a foreground
+# hand-back, each naming the ``agentId``. Each time the agent stops, main gets a ``<task-notification>``
+# naming the launching call's tool-use id; a ``SendMessage`` resume (its result names the
+# ``resumedAgentId``) runs it again, as a new user turn in its own conversation, and that run's notice
+# names the ``SendMessage`` call. ``cliversions.SUBAGENT_SHAPES_TESTED`` names
+# the CLI versions these shapes were measured on; for any other version rooms only expire.
+AGENT_TOOLS = frozenset({"Agent", "Task"})
+ASYNC_LAUNCH = "Async agent launched successfully."  # a background launch's result: the agent runs on
+HAND_BACK = "[Subagent hand-back]"  # a foreground agent's result: it has stopped
+NOTICE_OPENINGS = ("<system-reminder>", "[SYSTEM NOTIFICATION - NOT USER INPUT]")
+TASK_NOTIFICATION = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
+NOTIFIED_CALL = re.compile(r"<tool-use-id>([^<\s]+)</tool-use-id>")
+AGENT_ID = re.compile(r"\bagentId: (\w+)")
+RESUMED_AGENT = re.compile(r'"resumedAgentId"\s*:\s*"(\w+)"')
+
+
+class _SideRoom(NamedTuple):
+    """D40: what the engine remembers about a side room it opened."""
+
+    owner: str  # the conversation key
+    n: int  # the publishing request's message count
+    anchor: str  # its anchor hash over those messages
+    at: float  # the publish time, on the store's clock
+    ids: frozenset[str]  # the client tool-call ids its response held
+    prompt: str | None  # the conversation's first prompt, to match main's Agent call (Messages only)
+    runs: int  # turn starts in the publishing request: 1, plus one per resume of the agent
+
+
+def _texts(message: dict) -> list[str]:
+    content = message.get("content")
+    if isinstance(content, str):
+        return [content]
+    return [b["text"] for b in _blocks(message) if isinstance(b, dict) and isinstance(b.get("text"), str)]
+
+
+def first_prompt(messages: list[dict]) -> str | None:
+    """A Messages conversation's first prompt: its first user message's text blocks that are not
+    injected context, joined by newlines; None when it has none."""
+    for message in messages:
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                return content or None
+            parts = [b["text"] for b in _blocks(message) if isinstance(b, dict) and b.get("type") == "text"
+                     and isinstance(b.get("text"), str) and not _anthropic_is_context_block(b)]
+            return "\n".join(parts) or None
+    return None
+
+
+def _notice_texts(message: dict) -> list[str]:
+    """The texts of ``message`` that may carry a CLI notice, in the measured shapes only: a ``system``
+    message, or a user message whose content (a string, or its first text block) opens with the
+    ``<system-reminder>`` wrapper or ``[SYSTEM NOTIFICATION - NOT USER INPUT]``. Assistant text and
+    plain user text (a pasted notice) never count."""
+    if message.get("role") == "system":
+        return _texts(message)
+    if message.get("role") != "user":
+        return []
+    content = message.get("content")
+    if isinstance(content, str):
+        first = content
+    else:
+        texts = [b["text"] for b in _blocks(message) if isinstance(b, dict) and b.get("type") == "text"
+                 and isinstance(b.get("text"), str)]
+        first = texts[0] if texts else ""
+    return [first] if first.lstrip().startswith(NOTICE_OPENINGS) else []
+
+
+def _result_text(block: dict) -> str:
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    return "".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
+
+
+def agent_runs(messages: list[dict]) -> tuple[dict[str, list[str | None]], dict[str, int]]:
+    """D40: main's ``Agent`` calls by prompt (prompt -> each call's tool-use id, or None while the
+    call has no result or its result has an unknown shape), and how many of each call's agent's runs
+    have stopped. Each run stops under its own call id: the ``Agent`` call for the first run, and the
+    ``SendMessage`` call whose result says it resumed that ``agentId`` for each later run (a resumed
+    run's notice names the ``SendMessage``). So the count is the number of those call ids with stop
+    evidence (a foreground hand-back, or a ``<task-notification>`` in a measured notice shape naming
+    the id), however often one stop is reported. A call whose result is an error started no agent
+    and is left out."""
+    calls: dict[str, str] = {}  # Agent tool-use id -> prompt
+    agents: dict[str, str | None] = {}  # Agent tool-use id -> agentId, None when not known
+    sends: set[str] = set()  # SendMessage tool-use ids
+    resumes: dict[str, str] = {}  # SendMessage tool-use id -> the agentId it resumed
+    stopped: set[str] = set()  # tool-use ids (Agent or SendMessage) with stop evidence
+    for message in messages:
+        for block in _blocks(message):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                prompt = (block.get("input") or {}).get("prompt")
+                if block.get("name") in AGENT_TOOLS and isinstance(prompt, str):
+                    calls[block["id"]] = prompt
+                    agents.setdefault(block["id"], None)
+                elif block.get("name") == "SendMessage":
+                    sends.add(block["id"])
+            elif block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
+                call_id, text = block["tool_use_id"], _result_text(block).lstrip()
+                if call_id in sends:
+                    resumed = RESUMED_AGENT.search(text)
+                    if resumed and not block.get("is_error"):
+                        resumes[call_id] = resumed.group(1)
+                    continue
+                if call_id not in calls:
+                    continue
+                found = AGENT_ID.search(text)
+                if block.get("is_error"):
+                    agents.pop(call_id, None)  # no agent was started
+                elif found and text.startswith(ASYNC_LAUNCH):
+                    agents[call_id] = found.group(1)
+                elif found and text.startswith(HAND_BACK):
+                    agents[call_id] = found.group(1)
+                    stopped.add(call_id)
+        for text in _notice_texts(message):
+            for notice in TASK_NOTIFICATION.findall(text):
+                named = NOTIFIED_CALL.search(notice)
+                if named:
+                    stopped.add(named.group(1))
+    by_prompt: dict[str, list[str | None]] = {}
+    totals: dict[str, int] = {}
+    for call_id, prompt in calls.items():
+        if call_id not in agents:
+            continue
+        agent = agents[call_id]
+        by_prompt.setdefault(prompt, []).append(call_id if agent is not None else None)
+        if agent is not None:
+            totals[call_id] = (call_id in stopped) + sum(
+                send in stopped for send, resumed in resumes.items() if resumed == agent)
+    return by_prompt, totals
+
+
 def preamble_sha256(config: Config, pinned_text: str, index_text: str) -> str:
     return hashlib.sha256(compose_preamble(config, pinned_text, index_text).encode("utf-8")).hexdigest()
 
@@ -1601,6 +1755,7 @@ class RewriteEngine:
         self.tools = ToolCheck(self.store)
         # D38: which CLI version sends the requests, and was the session start recognised?
         self.clients = ClientVersions()
+        self._side_rooms: dict[str, _SideRoom] = {}  # D40: the side rooms this engine opened, by id
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -1649,6 +1804,10 @@ class RewriteEngine:
             checked = [*checked, {"event": "cli_version_error", "error": type(exc).__name__}]
         events[-1:-1] = checked
         events[-1].update(main=main, conversations=len(self.states))  # content-free, for side requests
+        if main and endpoint != COUNT_TOKENS:
+            closes: list[dict] = []
+            self._close_finished_side_rooms(request.get(dialect.field) or [], dialect, closes)
+            events[-1:-1] = closes  # the engine's request event stays last
         # Per-turn recall budget, request-time publish (contract PR #69, kept by 367916a): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
         # to 128,000, which would leave no room at all; the response-time publish adds the real output.
@@ -1836,13 +1995,117 @@ class RewriteEngine:
         except STORE_FAILURES as error:
             events.append({"event": "retained_stale", "epoch": state.epoch, "error": type(error).__name__})
 
-    def observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
+    def _now(self) -> float:
+        clock = getattr(self.store, "clock", None)  # the store's clock, which expires its rooms
+        return clock() if callable(clock) else time.time()
+
+    def _close_finished_side_rooms(self, messages: list[dict], dialect: Dialect, events: list[dict]) -> None:
+        """D40: called for each main request. A side room closes early only on evidence in main's own
+        history that every run of the agent holding it has stopped (``agent_runs``). The agent is
+        matched by the room's first prompt, which Claude Code sends unchanged as the ``prompt`` of
+        main's ``Agent`` (or ``Task``) call, and named by the ``agentId`` in that call's result. The
+        room was published in its agent's run ``room.runs`` (the turn starts in its request: one, plus
+        one per ``SendMessage`` resume), so it closes when that agent's stops (foreground hand-backs
+        and ``<task-notification>`` notices in the measured shapes) number at least that many: a late
+        notice of an earlier run cannot close a later run's room, whatever the order. Every ``Agent``
+        call with that prompt must be known and stopped that often (twins). Rooms matching no call,
+        calls without a result or with a result of an unknown shape, agents still running, any Codex
+        room, and every room when the CLI version is not one the shapes were measured on
+        (``SUBAGENT_SHAPES_TESTED``) keep the 15-minute expiry. Logged as ``side_room_closed`` with
+        reason ``agent_stopped``."""
+        if not self._side_rooms or dialect.name != "anthropic":
+            return
+        if self.clients.latest.get("claude") not in SUBAGENT_SHAPES_TESTED:
+            return
+        by_prompt, stops = agent_runs(messages)
+        doomed = []
+        for room_id, room in self._side_rooms.items():
+            agent_calls = by_prompt.get(room.prompt) if room.prompt else None
+            if agent_calls and all(c is not None and stops.get(c, 0) >= room.runs for c in agent_calls):
+                doomed.append(room_id)
+        if not doomed:
+            return
+        now = self._now()
+        for room_id in doomed:
+            try:
+                self.store.set_side_room(room_id, None)
+            except STORE_FAILURES as error:  # the room expires instead; not degraded mode
+                events.append({"event": "side_room_close_failed", "error": type(error).__name__})
+                continue
+            age = int(now - self._side_rooms.pop(room_id).at)
+            events.append({"event": "side_room_closed", "reason": "agent_stopped", "age_s": age})
+
+    def _publish_side_room(self, calls: StoreCalls, key: str, messages: list[dict], dialect: Dialect,
+                           room: int | None, call_ids: tuple[str, ...], events: list[dict]) -> None:
+        """D40: open, replace, or close the side room of the request ``messages``.
+
+        Rooms are per request lineage, not per conversation key: two subagents launched with the same
+        prompt, or a side request that forks one, share a key but must not share a room. Each room
+        remembers the request that published it (its message count and anchor hash), the ids of the
+        client tool calls its response held (``call_ids``, from the proxy), the conversation's first
+        prompt (to match main's ``Agent`` call, see ``_close_finished_side_rooms``), and the request's
+        turn starts (the agent's run). A request continues a room when it extends that room's
+        request, adds no turn start, and (for a room recorded with ids) returns a result
+        (``tool_result``, ``*_call_output``) for one of those ids. A twin carries its own ids and
+        cannot match. A fork that copies results for the room's calls does match; that is harmless
+        once those calls finished, but a fork that closes a still-running call with a placeholder
+        result and asks its question inside that result message cannot be told apart from the next
+        step (documented). Exactly one room must match: when two or more tie, the request continues
+        none of them, they keep their spend until they expire, and it opens its own room (or with
+        ``room`` None changes nothing). The lineage is kept in memory and forgotten once the room has
+        expired in the store (``SIDE_ROOM_TTL_S``)."""
+        token = _DIALECT.set(dialect)
+        try:
+            hashes = [message_hash(m) for m in messages]
+        finally:
+            _DIALECT.reset(token)
+        now = self._now()
+        self._side_rooms = {r: v for r, v in self._side_rooms.items() if side_room_live(v.at, now)}
+        results: dict[str, int] = {}  # tool-call id -> the last index of a message returning its result
+        for i, item in enumerate(messages):
+            for call_id in dialect.result_ids(item):
+                results[call_id] = i
+        by_id: list[str] = []
+        by_lineage: list[tuple[int, str]] = []
+        for room_id, entry in self._side_rooms.items():
+            n = entry.n
+            if (entry.owner != key or n >= len(messages) or anchor_hash(hashes[:n]) != entry.anchor
+                    or any(dialect.is_turn_start(m) for m in messages[n:])):
+                continue
+            if entry.ids:
+                if any(results.get(call_id, -1) >= n for call_id in entry.ids):
+                    by_id.append(room_id)
+            else:
+                by_lineage.append((n, room_id))
+        continued = None
+        if by_id:
+            continued = by_id[0] if len(by_id) == 1 else None
+        elif by_lineage:
+            longest = max(n for n, _ in by_lineage)
+            tied = [room_id for n, room_id in by_lineage if n == longest]
+            continued = tied[0] if len(tied) == 1 else None
+        if room is None:
+            if continued is not None:
+                calls.set_side_room(continued, None)
+                age = int(now - self._side_rooms.pop(continued).at)
+                events.append({"event": "side_room_closed", "reason": "no_tool_call", "age_s": age})
+            return
+        room_id = continued or f"{key}#{secrets.token_hex(4)}"
+        calls.set_side_room(room_id, room)
+        prompt = first_prompt(messages) if dialect.name == "anthropic" else None
+        runs = len(_turn_starts(messages, dialect))
+        self._side_rooms[room_id] = _SideRoom(key, len(messages), anchor_hash(hashes), now, frozenset(call_ids),
+                                              prompt, runs)
+
+    def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
+                      tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
         dialect = dialect_for(endpoint)
         # preamble() must see the same knobs as the request did
         with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
-            return self._observe_usage(endpoint, usage, request)
+            return self._observe_usage(endpoint, usage, request, tool_calls, tool_call_ids)
 
-    def _observe_usage(self, endpoint: str, usage: dict, request: dict) -> list[dict]:
+    def _observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
+                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
         """Feed a response's real usage back (a transformed endpoint; never ``count_tokens``). Returns the
         content-free events it raised (packet A2b; contract rule 3 as amended by PR #44). The proxy writes
         them on that request's log entry (``usage_events``), the one place they are logged (A2e,
@@ -1858,6 +2121,14 @@ class RewriteEngine:
           still in flight), so it is not paired with that request's bytes or estimate: the ratio, the
           last real input, and the estimate checks are left alone. ``over_bound`` and the room still
           use it, since they describe what the model received.
+
+        ``tool_calls`` (D40) says whether the response holds a tool call the client runs: True or
+        False from the proxy's stream hold when there is one, else from the response's stop reason
+        or output list, None when unknown (treated as True). The main conversation publishes its room
+        either way; any other conversation publishes the side room of its request lineage
+        (``_publish_side_room``) when the response may hold a client call and closes it when not.
+        ``tool_call_ids`` are the ids of those client calls, recorded with the room so that only a
+        request returning their results continues it.
         """
         dialect = dialect_for(endpoint)
         if dialect is None or endpoint == COUNT_TOKENS:
@@ -1917,6 +2188,11 @@ class RewriteEngine:
                 if self.publishes(key, messages, dialect):
                     calls.set_turn_room(turn_id(messages, dialect), self.turn_room(real + output))
                     state = publish_window(calls, state, self.estimator, window_model_name(request))
+                elif callable(getattr(self.store, "set_side_room", None)):
+                    # D40: this conversation's own room, from its own usage, for the tool calls this
+                    # response releases; every call is charged against it and main's room alike.
+                    room = None if tool_calls is False else self.turn_room(real + output)
+                    self._publish_side_room(calls, key, messages, dialect, room, tuple(tool_call_ids), events)
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;
             # the next turn start retries it. The event reaches the log with the others, via the proxy.

@@ -46,6 +46,11 @@ TESTED_VERSIONS: dict[str, tuple[str, ...]] = {
     "claude": ("2.1.302",),
     "codex": ("0.154.0", "0.163.0"),
 }
+# D40: the Claude Code versions whose subagent shapes (the Agent call's launch receipt and hand-back,
+# the task-notification notices, the subagent's first prompt) were measured (spikes/m2/subagents/).
+# The engine closes a side room early on those shapes only for these versions; for any other, side
+# rooms only expire. Re-measure with that spike before adding a version.
+SUBAGENT_SHAPES_TESTED: tuple[str, ...] = ("2.1.302",)
 CLI_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 AT_RISK = {
     "claude": "it may misread the session start and reminders and page text it should carry",
