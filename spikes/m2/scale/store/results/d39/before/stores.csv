@@ -1,2 +1,0 @@
-n,dialect,pages,bytes,disk_bytes,page_bytes_median,page_tokens_min,page_tokens_median,page_tokens_max,page_tokens_total,write_s_total,write_ms_per_page,markers_on_planted_pages
-6000,messages,6000,242391579,254722048,40155.0,19194,22882.0,29684,138094580,10.314,1.719,True

@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import random
 import tomllib
 from pathlib import Path
@@ -14,7 +15,16 @@ from contexto.launcher import mcp_payload
 from contexto.store import SessionStore
 from contexto.store.catalog import DEFAULT_TEXT_BUDGET_MB, MB, text_budget_bytes
 from contexto.store.pages import search_entry
-from contexto.store.search import B, K1, RECENCY_WEIGHT, SHOWN_IN_DETAIL, Query, SearchEntry, rank, search_key
+from contexto.store.search import (
+    K1,
+    RECENCY_WEIGHT,
+    SHOWN_IN_DETAIL,
+    B,
+    Query,
+    SearchEntry,
+    rank,
+    search_key,
+)
 
 VOCAB = ["alpha", "beta", "gamma", "delta", "E4127", "max_retries", "HTTP_TIMEOUT_S", "timeout", "src/app/main.py",
          "flaky", "test", "the", "ΟΔΟΣ", "straße", "a.b*c", "cache", "budget", "page", "query", "Retries"]
@@ -96,40 +106,91 @@ def server(tmp_path, budget):
     return store
 
 
-def test_search_results_are_the_same_under_a_tiny_budget_and_no_budget(tmp_path):
+def test_search_results_are_the_same_under_any_budget(tmp_path):
     writer = random_store(tmp_path)
     pages = [writer.get_page(p) for p in writer.page_ids()]
     entries = [search_entry(p) for p in pages]
     total = sum(len(e.text) for e in entries)
-    unlimited, tiny, none = server(tmp_path, None), server(tmp_path, 4096), server(tmp_path, 0)
+    budgets = [4096, total // 8, total // 3, 0]
+    unlimited, others = server(tmp_path, None), [server(tmp_path, b) for b in budgets]
     checked = 0
     for _ in range(2):  # the first search reads every page; the second reads only the pages not held
         for query in queries():
             expected = unlimited.search(query)
             assert expected == reference_rank(entries, query), query
-            assert tiny.search(query) == expected, query
-            assert none.search(query) == expected, query
+            for store in others:
+                assert store.search(query) == expected, (query, store._catalog.text_budget)
             checked += bool(expected)
     assert checked > 80
-    assert unlimited._catalog.held_bytes == total
-    assert 0 < tiny._catalog.held_bytes <= 4096 and none._catalog.held_bytes == 0
+    assert unlimited._catalog.held_bytes == total and set(unlimited._catalog.held().values()) == {"raw"}
+    for budget, store in zip(budgets, others):
+        assert store._catalog.held_bytes <= budget
+    assert others[-1]._catalog.held() == {}
+    assert "packed" in others[1]._catalog.held().values()  # an eighth of the text holds compressed pages
 
 
-def test_the_budget_holds_the_newest_pages_text(tmp_path):
+def written_one_at_a_time(tmp_path, texts, budget):
+    """A server that searched after each page was written, as in a session: pages arrive newest last."""
     writer = SessionStore(tmp_path, "s1")
-    ids = writer.page_out([page(f"needle {t:02d} " + "x" * 1000) for t in range(10)], 0)
+    store = server(tmp_path, budget)
+    ids = []
+    for t, text in enumerate(texts):
+        ids += writer.page_out([page(text)], t)
+        assert store.search("needle")[0] == ids[-1]
+    return writer, store, ids
+
+
+def noise(seed, n=2000):
+    """Text that zlib barely compresses (random letters and digits)."""
+    rng = random.Random(seed)
+    return "".join(rng.choices("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", k=n))
+
+
+def test_the_budget_holds_the_newest_pages_as_they_are_and_older_ones_compressed(tmp_path):
+    texts = [f"needle {t:02d} " + "the build passed and the output was clean\n" * 25 for t in range(10)]
+    writer, store, ids = written_one_at_a_time(tmp_path, texts, None)
     size = len(search_entry(writer.get_page(ids[0])).text)
-    store = server(tmp_path, 3 * size + 10)
-    assert store.search("needle")[0] == ids[-1]
-    held = {e.id for e in store._catalog.search_entries()[0] if e.text is not None}
-    assert held == set(ids[-3:]) and store._catalog.held_bytes == 3 * size
-    [new] = writer.page_out([page("needle 10 " + "x" * 1000)], 10)  # the same size
-    store.search("needle")
-    held = {e.id for e in store._catalog.search_entries()[0] if e.text is not None}
-    assert held == {ids[-2], ids[-1], new}  # the oldest went
+    store.set_search_cache(8 * size)  # 10 pages do not fit as they are: a quarter, 2 pages, stay so
+    held = store._catalog.held()
+    assert set(held) == set(ids)  # every page fits once the older ones are compressed
+    assert [held[p] for p in ids] == ["packed"] * 8 + ["raw"] * 2  # the newest as they are
+    assert store._catalog.held_bytes <= 8 * size
+    assert store.search("needle 03") == [ids[3]]  # a compressed page is searched like any other
+    store.set_search_cache(10 * size)  # a store that fits as it is: new pages stay as they are
+    [new] = writer.page_out([page("needle 10 " + "the build passed and the output was clean\n" * 25)], 10)
+    assert store.search("needle")[0] == new
+    assert store._catalog.held()[new] == "raw"
+
+
+def test_a_store_that_fits_the_budget_is_held_as_it_is(tmp_path):
+    writer = random_store(tmp_path, pages=40)
+    total = sum(len(search_entry(writer.get_page(p)).text) for p in writer.page_ids())
+    store = server(tmp_path, int(1.3 * total))  # fits by an estimate from file sizes, so not to the byte
+    store.search("alpha")
+    assert set(store._catalog.held().values()) == {"raw"} and store._catalog.held_bytes == total
+
+
+def test_when_compressed_text_does_not_fit_the_oldest_goes_first(tmp_path, monkeypatch):
+    texts = [f"needle {t:02d} " + noise(t) for t in range(10)]
+    writer, store, _ = written_one_at_a_time(tmp_path, texts, None)
+    ids = writer.page_ids()[::-1]  # oldest first
+    size = len(search_entry(writer.get_page(ids[0])).text)
+    store.set_search_cache(3 * size)
+    held = store._catalog.held()
+    kept = [i for i, p in enumerate(ids) if p in held]
+    assert kept == list(range(10 - len(kept), 10)) and len(kept) >= 3  # the newest pages
+    assert set(held.values()) == {"packed"}  # random text compresses a little: more pages fit compressed
+    assert store._catalog.held_bytes <= 3 * size
+    reads = Reads(monkeypatch)
+    store.search("needle")  # the older pages are read and not held: they would be the first to go
+    assert sorted(reads.take()) == sorted(f"{p}.json" for p in ids[:10 - len(kept)])
+    assert store._catalog.held() == held
+    [new] = writer.page_out([page("needle 10 " + noise(10))], 10)
+    assert store.search("needle")[0] == new
+    held = store._catalog.held()
+    assert new in held and ids[10 - len(kept)] not in held  # the newest came in, the oldest held went
     store.set_search_cache(size)
-    held = {e.id for e in store._catalog.search_entries()[0] if e.text is not None}
-    assert held == {new} and store._catalog.held_bytes == size
+    assert set(store._catalog.held()) <= {new} and store._catalog.held_bytes <= size
 
 
 def test_search_keeps_no_stub_and_the_index_still_reads_one(tmp_path):
@@ -163,21 +224,22 @@ class Reads:
 
 
 def test_a_page_whose_text_is_not_held_is_read_once_per_search(tmp_path, monkeypatch):
-    writer = SessionStore(tmp_path, "s1")
-    ids = writer.page_out([page(f"alpha beta {t}") for t in range(8)], 0)
-    size = len(search_entry(writer.get_page(ids[0])).text)
-    store = server(tmp_path, 2 * size)
+    texts = [f"needle alpha beta tag{t} " + noise(t, 500) for t in range(8)]
+    writer, store, _ = written_one_at_a_time(tmp_path, texts, None)
+    ids = writer.page_ids()[::-1]
+    store.set_search_cache(2 * len(search_entry(writer.get_page(ids[0])).text))
+    out = [f"{p}.json" for p in ids if p not in store._catalog.held()]
+    assert len(out) >= 4
     reads = Reads(monkeypatch)
-    assert len(store.search("alpha")) == 8 and len(reads.take()) == 8
-    assert len(store.search("alpha")) == 8 and sorted(reads.take()) == sorted(f"{p}.json" for p in ids[:6])
+    assert len(store.search("alpha")) == 8 and sorted(reads.take()) == sorted(out)
     # A short query tests every word of a page it has just read, so its frequencies need no second read.
-    assert len(store.search("beta alpha 3")) == 1 and len(reads.take()) == 6
-    assert len(store.search("absent alpha beta")) == 0 and len(reads.take()) == 6
+    assert len(store.search("beta alpha tag3")) == 1 and len(reads.take()) == len(out)
+    assert len(store.search("absent alpha beta")) == 0 and len(reads.take()) == len(out)
     # A long one stops at the first word a page lacks, and reads those pages again only if a page matches.
-    long_query = "alpha 3 " + " ".join(f"beta{i}" for i in range(10))
-    assert store.search(long_query) == [] and len(reads.take()) == 6
-    assert len(store.search("7 alpha beta alpha beta alpha beta beta")) == 1  # 3 distinct words: short
-    assert len(reads.take()) == 6
+    long_query = "alpha tag3 " + " ".join(f"beta{i}" for i in range(10))
+    assert store.search(long_query) == [] and len(reads.take()) == len(out)
+    assert len(store.search("tag7 alpha beta alpha beta alpha beta beta")) == 1  # 3 distinct words: short
+    assert len(reads.take()) == len(out)
 
 
 def test_a_long_matching_query_reads_a_page_again_only_until_a_match_is_found(tmp_path, monkeypatch):
@@ -193,13 +255,28 @@ def test_a_long_matching_query_reads_a_page_again_only_until_a_match_is_found(tm
     assert len(reads.take()) == 7 + before  # after the match, a page is tested for every word when read
 
 
-def test_a_page_quarantined_during_a_search_is_left_out(tmp_path):
+@pytest.mark.parametrize("budget", [None, 10**9, 60, 0])
+def test_a_page_quarantined_during_a_search_is_left_out_whatever_the_budget(tmp_path, monkeypatch, budget):
+    """Held text would still rank a page whose file went during the search, a read would not: the search
+    runs again on a new listing (reviewer-1 on PR #215)."""
+    import contexto.store as store_module
+
     writer = SessionStore(tmp_path, "s1")
     a, b = writer.page_out([page("needle a"), page("needle b")], 0)
-    store = server(tmp_path, 0)
-    entries, fetch = store._catalog.search_entries()
-    writer.quarantine_page(b)
-    assert rank(entries, "needle", fetch) == [a]
+    store = server(tmp_path, budget)
+    assert set(store.search("needle")) == {a, b}  # warm: held where the budget takes it
+    calls = []
+    original = store_module.rank
+
+    def rank_while_quarantining(entries, query, fetch=None):
+        calls.append(len(entries))
+        if len(calls) == 1:
+            writer.quarantine_page(b)
+        return original(entries, query, fetch)
+
+    monkeypatch.setattr(store_module, "rank", rank_while_quarantining)
+    assert store.search("needle") == [a]
+    assert calls == [2, 1]
 
 
 def test_rank_reads_held_text_without_fetch_and_skips_what_fetch_cannot_read():
@@ -214,6 +291,43 @@ def test_rank_reads_held_text_without_fetch_and_skips_what_fetch_cannot_read():
     assert rank([held, lazy], "needle", fetch) == ["pg_2", "pg_1"] and calls == [1]
     assert rank([held, lazy], "needle", lambda i: None) == ["pg_1"]  # gone since the listing
     assert rank([held, lazy], "needle") == ["pg_1"]  # no fetch: a page without text is left out
+
+
+@pytest.mark.parametrize("budget", [None, 10**9, 0])
+@pytest.mark.parametrize("field, value", [("turn", "3"), ("turn", None), ("turn", True), ("turn", 2.5),
+                                          ("id", 7)])
+def test_a_page_with_a_damaged_id_or_turn_is_left_out_and_not_counted(tmp_path, budget, field, value):
+    writer = SessionStore(tmp_path, "s1")
+    a, b = writer.page_out([page("needle a"), page("needle b")], 0)
+    path = writer.pages_dir / f"{b}.json"
+    record = json.loads(path.read_text())
+    record[field] = value
+    path.write_text(json.dumps(record))
+    store = server(tmp_path, budget)
+    for _ in range(2):
+        assert store.search("needle") == [a]
+        assert store.page_ids() == [a]
+        held = sum(e.size for e in store._catalog._entries.values() if e.held)
+        assert store._catalog.held_bytes == held
+    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+    assert {e["path"] for e in log if e["event"] == "page_unreadable"} == {f"{b}.json"}
+
+
+@pytest.mark.parametrize("budget", [None, 10**9])
+def test_rewritten_pages_leave_no_heap_items_behind(tmp_path, budget):
+    writer = SessionStore(tmp_path, "s1")
+    [a] = writer.page_out([page("needle a")], 0)
+    path = writer.pages_dir / f"{a}.json"
+    store = server(tmp_path, budget)
+    for i in range(300):  # not something Contexto does: pages are immutable
+        record = json.loads(path.read_text())
+        record["messages"][1]["content"][0]["text"] = f"needle {i}"
+        path.write_text(json.dumps(record))
+        os.utime(path, ns=(i * 10**9, i * 10**9))
+        assert store.search(f"needle {i}") == [a]
+    catalog = store._catalog
+    assert len(catalog._raw) + len(catalog._packed) <= 2 * 65
+    assert catalog.held_bytes == sum(e.size for e in catalog._entries.values() if e.held)
 
 
 # Configuration
@@ -278,7 +392,8 @@ def test_contexto_run_codex_passes_the_budget_to_the_mcp_server(tmp_path):
                         key_helper="echo k", upstream="https://u.invalid/v1", contexto_home=home)
     try:
         config = tomllib.loads((launch.codex_home / "config.toml").read_text())
-        assert config["mcp_servers"]["contexto"]["env"] == {"CONTEXTO_HOME": str(home), "CONTEXTO_SEARCH_CACHE_MB": "16"}
+        assert config["mcp_servers"]["contexto"]["env"] == {
+            "CONTEXTO_HOME": str(home), "CONTEXTO_SEARCH_CACHE_MB": "16"}
     finally:
         launch.cleanup()
     launch = plan_codex([], "http://127.0.0.1:1", "S1", auth_mode="chatgpt", env=env, cwd=tmp_path, home=tmp_path,

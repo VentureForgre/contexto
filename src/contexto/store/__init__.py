@@ -731,8 +731,15 @@ class SessionStore(LedgerOps):
 
     def search(self, query: str) -> list[str]:
         """Ids of pages holding every word of ``query`` (case-insensitive, any order), best first (D34)."""
-        entries, fetch = self._catalog.search_entries()
-        return rank(entries, query, fetch)
+        # A page removed while a search runs is left out whatever the budget: a held page would still be
+        # ranked, a page read from its file would not, so the search is run again on a new listing
+        # (D39, reviewer-1 on PR #215). Three tries, then the last result.
+        for _ in range(3):
+            entries, fetch, names = self._catalog.search_entries()
+            found = rank(entries, query, fetch)
+            if self._catalog.all_present(names):
+                break
+        return found
 
     def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
         salient = lists_identifiers(self.recall_variant(variant))
