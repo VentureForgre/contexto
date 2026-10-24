@@ -413,7 +413,7 @@ def test_run_codex_with_the_real_launcher_helpers(tmp_path, monkeypatch):
 
 def test_tag_leading_user_prompts_stay_turn_starts():
     from contexto.codex import CONTEXT_SECTIONS_CODEX_VERSION
-    assert CONTEXT_SECTIONS_CODEX_VERSION == "0.154.0"
+    assert CONTEXT_SECTIONS_CODEX_VERSION == "0.163.0"  # measured on 0.154.0, rechecked on 0.163.0 (D38)
     d = ResponsesDialect()
     for text in ("<div>fix this layout</div>", "<template>synthetic</template>", "<T>generic question",
                  "<environment_context_extra>not measured", "# AGENTS.md is a file name I mention"):

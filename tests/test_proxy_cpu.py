@@ -438,11 +438,13 @@ def drive(upstream: str, preserving: bool, turns: int = 18, restart_after: int =
     events = [{k: v for k, v in e.items() if k not in VOLATILE_KEYS} for e in log.events]
 
     def engine_view(engine: RewriteEngine) -> dict:
-        private = {k: v for k, v in vars(engine).items() if k not in ("store", "estimator", "config", "tools")}
+        private = {k: v for k, v in vars(engine).items()
+                   if k not in ("store", "estimator", "config", "tools", "clients")}
         # The missing-tools check (contexto.toolcheck) holds this run's clock readings; compare the rest.
         tools = {k: v for k, v in vars(engine.tools).items()
                  if k not in ("store", "clock", "started", "started_wall")}
-        return {"states": engine.states, "private": private, "tools": tools, "estimator": vars(engine.estimator)}
+        return {"states": engine.states, "private": private, "tools": tools, "clients": vars(engine.clients),
+                "estimator": vars(engine.estimator)}
 
     pages = {pid: store.get_page(pid) for pid in store.page_ids()}
     return {"bodies": list(Recorder.bodies), "events": events, "engines": [engine_view(e) for e in engines],
