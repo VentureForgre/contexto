@@ -639,9 +639,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
       agent's stops number at least that run: a late notice of an earlier run cannot close a later
       run's room, whatever the order. Every `Agent` call with that prompt must be known and stopped
       that often, so twins with one prompt close together. It is checked at each main request,
-      whatever started main's turn, and only while the CLI's `User-Agent` names a Claude Code version
-      in `SUBAGENT_SHAPES_TESTED` (`src/contexto/cliversions.py`, D38): for any other version, side
-      rooms only expire. The close is logged `side_room_closed` with reason `agent_stopped`. A room
+      whatever started main's turn, and only while the latest Claude Code version seen in a
+      request's `User-Agent` this session is in `SUBAGENT_SHAPES_TESTED` (`src/contexto/cliversions.py`,
+      D38): with no Claude Code `User-Agent` seen, or when the latest one names another version (the
+      CLI updated mid-session), side rooms only expire; a later request without a `User-Agent` keeps
+      the latest version seen. The close is logged `side_room_closed` with reason `agent_stopped`. A room
       matching no `Agent` call, a background agent still running, and any room on the Responses
       dialect (Codex has no `Agent` tool) keep the 15-minute expiry. If the store cannot close the
       room, the engine logs `side_room_close_failed` with the error's class and goes on: the room

@@ -29,9 +29,9 @@ and not re-measured on 2.1.302.
 | `CONTEXT_SECTION` (Codex section tags), `CONTEXT_SECTIONS_CODEX_VERSION` | `src/contexto/codex.py` | `spikes/m2/codex/probe.sh` |
 | subagent shapes (`AGENT_TOOLS`, `ASYNC_LAUNCH`, `HAND_BACK`, `NOTICE_OPENINGS`, the `<task-notification>` and `resumedAgentId` patterns), gated by `SUBAGENT_SHAPES_TESTED` (D40) | `src/contexto/rewrite.py`, `src/contexto/cliversions.py` | `spikes/m2/subagents` |
 
-The subagent shapes are gated by version: for a Claude Code version not in `SUBAGENT_SHAPES_TESTED`,
-side rooms only expire (15 minutes) and none closes early. Re-run `spikes/m2/subagents` (`run.sh`
-with `esc_scenario.py` modes `fg` and `stop`, and `resume_scenario.py`) before adding a version.
+The subagent shapes are gated by version: when the latest Claude Code version seen in a request's
+`User-Agent` is not in `SUBAGENT_SHAPES_TESTED`, side rooms only expire (15 minutes) and none closes
+early. Step 5 of the routine below re-measures them.
 
 If the `# Environment` heading changes, the session-start message becomes a settings change or
 carried text and can be paged once superseded (D33). If a context block's first line changes, the
@@ -111,16 +111,25 @@ Everything here is zero spend unless marked.
 4. Missing-tools notices: if the CLI's MCP or tool-search text changed in step 1 or 2, recapture the
    shapes `src/contexto/toolcheck.py` describes (tool search on, a resume with the server off PATH)
    and update `tests/test_toolcheck.py`.
-5. The suite: `pytest -q`.
-6. If nothing changed: append the version to `TESTED_VERSIONS["claude"]` and bump
+5. Subagent shapes (zero tokens, against the stub; D40): `spikes/m2/subagents/run.sh` with
+   `esc_scenario.py` (`SCEN_MODE=fg` and `SCEN_MODE=stop`) and with `resume_scenario.py`, then
+   `spikes/m2/subagents/drive.py` in interactive mode (`bgidle` and `esc`). Compare the captures with
+   the spike's README: the subagent's first prompt, the launch receipt and the hand-back, the
+   `<task-notification>` notices in a `system` message and in a `<system-reminder>` user message, and
+   a resume's `resumedAgentId`, new turn start, and `SendMessage`-named notice. Append the version to
+   `SUBAGENT_SHAPES_TESTED` only if they are unchanged; otherwise update the shapes in
+   `src/contexto/rewrite.py` and `tests/test_subagent_room.py` and record a decision. Leaving the
+   version out is safe: side rooms then only expire.
+6. The suite: `pytest -q`.
+7. If nothing changed: append the version to `TESTED_VERSIONS["claude"]` and bump
    `SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION` and `CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION` to it,
-   in the same commit. Both constants need steps 1, 2 and 5. `tests/test_cliversions.py` fails if the
+   in the same commit. Both constants need steps 1, 2 and 6. `tests/test_cliversions.py` fails if the
    newest tested version and those constants differ. Bump `HOOK_SIGNATURES_CLAUDE_CODE_VERSION` only
    if step 3 ran. Add the version to the table above.
-7. If something changed: update the signatures and their tests, re-run step 2 to measure what is
+8. If something changed: update the signatures and their tests, re-run step 2 to measure what is
    carried and paged with the new text, and record a decision in `docs/DECISIONS.md`.
-8. Live acceptance (spends tokens, needs the owner's approval): `spikes/m2/acceptance`, as in live run
-   #3 (`docs/research/M2-acceptance-run3.md`). Only for a change in step 7.
+9. Live acceptance (spends tokens, needs the owner's approval): `spikes/m2/acceptance`, as in live run
+   #3 (`docs/research/M2-acceptance-run3.md`). Only for a change in step 8.
 
 ## Routine for a new Codex version
 

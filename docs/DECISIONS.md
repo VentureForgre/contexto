@@ -733,8 +733,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
   launch receipt is not, an error result starts no agent, and any other result shape leaves the
   call unknown, which keeps its prompt's rooms on the expiry. Every call with that prompt must be
   known and stopped that often (twins). These shapes are tied to the CLI version (D38):
-  `cliversions.SUBAGENT_SHAPES_TESTED` lists 2.1.302, and for any other Claude Code version, read
-  from the request's `User-Agent`, side rooms only expire until the spike is re-run. It is checked
+  `cliversions.SUBAGENT_SHAPES_TESTED` lists 2.1.302, and when the latest Claude Code version seen
+  in a request's `User-Agent` this session is any other (or none was seen), side rooms only expire
+  until the spike is re-run. Round 6 made the count distinct: each run stops under its own call id
+  (the `Agent` call, then one `SendMessage` per resume), so the stops are the number of those ids
+  with stop evidence, and a stop reported twice (a notice resent, or a hand-back plus a notice)
+  counts once. It is checked
   at each main request, whatever started the turn; no idle time and no human prompt are involved. A
   room matching no call, or an agent still running, keeps the 15-minute expiry, so reviewer A's
   probes pass. A store failure on that close logs `side_room_close_failed` and leaves the room to
