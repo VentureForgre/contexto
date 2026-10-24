@@ -25,9 +25,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from acceptance import script  # noqa: E402  (first: it puts spikes/m0 on the path for fidelity)
+
+# isort: split
 from fidelity import l2f  # noqa: E402
 
-from acceptance import codex_budget, codex_driver, codex_recall_credit, script  # noqa: E402
+from acceptance import codex_budget, codex_driver, codex_recall_credit  # noqa: E402
 from acceptance.codex_stub import CodexStub  # noqa: E402
 
 DEFAULT_BOUND = 64_000

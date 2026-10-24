@@ -49,9 +49,12 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fidelity.l2f import normalize, parse_answers  # noqa: E402  (script.py puts spikes/m0 on the path)
+from acceptance import script  # noqa: E402  (first: it puts spikes/m0 on the path for fidelity)
 
-from acceptance import detectors, driver, replay, run, script  # noqa: E402
+# isort: split
+from fidelity.l2f import normalize, parse_answers  # noqa: E402
+
+from acceptance import detectors, driver, replay, run  # noqa: E402
 
 TARGETS = ("q_a_016", "q_a_012", "q_a_035", "q_a_024")  # builder-3's class-A H1-only misses, live run #2
 APPROVAL = 600_000  # the class-A line's first approval; --ceiling carries a raised one (intake 09:15Z: 740,000)
