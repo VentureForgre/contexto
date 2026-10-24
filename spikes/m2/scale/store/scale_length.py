@@ -64,13 +64,16 @@ import contexto.store.memory as memory_module  # noqa: E402
 from contexto import mcp  # noqa: E402
 from contexto.store import search as search_now  # noqa: E402
 from contexto.store.memory import MemoryStore  # noqa: E402
-from contexto.store.pages import _texts, is_context_page  # noqa: E402
+from contexto.store.pages import _search_fields, _texts, is_context_page  # noqa: E402
 
 D34_REF = "4b87ec2"  # main after PR #204 (D34)
 HOLD_ALL_MB = "1048576"  # a search text budget (D39) that holds every store here as it is
 K1 = 1.2
 VARIANTS = (("page", 0.75), ("page", 0.5), ("page", 0.3), ("page", 0.0), ("d41", 0.0), ("cap3", 0.0),
             ("texts", 0.75), ("fields", 0.75), ("fields", 0.3), ("floored", 0.75))
+GRID = (("page", 0.75), ("gridfull:1:none", 0.0)) + tuple(
+    (f"grid:{c}:{p}", 0.0) for c in (1, 2, 3) for p in ("2", "3", "none"))
+GRID_FULL = tuple((f"gridfull:{c}:{p}", 0.0) for c in (1, 2, 3) for p in ("2", "3", "none"))
 
 
 def load_d34(ref: str) -> ModuleType:
@@ -91,18 +94,21 @@ def load_d34(ref: str) -> ModuleType:
 
 
 class Entry(NamedTuple):
-    """``contexto.store.search.SearchEntry`` plus ``ends``: the offset in ``text`` where each text ends."""
+    """``contexto.store.search.SearchEntry`` plus what the other variants read: ``full``, every stub field
+    and text of the page joined by ``search.TEXT_SEP`` (what D34 searched: the stub fields are not dropped
+    when the turn's texts hold them), and ``ends``, the offset in ``full`` where each of them ends."""
 
     id: str
     turn: int
     text: bytes
     context: bool
     ends: array
+    full: bytes
 
 
 def entry_with_ends(page: dict[str, Any]) -> Entry:
-    """The page's searchable text as search holds it (the same bytes as ``pages.search_entry``: the texts
-    joined by ``search.TEXT_SEP``), with the end of each text."""
+    """The page as this tree's search holds it (``text``: the same bytes as ``pages.search_entry``), with
+    ``full`` and its ``ends`` for D34 and the prototypes."""
     stub = page["stub"]
     fields = [stub["user_text"], stub.get("system_text", ""), stub.get("reminder_text", ""), *stub["tools"],
               *stub["paths"], *_texts(page["messages"])]
@@ -111,13 +117,14 @@ def entry_with_ends(page: dict[str, Any]) -> Entry:
     for key in keys:
         end += 1 + len(key)
         ends.append(end)
-    return Entry(page["id"], page["turn"], search_now.TEXT_SEP.join(keys), is_context_page(page), ends)
+    return Entry(page["id"], page["turn"], search_now.search_text(_search_fields(page)), is_context_page(page), ends,
+                 search_now.TEXT_SEP.join(keys))
 
 
 def term_counts(text: bytes, ends: Sequence[int], term: bytes) -> Iterator[tuple[int, int, int]]:
-    """(index, occurrences, length) of each text holding ``term``. A word holds no whitespace, so it never
-    spans the newline between two texts; a phrase holding a newline is counted over the page as one text."""
-    if not ends or b"\n" in term:
+    """(index, occurrences, length) of each text holding ``term``. The texts are joined by
+    ``search.TEXT_SEP``, a byte no query word or phrase holds, so an occurrence never spans two texts."""
+    if not ends:
         found = text.count(term)
         if found:
             yield 0, found, len(text)
@@ -223,9 +230,22 @@ def rank_capped(entries: Sequence[Entry], query: str, cap: int) -> list[str]:
     return _rank_with(entries, query, relevance)
 
 
+def rank_grid(entries: Sequence[Any], query: str, text_cap: int, page_cap: int | None) -> list[str]:
+    """This tree's ``rank`` with ``search.TEXT_CAP`` and ``search.PAGE_CAP`` set for the call (the D41 grid)."""
+    saved = search_now.TEXT_CAP, search_now.PAGE_CAP
+    search_now.TEXT_CAP, search_now.PAGE_CAP = text_cap, page_cap
+    try:
+        return search_now.rank(entries, query)
+    finally:
+        search_now.TEXT_CAP, search_now.PAGE_CAP = saved
+
+
 def _rank_of(d34: ModuleType | None, kind: str, b: float) -> Callable[[Sequence[Any], str], list[str]]:
     if kind == "d41":
         return search_now.rank
+    if kind.startswith(("grid:", "gridfull:")):  # grid:TEXT_CAP:PAGE_CAP; gridfull reads ``full``
+        _, c, p = kind.split(":")
+        return lambda entries, query: rank_grid(entries, query, int(c), None if p == "none" else int(p))
     if kind == "cap3":
         return lambda entries, query: rank_capped(entries, query, 3)
     if kind == "texts":
@@ -248,13 +268,17 @@ def _rank_of(d34: ModuleType | None, kind: str, b: float) -> Callable[[Sequence[
 def ranker(d34: ModuleType | None, kind: str, b: float) -> Callable[..., list[str]]:
     """A ``rank(entries, query, fetch=None)`` as ``SessionStore.search`` calls it (D39). An entry whose text
     is not held is read through ``fetch`` first, so every variant sees every page; ``main`` holds all text
-    (``HOLD_ALL_MB``), so this happens only if a page cannot be held."""
+    (``HOLD_ALL_MB``), so this happens only if a page cannot be held. The variants that are not this
+    tree's ``rank`` read each page's ``full`` text, as D34 searched it."""
     inner = _rank_of(d34, kind, b)
+    own = kind == "d41" or kind.startswith("grid:")  # gridfull reads ``full``, as the tree at 0ff1bfe did
 
     def rank(entries: Sequence[Any], query: str, fetch: Callable[[int], Any] | None = None) -> list[str]:
         if any(e.text is None for e in entries):
             got = [e if e.text is not None else (fetch(i) if fetch is not None else None) for i, e in enumerate(entries)]
             entries = [e for e in got if e is not None and e.text is not None]
+        if not own:
+            entries = [e._replace(text=e.full) if isinstance(e, Entry) else e for e in entries]
         return inner(entries, query)
     return rank
 
@@ -302,6 +326,45 @@ def residual(mentions: tuple[int, ...]) -> list[int]:
     return [int(m.group(1)) for m in DETAILED.finditer(reply)]
 
 
+def _search_turns(store: MemoryStore, query: str) -> list[int]:
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    line = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "contexto_search", "arguments": {"query": query}}})
+    reply = server.handle_line(line)["result"]["content"][0]["text"]
+    return [int(m.group(1)) for m in DETAILED.finditer(reply)]
+
+
+FILLER = "\n".join(f"step {i}: ran the build and checked the output, nothing unusual" for i in range(40))
+
+
+def scenario_about() -> bool:
+    """D34's ``test_a_page_about_the_query_outranks_newer_pages_that_mention_it_once`` as on main: turn 1's
+    reply says "rate limit" in 4 lines of one text, 30 newer pages once. True when turn 1 is shown."""
+    store = MemoryStore("s1")
+    about = "\n".join(["The rate limit is 40 requests per minute per key.", "Raised the rate limit warning threshold.",
+                       "rate limit headers: X-RateLimit-Remaining", "The rate limit resets every 60 seconds."])
+    store.page_out([_page(FILLER + "\n" + about)], 1)
+    store.page_out([_page(FILLER + "\nwe may hit a rate limit here") for _ in range(30)], 2)
+    return 1 in _search_turns(store, "rate limit")
+
+
+def scenario_equal() -> bool:
+    """D34's ``test_the_newest_of_equally_relevant_statements_is_shown_first`` as on main: turns 8, 30, 45 set
+    the timeout in one reply that says it twice; every 4th turn mentions it in passing. True when, for
+    each of its 3 queries, the first value page shown is turn 45."""
+    store = MemoryStore("s1")
+    for t in range(1, 61):
+        if t in (8, 30, 45):
+            store.page_out([_page(FILLER + f"\nSet the HTTP client timeout to {t} seconds.\nHTTP_TIMEOUT_S = {t}")], t)
+        else:
+            store.page_out([_page(FILLER + ("\na client timeout surfaces as a 504" if t % 4 == 0 else ""))], t)
+    for query in ("timeout", "client timeout", "HTTP_TIMEOUT_S"):
+        values = [t for t in _search_turns(store, query) if t in (8, 30, 45)]
+        if values[:1] != [45]:
+            return False
+    return True
+
+
 def residual_ok(shown: list[int]) -> bool:
     """The current value (turn 10) is shown in detail, before the old one (turn 4)."""
     return [t for t in shown if t in (4, 10)][:1] == [10]
@@ -311,11 +374,18 @@ def residual_ok(shown: list[int]) -> bool:
 
 
 def variants_named() -> list[tuple[str, tuple[str, float]]]:
-    return [(kind if kind in ("d41", "cap3") else f"{kind} b={b:g}", (kind, b)) for kind, b in VARIANTS]
+    def name(kind: str, b: float) -> str:
+        if kind.startswith(("grid:", "gridfull:")):
+            _, c, p = kind.split(":")
+            if kind.startswith("gridfull:"):
+                return f"text cap {c}, page cap {p}" + (" (0ff1bfe)" if (c, p) == ("1", "none") else ", summary kept")
+            return f"text cap {c}, page cap {p}"
+        return kind if kind in ("d41", "cap3") else f"{kind} b={b:g}"
+    return [(name(kind, b), (kind, b)) for kind, b in VARIANTS]
 
 
 def summarize(rows: list[dict[str, Any]], residuals: dict[str, list[list[int]]],
-              stores: list[tuple[str, int, dict[str, Any]]]) -> str:
+              stores: list[tuple[str, int, dict[str, Any]]], scenarios: dict[str, tuple[bool, bool]]) -> str:
     out = ["| page sizes | N | page tokens min / median / max | total page tokens |", "|---|---:|---|---:|"]
     for sizes, n, row in stores:
         out.append(f"| {sizes} | {n:,} | {row['page_tokens_min']:,} / {row['page_tokens_median']:,} / "
@@ -340,6 +410,11 @@ def summarize(rows: list[dict[str, Any]], residuals: dict[str, list[list[int]]],
     for variant, shown in residuals.items():
         cells = [f"{', '.join(map(str, s))}{'' if residual_ok(s) else ' (no)'}" for s in shown]
         out.append(f"| {variant} | " + " | ".join(cells) + f" | {sum(map(residual_ok, shown))} |")
+    out += ["", "D34's two scenarios as main's tests state them (`scenario_about`, `scenario_equal`):", "",
+            "| variant | a page about the query is shown | the newest of equal statements comes first |",
+            "|---|---|---|"]
+    for variant, (about, equal) in scenarios.items():
+        out.append(f"| {variant} | {'yes' if about else 'no'} | {'yes' if equal else 'no'} |")
     return "\n".join(out) + "\n"
 
 
@@ -351,7 +426,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--d34-ref", default=D34_REF)
     parser.add_argument("--out", type=Path, default=HERE / "results" / "d41" / "length")
+    parser.add_argument("--grid", action="store_true",
+                        help="run D34, D41 at 0ff1bfe, and every TEXT_CAP 1-3 and PAGE_CAP 2, 3, none instead")
+    parser.add_argument("--grid-full", action="store_true",
+                        help="run the grid cells that keep the stub fields repeating the prompt or paths")
     args = parser.parse_args(argv)
+    global VARIANTS
+    if args.grid:
+        VARIANTS = GRID
+    elif args.grid_full:
+        VARIANTS = GRID_FULL
     args.out.mkdir(parents=True, exist_ok=True)
     d34 = load_d34(args.d34_ref)
     scale_bench.SEARCH_CACHE_MB = HOLD_ALL_MB  # the prototypes read each page's text ends from the held entry
@@ -359,11 +443,13 @@ def main(argv: list[str] | None = None) -> int:
     home = Path(tempfile.mkdtemp(prefix="contexto-length-"))
     rows: list[dict[str, Any]] = []
     residuals: dict[str, list[list[int]]] = {}
+    scenarios: dict[str, tuple[bool, bool]] = {}
     stores: list[tuple[str, int, dict[str, Any]]] = []
     try:
         for name, (kind, b) in variants_named():
             use(ranker(d34, kind, b))
             residuals[name] = [residual(r) for r in ROWS]
+            scenarios[name] = (scenario_about(), scenario_equal())
         for sizes in args.page_sizes:
             for n in args.sizes:
                 session = f"length-{sizes}-{n}"
@@ -387,7 +473,7 @@ def main(argv: list[str] | None = None) -> int:
         w = csv.DictWriter(f, ["page_sizes", "variant", *scale_bench.QUALITY_FIELDS])
         w.writeheader()
         w.writerows(rows)
-    summary = summarize(rows, residuals, stores)
+    summary = summarize(rows, residuals, stores, scenarios)
     (args.out / "summary.md").write_text(summary, encoding="utf-8")
     print(summary)
     return 0

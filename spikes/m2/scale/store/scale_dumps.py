@@ -12,6 +12,7 @@ Code's limit) and Reads at 100,000.
         --trials 500 --seed 7                             # "loud"
     .venv/bin/python spikes/m2/scale/store/scale_dumps.py --repo /tmp/cx-dumps-repo --dumps /tmp/cx-dumps \\
         --trials 500 --seed 11 --quiet                    # "quiet"
+    ... --trials 300 --seed 21 --quiet --adversarial many_calls   # and seed 22 split_output, 23 edits
 
 Each session has 40, 150, or 600 turns. 1, 2, or 4 old dumps of the key come before the turn that
 states its new value, which is one of four kinds: a one-line statement, an Edit (the key 4 times),
@@ -63,7 +64,12 @@ KEYS = {  # key: (old value, new value)
     "page_out": ("list", "tuple"), "search_key": ("bytes", "str"), "build_page": ("dict", "Page"),
 }
 VARIANTS = {"D34 (b 0.75)": ("page", 0.75), "D41 first (b 0, every occurrence)": ("page", 0.0),
-            "b 0, count capped at 3": ("cap3", 0.0), "D41 (b 0, once per text)": ("d41", 0.0)}
+            "b 0, count capped at 3": ("cap3", 0.0), "D41 at 0ff1bfe (once per text)": ("gridfull:1:none", 0.0),
+            **{f"text cap {c}, page cap {p}": (f"grid:{c}:{p}", 0.0) for c in (1, 2, 3) for p in ("2", "3", "none")}}
+# The same cells with the stub fields that repeat the turn's prompt or paths counted again, as at 0ff1bfe
+VARIANTS_FULL = {f"text cap {c}, page cap {p}, summary kept": (f"gridfull:{c}:{p}", 0.0)
+                 for c in (1, 2, 3) for p in ("2", "3", "none")}
+ADVERSARIAL = ("many_calls", "split_output", "edits")
 PASSING = ["{k} is read once at startup.", "{k} applies per request.", "grep shows {k} in two places.",
            "Left {k} alone in this change."]
 
@@ -170,6 +176,40 @@ def old_dump(c: Corpus, rng: random.Random, key: str, old: str, quiet: bool) -> 
                 f"{key} is {old} for now; the logs above show where it is used.")
 
 
+def adversarial_dump(c: Corpus, rng: random.Random, key: str, old: str, kind: str) -> list[dict[str, Any]]:
+    """Reviewer A's dumps built to hold the key in many texts (second review of PR #216). The turn's prompt
+    and reply do not name the key."""
+    files = [p for p in c.files if has(c.file_text[p], key)] or [c.files[0]]
+    if kind == "many_calls":  # the agent greps file by file: each call's command and output hold the key
+        k = rng.choice([5, 10, 20])
+        calls = []
+        for j in range(k):
+            p = files[j % len(files)]
+            lines = [f"{i}:{line}" for i, line in enumerate(c.file_text[p].splitlines(), 1) if has(line, key)]
+            calls.append(("Bash", {"command": f"grep -n {key} {p.relative_to(c.repo)}"},
+                          "\n".join(lines) or f"{key} = {old}"))
+        return turn("find every use", calls, "Here are the uses.")
+    if kind == "split_output":  # one tool result as many text blocks (an MCP tool's chunks)
+        out = c.sh(f"grep -rn -C3 {key} src tests docs")[:BASH_CAP] or f"{key} = {old}"
+        lines = out.splitlines()
+        size = rng.choice([5, 20, 50])
+        blocks = [{"type": "text", "text": "\n".join(lines[i:i + size])} for i in range(0, len(lines), size)]
+        tid = f"toolu_{rng.getrandbits(48):012x}"
+        return [{"role": "user", "content": "find every use"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": tid, "name": "mcp__search",
+                                                   "input": {"pattern": key}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": blocks}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "Here are the uses."}]}]
+    if kind == "edits":  # a refactor turn: one Edit per use, each old and new string naming the key
+        k = rng.choice([3, 6, 12])
+        calls = [("Edit", {"file_path": str(files[j % len(files)]), "old_string": f"{key} * x",
+                           "new_string": f"{key} * y"},
+                  f"The file has been updated. Here's the result of running `cat -n` on a snippet:\n  10\t{key} * y")
+                 for j in range(k)]
+        return turn("tidy the call sites", calls, "Done.")
+    raise SystemExit(f"unknown adversarial dump {kind!r}")
+
+
 def statement(c: Corpus, rng: random.Random, key: str, old: str, new: str) -> tuple[str, list[dict[str, Any]]]:
     """The turn that states the current value, and its kind."""
     kind = rng.choice(["short", "edit", "edit_then_tests", "long_output"])
@@ -189,7 +229,7 @@ def statement(c: Corpus, rng: random.Random, key: str, old: str, new: str) -> tu
                       f"Soak test passed. {key} is now {new}")
 
 
-def session(c: Corpus, rng: random.Random, key: str, quiet: bool):
+def session(c: Corpus, rng: random.Random, key: str, quiet: bool, adv: str = ""):
     old, new = KEYS[key]
     turns_n = rng.choice([40, 150, 600])
     s_new = rng.randrange(int(turns_n * 0.5), int(turns_n * 0.95))
@@ -201,7 +241,7 @@ def session(c: Corpus, rng: random.Random, key: str, quiet: bool):
     turns, roles, kinds = [], {}, {}
     for t in range(1, turns_n + 1):
         if t in dump_at:
-            tr = old_dump(c, rng, key, old, quiet)
+            tr = adversarial_dump(c, rng, key, old, adv) if adv else old_dump(c, rng, key, old, quiet)
             roles[t] = "dump"
         elif t == s_new:
             kinds[t], tr = statement(c, rng, key, old, new)
@@ -225,16 +265,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trials", type=int, default=500)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--quiet", action="store_true", help="only the dump's command and output name the key")
+    parser.add_argument("--adversarial", choices=ADVERSARIAL, default="",
+                        help="reviewer A's dumps that hold the key in many texts (their turn is always quiet)")
     parser.add_argument("--d34-ref", default=scale_length.D34_REF)
+    parser.add_argument("--variants-full", action="store_true",
+                        help="rank only the grid cells that keep the stub fields repeating the prompt or paths")
     args = parser.parse_args(argv)
     corpus = Corpus(args.repo, args.dumps)
     d34 = scale_length.load_d34(args.d34_ref)
-    rankers = {name: scale_length.ranker(d34, kind, b) for name, (kind, b) in VARIANTS.items()}
+    chosen = VARIANTS_FULL if args.variants_full else VARIANTS
+    rankers = {name: scale_length.ranker(d34, kind, b) for name, (kind, b) in chosen.items()}
     rng = random.Random(args.seed)
     agg: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for _ in range(args.trials):
         key = rng.choice(list(KEYS))
-        turns, roles, kinds, meta = session(corpus, rng, key, args.quiet)
+        turns, roles, kinds, meta = session(corpus, rng, key, args.quiet, args.adversarial)
         pages = [build_page(b"k" * 32, tr, t) for t, tr in enumerate(turns, 1)]
         entries = [scale_length.entry_with_ends(p) for p in pages]
         turn_of = {p["id"]: p["turn"] for p in pages}
@@ -255,7 +300,8 @@ def main(argv: list[str] | None = None) -> int:
                 a["newest"] += newest in top
     buckets = ["all"] + [f"passing mentions after {m}" for m in range(4)] + \
         [f"statement {k}" for k in ("short", "edit", "edit_then_tests", "long_output")]
-    print(f"{args.trials} sessions, seed {args.seed}, {'quiet' if args.quiet else 'loud'}")
+    shape = args.adversarial or ("quiet" if args.quiet else "loud")
+    print(f"{args.trials} sessions, seed {args.seed}, {shape}")
     print("| variant | sessions | n | statement in detail | old dump above it | stale only | newest mention in detail |")
     print("|---|---|---:|---:|---:|---:|---:|")
     for bucket in buckets:
