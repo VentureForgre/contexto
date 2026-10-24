@@ -18,7 +18,7 @@ import pytest
 
 from contexto import mcp
 from contexto.proxy import ContextoProxy, StreamHold, UsageReader, _takes_keyword, is_client_call
-from contexto.rewrite import MESSAGES, Config, RewriteEngine, agent_stops, first_prompt
+from contexto.rewrite import MESSAGES, Config, RewriteEngine, agent_runs, first_prompt
 from contexto.store import SIDE_ROOM_TTL_S, SessionStore
 from contexto.store.memory import MemoryStore
 
@@ -510,27 +510,31 @@ def notification(call_id, status="killed", agent="a4f9ecd55b4309f21"):
             f"<summary>Agent \"the agent\" was stopped</summary>\n</task-notification>")
 
 
-def idle_notification(call_id, status="killed"):
+def idle_notification(call_id, status="killed", agent="a4f9ecd55b4309f21"):
     """While main is idle the notification is a new user message, one <system-reminder> text block."""
-    return {"role": "user", "content": [{"type": "text", "text": f"<system-reminder>\n{notification(call_id, status)}"
-                                                                 "\n</system-reminder>"}]}
+    text = f"<system-reminder>\n{notification(call_id, status, agent)}\n</system-reminder>"
+    return {"role": "user", "content": [{"type": "text", "text": text}]}
 
 
-def loop_notification(call_id, status="completed"):
+def loop_notification(call_id, status="completed", agent="a4f9ecd55b4309f21"):
     """During main's tool loop it is a system message."""
-    return {"role": "system", "content": notification(call_id, status) + "\n\n<total_tokens>1 tokens left</total_tokens>"}
+    tail = "\n\n<total_tokens>1 tokens left</total_tokens>"
+    return {"role": "system", "content": notification(call_id, status, agent) + tail}
 
 
-def delegated(store, prompt="subagent", background=True, sub_input=120_000):
+CLAUDE = {"User-Agent": "claude-cli/2.1.302 (external, sdk-cli)"}  # the CLI version the shapes were measured on
+
+
+def delegated(store, prompt="subagent", background=True, sub_input=120_000, headers=CLAUDE):
     """Main delegates with an Agent call; the subagent's first response holds a tool call."""
     store.clock = clock = Clock()
     engine = RewriteEngine(store, config=CONFIG)
     main = request(conversation("main", 3) + [agent_call("toolu_A", prompt, background)])
-    engine(main, {}, MESSAGES)
+    engine(main, headers, MESSAGES)
     respond(engine, main, 20_000, tool_calls=True)
     if background:
         main = request(main["messages"] + [launch_receipt("toolu_A")])
-        engine(main, {}, MESSAGES)
+        engine(main, headers, MESSAGES)
         respond(engine, main, 20_500)
     sub = request(conversation(prompt, 1))
     engine(sub, {}, MESSAGES)
@@ -541,7 +545,7 @@ def delegated(store, prompt="subagent", background=True, sub_input=120_000):
 
 def main_turn(engine, body, *added):
     body = request(body["messages"] + list(added))
-    _, _, events = engine(body, {}, MESSAGES)
+    _, _, events = engine(body, CLAUDE, MESSAGES)
     respond(engine, body, 20_000)
     return body, [e for e in events if str(e.get("event", "")).startswith("side_room")]
 
@@ -549,8 +553,9 @@ def main_turn(engine, body, *added):
 def test_the_subagents_first_prompt_matches_mains_agent_call():
     sub = conversation("SUB-FG do the foreground thing", 1)
     assert first_prompt(sub) == "SUB-FG do the foreground thing"  # after its <system-reminder> block
-    prompts, stopped = agent_stops([agent_call("toolu_1", "SUB-FG do the foreground thing"), launch_receipt("toolu_1")])
-    assert prompts == {"SUB-FG do the foreground thing": ["toolu_1"]} and stopped == {}  # a launch is no stop
+    by_prompt, stops = agent_runs([agent_call("toolu_1", "SUB-FG do the foreground thing"),
+                                   launch_receipt("toolu_1", agent="a1")])
+    assert by_prompt == {"SUB-FG do the foreground thing": ["toolu_1"]} and stops == {"toolu_1": 0}  # no stop yet
 
 
 def test_a_stopped_background_agent_closes_its_room(kind, tmp_path):
@@ -585,7 +590,8 @@ def test_a_running_background_agent_keeps_its_room(kind, tmp_path):
     store = make_store(kind, tmp_path)
     engine, main, clock = delegated(store)
     clock.now += 300
-    main, closed = main_turn(engine, main, assistant("started"), idle_notification("toolu_other", "completed"))
+    other = idle_notification("toolu_other", "completed", agent="b0ther")
+    main, closed = main_turn(engine, main, assistant("started"), other)
     main, closed2 = main_turn(engine, main, assistant("ok"), user("a new question from the human"))
     main, closed3 = main_turn(engine, main, tool_use(2), tool_result(2))
     assert closed == closed2 == closed3 == [] and len(store.side_rooms()) == 1
@@ -608,13 +614,14 @@ def test_an_unmatched_room_keeps_the_expiry(kind, tmp_path):
 def test_twins_close_only_when_every_call_with_their_prompt_has_stopped(kind, tmp_path):
     store = make_store(kind, tmp_path)
     engine, main, _ = delegated(store, prompt="same prompt")
-    main, _ = main_turn(engine, main, agent_call("toolu_B", "same prompt"), launch_receipt("toolu_B"))
+    main, _ = main_turn(engine, main, agent_call("toolu_B", "same prompt"), launch_receipt("toolu_B", agent="b7win"))
     twin = request(conversation("same prompt", 1))
     engine(twin, {}, MESSAGES)
     respond(engine, twin, 30_000, tool_calls=True, tool_call_ids=("toolu_t",))
     main, closed = main_turn(engine, main, assistant("one done"), idle_notification("toolu_A", "completed"))
     assert closed == [] and len(store.side_rooms()) == 2  # which twin stopped is unknown
-    main, closed = main_turn(engine, main, assistant("both done"), idle_notification("toolu_B", "completed"))
+    twin_done = idle_notification("toolu_B", "completed", agent="b7win")
+    main, closed = main_turn(engine, main, assistant("both done"), twin_done)
     assert len(closed) == 2 and store.side_rooms() == {}
 
 
@@ -630,6 +637,80 @@ def test_a_resumed_agent_keeps_its_new_room(kind, tmp_path):
     respond(engine, resumed, 40_000, tool_calls=True, tool_call_ids=("toolu_r",))
     main, closed = main_turn(engine, main, tool_use(3), tool_result(3))
     assert closed == [] and len(store.side_rooms()) == 1
+
+
+def send_message(call_id, agent="a4f9ecd55b4309f21"):
+    """Main resumes a finished background agent: the call and its measured result."""
+    return [{"role": "assistant", "content": [{"type": "tool_use", "id": call_id, "name": "SendMessage", "input": {
+                "to": agent, "summary": "follow-up", "message": "RESUME also check Y"}}]},
+            {"role": "user", "content": [{"tool_use_id": call_id, "type": "tool_result", "content": [{
+                "type": "text", "text": f'{{"success":true,"message":"Resuming agent {agent[:7]}",'
+                                        f'"resumedAgentId":"{agent}"}}'}]}]}]
+
+
+def resumed_run(engine, sub_input=120_000):
+    """The resumed agent's request: its first run, then the resume message as a new user turn
+    (measured: a plain string starting "The coordinator sent a message while you were working")."""
+    body = request(conversation("subagent", 1) + [tool_use(5), tool_result(5), assistant("run 1 report"), {
+        "role": "user", "content": "The coordinator sent a message while you were working:\nRESUME also check Y"}])
+    engine(body, {}, MESSAGES)
+    respond(engine, body, sub_input, tool_calls=True, tool_call_ids=("toolu_r2",))
+    return body
+
+
+def test_a_resumed_run_closes_on_its_own_stop_notice_not_the_first_runs(kind, tmp_path):
+    """Measured on 2.1.302: a resumed run stops with a notice naming the SendMessage call but the
+    same task id. The room of run 2 needs two stop notices for that agent, so run 1's notice,
+    however late it arrives, does not close it."""
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store)
+    done = loop(request(conversation("subagent", 1)), "s")
+    engine(done, {}, MESSAGES)
+    respond(engine, done, 121_000, tool_calls=False)  # run 1 ends; its room closes on its own
+    assert store.side_rooms() == {}
+    resumed_run(engine)  # run 2 opens a room before main has seen run 1's notice
+    main, closed = main_turn(engine, main, *send_message("toolu_S"), loop_notification("toolu_A", "completed"))
+    assert closed == [] and len(store.side_rooms()) == 1  # one stop so far, run 2's room stays
+    main, closed = main_turn(engine, main, tool_use(7), tool_result(7), loop_notification("toolu_S", "completed"))
+    assert [e["reason"] for e in closed] == ["agent_stopped"] and store.side_rooms() == {}
+
+
+def test_notices_count_only_in_the_measured_shapes(kind, tmp_path):
+    """A notice pasted into a human message, quoted by the assistant, or sent as a plain user text
+    is not evidence; the CLI's own system message is."""
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store)
+    pasted = {"role": "user", "content": "why did I get this earlier?\n" + notification("toolu_A", "completed")}
+    quoted = assistant("The notice said: " + notification("toolu_A", "completed"))
+    blocks = {"role": "user", "content": [{"type": "text", "text": "look at this"},
+                                          {"type": "text", "text": notification("toolu_A", "completed")}]}
+    main, closed = main_turn(engine, main, assistant("started"), pasted, quoted, blocks)
+    assert closed == [] and len(store.side_rooms()) == 1
+    main, closed = main_turn(engine, main, tool_use(8), tool_result(8), loop_notification("toolu_A"))
+    assert [e["reason"] for e in closed] == ["agent_stopped"]
+
+
+def test_unknown_result_shapes_keep_the_room_and_errors_start_no_agent(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store, background=False)
+    odd = {"role": "user", "content": [{"tool_use_id": "toolu_A", "type": "tool_result",
+                                        "content": "Agent moved to the background. agentId: a4f9ecd55b4309f21"}]}
+    main, closed = main_turn(engine, main, odd)
+    assert closed == [] and len(store.side_rooms()) == 1  # an unknown shape is not a stop
+    by_prompt, _ = agent_runs([agent_call("toolu_E", "subagent"), {"role": "user", "content": [
+        {"tool_use_id": "toolu_E", "type": "tool_result", "content": "Agent type not found", "is_error": True}]}])
+    assert by_prompt == {}  # the failed call started no agent, so it blocks no twin's close
+
+
+def test_an_untested_cli_version_only_expires_rooms(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    untested = {"User-Agent": "claude-cli/2.1.400 (external, sdk-cli)"}
+    engine, main, clock = delegated(store, headers=untested)
+    body = request(main["messages"] + [assistant("waiting"), idle_notification("toolu_A")])
+    _, _, events = engine(body, untested, MESSAGES)
+    assert not [e for e in events if e["event"] == "side_room_closed"] and len(store.side_rooms()) == 1
+    clock.now += SIDE_ROOM_TTL_S + 1
+    assert store.side_rooms() == {}
 
 
 def test_a_failed_close_is_logged_and_does_not_degrade(kind, tmp_path):

@@ -131,7 +131,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, ClassVar, NamedTuple, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json
-from contexto.cliversions import ClientVersions
+from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import render_page
@@ -1522,13 +1522,23 @@ def anchor_hash(hashes: tuple[str, ...] | list[str]) -> str:
     return hashlib.sha256("\n".join(hashes).encode("utf-8")).hexdigest()
 
 
-# D40: Claude Code's subagents, as measured on 2.1.302 against a scripted stub (zero spend). Main
-# launches one with an ``Agent`` tool call (``Task`` in earlier releases); the subagent's first user
-# message carries a ``<system-reminder>`` block and then the call's ``prompt`` as its own text block.
+# D40: Claude Code's subagents, as measured on 2.1.302 against a scripted stub (zero spend,
+# spikes/m2/subagents/). Main launches one with an ``Agent`` tool call (``Task`` in earlier releases);
+# the subagent's first user message carries a ``<system-reminder>`` block and then the call's
+# ``prompt`` as its own text block. The call's result is a background launch receipt or a foreground
+# hand-back, each naming the ``agentId``. Each time the agent stops, main gets a ``<task-notification>``
+# naming the launching call's tool-use id; a ``SendMessage`` resume (its result names the
+# ``resumedAgentId``) runs it again, as a new user turn in its own conversation, and that run's notice
+# names the ``SendMessage`` call. ``cliversions.SUBAGENT_SHAPES_TESTED`` names
+# the CLI versions these shapes were measured on; for any other version rooms only expire.
 AGENT_TOOLS = frozenset({"Agent", "Task"})
-ASYNC_LAUNCH = "Async agent launched successfully."  # the tool result of a background launch
-TASK_NOTIFICATION = "<task-notification>"
+ASYNC_LAUNCH = "Async agent launched successfully."  # a background launch's result: the agent runs on
+HAND_BACK = "[Subagent hand-back]"  # a foreground agent's result: it has stopped
+NOTICE_OPENINGS = ("<system-reminder>", "[SYSTEM NOTIFICATION - NOT USER INPUT]")
+TASK_NOTIFICATION = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
 NOTIFIED_CALL = re.compile(r"<tool-use-id>([^<\s]+)</tool-use-id>")
+AGENT_ID = re.compile(r"\bagentId: (\w+)")
+RESUMED_AGENT = re.compile(r'"resumedAgentId"\s*:\s*"(\w+)"')
 
 
 class _SideRoom(NamedTuple):
@@ -1540,7 +1550,7 @@ class _SideRoom(NamedTuple):
     at: float  # the publish time, on the store's clock
     ids: frozenset[str]  # the client tool-call ids its response held
     prompt: str | None  # the conversation's first prompt, to match main's Agent call (Messages only)
-    main_len: int  # main's message count at the publish
+    runs: int  # turn starts in the publishing request: 1, plus one per resume of the agent
 
 
 def _texts(message: dict) -> list[str]:
@@ -1564,35 +1574,88 @@ def first_prompt(messages: list[dict]) -> str | None:
     return None
 
 
-def agent_stops(messages: list[dict]) -> tuple[dict[str, list[str]], dict[str, int]]:
-    """D40: main's ``Agent`` calls by prompt (prompt -> tool-use ids), and the calls whose agent has
-    stopped, each with the index of the latest message that says so: a result that is not the
-    asynchronous launch receipt (a foreground hand-back, completed or interrupted), or a
-    ``<task-notification>`` naming the call (Claude Code sends one, in a ``system`` message during
-    main's tool loop or a ``<system-reminder>`` user message while main is idle, each time a
-    background agent or command stops)."""
-    prompts: dict[str, list[str]] = {}
-    stopped: dict[str, int] = {}
-    for i, message in enumerate(messages):
+def _notice_texts(message: dict) -> list[str]:
+    """The texts of ``message`` that may carry a CLI notice, in the measured shapes only: a ``system``
+    message, or a user message whose content (a string, or its first text block) opens with the
+    ``<system-reminder>`` wrapper or ``[SYSTEM NOTIFICATION - NOT USER INPUT]``. Assistant text and
+    plain user text (a pasted notice) never count."""
+    if message.get("role") == "system":
+        return _texts(message)
+    if message.get("role") != "user":
+        return []
+    content = message.get("content")
+    if isinstance(content, str):
+        first = content
+    else:
+        texts = [b["text"] for b in _blocks(message) if isinstance(b, dict) and b.get("type") == "text"
+                 and isinstance(b.get("text"), str)]
+        first = texts[0] if texts else ""
+    return [first] if first.lstrip().startswith(NOTICE_OPENINGS) else []
+
+
+def _result_text(block: dict) -> str:
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    return "".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
+
+
+def agent_runs(messages: list[dict]) -> tuple[dict[str, list[str | None]], dict[str, int]]:
+    """D40: main's ``Agent`` calls by prompt (prompt -> each call's tool-use id, or None while the
+    call has no result or its result has an unknown shape), and how many times each call's agent has
+    stopped: one per foreground hand-back, plus one per ``<task-notification>`` in a measured notice
+    shape that names the call's tool-use id, or the id of a ``SendMessage`` call whose result says it
+    resumed that call's ``agentId`` (a resumed run's notice names the ``SendMessage``). A call whose
+    result is an error started no agent and is left out."""
+    calls: dict[str, str] = {}  # Agent tool-use id -> prompt
+    agents: dict[str, str | None] = {}  # Agent tool-use id -> agentId, None when not known
+    sends: set[str] = set()  # SendMessage tool-use ids
+    resumes: dict[str, str] = {}  # SendMessage tool-use id -> the agentId it resumed
+    stops: dict[str, int] = {}  # tool-use id (Agent or SendMessage) -> stops recorded under it
+    for message in messages:
         for block in _blocks(message):
             if not isinstance(block, dict):
                 continue
-            if block.get("type") == "tool_use" and block.get("name") in AGENT_TOOLS:
+            if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
                 prompt = (block.get("input") or {}).get("prompt")
-                if isinstance(prompt, str) and isinstance(block.get("id"), str):
-                    prompts.setdefault(prompt, []).append(block["id"])
+                if block.get("name") in AGENT_TOOLS and isinstance(prompt, str):
+                    calls[block["id"]] = prompt
+                    agents.setdefault(block["id"], None)
+                elif block.get("name") == "SendMessage":
+                    sends.add(block["id"])
             elif block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
-                content = block.get("content")
-                text = content if isinstance(content, str) else "".join(
-                    b.get("text", "") for b in content or [] if isinstance(b, dict))
-                if not text.lstrip().startswith(ASYNC_LAUNCH):
-                    stopped.setdefault(block["tool_use_id"], i)  # the hand-back of a foreground agent
-        for text in _texts(message):
-            if TASK_NOTIFICATION in text:
-                for call_id in NOTIFIED_CALL.findall(text):
-                    stopped[call_id] = i
-    agent_ids = {i for ids in prompts.values() for i in ids}
-    return prompts, {call_id: i for call_id, i in stopped.items() if call_id in agent_ids}
+                call_id, text = block["tool_use_id"], _result_text(block).lstrip()
+                if call_id in sends:
+                    resumed = RESUMED_AGENT.search(text)
+                    if resumed and not block.get("is_error"):
+                        resumes[call_id] = resumed.group(1)
+                    continue
+                if call_id not in calls:
+                    continue
+                found = AGENT_ID.search(text)
+                if block.get("is_error"):
+                    agents.pop(call_id, None)  # no agent was started
+                elif found and text.startswith(ASYNC_LAUNCH):
+                    agents[call_id] = found.group(1)
+                elif found and text.startswith(HAND_BACK):
+                    agents[call_id] = found.group(1)
+                    stops[call_id] = stops.get(call_id, 0) + 1
+        for text in _notice_texts(message):
+            for notice in TASK_NOTIFICATION.findall(text):
+                named = NOTIFIED_CALL.search(notice)
+                if named:
+                    stops[named.group(1)] = stops.get(named.group(1), 0) + 1
+    by_prompt: dict[str, list[str | None]] = {}
+    totals: dict[str, int] = {}
+    for call_id, prompt in calls.items():
+        if call_id not in agents:
+            continue
+        agent = agents[call_id]
+        by_prompt.setdefault(prompt, []).append(call_id if agent is not None else None)
+        if agent is not None:
+            totals[call_id] = stops.get(call_id, 0) + sum(
+                stops.get(send, 0) for send, resumed in resumes.items() if resumed == agent)
+    return by_prompt, totals
 
 
 def preamble_sha256(config: Config, pinned_text: str, index_text: str) -> str:
@@ -1686,7 +1749,6 @@ class RewriteEngine:
         # D38: which CLI version sends the requests, and was the session start recognised?
         self.clients = ClientVersions()
         self._side_rooms: dict[str, _SideRoom] = {}  # D40: the side rooms this engine opened, by id
-        self._main_len = 0  # D40: the message count of main's latest request
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -1931,24 +1993,27 @@ class RewriteEngine:
 
     def _close_finished_side_rooms(self, messages: list[dict], dialect: Dialect, events: list[dict]) -> None:
         """D40: called for each main request. A side room closes early only on evidence in main's own
-        history that the subagent holding it has stopped. The subagent is matched by its first
-        prompt, which Claude Code 2.1.302 sends exactly as the ``prompt`` of main's ``Agent`` (or
-        ``Task``) call. The evidence (``agent_stops``) is a result for that call that is not the
-        asynchronous launch receipt (a foreground hand-back, completed or interrupted), or a
-        ``<task-notification>`` naming the call's tool-use id (sent when the agent stops: completed,
-        failed, or killed). The evidence must come after the room's publish (at a message index at
-        least main's message count then), so an agent resumed after an earlier stop keeps its new
-        room, and every ``Agent`` call with that prompt must have stopped (twins). Rooms matching no
-        call, and agents still running in the background, keep the 15-minute expiry. Logged as
-        ``side_room_closed`` with reason ``agent_stopped``."""
-        self._main_len = len(messages)
+        history that every run of the agent holding it has stopped (``agent_runs``). The agent is
+        matched by the room's first prompt, which Claude Code sends unchanged as the ``prompt`` of
+        main's ``Agent`` (or ``Task``) call, and named by the ``agentId`` in that call's result. The
+        room was published in its agent's run ``room.runs`` (the turn starts in its request: one, plus
+        one per ``SendMessage`` resume), so it closes when that agent's stops (foreground hand-backs
+        and ``<task-notification>`` notices in the measured shapes) number at least that many: a late
+        notice of an earlier run cannot close a later run's room, whatever the order. Every ``Agent``
+        call with that prompt must be known and stopped that often (twins). Rooms matching no call,
+        calls without a result or with a result of an unknown shape, agents still running, any Codex
+        room, and every room when the CLI version is not one the shapes were measured on
+        (``SUBAGENT_SHAPES_TESTED``) keep the 15-minute expiry. Logged as ``side_room_closed`` with
+        reason ``agent_stopped``."""
         if not self._side_rooms or dialect.name != "anthropic":
             return
-        prompts, stopped = agent_stops(messages)
+        if self.clients.latest.get("claude") not in SUBAGENT_SHAPES_TESTED:
+            return
+        by_prompt, stops = agent_runs(messages)
         doomed = []
         for room_id, room in self._side_rooms.items():
-            ids = prompts.get(room.prompt) if room.prompt else None
-            if ids and all(i in stopped for i in ids) and max(stopped[i] for i in ids) >= room.main_len:
+            agent_calls = by_prompt.get(room.prompt) if room.prompt else None
+            if agent_calls and all(c is not None and stops.get(c, 0) >= room.runs for c in agent_calls):
                 doomed.append(room_id)
         if not doomed:
             return
@@ -1970,8 +2035,8 @@ class RewriteEngine:
         prompt, or a side request that forks one, share a key but must not share a room. Each room
         remembers the request that published it (its message count and anchor hash), the ids of the
         client tool calls its response held (``call_ids``, from the proxy), the conversation's first
-        prompt (to match main's ``Agent`` call, see ``_close_finished_side_rooms``), and main's
-        message count at the publish. A request continues a room when it extends that room's
+        prompt (to match main's ``Agent`` call, see ``_close_finished_side_rooms``), and the request's
+        turn starts (the agent's run). A request continues a room when it extends that room's
         request, adds no turn start, and (for a room recorded with ids) returns a result
         (``tool_result``, ``*_call_output``) for one of those ids. A twin carries its own ids and
         cannot match. A fork that copies results for the room's calls does match; that is harmless
@@ -2020,8 +2085,9 @@ class RewriteEngine:
         room_id = continued or f"{key}#{secrets.token_hex(4)}"
         calls.set_side_room(room_id, room)
         prompt = first_prompt(messages) if dialect.name == "anthropic" else None
+        runs = len(_turn_starts(messages, dialect))
         self._side_rooms[room_id] = _SideRoom(key, len(messages), anchor_hash(hashes), now, frozenset(call_ids),
-                                              prompt, self._main_len)
+                                              prompt, runs)
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:

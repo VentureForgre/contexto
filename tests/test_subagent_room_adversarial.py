@@ -7,7 +7,9 @@ Code's default 2-minute Bash timeout; it is kept with the 10-minute maximum, and
 the documented limit for a call that starts after the expiry. Of the round-3 placeholder-fork
 probes, the first passes and the second is a documented limitation (strict xfail). The round-4
 probe (a CLI-injected turn closing a running background subagent's room) passes since rooms close
-early only on evidence that their own agent stopped.
+early only on evidence that their own agent stopped. The round-5 probes (a late notice of a resumed
+agent's first run, a pasted notice, a twin's and another task's notices) pass since a room needs as
+many stops as its agent has runs, and notices count only in the measured shapes.
 """
 
 from __future__ import annotations
@@ -259,3 +261,55 @@ def test_probe_idle_close_takes_a_running_background_subagents_room(tmp_path):
     clock.now += 60  # B's Bash ends at 3 minutes; its recall starts
     _, charged = recall(store, big_page(store))
     assert charged <= room_for(120_000, 1_000)
+
+
+def _bg(tmp_path):
+    from test_subagent_room import delegated
+    store = SessionStore(tmp_path, "s1")
+    engine, main, clock = delegated(store)  # background agent toolu_A, prompt "subagent", room 4,000
+    return store, engine, main, clock
+
+
+def test_probe_resumed_agent_closed_by_the_late_notice_of_its_first_run(tmp_path):
+    """X finishes run 1 while main is in a step [SendMessage(X), Bash 30 s]. The SendMessage resumes X,
+    and X's resumed first response publishes its new room before main's next request. That request
+    carries the notice of run 1 (index >= the new room's main_len), which closes the resumed run's room."""
+    from test_rewrite import tool_result, tool_use
+    from test_subagent_room import main_turn
+    store, engine, main, clock = _bg(tmp_path)
+    final = request(conversation("subagent", 1) + [tool_use("s"), tool_result("s")])
+    engine(final, {}, MESSAGES)
+    respond(engine, final, 121_000, 50, tool_calls=False)  # run 1 ends: its room closes (no tool call)
+    send = {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_S", "name": "SendMessage",
+         "input": {"to": "a4f9ecd55b4309f21", "message": "also check Y"}},
+        {"type": "tool_use", "id": "toolu_bash", "name": "Bash", "input": {"command": "sleep 30"}}]}
+    resumed = request(final["messages"] + [assistant("run 1 report"), user("also check Y")])
+    engine(resumed, {}, MESSAGES)
+    respond(engine, resumed, 120_000, 1_000, tool_calls=True, tool_call_ids=("toolu_r",))  # run 2: 4,000
+    results = {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_S", "content": "Message sent"},
+        {"type": "tool_result", "tool_use_id": "toolu_bash", "content": ""}]}
+    from test_subagent_room import loop_notification
+    main, closed = main_turn(engine, main, send, results, loop_notification("toolu_A", "completed"))
+    _, charged = recall(store, big_page(store))  # run 2's in-flight call
+    assert charged <= room_for(120_000, 1_000)
+
+
+def test_probe_pasted_notification_closes_a_running_agents_room(tmp_path):
+    from test_subagent_room import main_turn, notification
+    store, engine, main, clock = _bg(tmp_path)
+    pasted = "why did I get this earlier?\n" + notification("toolu_A", "completed")
+    main, closed = main_turn(engine, main, assistant("started"), {"role": "user", "content": pasted})
+    _, charged = recall(store, big_page(store))
+    assert charged <= room_for(120_000, 1_000)
+
+
+def test_probe_notification_for_another_id_and_one_twin_stopping(tmp_path):
+    from test_subagent_room import agent_call, launch_receipt, main_turn, idle_notification
+    store, engine, main, clock = _bg(tmp_path)
+    main, _ = main_turn(engine, main, agent_call("toolu_B", "subagent"), launch_receipt("toolu_B"))
+    main, c1 = main_turn(engine, main, assistant("x"), idle_notification("toolu_B", "completed"))  # the twin stops
+    main, c2 = main_turn(engine, main, assistant("y"), idle_notification("toolu_Z", "completed"))  # another task
+    _, charged = recall(store, big_page(store))
+    assert c1 == c2 == [] and charged <= room_for(120_000, 1_000)

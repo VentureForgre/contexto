@@ -9,8 +9,9 @@ bodies stay in that directory and are not committed.
 - `run.sh <name> <scenario.py> <prompt>`: print mode (`claude -p`).
 - `drive.py <name> esc|bgidle`: interactive mode in a pty; `esc` presses Esc while the subagent's
   tool runs and then types a new prompt.
-- `esc_scenario.py` (`SCEN_MODE` = `fg`, `stop`, `esc`, `bgidle`) and `bg_scenario.py` (a foreground
-  and a background agent plus a background Bash at once) script the stub's replies.
+- `esc_scenario.py` (`SCEN_MODE` = `fg`, `stop`, `esc`, `bgidle`), `bg_scenario.py` (a foreground
+  and a background agent plus a background Bash at once), and `resume_scenario.py` (a background
+  agent resumed twice with `SendMessage`) script the stub's replies.
 - `show.py <capture dir>` prints each captured request's messages in short form.
 
 Measured on 2026-10-24 (claude-haiku-5-5 model id, nonessential traffic off):
@@ -34,6 +35,12 @@ Measured on 2026-10-24 (claude-haiku-5-5 model id, nonessential traffic off):
 5. A background agent stopped with `TaskStop` gives a notification with `<status>killed</status>`.
 6. A human prompt typed in interactive mode arrives as a user message whose content is a plain
    string.
+7. A finished background agent resumed with `SendMessage` (`resume_scenario.py`, twice): main's
+   `SendMessage` result is `{"success":true,"message":"Resuming agent ...","resumedAgentId":"<agentId>",...}`.
+   The subagent's next request is its whole earlier conversation plus a new user message, a plain
+   string starting `The coordinator sent a message while you were working:`, so each resume adds a
+   turn start to its conversation. When the resumed run stops, the notice's `<task-id>` is the same
+   `agentId` but its `<tool-use-id>` is the `SendMessage` call's id, not the `Agent` call's.
 
 Not captured: the tool result of a foreground subagent interrupted by Esc, since every interactive
 launch ran in the background.
