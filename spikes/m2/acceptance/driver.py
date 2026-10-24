@@ -11,7 +11,7 @@ The guard reserves the full output allowance before every turn and stops the run
 passing the approved budget.
 
 Credential (intake, D12): the run uses an isolated Claude Code config directory in the scratch
-directory, so the owner's claude.ai login is never found. Its settings.json names ``keyhelper.py``
+directory, so the user's claude.ai login is never found. Its settings.json names ``keyhelper.py``
 as the apiKeyHelper, with only the path of the seat's settings file as argument; the seat's own
 helper runs at call time, read-only. No key and no copy of the helper command is written anywhere.
 Credential variables are removed from the child environment. The first 401 or 403 in the session

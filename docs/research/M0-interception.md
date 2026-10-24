@@ -544,7 +544,7 @@ recalled pages, which the proxy's stubbing then has to handle like any other too
 policy proposed in lane 2's PR #7 (reviewer-2 finding B3 there). The two documents must agree before
 intake merges the recommendation; this document does not resolve it.
 
-## 6. Auth and terms (question 5)
+## 6. Auth (question 5)
 
 ### Claude Code
 
@@ -564,12 +564,6 @@ intake merges the recommendation; this document does not resolve it.
   `anthropic-beta`, `anthropic-version`, `x-app`, `x-claude-code-session-id`, `x-stainless-*`. With the
   seat's `apiKeyHelper` (recipe proof): both `authorization` and `x-api-key`. Subscription-mode
   headers were not captured.
-- **Terms** [documented: https://code.claude.com/docs/en/legal-and-compliance]: OAuth is "designed to
-  support ordinary use of Claude Code"; developers may not "route requests through Free, Pro, or Max
-  plan credentials on behalf of their users" or "collect, store, or intermediate Claude.ai
-  credentials or session tokens"; an end user may sign in "to the unmodified Claude Code binary with
-  their own Claude subscription". Consumer Terms (effective 2025-10-08) forbid automated access
-  except with an API key or where Anthropic otherwise explicitly permits it (https://www.anthropic.com/legal/consumer-terms).
 
 ### Codex
 
@@ -582,17 +576,11 @@ intake merges the recommendation; this document does not resolve it.
   `Authorization: Bearer <key>`; ChatGPT mode `Authorization: Bearer <access token>` plus
   `ChatGPT-Account-ID`. Measured with a dummy key: `authorization` on both the WebSocket upgrade and
   the HTTP POST [measured: `run.sh cx-hooks`, names only].
-- **Terms** [documented: https://openai.com/policies/terms-of-use/, effective 2026-01-01]: "You may
-  not share your account credentials", and users may not "Automatically or programmatically extract
-  data or Output" or "circumvent any rate limits". Codex docs: "Use API key authentication for
-  programmatic Codex CLI workflows" (https://learn.chatgpt.com/docs/auth).
 
-### Reading (inferred, not legal advice)
+### Credential mode
 
-A local proxy that the owner points their own unmodified CLI at is a configuration both vendors
-document. A product that intermediates subscription tokens, or heavy automated rewriting of
-subscription traffic, is where the terms bite. API-key auth through the proxy is the lowest-risk
-path for both CLIs. The decision belongs to the owner (section 10).
+Both CLIs send API-key and login credentials to a custom base URL, so a local proxy sees whichever
+one the CLI uses. Which modes Contexto routes is an owner decision (section 10).
 
 ## 7. Experiments and reproduction
 
@@ -723,7 +711,7 @@ files, names and counts only].
 | 22:52:56 to 22:55:22 | `claude-fable-5-1` | 10 | 401 on every request; stopped by a 150 s alarm |
 
 - **Credential type:** both runs ran outside the seat worktree, so they did not load the seat's
-  `apiKeyHelper` and fell back to the owner's claude.ai subscription OAuth login (`anthropic-beta`
+  `apiKeyHelper` and fell back to a claude.ai subscription OAuth login (`anthropic-beta`
   included `oauth-2025-04-20`). With the inherited `ANTHROPIC_BASE_URL`, that credential went to the
   rig proxy, which answered 401 each time.
 - **Not checked:** whether the rig proxy logs authorization headers.
@@ -774,11 +762,10 @@ missed [measured by manager-1; reading inferred].
 
 ## 10. Owner decisions
 
-1. **Credential mode for any rewriting proxy (Q5).** Route API-key traffic only, or also the owner's
-   Claude subscription and ChatGPT login. Both vendors' terms restrict intermediating subscription
-   credentials (section 6). This gates phase 2.
-2. **Live calls on the owner's subscription for experiments.** Decided by the owner for Codex: the
-   `labcodex.subject` seat runs on the owner's ChatGPT login (decision record on queue row
+1. **Credential mode for any rewriting proxy (Q5).** Route API-key traffic only, or also claude.ai
+   and ChatGPT logins (section 6). This gates phase 2.
+2. **Live calls on a subscription login for experiments.** Decided by the owner for Codex: the
+   `labcodex.subject` seat runs on a ChatGPT login (decision record on queue row
    `qitem-20261015224601-10ad09bd`). Claude live runs in lane 1 use the seat's proxy credential
    through the proven recipe, or zero-spend stubs.
 3. **Dependence on undocumented behavior.** PreCompact stdout steering in Claude Code works today
@@ -789,7 +776,7 @@ missed [measured by manager-1; reading inferred].
    keeps the CLI's history smaller but needs a shadow history and stream stitching.
 6. **Rewriting the `usage` a proxy reports to the CLI** (section 3). It would steer the CLI's
    compaction decision, but it changes what the owner's tool reports about real consumption.
-7. **Preserved-thinking status of the owner's Anthropic account** (section 4). A fact to check
+7. **Preserved-thinking status of the Anthropic account phase 2 uses** (section 4). A fact to check
    rather than a choice: accounts created on or after 2026-08-31 get the prefix check by default.
    Lane 2's probe account dropped turns without error but rejected edits before signed thinking;
    the owner should confirm the account phase 2 would use behaves the same.

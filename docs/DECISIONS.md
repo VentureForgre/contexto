@@ -11,8 +11,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   The owner's one limit: nothing is published outside this repository (no PyPI, npm, Homebrew,
   public repos, or public posts). (Superseded in part by D42: the repository itself is now public;
   the rest of the limit stands.) Intake added two limits of its own: the owner's personal Claude
-  and Codex configuration is not changed, and heavy spend on the owner's ChatGPT plan waits for
-  the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
+  and Codex configuration is not changed, and heavy spend on the ChatGPT-login test seat (D8) waits
+  for the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
   including the M0 brief's Q5 gate (see D12).
 
 ## Product direction
@@ -46,9 +46,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   (Claude Code, claude-haiku-5-5) and `labcodex.subject` (Codex, gpt-6-astra) are real long-running
   OpenRig seats, the owner's actual use case, and avoid builder-seat hook and resume-token
   collisions.
-- **D8. Seats stay on `builtin:yolo`; the Codex test seat uses the owner's ChatGPT login.** Owner,
+- **D8. Seats stay on `builtin:yolo`; the Codex test seat uses a ChatGPT login.** Owner,
   2026-10-15. Under yolo Codex drops `-p` profiles and project-local config cannot set
-  `model_provider`, so routing the seat to the rig proxy would change the owner's personal default.
+  `model_provider`, so routing the seat to the rig proxy would change the user-level Codex default.
 - **D9. The 2M compaction-loss run was replaced by a quality-versus-context-size probe.** Intake under
   D2, 2026-10-15. Forcing a session into compaction measures the wrong thing; the probe finds the
   context size where recall starts to slip, which bounds the working window.
@@ -63,8 +63,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   2026-10-15. The M0 brief gated rewriting on an owner decision about Q5; the owner delegated that
   decision through D0. This settles Q5 for development: rewriting experiments run through the
   owner's proxy with the rig key (Claude) or the same proxy through a throwaway `CODEX_HOME` whose
-  provider uses `auth.command` (Codex). Rewritten traffic never uses the owner's ChatGPT or
-  claude.ai subscription login, and the owner's own config files are never edited. What end users
+  provider uses `auth.command` (Codex). Rewritten traffic never uses a ChatGPT or claude.ai
+  login, and user-level config files are never edited. What end users
   should use is a product documentation question, listed under open decisions.
 
 - **D16. Phase 2 attaches through a launcher wrapper.** Intake under D0, 2026-10-15. Measured by
