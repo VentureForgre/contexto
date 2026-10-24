@@ -374,6 +374,114 @@ What the numbers show:
   scan stops when none is left. A query whose every word is on nearly every page still costs one
   scan per word (3 such words: 0.75 s before and after).
 
+## D41: BM25's length term on pages sized like real turns (2026-10-24)
+
+The D34 runs above could not test BM25's length discount: every synthetic page is 19,000 to 30,000
+tokens. Reviewer-2's 13-turn unit cases showed it can bury the long turn that states the current
+value under short older pages (`tests/test_search_rank.py`). D41 (`docs/DECISIONS.md`) drops the
+length term (BM25 with b 0). What was added to measure it:
+
+- `scale_bench.py --page-sizes calibration` (and `scale_synth.calibrated_goal`) draws each turn's
+  token goal from a lognormal fitted to `calibration.json`'s real turn sizes: mu is the log of the
+  median (1,947), sigma 1.98 is the mean of the fits through the 90th and 95th percentiles (24,649
+  and 50,840), capped at the largest real turn (566,461). The rest of each turn's random draws are
+  unchanged. Every turn still holds at least one tool call, and each plant and distractor its own,
+  so small goals come out larger: pages are 112 to 571,844 tokens, median 5,509, at 6,000 pages
+  (real median 1,947).
+- `quality.csv` has a `stale_only` column: a changing value whose older page is among the 3
+  detailed hits while its latest page is not.
+- `scale_length.py` builds one store per page-size model and size, then runs every probe query
+  in-process under each ranking: D34's `rank` read from git at `4b87ec2` with b 0.75, 0.5, 0.3, 0;
+  this tree's `rank` (`d41`); and three prototypes that take length text by text (a text is one
+  stub field or one text, tool input, or tool output): `texts` (length of the texts holding a query
+  word, against its mean over the matches), `fields` (BM25F against the store's mean text length),
+  and `floored` (the same BM25F with each text at least the mean). It also runs reviewer-2's 13-turn
+  cases under each.
+
+Commands (this machine, M5 Pro; quality is deterministic, so load does not matter for it):
+
+```
+.venv/bin/python spikes/m2/scale/store/scale_length.py --sizes 17,1000,3000,6000 --out results/d41/length
+.venv/bin/python spikes/m2/scale/store/scale_length.py --sizes 1000,6000 --floor 0.002 \
+    --out results/d41/length/floor_0.002
+# before: a `git archive` of 4b87ec2 (D34) with this branch's spikes/m2/scale/store/*.py copied in
+<before>/spikes/m2/scale/store/scale_bench.py --sizes 17,1000,3000,6000 --responses-sizes 1000 --passes 1 \
+    --profile-n 0 --page-sizes spike --out results/d41/before_spike         # and --page-sizes calibration
+.venv/bin/python spikes/m2/scale/store/scale_bench.py --sizes 17,1000,3000,6000 --responses-sizes 1000 \
+    --passes 1 --profile-n 0 --page-sizes spike --out results/d41/after_spike  # and --page-sizes calibration
+```
+
+### Ranking variants (`results/d41/length/summary.md`)
+
+Top 3: planted page among the 3 detailed hits (of 86). Latest: changing values whose first value page
+shown is the latest (of 24). Stale: an older value shown in detail and the latest not (of 24).
+Facts: facts with a query in the top 3 (of 30). `page b=0.75` is D34; `d41` ranks as `page b=0`.
+
+| pages | N | D34 (page b=0.75) | page b=0.5 | page b=0.3 | D41 (b 0) | texts b=0.75 | fields b=0.75 | fields b=0.3 | floored b=0.75 |
+|---|---:|---|---|---|---|---|---|---|---|
+| spike | 1,000 | 63 / 21 / 0 | 63 / 21 / 0 | 63 / 21 / 0 | 63 / 21 / 0 | 60 / 20 / 0 | 63 / 21 / 0 | 63 / 21 / 0 | 63 / 21 / 0 |
+| spike | 3,000 | 60 / 21 / 0 | 60 / 21 / 0 | 60 / 21 / 0 | 60 / 21 / 0 | 55 / 19 / 0 | 57 / 21 / 0 | 59 / 21 / 0 | 59 / 21 / 0 |
+| spike | 6,000 | 56 / 20 / 0 | 58 / 21 / 0 | 57 / 20 / 0 | 58 / 20 / 0 | 51 / 17 / 0 | 53 / 20 / 0 | 54 / 20 / 0 | 56 / 20 / 0 |
+| real | 1,000 | 61 / 20 / 0 | 62 / 21 / 0 | 63 / 21 / 0 | 63 / 21 / 0 | 60 / 20 / 0 | 63 / 21 / 0 | 63 / 21 / 0 | 63 / 21 / 0 |
+| real | 3,000 | 57 / 20 / 0 | 58 / 21 / 0 | 59 / 21 / 0 | 60 / 21 / 0 | 55 / 19 / 0 | 57 / 21 / 0 | 59 / 21 / 0 | 59 / 21 / 0 |
+| real | 6,000 | 53 / 17 / 3 | 55 / 19 / 2 | 54 / 19 / 2 | 58 / 20 / 0 | 48 / 13 / 3 | 53 / 20 / 0 | 54 / 20 / 0 | 56 / 20 / 0 |
+| 13-turn cases fixed (of 3) | | 0 | 0 | 0 | 3 | 3 | 3 | 3 | 3 |
+
+Each cell is top 3 / latest / stale. Facts: 29 of 30 for every variant at 1,000 to 6,000 except D34,
+`page b=0.5` and `page b=0.3` (28) and `texts` (27) at 6,000 real-size pages; 30 of 30 for every
+variant at 17 pages, where every variant scores 71 / 21 / 0. With the 0.2 percent topic floor
+(`results/d41/length/floor_0.002/`), top 3 / latest / stale / facts:
+
+| pages | N | D34 | D41 | fields b=0.75 | floored b=0.75 |
+|---|---:|---|---|---|---|
+| spike | 1,000 | 59 / 20 / 0 / 27 | 60 / 21 / 0 / 27 | 57 / 21 / 0 / 27 | 60 / 21 / 0 / 27 |
+| spike | 6,000 | 41 / 17 / 0 / 24 | 44 / 19 / 0 / 24 | 34 / 19 / 0 / 20 | 44 / 19 / 0 / 24 |
+| real | 1,000 | 56 / 20 / 0 / 27 | 60 / 21 / 0 / 27 | 57 / 21 / 0 / 27 | 60 / 21 / 0 / 27 |
+| real | 6,000 | 29 / 15 / 2 / 17 | 44 / 19 / 0 / 24 | 34 / 19 / 0 / 20 | 44 / 19 / 0 / 24 |
+
+What the numbers show:
+
+- On pages sized like real turns, D34's length discount shows the bug in the harness: at 6,000
+  pages 3 changing-value queries show an older value in detail and not the latest. D41 shows none,
+  and has 5 more queries in the top 3 (58 against 53), 3 more latest-first (20 against 17).
+- Every variant with a length term lost hits as b rose, on both page-size models. D41 is never
+  worse than D34 in any column of any row, and on spike-size pages, where length hardly varies, it
+  matches D34 except at 6,000 (58 against 56).
+- Taking length text by text fixes the 13-turn cases but costs elsewhere. With the length of the
+  matching texts, a plant whose value is also in a long tool output loses to one-line distractors.
+  With BM25F, a text shorter than the mean is boosted, so one mention in a short line nearly
+  saturates and saying the word in 2 or 3 places stops counting: every query it loses against D41 is
+  a static fact whose plant says the query in more than one place (`bucket`, `backup`, `flag`,
+  `on-call`, `shard map`, `ticket`). Flooring each text's length at the mean recovers most of that and ties D41 with the topic
+  floor, but is 1 to 2 below it at 3,000 and 6,000 without the floor.
+- Not measured: how often real turns repeat a query word. Each distractor here is one line, so a
+  long log that repeats a word, the case a length discount exists for, is absent. Under D41 such a
+  page gains at most k1 + 1 = 2.2 times a single mention (`tests/test_search_rank.py`).
+
+### Before and after on the main harness (`results/d41/before_*`, `results/d41/after_*`)
+
+`scale_compare.py results/d41/before_spike results/d41/after_spike`, and the same for
+`calibration`. One timing pass each, run back to back, so latency is a rough guide (the D34 runs used
+3 passes). Quality is the same as `scale_length.py`'s.
+
+| pages | N | dialect | run | top 3 | latest | facts | value shown | search rare / common / multi, s | first search, s | MCP peak RSS MB |
+|---|---:|---|---|---:|---:|---:|---:|---|---:|---:|
+| spike | 1,000 | messages | before / after | 63 / 63 | 21 / 21 | 29 / 29 | 57 / 57 | 0.017 / 0.041 / 0.040, 0.015 / 0.040 / 0.039 | 0.133, 0.125 | 76, 76 |
+| spike | 3,000 | messages | before / after | 60 / 60 | 21 / 21 | 29 / 29 | 54 / 54 | 0.047 / 0.088 / 0.117, 0.046 / 0.088 / 0.118 | 0.397, 0.397 | 162, 162 |
+| spike | 6,000 | messages | before / after | 56 / 58 | 20 / 20 | 29 / 29 | 50 / 52 | 0.093 / 0.158 / 0.233, 0.098 / 0.170 / 0.235 | 0.764, 0.783 | 290, 291 |
+| spike | 1,000 | responses | before / after | 63 / 63 | 21 / 21 | 29 / 29 | 54 / 54 | 0.016 / 0.044 / 0.040, 0.018 / 0.043 / 0.041 | 0.140, 0.149 | 76, 76 |
+| real | 1,000 | messages | before / after | 61 / 63 | 20 / 21 | 29 / 29 | 55 / 57 | 0.013 / 0.042 / 0.025, 0.011 / 0.059 / 0.024 | 0.099, 0.095 | 68, 80 |
+| real | 3,000 | messages | before / after | 57 / 60 | 20 / 21 | 29 / 29 | 51 / 54 | 0.036 / 0.077 / 0.074, 0.036 / 0.101 / 0.078 | 0.315, 0.306 | 118, 155 |
+| real | 6,000 | messages | before / after | 53 / 58 | 17 / 20 | 28 / 29 | 47 / 52 | 0.067 / 0.148 / 0.141, 0.069 / 0.166 / 0.144 | 0.587, 0.610 | 204, 237 |
+| real | 1,000 | responses | before / after | 61 / 63 | 20 / 21 | 29 / 29 | 52 / 54 | 0.012 / 0.047 / 0.025, 0.012 / 0.067 / 0.024 | 0.106, 0.112 | 66, 81 |
+
+`index_text` is unchanged (it does not rank). On real-size pages a word on every page (the common
+latency queries `self`, `return`, `import`) now puts the long pages that say it most among the 3
+detailed hits: at 3,000 pages the detailed pages for `return` were 894, 82,035, and 72,118 tokens
+before and 894, 82,035, and 164,431 after (a scratch check, in-process). Reading and rendering
+them is why common-word search takes 0.02 s longer and the MCP child's peak memory is 12 to 37 MB
+higher. Rare and multi-word queries, the kind the probes use, are unchanged.
+
 ## Files
 
 - `scale_bench.py`: the harness (store build, stdio and in-process timing, quality, profile, summary).
@@ -383,7 +491,11 @@ What the numbers show:
 - `scale_fts_proto.py`: the text-cache, FTS5 trigram, and BM25 prototypes.
 - `scale_compare.py`: the before and after table of D34 from two result directories.
 - `scale_long_query.py`: `rank` before and after word-by-word narrowing, on queries of 1 to 120 words.
+- `scale_length.py`: BM25 length models and b on spike-size and real-size pages, and reviewer-2's
+  13-turn cases (D41).
 - `test_scale_store.py`: fast checks of the helpers (about 0.5 s, part of the default suite).
 - `results/`: `stores.csv`, `latency.csv` (every call), `quality.csv` (every probe query), `df.csv`,
   `profile_3000.txt`, `env.json`, `summary.md`, `fts_*`, and `floor_0.002/`; `d34_before/` and
-  `d34_after/` (with `d34_after/floor_0.002/` and `long_query.txt`) are the same outputs from the D34 runs.
+  `d34_after/` (with `d34_after/floor_0.002/` and `long_query.txt`) are the same outputs from the D34 runs;
+  `d41/` holds `length/` (with `floor_0.002/`) from `scale_length.py` and the D41 before and after
+  runs of `scale_bench.py` for each page-size model.
