@@ -14,7 +14,16 @@ from contexto.proxy import AFFINITY_HEADER, ContextoProxy, affinity_key, is_vend
 from contexto.store import SessionStore
 from contexto.store.memory import MemoryStore
 from test_proxy_server import (  # noqa: F401
-    AUTH, REQUEST, REQUEST_BYTES, SECRET, MemoryLog, StubEngine, Upstream, call, make_proxy, upstream,
+    AUTH,
+    REQUEST,
+    REQUEST_BYTES,
+    SECRET,
+    MemoryLog,
+    StubEngine,
+    Upstream,
+    call,
+    make_proxy,
+    upstream,
 )
 
 SALT = bytes(range(32))
@@ -111,7 +120,8 @@ def test_a_failed_transform_still_sends_the_key(make_proxy):
 def test_codex_session_signals_pass_through_with_the_key(make_proxy):
     proxy, _ = make_proxy(affinity_key=KEY)
     body = json.dumps({"model": "gpt-6-astra", "prompt_cache_key": "thread-1", "stream": True,
-                       "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]},
+                       "input": [{"type": "message", "role": "user",
+                                  "content": [{"type": "input_text", "text": "hi"}]}]},
                       separators=(",", ":")).encode()
     headers = {"Content-Type": "application/json", "Authorization": "Bearer k", "session-id": "thread-1"}
     call(proxy, "POST", "/responses", body, headers)
@@ -176,7 +186,8 @@ def test_no_salt_is_created_for_a_vendor_upstream(tmp_path):
     for url in ("https://api.anthropic.com", "https://chatgpt.com/backend-api/codex", "https://x.services.ai.azure.com"):
         assert launcher.session_affinity_key(store, url) is None
     assert not (tmp_path / AFFINITY_SALT_FILE).exists()  # not created, so nothing to fail on either
-    assert launcher.session_affinity_key(store, "https://cpa.example.com") == affinity_key("s1", affinity_salt(tmp_path))
+    assert (launcher.session_affinity_key(store, "https://cpa.example.com")
+            == affinity_key("s1", affinity_salt(tmp_path)))
 
 
 def test_start_proxy_keys_the_header_by_session_and_install_salt(tmp_path):

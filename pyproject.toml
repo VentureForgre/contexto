@@ -46,3 +46,6 @@ extend-immutable-calls = [
 [tool.ruff.lint.per-file-ignores]
 # Research spikes are frozen measurement code that docs/research cites; long lines are left as written.
 "spikes/**" = ["E501"]
+# It imports pytest fixtures from test_proxy_server and takes them as parameters, which F811 reads
+# as redefinitions.
+"tests/test_upstream_affinity.py" = ["F811"]
