@@ -57,8 +57,9 @@ jobs:
         with:
           # uv downloads this CPython when the runner lacks it.
           python-version: ${{ matrix.python }}
+      # pytest is pinned for the same reason as Ruff.
       - name: Run pytest
-        run: uv run --with pytest pytest
+        run: uv run --with pytest==9.1.1 pytest
       - name: Check that the package builds
         run: uv build --out-dir "$RUNNER_TEMP/dist"
 

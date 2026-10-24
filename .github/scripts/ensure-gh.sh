@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Make the GitHub CLI available to the release jobs. GitHub-hosted runners ship gh; the org's
-# self-hosted runner does not, and a release without gh publishes no sdist or wheel (v0.2.2).
+# Make the GitHub CLI available to the release jobs. The GitHub-hosted runners they run on ship gh,
+# so this normally only reports its version. The install below is a fallback for a runner without
+# gh, since a release without gh publishes no sdist or wheel (v0.2.2).
 #
 # If gh is already on PATH it is used as is. Otherwise a pinned gh release is downloaded into
 # RUNNER_TEMP, its archive checked against the SHA-256 published in that release's checksums
