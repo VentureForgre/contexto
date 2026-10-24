@@ -393,49 +393,63 @@ the owner's delegation. Open decisions are listed at the end with the options an
   written by `page_out` for both processes (rejected for now: a new store file that must stay
   consistent with quarantine, with a crash between the page and the manifest write, and with
   stub-rule changes such as `current_stub`, to save one read of every page after a proxy restart).
-- **D36. One session reaches one upstream credential: the CLI's session signals plus Contexto's
-  `X-Session-Affinity`, and consistent-hash affinity on the owner's proxy; this settles O6.** Owner
-  request ("improve this"), 2026-10-24, including the contract change. Cause, measured read-only on
-  the live deployment (kubectl, 2026-10-24; only the routing section and a count of credential files
-  were read): `cliproxy.sullylab.de` is the `cliproxy-cluster` Deployment, 4 serving pods at the time
-  (HPA 3 to 50) behind one Service, each running CLIProxyAPI v7.3.12 (pinned `2eb8dd11`) behind a
-  gateway that forwards client headers unchanged; the config has `routing.strategy: round-robin` and
-  no session affinity; each pod holds 4 Claude credential files. Inferred: each pod rotates its own
-  counter over the Claude credentials and the Service picks a pod per request, which gives O6's 3
-  classes. CLIProxyAPI's own `routing.session-affinity` (in v7.3.12 and in v8.0.42, read in the
-  source) does not fix it alone: bindings live in each process, and a new session binds to that
-  pod's next round-robin credential, so N pods can bind one session N ways (reproduced in a unit
-  test). What changed: (1) on the proxy, a new CLIProxyAPI option
-  `routing.session-affinity-consistent-hash`: each session is routed by rendezvous hashing of its
-  session id and each available credential id, so every pod picks the same credential with no
-  shared state; a credential in cooldown moves only its own sessions, each to its next-ranked
-  credential, and they return when it recovers; removing a credential moves only its sessions;
-  subagents and forks hash their parent's id. It is reviewed on a fork first
-  (`1solomonwakhungu/CLIProxyAPI` PR #1, against the fork's main) and carried to the deployment as
-  a v7.3.12 backport patch (`VentureForgre/cliproxy-cluster` PR #7). Nothing is deployed; the owner
-  enables it with the new image and a resealed config (steps in that PR). (2) In Contexto, the
-  proxy adds `X-Session-Affinity: contexto-<hash>` to every request whose upstream is not an
-  Anthropic, OpenAI, or ChatGPT host, unless the CLI sent one (contract, Stack). The value is the
-  first 32 hex digits of SHA-256 of a fixed prefix and the session id, so a session name the user
-  chose stays local. Measured with a local stand-in upstream (zero spend): Claude Code 2.1.302 sends
-  `X-Claude-Code-Session-Id` and `metadata.user_id` with the same `session_id` on every Messages
-  request; Codex sends `session-id` and `prompt_cache_key` (`docs/research/M2-codex-adapter.md`).
-  CLIProxyAPI ranks both CLIs' signals above `X-Session-Affinity`, so for real sessions the proxy
-  routes on the CLI's own id, which Contexto forwards unchanged; Contexto's key covers requests
-  with no CLI signal, which would otherwise fall to the proxy's per-process prefix matcher, and
-  gives a black-box test one key to send. Verification once deployed: 10 byte-identical requests
-  with one `X-Session-Affinity` should show 1 cache write and 9 reads, and with
-  `--observe-thinking` no `end_user_binding_mismatch`. Limits: a pod that has not yet seen a
-  credential's failure keeps sending that credential's sessions to it until its own request fails
-  over; requests with no session signal at all still use the per-process matcher; all pods must hold
-  the same credentials (one owner publishes them). Options considered: enabling
-  `session-affinity` alone (rejected: per-pod bindings, above); `fill-first` with affinity
-  (config-only and the same on every pod, rejected: every session lands on one account until it
-  cools down); Traefik sticky cookies (the CLIs keep no cookies); Service `sessionAffinity: ClientIP`
-  (every request reaches the Service from the tunnel and Traefik, which also balances to endpoints
-  itself); a shared binding store such as Redis (a new dependency and failure mode for the same
-  result); Contexto rewriting `X-Claude-Code-Session-Id` to its own key (rejected: it changes a
-  header the CLI owns and that upstream also reads).
+- **D36. Each request carries a stable session signal a routing proxy can pin to one upstream
+  credential: the CLI's own signals plus Contexto's salted `X-Session-Affinity`; on the proxy side,
+  consistent-hash affinity; this settles O6.** Owner request ("improve this"), 2026-10-24,
+  including the contract change. Cause: the owner's CLIProxyAPI deployment runs several CLIProxyAPI
+  replicas behind one load balancer, each rotating credentials on its own (`routing.strategy:
+  round-robin`, no session affinity), so a session's requests reach whichever credential each
+  replica's counter points at. That gives O6's classes. CLIProxyAPI's own `routing.session-affinity`
+  does not fix it alone (read in the source): bindings live in each process, and a new session binds
+  to that replica's next round-robin credential, so N replicas can bind one session N ways
+  (reproduced by `TestSessionAffinityPerReplicaCacheSplitsSessionsAcrossReplicas` in the proposed
+  CLIProxyAPI change, `sdk/cliproxy/auth/session_affinity_consistent_hash_test.go`). What changed:
+  (1) on the proxy, a proposed upstream CLIProxyAPI option, `routing.session-affinity-consistent-hash`:
+  each session is routed by rendezvous hashing of its root session id and each available credential
+  id, so every replica picks the same credential with no shared state; a credential in cooldown
+  moves only its own sessions, each to its next-ranked credential, and they return when it recovers.
+  It is under review and not deployed. (2) In Contexto, the proxy adds `X-Session-Affinity:
+  contexto-<key>` to every request whose upstream host name is not an Anthropic, OpenAI (including
+  Azure OpenAI, `*.openai.azure.com`), or ChatGPT host, unless the CLI sent one (contract, Stack).
+  The host is IDNA-normalized first, as the socket layer does when it connects, so a name such as
+  `api.anthro<soft hyphen>pic.com` counts as Anthropic's; a name that cannot be normalized gets no
+  header. Matching is by name: an IP literal upstream gets the header, even a vendor's address,
+  because Contexto cannot tell a vendor IP from a local proxy's. The key is the first 32 hex digits
+  of HMAC-SHA-256 of the session id under a random 32-byte salt written once per install at
+  `$CONTEXTO_HOME/affinity.salt` (0600), so it is the same after a restart and on a resume, and the
+  session id, even a guessable `--session` name, cannot be checked against it without the salt. If
+  the salt cannot be read, the session runs without the header and logs
+  `affinity_salt_unavailable`. Measured with a local stand-in upstream (zero spend): Claude Code
+  2.1.302 sends `X-Claude-Code-Session-Id` and `metadata.user_id` with the same `session_id` on
+  every Messages request; Codex sends `session-id` and `prompt_cache_key`
+  (`docs/research/M2-codex-adapter.md`). In CLIProxyAPI's order, `X-Claude-Code-Session-Id`,
+  Claude's `metadata.user_id`, and Codex's `session-id` header rank above `X-Session-Affinity`;
+  `prompt_cache_key` ranks below it. So both CLIs' requests route on the CLI's own id, which
+  Contexto forwards unchanged, as long as Codex keeps sending `session-id`. CLIProxyAPI labels a
+  request it routes on `X-Session-Affinity` as client type `opencode`, which only names the signal.
+  What is pinned: each distinct session signal maps to one credential. The CLI's id and Contexto's
+  key are different identities and generally hash to different credentials, so a request of the
+  session that carries no CLI signal gets a stable credential of its own, not necessarily the
+  session's. That is harmless for cache and thinking, since such a request shares no prefix with
+  the conversation; in practice the key decides routing only for black-box checks. Subagents and
+  side requests share the session's key on purpose, as they go through the same Contexto proxy, and
+  CLIProxyAPI's consistent hash sends Claude Code subagents to their root session's credential.
+  They share the system and tools prefix, so one credential keeps that cache warm. The cost:
+  parallel subagents load one credential's rate limit, and a 429 there moves the whole session,
+  main conversation included, to the next credential until the first recovers, with one cache miss
+  and dropped thinking at each move. Verification once deployed: 10 byte-identical requests with
+  one `X-Session-Affinity` should show 1 cache write and 9 reads, and with `--observe-thinking` no
+  `end_user_binding_mismatch`. Limits: a replica that has not yet seen a credential's failure keeps
+  sending that credential's sessions to it until its own request fails over; requests with no
+  session signal at all still use CLIProxyAPI's per-process prefix matcher; all replicas must hold
+  the same credentials. Options considered: enabling `session-affinity` alone (rejected: per-replica
+  bindings, above); `fill-first` with affinity (config-only and the same on every replica, rejected:
+  every session lands on one account until it cools down); sticky cookies at the load balancer (the
+  CLIs keep no cookies); client-IP affinity at the load balancer (every request reaches the
+  replicas from the same ingress); a shared binding store such as Redis (a new dependency and
+  failure mode for the same result); an unsalted hash of the session id (rejected: a guessable name
+  could be checked against the key); Contexto rewriting `X-Claude-Code-Session-Id` to its own key
+  (rejected: it changes a header the CLI owns and that upstream also reads).
 
 ## Repository and process
 
@@ -501,17 +515,18 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   who run Contexto themselves. Needs the terms question answered in the product docs. Owner
   decision, because it bears on what may be shared beyond this repository.
 - **O5. First real release.** Settled by D29 (v0.1.0 after M2 acceptance).
-- **O6. Upstream affinity on the owner's proxy.** Resolved by D36 (consistent-hash session
-  affinity on the proxy, built but not deployed, and Contexto's `X-Session-Affinity`); kept here for
-  its evidence. Measured: full cache misses with byte-identical
+- **O6. Upstream affinity on the owner's proxy.** Resolved by D36 (a proposed consistent-hash
+  session affinity option for CLIProxyAPI, not deployed, and Contexto's `X-Session-Affinity`); kept
+  here for its evidence. Measured: full cache misses with byte-identical
   prefixes (4 of 14 eligible throwaway calls) and thinking dropped on every request
   (`end_user_binding_mismatch`) through the owner's proxy. Lane 1's black-box test (L1-e,
   81,319 tokens): over 10 haiku requests the keep/drop pattern falls into exactly 3 consistent
   classes, and a byte-identical series shows exactly 3 cache writes before steady reads (counts
   measured; reported by manager-1, doc pending in lane 1's L1-f PR). Inferred: the route spreads
   requests across at least 3 upstream identities, and each byte-identical miss is the first request
-  to reach an identity. Opus over 5 requests kept all thinking (inconclusive). Fix is a per-session upstream affinity setting on the owner's
-  infrastructure. Owner decision; intake does not touch the proxy (D11).
+  to reach an identity. Opus over 5 requests kept all thinking (inconclusive). At the time the fix
+  was left to the owner, since intake did not touch the proxy (D11); D36's owner request covers the
+  proxy-side work.
 - **O7. OpenRig context-usage clock bug.** Measured by lane 1: every seat's context usage reads
   `stale_generation` because tenure boot times are stored in UTC without `Z` and parsed as local
   time (UTC-5), blinding `rig ps`, `whoami`, and compaction planning for about 5 hours after boot.

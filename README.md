@@ -260,11 +260,12 @@ turns Codex's request compression off.
 session's requests over several upstream accounts loses the prompt cache and the thinking blocks on
 each switch. Contexto forwards the CLI's own session signals unchanged (Claude Code's
 `X-Claude-Code-Session-Id` and `metadata.user_id`, Codex's `session-id` and `prompt_cache_key`) and
-adds `X-Session-Affinity: contexto-<hash of the session id>` to requests for any upstream other than
-Anthropic, OpenAI, and ChatGPT hosts. The proxy has to route on one of them. CLIProxyAPI does with
-`routing.session-affinity: true`. Several replicas behind one load balancer also need
-`routing.session-affinity-consistent-hash: true`, which is a patch not yet in upstream CLIProxyAPI
-(D36 in `docs/DECISIONS.md`).
+adds `X-Session-Affinity: contexto-<salted hash of the session id>` to requests for any upstream
+other than Anthropic, OpenAI (including Azure OpenAI), and ChatGPT hosts. The proxy has to route on
+one of them. CLIProxyAPI does with `routing.session-affinity: true`. Several replicas behind one load
+balancer also need consistent hashing, proposed upstream as
+`routing.session-affinity-consistent-hash: true` and not yet in a CLIProxyAPI release (D36 in
+`docs/DECISIONS.md`).
 
 **`count_tokens` returns 403.** Errors from the upstream pass through unchanged. Some proxies refuse
 `/v1/messages/count_tokens`; Claude Code calls it only around compaction.
