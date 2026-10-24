@@ -28,7 +28,7 @@ The release and recovery jobs run only when the repository variable `RELEASES_EN
 2026-10-16), a push to `main` runs only a job that prints "Releases are disabled": no
 CI gate, no tag, no release, and no upload. A manual dispatch does nothing either.
 
-- **Who turns it on:** the repository owner, or intake on the owner's recorded instruction.
+- **Who turns it on:** the repository owner, or an agent on the owner's recorded instruction.
 - **When it was turned on:** after M2 acceptance passed, under D29, which settled O5. The push that
   merged PR #141 released every releasable commit since the start of history as v0.1.0.
 - **Turning it off again:** delete the variable or set it to anything other than `true`.
@@ -40,8 +40,9 @@ CI gate, no tag, no release, and no upload. A manual dispatch does nothing eithe
   bump or changelog commit is made. The workflow then checks that `HEAD` is still the merged commit
   and that the tag points at it. Even if a step tried to push to `main`, the ruleset would reject the
   push, because `GITHUB_TOKEN` is not a bypass actor.
-- **It never publishes a package anywhere else.** This repository is private: no PyPI, npm,
-  Homebrew, or Scoop. The sdist and wheel exist only as GitHub Release assets.
+- **It never publishes a package anywhere else.** Releases go only to this repository's GitHub
+  Releases (D42): no PyPI, npm, Homebrew, or Scoop. The sdist and wheel exist only as GitHub
+  Release assets.
 - **It never edits the version in Git.** No file in the repository carries the release version.
   `pyproject.toml` keeps its static `version`; the release build overwrites it in the runner's
   checkout only (`uv version <v> --frozen`), and `.github/scripts/release-build.sh` fails the release
@@ -115,7 +116,7 @@ none of those, every job passes without doing anything. The pytest run collects 
 `spikes/` as well. That is intended, because those tests back numbers that research documents cite.
 
 Every CI and release job runs on the organization's self-hosted runner (labels `self-hosted`,
-`Linux`, `X64`), one job at a time, since hosted Actions minutes were blocked by billing (PR #188).
+`Linux`, `X64`), one job at a time (PR #188).
 
 Third-party actions are pinned by commit SHA, with the release tag in a comment:
 `actions/checkout` v7.0.1 and `astral-sh/setup-uv` v10.2.0. To update one, resolve the new tag's

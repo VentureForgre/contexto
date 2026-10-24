@@ -164,7 +164,7 @@ into `claude -p` and asked for one key's value. Usage from the session JSONL [me
 
 ### Codex (extrapolated, not run)
 
-No Codex rollover was run, to save the owner's ChatGPT plan (manager-1's decision). From the
+No Codex rollover was run, to save ChatGPT-login usage (manager-1's decision). From the
 measured `labcodex.subject` onboarding [measured, PR #10]: a fresh Codex seat costs about 58,985
 tokens over 2 requests to orient and holds 32,331 tokens of context before its first task. A seeded
 Codex rollover would start from that floor plus the handoff [inferred, extrapolated from those
