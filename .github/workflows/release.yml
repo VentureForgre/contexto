@@ -31,7 +31,7 @@ env:
 jobs:
   disabled:
     if: vars.RELEASES_ENABLED != 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - name: Report that releases are off
         run: echo "::notice::Releases are disabled. Set the repository variable RELEASES_ENABLED to true to enable them (see RELEASING.md)."
@@ -43,7 +43,7 @@ jobs:
   release:
     needs: ci
     if: github.event_name == 'push' && vars.RELEASES_ENABLED == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -95,7 +95,7 @@ jobs:
           test -n "$remote"
           echo "$TAG points at $GITHUB_SHA; HEAD unchanged; no commit was made."
 
-      - name: Make gh available (the self-hosted runner has none)
+      - name: Check that gh is available (hosted runners ship it; the script installs it only if missing)
         if: steps.plan.outputs.released == 'true'
         run: bash .github/scripts/ensure-gh.sh
 
@@ -115,7 +115,7 @@ jobs:
 
   reattach:
     if: github.event_name == 'workflow_dispatch' && vars.RELEASES_ENABLED == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
@@ -131,7 +131,7 @@ jobs:
           python-version: "3.12"
           # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
           ignore-nothing-to-cache: true
-      - name: Make gh available (the self-hosted runner has none)
+      - name: Check that gh is available (hosted runners ship it; the script installs it only if missing)
         run: bash .github/scripts/ensure-gh.sh
       - name: Refuse anything but an existing release tag on main
         run: bash .github/scripts/reattach-verify.sh "$TAG"

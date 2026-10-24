@@ -1,6 +1,6 @@
-from contexto.canonical import canonical_bytes, canonical_json
 import math
 
+from contexto.canonical import canonical_bytes, canonical_json
 from contexto.tokens import (
     TEXT_BYTES_PER_TOKEN,
     TOOL_RESULT_BYTES_PER_TOKEN,

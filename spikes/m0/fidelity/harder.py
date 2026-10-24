@@ -29,7 +29,7 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fidelity.l2d import _WORDS, wilson  # noqa: E402
+from fidelity.l2d import _WORDS  # noqa: E402
 from fidelity.l2f import Probe, score  # noqa: E402
 from fidelity.session import _filler_text  # noqa: E402
 

@@ -775,7 +775,7 @@ def report(results: Mapping[str, Any]) -> str:
         lo, hi = r["interval"]
         ins = r["instruction"]
         cats = r["tables"]["category"]
-        cell = lambda c: f"{cats[c]['correct']}/{cats[c]['total']}" if c in cats else "-"  # noqa: E731
+        cell = lambda c: f"{cats[c]['correct']}/{cats[c]['total']}" if c in cats else "-"  # noqa: E731, B023
         stale = sum(c["stale"] for c in cats.values())
         out.append(
             f"| {k} | {r['context']:,} | {r['correct']}/{r['total']} | {lo:.2f}-{hi:.2f} | "

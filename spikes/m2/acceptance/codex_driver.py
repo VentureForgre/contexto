@@ -25,9 +25,10 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from acceptance import script
 from acceptance.detectors import FAILURE_EVENTS
@@ -144,7 +145,7 @@ class SpendWatch:
             if starting:
                 return False
             raise WatchFailed("the session log is missing" + (" after it was seen" if self._seen_log else
-                                                              " past the first turn's startup window"))
+                                                              " past the first turn's startup window")) from None
         except OSError as exc:
             raise WatchFailed(f"the session log cannot be read: {type(exc).__name__}") from exc
         self._seen_log = True

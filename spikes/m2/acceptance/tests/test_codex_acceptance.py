@@ -7,9 +7,9 @@ import json
 import math
 import shutil
 import signal
-import time
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -301,7 +301,7 @@ def test_the_turn_process_group_is_killed_when_the_watcher_fails(tmp_path, probl
             with log.open("ab") as f:
                 f.write(b"{partial" if problem == "open line" else b"{not json}\n")
 
-        def watch_after_write(inner=codex_driver.SpendWatch(log, 10**9, 1)):
+        def watch_after_write(inner=codex_driver.SpendWatch(log, 10**9, 1)):  # noqa: B008 - one shared watch
             if not hasattr(watch_after_write, "done"):
                 corrupt_after_start()
                 watch_after_write.done = True
@@ -334,6 +334,7 @@ def test_a_stub_tool_call_round_is_held_by_the_real_proxy(tmp_path):
     import urllib.request
 
     from acceptance.codex_stub import CodexStub
+
     from contexto import proxy as proxy_mod
     from contexto import rewrite
     from contexto.store import SessionStore

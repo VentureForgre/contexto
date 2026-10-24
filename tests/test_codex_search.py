@@ -32,7 +32,8 @@ def store(request, tmp_path):
 
 def call(store, name, arguments):
     server = mcp.Server(store, io.StringIO(), io.StringIO())
-    line = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}})
+    line = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": name, "arguments": arguments}})
     result = server.handle_line(line)["result"]
     assert result["isError"] is False
     return result["content"][0]["text"]
@@ -91,7 +92,8 @@ def test_a_codex_function_call_feeds_the_stub_tools_and_paths():
 def test_typeless_codex_messages_are_read_like_typed_ones():
     turn = [{"role": "user", "content": [{"type": "input_text", "text": PLANT}]}]  # no top-level type
     page = {"turn": 0, "messages": turn, "stub": build_stub(turn)}
-    assert page_matches(page, "retention_days") and PLANT in render_page(page) and build_stub(turn)["user_text"] == PLANT
+    assert page_matches(page, "retention_days") and PLANT in render_page(page)
+    assert build_stub(turn)["user_text"] == PLANT
 
 
 def test_codex_context_sections_and_reasoning_are_neither_searched_nor_stubbed():

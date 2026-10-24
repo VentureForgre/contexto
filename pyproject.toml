@@ -17,3 +17,32 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 # Package tests and the M0 spike tests that research documents cite.
 testpaths = ["tests", "spikes"]
+
+[tool.ruff]
+target-version = "py312"
+# The code has no enforced width; 120 is the longest common one it fits. `ruff format` is not
+# enforced: it would rewrite most files, which is churn rather than a fix.
+line-length = 120
+# Tests import each other (`from test_rewrite import ...`); sort those with the package, as written.
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    # zip() without strict=: the zipped sequences are equal by construction, and strict=True
+    # would turn a silent truncation into an exception, which is a behavior change.
+    "B905",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# Frozen dataclasses: safe as argument defaults.
+extend-immutable-calls = [
+    "contexto.rewrite.Config",
+    "acceptance.budget.Params",
+    "cost_model.CvmPolicy",
+    "fidelity.harder.Mix",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Research spikes are frozen measurement code that docs/research cites; long lines are left as written.
+"spikes/**" = ["E501"]

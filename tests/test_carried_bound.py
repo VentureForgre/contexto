@@ -37,7 +37,6 @@ from contexto.rewrite import (
 )
 from contexto.store.memory import MemoryStore
 from contexto.tokens import TokenEstimator
-
 from test_epoch_resume import EpochStore
 
 MESSAGES = "/v1/messages"
@@ -133,7 +132,8 @@ def turn_5x(t: int, opus: bool = True) -> list[dict]:
     tagged = not opus
     if t == 1:
         start = [{"role": "user", "content": [rem(CLAUDE_MD), rem(ATTRIBUTION),
-                                              {"type": "text", "text": f"Turn 1. Synthetic user request number 1. {FILL}"}]},
+                                              {"type": "text",
+                                               "text": f"Turn 1. Synthetic user request number 1. {FILL}"}]},
                  system_5x(ENVIRONMENT, "medium" if opus else None, tagged)]
     else:
         items = []
@@ -195,7 +195,7 @@ def fallback_view(messages: list[dict], budget: int, upto: int | None = None):
 
 def last(iterable):
     item = None
-    for item in iterable:
+    for item in iterable:  # noqa: B007 - the last value bound is the result
         pass
     return item
 
@@ -258,7 +258,7 @@ def test_effort_changes_no_longer_grow_what_the_fallback_cannot_page():
     plan = TokenEstimator().estimate_messages([system_5x(PLAN_ENTRY, "medium")])
     view = list(fallback_view(msgs, budget=0))
     floor = view[0][2]
-    for t, k, carried, _, _ in view:
+    for t, _, carried, _, _ in view:
         # messages[0]'s blocks and the environment message, plus at most the latest effort change and
         # the latest plan-mode text: bounded, not growing with the number of changes.
         assert carried <= floor + 2 * plan + 200, (t, carried, floor)
@@ -312,12 +312,13 @@ def test_later_turn_start_blocks_are_paged_and_growth_stays_under_the_budget():
     budget = 8_000
     plan = TokenEstimator().estimate(PLAN_ENTRY)
     initial = None
-    for t, k, carried, paged, store in fallback_view(msgs, budget=budget):
+    for t, _, carried, _, store in fallback_view(msgs, budget=budget):  # noqa: B007 - store is read after the loop
         if initial is None:
             initial = carried
         # measured before D32: 3,382 -> 13,256 (one process) with nothing paged
         assert carried - initial <= budget + plan, (t, carried - initial)
-    assert any('"<system-reminder>' in canonical_bytes(p).decode() or "Plan mode is active" in canonical_bytes(p).decode()
+    assert any('"<system-reminder>' in canonical_bytes(p).decode()
+               or "Plan mode is active" in canonical_bytes(p).decode()
                for p in store.pages.values())
 
 
@@ -400,7 +401,7 @@ def test_paged_blocks_are_recallable_and_the_prefix_is_stable_between_rotations(
     blocks, _ = carried_content(msgs, state.k, state.paged_carried)
     assert blocks[: len(m0)] == m0
     # Consecutive turn starts without a rotation send the same first message.
-    for (r1, p1), (r2, p2) in zip(prefixes, prefixes[1:]):
+    for (_, p1), (r2, p2) in zip(prefixes, prefixes[1:]):
         if not r2:
             assert p1 == p2
 
@@ -509,10 +510,9 @@ def test_a_restart_after_settings_change_paging_sends_the_same_bytes(opus, resta
 def test_the_fallback_still_pages_carried_developer_items_on_codex():
     # The Responses dialect has no context blocks and classifies developer items after the lead as
     # carried text (input_text parts); D32 and D33 must not stop the fallback from paging them.
+    import test_codex as codex
     from contexto.codex import RESPONSES
     from contexto.rewrite import _DIALECT
-
-    import test_codex as codex
 
     items = codex.history(1)
     for t in range(1, 12):

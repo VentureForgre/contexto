@@ -76,8 +76,8 @@ def write_new(path: Path, data: bytes) -> bool:
 def affinity_salt(home: Path) -> bytes:
     """The install's random salt for upstream affinity keys (D36), ``home/affinity.salt`` (0600),
     created atomically on first use and the same for every later session and resume. It is read
-    without following a symlink (OSError) or blocking on a FIFO, and must be a regular file holding a hex salt of the right
-    size (ValueError otherwise)."""
+    without following a symlink (OSError) or blocking on a FIFO, and must be a regular file holding
+    a hex salt of the right size (ValueError otherwise)."""
     path = Path(home) / AFFINITY_SALT_FILE
     if not path.exists():
         private_dir(Path(home))

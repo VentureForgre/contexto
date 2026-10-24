@@ -128,7 +128,8 @@ class FakeCLIProxyAPI(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/v1/models":
             if self._authenticated():
-                self._json(200, {"object": "list", "data": [{"id": m, "object": "model"} for m in sorted(SERVED_MODELS)]})
+                self._json(200, {"object": "list",
+                                 "data": [{"id": m, "object": "model"} for m in sorted(SERVED_MODELS)]})
             return
         self._not_found()
 

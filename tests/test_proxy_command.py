@@ -36,6 +36,15 @@ def test_help_lists_the_proxy_flags(capsys):
     assert "--observe-thinking" in out and "--upstream" in out and "--port" in out
 
 
+def first_line(stream, timeout: float) -> str:
+    """The stream's first line, or "" if none arrives within the deadline (readline alone has none)."""
+    lines: list[str] = []
+    reader = threading.Thread(target=lambda: lines.append(stream.readline()), daemon=True)
+    reader.start()
+    reader.join(timeout)
+    return lines[0].strip() if lines else ""
+
+
 def test_proxy_command_serves_and_logs_to_the_session(tmp_path: Path):
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), Hello)
     threading.Thread(target=upstream.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
@@ -44,18 +53,21 @@ def test_proxy_command_serves_and_logs_to_the_session(tmp_path: Path):
     proc = subprocess.Popen([sys.executable, "-m", "contexto", "proxy", "--session", "s1", "--upstream", url],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, cwd=tmp_path)
     try:
-        line = proc.stdout.readline().strip()
+        line = first_line(proc.stdout, timeout=60)
         words = line.split()
-        assert words[:2] == ["listening", "on"] and words[3:] == ["session", "s1", "upstream", "flag"]
+        assert words[:2] == ["listening", "on"] and words[3:] == ["session", "s1", "upstream", "flag"], line
         host, port = words[2].rsplit(":", 1)
         assert host == "127.0.0.1"
-        conn = http.client.HTTPConnection(host, int(port), timeout=10)
+        conn = http.client.HTTPConnection(host, int(port), timeout=60)
         conn.request("HEAD", "/api/hello")
         assert conn.getresponse().status == 200
         conn.close()
-    finally:
         proc.send_signal(signal.SIGINT)
-        proc.wait(timeout=10)
+        proc.wait(timeout=60)  # Ctrl+C is how the proxy is stopped; it must exit on it
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate()
         upstream.shutdown()
         upstream.server_close()
     log = (tmp_path / "home" / "sessions" / "s1" / "log.jsonl").read_text()

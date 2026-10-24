@@ -8,8 +8,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from acceptance import recall_credit, script  # noqa: E402,F401  (script puts spikes/m0 on the path)
-from contexto.store.render import render_page  # noqa: E402
 from fidelity.l2f import Probe  # noqa: E402
+
+from contexto.store.render import render_page  # noqa: E402
 
 PLANT = "cfg checkout-api.retention_days=juniper-2573"
 PAGE = {"id": "pg_aaaa000000000001", "turn": 0, "stub": {"user_text": "log", "tools": [], "paths": []},

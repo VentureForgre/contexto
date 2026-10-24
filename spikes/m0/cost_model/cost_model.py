@@ -291,7 +291,7 @@ class Buckets:
     usd: float = 0.0
     requests: int = 0
 
-    def add(self, o: "Buckets") -> None:
+    def add(self, o: Buckets) -> None:
         self.uncached += o.uncached
         self.write += o.write
         self.read += o.read
@@ -385,7 +385,7 @@ class Engine:
         self.last_send = self.now
         return b
 
-    def idle(self, gap_s: float, keepalive: "Keepalive | None") -> Buckets:
+    def idle(self, gap_s: float, keepalive: Keepalive | None) -> Buckets:
         """Advance through think time, sending keepalive pings if configured."""
         spent = Buckets()
         if keepalive and self.last_send is not None and self.tier.ttl_s < gap_s <= keepalive.max_idle_s:
@@ -1327,7 +1327,7 @@ def build_blocks(prices: dict, profile: dict) -> dict[str, str]:
                           run_plain(trace, focus, None, replace(comp, threshold=at))))
             cands.append((f"H4 rollover at {_k(at)}", run_plain(trace, focus, None, replace(roll, threshold=at))))
         cands.append(("H5 tool-result clearing, vendor defaults", run_plain(trace, focus, None, clear=ClearPolicy())))
-        for vlabel, vp, h in bounded_variants(policy, bound, trace)[:3]:
+        for vlabel, vp, _h in bounded_variants(policy, bound, trace)[:3]:
             if vp:
                 r = run_cvm(trace, focus, None, vp)
                 if vp.headroom_online and not vp.page_tool_output_over:

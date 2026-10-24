@@ -561,11 +561,117 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     budget does not apply and only the per-call limit holds. With an engine present but no room
     published for the call's turn, the same applies and the store logs `turn_room_missing`, so a
     missed publish shows up in acceptance logs.
-  - Known limitation (since v0.1.0): subagents and side requests launched by the CLI share the
-    session's store. Only the main conversation publishes the room (packet A14; see
-    `contexto_search` below), so their tool calls are charged against the main conversation's
-    room, which was not measured from their requests, and concurrent subagents can overspend it;
-    keying the room by conversation is the later fix.
+  - Side rooms (D40). Subagents and side requests launched by the CLI share the session's store,
+    but each is its own request with its own context, and a tool result lands only in the window
+    of the conversation that called the tool. The room above is the main conversation's (packet
+    A14; see `contexto_search` below). Every other conversation publishes a side room through
+    `SessionStore.set_side_room(room_id, room_tokens)` when its response's real usage arrives (the
+    same formula, from its own usage) if the response holds a tool call the client runs, and
+    closes it with `room_tokens` None if it holds none. There is no request-time side publish:
+    when the hold runs, it makes every tool call wait for its response's publish (the cases where
+    it does not are listed below).
+    - Tool-call signal. The proxy passes `tool_calls` to `observe_usage` when the callable takes
+      that keyword. When the response has a stream hold, the hold decides: True if a client call
+      started, False otherwise. Hosted Responses calls (`web_search_call`, `file_search_call`,
+      `image_generation_call`, `code_interpreter_call`, the hosted remote-MCP `mcp_call`, and a
+      `tool_search_call` whose `execution` is not `client`) still start the hold but run on OpenAI's
+      servers, never reach Contexto's MCP server, and do not count. Every other call counts as a
+      client call: a Messages `tool_use`, and any other Responses `*_call` item, known
+      (`function_call`, `custom_tool_call`, `local_shell_call`, `computer_call`) or not, so a new
+      type fails safe. With no hold, a Messages `stop_reason` decides (`tool_use` or not), or the
+      client calls in a Responses `output` list; else the value is None, which the engine treats as
+      True. A callable that takes `tool_call_ids` also gets the ids of the client calls the proxy saw
+      in the response: `tool_use` ids, Responses `call_id`s.
+    - Room per request lineage. Two subagents launched with the same prompt, or a side request
+      that forks one, have the same conversation key, so a room is not keyed by it. A fork of the
+      main conversation shares main's key and is treated as main (`publishes`), so it uses main's
+      room, not a side room. The engine gives each side room an id (the conversation key and a
+      random suffix) and remembers the request that published it (its message count and anchor
+      hash) and the tool-call ids its response held. A request continues a room only if it extends
+      that room's request, adds no turn start, and returns a result (`tool_result`, a Responses
+      `*_output` item) for one of the room's recorded ids. A twin carries only its own ids and
+      cannot match. A fork that copies results for the room's calls does continue the room; that is
+      harmless once those calls have finished, since the holder has nothing in flight and its next
+      response opens a fresh room. A fork made while a call is still running, which answers that
+      call with a placeholder result and asks its question inside the same message, cannot be told
+      apart from the next step and can replace or close the room (a limitation; no Claude Code path
+      is known to fork a running subagent). A room recorded without ids (the proxy saw none) is
+      continued by a request that extends it and adds no turn start. Exactly one room must match:
+      when two or more tie, the request continues none, the tied rooms keep their spend until they
+      expire, and the request opens its own room. A continued room is replaced (with a tool call)
+      or closed (without, logged `side_room_closed` with reason `no_tool_call`); any other request
+      opens a new room, or with no tool call changes nothing.
+    - Charging. The MCP server cannot tell which conversation made a call, so `charge_turn_room`
+      gives the call the smallest remaining room among the main room and every live side room,
+      counts what it returns against all of them in the same locked read-modify-write, and returns
+      a content-free summary that the call's `mcp_call` event records: `limited_by` (`main`, also on
+      a tie, or `side`), `side_rooms` (the number of live side rooms), and for a side limit
+      `limiting_age_s` (that room's seconds since its last publish). A publish resets only its own
+      room's spend. With no main room published but a side room live, the side rooms alone bound the
+      call.
+    - Expiry. A side room lives 15 minutes (`SIDE_ROOM_TTL_S`, 900 seconds) after its publish; its
+      holder's next response restarts that time. Claude Code starts an MCP call 5 to 16 ms after its
+      `tool_use` block completes, so a holder's own calls normally land within a second of its
+      response. A call can also wait behind another tool of the same response: a Bash command can
+      run to Claude Code's 10-minute maximum timeout, and 15 minutes leaves margin over that. A call
+      held longer, most often by a permission prompt the user has not answered, finds its room
+      expired (see below). The session store's times are wall-clock, because the proxy publishes and
+      the MCP server charges from separate processes; a publish time more than 15 minutes in the
+      future (a clock stepped back) counts as expired. `MemoryStore` uses a monotonic clock. Expired
+      rooms are dropped at the next charge or side publish, each logged `side_room_expired` with its
+      age, room, and spend.
+    - Closing when the agent stops. A side room closes before its expiry only on evidence in main's
+      own history that every run of the subagent holding it has stopped (measured on Claude Code
+      2.1.302 against a scripted stub, `spikes/m2/subagents/`). The subagent is matched by its first
+      prompt: its first user message carries a `<system-reminder>` block and then main's `Agent`
+      (or `Task`) call's `prompt`, unchanged. A stop is one of two measured shapes: the call's
+      result is a foreground hand-back (it starts `[Subagent hand-back]`), or a
+      `<task-notification>` names the call's tool-use id, or the id of a `SendMessage` call whose
+      result says it resumed that call's agent (`resumedAgentId`; a resumed run's notice names the
+      `SendMessage`). A notice counts only where the CLI puts it: in a `system` message (during
+      main's tool loop), or in a user message whose content, or first text block, opens with the
+      `<system-reminder>` wrapper or `[SYSTEM NOTIFICATION - NOT USER INPUT]` (while main is idle).
+      A notice in assistant text, or pasted into a human message, never counts. The background
+      launch receipt (`Async agent launched successfully.`) is not a stop; an error result means the
+      call started no agent; any other result shape leaves the call unknown, so its prompt's rooms
+      only expire. Each resume adds a turn start to the subagent's own conversation, so a room's run
+      is the number of turn starts in the request that published it, and the room closes when its
+      agent's stops number at least that run: a late notice of an earlier run cannot close a later
+      run's room, whatever the order. Every `Agent` call with that prompt must be known and stopped
+      that often, so twins with one prompt close together. It is checked at each main request,
+      whatever started main's turn, and only while the latest Claude Code version seen in a
+      request's `User-Agent` this session is in `SUBAGENT_SHAPES_TESTED` (`src/contexto/cliversions.py`,
+      D38): with no Claude Code `User-Agent` seen, or when the latest one names another version (the
+      CLI updated mid-session), side rooms only expire; a later request without a `User-Agent` keeps
+      the latest version seen. The close is logged `side_room_closed` with reason `agent_stopped`. A room
+      matching no `Agent` call, a background agent still running, and any room on the Responses
+      dialect (Codex has no `Agent` tool) keep the 15-minute expiry. If the store cannot close the
+      room, the engine logs `side_room_close_failed` with the error's class and goes on: the room
+      expires instead, and the engine stays out of degraded mode (unlike a failed `set_side_room`
+      publish, which is a rule 14 `store_error`).
+    - Inside a main turn. Main's room resets at each main publish; a side room resets only at its
+      holder's publish. While a side room is live, every charge, main's own included, also spends
+      it, so main's recall can be held below main's own room, down to nothing, by a side room whose
+      holder has stopped without evidence in main's history: a subagent that failed after a tool
+      call, a response whose signal was unknown, tied rooms that no request continues, or a
+      subagent matched to no `Agent` call. That lasts up to 15 minutes after the room's last
+      publish; `limited_by: side` with a large `limiting_age_s` on the calls shows it. Esc did not
+      cause it in the capture: every interactive launch ran in the background, the Esc stopped
+      nothing, and the subagent finished normally.
+    - When main's room is the only bound. A side conversation's calls are charged only against
+      main's room (and any other live side room), as before D40, when it has no room of its own:
+      the hold was skipped (`hold_skipped`: encoded or unchunked SSE), so its tool calls reach the
+      CLI before the publish; its request failed in the transform (`transform_error`), so the engine
+      has no state for it; it entered degraded mode before its first publish, or its `set_side_room`
+      failed (rule 14 makes it degraded), so no room was opened (a degraded conversation keeps the
+      last room it opened, until expiry); or its call starts more than 15 minutes after its
+      response's publish, for example after a permission prompt.
+    - Where the events land. `side_room_expired` is a store event, a top-level line in the session
+      log. `side_room_closed` and `side_room_close_failed` are engine events inside a request's log
+      entry: with reason `agent_stopped` (and the close failure) in the main request's
+      `transform_events`, with reason `no_tool_call` in the side request's `usage_events`.
+    - Limitations: one conversation's charges also spend the others' rooms; for a subagent, search's
+      "in view" still means the main conversation's window.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
@@ -642,9 +748,9 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   starts, re-evaluated at each turn start: it changes only when another conversation has strictly
   more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
   stay main. The choice is made before the request is transformed, so a request that fails after
-  its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them, so their tool calls see the
-  main conversation's room and snapshot, and for a subagent "in view" refers to the main
-  conversation's window (part of the documented subagent limitation); the MCP
+  its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them (they publish side rooms instead, D40, see the per-turn
+  recall budget), so their tool calls see the main conversation's snapshot, and for a subagent
+  "in view" refers to the main conversation's window (a documented subagent limitation); the MCP
   server cannot tell which conversation issued a call. Matches in the
   snapshot (a retained entry matches as a page does: every word of the query in its text, and its
   matching lines chosen by the same rule) are listed first, labeled in view, newest first, as the matching line only, at most 3
@@ -832,7 +938,8 @@ a no-replayed-thinking baseline.
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
    `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`,
-   `epoch_record_stale`, `mcp_tools_missing`, `toolcheck_error`, or `unclassified_system_message`.
+   `epoch_record_stale`, `mcp_tools_missing`, `toolcheck_error`, `side_room_close_failed` (D40), or
+   `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the

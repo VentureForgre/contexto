@@ -2,7 +2,10 @@
 """H2 probe hooks. Logs event name, input field names, source/trigger. Injects synthetic
 markers: SessionStart/UserPromptSubmit via additionalContext, PreCompact via plain stdout.
 PRECOMPACT_BLOCK=1 makes PreCompact exit 2 (block)."""
-import json, os, sys
+import json
+import os
+import sys
+
 data = json.load(sys.stdin)
 event = data.get("hook_event_name", "?")
 with open(sys.argv[1], "a") as f:  # log path passed by the generated hook config

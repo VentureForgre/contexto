@@ -5,7 +5,13 @@ tool code over a SessionStore of that run's 15 paged turns, rebuilt byte for byt
 run.plan(). A deterministic search policy stands in for the model (it searches every probe). Prints
 numbers only. Run: uv run python spikes/m2/estimate/one_turn.py
 """
-import io, json, math, re, statistics, sys, tempfile
+import io
+import json
+import math
+import re
+import statistics
+import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -13,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[3]  # the repository
 for p in (ROOT / "spikes" / "m2", ROOT / "spikes" / "m0", ROOT / "src"):
     sys.path.insert(0, str(p))
 from acceptance import run  # noqa: E402
+
 from contexto import mcp  # noqa: E402
 from contexto.store import SessionStore  # noqa: E402
 

@@ -20,12 +20,13 @@ import base64
 import json
 import math
 import random
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 from typing import Any
 
-from contexto.tokens import estimate_message_tokens
 from scale_probes import FACTS, LATENCY_QUERIES, RENAME_MENTION_RATE, Fact, Plant, planted_turn
+
+from contexto.tokens import estimate_message_tokens
 
 HERE = Path(__file__).resolve().parent
 TARGET_TOKENS = (19_000, 23_000)  # the goal; the last tool call overshoots it by 0 to ~6K
@@ -121,7 +122,7 @@ def _path(rng: random.Random) -> str:
     return f"tests/test_{name}.py" if rng.random() < 0.25 else f"src/{pkg}/{name}.py"
 
 
-@lru_cache(maxsize=None)
+@cache
 def forbidden() -> tuple[str, ...]:
     """Strings background text must never contain: every probe query and planted marker, and the
     rename identifiers (their mentions are injected at a fixed rate). The common latency queries
@@ -137,7 +138,7 @@ def _clean(line: str) -> bool:
     return not any(w in line for w in forbidden())
 
 
-@lru_cache(maxsize=None)
+@cache
 def pools(seed: int = 7) -> dict[str, tuple[str, ...]]:
     """Fixed line pools, filtered of probe strings (built once per process)."""
     rng = random.Random(f"pools:{seed}")
@@ -162,7 +163,7 @@ NEAR_TEMPLATES = (
 )
 
 
-@lru_cache(maxsize=None)
+@cache
 def calibration(path: str = str(HERE / "calibration.json")) -> dict[str, float]:
     try:
         return dict(json.loads(Path(path).read_text(encoding="utf-8"))["df"])

@@ -8,8 +8,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 import variants
+
 from contexto.canonical import canonical_json
 
 FILL = "synthetic log line " * 120

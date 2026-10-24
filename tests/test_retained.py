@@ -137,7 +137,6 @@ def test_the_snapshot_is_never_logged(tmp_path):
 def test_snapshot_write_and_room_publish_both_fail_never_serves_the_previous_window(tmp_path, monkeypatch):
     store = SessionStore(tmp_path, "s1")
     request(store)  # request N-1: snapshot and room both stamped 1
-    real_update, real_write = store._update_meta, store._write_atomic
     monkeypatch.setattr(store, "_write_atomic", lambda path, data: (_ for _ in ()).throw(OSError("ENOSPC")))
     with pytest.raises(OSError):
         store.set_retained(2, 9, ENTRIES)  # request N: sequence bumped to 2, snapshot write fails

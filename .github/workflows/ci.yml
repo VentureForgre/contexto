@@ -4,8 +4,7 @@ on:
   pull_request:
     branches: [main]
   # Test main itself after every merge. release.yml also calls this workflow on pushes to main, but
-  # only when RELEASES_ENABLED is "true"; with releases on, a main push runs CI twice (about a
-  # minute). No concurrency group: one shared with Release's call would cancel its pending run.
+  # only when RELEASES_ENABLED is "true"; with releases on, a main push runs CI twice.
   push:
     branches: [main]
   workflow_call:
@@ -13,54 +12,63 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels that pull request's older run. Every other run (a push to
+# main, Release's call) is a group of its own, so nothing on main is cancelled or held back.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
-          # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
+          # uvx keeps its tools outside the uv cache, so this job may leave nothing to save.
           ignore-nothing-to-cache: true
-      - name: Lint with Ruff when the repository configures it
-        run: |
-          if [ -f ruff.toml ] || [ -f .ruff.toml ] || { [ -f pyproject.toml ] && grep -q '^\[tool\.ruff' pyproject.toml; }; then
-            uvx ruff check .
-            uvx ruff format --check .
-          else
-            echo "No Ruff configuration in this tree; skipping lint."
-          fi
+      # Ruff is pinned so a new release cannot fail CI on code that did not change. The rules are in
+      # pyproject.toml. `ruff format --check` is not run: it would rewrite most files.
+      - name: Lint with Ruff
+        run: uvx ruff@0.17.2 check .
 
   test:
-    runs-on: [self-hosted, Linux, X64]
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.12", "3.13", "3.14", "3.15"]
+        include:
+          # The oldest supported and the newest stable Python on macOS.
+          - os: macos-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.15"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
-          python-version: "3.12"
-          # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
-          ignore-nothing-to-cache: true
-      - name: Run pytest when the tree has tests
-        run: |
-          if git ls-files -- '*test_*.py' '*_test.py' | grep -q .; then
-            uv run --with pytest pytest
-          else
-            echo "No test files in this tree; skipping pytest."
-          fi
-      - name: Check the package builds when the tree has one
-        run: |
-          if [ -f pyproject.toml ]; then
-            uv build --out-dir "$RUNNER_TEMP/dist"
-          else
-            echo "No pyproject.toml in this tree; skipping the build check."
-          fi
+          # uv downloads this CPython when the runner lacks it.
+          python-version: ${{ matrix.python }}
+      # pytest is pinned for the same reason as Ruff.
+      - name: Run pytest
+        run: uv run --with pytest==9.1.1 pytest
+      - name: Check that the package builds
+        run: uv build --out-dir "$RUNNER_TEMP/dist"
 
+  # The one required status check. Branch rules name this job, not the matrix legs.
   ci:
     name: ci
     if: always()
     needs: [lint, test]
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - name: Require every CI job to succeed
         env:

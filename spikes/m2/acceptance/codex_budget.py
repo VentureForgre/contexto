@@ -26,16 +26,15 @@ from __future__ import annotations
 import json
 import math
 import sys
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from acceptance import script  # noqa: E402
 
 # One adapter over budget.py (lane B): builder-4 is changing that module (Params.recalls becomes
 # tool_rounds), so everything A16 takes from it passes through here and a rename is one line.
 from acceptance import budget as _budget
+from acceptance import script  # noqa: E402
 
 
 def turn_tokens(turn_bytes: int) -> int:

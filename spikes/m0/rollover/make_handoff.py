@@ -22,12 +22,12 @@ def main() -> None:
     unit, out = int(sys.argv[1]), sys.argv[2]
     lines = ["# Synthetic handoff (test data)", ""]
     i = 0
-    while sum(len(l) + 1 for l in lines) < unit * 4:
+    while sum(len(line) + 1 for line in lines) < unit * 4:
         i += 1
         lines.append(f"fact-{i:04d}: key-{i:04d} = {value(i)}")
     with open(out, "w") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"{out}: {i} facts, {sum(len(l) + 1 for l in lines)} bytes")
+    print(f"{out}: {i} facts, {sum(len(line) + 1 for line in lines)} bytes")
 
 
 if __name__ == "__main__":

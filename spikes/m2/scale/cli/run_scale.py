@@ -19,7 +19,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent

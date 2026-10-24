@@ -212,7 +212,7 @@ def build(seed: int = DEFAULT_SEED, groups: Sequence[str] = ("a", "b"), filler_l
             answer = lines[target].split("=")[1]
             for line in lines:
                 stage[1 if i % 2 else 2].append(line)
-            others = tuple(l.split("=")[1] for j, l in enumerate(lines) if j != target)
+            others = tuple(entry.split("=")[1] for j, entry in enumerate(lines) if j != target)
             probes.append(Probe(pid(), g, "distractor", f"{dups}-dups",
                                 f"What value did {key} have in the logs earlier in this conversation? Answer with the value only.",
                                 answer, older=others, subjects=(key,), statements=tuple(lines)))
@@ -324,7 +324,7 @@ def run_budget(head: int = 1_500, checkpoints: Sequence[int] = (41_000, 92_000, 
     for r in rows:
         turns[r["turn"]] = turns.get(r["turn"], 0) + r["context"] + r["output"]
     worst, cumulative = 0, 0
-    for t, cost in turns.items():
+    for _t, cost in turns.items():
         worst = max(worst, cumulative + int(gate_factor * cost))
         cumulative += cost
     return {"rows": rows, "total": cumulative, "worst_gate": worst, "head": head}

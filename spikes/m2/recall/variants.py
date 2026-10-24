@@ -43,7 +43,16 @@ from typing import Any
 
 from contexto.canonical import canonical_json
 from contexto.paths import session_dir
-from contexto.rewrite import ANTHROPIC, MESSAGES, Config, RewriteEngine, _DIALECT, is_context_block, is_turn_start, strip_thinking
+from contexto.rewrite import (
+    _DIALECT,
+    ANTHROPIC,
+    MESSAGES,
+    Config,
+    RewriteEngine,
+    is_context_block,
+    is_turn_start,
+    strip_thinking,
+)
 from contexto.store import KEY_BYTES, SessionStore
 from contexto.tokens import TokenEstimator
 
