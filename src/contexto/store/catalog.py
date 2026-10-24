@@ -58,7 +58,10 @@ ZLIB_LEVEL = 1  # level 6 compresses a little smaller and several times slower (
 # When the store's text does not fit the budget as it is, at most this share of the budget is held
 # uncompressed. Text held uncompressed and compressed later leaves its memory with the allocator, which
 # does not give it back: at 6,000 pages and 64 MB, peak RSS was 185 MB with no limit, 145 MB with half,
-# and 124 MB with a quarter, while the uncompressed pages left at the end were the same.
+# and 124 MB with a quarter, while the uncompressed pages left at the end were the same. The cost: a
+# budget raised above the store's compressed size but below its uncompressed size is partly left
+# unused, and search is slower than it could be (reviewer-2 on PR #215: 80 of 128 MiB held, 0.31 s
+# against 0.25 s, for 140 MB of peak RSS against 232).
 RAW_SHARE = 0.25
 
 
@@ -89,6 +92,7 @@ class Entry:
     held: int = 0  # the admission number of the held text, 0 when no text is held
     packed: bytes | None = None  # the held text compressed, when it is held that way
     size: int = 0  # the bytes the held text counts against the budget
+    packed_size: int = 0  # the text's compressed size, once compressing it found it larger than the budget
     lines: dict[bool, str] = field(default_factory=dict)  # the index line, by whether it lists identifiers
 
     @property
@@ -268,6 +272,10 @@ class PageCatalog:
         size = len(found.text)
         self._seen_files += file_bytes
         self._seen_bytes += size
+        if self._budget is not None and size > self._budget and not entry.packed_size:
+            entry.packed_size = len(zlib.compress(found.text, ZLIB_LEVEL))
+        if self._budget is not None and entry.packed_size > self._budget:
+            return  # larger than the budget even compressed: holding it would let every other text go first
         if self._budget is not None and self._held_bytes + size > self._budget and not self._raw_count:
             # Every held text is compressed already, so this one would be compressed and then let go first
             # if it is the oldest: skip the compression (a search over a store larger than the budget).
@@ -308,6 +316,10 @@ class PageCatalog:
                 self._held_bytes += len(packed) - entry.size
                 entry.size = len(packed)
                 self._raw_count -= 1
+                if entry.size > self._budget:  # larger than the budget even compressed: let it go now,
+                    self._held_bytes -= entry.size  # not every older text first, and never hold it again
+                    entry.held, entry.packed, entry.size, entry.packed_size = 0, None, 0, len(packed)
+                    continue
                 heapq.heappush(self._packed, item)
                 continue
             if self._held_bytes <= self._budget:

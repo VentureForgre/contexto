@@ -193,6 +193,21 @@ def test_when_compressed_text_does_not_fit_the_oldest_goes_first(tmp_path, monke
     assert set(store._catalog.held()) <= {new} and store._catalog.held_bytes <= size
 
 
+def test_a_newest_page_larger_than_the_budget_even_compressed_is_not_held(tmp_path, monkeypatch):
+    """Holding it would let every other text go first, at every search (reviewer-1 on PR #215)."""
+    writer = SessionStore(tmp_path, "s1")
+    small = writer.page_out([page(f"needle {t}") for t in range(20)], 0)
+    [big] = writer.page_out([page("needle big " + noise(1, 45_000))], 20)
+    budget = sum(len(search_entry(writer.get_page(p)).text) for p in small) + 100
+    store = server(tmp_path, budget)
+    assert big in store.search("needle")
+    assert set(store._catalog.held()) == set(small) and store._catalog.held_bytes <= budget
+    reads = Reads(monkeypatch)
+    assert big in store.search("needle")
+    assert reads.take() == [f"{big}.json"]  # read for the search, not held, and nothing else let go
+    assert set(store._catalog.held()) == set(small)
+
+
 def test_search_keeps_no_stub_and_the_index_still_reads_one(tmp_path):
     writer = SessionStore(tmp_path, "s1")
     ids = writer.page_out([page(f"needle {t}", prompt=f"task {t}") for t in range(5)], 0)
