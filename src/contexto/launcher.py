@@ -35,11 +35,12 @@ budget under 25,000 is shown on stderr once. So is a main conversation running w
 MCP tools (``contexto.toolcheck``): neither CLI reports an MCP server that fails to start, so the
 proxy checks and the launcher warns, during the run or at exit, and once more after the CLI exits if
 the session ended still without them. So is a CLI version Contexto was not tested with
-(``contexto.cliversions``, D38: ``<cli> --version`` at start; ``--no-version-check`` or
-``CONTEXTO_NO_VERSION_CHECK=1`` skips it). stderr stays quiet otherwise.
+(``contexto.cliversions``, D38: ``<cli> --version`` at start; ``contexto run --no-version-check
+<cli>`` or ``CONTEXTO_NO_VERSION_CHECK=1`` skips it). stderr stays quiet otherwise.
 
 Exit codes: claude's own code; 128 + N if claude died from signal N; 2 for a usage error such as
-a bound above the guard; 1 if the proxy cannot start; 127 if ``claude`` is not on PATH.
+a bound above the guard; 1 if the proxy cannot start; 127 if ``claude`` is not on PATH; 130 for a
+Ctrl+C during the version check, before claude starts.
 """
 
 from __future__ import annotations
@@ -73,6 +74,7 @@ BOUND_GUARD = 170_000  # below Claude Code's idle compaction (200,000) with room
 EXIT_USAGE = 2
 EXIT_PROXY = 1
 EXIT_NOT_FOUND = 127
+EXIT_INTERRUPTED = 130  # 128 + SIGINT: Ctrl+C before the CLI started
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
@@ -296,17 +298,27 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     return proxy, engine_name
 
 
-def check_cli_version(cli: str, binary: str, store: Any, *, enabled: bool = True, stderr=None) -> None:
+def check_cli_version(cli: str, binary: str, store: Any, *, enabled: bool = True, stderr=None) -> bool:
     """D38: log the installed CLI's version (``<binary> --version``, a few seconds at most) and print one
-    warning line when Contexto was not tested with it. Never raises and never stops the launch; a CLI
-    whose version cannot be read is logged, not warned about. Shared by claude and codex."""
-    event, warning = launch_check(cli, binary, enabled=enabled)
+    warning line when Contexto was not tested with it. Never raises; a CLI whose version cannot be read
+    is logged, not warned about. Returns False only when the user pressed Ctrl+C during the check: the
+    caller then exits ``EXIT_INTERRUPTED`` through its normal cleanup, without starting the CLI and
+    without a traceback. Shared by claude and codex."""
+    out = stderr or sys.stderr
+    try:
+        event, warning = launch_check(cli, binary, enabled=enabled)
+    except KeyboardInterrupt:  # the check killed its --version process group before this
+        event, warning = {"event": "cli_version_check", "cli": cli, "error": "interrupted"}, None
     try:
         store.log(event)
     except Exception:  # a diagnostic record; never stop a launch for it
         pass
+    if event.get("error") == "interrupted":
+        print("contexto: interrupted", file=out, flush=True)
+        return False
     if warning:
-        print(f"contexto: {warning}", file=stderr or sys.stderr, flush=True)
+        print(f"contexto: {warning}", file=out, flush=True)
+    return True
 
 
 def report_missing_tools(proxy: ContextoProxy) -> None:
@@ -381,7 +393,9 @@ def _run(options: LaunchOptions, stderr) -> int:
                    "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args)})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
-        check_cli_version("claude", claude, store, enabled=options.version_check, stderr=stderr)
+        if not check_cli_version("claude", claude, store, enabled=options.version_check, stderr=stderr):
+            code = EXIT_INTERRUPTED
+            return code
         warning = start_warning(options.bound, options.headroom_floor, assumed_overhead())
         if warning:
             print(f"contexto: {warning}", file=stderr, flush=True)

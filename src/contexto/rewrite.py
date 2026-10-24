@@ -1638,7 +1638,7 @@ class RewriteEngine:
         except Exception as exc:
             checked = [{"event": "toolcheck_error", "error": type(exc).__name__}]  # content-free
         try:
-            checked = [*checked, *self.clients.observe(request, headers, dialect, main=main)]
+            checked = [*checked, *self.clients.observe(request, headers, dialect)]
         except Exception as exc:  # a diagnostic, like the tool check
             checked = [*checked, {"event": "cli_version_error", "error": type(exc).__name__}]
         events[-1:-1] = checked

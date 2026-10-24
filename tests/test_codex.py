@@ -338,8 +338,12 @@ class FakeLauncher:
     def report_missing_tools(self, proxy):
         self.calls["reported_after_stop"] = proxy.stopped
 
+    EXIT_INTERRUPTED = 130
+    interrupted = False
+
     def check_cli_version(self, cli, binary, store, *, enabled=True, stderr=None):
         self.calls["version_check"] = (cli, binary, enabled)
+        return not self.interrupted
 
     def run_child(self, argv, env, *, stderr=None):
         home = env.get("CODEX_HOME")
@@ -424,6 +428,11 @@ def test_run_codex_checks_the_codex_binary_unless_silenced(tmp_path, monkeypatch
         fake = FakeLauncher()
         assert run_codex(args, launcher=fake, stderr=io.StringIO()) == 0
         assert fake.calls["version_check"] == ("codex", "codex", enabled)
+    fake = FakeLauncher()
+    fake.interrupted = True  # Ctrl+C during the check: codex never runs, the proxy still stops
+    assert run_codex(parse("--codex-key-helper", "/synthetic/helper", "codex", "exec", "hi"), launcher=fake,
+                     stderr=io.StringIO()) == 130
+    assert "argv" not in fake.calls and fake.proxy.stopped and fake.calls["reported_after_stop"]
 
 
 def test_tag_leading_user_prompts_stay_turn_starts():

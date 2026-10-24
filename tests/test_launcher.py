@@ -226,6 +226,28 @@ def test_version_check_is_silenced_by_the_flag_or_the_env(env, upstream, tmp_pat
     assert check == [{**check[0], "cli": "claude", "skipped": True}]
 
 
+def test_ctrl_c_during_the_version_check_exits_130_without_a_traceback(env, upstream, tmp_path):
+    # D38: claude --version hangs; Ctrl+C reaches the launcher (the check runs --version in its own
+    # process group, so the hanging command does not get it). The launcher stops the proxy, logs the
+    # exit, and never starts claude.
+    env["FAKE_VERSION_HANG"] = "1"
+    env.pop("CONTEXTO_NO_VERSION_CHECK", None)
+    proc = launch(env, "--upstream", upstream, "--session", "v4", "claude", cwd=tmp_path)
+    assert proc.stderr is not None
+    line = proc.stderr.readline()
+    assert "contexto: session v4" in line, line
+    time.sleep(0.5)  # into the version check
+    proc.send_signal(signal.SIGINT)
+    rest = proc.communicate(timeout=30)[1]
+    assert proc.returncode == 130, rest
+    assert "Traceback" not in rest and "KeyboardInterrupt" not in rest and "contexto: interrupted" in rest
+    assert not Path(env["FAKE_RECORD"]).exists()  # claude never ran
+    events = session_log(env, "v4")
+    assert [e for e in events if e["event"] == "cli_version_check"][0]["error"] == "interrupted"
+    assert events[-1]["event"] == "exit" and events[-1]["code"] == 130
+    assert "proxy_stop" in [e["event"] for e in events]
+
+
 def test_tested_claude_version_prints_nothing(env, upstream, tmp_path):
     env.pop("CONTEXTO_NO_VERSION_CHECK", None)
     proc = launch(env, "--upstream", upstream, "--session", "v3", "claude", cwd=tmp_path)

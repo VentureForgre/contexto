@@ -444,8 +444,9 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         for note in plan.notes:
             print(f"contexto: {note}", file=stderr)
         print(f"contexto: session {session_id}, engine {engine_name}, codex auth {args.codex_auth}", file=stderr)
-        launcher.check_cli_version("codex", plan.argv[0], store, enabled=not getattr(args, "no_version_check", False),
-                                   stderr=stderr)
+        if not launcher.check_cli_version("codex", plan.argv[0], store,
+                                          enabled=not getattr(args, "no_version_check", False), stderr=stderr):
+            return launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started
         return launcher.run_child(plan.argv, plan.env, stderr=stderr)
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)

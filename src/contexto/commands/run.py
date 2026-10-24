@@ -19,7 +19,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                     "that keeps the upstream prompt under --bound. Contexto options go before "
                     "'claude'; everything after 'claude' is passed to Claude Code unchanged.",
         epilog="Exit codes: Claude Code's own code; 128+N if it died from signal N; 2 usage error; "
-               "1 proxy failed to start; 127 'claude' not found on PATH.")
+               "1 proxy failed to start; 127 'claude' not found on PATH; 130 Ctrl+C during the version check.")
     parser.add_argument("--bound", type=int, default=DEFAULT_BOUND,
                         help=f"upstream prompt bound in tokens (default {DEFAULT_BOUND:,}; "
                              f"above {BOUND_GUARD:,} needs --allow-large-bound)")
