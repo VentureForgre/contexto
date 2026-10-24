@@ -39,7 +39,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         store = SessionStore(contexto_home(), session_id)
         proxy = ContextoProxy(upstream.url, store, observe_thinking=args.observe_thinking,
-                              upstream_source=upstream.source, affinity_key=session_affinity_key(store))
+                              upstream_source=upstream.source, affinity_key=session_affinity_key(store, upstream.url))
         port = proxy.start(args.port)
     except (OSError, ValueError) as exc:
         print(f"contexto proxy: cannot start: {exc}", file=sys.stderr)

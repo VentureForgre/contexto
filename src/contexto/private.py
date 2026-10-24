@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import stat
 from pathlib import Path
 
 DIR_MODE = 0o700
@@ -74,15 +75,23 @@ def write_new(path: Path, data: bytes) -> bool:
 
 def affinity_salt(home: Path) -> bytes:
     """The install's random salt for upstream affinity keys (D36), ``home/affinity.salt`` (0600),
-    created atomically on first use and the same for every later session and resume. ValueError if
-    the file is not a hex salt of the right size."""
+    created atomically on first use and the same for every later session and resume. It is read
+    without following a symlink (OSError) and must be a regular file holding a hex salt of the right
+    size (ValueError otherwise)."""
     path = Path(home) / AFFINITY_SALT_FILE
     if not path.exists():
         private_dir(Path(home))
         # A losing racer's write_new returns False and reads the winner's complete salt below.
         write_new(path, secrets.token_bytes(AFFINITY_SALT_BYTES).hex().encode("ascii"))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)  # a symlink raises OSError (ELOOP)
     try:
-        salt = bytes.fromhex(path.read_text(encoding="ascii").strip())
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"{path} is not a regular file")
+        data = os.read(fd, 4 * AFFINITY_SALT_BYTES)
+    finally:
+        os.close(fd)
+    try:
+        salt = bytes.fromhex(data.decode("ascii").strip())
     except UnicodeDecodeError as exc:
         raise ValueError(f"{path} is not a hex salt") from exc
     if len(salt) != AFFINITY_SALT_BYTES:

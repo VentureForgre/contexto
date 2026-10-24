@@ -107,10 +107,10 @@ HOP_BY_HOP = frozenset({
 })
 USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 AFFINITY_HEADER = "X-Session-Affinity"
-# Host names (and their subdomains) that serve the vendor APIs directly, including Azure OpenAI:
-# each has one identity per key, so the affinity header is not sent to them (D36). Matching is by
-# host name only; an IP literal upstream gets the header.
-VENDOR_HOSTS = ("anthropic.com", "openai.com", "chatgpt.com", "openai.azure.com")
+# Host names (and their subdomains) that serve the vendor APIs directly, including Azure OpenAI
+# and Azure AI Foundry: each has one identity per key, so the affinity header is not sent to them
+# (D36). Matching is by host name only; an IP literal upstream gets the header.
+VENDOR_HOSTS = ("anthropic.com", "openai.com", "chatgpt.com", "openai.azure.com", "services.ai.azure.com")
 
 Headers = dict[str, str]
 TransformResult = tuple[dict[str, Any], Headers, list[dict[str, Any]]]
@@ -212,7 +212,7 @@ def is_vendor_host(host: str) -> bool:
     the socket layer does when it connects (a soft hyphen in ``api.anthro\xadpic.com`` maps away); a
     name that cannot be normalized counts as a vendor host, so it gets no header."""
     try:
-        host = host.rstrip(".").encode("idna").decode("ascii").lower()
+        host = host.encode("idna").decode("ascii").lower().rstrip(".")
     except UnicodeError:
         return True
     return any(host == vendor or host.endswith("." + vendor) for vendor in VENDOR_HOSTS)

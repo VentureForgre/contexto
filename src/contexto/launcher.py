@@ -56,11 +56,12 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from contexto.cliversions import launch_check
 from contexto.paths import contexto_home
 from contexto.private import affinity_salt
-from contexto.proxy import ContextoProxy, affinity_key, identity_transform
+from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import SessionStore
 from contexto.toolcheck import missing_tools_message
 from contexto.upstream import resolve_upstream
@@ -271,12 +272,16 @@ def check_options(options: LaunchOptions) -> None:
                           EXIT_USAGE)
 
 
-def session_affinity_key(store: Any) -> str | None:
+def session_affinity_key(store: Any, upstream_url: str) -> str | None:
     """The store's ``X-Session-Affinity`` value (D36), salted by the install's ``affinity.salt`` in
-    the store's home; None for a store without a home (in memory) or when the salt cannot be read,
-    which is logged and only costs the header."""
+    the store's home. None, without touching the salt, for a vendor upstream (no header is sent
+    there) or a store without a home (in memory); None when the salt cannot be read, which is logged
+    and only costs the header."""
     home, session_id = getattr(store, "home", None), getattr(store, "session_id", None)
     if home is None or not isinstance(session_id, str):
+        return None
+    host = urlsplit(upstream_url).hostname
+    if not host or is_vendor_host(host):
         return None
     try:
         return affinity_key(session_id, affinity_salt(home))
@@ -298,7 +303,7 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     except Exception:  # a diagnostic record; never stop a launch for it
         pass
     transform, observe_usage, engine_name = build_engine(store, config)
-    key = session_affinity_key(store)
+    key = session_affinity_key(store, upstream_url)
     try:
         proxy = ContextoProxy(upstream_url, NoticeLog(store, stderr or sys.stderr), transform,
                               observe_usage=observe_usage, observe_thinking=observe_thinking,

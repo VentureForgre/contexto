@@ -52,6 +52,7 @@ def test_the_salt_is_created_once_private_and_reused(tmp_path):
 @pytest.mark.parametrize("host, vendor", [
     ("api.anthropic.com", True), ("API.Anthropic.com.", True), ("eu.api.anthropic.com", True),
     ("api.openai.com", True), ("chatgpt.com", True), ("my-resource.openai.azure.com", True),
+    ("myres.services.ai.azure.com", True), ("api.anthropic.com\u3002", True),  # ideographic trailing dot
     ("api.anthro\xadpic.com", True),  # the soft hyphen maps away under IDNA, as when connecting
     ("cpa.example.com", False), ("127.0.0.1", False), ("localhost", False),
     ("notanthropic.com", False), ("anthropic.com.example.net", False), ("azure.com", False),
@@ -140,6 +141,36 @@ def test_the_rewrite_engine_keeps_the_session_fields():
     claude = json.loads(CLAUDE_BODY)
     sent, headers, _ = transform(json.loads(CLAUDE_BODY), dict(CLAUDE_HEADERS), "/v1/messages")
     assert sent["metadata"] == claude["metadata"] and headers["X-Claude-Code-Session-Id"] == CLAUDE_SESSION
+
+
+def test_the_salt_is_never_read_through_a_symlink(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.write_text(bytes(range(32)).hex())
+    (tmp_path / AFFINITY_SALT_FILE).symlink_to(target)
+    with pytest.raises(OSError):
+        affinity_salt(tmp_path)
+    (tmp_path / AFFINITY_SALT_FILE).unlink()
+    (tmp_path / AFFINITY_SALT_FILE).mkdir()
+    with pytest.raises((OSError, ValueError)):
+        affinity_salt(tmp_path)
+
+
+def test_a_symlinked_salt_costs_only_the_header(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.write_text(bytes(range(32)).hex())
+    (tmp_path / AFFINITY_SALT_FILE).symlink_to(target)
+    store = SessionStore(tmp_path, "s1")
+    assert launcher.session_affinity_key(store, "http://127.0.0.1:9") is None
+    events = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+    assert any(e["event"] == "affinity_salt_unavailable" for e in events)
+
+
+def test_no_salt_is_created_for_a_vendor_upstream(tmp_path):
+    store = SessionStore(tmp_path, "s1")
+    for url in ("https://api.anthropic.com", "https://chatgpt.com/backend-api/codex", "https://x.services.ai.azure.com"):
+        assert launcher.session_affinity_key(store, url) is None
+    assert not (tmp_path / AFFINITY_SALT_FILE).exists()  # not created, so nothing to fail on either
+    assert launcher.session_affinity_key(store, "https://cpa.example.com") == affinity_key("s1", affinity_salt(tmp_path))
 
 
 def test_start_proxy_keys_the_header_by_session_and_install_salt(tmp_path):
