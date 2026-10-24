@@ -659,13 +659,16 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   1,048,576 bytes (default 64; `0` holds none), or `contexto mcp --search-cache-mb`, which
   overrides it. `contexto run` passes the variable to the MCP server for both CLIs when it is set;
   an invalid value is logged `search_cache_invalid` and the default used, so the server still
-  starts. The budget counts held text as it is or compressed (zlib level 1): the newest pages (by
-  turn, then id) are held as they are, and while the held bytes exceed the budget the oldest
-  uncompressed text is compressed, then the oldest compressed text let go. When the store's text
-  does not fit the budget as it is, at most a quarter of the budget is held uncompressed. A page
-  that is not held is read from its file at each search and let go after it; a page that would be
-  compressed and let go first is not held. A page removed while a search runs is left out (the
-  search runs again on a new listing when a listed file is gone at its end), and a page whose id is
+  starts. The budget counts held text as it is or compressed (zlib level 1): a page read for a
+  search is held as it is, and while the held bytes exceed the budget the oldest uncompressed text
+  (by turn, then id) is compressed, then the oldest compressed text let go. So a store whose
+  compressed text fits keeps every page, the newest uncompressed while room allows, and a larger
+  store keeps its newest pages compressed, none uncompressed. When the store's text does not fit the
+  budget as it is, at most a quarter of the budget is held uncompressed. A page that is not held is
+  read from its file at each search and let go after it; a page that would be compressed and let go
+  first, or that is larger than the budget even compressed, is not held. A page removed while a
+  search runs is left out (the search runs again on a new listing when a listed file is gone at its
+  end, up to 3 passes, then returns the last result), and a page whose id is
   not a string or whose turn is not an integer is logged `page_unreadable` and left out. Search
   results do not depend on the budget. Limitations: a store larger than the budget's compressed
   capacity reads every page outside it at each search; at 6,000 synthetic pages (184 MiB of text,

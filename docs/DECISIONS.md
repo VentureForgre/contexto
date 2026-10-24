@@ -651,12 +651,19 @@ the owner's delegation. Open decisions are listed at the end with the options an
   compressed text fits keeps every page, the newest as they are, and a larger store keeps its
   newest pages compressed and reads the rest from their files at each search. A page that would be
   compressed and then let go first (every held text is compressed and it is older than all of
-  them) is not held, so a search over a large store does not compress what it will drop. When the
+  them) is not held, so a search over a large store does not compress what it will drop, and
+  neither is a page larger than the budget even compressed, which would let every other text go
+  first (reviewer-1). When the
   store's text does not fit the budget as it is (estimated from the listed pages' file sizes and the
   text per file byte of the pages read so far), at most a quarter of the budget is held as it is:
   text held as it is and compressed later leaves its memory with the allocator, and at 6,000 pages
   peak RSS was 185 MB with no limit on that share, 145 MB with half, and 124 MB with a quarter,
-  with the same pages left uncompressed at the end (292). On this store zlib level 1 makes text 3.2
+  with the same pages left uncompressed at the end (292). The quarter costs something when the
+  budget is raised above the store's compressed size but below its uncompressed size: part of the
+  budget stays unused and search is slower (reviewer-2, 128 MB on this store: 80 of 128 MiB held,
+  1,044 pages uncompressed instead of 3,337, 0.31 s instead of 0.25 s, for 140 MB of peak RSS
+  instead of 232). Without it peak RSS reached 1.8 times the budget, so the budget would not bound
+  memory. On this store zlib level 1 makes text 3.2
   times smaller; compressing a 32 KB page takes about 137 us once, decompressing it 27 us per
   search, against about 110 us to read, parse, and fold it again (reviewer-2's measurements). Not
   LRU: every search reads every page (a word matches as a substring, so no index can skip a page),
@@ -671,7 +678,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   when the query has at most 6 words (a read costs about as much as 6 failing substring tests on a
   32 KB page: 92 us against 15 us) or a match is already known. A page removed while a search runs
   is left out whatever the budget: held text would still rank it and a read would not, so when a
-  listed file is gone at the end the search runs again on a new listing (reviewer-1). A page whose
+  listed file is gone at the end the search runs again on a new listing, up to 3 passes; if a page
+  is removed during each of them, the third pass's result is returned, and it can still depend on
+  the budget (reviewer-1). A page whose
   id is not a string or whose turn is not an integer is damaged: it is logged `page_unreadable` and
   left out, rather than breaking the ordering of every search (reviewer-1); (4) besides held text,
   the server keeps each page's id, turn, and whether it holds only context blocks: 695 bytes per
