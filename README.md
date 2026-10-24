@@ -19,7 +19,9 @@ Contexto sends no extra model calls. It reads and rewrites the requests your CLI
 
 Contexto needs Python 3.12 or later and has no runtime dependencies. Install the wheel from the
 latest release, [v0.4.0](https://github.com/VentureForgre/contexto/releases/tag/v0.4.0). It has two
-assets: `contexto-0.4.0-py3-none-any.whl` and `contexto-0.4.0.tar.gz`. It is not on PyPI.
+assets: `contexto-0.4.0-py3-none-any.whl` and `contexto-0.4.0.tar.gz`. It is not on PyPI: the
+PyPI package named `contexto` is an unrelated project, so `pip install contexto` installs the wrong
+thing. Use the release URL or the downloaded wheel.
 
 Straight from the release URL, with no GitHub login (this needs the repository to be public):
 
@@ -45,9 +47,9 @@ You also need `claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
 
 ### Platforms
 
-Tested on macOS and Linux with Python 3.12 or later. Windows is not supported: the session store
-relies on POSIX file modes (0700 directories, 0600 files, set with `os.fchmod`), which Windows does
-not provide.
+Tested on macOS and Linux with Python 3.12. Windows is not supported: the store locks files with
+`fcntl`, the launcher forwards POSIX signals (`SIGHUP`), and the store relies on POSIX file modes
+(0700 directories, 0600 files).
 
 ## Quickstart
 

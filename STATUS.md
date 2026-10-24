@@ -223,9 +223,9 @@ Each item is a separate pull request or owner task; none is on `main` yet.
   (3)). Choose b on a harness variant that draws page sizes from
   `spikes/m2/scale/store/calibration.json`'s real turn sizes, or take BM25's length from the
   messages that hold a match rather than the whole page.
-- CLIProxyAPI support as an upstream (O4).
-- Per-session upstream affinity on the owner's proxy (O6).
-- The OpenRig context-usage clock bug report (O7).
+- CLIProxyAPI support as an upstream (O4; the owner decided on 2026-10-24 to support it).
+- Per-session upstream affinity on the owner's proxy (O6; the owner decided on 2026-10-24 to fix
+  it).
 - Making the repository public: README install from the public release URL, `SECURITY.md`, and
   the self-hosted runner question under "Needs the owner". There is no license file yet; that is
   the owner's decision.
@@ -250,11 +250,8 @@ Measured candidates deliberately not pursued (each would need a live run or new 
   revisit only if a seat shows a recall cost).
 
 Needs the owner:
-- O4: end-user authentication guidance (API key only, or subscription logins too); CLIProxyAPI
-  support is in progress.
-- O6: per-session upstream affinity on the owner's proxy (the remaining cache misses and dropped
-  thinking come from the proxy spreading requests across identities); in progress.
-- O7: whether to report the OpenRig context-usage clock bug upstream; the report is in progress.
+- Upgrade OpenRig on the host from 0.5.15 to 0.6.1 or later to get the clock fix (O7, resolved
+  below).
 - GitHub billing: the org's hosted Actions minutes are blocked by a failed payment or spending
   limit; CI and releases now run on the self-hosted runner `ubuntu-final-middle`, one job at a
   time.
@@ -270,12 +267,16 @@ Needs the owner:
 - O3: settled by D31: the default bound stays 150,000, including for OpenRig seats, because a
   larger bound lowers the largest single turn that stays under Claude Code's 200,000 idle-compaction
   minimum (about 87k at 150,000 against 67k at 170,000 on a 92k head, modeled).
-- O4 (owner): end-user auth guidance (API key only, or subscription logins too).
+- O4: decided by the owner on 2026-10-24: support CLIProxyAPI as an upstream; the work is in
+  progress.
 - O5: settled by D29. v0.1.0 was cut from f990703 (tag and GitHub Release on this private
   repository, sdist and wheel attached, no package registry).
-- O6 (owner): per-session upstream affinity on the owner's proxy (cache misses and dropped
-  thinking traced to the proxy spreading requests across identities).
-- O7 (owner): OpenRig context-usage clock bug (UTC parsed as local time).
+- O6: decided by the owner on 2026-10-24: fix per-session upstream affinity on the owner's proxy
+  (cache misses and dropped thinking traced to the proxy spreading requests across identities);
+  the work is in progress.
+- O7: resolved upstream. OpenRig fixed the context-usage clock bug (UTC parsed as local time) in
+  its PR #124 (commit 4a920dba), first released in v0.6.1. The host runs 0.5.15 and needs only an
+  upgrade; no report is needed.
 
 ## Known limitations (v0.4.0)
 
@@ -334,8 +335,10 @@ Needs the owner:
   Claude Code's own `# Environment` text, and the kinds of context block on 2.1.302's first lines:
   re-run the reminders spike when the CLI changes. Resuming an epoch record written before v0.4.0
   can carry one message the old code had paged (logged as `carried_reclassified`).
-- Windows is not supported: the store relies on POSIX file modes (`os.fchmod`, 0700 and 0600).
-  Tested on macOS and Linux with Python 3.12.
+- Windows is not supported: the store locks files with `fcntl` (`store/__init__.py`,
+  `store/ledger.py`), the launcher forwards `SIGHUP` (`launcher.py`), and the store relies on
+  POSIX file modes (0700 and 0600), so neither imports there. Tested on macOS and Linux with
+  Python 3.12.
 - Cache efficiency depends on the upstream route (O6): 29 of 31 and 36 of 37 in the live runs.
 - Organization-managed Claude Code settings outrank the launcher's `--settings`; a user-supplied
   `--settings` is refused (exit 2); a user `--mcp-config` is allowed.

@@ -125,9 +125,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   position and content (identical countdowns in different turn starts stay distinct), so a
   resumed engine carries exactly what the previous one did, except once after an upgrade that
   reclassifies carried content: a record written before v0.4.0 can have paged, as carried text,
-  a message this version never pages (the claude-sonnet-5 and claude-fable-5 environment message, or a latest
-  copy hidden because an older byte-identical copy was paged). The resumed engine carries it
-  again from its first request (one cache write from the carried position on) and logs
+  a message this version never pages (the claude-sonnet-5 and claude-fable-5 environment message,
+  or a latest copy hidden because an older byte-identical copy was paged). The resumed engine
+  carries it again from its first request (one cache write from the carried position on) and logs
   `carried_reclassified` (rule 16). The proxy logs `carried_paged` with
   the count, the tokens freed, how many were context blocks, and how many were of no recognisable
   kind (`unrecognised`; on 5.x ids the per-turn system reminders and settings changes riding on them
@@ -355,12 +355,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       content-free `carried_reclassified` with `epoch` and `count` when the record's
       `paged_carried` names, by hash, system messages without settings fields that the current
       rules carry (session-start, or protected as the latest of a kind) and that the rules
-      before v0.4.0 hid; the resume goes ahead and those messages are carried again. The record does not say
-      which version wrote it, so on a record this version wrote the count can include a latest
-      copy that was already carried: it is an upper bound on what changed. Measured sizing
-      (packet A8's ratio restore) still applies; it waits for the first request on the recorded
-      model, so a side request on another model that arrives first logs `sizing_not_restored` once
-      and does not cancel it.
+      before v0.4.0 hid; the resume goes ahead and those messages are carried again. The record
+      does not say which version wrote it, so on a record this version wrote the count can
+      include a latest copy that was already carried: it is an upper bound on what changed.
+      Measured sizing (packet A8's ratio restore) still applies; it waits for the first request on
+      the recorded model, so a side request on another model that arrives first logs
+      `sizing_not_restored` once and does not cancel it.
     - **Who writes.** Only the main conversation writes. After a restart, no conversation writes
       until one has resumed from the record or has strictly more turn starts than the record's
       `last_turn_count`, so a side request that arrives first cannot overwrite it.

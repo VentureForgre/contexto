@@ -18,8 +18,11 @@ into tasks and gives each to a builder subagent. Each builder works in its own G
 own `claude/<topic>` branch from `origin/main`, runs the full test suite, and opens a pull request.
 Two independent reviewer agents then check the pull request at its exact head commit and post their
 verdicts as PR comments. A pull request merges only after both reviewers approve that head; a new
-push needs new verdicts. GitHub does not enforce the approvals (the team uses one shared account),
-so this is a team rule.
+push needs new verdicts. The project has one owner, and the builder and reviewer agents post from
+the owner's account, so GitHub cannot count their approvals; the two verdicts are a project rule.
+
+Pull requests from outside contributors are welcome. CI does not run on a pull request from a fork
+until a maintainer approves the workflow run, and the same two-verdict review applies before merge.
 
 Before 2026-10-17 the work ran on an OpenRig rig (an intake lead, two managers, four builders, and
 two reviewers, each in its own worktree). That rig was taken down; older records in `docs/` and
