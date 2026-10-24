@@ -44,10 +44,13 @@ order (measured in M0, PR #16 findings 1 and 1a: a settings-file `env.ANTHROPIC_
 overrides the process environment, and in a git worktree the main checkout's
 `settings.local.json` wins): explicit `--upstream`; else the first settings file that sets
 `env.ANTHROPIC_BASE_URL`, in Claude Code's precedence (in a worktree the main checkout's
-`.claude/settings.local.json` first, then the local, project, and user settings files); else
+`.claude/settings.local.json` first, then the local, project, and user settings files, the user's
+being `$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35); else
 `ANTHROPIC_BASE_URL` in the process environment; else `https://api.anthropic.com`. The launcher's
 own flag-level `--settings` outranks all of these, which is what makes the proxy attachment work.
 Organization-managed settings still outrank `--settings`; document that limit.
+Supported upstreams for end users (D35): the vendor API with an API key, or a CLIProxyAPI
+instance (its root for Claude Code, the root plus `/v1` for Codex); setup in `docs/cliproxyapi.md`.
 
 ## Rewrite engine (normative)
 
@@ -442,6 +445,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   and builder-2's unpushed ledger work at commit 1ab5f29 (readable from the shared object store),
   append-only JSONL with a hash chain and crash-truncation repair. File sources require `sha256`;
   a missing file counts as stale. Records may cite pages as provenance (`type: page`).
+- **Live lock (D37):** every process that opens a session for writing (proxy, launcher, MCP server)
+  holds a shared `flock` on `live.lock` in the session directory until it exits; the descriptor is
+  not inherited by child processes. A session whose lock another process holds is in use, and
+  `contexto sessions prune` never deletes it. Stores never follow a symlinked `live.lock`.
 - **Pinned text** starts with fixed instruction lines, then lists open obligations, active
   decisions, then verified facts, newest first, each with its id, capped at `pin_budget` (default
   6,000 tokens). The instruction lines must say that earlier turns are paged out and how to reach
@@ -499,7 +506,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     already read (`message_start`'s, for Messages), so that publish also comes before any held
     event; the held events are still released, because rule 8 forwards what upstream sent and the
     CLI decides what a stream without its terminator means. A tool call
-    therefore always sees the current turn's room. Keepalive pings may be sent during a hold.
+    therefore always sees the current turn's room. Keepalives pass during a hold as they arrive:
+    `ping` events and comment-only events such as CLIProxyAPI's `: keep-alive` (D35).
   - `contexto_recall`, `contexto_search`, and `contexto_state` charge the tokens they return
     against the room for the current turn id, converted with the same ratio as the per-call limit,
     with an atomic, locked read-modify-write so parallel calls cannot overspend. The charge
@@ -694,7 +702,24 @@ the exception's type name only and keeps the request's rewrite.
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run
 the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
-`contexto recall <page id>`, `contexto state`. Exit codes and `--help` documented in README.
+`contexto sessions prune`, `contexto recall <page id>`, `contexto state`. Exit codes and `--help`
+documented in README.
+
+`contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated
+blocks under the session directory, symlinks counted as links) and a total. `contexto sessions
+prune` (D37) deletes whole session directories. It selects by `--older-than DURATION` (`30d`, `12h`;
+idle time since the last activity `sessions list` shows), `--keep N` (keep the N most recently
+active), and `--session ID`; all given conditions must hold and at least one is required. Without
+`--yes` it only prints the selection with sizes and a total, and writes nothing. `--json` prints
+`dry_run`, `total_bytes`, and each selected session's `status` and `reason`, or `{"error": ...}`
+when selection fails. It never deletes a
+session whose `live.lock` another process holds, one whose `live.lock` is a symlink or not a regular
+file, or one active in the last 10 minutes. `sessions/` and each session must be real directories,
+and every step after the check works through open directory descriptors (`O_NOFOLLOW`, inode
+checked against the selected entry), so a symlink swapped in at any moment cannot make prune delete
+or create anything outside the checked directory. Failures are per session; the exit code is 1 if
+any failed or if the session named by `--session` was skipped, with `contexto: error:` on stderr.
+A store resumed while prune deletes its session waits, starts empty, and prints a warning.
 
 ## Lanes
 

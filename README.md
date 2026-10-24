@@ -117,6 +117,17 @@ ChatGPT login mode (`--codex-auth chatgpt`) uses your own `CODEX_HOME` with `-c`
 is tested only with synthetic credentials, never live. Follow your provider's terms for whatever
 credentials you use with Contexto.
 
+### Upstreams and CLIProxyAPI
+
+If you run Contexto yourself, the supported upstreams are the vendor's API with your own API key, or
+a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance reached with one of its client
+keys (D35). Subscription logins live in CLIProxyAPI or the vendor's own CLI, never in Contexto, and
+you must follow your providers' terms. For CLIProxyAPI, set Claude Code's `ANTHROPIC_BASE_URL` to its
+root (for example `http://127.0.0.1:8317`, no `/v1`) and its `apiKeyHelper` to a command that prints
+the client key; `contexto run claude` and `contexto run codex` then both go through it. With the key
+in `ANTHROPIC_AUTH_TOKEN` instead, Codex also needs `--codex-key-helper`. Setup, checks, and what was
+tested: [docs/cliproxyapi.md](docs/cliproxyapi.md).
+
 ## Bound and configuration
 
 `contexto run` options (all go before `claude` or `codex`):
@@ -165,13 +176,15 @@ warns again, once, if the measured overhead does the same.
 
 ## Inspecting sessions
 
-These commands read a session's store under `$CONTEXTO_HOME/sessions/<id>/` and never change it.
+These commands read a session's store under `$CONTEXTO_HOME/sessions/<id>/` and never change it
+(except `sessions prune`, below).
 `recall` and `state` pick the session from `--session ID`, else `CONTEXTO_SESSION`, else the session
 with the most recent activity, and print the choice to stderr (for example
 `session 7f3a (most recent)`), so stdout carries only the text.
 
 - `contexto sessions list [--json]`: one row per session, most recent activity first: id, created
-  time, page count, ledger record count (`?` if the ledger cannot be read), and last activity, in UTC.
+  time, page count, ledger record count (`?` if the ledger cannot be read), last activity in UTC, and
+  size on disk, then the total size. `--json` gives the size as `size_bytes`.
 - `contexto sessions show ID [--json]`: created and last activity times; page, record, active
   record, and open obligation counts; session-log event, over-bound turn, and upstream 4xx counts;
   the last epoch the proxy logged; and whether the ledger verifies. `--json` adds event counts by type.
@@ -183,6 +196,36 @@ with the most recent activity, and print the choice to stderr (for example
 - `contexto state [--session ID]`: the full pinned state, the same text as the MCP `contexto_state`
   tool but never cut by a recall budget. It hashes each file a record cites as provenance, inside the session's
   recorded working directory, to mark changed files `STALE`. It never writes there.
+
+### Removing old sessions
+
+Session directories hold the raw conversation and are never removed on their own.
+`contexto sessions prune` deletes whole sessions. It is the one `sessions` command that changes the
+store.
+
+```
+contexto sessions prune --older-than 30d          # list sessions idle for 30 days, with sizes
+contexto sessions prune --older-than 30d --yes    # delete them
+contexto sessions prune --keep 10 --yes           # keep the 10 most recently active, delete the rest
+contexto sessions prune --session 7f3a --yes      # delete one session
+```
+
+- Without `--yes` nothing is deleted: it prints each selected session, its size, and the total.
+- `--older-than` takes a whole number and a unit: `s`, `m`, `h`, `d`, or `w`. Age is the time since
+  the last activity that `sessions list` shows. When several options are given, a session must
+  match all of them.
+- A session in use by a running `contexto run`, `contexto proxy`, or `contexto mcp` is skipped, and
+  so is any session active in the last 10 minutes. Stop the session first. If you name it with
+  `--session`, prune exits 1 with the reason on stderr.
+- `sessions/` and each session must be real directories. Prune deletes through open directory
+  handles and never follows a symlink, so it does not delete or create anything outside the session
+  it checked, even if a path is swapped for a link while it runs.
+- If one session cannot be deleted, prune reports it on stderr, goes on with the rest, and exits 1.
+- `--json` prints `dry_run`, `total_bytes`, and each selected session with its `status`
+  (`would_remove`, `removed`, `skipped`, or `failed`) and `reason`. If prune fails before selecting
+  anything (for example an unknown `--session`), it prints `{"error": ...}` instead and exits 1.
+- If you resume a session with `contexto run --session ID` while prune is deleting it, the resume
+  waits, then starts the session empty and prints a warning.
 
 ## MCP tools the model gets
 
@@ -207,7 +250,8 @@ character ranges, never the text.
 **Which upstream does `contexto run` use?** The first of: `--upstream`; `env.ANTHROPIC_BASE_URL` from
 the first Claude Code settings file that sets it (in a git worktree, the main checkout's
 `.claude/settings.local.json` first, then the project's `.claude/settings.local.json`, then
-`.claude/settings.json`, then `~/.claude/settings.json`); `ANTHROPIC_BASE_URL` in the environment;
+`.claude/settings.json`, then `~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json` when
+`CLAUDE_CONFIG_DIR` is set); `ANTHROPIC_BASE_URL` in the environment;
 `https://api.anthropic.com`. The session log records which source won, never the URL.
 
 **Requests bypass the proxy.** Organization-managed Claude Code settings outrank the launcher's
@@ -287,6 +331,7 @@ full list is in
 | `run` | 127 | `claude` or `codex` is not on `PATH` |
 | `sessions`, `recall`, `state` | 0 | Success (an empty session list is a success) |
 | `sessions`, `recall`, `state` | 1 | Unknown or invalid session id, unknown page id, an offset past the end of the page, or an unreadable ledger |
+| `sessions prune` | 1 | A session could not be deleted, or the session named by `--session` was skipped (in use, active in the last 10 minutes, or unsafe to delete) |
 | any | 2 | Unknown command or option, or a missing argument (`contexto` with no command prints help and exits 2) |
 
 Development, tests, and releases: see [CONTRIBUTING.md](CONTRIBUTING.md).

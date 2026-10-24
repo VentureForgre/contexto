@@ -186,7 +186,9 @@ RESPONSES = ResponsesDialect()
 # config 0600, removed on exit) whose custom provider points at the proxy and gets its bearer token
 # from ``auth.command`` running the existing key helper. The config names the helper command only,
 # never a key. ChatGPT mode (``--codex-auth chatgpt``): the user's own CODEX_HOME with ``-c`` overrides
-# only and ``requires_openai_auth``; its end-user terms question is open as O4. Both keep Codex on
+# only and ``requires_openai_auth``: Codex keeps its own login and the proxy passes it through. Under
+# D35 logins belong in CLIProxyAPI (reached in API-key mode) or the vendor's own CLI, never in
+# Contexto, and users follow their providers' terms. Both keep Codex on
 # HTTP (custom providers have no WebSocket transport) and turn request compression off, because the
 # proxy cannot transform compressed bodies. Some Codex calls (rate limits, usage, a remote MCP
 # connection) go to chatgpt.com directly and bypass the proxy by design.
@@ -197,8 +199,10 @@ KEY_HELPER_ENV = "CONTEXTO_CODEX_KEY_HELPER"
 UPSTREAM_ENV = "CONTEXTO_CODEX_UPSTREAM"
 CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
 PROVIDER_ID = "contexto"
-CHATGPT_MODE_HELP = ("ChatGPT login: route the user's own Codex ChatGPT credentials through the local proxy. "
-                     "Whether end users may do this under OpenAI's terms is an open owner question (O4).")
+CHATGPT_MODE_HELP = ("ChatGPT login: route the user's own Codex ChatGPT credentials through the local proxy, "
+                     "tested only with synthetic credentials. Logins belong in CLIProxyAPI or the vendor's own "
+                     "CLI, never in Contexto, and you must follow your provider's terms (D35, "
+                     "https://github.com/VentureForgre/contexto/blob/main/docs/cliproxyapi.md).")
 
 
 class CodexLaunchError(RuntimeError):
@@ -224,13 +228,14 @@ class CodexLaunch:
         self.codex_home = None
 
 
-def claude_api_key_helper(cwd: Path, home: Path) -> str | None:
+def claude_api_key_helper(cwd: Path, home: Path, env: dict[str, str] | None = None) -> str | None:
     """The ``apiKeyHelper`` Claude Code would use, from the same settings files and order as the
-    upstream resolution (the main checkout's local settings first in a linked worktree)."""
-    for _kind, path in claude_settings_order(cwd, home):
+    upstream resolution (the main checkout's local settings first in a linked worktree, and
+    ``$CLAUDE_CONFIG_DIR/settings.json`` for the user's when ``env`` sets it)."""
+    for _kind, path in claude_settings_order(cwd, home, env):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):  # unreadable or not JSON: skipped, as if absent
             continue
         value = data.get("apiKeyHelper") if isinstance(data, dict) else None
         if isinstance(value, str) and value.strip():
@@ -319,17 +324,26 @@ def resolve_codex_upstream(auth_mode: str, explicit: str | None, env: dict[str, 
                            claude_upstream: str | None) -> str:
     """The proxy's upstream for Codex, which carries the version path: ``--codex-upstream``, else
     ``CONTEXTO_CODEX_UPSTREAM``, else the ChatGPT backend in ChatGPT mode, else the upstream Claude Code
-    would use (the owner's proxy) plus ``/v1`` in API-key mode."""
+    would use (for example a CLIProxyAPI root, D35) plus ``/v1`` in API-key mode."""
+    return codex_upstream_with_source(auth_mode, explicit, env, claude_upstream)[0]
+
+
+def codex_upstream_with_source(auth_mode: str, explicit: str | None, env: dict[str, str],
+                               claude_upstream: str | None, claude_source: str | None = None) -> tuple[str, str]:
+    """``resolve_codex_upstream`` plus where the URL came from, for the session line and log (D35):
+    ``codex-flag``, ``codex-env``, ``chatgpt-default``, or ``claude-<source>+/v1`` (the Claude
+    upstream's own source label, such as ``claude-settings:local+/v1``). Never the URL itself."""
     if auth_mode not in (API_KEY_MODE, CHATGPT_MODE):
         raise CodexLaunchError(f"unknown Codex auth mode: {auth_mode}")
-    target = explicit or env.get(UPSTREAM_ENV)
-    if not target and auth_mode == CHATGPT_MODE:
-        target = CHATGPT_UPSTREAM
-    if not target and claude_upstream:
-        target = claude_upstream.rstrip("/") + "/v1"
-    if not target:
-        raise CodexLaunchError(f"no upstream for Codex: pass --codex-upstream or set {UPSTREAM_ENV}")
-    return target
+    if explicit:
+        return explicit, "codex-flag"
+    if env.get(UPSTREAM_ENV):
+        return env[UPSTREAM_ENV], "codex-env"
+    if auth_mode == CHATGPT_MODE:
+        return CHATGPT_UPSTREAM, "chatgpt-default"
+    if claude_upstream:
+        return claude_upstream.rstrip("/") + "/v1", f"claude-{claude_source or 'upstream'}+/v1"
+    raise CodexLaunchError(f"no upstream for Codex: pass --codex-upstream or set {UPSTREAM_ENV}")
 
 
 def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_mode: str = API_KEY_MODE,
@@ -348,7 +362,7 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     if auth_mode == CHATGPT_MODE:
         argv = [codex_bin, *chatgpt_overrides(proxy_url, session_id, contexto_home, base_env), *codex_args]
         return CodexLaunch(argv=argv, env=base_env, upstream=target, notes=[CHATGPT_MODE_HELP])
-    helper = key_helper or base_env.get(KEY_HELPER_ENV) or claude_api_key_helper(cwd, home)
+    helper = key_helper or base_env.get(KEY_HELPER_ENV) or claude_api_key_helper(cwd, home, base_env)
     if not helper:
         raise CodexLaunchError(f"no key helper: pass --codex-key-helper, set {KEY_HELPER_ENV}, "
                                "or configure apiKeyHelper in Claude Code settings")
@@ -408,10 +422,14 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         options = launcher.options_from_args(args)
         launcher.check_options(options)
         claude = upstream_module.resolve_upstream(args.upstream)
-        target = resolve_codex_upstream(args.codex_auth, args.codex_upstream, dict(os.environ), claude.url)
+        target, source = codex_upstream_with_source(args.codex_auth, args.codex_upstream, dict(os.environ),
+                                                    claude.url, claude.source)
         session_id = args.session or uuid.uuid4().hex
-        store = launcher.open_session(paths.contexto_home(), session_id, Path.cwd())
-        proxy, engine_name = launcher.start_proxy(store, target, "codex", launcher.engine_config(options),
+        try:
+            store = launcher.open_session(paths.contexto_home(), session_id, Path.cwd())
+        except (OSError, ValueError) as exc:  # as `contexto run claude` reports it
+            raise launcher.LaunchError(f"cannot open session {session_id!r}: {exc}", 2) from exc
+        proxy, engine_name = launcher.start_proxy(store, target, source, launcher.engine_config(options),
                                                   args.observe_thinking, stderr=stderr)
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)
@@ -427,7 +445,8 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                           contexto_home=paths.contexto_home())
         for note in plan.notes:
             print(f"contexto: {note}", file=stderr)
-        print(f"contexto: session {session_id}, engine {engine_name}, codex auth {args.codex_auth}", file=stderr)
+        print(f"contexto: session {session_id}, engine {engine_name}, codex auth {args.codex_auth}, "
+              f"upstream {source}", file=stderr)
         return launcher.run_child(plan.argv, plan.env, stderr=stderr)
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)
