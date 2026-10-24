@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
             turn_of = {pid: t for t, pid in enumerate(ids)}
 
             def row(what: str, query: str, seconds: float, **extra) -> None:
-                timing_rows.append({"n": n, "what": what, "query": query, "seconds": f"{seconds:.6f}", **extra})  # noqa: B023
+                timing_rows.append({"n": n, "what": what, "query": query, "seconds": f"{seconds:.6f}", **extra})  # noqa: B023 - row() is called within the iteration
 
             # Current search, for reference and for the result-set check.
             current = {}
@@ -100,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             row("text cache: load all pages", "", load_s, bytes=mem)
             ordered = sorted(cache.items(), key=lambda kv: (kv[1][0], kv[0]), reverse=True)  # kept with the cache
             for kind, q in queries:
-                s, hits = timed(lambda: [pid for pid, (t, text) in ordered if q in text], args.reps)  # noqa: B023
+                s, hits = timed(lambda: [pid for pid, (t, text) in ordered if q in text], args.reps)  # noqa: B023 - timed() calls it at once
                 row(f"text cache search ({kind})", q, s, hits=len(hits), same=hits == current[q])
 
             # FTS5 trigram, case-sensitive: exact substring semantics, written at page time.
@@ -123,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
                 phrase = '"' + q.replace('"', '""') + '"'
                 s, hits = timed(lambda: [r[0] for r in db.execute(  # noqa: B023 - timed() calls it at once
                     "SELECT page_id FROM pages WHERE pages MATCH ? ORDER BY CAST(turn AS INTEGER) DESC",
-                    (phrase,))], args.reps)  # noqa: B023
+                    (phrase,))], args.reps)  # noqa: B023 - same lambda as above
                 row(f"fts5 trigram search ({kind})", q, s, hits=len(hits), same=hits == current[q])
             db.close()
 

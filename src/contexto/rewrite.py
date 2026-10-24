@@ -85,16 +85,16 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 - Transform failures (rule 14, PR #52; manager-1 2026-10-16 02:00Z): a ``PageConflictError`` is a
   ``page_conflict``; ``OSError``, ``LedgerError``, ``KeyFileError``, ``SessionNotFoundError`` and
   ``PageNotFoundError`` (from ``quarantine_page``) are a ``store_error``. Either one at a turn start
-  keeps the state from before the attempt and enters
-  degraded mode (``degraded_enter``): no paging, no rotation, the current epoch's transform extended
-  append-only, and every request event marked ``degraded: true``. Each later turn start tries the
-  store once (a read of the pinned and index text, then the normal rotation); success logs
-  ``degraded_leave``, failure stays degraded. A conflict on the same page at that retry is
-  persistent: the store quarantines the page (``quarantine_page``, lane B PR #59, which logs
-  ``page_quarantined`` itself) and the rotation re-pages it once from the current messages. A paged_changed resync whose
-  paging fails, or a failure building the degraded transform, is terminal for the request: the
-  original request is forwarded and ``fallback_failed`` logged. Any other exception propagates to
-  the proxy as ``transform_error``.
+  keeps the state from before the attempt and enters degraded mode (``degraded_enter``): no paging,
+  no rotation, the current epoch's transform extended append-only, and every request event marked
+  ``degraded: true``. Each later turn start tries the store once (a read of the pinned and index
+  text, then the normal rotation); success logs ``degraded_leave``, failure stays degraded. A
+  conflict on the same page at that retry is persistent: the store quarantines the page
+  (``quarantine_page``, lane B PR #59, which logs ``page_quarantined`` itself) and the rotation
+  re-pages it once from the current messages. A paged_changed resync whose paging fails, or a
+  failure building the degraded transform, is terminal for the request: the original request is
+  forwarded and ``fallback_failed`` logged. Any other exception propagates to the proxy as
+  ``transform_error``.
 - The window budget ``W`` and the measured bytes-per-token ratio are published through
   ``set_window`` (lane B B9, PR #56, for ``contexto_recall``'s per-call cap) when ``W`` changes at a
   rotation or head change, when the first response measures the head, or when the ratio moves more

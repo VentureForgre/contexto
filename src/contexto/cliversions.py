@@ -35,7 +35,8 @@ import shutil
 import signal
 import subprocess
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 # Claude Code 2.1.302: session-start signature, context-block kinds, and the missing-tools notices
 # (spikes/m2/scale/reminders, live run #3). codex-cli 0.154.0: the Responses shapes and acceptance
