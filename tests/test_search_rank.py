@@ -200,7 +200,8 @@ def edit_turn(t):
                 "file_path": "src/app/http.py", "old_string": "HTTP_TIMEOUT_S = 10",
                 "new_string": f"HTTP_TIMEOUT_S = {t}"}}]},
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{t}", "content": "updated"}]},
-            {"role": "assistant", "content": [{"type": "text", "text": f"Set the HTTP client timeout to {t} seconds."}]}]
+            {"role": "assistant",
+             "content": [{"type": "text", "text": f"Set the HTTP client timeout to {t} seconds."}]}]
 
 
 def test_the_newest_of_equally_relevant_statements_is_shown_first(store):
@@ -314,8 +315,8 @@ def test_a_term_counts_once_per_text_and_page_length_does_not_count():
     pages whose texts hold the word as often score alike however long they are, so recency orders them.
     An old grep whose output repeats the word 30 times counts twice, for the command and the output, so
     the newest one-line statement outranks it (1.5 against 1.38); counted per occurrence the grep would
-    win (2.12 against 1.5). A page with the word in 3 texts still outranks a newer page with it in one (1.57 against 1.5),
-    and 8 texts score at most K1 + 1 = 2.2 times one."""
+    win (2.12 against 1.5). A page with the word in 3 texts still outranks a newer page with it in one
+    (1.57 against 1.5), and any number of texts scores at most K1 + 1 = 2.2 times one."""
     assert rank([entry("long", 1, ["retry_budget ok", SOAK_OUTPUT]), entry("short", 2, "retry_budget ok")],
                 "retry_budget") == ["short", "long"]
     assert rank([entry("short", 1, "retry_budget ok"), entry("long", 2, ["retry_budget ok", SOAK_OUTPUT])],

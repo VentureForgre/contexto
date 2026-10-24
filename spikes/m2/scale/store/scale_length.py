@@ -56,6 +56,8 @@ ROOT = HERE.parents[3]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "src"))
 
+import scale_bench  # noqa: E402
+
 import contexto.store as store_module  # noqa: E402
 import contexto.store.catalog as catalog_module  # noqa: E402
 import contexto.store.memory as memory_module  # noqa: E402
@@ -63,7 +65,6 @@ from contexto import mcp  # noqa: E402
 from contexto.store import search as search_now  # noqa: E402
 from contexto.store.memory import MemoryStore  # noqa: E402
 from contexto.store.pages import _texts, is_context_page  # noqa: E402
-import scale_bench  # noqa: E402
 
 D34_REF = "4b87ec2"  # main after PR #204 (D34)
 HOLD_ALL_MB = "1048576"  # a search text budget (D39) that holds every store here as it is

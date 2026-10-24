@@ -9,10 +9,11 @@ import pytest
 import scale_bench
 import scale_calibrate
 import scale_synth
+from scale_probes import FACTS, LATENCY_QUERIES, planted_turn
+
 from contexto.store import SessionStore
 from contexto.store.pages import _texts
 from contexto.tokens import estimate_message_tokens
-from scale_probes import FACTS, LATENCY_QUERIES, planted_turn
 
 
 def text_of(turn: list[dict]) -> str:
@@ -118,7 +119,7 @@ def test_calibration_splits_turns_at_user_prompts_and_skips_sidechains(tmp_path:
     assert result["turns"] == 2 and result["df_counts"]["rate limit"] == 1 and result["df"]["rate limit"] == 0.5
 
 
-def test_calibrated_page_sizes_follow_the_real_turn_sizes_and_keep_their_plants():
+def test_calibrated_goals_follow_the_real_turn_sizes_and_their_turns_keep_their_plants():
     mu, sigma, top = scale_synth.turn_size_model()
     assert round(sigma, 2) == 1.98 and top == 566_461
     goals = sorted(scale_synth.calibrated_goal(t) for t in range(2000))
@@ -131,15 +132,16 @@ def test_calibrated_page_sizes_follow_the_real_turn_sizes_and_keep_their_plants(
 
 
 def test_the_length_spike_ranks_reviewer_two_cases_as_recorded(monkeypatch):
+    import scale_length
+
     import contexto.store as store_module
     import contexto.store.catalog as catalog_module
     import contexto.store.memory as memory_module
-    import scale_length
     from contexto.store.pages import search_entry
     for module, name in ((store_module, "rank"), (memory_module, "rank"), (catalog_module, "search_entry"),
                          (memory_module, "search_entry")):
         monkeypatch.setattr(module, name, getattr(module, name))  # restored after the test
-    for kind in ("d41", "texts", "fields", "floored"):
+    for kind in ("d41", "cap3", "texts", "fields", "floored"):
         scale_length.use(scale_length.ranker(None, kind, 0.75))
         assert scale_length.residual((6, 13)) == [13, 10, 6], kind
     page = {"id": "pg_1", "turn": 1, "stub": {"user_text": "Σ q", "tools": ["Bash"], "paths": []},

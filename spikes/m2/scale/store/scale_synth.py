@@ -170,24 +170,33 @@ def calibration(path: str = str(HERE / "calibration.json")) -> dict[str, float]:
         raise SystemExit(f"cannot read calibration {path}: {e}; run scale_calibrate.py first") from e
 
 
-@lru_cache(maxsize=None)
+_SIZE_MODELS: dict[str, tuple[float, float, int]] = {}
+
+
 def turn_size_model(path: str = str(HERE / "calibration.json")) -> tuple[float, float, int]:
     """A lognormal fit of the real turn sizes in ``calibration.json`` (D41): (mu, sigma, max tokens).
     mu is the log of the median; sigma is the mean of the two fits through the 90th and 95th percentiles
-    (1.98 and 1.98 for the recorded corpus, so the shape is close to lognormal in its upper half)."""
-    try:
-        sizes = json.loads(Path(path).read_text(encoding="utf-8"))["turn_tokens"]
-        mu = math.log(sizes["median"])
-        sigma = ((math.log(sizes["p90"]) - mu) / 1.2816 + (math.log(sizes["p95"]) - mu) / 1.6449) / 2
-        return mu, sigma, int(sizes["max"])
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        raise SystemExit(f"cannot read turn sizes from {path}: {e}; run scale_calibrate.py first") from e
+    (1.98 and 1.98 for the recorded corpus, so the shape is close to lognormal in its upper half). Read
+    once per path."""
+    if path not in _SIZE_MODELS:
+        try:
+            sizes = json.loads(Path(path).read_text(encoding="utf-8"))["turn_tokens"]
+            mu = math.log(sizes["median"])
+            sigma = ((math.log(sizes["p90"]) - mu) / 1.2816 + (math.log(sizes["p95"]) - mu) / 1.6449) / 2
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise SystemExit(f"cannot read turn sizes from {path}: {e}; run scale_calibrate.py first") from e
+        _SIZE_MODELS[path] = (mu, sigma, int(sizes["max"]))
+    return _SIZE_MODELS[path]
 
 
 def calibrated_goal(t: int, seed: int = 7) -> int:
-    """The token goal of turn ``t`` drawn from ``turn_size_model``, capped at the corpus maximum. A turn
-    still holds at least one tool call, and every plant and distractor gets its own, so a drawn goal under
-    about 1,000 tokens comes out larger."""
+    """The token goal of turn ``t`` drawn from ``turn_size_model``, capped at the corpus maximum. The goals
+    match the real turns (6,000 drawn: median 1,940, p90 23,918, p95 47,484), but only the upper half of
+    the pages built from them does: one synthetic tool step is about 2,770 tokens, and every plant and
+    distractor gets a step of its own, so the 37 percent of goals under 1,000 tokens come out at a median
+    of 2,772 (pages at 6,000: median 5,509 against the real 1,947, mean 15,178 against 10,431; p90 25,755 and
+    p95 50,557 against 24,649 and 50,840). A turn whose goal its prompt already meets, with no plant or
+    distractor, has no tool call (54 of 6,000, the 112-token minimum)."""
     mu, sigma, top = turn_size_model()
     return min(top, int(random.Random(f"size:{seed}:{t}").lognormvariate(mu, sigma)))
 
