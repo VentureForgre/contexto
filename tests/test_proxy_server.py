@@ -337,6 +337,18 @@ def test_other_paths_pass_through_untouched(make_proxy):
     assert [e["path"] for e in log.requests(3)] == ["/api/hello", "/v1/models", "/v1/other"]
 
 
+def test_start_makes_no_hostname_lookup(make_proxy, monkeypatch):
+    """http.server names a server with socket.getfqdn, which took 35 s per process on a macOS CI
+    runner and so delayed every launch; the proxy binds without it."""
+    def no_lookup(*args):
+        raise AssertionError("the proxy looked up a hostname")
+
+    monkeypatch.setattr(socket, "getfqdn", no_lookup)
+    proxy, _ = make_proxy()
+    response, _ = call(proxy, "HEAD", "/api/hello")
+    assert response.status == 200 and proxy.url == f"http://127.0.0.1:{proxy.port}"
+
+
 # SSE relay and usage
 
 

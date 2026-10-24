@@ -55,6 +55,7 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import socketserver
 import ssl
 import threading
 import time
@@ -647,6 +648,17 @@ class _UpstreamHTTPS(http.client.HTTPSConnection):
         self.sock = self.tls_context.wrap_socket(self.sock, server_hostname=self.host)
 
 
+class _LoopbackServer(ThreadingHTTPServer):
+    """``HTTPServer.server_bind`` names the server with ``socket.getfqdn(host)``, a reverse lookup
+    that took 35 seconds per process on a GitHub macOS runner and delayed every launch by as much.
+    Nothing reads the name, so the bound address stands in for it and no lookup is made."""
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name, self.server_port = str(host), port
+
+
 class ContextoProxy:
     def __init__(self, upstream: str, log: SessionLog, transform: Transform = identity_transform, *,
                  observe_usage: ObserveUsage | None = None, observe_thinking: bool = False,
@@ -688,7 +700,7 @@ class ContextoProxy:
         class Handler(_Handler):
             owner = proxy
 
-        self._server = ThreadingHTTPServer((LISTEN_HOST, port), Handler)
+        self._server = _LoopbackServer((LISTEN_HOST, port), Handler)
         self._server.daemon_threads = True
         self._thread = threading.Thread(target=self._server.serve_forever, name="contexto-proxy", daemon=True)
         self._thread.start()
