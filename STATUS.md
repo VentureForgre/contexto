@@ -119,8 +119,8 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
 - M0 study, lane 1: about 4.9M as reported by manager-1 (documented parts in
   `docs/research/M0-proxy-measurements.md`, `M0-codex-measurements.md`, `M0-rollover.md`, and
   81,319 for the route-identity test). Lane 2: about 1.0M, summed from its research docs.
-- Codex smoke: 161,549 (API-key mode). Earlier Codex seat measurement: 410,827 on the owner's
-  ChatGPT plan.
+- Codex smoke: 161,549 (API-key mode). Earlier Codex seat measurement: 410,827 on a ChatGPT
+  login.
 - Acceptance before D27: H1 #1 1,783,815; aborted attempt up to about 65,000; recall experiment
   415,413; H1 #2 2,015,165; baseline 447,659.
 - Live run #2: 5,897,784 (Contexto 3,260,912, baseline 2,636,872).
@@ -198,7 +198,7 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
 - D28: fix stale chain answers in search (matches in view first, latest lines per page), then
   rerun both arms. Rejected: accept as a limitation, widen the tolerance, rerun one arm only.
 - D29: cut v0.1.0 after acceptance, on the owner's instruction to come back to a finished
-  project; private GitHub Release only.
+  project; GitHub Release only, no package registry.
 - D32: the bounded fallback also pages context blocks of later turn starts (4.x ids), so carried
   content stops growing with them.
 - D33: session-start is recognised by its content, not by settings fields, so an effort change no
@@ -239,7 +239,7 @@ The 30M plan the owner approved on 2026-10-18 is done, each step with two review
 growth stopped (D32, D33, #203, v0.4.0), search ranked by BM25 with a recency prior and page reads
 cached (D34, #204, v0.4.0; the `index_text` manifest was rejected there), each message hashed once
 in the proxy (#205, v0.2.9), and the missing-tools warning (#202, v0.3.0). That plan ran with no
-live model runs while the seats' weekly limit was 90 percent used; the limit reset on 2026-10-22.
+live model runs.
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
@@ -252,16 +252,15 @@ Measured candidates deliberately not pursued (each would need a live run or new 
 Needs the owner:
 - Upgrade OpenRig on the host from 0.5.15 to 0.6.1 or later to get the clock fix (O7, resolved
   below).
-- GitHub billing: the org's hosted Actions minutes are blocked by a failed payment or spending
-  limit; CI and releases now run on the self-hosted runner `ubuntu-final-middle`, one job at a
-  time.
-- The self-hosted runner group allows public repositories, so a public repository's pull requests
-  could run code on the homelab runner. Decided: when the repository goes public, the owner sets
+- CI and releases run on the organization's self-hosted runner (labels `self-hosted`, `Linux`,
+  `X64`), one job at a time, until the CI pull request moves them to GitHub-hosted runners. The
+  runner group allows public repositories, so a public repository's pull requests could run code
+  on that runner. Decided (D42): when the repository goes public, the owner sets
   "Require approval for all external contributors" for workflow runs on fork pull requests, and
   CI moves to GitHub-hosted runners (the CI pull request is in progress). The org's runner group
   stays as it is, because other public repositories in the org use it.
-- GitHub private vulnerability reporting, which `SECURITY.md` points to, is off while the
-  repository is private; turn it on in the repository's security settings once it is public.
+- GitHub private vulnerability reporting, which `SECURITY.md` points to, is off; turn it on in
+  the repository's security settings when the repository goes public (D42).
 
 ## Open decisions (details in DECISIONS.md)
 
@@ -272,7 +271,7 @@ Needs the owner:
   Contexto themselves use either a vendor API key or a CLIProxyAPI instance. Subscription logins
   live in CLIProxyAPI or the vendor's own CLI, never in Contexto, and users follow their
   providers' terms.
-- O5: settled by D29. v0.1.0 was cut from f990703 (tag and GitHub Release on this private
+- O5: settled by D29. v0.1.0 was cut from f990703 (tag and GitHub Release on this
   repository, sdist and wheel attached, no package registry).
 - O6: decided by the owner on 2026-10-24: fix per-session upstream affinity on the owner's proxy
   (cache misses and dropped thinking traced to the proxy spreading requests across identities);
@@ -389,7 +388,7 @@ no package registry release.
 
 ## Process notes
 
-- 2026-10-16 18:15Z: hosted GitHub Actions stopped starting jobs (billing). Until the move to
+- 2026-10-16 18:15Z: hosted GitHub Actions stopped starting jobs. Until the move to
   the self-hosted runner (PR #188, main 2da3cb0), merges were checked by full local test runs
   from the author, the reviewer, and intake. 19:31Z to about 00:40Z the rig was down; the owner
   restored it, and several seats' git worktrees were recreated.

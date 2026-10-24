@@ -23,7 +23,7 @@ assets: `contexto-0.4.0-py3-none-any.whl` and `contexto-0.4.0.tar.gz`. It is not
 PyPI package named `contexto` is an unrelated project, so `pip install contexto` installs the wrong
 thing. Use the release URL or the downloaded wheel.
 
-Straight from the release URL, with no GitHub login (this needs the repository to be public):
+Straight from the release URL, with no GitHub login:
 
 ```sh
 pipx install https://github.com/VentureForgre/contexto/releases/download/v0.4.0/contexto-0.4.0-py3-none-any.whl
@@ -32,8 +32,7 @@ contexto --version                                    # contexto 0.4.0
 
 `pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment.
 
-Or download it first with the GitHub CLI (needed while the repository is private; `gh` must be
-logged in to an account that can read it):
+Or download it first with the GitHub CLI:
 
 ```sh
 gh release download v0.4.0 --repo VentureForgre/contexto --pattern 'contexto-0.4.0-py3-none-any.whl'
@@ -114,8 +113,8 @@ Codex requests go to `--codex-upstream`, else `$CONTEXTO_CODEX_UPSTREAM`, else (
 upstream Claude Code would use plus `/v1`, or (ChatGPT mode) the ChatGPT Codex backend.
 
 ChatGPT login mode (`--codex-auth chatgpt`) uses your own `CODEX_HOME` with `-c` overrides instead. It
-is tested only with synthetic credentials, never live, and whether end users may route ChatGPT
-credentials this way under OpenAI's terms is an open question.
+is tested only with synthetic credentials, never live. Follow your provider's terms for whatever
+credentials you use with Contexto.
 
 ### Upstreams and CLIProxyAPI
 
