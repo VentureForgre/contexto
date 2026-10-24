@@ -227,12 +227,18 @@ def test_sigterm_is_forwarded_to_claude_and_everything_is_cleaned_up(env, upstre
     assert session_log(env, "s4")[-1]["event"] == "exit"
 
 
-def test_ctrl_c_reaches_claude_and_does_not_kill_the_launcher(env, upstream, tmp_path):
-    env["FAKE_SLEEP"] = "30"
+def test_ctrl_c_reaches_claude_and_does_not_kill_the_launcher(env, upstream, tmp_path, sigint_default):
+    # The fake sleeps far past the deadline below, so only the interrupt can end it in time.
+    env["FAKE_SLEEP"] = "300"
     proc = launch(env, "--upstream", upstream, "--session", "s5", "claude", cwd=tmp_path, start_new_session=True)
-    wait_for(Path(env["FAKE_RECORD"]))
+    wait_for(Path(env["FAKE_RECORD"]), timeout=60)
     os.killpg(proc.pid, signal.SIGINT)  # what a terminal does on Ctrl+C: the whole foreground group
-    proc.communicate(timeout=30)
+    try:
+        proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
     assert proc.returncode == 130  # claude's own exit code after handling the interrupt
     events = session_log(env, "s5")
     assert [e["event"] for e in events][-2:] == ["proxy_stop", "exit"] and events[-1]["code"] == 130
