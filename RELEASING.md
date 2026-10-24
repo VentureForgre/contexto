@@ -105,17 +105,18 @@ No VCS-derived version plugin (hatch-vcs, setuptools-scm) is needed.
 | `.github/semantic-release.toml` | PSR settings: `v{version}` tags, conventional parser, release types, `main` only, no version files |
 | `.github/scripts/release-build.sh` | PSR `build_command`: stamp, build, and verify artifact versions; skip cleanly without `pyproject.toml` |
 | `.github/scripts/reattach-verify.sh` | Recovery guard: the tag must be an existing `vX.Y.Z` tag on `main` |
-| `.github/scripts/ensure-gh.sh` | Both release jobs: use `gh` if the runner has it, else install a pinned, checksum-verified `gh` (the self-hosted runner has none) |
+| `.github/scripts/ensure-gh.sh` | Both release jobs: use `gh` if the runner has it (hosted runners do), else install a pinned, checksum-verified `gh` |
 | `.github/workflows/ci.yml` | Pull request checks; also the required gate for releases (`workflow_call`) |
 | `.github/workflows/release.yml` | Release on push to `main`; manual recovery for an existing tag; both gated on `RELEASES_ENABLED` |
 
-CI runs Ruff only when the repository configures it, runs `uv run --with pytest pytest` only when the
-tree has test files, and checks that the package builds when `pyproject.toml` exists. On a tree with
-none of those, every job passes without doing anything. The pytest run collects spike tests under
-`spikes/` as well. That is intended, because those tests back numbers that research documents cite.
+CI runs `ruff check`, then `uv run --with pytest pytest` and `uv build` on each Python and OS in its
+test matrix. Release's call runs the same jobs. The pytest run collects spike tests under `spikes/`
+as well. That is intended, because those tests back numbers that research documents cite.
 
-Every CI and release job runs on the organization's self-hosted runner (labels `self-hosted`,
-`Linux`, `X64`), one job at a time, since hosted Actions minutes were blocked by billing (PR #188).
+Every CI and release job runs on a GitHub-hosted `ubuntu-latest` runner, or `macos-latest` for the
+macOS test jobs. From PR #188 until the repository went public they ran on the organization's
+self-hosted runner, because hosted Actions minutes were blocked by billing. A self-hosted runner on
+a public repository would let a fork's pull request run code on that machine.
 
 Third-party actions are pinned by commit SHA, with the release tag in a comment:
 `actions/checkout` v7.0.1 and `astral-sh/setup-uv` v10.2.0. To update one, resolve the new tag's
