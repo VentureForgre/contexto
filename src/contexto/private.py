@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import os
 import secrets
+import stat
 from pathlib import Path
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
+AFFINITY_SALT_FILE = "affinity.salt"
+AFFINITY_SALT_BYTES = 32
 
 
 def private_dir(path: Path) -> Path:
@@ -68,3 +71,31 @@ def write_new(path: Path, data: bytes) -> bool:
         return False
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def affinity_salt(home: Path) -> bytes:
+    """The install's random salt for upstream affinity keys (D36), ``home/affinity.salt`` (0600),
+    created atomically on first use and the same for every later session and resume. It is read
+    without following a symlink (OSError) or blocking on a FIFO, and must be a regular file holding a hex salt of the right
+    size (ValueError otherwise)."""
+    path = Path(home) / AFFINITY_SALT_FILE
+    if not path.exists():
+        private_dir(Path(home))
+        # A losing racer's write_new returns False and reads the winner's complete salt below.
+        write_new(path, secrets.token_bytes(AFFINITY_SALT_BYTES).hex().encode("ascii"))
+    # O_NOFOLLOW: a symlink raises OSError (ELOOP). O_NONBLOCK: a FIFO opens at once and fails the
+    # regular-file check below instead of blocking the launch.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"{path} is not a regular file")
+        data = os.read(fd, 4 * AFFINITY_SALT_BYTES)
+    finally:
+        os.close(fd)
+    try:
+        salt = bytes.fromhex(data.decode("ascii").strip())
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path} is not a hex salt") from exc
+    if len(salt) != AFFINITY_SALT_BYTES:
+        raise ValueError(f"{path} holds a {len(salt)}-byte salt, expected {AFFINITY_SALT_BYTES}")
+    return salt
