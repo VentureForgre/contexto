@@ -76,14 +76,16 @@ def write_new(path: Path, data: bytes) -> bool:
 def affinity_salt(home: Path) -> bytes:
     """The install's random salt for upstream affinity keys (D36), ``home/affinity.salt`` (0600),
     created atomically on first use and the same for every later session and resume. It is read
-    without following a symlink (OSError) and must be a regular file holding a hex salt of the right
+    without following a symlink (OSError) or blocking on a FIFO, and must be a regular file holding a hex salt of the right
     size (ValueError otherwise)."""
     path = Path(home) / AFFINITY_SALT_FILE
     if not path.exists():
         private_dir(Path(home))
         # A losing racer's write_new returns False and reads the winner's complete salt below.
         write_new(path, secrets.token_bytes(AFFINITY_SALT_BYTES).hex().encode("ascii"))
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)  # a symlink raises OSError (ELOOP)
+    # O_NOFOLLOW: a symlink raises OSError (ELOOP). O_NONBLOCK: a FIFO opens at once and fails the
+    # regular-file check below instead of blocking the launch.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError(f"{path} is not a regular file")

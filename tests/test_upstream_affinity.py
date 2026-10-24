@@ -155,6 +155,12 @@ def test_the_salt_is_never_read_through_a_symlink(tmp_path):
         affinity_salt(tmp_path)
 
 
+def test_a_fifo_salt_is_rejected_without_blocking(tmp_path):
+    os.mkfifo(tmp_path / AFFINITY_SALT_FILE)
+    with pytest.raises(ValueError, match="not a regular file"):
+        affinity_salt(tmp_path)  # would block forever in open() without O_NONBLOCK
+
+
 def test_a_symlinked_salt_costs_only_the_header(tmp_path):
     target = tmp_path / "elsewhere"
     target.write_text(bytes(range(32)).hex())
