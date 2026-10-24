@@ -100,9 +100,14 @@ HOSTED_CALL_TYPES = frozenset({"web_search_call", "file_search_call", "image_gen
 
 
 def is_client_call(item: Any) -> bool:
-    """D40: a Responses output item that is a tool call the client runs (see ``HOSTED_CALL_TYPES``)."""
+    """D40: a Responses output item that is a tool call the client runs (see ``HOSTED_CALL_TYPES``).
+    A ``tool_search_call`` runs hosted unless its ``execution`` is ``client`` (OpenAI tool search)."""
     item_type = item.get("type") if isinstance(item, dict) else None
+    if item_type == "tool_search_call":
+        return item.get("execution") == "client"
     return isinstance(item_type, str) and item_type.endswith("_call") and item_type not in HOSTED_CALL_TYPES
+
+
 THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 UPSTREAM_TIMEOUT_S = 900
 STOP_DRAIN_S = 2.0  # how long stop() waits for in-flight requests to finish and log

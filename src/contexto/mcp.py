@@ -570,8 +570,9 @@ class Server:
         With no room published only the per-call limit applies. If the engine is present (it has
         recorded the window) but published no room, a ``turn_room_missing`` event makes the missed
         publish visible. A budgeted call's ``mcp_call`` event also says which room bounded it
-        (``limited_by``: ``main`` or ``side``, D40), so a side room holding main's recall down shows
-        in the log.
+        (``limited_by``: ``main`` or ``side``, D40), how many side rooms are live (``side_rooms``),
+        and for a side limit that room's seconds since its last publish (``limiting_age_s``), so a
+        stale side room holding main's recall down can be told from a live subagent.
         """
         window_tokens, ratio = self._window()
         ratio = min(ratio, MAX_CHARS_PER_TOKEN) if ratio else UNMEASURED_CHARS_PER_TOKEN
@@ -591,9 +592,11 @@ class Server:
             return used
 
         charge_turn_room = getattr(self.store, "charge_turn_room", None)
-        limited_by = charge_turn_room(charge) if callable(charge_turn_room) else charge(None)
-        if limited_by in ("main", "side") and out["budget"]["turn_budget"] != "unbudgeted":
-            out["budget"]["limited_by"] = limited_by  # D40: whose room bounded this call, content-free
+        rooms = charge_turn_room(charge) if callable(charge_turn_room) else charge(None)
+        if isinstance(rooms, dict) and out["budget"]["turn_budget"] != "unbudgeted":
+            # D40, content-free: which room bounded this call, how many side rooms are live, and the
+            # bounding side room's seconds since its publish
+            out["budget"].update({k: rooms[k] for k in ("limited_by", "side_rooms", "limiting_age_s") if k in rooms})
         if out["budget"]["turn_budget"] == "unbudgeted" and window_tokens is not None:
             try:
                 self.store.log({"event": "turn_room_missing", "tool": tool})

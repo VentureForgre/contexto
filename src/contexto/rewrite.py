@@ -131,7 +131,8 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, ClassVar, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json
-from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
+from contexto.store import (SIDE_ROOM_IDLE_S, KeyFileError, PageConflictError, PageNotFoundError,
+                            SessionNotFoundError, side_room_live)
 from contexto.store.ledger import LedgerError
 from contexto.store.render import render_page
 from contexto.tokens import TokenEstimator
@@ -1564,6 +1565,7 @@ class RewriteEngine:
         self.tools = ToolCheck(self.store)
         # D40: open side rooms by id -> (conversation key, message count, anchor hash, publish time)
         self._side_rooms: dict[str, tuple[str, int, str, float, frozenset[str]]] = {}  # + call ids
+        self._main_turn: tuple[str, float] | None = None  # main's turn id and when it was first seen
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -1607,6 +1609,10 @@ class RewriteEngine:
             checked = [{"event": "toolcheck_error", "error": type(exc).__name__}]  # content-free
         events[-1:-1] = checked
         events[-1].update(main=main, conversations=len(self.states))  # content-free, for side requests
+        if main and endpoint != COUNT_TOKENS:
+            closes: list[dict] = []
+            self._close_idle_side_rooms(request.get(dialect.field) or [], dialect, closes)
+            events[-1:-1] = closes  # the engine's request event stays last
         # Per-turn recall budget, request-time publish (contract PR #69, kept by 367916a): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
         # to 128,000, which would leave no room at all; the response-time publish adds the real output.
@@ -1794,28 +1800,65 @@ class RewriteEngine:
         except STORE_FAILURES as error:
             events.append({"event": "retained_stale", "epoch": state.epoch, "error": type(error).__name__})
 
+    def _now(self) -> float:
+        clock = getattr(self.store, "clock", None)  # the store's clock, which expires its rooms
+        return clock() if callable(clock) else time.time()
+
+    def _close_idle_side_rooms(self, messages: list[dict], dialect: Dialect, events: list[dict]) -> None:
+        """D40: called for each main request. Main's turn id changes only at a turn start, a user
+        prompt, so the time a new id is first seen is when a human started this main turn. A side
+        room published before that and idle for more than ``SIDE_ROOM_IDLE_S`` is closed with
+        ``side_room_closed`` (reason ``idle_at_main_turn``): a live subagent republishes at every
+        step, so such a room almost always belongs to a subagent the user interrupted. A background
+        subagent from an earlier turn that waits longer than that on one tool loses its room (its late
+        call is then charged against the other rooms only). Only rooms this engine opened are
+        checked; rooms from before a restart expire."""
+        tid = turn_id(messages, dialect)
+        if self._main_turn is None or self._main_turn[0] != tid:
+            # With no side room open when the turn starts, every room is published after it and none
+            # can be closed this way during it, so the start time is only read when one is open.
+            self._main_turn = (tid, self._now() if self._side_rooms else float("-inf"))
+        started = self._main_turn[1]
+        if not self._side_rooms or started == float("-inf"):
+            return
+        now = self._now()
+        if not any(at < started and now - at > SIDE_ROOM_IDLE_S for _, _, _, at, _ in self._side_rooms.values()):
+            return
+        close = getattr(self.store, "close_idle_side_rooms", None)
+        if not callable(close):
+            return
+        try:
+            closed = close(started, SIDE_ROOM_IDLE_S)
+        except STORE_FAILURES as error:
+            events.append({"event": "side_room_close_failed", "error": type(error).__name__})
+            return
+        for room_id, age in closed:
+            self._side_rooms.pop(room_id, None)
+            events.append({"event": "side_room_closed", "reason": "idle_at_main_turn", "age_s": age})
+
     def _publish_side_room(self, calls: StoreCalls, key: str, messages: list[dict], dialect: Dialect,
-                           room: int | None, call_ids: tuple[str, ...] = ()) -> None:
+                           room: int | None, call_ids: tuple[str, ...], events: list[dict]) -> None:
         """D40: open, replace, or close the side room of the request ``messages``.
 
         Rooms are per request lineage, not per conversation key: two subagents launched with the same
         prompt, or a side request that forks one, share a key but must not share a room. Each room
         remembers the request that published it (its message count and anchor hash) and the ids of
         the client tool calls its response held (``call_ids``, from the proxy). A request continues a
-        room it extends when it carries a result (``tool_result``, ``*_call_output``) for one of
-        that room's ids: the response's own calls, so a twin with the same history cannot match. A
-        room recorded without ids (the proxy saw none) is continued by a request that extends it and
-        adds no turn start. Exactly one room must match: when two or more tie, the request continues
-        none of them, they keep their spend until they expire, and it opens its own room (or with
-        ``room`` None changes nothing). The lineage is kept in memory and forgotten once the room
-        has expired in the store (``SIDE_ROOM_TTL_S``)."""
+        room when it extends that room's request, adds no turn start, and (for a room recorded with
+        ids) returns a result (``tool_result``, ``*_call_output``) for one of those ids. A twin
+        carries its own ids and cannot match. A fork that copies results for the room's calls does
+        match; that is harmless once those calls finished, but a fork that closes a still-running
+        call with a placeholder result and asks its question inside that result message cannot be
+        told apart from the next step (documented). Exactly one room must match: when two or more
+        tie, the request continues none of them, they keep their spend until they expire, and it
+        opens its own room (or with ``room`` None changes nothing). The lineage is kept in memory and
+        forgotten once the room has expired in the store (``SIDE_ROOM_TTL_S``)."""
         token = _DIALECT.set(dialect)
         try:
             hashes = [message_hash(m) for m in messages]
         finally:
             _DIALECT.reset(token)
-        clock = getattr(self.store, "clock", None)  # the store's clock, which expires its rooms
-        now = clock() if callable(clock) else time.time()
+        now = self._now()
         self._side_rooms = {r: v for r, v in self._side_rooms.items() if side_room_live(v[3], now)}
         results: dict[str, int] = {}  # tool-call id -> the last index of a message returning its result
         for i, item in enumerate(messages):
@@ -1824,12 +1867,13 @@ class RewriteEngine:
         by_id: list[str] = []
         by_lineage: list[tuple[int, str]] = []
         for room_id, (owner, n, anchor, _, ids) in self._side_rooms.items():
-            if owner != key or n >= len(messages) or anchor_hash(hashes[:n]) != anchor:
+            if (owner != key or n >= len(messages) or anchor_hash(hashes[:n]) != anchor
+                    or any(dialect.is_turn_start(m) for m in messages[n:])):
                 continue
             if ids:
                 if any(results.get(call_id, -1) >= n for call_id in ids):
                     by_id.append(room_id)
-            elif not any(dialect.is_turn_start(m) for m in messages[n:]):
+            else:
                 by_lineage.append((n, room_id))
         continued = None
         if by_id:
@@ -1841,7 +1885,8 @@ class RewriteEngine:
         if room is None:
             if continued is not None:
                 calls.set_side_room(continued, None)
-                del self._side_rooms[continued]
+                age = int(now - self._side_rooms.pop(continued)[3])
+                events.append({"event": "side_room_closed", "reason": "no_tool_call", "age_s": age})
             return
         room_id = continued or f"{key}#{secrets.token_hex(4)}"
         calls.set_side_room(room_id, room)
@@ -1942,7 +1987,7 @@ class RewriteEngine:
                     # D40: this conversation's own room, from its own usage, for the tool calls this
                     # response releases; every call is charged against it and main's room alike.
                     room = None if tool_calls is False else self.turn_room(real + output)
-                    self._publish_side_room(calls, key, messages, dialect, room, tuple(tool_call_ids))
+                    self._publish_side_room(calls, key, messages, dialect, room, tuple(tool_call_ids), events)
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;
             # the next turn start retries it. The event reaches the log with the others, via the proxy.

@@ -12,7 +12,7 @@ from typing import Any
 
 from contexto.store import (PageConflictError, PageNotFoundError, SideRooms, charge_rooms, check_epoch, check_model,
                              check_page_id, check_retained, check_room_id, check_turn_room, check_window,
-                             live_side_rooms, redact)
+                             expired_side_room_events, live_side_rooms, redact)
 from contexto.store.ledger import MemoryLedger
 from contexto.store.recall import lists_identifiers
 from contexto.store.pages import build_page, current_stub, render_index, same_content, search_entry
@@ -76,7 +76,7 @@ class MemoryStore(LedgerOps):
             check_turn_room("side", room_tokens)
         now = self.clock()
         with self._room_lock:  # see SessionStore.set_side_room
-            self._side_rooms = live_side_rooms(self._side_rooms, now)
+            self._drop_expired(now)
             if room_tokens is None:
                 self._side_rooms.pop(room_id, None)
             else:
@@ -84,6 +84,22 @@ class MemoryStore(LedgerOps):
 
     def side_rooms(self) -> dict[str, tuple[int, int]]:
         return {r: (t, s) for r, (t, s, _) in live_side_rooms(self._side_rooms, self.clock()).items()}
+
+    def close_idle_side_rooms(self, published_before: float, idle_s: float) -> list[tuple[str, int]]:
+        now = self.clock()
+        with self._room_lock:  # see SessionStore.close_idle_side_rooms
+            self._drop_expired(now)
+            closed = [(r, int(now - at)) for r, (_, _, at) in self._side_rooms.items()
+                      if at < published_before and now - at > idle_s]
+            for room_id, _ in closed:
+                del self._side_rooms[room_id]
+        return closed
+
+    def _drop_expired(self, now: float) -> None:
+        """Drop expired side rooms, logging ``side_room_expired`` for each (caller holds the lock)."""
+        for event in expired_side_room_events(self._side_rooms, now):
+            self.log(event)
+        self._side_rooms = live_side_rooms(self._side_rooms, now)
 
     def set_retained(self, epoch: int, k: int, turns: list[dict[str, Any]]) -> None:
         entries = check_retained(epoch, k, turns)
@@ -112,17 +128,17 @@ class MemoryStore(LedgerOps):
     def turn_room(self) -> tuple[str | None, int | None, int]:
         return self._turn_room
 
-    def charge_turn_room(self, charge: Callable[[int | None], int]) -> str | None:
+    def charge_turn_room(self, charge: Callable[[int | None], int]) -> dict[str, Any] | None:
         now = self.clock()
         with self._room_lock:
-            self._side_rooms = live_side_rooms(self._side_rooms, now)
-            result = charge_rooms(self._turn_room, self._side_rooms, charge)
+            self._drop_expired(now)
+            result = charge_rooms(self._turn_room, self._side_rooms, charge, now)
             if result is None:
                 return None
-            record, self._side_rooms, limited_by = result
+            record, self._side_rooms, summary = result
             if record is not None:
                 self._turn_room = (record["turn_id"], record["room_tokens"], record["spent_tokens"])
-            return limited_by
+            return summary
 
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]:
         ids = []

@@ -4,12 +4,15 @@ The stale-room probe originally made 40 main recalls at one instant. Side rooms 
 ``SIDE_ROOM_TTL_S`` after their publish, so it advances a clock by 30 seconds per main step, and also
 checks that the stale room still bounds main while it is live. The round-2 Bash probe used Claude
 Code's default 2-minute Bash timeout; it is kept with the 10-minute maximum, and a second test pins
-the documented limit for a call that starts after the expiry.
+the documented limit for a call that starts after the expiry. Of the round-3 placeholder-fork
+probes, the first passes and the second is a documented limitation (strict xfail).
 """
 
 from __future__ import annotations
 
 import json
+
+import pytest
 
 from contexto.rewrite import MESSAGES, RewriteEngine
 from contexto.store import SIDE_ROOM_TTL_S, SessionStore
@@ -166,3 +169,63 @@ def test_a_call_after_the_expiry_is_charged_against_main_only(tmp_path):
     pid = big_page(store)
     _, charged = recall(store, pid)
     assert charged > room_for(120_000, 1_000)
+
+
+def _subagent_with_ids(tmp_path):
+    store = SessionStore(tmp_path, "s1")
+    store.clock = Clock()
+    engine = RewriteEngine(store, config=CONFIG)
+    main = request(conversation("main", 3))
+    engine(main, {}, MESSAGES)
+    respond(engine, main, 20_000)  # main's room 104,000
+    store.set_window(200_000, 2.0)
+    a = request(conversation("subagent A", 1))
+    engine(a, {}, MESSAGES)
+    respond(engine, a, 120_000, 1_000, tool_calls=True, tool_call_ids=("toolu_9",))  # A's room 4,000
+    return engine, store, a
+
+
+def _fork_of(a, separate_prompt=True):
+    """A fork of A made while A's call toolu_9 runs: it copies A's history and, to stay a valid
+    request, closes the dangling tool_use with a placeholder result."""
+    msgs = a["messages"] + [tool_use(9), tool_result(9, "[still running]")]
+    if separate_prompt:
+        msgs.append(user("In one line, what are you doing?"))
+    else:
+        msgs[-1] = {"role": "user", "content": msgs[-1]["content"] + [{"type": "text", "text": "In one line?"}]}
+    return request(msgs)
+
+
+def test_probe_fork_with_placeholder_results_closes_the_subagents_room(tmp_path):
+    """The fork adds its own user prompt (a turn start), so it does not continue A's room."""
+    engine, store, a = _subagent_with_ids(tmp_path)
+    fork = _fork_of(a)
+    engine(fork, {}, MESSAGES)
+    respond(engine, fork, 120_500, 30, tool_calls=False)
+    pid = big_page(store)
+    _, charged = recall(store, pid)  # A's in-flight call
+    assert charged <= room_for(120_000, 1_000)
+
+
+@pytest.mark.xfail(strict=True, reason="documented D40 limitation: a fork that answers A's running call with a "
+                                       "placeholder result and asks inside that message looks like A's next step")
+def test_probe_fork_with_placeholder_results_resets_the_subagents_spend(tmp_path):
+    engine, store, a = _subagent_with_ids(tmp_path)
+    total = 0
+    for i in range(6):  # A's parallel recalls before the fork's response
+        total += recall(store, big_page(store, 60_000 + i))[1]
+    fork = _fork_of(a, separate_prompt=False)
+    engine(fork, {}, MESSAGES)
+    respond(engine, fork, 120_500, 30, tool_calls=True, tool_call_ids=("toolu_f1",))
+    for i in range(6):  # A's remaining recalls of the same response
+        total += recall(store, big_page(store, 70_000 + i))[1]
+    assert total <= room_for(120_000, 1_000)
+
+
+def test_probe_legit_next_step_continues_by_id(tmp_path):
+    """Control: A's own next request (results for toolu_9) continues and replaces A's room: one room."""
+    engine, store, a = _subagent_with_ids(tmp_path)
+    nxt = request(a["messages"] + [tool_use(9), tool_result(9)])
+    engine(nxt, {}, MESSAGES)
+    respond(engine, nxt, 121_000, 1_000, tool_calls=True, tool_call_ids=("toolu_10",))
+    assert len(store.side_rooms()) == 1

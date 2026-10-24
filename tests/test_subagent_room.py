@@ -19,7 +19,7 @@ import pytest
 from contexto import mcp
 from contexto.proxy import ContextoProxy, StreamHold, UsageReader, _takes_keyword, is_client_call
 from contexto.rewrite import MESSAGES, Config, RewriteEngine
-from contexto.store import SIDE_ROOM_TTL_S, SessionStore
+from contexto.store import SIDE_ROOM_IDLE_S, SIDE_ROOM_TTL_S, SessionStore
 from contexto.store.memory import MemoryStore
 
 from test_codex import call as codex_call
@@ -207,10 +207,11 @@ def test_closing_a_side_room_and_main_turns(kind, tmp_path):
     store.set_turn_room("3", 10_000)
     store.set_side_room("anthropic:a", 0)
     seen = []
-    assert store.charge_turn_room(lambda remaining: seen.append(remaining) or 0) == "side"
+    assert store.charge_turn_room(lambda remaining: seen.append(remaining) or 0)["limited_by"] == "side"
     store.set_side_room("anthropic:a", None)  # A's response held no tool call
     store.set_side_room("anthropic:never", None)  # closing an unknown room is a no-op
-    assert store.charge_turn_room(lambda remaining: seen.append(remaining) or 0) == "main"
+    summary = store.charge_turn_room(lambda remaining: seen.append(remaining) or 0)
+    assert summary == {"limited_by": "main", "side_rooms": 0}
     assert seen == [0, 10_000] and store.side_rooms() == {}
     store.set_side_room("anthropic:b", 2_000)
     store.set_turn_room("3", 9_000)
@@ -235,16 +236,27 @@ def test_a_side_room_expires_unless_republished(kind, tmp_path):
     clock.now += SIDE_ROOM_TTL_S - 1
     store.set_side_room("anthropic:b", 3_000)  # B's next response restarts its time
     seen = []
-    store.charge_turn_room(lambda remaining: seen.append(remaining) or 100)
+    summary = store.charge_turn_room(lambda remaining: seen.append(remaining) or 100)
     assert seen == [1_000]  # A still bounds the call just inside its time
+    assert summary == {"limited_by": "side", "side_rooms": 2, "limiting_age_s": int(SIDE_ROOM_TTL_S - 1)}
     clock.now += 2
     store.charge_turn_room(lambda remaining: seen.append(remaining) or 0)
     assert seen[-1] == 2_900 and store.side_rooms() == {"anthropic:b": (3_000, 100)}  # A expired
     clock.now += SIDE_ROOM_TTL_S + 1
-    assert store.charge_turn_room(lambda remaining: seen.append(remaining) or 0) == "main"
+    assert store.charge_turn_room(lambda remaining: seen.append(remaining) or 0)["limited_by"] == "main"
     assert seen[-1] == 9_900 and store.side_rooms() == {}
     if kind == "session":
         assert json.loads((store.dir / "meta.json").read_text())["side_rooms"] == {}  # dropped on the write
+    expired = [e for e in logged(store) if e["event"] == "side_room_expired"]
+    assert [(e["room_tokens"], e["spent_tokens"]) for e in expired] == [(1_000, 100), (3_000, 100)]
+    assert all(e["age_s"] > SIDE_ROOM_TTL_S for e in expired)
+
+
+def logged(store):
+    if isinstance(store, MemoryStore):
+        return store.events
+    path = store.dir / "log.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
 def test_a_publish_time_far_in_the_future_counts_as_expired(kind, tmp_path):
@@ -460,7 +472,91 @@ def test_a_charge_records_which_room_limited_it(tmp_path):
         store.set_side_room(room_id, None)
     server.handle_line(line)
     del store.log
-    assert [e.get("limited_by") for e in events if e.get("event") == "mcp_call"] == ["side", "main"]
+    calls_logged = [e for e in events if e.get("event") == "mcp_call"]
+    assert [e.get("limited_by") for e in calls_logged] == ["side", "main"]
+    assert [e.get("side_rooms") for e in calls_logged] == [2, 0]
+    assert "limiting_age_s" in calls_logged[0] and "limiting_age_s" not in calls_logged[1]
+
+
+def interrupted(store):
+    """Main (turn 3) and a subagent near its bound whose response released a tool call, after which
+    the user pressed Esc: the subagent never sends its next request. Returns the engine and main's
+    request; the subagent's room is 4,000 and main's 104,000."""
+    store.clock = clock = Clock()
+    engine = RewriteEngine(store, config=CONFIG)
+    main = request(conversation("main", 3))
+    engine(main, {}, MESSAGES)
+    respond(engine, main, 20_000)
+    sub = request(conversation("subagent", 1))
+    engine(sub, {}, MESSAGES)
+    respond(engine, sub, 120_000, tool_calls=True, tool_call_ids=("toolu_s",))
+    store.set_window(200_000, 2.0)
+    return engine, main, clock
+
+
+def main_step(engine, body, events=None):
+    _, _, request_events = engine(body, {}, MESSAGES)
+    if events is not None:
+        events += request_events
+    respond(engine, body, 20_000)
+
+
+def test_an_interrupted_subagents_room_closes_two_minutes_into_the_next_human_turn(kind, tmp_path):
+    """Esc during a subagent's tool leaves its room live. Once the human types and main's turn runs,
+    a main request made more than SIDE_ROOM_IDLE_S after that room's last publish closes it, so main's
+    recall is not held down for the whole expiry."""
+    store = make_store(kind, tmp_path)
+    engine, main, clock = interrupted(store)
+    clock.now += 30
+    turn = request(main["messages"] + [assistant("stopped"), user("never mind, do this instead")])
+    events: list[dict] = []
+    main_step(engine, turn, events)  # the human typed 30 s after the interrupt: the room stays
+    assert len(store.side_rooms()) == 1 and recall(store, big_page(store))[1] <= 4_000
+    clock.now += SIDE_ROOM_IDLE_S - 29  # main's next step in that turn, 121 s after the publish
+    step = request(turn["messages"] + [tool_use(1), tool_result(1)])
+    main_step(engine, step, events)
+    assert store.side_rooms() == {}
+    [closed] = [e for e in events if e["event"] == "side_room_closed"]
+    assert closed["reason"] == "idle_at_main_turn" and closed["age_s"] == int(SIDE_ROOM_IDLE_S) + 1
+    assert recall(store, big_page(store, 61_000))[1] > 4_000  # main's own room bounds main again
+
+
+def test_idle_rooms_stay_open_inside_the_turn_that_started_them(kind, tmp_path):
+    """A subagent working while main waits in the same turn (a foreground Task, or a background
+    agent started this turn) keeps its room however long its tool runs; only a later human turn
+    can close it early."""
+    store = make_store(kind, tmp_path)
+    engine, main, clock = interrupted(store)
+    clock.now += 600  # a 10-minute Bash
+    step = request(main["messages"] + [tool_use(1), tool_result(1)])  # main's loop, same turn
+    main_step(engine, step)
+    assert len(store.side_rooms()) == 1
+    clock.now += 10
+    late = request(conversation("background agent", 1))  # opened after the turn started
+    engine(late, {}, MESSAGES)
+    respond(engine, late, 30_000, tool_calls=True, tool_call_ids=("toolu_b",))
+    clock.now += 20
+    turn = request(step["messages"] + [assistant("done"), user("next")])
+    main_step(engine, turn)  # a new human turn: the 630-second-idle room closes, the new one stays
+    assert [room for room, _ in store.side_rooms().values()] == [room_for(30_000, 1_000)]
+
+
+def test_a_subagent_that_finishes_logs_its_close(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    store.clock = clock = Clock()
+    engine = RewriteEngine(store, config=CONFIG)
+    main = request(conversation("main", 3))
+    sub = request(conversation("subagent", 1))
+    engine(main, {}, MESSAGES)
+    respond(engine, main, 20_000)
+    engine(sub, {}, MESSAGES)
+    respond(engine, sub, 50_000, tool_calls=True, tool_call_ids=("toolu_1",))
+    clock.now += 7
+    done = loop(sub, 1)
+    engine(done, {}, MESSAGES)
+    events = respond(engine, done, 51_000, tool_calls=False)
+    assert [e for e in events if e["event"] == "side_room_closed"] == [
+        {"event": "side_room_closed", "reason": "no_tool_call", "age_s": 7}]
 
 
 def test_a_side_room_store_failure_is_a_store_error():
@@ -534,6 +630,7 @@ def responses_stream(*item_types: str) -> list[bytes]:
     (("file_search_call", "code_interpreter_call", "mcp_call"), False),  # all hosted
     (("message",), False),
     (("some_future_call",), True),  # an unknown call type fails safe: it counts as the client's
+    (("tool_search_call",), False),  # OpenAI tool search runs hosted unless execution is "client"
 ])
 def test_codex_hosted_calls_do_not_count_as_tool_calls(tool_call_proxy, items, expected):
     proxy, seen = tool_call_proxy
@@ -542,6 +639,13 @@ def test_codex_hosted_calls_do_not_count_as_tool_calls(tool_call_proxy, items, e
     assert seen == [expected]
     client = [f"call_{i}" for i, t in enumerate(items) if t.endswith("_call") and is_client_call({"type": t})]
     assert proxy.seen_ids == [tuple(client)]  # the client calls' ids, once each (added and completed)
+
+
+def test_a_client_executed_tool_search_counts():
+    assert is_client_call({"type": "tool_search_call", "execution": "client"})
+    assert not is_client_call({"type": "tool_search_call", "execution": "server"})
+    assert not is_client_call({"type": "tool_search_call"})
+    assert is_client_call({"type": "function_call"}) and not is_client_call({"type": "message"})
 
 
 def test_the_proxy_reports_tool_use_ids(tool_call_proxy):

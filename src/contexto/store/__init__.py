@@ -261,6 +261,10 @@ def read_turn_room(meta: dict[str, Any]) -> tuple[str | None, int | None, int]:
 # holder that stopped holds main's recall down for at most this long; ``limited_by: side`` on
 # ``mcp_call`` shows it. A live holder republishes at its next response.
 SIDE_ROOM_TTL_S = 900.0
+# D40: during a main turn that a human prompt started, a side room published before that turn and
+# not republished for this long is closed: a live subagent republishes at every step, so a room idle
+# this long across a human prompt is almost always one the user interrupted (Esc during its tool).
+SIDE_ROOM_IDLE_S = 120.0
 
 # room id -> (room tokens, tokens spent since its publish, publish time on the store's clock)
 SideRooms = dict[str, tuple[int, int, float]]
@@ -309,8 +313,14 @@ def side_rooms_record(rooms: SideRooms) -> dict[str, dict[str, Any]]:
             for r, (tokens, spent, at) in rooms.items()}
 
 
-def charge_rooms(main: tuple[str | None, int | None, int], sides: SideRooms, charge: Callable[[int | None], int]
-                 ) -> tuple[dict[str, Any] | None, SideRooms, str] | None:
+def expired_side_room_events(recorded: SideRooms, now: float) -> list[dict[str, Any]]:
+    """Content-free ``side_room_expired`` events for the recorded rooms that are no longer live."""
+    return [{"event": "side_room_expired", "age_s": int(now - at), "room_tokens": tokens, "spent_tokens": spent}
+            for tokens, spent, at in recorded.values() if not side_room_live(at, now)]
+
+
+def charge_rooms(main: tuple[str | None, int | None, int], sides: SideRooms, charge: Callable[[int | None], int],
+                 now: float | None = None) -> tuple[dict[str, Any] | None, SideRooms, dict[str, Any]] | None:
     """Charge every open room at once (D40): the main conversation's and each live side room.
 
     ``charge`` gets the tokens left (None when no room is open, which leaves the call unbudgeted)
@@ -320,12 +330,15 @@ def charge_rooms(main: tuple[str | None, int | None, int], sides: SideRooms, cha
     every one. Then no conversation with a live room receives more than that room, however the
     calls of several conversations interleave. ``sides`` must hold live rooms only (see
     ``live_side_rooms``). Returns (the updated main record, or None when main has no room; the
-    updated side rooms; ``"main"`` or ``"side"``, the room that limited the call, main on a tie), or
-    None when no room is open at all.
+    updated side rooms; a content-free summary for the call's log: ``limited_by``, ``main`` or
+    ``side``, the room that limited the call, main on a tie; ``side_rooms``, the number of live side
+    rooms; and for a side limit with ``now`` given, ``limiting_age_s``, that room's seconds since its
+    last publish, so a stale room can be told from a live subagent), or None when no room is open.
     """
     turn_id, room_tokens, spent = main
     published = turn_id is not None and room_tokens is not None
-    side_left = min((max(0, t - s) for t, s, _ in sides.values()), default=None)
+    tightest = min(sides.items(), key=lambda kv: max(0, kv[1][0] - kv[1][1]), default=None)
+    side_left = max(0, tightest[1][0] - tightest[1][1]) if tightest else None
     main_left = max(0, room_tokens - spent) if published else None
     left = [x for x in (main_left, side_left) if x is not None]
     if not left:
@@ -337,7 +350,10 @@ def charge_rooms(main: tuple[str | None, int | None, int], sides: SideRooms, cha
         raise ValueError(f"a turn-room charge must be between 0 and {remaining} tokens, not {used!r}")
     record = {"turn_id": turn_id, "room_tokens": room_tokens, "spent_tokens": spent + used} if published else None
     limited_by = "main" if main_left is not None and main_left == remaining else "side"
-    return record, {r: (t, s + used, at) for r, (t, s, at) in sides.items()}, limited_by
+    summary: dict[str, Any] = {"limited_by": limited_by, "side_rooms": len(sides)}
+    if limited_by == "side" and tightest is not None and now is not None:
+        summary["limiting_age_s"] = max(0, int(now - tightest[1][2]))
+    return record, {r: (t, s + used, at) for r, (t, s, at) in sides.items()}, summary
 
 
 class SessionNotFoundError(LookupError):
@@ -453,9 +469,11 @@ class SessionStore(LedgerOps):
         if room_tokens is not None:
             check_turn_room("side", room_tokens)
         now = self.clock()
+        expired: list[dict[str, Any]] = []
 
         def change(meta: dict[str, Any]) -> dict[str, Any] | None:
             recorded = read_side_rooms(meta)
+            expired[:] = expired_side_room_events(recorded, now)
             rooms = live_side_rooms(recorded, now)
             if room_tokens is None:
                 rooms.pop(room_id, None)
@@ -466,6 +484,7 @@ class SessionStore(LedgerOps):
             return {"side_rooms": side_rooms_record(rooms)} if rooms or "side_rooms" in meta else None
 
         self._modify_meta(change)
+        self._log_side_events(expired)
 
     def side_rooms(self) -> dict[str, tuple[int, int]]:
         """The live side rooms: room id -> (room tokens, tokens spent since its publish)."""
@@ -564,31 +583,64 @@ class SessionStore(LedgerOps):
         """(turn id, room tokens, tokens spent this turn); (None, None, 0) until the engine publishes."""
         return read_turn_room(self._meta())
 
-    def charge_turn_room(self, charge: Callable[[int | None], int]) -> str | None:
+    def charge_turn_room(self, charge: Callable[[int | None], int]) -> dict[str, Any] | None:
         """Charge this turn's room atomically: ``charge`` runs while meta.lock is held.
 
         See ``charge_rooms``. Parallel tool calls serialize here, so together they never spend
         more than the smallest open room, and each charge counts against every live room (D40);
-        expired side rooms are dropped. Returns the room that limited the call (``"main"`` or
-        ``"side"``), or None when no room is open.
+        expired side rooms are dropped and each logs ``side_room_expired``. Returns the call's
+        content-free room summary (``limited_by``, ``side_rooms``, ``limiting_age_s``; see
+        ``charge_rooms``), or None when no room is open.
         """
         now = self.clock()
-        limited: list[str] = []
+        summary: list[dict[str, Any]] = []
+        expired: list[dict[str, Any]] = []
 
         def update(meta: dict[str, Any]) -> dict[str, Any] | None:
             recorded = read_side_rooms(meta)
-            result = charge_rooms(read_turn_room(meta), live_side_rooms(recorded, now), charge)
+            expired[:] = expired_side_room_events(recorded, now)
+            result = charge_rooms(read_turn_room(meta), live_side_rooms(recorded, now), charge, now)
             if result is None:
                 return {"side_rooms": {}} if recorded else None  # every side room had expired
-            record, charged, limited_by = result
-            limited.append(limited_by)
+            record, charged, info = result
+            summary.append(info)
             updates: dict[str, Any] = {"side_rooms": side_rooms_record(charged)} if recorded else {}
             if record is not None:
                 updates["turn_room"] = {**record, "seq": read_room_stamp(meta)}
             return updates or None
 
         self._modify_meta(update)
-        return limited[0] if limited else None
+        self._log_side_events(expired)
+        return summary[0] if summary else None
+
+    def close_idle_side_rooms(self, published_before: float, idle_s: float) -> list[tuple[str, int]]:
+        """Close the side rooms last published before ``published_before`` and more than ``idle_s``
+        seconds ago (D40: the engine calls this during a main turn that a human prompt started, for
+        a subagent interrupted mid-tool). Returns (room id, age in seconds) for each room closed."""
+        now = self.clock()
+        closed: list[tuple[str, int]] = []
+        expired: list[dict[str, Any]] = []
+
+        def change(meta: dict[str, Any]) -> dict[str, Any] | None:
+            recorded = read_side_rooms(meta)
+            expired[:] = expired_side_room_events(recorded, now)
+            rooms = live_side_rooms(recorded, now)
+            closed[:] = [(r, int(now - at)) for r, (_, _, at) in rooms.items()
+                         if at < published_before and now - at > idle_s]
+            for room_id, _ in closed:
+                del rooms[room_id]
+            return {"side_rooms": side_rooms_record(rooms)} if rooms != recorded else None
+
+        self._modify_meta(change)
+        self._log_side_events(expired)
+        return closed
+
+    def _log_side_events(self, events: list[dict[str, Any]]) -> None:
+        for event in events:
+            try:
+                self.log(event)
+            except Exception:  # a log write must never fail a charge or a publish
+                pass
 
     def _write_atomic(self, path: Path, data: bytes) -> None:
         """Write ``path`` privately and atomically: a fsynced temp file renamed into place."""
