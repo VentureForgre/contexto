@@ -398,8 +398,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
 
 - **D13. Repository lives at VentureForgre/contexto, private, PR-only `main`.** Owner, 2026-10-15.
   (Private status superseded by D42; the PR-only rules stand.)
-  The personal account's plan reports `free` through the API, and branch rules are unavailable for private repos on that plan; the
-  org is on Team. Ruleset 25202810: PR required, no force-push, no deletion, no bypass, 0 required
+  The personal account's plan reports `free` through the API, and branch rules are unavailable
+  for private repos on that plan; the org is on Team. Ruleset 25202810: PR required, no force-push, no deletion, no bypass, 0 required
   approvals because all seats share one GitHub account. Exact-head review by a reviewer seat is a
   team rule.
 - **D14. Releases follow discord-cli's Conventional Commit versioning, adapted.** Owner request,
