@@ -101,6 +101,14 @@ class ResponsesDialect(Dialect):
         parts = _parts(item)
         return item.get("role") == "user" and bool(parts) and all(is_context_part(p) for p in parts)
 
+    def result_ids(self, item: dict) -> list[str]:
+        """D40: the call id a ``*_output`` item (``function_call_output``, ``custom_tool_call_output``,
+        ``local_shell_call_output``, ...) returns a result for."""
+        if not str(item.get("type", "")).endswith("_output"):
+            return []
+        call_id = item.get("call_id", item.get("id"))
+        return [call_id] if isinstance(call_id, str) else []
+
     def retained_blocks(self, item: dict) -> list[tuple[str, dict]]:
         """A14: Responses items as the Messages API blocks ``render_page`` renders, so an in-view line
         reads like a paged one: message text parts (not context sections), calls as ``tool_use``, call

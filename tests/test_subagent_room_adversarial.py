@@ -1,8 +1,10 @@
 """Reviewer A's adversarial probes for PR #209 (D40), kept as regression tests.
 
 The stale-room probe originally made 40 main recalls at one instant. Side rooms now expire
-``SIDE_ROOM_TTL_S`` after their publish, so it advances a clock by 5 seconds per main step, and also
-checks that the stale room still bounds main while it is live.
+``SIDE_ROOM_TTL_S`` after their publish, so it advances a clock by 30 seconds per main step, and also
+checks that the stale room still bounds main while it is live. The round-2 Bash probe used Claude
+Code's default 2-minute Bash timeout; it is kept with the 10-minute maximum, and a second test pins
+the documented limit for a call that starts after the expiry.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import json
 from contexto.rewrite import MESSAGES, RewriteEngine
 from contexto.store import SIDE_ROOM_TTL_S, SessionStore
 
-from test_rewrite import assistant, conversation, request, user
+from test_rewrite import assistant, conversation, request, tool_result, tool_use, user
 from test_subagent_room import CONFIG, Clock, big_page, recall, respond, room_for, session
 
 
@@ -71,7 +73,7 @@ def test_probe_a_stale_side_room_starves_main_for_the_rest_of_its_turn(tmp_path)
         if clock.now - 1_000_000.0 <= SIDE_ROOM_TTL_S:
             total_while_live += last
         respond(engine, main, 20_000)  # main republishes at each response: its own spend resets
-        clock.now += 5  # one main step
+        clock.now += 30  # one main step; 40 steps outlast the expiry
     assert total_while_live <= side_room  # while live, the side room bounds every charge
     assert last > 0 and store.side_rooms() == {}  # after it expired, main's own room is back
 
@@ -101,3 +103,66 @@ def test_probe_main_only_with_toolless_side_requests_is_unchanged(tmp_path):
         pid = big_page(s, 400_000)
         totals.append(recall(s, pid)[1])
     assert totals[0] == totals[1]
+
+
+def _twins(tmp_path):
+    store = SessionStore(tmp_path, "s1")
+    store.clock = clock = Clock()
+    engine = RewriteEngine(store, config=CONFIG)
+    main = request(conversation("main", 3))
+    engine(main, {}, MESSAGES)
+    respond(engine, main, 20_000)  # main's room 104,000
+    store.set_window(200_000, 2.0)
+    first = conversation("same prompt", 1)
+    a1 = request(first)
+    a2 = request(conversation("same prompt", 1))
+    engine(a1, {}, MESSAGES)
+    respond(engine, a1, 120_000, 1_000, tool_calls=True)  # A1's room: 4,000; A1's slow tools run now
+    clock.now += 1
+    engine(a2, {}, MESSAGES)
+    respond(engine, a2, 10_000, 1_000, tool_calls=True)  # A2's room: 114,000
+    clock.now += 1
+    a2_next = request(first + [tool_use(1), tool_result(1)])  # A2's quick tool finished: its step 2
+    engine(a2_next, {}, MESSAGES)
+    return engine, store, clock, a2_next
+
+
+def test_probe_twin_step_two_takes_over_the_other_twins_room(tmp_path):
+    """Both twins' rooms have the same lineage (the same first request). A2's second step must not
+    continue A1's room and reset it while A1's calls are still in flight."""
+    engine, store, clock, a2_next = _twins(tmp_path)
+    respond(engine, a2_next, 11_000, 1_000, tool_calls=True)
+    pid = big_page(store)
+    _, charged = recall(store, pid)  # A1's call, released by A1's first response
+    assert charged <= room_for(120_000, 1_000)
+
+
+def test_probe_twin_last_step_closes_the_other_twins_room(tmp_path):
+    engine, store, clock, a2_next = _twins(tmp_path)
+    respond(engine, a2_next, 11_000, 50, tool_calls=False)  # A2 is done
+    pid = big_page(store)
+    _, charged = recall(store, pid)
+    assert charged <= room_for(120_000, 1_000)
+
+
+def test_probe_a_call_after_a_ten_minute_bash_still_has_its_room(tmp_path):
+    """[Bash (runs to Claude Code's 10-minute maximum timeout), contexto_recall] in one response."""
+    store = SessionStore(tmp_path, "s1")
+    store.clock = clock = Clock()
+    session(store)
+    clock.now += 600.5
+    pid = big_page(store)
+    _, charged = recall(store, pid)
+    assert charged <= room_for(120_000, 1_000)
+
+
+def test_a_call_after_the_expiry_is_charged_against_main_only(tmp_path):
+    """The documented limit: a call held past the expiry (an unanswered permission prompt, say)
+    finds its room gone and is charged against main's room, as before D40."""
+    store = SessionStore(tmp_path, "s1")
+    store.clock = clock = Clock()
+    session(store)
+    clock.now += SIDE_ROOM_TTL_S + 1
+    pid = big_page(store)
+    _, charged = recall(store, pid)
+    assert charged > room_for(120_000, 1_000)

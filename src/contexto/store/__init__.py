@@ -254,12 +254,15 @@ def read_turn_room(meta: dict[str, Any]) -> tuple[str | None, int | None, int]:
 
 # D40: a side room lives this long after its publish unless its holder republishes or closes it.
 # Claude Code starts an MCP call 5 to 16 ms after its tool_use block completes (contract, stream
-# hold), so a holder's own calls normally land within a second of its response; 120 s also covers a
-# call queued behind another tool of the same response, such as a Bash command running to Claude
-# Code's default 2-minute timeout. A live holder republishes at its next response.
-SIDE_ROOM_TTL_S = 120.0
+# hold), so a holder's own calls normally land within a second of its response. A call can also
+# wait behind another tool of the same response: a Bash command can run to Claude Code's maximum
+# timeout of 10 minutes, and 15 minutes leaves margin over that. A call held longer, for example by
+# a permission prompt the user has not answered, is charged without its room (documented). A
+# holder that stopped holds main's recall down for at most this long; ``limited_by: side`` on
+# ``mcp_call`` shows it. A live holder republishes at its next response.
+SIDE_ROOM_TTL_S = 900.0
 
-# room id -> (room tokens, tokens spent since its publish, publish time in seconds since the epoch)
+# room id -> (room tokens, tokens spent since its publish, publish time on the store's clock)
 SideRooms = dict[str, tuple[int, int, float]]
 
 
@@ -288,10 +291,17 @@ def read_side_rooms(meta: dict[str, Any]) -> SideRooms:
     return out
 
 
+def side_room_live(published_at: float, now: float) -> bool:
+    """Whether a room published at ``published_at`` is live at ``now``: at most ``SIDE_ROOM_TTL_S``
+    old. The session store's times are wall-clock, since the proxy publishes and the MCP server
+    charges from separate processes, so a publish time more than ``SIDE_ROOM_TTL_S`` in the future
+    (a clock stepped back) counts as expired rather than live for as long as the step."""
+    return -SIDE_ROOM_TTL_S <= now - published_at <= SIDE_ROOM_TTL_S
+
+
 def live_side_rooms(rooms: SideRooms, now: float) -> SideRooms:
-    """The side rooms published at most ``SIDE_ROOM_TTL_S`` before ``now`` (a clock that went
-    backwards keeps a room live)."""
-    return {r: room for r, room in rooms.items() if now - room[2] <= SIDE_ROOM_TTL_S}
+    """The side rooms live at ``now`` (see ``side_room_live``)."""
+    return {r: room for r, room in rooms.items() if side_room_live(room[2], now)}
 
 
 def side_rooms_record(rooms: SideRooms) -> dict[str, dict[str, Any]]:
@@ -359,7 +369,9 @@ def redact(event: Any) -> Any:
 class SessionStore(LedgerOps):
     def __init__(self, home: Path, session_id: str) -> None:
         self.session_id = session_id
-        self.clock: Callable[[], float] = time.time  # side-room publish times and expiry (D40)
+        # Side-room publish times and expiry (D40): wall-clock, since the proxy and the MCP server are
+        # separate processes; see side_room_live for a clock stepped back.
+        self.clock: Callable[[], float] = time.time
         self.dir = session_dir(home, session_id)
         self.pages_dir = self.dir / "pages"
         # Narrow an existing wide CONTEXTO_HOME and sessions/ too, not only directories we create.

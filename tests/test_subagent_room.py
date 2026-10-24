@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 import pytest
 
 from contexto import mcp
-from contexto.proxy import ContextoProxy, StreamHold, UsageReader, _takes_keyword
+from contexto.proxy import ContextoProxy, StreamHold, UsageReader, _takes_keyword, is_client_call
 from contexto.rewrite import MESSAGES, Config, RewriteEngine
 from contexto.store import SIDE_ROOM_TTL_S, SessionStore
 from contexto.store.memory import MemoryStore
@@ -247,6 +247,18 @@ def test_a_side_room_expires_unless_republished(kind, tmp_path):
         assert json.loads((store.dir / "meta.json").read_text())["side_rooms"] == {}  # dropped on the write
 
 
+def test_a_publish_time_far_in_the_future_counts_as_expired(kind, tmp_path):
+    """A wall clock stepped back would otherwise keep a room live for as long as the step."""
+    store = make_store(kind, tmp_path)
+    store.clock = clock = Clock()
+    store.set_side_room("anthropic:a", 1_000)
+    clock.now -= SIDE_ROOM_TTL_S - 1  # stepped back a little: still live
+    assert list(store.side_rooms()) == ["anthropic:a"]
+    clock.now -= 2  # the publish now lies more than the expiry time in the future
+    assert store.side_rooms() == {}
+    assert store.charge_turn_room(lambda remaining: 0) is None  # nothing open: unbudgeted
+
+
 def test_side_rooms_alone_still_budget_a_call(kind, tmp_path):
     """Main has published nothing yet (after a restart, say) but a side room is open: it bounds the call."""
     store = make_store(kind, tmp_path)
@@ -340,32 +352,78 @@ def test_a_closed_side_room_no_longer_limits_main():
     assert recall(store, pid)[1] > 0
 
 
-def test_twins_and_forks_get_their_own_rooms(kind, tmp_path):
-    """Two subagents with the same prompt share a conversation key. Each publish opens its own room,
-    a step of one replaces only one room, and a fork (the same history plus a new user line)
-    neither continues nor closes either."""
-    store = make_store(kind, tmp_path)
+def twins(store):
+    """Main, then two subagents launched with the same prompt (the same conversation key and the
+    same first request): twin 1 near the bound, twin 2 with room. Returns the engine and the request."""
     engine = RewriteEngine(store, config=CONFIG)
     main = request(conversation("main", 3))
     engine(main, {}, MESSAGES)
     respond(engine, main, 20_000)
     twin = request(conversation("same prompt", 1))
-    for usage in (120_000, 10_000):  # twin 1, then twin 2, with the same request
-        engine(twin, {}, MESSAGES)
-        respond(engine, twin, usage, tool_calls=True)
-    assert sorted(room for room, _ in store.side_rooms().values()) == [4_000, 114_000]
-    step = loop(twin, 1)
-    engine(step, {}, MESSAGES)
-    respond(engine, step, 50_000, tool_calls=True)  # one twin's next step replaces one room only
-    assert len(store.side_rooms()) == 2
+    return engine, twin
+
+
+def test_twins_continue_their_own_rooms_by_tool_call_id(kind, tmp_path):
+    """Each twin's response held its own tool call. Only the request returning that call's result
+    continues the room, whichever twin's step arrives first; a fork continues neither."""
+    store = make_store(kind, tmp_path)
+    engine, twin = twins(store)
+    engine(twin, {}, MESSAGES)
+    respond(engine, twin, 120_000, tool_calls=True, tool_call_ids=("toolu_1",))  # twin 1: 4,000
+    engine(twin, {}, MESSAGES)
+    respond(engine, twin, 10_000, tool_calls=True, tool_call_ids=("toolu_2",))  # twin 2: 114,000
+    rooms = {room: room_id for room_id, (room, _) in store.side_rooms().items()}
+    assert sorted(rooms) == [4_000, 114_000]
+    step2 = loop(twin, 2)  # twin 2 is quicker: its step returns toolu_2's result
+    engine(step2, {}, MESSAGES)
+    respond(engine, step2, 11_000, tool_calls=True, tool_call_ids=("toolu_3",))
+    assert store.side_rooms()[rooms[4_000]] == (4_000, 0)  # twin 1's room is untouched
+    assert store.side_rooms()[rooms[114_000]] == (room_for(11_000, 1_000), 0)  # twin 2's, re-measured
     fork = request(twin["messages"] + [assistant("so far"), user("summarize in one line")])
     engine(fork, {}, MESSAGES)
-    respond(engine, fork, 3_000, 20, tool_calls=False)  # adds a turn start: continues neither twin
+    respond(engine, fork, 3_000, 20, tool_calls=False)  # returns no result: continues neither twin
     assert len(store.side_rooms()) == 2
-    done = loop(step, 2)
+    done = loop(step2, 3)
     engine(done, {}, MESSAGES)
-    respond(engine, done, 51_000, tool_calls=False)  # that twin finishes: the other's room stays
-    assert len(store.side_rooms()) == 1
+    respond(engine, done, 12_000, tool_calls=False)  # twin 2 finishes: twin 1's room stays
+    assert store.side_rooms() == {rooms[4_000]: (4_000, 0)}
+
+
+def test_tied_rooms_without_ids_are_continued_by_neither(kind, tmp_path):
+    """Without tool-call ids (no hold saw them) the twins' rooms tie on lineage. A step continues
+    neither: it opens its own room, and the tied ones keep their spend until they expire."""
+    store = make_store(kind, tmp_path)
+    engine, twin = twins(store)
+    for usage in (120_000, 10_000):
+        engine(twin, {}, MESSAGES)
+        respond(engine, twin, usage, tool_calls=True)
+    step = loop(twin, 1)
+    engine(step, {}, MESSAGES)
+    respond(engine, step, 11_000, tool_calls=True)
+    assert sorted(room for room, _ in store.side_rooms().values()) == [4_000, 113_000, 114_000]
+    engine(step, {}, MESSAGES)
+    respond(engine, step, 11_000, tool_calls=False)  # the same request again: it continues nothing
+    assert len(store.side_rooms()) == 3
+
+
+def test_a_room_with_ids_needs_one_of_their_results(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    engine = RewriteEngine(store, config=CONFIG)
+    main = request(conversation("main", 3))
+    sub = request(conversation("subagent", 1))
+    engine(main, {}, MESSAGES)
+    respond(engine, main, 20_000)
+    engine(sub, {}, MESSAGES)
+    respond(engine, sub, 50_000, tool_calls=True, tool_call_ids=("toolu_7",))
+    [room_id] = store.side_rooms()
+    other = loop(sub, 8)  # extends the request, but returns a result for some other call
+    engine(other, {}, MESSAGES)
+    respond(engine, other, 51_000, tool_calls=False)
+    assert list(store.side_rooms()) == [room_id]
+    mine = loop(sub, 7)
+    engine(mine, {}, MESSAGES)
+    respond(engine, mine, 51_000, tool_calls=False)
+    assert store.side_rooms() == {}
 
 
 def test_the_engine_forgets_expired_lineages(kind, tmp_path):
@@ -428,13 +486,16 @@ def tool_call_proxy():
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     Upstream.gzip_anyway, Upstream.accept_encodings, Upstream.pause_before = False, [], -1
     seen: list = []
+    ids: list = []
 
-    def observe(endpoint, usage, request, tool_calls=None):
+    def observe(endpoint, usage, request, tool_calls=None, tool_call_ids=()):
         seen.append(tool_calls)
+        ids.append(tool_call_ids)
         return []
 
     proxy = ContextoProxy(f"http://127.0.0.1:{server.server_address[1]}", MemoryStore(),
                           lambda r, h, e: (r, h, [{"epoch": 0}]), observe_usage=observe)
+    proxy.seen_ids = ids
     proxy.start()
     yield proxy, seen
     proxy.stop()
@@ -454,7 +515,8 @@ def test_the_proxy_tells_observe_usage_whether_the_response_holds_a_tool_call(to
 
 
 def responses_stream(*item_types: str) -> list[bytes]:
-    items = [{"type": t, "id": f"it_{i}"} for i, t in enumerate(item_types)]
+    items = [{"type": t, "id": f"it_{i}", **({"call_id": f"call_{i}"} if t.endswith("_call") else {})}
+             for i, t in enumerate(item_types)]
     return ([ev({"type": "response.created", "response": {"status": "in_progress"}})]
             + [ev({"type": "response.output_item.added", "output_index": i, "item": item})
                for i, item in enumerate(items)]
@@ -469,13 +531,31 @@ def responses_stream(*item_types: str) -> list[bytes]:
     (("web_search_call", "message"), False),  # hosted: the server ran it, no MCP call can follow
     (("image_generation_call",), False),
     (("web_search_call", "function_call"), True),  # a client call after a hosted one still counts
+    (("file_search_call", "code_interpreter_call", "mcp_call"), False),  # all hosted
     (("message",), False),
+    (("some_future_call",), True),  # an unknown call type fails safe: it counts as the client's
 ])
 def test_codex_hosted_calls_do_not_count_as_tool_calls(tool_call_proxy, items, expected):
     proxy, seen = tool_call_proxy
     Upstream.stream = responses_stream(*items)
     read_with_times(proxy, path="/v1/responses")
     assert seen == [expected]
+    client = [f"call_{i}" for i, t in enumerate(items) if t.endswith("_call") and is_client_call({"type": t})]
+    assert proxy.seen_ids == [tuple(client)]  # the client calls' ids, once each (added and completed)
+
+
+def test_the_proxy_reports_tool_use_ids(tool_call_proxy):
+    proxy, _ = tool_call_proxy
+    Upstream.stream = [START, *text_block(0), *tool_block(1), *tool_block(2), DELTA, STOP]
+    read_with_times(proxy)
+    assert proxy.seen_ids == [("toolu_1", "toolu_2")]
+
+
+def test_codex_results_are_matched_by_call_id():
+    from contexto.codex import RESPONSES
+    assert RESPONSES.result_ids(codex_output(4)) == ["call_4"]
+    assert RESPONSES.result_ids(codex_call(4)) == [] and RESPONSES.result_ids(codex_prompt("x")) == []
+    assert RESPONSES.result_ids({"type": "custom_tool_call_output", "call_id": "c9", "output": "o"}) == ["c9"]
 
 
 def test_a_hosted_call_still_holds_the_stream():
@@ -517,7 +597,8 @@ def test_codex_side_conversations_get_side_rooms():
     engine(main, {}, RESPONSES_PATH)
     engine.observe_usage(RESPONSES_PATH, {"input_tokens": 20_000, "output_tokens": 1_000}, main, tool_calls=True)
     engine(side, {}, RESPONSES_PATH)
-    engine.observe_usage(RESPONSES_PATH, {"input_tokens": 120_000, "output_tokens": 1_000}, side, tool_calls=True)
+    engine.observe_usage(RESPONSES_PATH, {"input_tokens": 120_000, "output_tokens": 1_000}, side, tool_calls=True,
+                         tool_call_ids=("call_1",))
     [(room_id, room)] = store.sides
     assert room_id.startswith("responses:") and room == room_for(120_000, 1_000)
     step = codex_request(side["input"] + [codex_call(1), codex_output(1)])

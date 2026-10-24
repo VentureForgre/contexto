@@ -32,7 +32,7 @@ class MemoryStore(LedgerOps):
         self._turn_room: tuple[str | None, int | None, int] = (None, None, 0)
         self._room_stamp: int | None = None
         self._side_rooms: SideRooms = {}  # D40: room id -> (room tokens, spent since its publish, published at)
-        self.clock: Callable[[], float] = time.time
+        self.clock: Callable[[], float] = time.monotonic  # one process: side-room expiry need not be wall-clock
         self._request_seq = 0
         self._retained_stamp: int | None = None
         self._retained: tuple[int, int, int, list[dict[str, Any]]] | None = None

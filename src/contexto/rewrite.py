@@ -131,8 +131,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, ClassVar, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json
-from contexto.store import (SIDE_ROOM_TTL_S, KeyFileError, PageConflictError, PageNotFoundError,
-                            SessionNotFoundError)
+from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import render_page
 from contexto.tokens import TokenEstimator
@@ -359,6 +358,13 @@ class Dialect:
 
     def is_system_like(self, item: dict) -> bool:
         return item.get("role") == "system"
+
+    def result_ids(self, item: dict) -> list[str]:
+        """D40: the tool-call ids this item returns results for (its ``tool_result`` blocks)."""
+        if item.get("role") != "user":
+            return []
+        return [b["tool_use_id"] for b in _blocks(item) if isinstance(b, dict) and b.get("type") == "tool_result"
+                and isinstance(b.get("tool_use_id"), str)]
 
     def retained_blocks(self, item: dict) -> list[tuple[str, dict]]:
         """A14: the item's searchable blocks as (role, Messages API block): text that is not an injected
@@ -1557,7 +1563,7 @@ class RewriteEngine:
         # Are Contexto's MCP tools reaching the main conversation? (contexto.toolcheck)
         self.tools = ToolCheck(self.store)
         # D40: open side rooms by id -> (conversation key, message count, anchor hash, publish time)
-        self._side_rooms: dict[str, tuple[str, int, str, float]] = {}
+        self._side_rooms: dict[str, tuple[str, int, str, float, frozenset[str]]] = {}  # + call ids
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -1789,17 +1795,20 @@ class RewriteEngine:
             events.append({"event": "retained_stale", "epoch": state.epoch, "error": type(error).__name__})
 
     def _publish_side_room(self, calls: StoreCalls, key: str, messages: list[dict], dialect: Dialect,
-                           room: int | None) -> None:
+                           room: int | None, call_ids: tuple[str, ...] = ()) -> None:
         """D40: open, replace, or close the side room of the request ``messages``.
 
         Rooms are per request lineage, not per conversation key: two subagents launched with the same
-        prompt, or a side request that forks one, share a key but must not share a room. A request
-        continues a room when it extends that room's request (the same first ``n`` messages) and adds
-        no turn start, as a tool loop's next request does (its response and the tool results). It
-        replaces or closes only that room, the longest such lineage, and the oldest of equal ones (a
-        twin's room is left for the twin); a request that continues none opens a new room, or with
-        ``room`` None changes nothing. The lineage is kept in memory and forgotten once the room has
-        expired in the store (``SIDE_ROOM_TTL_S``)."""
+        prompt, or a side request that forks one, share a key but must not share a room. Each room
+        remembers the request that published it (its message count and anchor hash) and the ids of
+        the client tool calls its response held (``call_ids``, from the proxy). A request continues a
+        room it extends when it carries a result (``tool_result``, ``*_call_output``) for one of
+        that room's ids: the response's own calls, so a twin with the same history cannot match. A
+        room recorded without ids (the proxy saw none) is continued by a request that extends it and
+        adds no turn start. Exactly one room must match: when two or more tie, the request continues
+        none of them, they keep their spend until they expire, and it opens its own room (or with
+        ``room`` None changes nothing). The lineage is kept in memory and forgotten once the room
+        has expired in the store (``SIDE_ROOM_TTL_S``)."""
         token = _DIALECT.set(dialect)
         try:
             hashes = [message_hash(m) for m in messages]
@@ -1807,14 +1816,28 @@ class RewriteEngine:
             _DIALECT.reset(token)
         clock = getattr(self.store, "clock", None)  # the store's clock, which expires its rooms
         now = clock() if callable(clock) else time.time()
-        self._side_rooms = {r: v for r, v in self._side_rooms.items() if now - v[3] <= SIDE_ROOM_TTL_S}
-        best: tuple[int, str] | None = None
-        for room_id, (owner, n, anchor, _) in self._side_rooms.items():
-            if (owner == key and n < len(messages) and (best is None or n > best[0])
-                    and anchor_hash(hashes[:n]) == anchor
-                    and not any(dialect.is_turn_start(m) for m in messages[n:])):
-                best = (n, room_id)
-        continued = best[1] if best else None
+        self._side_rooms = {r: v for r, v in self._side_rooms.items() if side_room_live(v[3], now)}
+        results: dict[str, int] = {}  # tool-call id -> the last index of a message returning its result
+        for i, item in enumerate(messages):
+            for call_id in dialect.result_ids(item):
+                results[call_id] = i
+        by_id: list[str] = []
+        by_lineage: list[tuple[int, str]] = []
+        for room_id, (owner, n, anchor, _, ids) in self._side_rooms.items():
+            if owner != key or n >= len(messages) or anchor_hash(hashes[:n]) != anchor:
+                continue
+            if ids:
+                if any(results.get(call_id, -1) >= n for call_id in ids):
+                    by_id.append(room_id)
+            elif not any(dialect.is_turn_start(m) for m in messages[n:]):
+                by_lineage.append((n, room_id))
+        continued = None
+        if by_id:
+            continued = by_id[0] if len(by_id) == 1 else None
+        elif by_lineage:
+            longest = max(n for n, _ in by_lineage)
+            tied = [room_id for n, room_id in by_lineage if n == longest]
+            continued = tied[0] if len(tied) == 1 else None
         if room is None:
             if continued is not None:
                 calls.set_side_room(continued, None)
@@ -1822,15 +1845,17 @@ class RewriteEngine:
             return
         room_id = continued or f"{key}#{secrets.token_hex(4)}"
         calls.set_side_room(room_id, room)
-        self._side_rooms[room_id] = (key, len(messages), anchor_hash(hashes), now)
+        self._side_rooms[room_id] = (key, len(messages), anchor_hash(hashes), now, frozenset(call_ids))
 
-    def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None) -> list[dict]:
+    def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
+                      tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
         dialect = dialect_for(endpoint)
         # preamble() must see the same knobs as the request did
         with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
-            return self._observe_usage(endpoint, usage, request, tool_calls)
+            return self._observe_usage(endpoint, usage, request, tool_calls, tool_call_ids)
 
-    def _observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None) -> list[dict]:
+    def _observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
+                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
         """Feed a response's real usage back (a transformed endpoint; never ``count_tokens``). Returns the
         content-free events it raised (packet A2b; contract rule 3 as amended by PR #44). The proxy writes
         them on that request's log entry (``usage_events``), the one place they are logged (A2e,
@@ -1852,6 +1877,8 @@ class RewriteEngine:
         or output list, None when unknown (treated as True). The main conversation publishes its room
         either way; any other conversation publishes the side room of its request lineage
         (``_publish_side_room``) when the response may hold a client call and closes it when not.
+        ``tool_call_ids`` are the ids of those client calls, recorded with the room so that only a
+        request returning their results continues it.
         """
         dialect = dialect_for(endpoint)
         if dialect is None or endpoint == COUNT_TOKENS:
@@ -1915,7 +1942,7 @@ class RewriteEngine:
                     # D40: this conversation's own room, from its own usage, for the tool calls this
                     # response releases; every call is charged against it and main's room alike.
                     room = None if tool_calls is False else self.turn_room(real + output)
-                    self._publish_side_room(calls, key, messages, dialect, room)
+                    self._publish_side_room(calls, key, messages, dialect, room, tuple(tool_call_ids))
         except STORE_FAILURES as error:
             # Rule 14: a store that cannot be written after a response is a store_error like any other;
             # the next turn start retries it. The event reaches the log with the others, via the proxy.
