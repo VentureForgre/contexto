@@ -374,6 +374,71 @@ What the numbers show:
   scan stops when none is left. A query whose every word is on nearly every page still costs one
   scan per word (3 such words: 0.75 s before and after).
 
+## After D39: the MCP server holds search text up to a budget (2026-10-24)
+
+D39 caps the page text the MCP server holds for search (`CONTEXTO_SEARCH_CACHE_MB`, default 64).
+It holds the newest pages' text as it is and older pages' text compressed (zlib level 1), counting
+compressed bytes against the same budget; at each search it reads pages that are not held from
+their files and lets them go. The 6,000-page store (`stores.csv`: 254.7 MB on disk, 184 MiB of
+folded text, 32.1 KB per page) was measured with the server's budget at 64 MB (the default),
+unlimited (100,000 MB), and 0:
+
+```
+# before: origin/main 18b9955, from a `git archive` copy so the MCP children import that code
+python spikes/m2/scale/store/scale_bench.py --sizes 6000 --responses-sizes= --profile-n 0 --out results/d39/before
+# after: this branch, once per budget
+python spikes/m2/scale/store/scale_bench.py --sizes 6000 --responses-sizes= --profile-n 0 --out results/d39/after_64
+python spikes/m2/scale/store/scale_bench.py --sizes 6000 --responses-sizes= --profile-n 0 \
+    --search-cache-mb 100000 --out results/d39/unlimited
+python spikes/m2/scale/store/scale_bench.py --sizes 6000 --responses-sizes= --profile-n 0 \
+    --search-cache-mb 0 --out results/d39/zero
+python spikes/m2/scale/store/scale_compare.py results/d39/before results/d39/after_64
+```
+
+`--search-cache-mb` sets the budget of the MCP child (through the environment variable) and of the
+in-process server, which the quality pass uses. The four runs went one after another on the same
+machine, with other builders' test suites running (load1 6.5 to 11.7, in each `summary.md`).
+`after_64_uncompressed` is the same run at this PR's first head (8a96500), which held text only
+uncompressed, measured earlier the same day.
+
+| Budget | search rare / common / multi, s | first search, s | index_text warm / cold, s | MCP peak RSS MB |
+|---|---|---:|---|---:|
+| before D39 (no cap) | 0.100 / 0.174 / 0.243 | 0.88 | 0.037 / 0.652 | 290 |
+| unlimited | 0.100 / 0.171 / 0.246 | 0.81 | 0.035 / 0.618 | 278 |
+| 64 MB (default) | 0.263 / 0.334 / 0.405 | 1.62 | 0.034 / 0.604 | 134 |
+| 64 MB, uncompressed only (8a96500) | 0.548 / 0.633 / 0.693 | 0.85 | 0.035 / 0.613 | 129 |
+| 0 | 0.799 / 0.880 / 0.908 | 0.78 | 0.031 / 0.561 | 47 |
+
+- Results are the same. `quality.csv` is byte-identical in all runs (86 probe queries: the outcome,
+  the rank shown, the matching page count, and whether the value is shown), and all 270 search
+  replies over stdio have the same length as before. The 30 recall rows differ only because each
+  run's store has its own key, so its own page ids. `tests/test_search_cache.py` checks the same on
+  random stores at several budgets, against a reference ranking with no narrowing.
+- What 64 MB holds here: every page, 292 as they are and 5,708 compressed (zlib level 1 makes this
+  text 3.2 times smaller; the whole store is 57.8 MiB compressed). A search decompresses 5,708
+  pages, 27 us each, instead of reading, parsing, and folding about 3,900 pages, about 110 us each,
+  so the budget's added search time falls by about 64 percent against the uncompressed-only head.
+  The first search compresses those pages once (137 us each), 1.6 s instead of 0.8.
+- Memory. Peak RSS falls from 290 MB to 134 MB at the default and to 47 MB at 0. Text held
+  uncompressed and compressed later leaves its memory with the allocator, which keeps it: with no
+  limit on the uncompressed share, in-process peak RSS at 64 MB was 185 MB; with half the budget,
+  145; with a quarter, 124. So when the store's text does not fit as it is, at most a quarter of the
+  budget stays uncompressed (the pages left uncompressed at the end are the same 292 either way).
+  Besides held text the server keeps 695 bytes per page (id, turn, kind) and about 210 more per
+  held page (`tracemalloc`: 4.2 MB at 6,000 pages with budget 0; 5.4 MB beyond the 67.1 MB counted
+  at 64 MB). The page stub (2.4 KB per page, 14 MB at 6,000) is no longer kept by the MCP server,
+  which never builds the index.
+- Where the default stops mattering. 64 MiB holds 2,085 of these pages as they are (about 48M
+  tokens of history) and about 3.2 times that compressed. A 30M-token session
+  (`docs/research/M2-scale-30m.md`: 1,616 pages) has at most 30M tokens paged, about 40 MiB of
+  folded text at this store's 1.4 bytes per token, so it keeps every page as it is and searches as
+  fast as before. The 3.2 ratio is from synthetic text; real text is unmeasured.
+- Long queries (`results/d39/long_query.txt`, `scale_long_query.py --before 4b87ec2`, every page
+  held): the same results and the same times as main, 0.05 to 0.33 s with one word absent and up to
+  120 words. With pages outside the budget a query reads each of them once, and a second time only
+  if some page matches, the query has more than 6 words, and the page came before the first match
+  in the listing (a page just read is tested for every word at once otherwise).
+
 ## Files
 
 - `scale_bench.py`: the harness (store build, stdio and in-process timing, quality, profile, summary).
@@ -381,9 +446,11 @@ What the numbers show:
 - `scale_probes.py`: the 30 facts, 86 probe queries, and 9 latency queries (fixed).
 - `scale_calibrate.py`, `calibration.json`: real-turn query frequencies and turn sizes (numbers only).
 - `scale_fts_proto.py`: the text-cache, FTS5 trigram, and BM25 prototypes.
-- `scale_compare.py`: the before and after table of D34 from two result directories.
+- `scale_compare.py`: the before and after table of D34 (and D39) from two result directories.
 - `scale_long_query.py`: `rank` before and after word-by-word narrowing, on queries of 1 to 120 words.
 - `test_scale_store.py`: fast checks of the helpers (about 0.5 s, part of the default suite).
 - `results/`: `stores.csv`, `latency.csv` (every call), `quality.csv` (every probe query), `df.csv`,
   `profile_3000.txt`, `env.json`, `summary.md`, `fts_*`, and `floor_0.002/`; `d34_before/` and
-  `d34_after/` (with `d34_after/floor_0.002/` and `long_query.txt`) are the same outputs from the D34 runs.
+  `d34_after/` (with `d34_after/floor_0.002/` and `long_query.txt`) are the same outputs from the D34 runs;
+  `d39/` holds the D39 runs at 6,000 pages (`before`, `after_64`, `after_64_uncompressed`, `unlimited`,
+  `zero`, `long_query.txt`).
