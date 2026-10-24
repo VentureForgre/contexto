@@ -248,8 +248,8 @@ crashes after it answered cannot be detected: the record stays.
 Claude Code's and Codex's requests by text the CLI writes, and was tested with the versions the line
 names. A newer CLI usually works, but if it changed that text, Contexto can page context it should
 keep, and nothing else says so. The launch goes on. Look for a newer Contexto, or report the version
-at https://github.com/VentureForgre/contexto/issues. `--no-version-check` or
-`CONTEXTO_NO_VERSION_CHECK=1` silences it. During the run the session log records the version each
+at https://github.com/VentureForgre/contexto/issues. `contexto run --no-version-check claude` (the
+flag goes before `claude` or `codex`) or `CONTEXTO_NO_VERSION_CHECK=1` silences it. During the run the session log records the version each
 request names (`cli_version`) and `session_start_unrecognised` if the session start was not
 recognised. [docs/cli-updates.md](docs/cli-updates.md) is how a new version gets tested.
 
@@ -294,6 +294,7 @@ full list is in
 | `run` | 1 | The proxy could not start |
 | `run` | 2 | Usage error, for example `--bound` above 170,000, a `--settings` after `claude`, or no Codex key helper or upstream |
 | `run` | 127 | `claude` or `codex` is not on `PATH` |
+| `run` | 130 | Ctrl+C during the version check, before the CLI started |
 | `sessions`, `recall`, `state` | 0 | Success (an empty session list is a success) |
 | `sessions`, `recall`, `state` | 1 | Unknown or invalid session id, unknown page id, an offset past the end of the page, or an unreadable ledger |
 | any | 2 | Unknown command or option, or a missing argument (`contexto` with no command prints help and exits 2) |
