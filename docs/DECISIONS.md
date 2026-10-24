@@ -497,11 +497,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
   with its reason; (4) a publish resets only its own room's spend, since that conversation's input
   now holds its own results but none of the others'; (5) a side room expires 15 minutes after its
   publish unless its holder publishes again. Inside a main turn, main's room resets at each main
-  response but a side room does not, so a side room whose holder stopped (a subagent the user
-  interrupted, one that failed after a tool call, a stopped background agent, an unknown signal,
-  tied rooms) spends down with every charge, main's included, and can hold main's recall at
-  nothing; both reviewers measured this lasting the whole turn, which in an autonomous run can be
-  hours. Expiry bounds it. The first version used 120 seconds on the reasoning that it covered a
+  response but a side room does not, so a side room whose holder stopped (a subagent that failed
+  after a tool call, a stopped background agent, an unknown signal, tied rooms; see (6) for the
+  stops that now close early) spends down with every charge, main's included, and can hold main's
+  recall at nothing; both reviewers measured this lasting the whole turn, which in an autonomous
+  run can be hours. Expiry bounds it. The first version used 120 seconds on the reasoning that it covered a
   call queued behind a Bash command at Claude Code's default 2-minute timeout; both reviewers showed
   it does not (the call starts after the Bash command is killed, past expiry), and Bash's timeout
   can be raised to 10 minutes. Claude Code starts an MCP call 5 to 16 ms after its `tool_use` block
@@ -512,37 +512,53 @@ the owner's delegation. Open decisions are listed at the end with the options an
   and a long starvation is visible as `limited_by: side` with a large `limiting_age_s`, so the
   expiry errs long. The session store's times are wall-clock, because the proxy and the MCP server
   are separate processes; a publish time more than 15 minutes in the future (a clock stepped back)
-  counts as expired, and `MemoryStore` uses a monotonic clock; (6) reviewer B measured the common
-  interactive case: Esc during a subagent's tool leaves its room live, and main's recall halved
-  each minute to nothing, from minute 8 to minute 15. So during a main turn that a human prompt
-  started (main's turn id changes only at a user prompt), each main request closes side rooms
-  published before that turn and not republished for more than 2 minutes (`SIDE_ROOM_IDLE_S`). A
-  live subagent republishes at every step, so a room idle that long across a human prompt is almost
-  always an interrupted one. Checking at every main request of the turn, not only at its first,
-  covers the user who presses Esc and types within 2 minutes. A room opened during the current main
-  turn is never closed this way, so a foreground subagent on a 10-minute Bash command, which main
-  waits for inside the same turn, keeps its room. Residual risk: a background subagent from an
-  earlier turn that waits more than 2 minutes on one tool while the human's new turn runs loses its
-  room, and a call it makes after that is charged against the other rooms only. The first version
-  closed every side room at a new main turn, which also hit live background subagents mid-step;
-  this closes only rooms idle for 2 minutes. Cost: concurrent conversations slow each other's
-  recall; a stopped holder holds it down for up to 2 minutes into the next human turn, or 15 minutes
-  otherwise. Limitations: main's room is the only bound for a side conversation's calls when it
-  has no room of its own: the hold was skipped (`hold_skipped`), its transform failed, it entered
-  degraded mode (or its `set_side_room` failed) before its first publish, its call starts more than
-  15 minutes after its response's publish, or its room was closed at a human turn; a degraded side
-  conversation keeps the last room it opened until expiry; search's "in view" still means main's
-  window. Options considered: a per-subagent share of main's room (rejected: main's room says
-  nothing about a subagent's window, so a share can still overflow it); a stronger lock on the
-  shared room (rejected: the room was already locked; the fault is what it was measured from);
-  attributing each MCP call to its conversation (rejected for now: the MCP request carries no
-  conversation id that Contexto can rely on, and two conversations can make identical calls; the
-  tool-call ids above attribute a request to a room, not an MCP call); a tie-break by room age
-  (rejected: reviewer A showed each order fails for one twin); resetting a side room's spend at
-  main's publishes (rejected: the holder's own unmeasured results would be forgotten while it is
-  still live); closing side rooms only when their holder closes them (rejected: a holder that
-  stops never does); closing idle rooms only at the first request of a human turn (rejected: a user
-  who types right after Esc would wait the full 15 minutes).
+  counts as expired, and `MemoryStore` uses a monotonic clock; (6) reviewer B measured a stale room
+  holding main's recall at nothing from minute 8 to minute 15 in a simulated Esc. Round 3 closed,
+  during a main turn, side rooms published before it and idle for 2 minutes. Reviewer A showed in
+  round 4 that any user message that is not a tool result starts a main turn, including ones Claude
+  Code injects, so a running background agent's room was closed and its queued recall went over its
+  room (38,447 against 4,000). So the shapes were measured instead, at zero spend: Claude Code
+  2.1.302 against a scripted stub (`spikes/m2/subagents/`). (a) A background agent's or command's
+  stop reaches main as a `<task-notification>` (with the launching call's `<tool-use-id>` and a
+  `<status>` of `completed`, `failed`, or `killed`), in a `system` message during main's tool loop
+  and in a new `<system-reminder>` user message while main is idle; resent later, that message
+  can be a plain string, which the engine counts as a turn start. (b) A background launch returns
+  `Async agent launched successfully.` at once; in print mode `run_in_background: false` ran the
+  subagent in the foreground and returned a `[Subagent hand-back]` report, but in interactive mode
+  the same call was launched in the background, so Esc, pressed while the subagent's tool ran,
+  stopped nothing: the subagent finished and main got a `completed` notification. The result of an
+  interrupted foreground subagent could not be produced. (c) A subagent's first request carries the
+  `Agent` call's `prompt` unchanged, after a `<system-reminder>` block. So now a side room closes
+  early only on evidence in main's history that its own agent stopped: the room's first prompt
+  matches an `Agent` call whose result is not the launch receipt (a foreground hand-back, completed
+  or interrupted) or that a `<task-notification>` names. The evidence must come after the room's
+  publish (an agent resumed after an earlier stop keeps its new room), and every call with that
+  prompt must have stopped (twins). It is checked at each main request, whatever started the turn;
+  no idle time and no human prompt are involved. A room matching no call, or an agent still
+  running, keeps the 15-minute expiry, so reviewer A's probe passes. A store failure on that close
+  logs `side_room_close_failed` and leaves the room to expire, without degraded mode. This covers
+  the stops Claude Code reports (an agent finished, failed, or killed with `TaskStop` or the UI);
+  it does not cover a subagent that dies without a notification, which keeps the expiry. The first
+  version closed every side room at a new main turn, and round 3 closed idle ones at a turn start;
+  both hit live background agents. Cost: concurrent conversations slow each other's recall; a
+  holder that stopped without a notification holds it down for up to 15 minutes. Limitations:
+  main's room is the only bound for a side conversation's calls when it has no room of its own:
+  the hold was skipped (`hold_skipped`), its transform failed, it entered degraded mode (or its
+  `set_side_room` failed) before its first publish, or its call starts more than 15 minutes after
+  its response's publish; a degraded side conversation keeps the last room it opened until expiry;
+  search's "in view" still means main's window. Options considered: a per-subagent share of main's
+  room (rejected: main's room says nothing about a subagent's window, so a share can still overflow
+  it); a stronger lock on the shared room (rejected: the room was already locked; the fault is what
+  it was measured from); attributing each MCP call to its conversation (rejected for now: the MCP
+  request carries no conversation id that Contexto can rely on, and two conversations can make
+  identical calls; the tool-call ids above attribute a request to a room, not an MCP call); a
+  tie-break by room age (rejected: reviewer A showed each order fails for one twin); resetting a side
+  room's spend at main's publishes (rejected: the holder's own unmeasured results would be
+  forgotten while it is still live); closing side rooms only when their holder closes them
+  (rejected: a holder that stops never does); closing rooms idle for 2 minutes at a turn start
+  (rejected: CLI-injected turns start main turns too, and background agents legitimately idle
+  longer); closing only foreground agents' rooms (not chosen: in interactive mode every launch ran
+  in the background, so it would close nothing, while a notification is direct evidence of a stop).
 
 ## Repository and process
 

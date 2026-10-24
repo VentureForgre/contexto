@@ -599,32 +599,46 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
       future (a clock stepped back) counts as expired. `MemoryStore` uses a monotonic clock. Expired
       rooms are dropped at the next charge or side publish, each logged `side_room_expired` with its
       age, room, and spend.
-    - Closing at a human turn. Main's turn id changes only at a turn start, a user prompt, so the
-      time the engine first sees a new id is when a human started that main turn. At each main
-      request in that turn, a side room published before it and not republished for more than 2
-      minutes (`SIDE_ROOM_IDLE_S`) is closed, logged `side_room_closed` with reason
-      `idle_at_main_turn`. A live subagent republishes at every step, so such a room almost always
-      belongs to a subagent the user interrupted (Esc during its tool). A room opened during the
-      current main turn is never closed this way, however long its tool runs. Residual risk: a
-      background subagent from an earlier turn that waits more than 2 minutes on one tool (a long
-      Bash command) while the human's new turn runs loses its room, and a call it makes after that
-      is charged against the other rooms only.
+    - Closing when the agent stops. A side room closes before its expiry only on evidence in main's
+      own history that the subagent holding it has stopped (measured on Claude Code 2.1.302 against
+      a scripted stub, `spikes/m2/subagents/`). The subagent is matched by its first prompt: its
+      first user message carries a `<system-reminder>` block and then main's `Agent` (or `Task`)
+      call's `prompt`, unchanged. The evidence is a result for that call that is not the background
+      launch receipt (`Async agent launched successfully.`), that is a foreground hand-back
+      (completed or interrupted), or a `<task-notification>` naming the call's tool-use id, which the
+      CLI sends when a background agent stops (`completed`, `failed`, `killed`), in a `system`
+      message during main's tool loop or a `<system-reminder>` user message while main is idle.
+      The evidence must sit at a message index at least main's message count when the room was
+      published, so an agent stopped, resumed, and running again keeps its new room; and every
+      `Agent` call with that prompt must have stopped, so twins with one prompt close together. It
+      is checked at each main request, whatever started main's turn. The close is logged
+      `side_room_closed` with reason `agent_stopped`. A room matching no `Agent` call, a background
+      agent still running, and any room on the Responses dialect (Codex has no `Agent` tool) keep the
+      15-minute expiry. If the store cannot close the room, the engine logs
+      `side_room_close_failed` with the error's class and goes on: the room expires instead, and
+      the engine stays out of degraded mode (unlike a failed `set_side_room` publish, which is a
+      rule 14 `store_error`).
     - Inside a main turn. Main's room resets at each main publish; a side room resets only at its
       holder's publish. While a side room is live, every charge, main's own included, also spends
       it, so main's recall can be held below main's own room, down to nothing, by a side room whose
-      holder has stopped: a subagent the user interrupted (Esc during its tool) until 2 minutes into
-      the next human turn; within the same main turn, or for a subagent that failed after a tool
-      call, a stopped background agent, a response whose signal was unknown, or tied rooms that no
-      request continues, up to 15 minutes after that room's last publish. `limited_by: side` with a
-      large `limiting_age_s` on the calls shows it.
+      holder has stopped without evidence in main's history: a subagent that failed after a tool
+      call, a response whose signal was unknown, tied rooms that no request continues, or a
+      subagent matched to no `Agent` call. That lasts up to 15 minutes after the room's last
+      publish; `limited_by: side` with a large `limiting_age_s` on the calls shows it. Esc did not
+      cause it in the capture: every interactive launch ran in the background, the Esc stopped
+      nothing, and the subagent finished normally.
     - When main's room is the only bound. A side conversation's calls are charged only against
       main's room (and any other live side room), as before D40, when it has no room of its own:
       the hold was skipped (`hold_skipped`: encoded or unchunked SSE), so its tool calls reach the
       CLI before the publish; its request failed in the transform (`transform_error`), so the engine
       has no state for it; it entered degraded mode before its first publish, or its `set_side_room`
       failed (rule 14 makes it degraded), so no room was opened (a degraded conversation keeps the
-      last room it opened, until expiry); its call starts more than 15 minutes after its response's
-      publish, for example after a permission prompt; or its room was closed at a human turn.
+      last room it opened, until expiry); or its call starts more than 15 minutes after its
+      response's publish, for example after a permission prompt.
+    - Where the events land. `side_room_expired` is a store event, a top-level line in the session
+      log. `side_room_closed` and `side_room_close_failed` are engine events inside a request's log
+      entry: with reason `agent_stopped` (and the close failure) in the main request's
+      `transform_events`, with reason `no_tool_call` in the side request's `usage_events`.
     - Limitations: one conversation's charges also spend the others' rooms; for a subagent, search's
       "in view" still means the main conversation's window.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
