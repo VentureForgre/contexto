@@ -70,8 +70,9 @@ port) or `https://cpa.example.com`. CLIProxyAPI serves `/v1/messages`, `/v1/mess
    The session line on stderr names where the upstream came from (`upstream flag`, or
    `upstream settings:user`, and so on), never the URL. Contexto reads the same settings files as
    Claude Code, including `$CLAUDE_CONFIG_DIR/settings.json` in place of `~/.claude/settings.json`
-   when `CLAUDE_CONFIG_DIR` is set (before D35 it always read `~/.claude/settings.json`; with an
-   older Contexto, use project settings or `--upstream`).
+   when `CLAUDE_CONFIG_DIR` is set. The value is used as given, as Claude Code does, so `~` in it
+   is not expanded. Contexto v0.4.0 and earlier always read `~/.claude/settings.json`; with those
+   versions, use project settings or `--upstream`.
 
 Do not add `/v1` to `ANTHROPIC_BASE_URL` or `--upstream`: Claude Code adds it, and
 `<root>/v1/v1/messages` is a 404.

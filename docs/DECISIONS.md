@@ -424,7 +424,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   at once only when it ends with its line ending; an unterminated one at end of stream is held
   and released last, so no held event is glued onto it (reviewer-A). Two launcher changes from
   the review (reviewer-B): the user settings file is `$CLAUDE_CONFIG_DIR/settings.json` when
-  `CLAUDE_CONFIG_DIR` is set, as in Claude Code, for both the upstream and the Codex key helper
+  `CLAUDE_CONFIG_DIR` is set, as in Claude Code (used as given, without `~` expansion; empty
+  counts as unset), for both the upstream and the Codex key helper
   (before, Contexto always read `~/.claude/settings.json`); and the Codex session line and
   `proxy_start` event name where the Codex upstream came from (`codex-flag`, `codex-env`,
   `chatgpt-default`, or `claude-<source>+/v1`), never the URL. Measured on
@@ -475,8 +476,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **Terms analysis removed on purpose.** The vendor terms quotes and the inferred terms reading
     in `docs/research/M0-interception.md` section 6, and the summaries of them elsewhere, were
     removed. They are public vendor text, but here they were applied to the owner's own use. The
-    repository makes no claim about terms compliance. End-user auth guidance stays open as O4,
-    and the README tells users to follow their providers' terms for the credentials they use.
+    repository makes no claim about terms compliance. End-user auth guidance was left to O4, which
+    D35 settles: the vendor API with an API key or a CLIProxyAPI instance, logins in CLIProxyAPI or
+    the vendor's own CLI, and users follow their providers' terms for the credentials they use.
   - **History is not rewritten** (owner decision). Old commits, pull request diffs and pull request
     comments keep the proxy hostname, one home-directory path, the owner's commit email, the
     runner's machine name and billing notes. A rewrite would need force pushes, which the ruleset
