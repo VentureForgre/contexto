@@ -15,7 +15,7 @@ from typing import Any
 from contexto.canonical import canonical_bytes
 from contexto.store.recall import DEFAULT_LINES, salient_identifiers
 from contexto.store.render import as_message, is_responses_item
-from contexto.store.search import Query, SearchEntry, rank, search_key, searchable
+from contexto.store.search import Query, SearchEntry, rank, search_text, searchable
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
 STUB_TEXT_CHARS = 200
@@ -216,12 +216,21 @@ def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int) -> dict
     return page
 
 
+def _search_fields(page: dict[str, Any]) -> list[str]:
+    """The texts search reads on a page, each counted on its own by ``rank`` (D41): the stub fields
+    (``user_text``, ``system_text``, ``reminder_text``, each tool name, each path), then every text of the
+    turn (``_texts``: each text block, each string field of a tool input, each tool output). The stub
+    repeats the prompt's first 200 characters and the paths, so a prompt or a path that names a key
+    counts as two texts. Dropping those repeats was measured and lost 2 of 86 probes from the top 3 at
+    6,000 pages, on both page-size models, so they are kept (reviewer A on PR #216)."""
+    stub = page["stub"]
+    return [stub["user_text"], stub.get("system_text", ""), stub.get("reminder_text", ""), *stub["tools"],
+            *stub["paths"], *_texts(page["messages"])]
+
+
 def searchable_text(page: dict[str, Any]) -> str:
     """What search reads on a page, folded: the stub fields and every text of the page's turn (D34)."""
-    stub = page["stub"]
-    return searchable([stub["user_text"], stub.get("system_text", ""),
-                       stub.get("reminder_text", ""), *stub["tools"], *stub["paths"],
-                       *_texts(page["messages"])])
+    return searchable(_search_fields(page))
 
 
 def _is_context_text(text: Any) -> bool:
@@ -260,7 +269,7 @@ def is_context_page(page: dict[str, Any]) -> bool:
 
 def search_entry(page: dict[str, Any]) -> SearchEntry:
     """What search reads of a page (``contexto.store.search.rank``)."""
-    return SearchEntry(page["id"], page["turn"], search_key(searchable_text(page)), is_context_page(page))
+    return SearchEntry(page["id"], page["turn"], search_text(_search_fields(page)), is_context_page(page))
 
 
 def page_matches(page: dict[str, Any], query: str) -> bool:

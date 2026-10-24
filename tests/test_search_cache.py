@@ -17,9 +17,11 @@ from contexto.store.catalog import DEFAULT_TEXT_BUDGET_MB, MB, text_budget_bytes
 from contexto.store.pages import search_entry
 from contexto.store.search import (
     K1,
+    PAGE_CAP,
     RECENCY_WEIGHT,
     SHOWN_IN_DETAIL,
-    B,
+    TEXT_CAP,
+    TEXT_SEP,
     Query,
     SearchEntry,
     rank,
@@ -60,7 +62,9 @@ def queries(seed=39):
 
 
 def reference_rank(entries, query):
-    """D34 as the module docstring states it, with no narrowing and no fetch: every word on every page."""
+    """D34 with D41 as the module docstring states them, with no narrowing and no fetch: every word on every
+    page, a term counted per text (the parts between ``TEXT_SEP``) up to ``TEXT_CAP`` each and ``PAGE_CAP`` in
+    all, no length term."""
     q = Query.parse(query)
     if q is None or not entries:
         return []
@@ -76,18 +80,17 @@ def reference_rank(entries, query):
     if q.multiword:
         df[phrase] = sum(on.values())
     idf = {t: math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5)) for t in terms if df[t]}
-    avg = sum(len(e.text) for e in entries) / n or 1.0
     by_age = sorted(matched, key=lambda e: (e.turn, e.id))
     position = {e.id: (k / (len(by_age) - 1) if len(by_age) > 1 else 1.0) for k, e in enumerate(by_age)}
     scored = []
     for e in matched:
-        norm = K1 * (1 - B + B * len(e.text) / avg)
         relevance = 0.0
         for term, weight in idf.items():
             if term == phrase and q.multiword and not on[e.id]:
                 continue
-            tf = e.text.count(term)
-            relevance += weight * tf * (K1 + 1) / (tf + norm)
+            tf = sum(min(TEXT_CAP, part.count(term)) for part in e.text.split(TEXT_SEP))
+            tf = tf if PAGE_CAP is None else min(PAGE_CAP, tf)
+            relevance += weight * tf * (K1 + 1) / (tf + K1)
         scored.append((not e.context, on[e.id], relevance * (1 + RECENCY_WEIGHT * position[e.id]), e.turn, e.id))
     scored.sort(reverse=True)
     ranked = [s[4] for s in scored]

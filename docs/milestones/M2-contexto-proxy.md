@@ -689,12 +689,32 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   whole query as typed (case-insensitively), then turn pages holding only its words, then pages
   holding only paged context blocks (system messages and Codex `developer` items, or user messages
   made only of `<system-reminder>` blocks, D32; recognised from the messages, whatever the stub),
-  which stay searchable and recallable. Within each group pages rank by BM25 relevance over the words and the
-  whole query (k1 1.2, b 0.75, length in UTF-8 bytes, inverse document frequency over all pages of
-  the store) times a recency prior `1 + 0.5 r`, where `r` runs from 0 for the oldest matching page
-  to 1 for the newest, so a newer page wins unless an older one is clearly more about the query;
+  which stay searchable and recallable. Within each group pages rank by BM25 relevance over the words
+  and the whole query (k1 1.2, inverse document frequency over all pages of the store) with two
+  changes (D41). A term's frequency on a page is the number of the page's texts that hold it, at
+  most 3. A text is one stub field (the prompt's first 200 characters, each tool name, each path) or
+  one text of the turn: each text block, each string field of a tool input, each tool output; the
+  stub repeats the prompt and the paths, so they count twice. So a grep or a log that repeats a key
+  many times counts once, and a turn that runs many greps counts 3. And there is no length term
+  (b 0): a long turn that states a value once scores as a short page that states it once. A page
+  with the term in 3 or more texts scores 1.57 times a page with it in one. Relevance is multiplied
+  by a recency prior `1 + 0.5 r`, where `r` runs from 0 for the oldest matching page to 1 for the
+  newest. Against the newest match, the oldest needs the term in 3 texts to the newest page's 1
+  (1.57 against 1.5); 2 texts (1.375) outrank a one-line page unless it is about 0.75 or more of the
+  way newer among the matches. Repetition inside
+  one text does not count, so a reply or a file that discusses a key at length weighs as one passing
+  mention, and a newer passing mention outranks it (D41 records this loss against D34: a reply that
+  says "rate limit" in 4 lines is no longer shown above 30 newer one-line mentions). Measured cost
+  (D41): an old turn that names a key in 2 or more texts (a prompt that names it counts twice)
+  usually outranks a newer one-line reply that states its new value, and once a passing mention
+  follows that reply, it can leave the 3 best pages (in a
+  simulation built from this repository's own tool output, a one-line reply reached the 3 best in 38
+  of 122 sessions where D34 reached 64, 61 of 132 against 65 where only the old turn's command and
+  output name the key, and 28 of 85 against 37 where the old turn runs a grep per file; stale-only
+  results fell from D34's 724 to 615 over the five sets of sessions);
   ties go to the newer page. The newest matching turn page (the newest matching page when no turn
-  page matches) is always one of the 3 best: if it ranks lower it takes the third place. The
+  page matches) is always one of the 3 best: if it ranks lower it takes the third place. This
+  covers the turn that states a value only while it is the newest mention. The
   reply's paged part opens with `[best matching pages by relevance, shown newest first:]`. In both
   the 3 best pages and the next 50, turn pages come first, newest first (for superseded facts the
   newest statement among them is the current one), then context-block pages, newest first, after
@@ -783,7 +803,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   every page once and compresses what the budget keeps (1.6 s at 6,000 pages and 64 MB); pages are
   narrowed word by word, so a query stops scanning as soon as no page holds every word so far, but
   a query with matches scans the text once per word, and reads a page outside the budget a second
-  time when the query has more than 6 words and the page came before the first match.
+  time when the query has more than 6 words and the page came before the first match. The budget
+  bounds the text held between searches, not what one search reads to answer: `contexto_search`
+  reads and renders each of the up to 53 pages it shows, with no cap on their size (D41; a per-search
+  byte budget is a tracked follow-up).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
