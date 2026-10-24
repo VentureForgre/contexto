@@ -510,13 +510,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
   from the same ingress); a shared binding store such as Redis (a new dependency and failure mode
   for the same result); an unsalted hash of the session id (rejected: a guessable name could be
   checked against the key); Contexto rewriting `X-Claude-Code-Session-Id` to its own key (rejected:
-  it changes a header the CLI owns and that upstream also reads). Deployed 2026-10-24 on the owner's
-  CLIProxyAPI deployment (`session-affinity` and `session-affinity-consistent-hash` on, ttl 1h;
-  CLIProxyAPI 7.3.12 with the proposed change). Verified the same day: every replica ready, no
-  backend errors and no 5xx; a 10-request byte-identical claude-haiku-5-5 series with one
-  `X-Session-Affinity` showed 1 cache write (13,654 tokens) and 9 reads of 13,654, all 200, across 4
-  replicas on 1 credential (before the change: 3 writes). The `--observe-thinking` check for dropped
-  thinking was not run.
+  it changes a header the CLI owns and that upstream also reads). Deployed on the owner's
+  CLIProxyAPI deployment on 2026-10-24, with `session-affinity` and the consistent-hash option on.
+  Verified with a 10-request byte-identical claude-haiku-5-5 series using one affinity key: 1 cache
+  write, then 9 reads, all served by one credential across several replicas (before: 3 writes).
+  Rollback is reverting the deployment change. Not yet run: the `--observe-thinking` check.
 - **D37. `contexto sessions prune` deletes whole sessions, dry run by default, and never one in
   use.** Intake, 2026-10-24, from the 2026-10-16 report that session folders grow without limit and
   could only be freed by deleting files by hand. Contract change: a new subcommand, a new store file,

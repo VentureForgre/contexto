@@ -330,20 +330,16 @@ Needs the owner:
 
 ## O6 (upstream affinity), resolved by D36: deployed 2026-10-24
 
-- Live: the owner's CLIProxyAPI deployment runs routing.session-affinity,
-  session-affinity-consistent-hash, ttl 1h (cliproxy-cluster #10), image sha256:6be56ec3… from
-  f78c897 (v7.3.12 + patches 0001-0005). Rendezvous hashing of the session id, so every replica
-  picks the same credential; nested subagents rank with their root. Upstream proposal:
-  router-for-me/CLIProxyAPI#6954. Contexto #212 sends a salted per-session X-Session-Affinity to
-  non-vendor upstreams; the CLI's own ids rank above it.
-- Verified: rollout 4/4 ready; check_config_rollout.sh exit 0 (after one same-second stale pod was
-  replaced); 3 routing keys; no backend errors, no 5xx. A 10-request byte-identical
-  claude-haiku-5-5 series with one key: 1 write (13,654), then 9 reads of 13,654, all 200, across
-  4 pods on 1 credential (before the fix: 3 writes). Not run: the --observe-thinking check for
-  dropped thinking.
-- Rollback: revert cliproxy-cluster #10 (Flux restores image and config; the revision annotation
-  rolls the pods), or reseal with consistent-hash false. Never `kubectl rollout restart` (Flux
-  reverts it and rolls again); delete stale pods one at a time.
+- Deployed on the owner's CLIProxyAPI deployment on 2026-10-24, with `session-affinity` and the
+  consistent-hash option on. The option hashes the session id so every replica picks the same
+  credential; nested subagents rank with their root session. Upstream proposal:
+  router-for-me/CLIProxyAPI#6954. Contexto (#212) sends a salted per-session
+  `X-Session-Affinity` to non-vendor upstreams; the CLI's own session ids rank above it.
+- Verified with a 10-request byte-identical claude-haiku-5-5 series using one affinity key: 1
+  cache write, then 9 reads, all served by one credential across several replicas (before: 3
+  writes).
+- Rollback is reverting the deployment change.
+- Not yet run: the `--observe-thinking` check for dropped thinking.
 
 ## Known limitations (v0.5.1)
 
