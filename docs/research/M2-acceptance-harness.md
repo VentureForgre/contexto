@@ -699,9 +699,10 @@ python3 spikes/m2/acceptance/run.py live ... --model claude-opus-5-5 [--allow-co
 `"permissions": {"allow": ["mcp__contexto"]}` to the isolated Claude Code settings, beside the
 apiKeyHelper. It is off by default, since the contract runs acceptance on default Claude Code
 settings, and the H1 record says whether it was on (`allow_contexto_tools`). On 2.1.302, `claude
--p` refuses every Contexto tool call without such a rule (2.1.301 ran them). D44, which makes
-`contexto run` allow Contexto's own tools, was not merged when this was written; once it is, the
-flag should not be needed.
+-p` refuses every Contexto tool call without such a rule (2.1.301 ran them). D44 was not merged
+when this was written. Since D44 (PR #224) the launcher's own `--settings` allows Contexto's five
+tools, so the flag is redundant: keep it off, since turning it on would hide a D44 regression. It
+stays only to reproduce the Opus run's retry, and old H1 records still carry `allow_contexto_tools`.
 
 **Title side request.** On 2.1.302 the first Messages request is a title request: one message, no
 tool list, answered with no tool call, and absent from Claude Code's own `api-request` records. The

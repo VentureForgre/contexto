@@ -57,9 +57,10 @@ def isolated_config(scratch: Path, seat_settings: Path, allow_contexto_tools: bo
     """Create the isolated CLAUDE_CONFIG_DIR whose only setting is the apiKeyHelper shim.
 
     With ``allow_contexto_tools`` it also gets a permission allow rule for Contexto's MCP tools
-    (``mcp__contexto``). Off by default: the contract runs acceptance on default Claude Code settings.
-    Claude Code 2.1.302 in ``-p`` mode refuses every MCP tool call without such a rule (2.1.301 ran
-    them), and until the launcher allows Contexto's own tools (D44) a run on 2.1.302 needs it."""
+    (``mcp__contexto``). Keep it off: the contract runs acceptance on default Claude Code settings, and
+    since D44 the launcher's own ``--settings`` allows Contexto's tools, so the flag is redundant. Turned
+    on, it would hide a D44 regression (a launcher that stopped allowing them). It stays so that a run
+    can reproduce the Opus run's retry (PR #221), and H1 records keep naming it."""
     if not seat_settings.is_file():
         raise ValueError("the seat settings file does not exist")
     config = scratch / "claude-config"
