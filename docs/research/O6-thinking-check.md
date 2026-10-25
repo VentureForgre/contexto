@@ -17,8 +17,9 @@ time here is UTC.
   ...}`.
 - The proxy keeps only the last value it sees (`UsageReader._take_transformations`,
   `proxy.py:533-537`). A drop reported in `message_start` and followed by an empty list in
-  `message_delta` would be logged as `[]`. A separate fix is pending: it makes the proxy keep every
-  distinct item across events. This run does not change `src`. In every streamed response that was
+  `message_delta` would be logged as `[]`. A separate fix is pending in PR #222 (in review, not
+  merged): it makes the proxy keep every distinct item across events. This run does not change
+  `src`. In every streamed response that was
   read event by event (16 on `claude-haiku-5-5`, 1 on `claude-opus-5-5`), the field came only in
   `message_start`, and `message_delta` never carried it. The last-wins reading would not have hidden
   a drop in those responses. The Opus controls below were read last-wins, like the proxy.
@@ -112,29 +113,39 @@ Part 1 is L1-e's pure appends with no session signal: 6 requests, each replaying
 | JSON | 6 | 2 (requests 1 and 2) | 4 | 0 |
 | Streaming | 6 | 2 (requests 1 and 2) | 4 | 0 |
 
-The first thinking block came from request 2. Every later request read request 2's cache, so no
-replay left that credential.
+With no session signal, requests 1 and 2 landed on different credentials: request 2 read nothing
+after request 1's write. The first thinking block came from request 2. Every later request read
+request 2's cache chain, so no replay left that credential [inferred, as above]. What kept them
+together is not shown here; D36 says requests with no session signal go through CLIProxyAPI's
+per-process prefix matcher (`docs/DECISIONS.md`, D36 "Limits"). This is the outcome that differs
+from 2026-10-15: L1-e Series A reported drops on 8 of its 9 replaying requests, and part 1 here
+reported 0 of 8.
 
 Part 2: request A under key k0 produces a signed block. Requests B replay it under k0 to k6, and
-once under k0 with another `metadata.user_id`. A B request that reads A's cache chain is on A's
-credential. One that writes fresh, or reads the prefix another B request wrote, is on another
-credential.
+once under k0 with another `metadata.user_id`. Placement is by what each B request read
+[inferred, as above]:
+- a read of A's cache chain (JSON 11,372, or 11,468 after B-k0's tail; streaming 11,371, or
+  11,461) puts it on A's credential;
+- a fresh write (JSON 11,394, streaming 11,393), or a read of exactly that fresh write, puts it on
+  another credential.
 
 | Transport | B requests | On A's credential | On another credential | Dropped on A's | Dropped on another |
 |---|---|---|---|---|---|
 | JSON | 8 | 3 (k0, k1, k0 with other user) | 5 (k2, k4 fresh; k3, k5, k6 read a B request's write) | 0 of 3 | 5 of 5 |
 | Streaming | 8 | 5 (k0, k2, k3, k5, k0 with other user) | 3 (k1 fresh; k4, k6 read k1's) | 0 of 5 | 3 of 3 |
 
-- Every drop reported `thinking_dropped` with reason `end_user_binding_mismatch`, and no `location`
-  key was among the item's fields. JSON reported it in the body's top-level field. The stream
+- Every drop reported `thinking_dropped` with reason `end_user_binding_mismatch`, with no `location`
+  value (the script cannot tell a missing key from a null). JSON reported it in the body's top-level field. The stream
   reported it only in `message_start`'s message; `message_delta` carried no field in any of the 16
   streamed responses (the first run's 6 part-1 requests and its one A request, which produced no
   thinking; the rerun's A and 8 B requests).
 - A different `metadata.user_id` on A's credential caused no drop (0 of 2). On this route the binding
   follows the credential, not the end-user id sent.
 - So the API still reports dropped thinking on `claude-haiku-5-5` through the owner's proxy, in both
-  transports, when a replay lands on another credential, and affinity is what keeps a session's
-  replays on one credential.
+  transports, when a replay lands on another credential [inferred, as above].
+- The affinity key decides which credential serves a replay: the same key kept it on A's credential
+  (4 of 4, B-k0 and B-k0 with the other user id, both transports), and other keys moved 8 of 12 to
+  another credential.
 
 ## Opus controls (`claude-opus-5-5`, direct to the owner's proxy)
 
@@ -154,7 +165,7 @@ These ran before the haiku control.
 | 2b. as 2, plus `drop_block` and a fixed `metadata.user_id` | 9 (k0 to k8) | at least 3 | 0 | 10 of 10 | 114,797 |
 | 3. as 2b, B's `metadata.user_id` differs from A's, all sent on k0 (the file labels two of them k1 and k2) | 3 | 0 | 0 | 4 of 4 | 45,884 |
 | 4. no binding beta, one request | - | - | - | 0 of 1 | 151 |
-| 5. one small streaming request, read event by event | - | - | - | `message_start` only | 151 |
+| 5. one small streaming request, no replayed thinking, read event by event | - | - | - | `message_start` only | 151 |
 
 - Fresh-write counts are lower bounds. A read can come from a prefix another B request wrote, not
   only from A's, so at least 6 Opus replays across controls 2 and 2b landed on another credential.
@@ -165,12 +176,15 @@ These ran before the haiku control.
 - The field follows the beta: present on 48 of 48 responses with it (the session and controls 1 to
   3), absent on 1 of 1 without it. That shows the beta reaches the API and the field is returned.
   It does not show that Opus drops get reported.
+- Control 5 carried no replayed thinking and none of Claude Code's betas. It shows where the field
+  sits in an Opus response with nothing dropped, not where an Opus drop item would sit.
 - Every drop on 2026-10-15 was on `claude-haiku-5-5`. The one `claude-opus-5-5` series that day (M0
-  L1-e Series C, `M0-interception.md`) kept every replayed block and reported no drop. These Opus
-  controls agree: at least 6 replays onto another credential, none reported dropped. The haiku
-  control shows the signal and route still work, so on Opus no change is shown. Either Opus 5.5
-  thinking is not bound per credential, or Opus drops it without reporting; the signal cannot
-  separate the two.
+  L1-e Series C, `M0-interception.md`) kept every replayed block and reported no drop, and did not
+  show that its replays left a credential. Here at least 6 Opus replays landed on another credential
+  [inferred, as above], and none reported a drop. The haiku control shows the signal and route still
+  work, so on Opus no change is shown. Three readings fit: Opus 5.5 thinking is not bound per
+  credential; Opus drops it without reporting; or a drop was reported in an event that the last-wins
+  read overwrote, which no stream read event by event showed.
 - A functional check was tried at small size: a number chosen only in A's thinking, asked for in B.
   It could not be interpreted. Under `display: "updates"` the returned thinking text is empty, so the
   number could not be confirmed to exist, and the model answered NONE on k0 as well. Its 1,590 tokens
@@ -196,8 +210,8 @@ worst case above 25,000,000 tokens; the worst case here was the watcher's approv
   stopped on 3 of 50 message hashes: Claude Code writes one user record per `tool_result` but sends
   parallel tool calls' results as one message. This is known, not new in 2.1.302. It has been seen
   since live run #2. `classa.py` already merges such runs (`_known_messages`), and
-  `tests/test_classa.py:132-155` pins that `replay.recorded_messages` raises on this shape. Reviewer
-  B reproduced it with a synthetic JSONL.
+  `spikes/m2/acceptance/tests/test_classa.py:132-155` pins that `replay.recorded_messages` raises on
+  this shape.
   - It does not affect `run.py score`, which reads the answer files and the H1 record.
   - `run_replay` refuses (exit 2) on it rather than building a wrong baseline.
   - This run's analysis decoded with the same merge `classa.py` does; the harness is unchanged.
@@ -211,8 +225,10 @@ worst case above 25,000,000 tokens; the worst case here was the watcher's approv
 - Measured: no dropped thinking was reported in the Opus session. The session stayed on one
   credential by cache evidence [inferred, as above].
 - Measured: on `claude-haiku-5-5` the API still reports drops through the owner's proxy whenever a
-  replay lands on another credential, in JSON and streaming, in `message_start`. Affinity is what
-  keeps a session's replays on one credential.
+  replay lands on another credential [inferred, as above], in JSON and streaming, in
+  `message_start`. The affinity key decides the credential: same key 4 of 4 on A's, other keys 8 of
+  12 elsewhere. Unkeyed replays also stayed on one credential (0 of 8 dropped), unlike 2026-10-15.
 - Not shown: whether Opus 5.5 thinking is ever dropped across credentials. Opus replays onto other
-  credentials reported no drop, on 2026-10-15 and here. For an Opus session, a zero from the signal
+  credentials reported no drop here; the one Opus series on 2026-10-15 also reported none, with
+  crossing unknown. For an Opus session, a zero from the signal
   says nothing either way; the one-credential cache evidence is the stronger result.
