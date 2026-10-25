@@ -43,12 +43,13 @@ Refused tools (D44): the tools can be offered and still refused. Claude Code 2.1
 refuses an MCP tool that no permission rule allows, and the model gets the tool result "Claude requested
 permissions to use mcp__contexto__contexto_search, but you haven't granted it yet." (``is_error``). The
 launcher's ``--settings`` allows Contexto's tools, but a user's ``ask`` rule for one of them outranks that
-allow (measured, zero spend). So the check also reads the newest user message of every Messages API
-request, main or not, since a refusal loses recall in a subagent too. A result counts only when it answers
-a Contexto tool call of the assistant message before it, so another tool's output that quotes the text does
-not. The first refusal of a Contexto tool logs ``mcp_tools_denied`` with the tools' names (never other
-content); the launcher shows it once. A
-user who answers "No" at an interactive prompt gets other text, which does not count: that was a choice.
+allow (measured, zero spend). So the check also reads the trailing user messages
+(those after the last assistant message) of every Messages API request, main or not, since a refusal loses
+recall in a subagent too. A result counts only when its id names a Contexto tool call of an assistant
+message in the request, so another tool's output that quotes the text does not. The first refusal of a
+Contexto tool logs ``mcp_tools_denied`` with the tools' names (never other content); the launcher shows it
+once. A user who answers "No" at an interactive prompt gets other text, which does not count: that was a
+choice.
 """
 
 from __future__ import annotations
@@ -166,39 +167,47 @@ def anthropic_tools_offered(request: dict[str, Any]) -> bool | None:
     return (offered or any(_named(t) for t in tools)) and not down
 
 
-def _contexto_calls(message: dict[str, Any]) -> dict[str, str]:
-    """The Contexto tool calls in an assistant message, by ``tool_use`` id."""
-    content = message.get("content")
-    blocks = content if isinstance(content, list) else []
-    return {b["id"]: b["name"] for b in blocks
-            if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str) and _named(b)}
+def _contexto_calls(messages: list[dict[str, Any]]) -> dict[str, str]:
+    """The Contexto tool calls of the assistant messages, by ``tool_use`` id."""
+    calls: dict[str, str] = {}
+    for message in messages:
+        content = message.get("content") if message.get("role") == "assistant" else None
+        for b in content if isinstance(content, list) else []:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str) and _named(b):
+                calls[b["id"]] = b["name"]
+    return calls
 
 
 def anthropic_denied_tools(request: dict[str, Any]) -> list[str]:
-    """Contexto tools Claude Code refused for lack of a permission rule, in the request's newest user message.
-    A ``tool_result`` counts only when it has ``is_error``, answers a Contexto tool call (``mcp__contexto__``)
-    of the assistant message before it, and its text is the refusal naming that same tool: another tool's
-    result that quotes the refusal text (a failed Bash command printing it) does not. Only the newest user
-    message is read, so a refusal counts on the request that first carries it; role ``system`` messages
-    around it are skipped."""
+    """Contexto tools Claude Code refused for lack of a permission rule, in the request's trailing user
+    messages (every user message after the last assistant message; role ``system`` messages among them are
+    skipped). A ``tool_result`` counts only when it has ``is_error``, its ``tool_use_id`` is a string naming a
+    Contexto tool call (``mcp__contexto__``) of an assistant message in the request, and its text is the
+    refusal naming that same tool: another tool's result that quotes the refusal text (a failed Bash command
+    printing it) does not. The results may be split across those user messages in any order. Only the
+    trailing user messages are read, so a refusal counts on the request that first carries it."""
     messages = [m for m in request.get("messages") or [] if isinstance(m, dict) and m.get("role") != "system"]
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].get("role") != "user":
-            continue
-        previous = messages[index - 1] if index > 0 else None
-        calls = _contexto_calls(previous) if isinstance(previous, dict) and previous.get("role") == "assistant" else {}
-        denied: list[str] = []
-        content = messages[index].get("content")
+    trailing: list[dict[str, Any]] = []
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            break
+        trailing.insert(0, message)
+    if not trailing:
+        return []
+    calls = _contexto_calls(messages[:len(messages) - len(trailing)])
+    denied: list[str] = []
+    for message in trailing:
+        content = message.get("content")
         for block in content if isinstance(content, list) else []:
             if not (isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error")):
                 continue
-            name = calls.get(block.get("tool_use_id"))
+            tool_use_id = block.get("tool_use_id")
+            name = calls.get(tool_use_id) if isinstance(tool_use_id, str) else None
             if name is None:
                 continue
             if any(name in _DENIED.findall(text) for text in _texts(block.get("content"))) and name not in denied:
                 denied.append(name)
-        return denied
-    return []
+    return denied
 
 
 def _names_tree(tools: Any, depth: int = 0) -> bool:

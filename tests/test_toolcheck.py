@@ -407,13 +407,44 @@ def test_a_refusal_counts_only_as_the_result_of_a_contexto_tool_call():
     both = after_tool_calls([("Bash", quoted, True), (RECALL, refusal(RECALL), True)])
     assert anthropic_denied_tools(both) == [RECALL]
     assert anthropic_denied_tools(after_tool_calls([(RECALL, refusal(SEARCH), True)])) == []
-    # A result whose call is not in the assistant message right before it does not count either.
+    # A result whose call is in no assistant message of the request does not count either.
     orphan = after_tool_calls([(RECALL, refusal(RECALL), True)])
     orphan["messages"][-3]["content"] = [{"type": "text", "text": "no tool call"}]
     assert anthropic_denied_tools(orphan) == []
 
 
-def test_only_the_newest_user_message_is_read():
+def test_results_split_across_trailing_user_messages_in_any_order_count():
+    # Review of PR #224: the results of one round can arrive in consecutive user messages, in any order,
+    # with role "system" messages between them; and a call can sit in an earlier assistant message.
+    request = after_tool_calls([(SEARCH, refusal(SEARCH), True), ("Bash", "ok", False),
+                                (RECALL, refusal(RECALL), True)])
+    answers = request["messages"][-2]["content"]
+    request["messages"][-2:] = [{"role": "user", "content": [answers[2]]},
+                                {"role": "system", "content": "<total_tokens>1</total_tokens>"},
+                                {"role": "user", "content": [answers[1]]},
+                                {"role": "user", "content": [answers[0], {"type": "text", "text": "next"}]}]
+    assert anthropic_denied_tools(request) == [RECALL, SEARCH]
+    # The calls may sit in earlier assistant messages than the last one.
+    uses = request["messages"][1]["content"]
+    between = {"role": "user", "content": [{"type": "text", "text": "<system-reminder>x</system-reminder>"}]}
+    request["messages"][1:2] = [{"role": "assistant", "content": [uses[0]]}, between,
+                                {"role": "assistant", "content": uses[1:]}]
+    assert anthropic_denied_tools(request) == [RECALL, SEARCH]
+    # A refusal before the last assistant message was reported on an earlier request: not read again.
+    request["messages"][2]["content"].append(request["messages"][-1]["content"].pop(0))
+    assert anthropic_denied_tools(request) == [RECALL]
+
+
+@pytest.mark.parametrize("tool_use_id", [["toolu_0"], {"id": "toolu_0"}, 0, None])
+def test_a_result_whose_id_is_not_a_string_does_not_match_and_does_not_raise(tool_use_id):
+    request = after_tool_calls([(SEARCH, refusal(SEARCH), True)])
+    request["messages"][-2]["content"][0]["tool_use_id"] = tool_use_id
+    assert anthropic_denied_tools(request) == []
+    check = ToolCheck(Marker(), clock=Clock(), wall=lambda: 0.0)
+    assert check.observe(request, "anthropic", main=False) == []
+
+
+def test_only_the_trailing_user_messages_are_read():
     old = after_tool_calls([(SEARCH, refusal(SEARCH), True)])["messages"][1:]
     request = after_tool_calls([(SEARCH, "matches", False)], history=old[:-1])  # the refusal is a turn back
     assert anthropic_denied_tools(request) == []

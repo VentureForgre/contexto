@@ -874,10 +874,13 @@ draw over a line printed mid-run. If the check itself raises, the engine logs `t
 the exception's type name only and keeps the request's rewrite.
 
 Refused tools (D44): offered tools can still be refused. On every Messages API request, main or not,
-the check reads the newest user message: a `tool_result` with `is_error` whose text is Claude Code
-2.1.302's refusal ("Claude requested permissions to use <tool>, but you haven't granted it yet.")
-counts when it answers an `mcp__contexto__` tool call of the assistant message before it and the
-refusal names that tool; another tool's result that quotes the text does not. The first one in a session logs `mcp_tools_denied` (`dialect`,
+the check reads the trailing user messages (every user message after the last assistant message,
+role `system` messages among them skipped; the results may be split across them in any order): a
+`tool_result` with `is_error` whose text is Claude Code 2.1.302's refusal ("Claude requested
+permissions to use <tool>, but you haven't granted it yet.") counts when its
+`tool_use_id` is a string naming an `mcp__contexto__` tool call of an assistant message in the request
+and the refusal names that tool; another tool's result that quotes the text does not, nor does a
+result whose id is not a string. The first one in a session logs `mcp_tools_denied` (`dialect`,
 `main`, `tools`: the refused tools' short names, `elapsed_s`) on that request's `transform_events`,
 and the launcher prints one stderr warning naming the tools, the likely cause (a user's `ask` rule,
 or organization-managed settings), and the README section. A user's "No" at an interactive prompt
