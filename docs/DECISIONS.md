@@ -216,7 +216,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   score above 54 overall or in any category, acceptance 2 passes by arithmetic, and step 2 was not
   run. Options considered: run step 2 anyway for a baseline figure (rejected: 1.5M tokens for a
   number that cannot change the verdict); run both arms at once as for Claude (rejected: staging
-  let a failed H1 stop before the baseline spend).
+  let a failed H1 stop before the baseline spend). (Later, 2026-10-25, PR #219: step 1 ran again at
+  the default 150,000 on main 9d2949a and codex-cli 0.163.0 and passed acceptance 1 to 3, 54 of 54,
+  so 150,000 is no longer untested on Codex; `docs/research/M2-codex-acceptance-150k.md`.)
 
 - **D31. Keep the default bound at 150,000, including for OpenRig seats; this settles O3.**
   Intake, 2026-10-16. A32 (`docs/research/M2-seat-bound.md`, modeled on a synthetic seat session
@@ -516,6 +518,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
   of the run is in this repository): a 10-request byte-identical claude-haiku-5-5 series using one
   affinity key gave 1 cache write, then 9 reads, all served by one credential across several
   replicas (before: 3 writes). Not yet run: the `--observe-thinking` check for dropped thinking.
+  (Later, 2026-10-25 UTC, PR #220: the check ran. A claude-opus-5-5 session reported 0
+  `thinking_dropped` in 18 responses and by cache evidence stayed on one credential; a
+  claude-haiku-5-5 control still reports drops when a replay lands on another credential, while
+  Opus cross-credential replays reported none, so the signal cannot show Opus drops;
+  `docs/research/O6-thinking-check.md`.)
 - **D37. `contexto sessions prune` deletes whole sessions, dry run by default, and never one in
   use.** Intake, 2026-10-24, from the 2026-10-16 report that session folders grow without limit and
   could only be freed by deleting files by hand. Contract change: a new subcommand, a new store file,
@@ -1033,8 +1040,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   `license-files = ["LICENSE"]` (ships the file and the `License-File` field) in the wheel and sdist.
   The grant covers the project's own code and docs at every commit, not third-party text that old
   history quotes. The release files of v0.5.1 and earlier do not contain `LICENSE`; the first
-  release built after this change does. Contributions are accepted under the same license
-  (`CONTRIBUTING.md`).
+  release built after this change does (later: v0.5.2, 2026-10-25). Contributions are accepted
+  under the same license (`CONTRIBUTING.md`).
 - **D44. `contexto run claude` allows Contexto's own MCP tools in its `--settings`.** Claude,
   2026-10-25, under D0; contract change. The live acceptance run on Claude Opus 5.5 (PR #221,
   `docs/research/M2-acceptance-opus.md`) found that Claude Code 2.1.302 in `-p` mode refuses every
@@ -1207,8 +1214,9 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   affinity option for CLIProxyAPI, proposed upstream and deployed on the owner's proxy 2026-10-24,
   and Contexto's `X-Session-Affinity`; verified for cache reuse, the dropped-thinking check has
   not been run); kept
-  here for its evidence. Measured: full cache misses with byte-identical
-  prefixes (4 of 14 eligible throwaway calls) and thinking dropped on every request
+  here for its evidence. (Later, 2026-10-25 UTC, PR #220: the dropped-thinking check ran; see the
+  note under D36 and `docs/research/O6-thinking-check.md`.) Measured: full cache misses with
+  byte-identical prefixes (4 of 14 eligible throwaway calls) and thinking dropped on every request
   (`end_user_binding_mismatch`) through the owner's proxy. Lane 1's black-box test (L1-e,
   81,319 tokens): over 10 haiku requests the keep/drop pattern falls into exactly 3 consistent
   classes, and a byte-identical series shows exactly 3 cache writes before steady reads (counts

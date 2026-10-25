@@ -301,7 +301,8 @@ changed.
 
 **Open item:** move both corrections into the harness (`recall_credit` turn ends, `replay`
 decoder). Until then, `run.py check` reports `recall_credited: false` on a 2.1.302 run, and
-`run.py replay` refuses one with parallel tool results.
+`run.py replay` refuses one with parallel tool results. (Later: done in PR #223, 2026-10-25; on this
+session, `run.py check` credits q_p_03 with 24 turn ends.)
 
 ## Figures from the Claude Code transcripts (not kept)
 

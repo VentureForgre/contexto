@@ -35,16 +35,16 @@ What it includes:
 ## Install
 
 Contexto needs Python 3.12 or later and has no runtime dependencies. Install the wheel from the
-latest release, [v0.5.1](https://github.com/VentureForgre/contexto/releases/tag/v0.5.1). It has two
-assets: `contexto-0.5.1-py3-none-any.whl` and `contexto-0.5.1.tar.gz`. It is not on PyPI: the
+latest release, [v0.5.7](https://github.com/VentureForgre/contexto/releases/tag/v0.5.7). It has two
+assets: `contexto-0.5.7-py3-none-any.whl` and `contexto-0.5.7.tar.gz`. It is not on PyPI: the
 PyPI package named `contexto` is an unrelated project, so `pip install contexto` installs the wrong
 thing. Use the release URL or the downloaded wheel.
 
 Straight from the release URL, with no GitHub login:
 
 ```sh
-pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.1/contexto-0.5.1-py3-none-any.whl
-contexto --version                                    # contexto 0.5.1
+pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.7/contexto-0.5.7-py3-none-any.whl
+contexto --version                                    # contexto 0.5.7
 ```
 
 `pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment.
@@ -52,8 +52,8 @@ contexto --version                                    # contexto 0.5.1
 Or download it first with the GitHub CLI:
 
 ```sh
-gh release download v0.5.1 --repo VentureForgre/contexto --pattern 'contexto-0.5.1-py3-none-any.whl'
-uv tool install ./contexto-0.5.1-py3-none-any.whl     # or: pipx install ./contexto-0.5.1-py3-none-any.whl
+gh release download v0.5.7 --repo VentureForgre/contexto --pattern 'contexto-0.5.7-py3-none-any.whl'
+uv tool install ./contexto-0.5.7-py3-none-any.whl     # or: pipx install ./contexto-0.5.7-py3-none-any.whl
 ```
 
 `pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`. To
@@ -320,9 +320,9 @@ answers Codex's tool list request, and the proxy checks for that record. For Cod
 crashes after it answered cannot be detected: the record stays.
 
 **"warning: Claude Code refused Contexto's contexto_search ..." ("you haven't granted it yet").**
-The tools are there, but Claude Code would not run them. Claude Code 2.1.302 in `-p` mode refuses
-any MCP tool that no permission rule allows, so without a rule `contexto run claude -p` loses
-recall. The launcher's `--settings` allows exactly `mcp__contexto__contexto_recall`, `_pin`,
+The tools are there, but Claude Code would not run them. Claude Code 2.1.302 and 2.1.310 in `-p`
+mode refuse any MCP tool that no permission rule allows, so without a rule `contexto run claude -p`
+loses recall. The launcher's `--settings` allows exactly `mcp__contexto__contexto_recall`, `_pin`,
 `_close`, `_state`, and `_search`, and nothing else. These tools only touch your own local data:
 they read the session's store under `$CONTEXTO_HOME` and log their calls there, pin and close add
 ledger records, and `contexto_state` reads and hashes the project files that ledger records cite, to
@@ -378,16 +378,17 @@ pinned records in `ledger.jsonl` in the same directory.
 
 ## Known limitations
 
-Claude Code acceptance ran on one model, one bound, and one upstream. Codex passed acceptance
-criteria 1 to 3 on one model at bound 64,000; the default bound 150,000 is untested on Codex. Cache
-efficiency depends on the upstream route. The MCP server holds search text up to
-`CONTEXTO_SEARCH_CACHE_MB` (64 MB by default; newest pages as they are, older ones compressed) and
-reads pages that do not fit from the store at each search; the first search of each MCP process
-reads every page once (1.6 s at 6,000 synthetic pages). Each query word scans that text once, so a
-long query with matches costs more, and the up to 53 pages one search shows are read in full with
-no size cap. Search counts a word once per text of a turn, so a reply that discusses a key at
-length weighs as one passing mention. The full list is in
-[STATUS.md, "Known limitations (v0.5.1)"](STATUS.md#known-limitations-v051).
+Claude Code acceptance ran on two models (claude-haiku-5-5 and claude-opus-5-5), one bound, and one
+upstream, on Claude Code 2.1.301 and 2.1.302. On 2.1.310, where tool search is on by default, only a
+short live recall check ran. Codex passed acceptance criteria 1 to 3 on one model at bound 64,000
+and at the default 150,000. Cache efficiency depends on the upstream route. The MCP server holds
+search text up to `CONTEXTO_SEARCH_CACHE_MB` (64 MB by default; newest pages as they are, older ones
+compressed) and reads pages that do not fit from the store at each search; the first search of each
+MCP process reads every page once (1.6 s at 6,000 synthetic pages). Each query word scans that text
+once, so a long query with matches costs more, and the up to 53 pages one search shows are read in
+full with no size cap. Search counts a word once per text of a turn, so a reply that discusses a key
+at length weighs as one passing mention. The full list is in
+[STATUS.md, "Known limitations (v0.5.7)"](STATUS.md#known-limitations-v057).
 
 ## Exit codes
 
