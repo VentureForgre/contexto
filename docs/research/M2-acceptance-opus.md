@@ -158,16 +158,15 @@ requests over 18 content turns.
 The content is identical. Four other things changed between the two runs, so no difference below
 can be put down to the model alone:
 
-- **The product.** From fbb1303 to 9d2949a there are 80 commits, 77 of them pull-request merges,
-  and +4,506 / -473 lines in `src/contexto`. Among them:
+- **The product.** From fbb1303 to 9d2949a there are 78 pull requests (77 merge commits plus
+  the squash-merged #217; 397 commits in all) and +4,506 / -473 lines in `src/contexto`. Among them:
   - D34: `contexto_search` moved from an exact case-sensitive substring match to every word in any
     case, ranked by BM25. Its tool description and no-hit text changed with it.
   - D41: ranking changes.
   - B22 (#145): in-view search skips the current turn's own question.
   - D39: the search text cache.
   - D32 and D33: bounded carried content.
-  - A28: cache-aware rotation.
-  - A33 and A34: headroom rules.
+  - A34 (#187): the headroom rule.
 - **The client.** Claude Code 2.1.301 became 2.1.302:
   - it sends a title side request;
   - it no longer uses auto mode for tools in `-p`;
@@ -180,7 +179,7 @@ can be put down to the model alone:
 | Figure | Run #3 (`claude-haiku-5-5`) | This run (`claude-opus-5-5`) | Changed with the model |
 |---|---|---|---|
 | Code; client | fbb1303; 2.1.301 | 9d2949a; 2.1.302 | - |
-| Fidelity, H1 / baseline | 51 / 48 | 53 / 54 | H1: product (D34, D41, B22, D32/D33, rotation and headroom rules), client. Baseline: replayed transcript with the pin rounds |
+| Fidelity, H1 / baseline | 51 / 48 | 53 / 54 | H1: product (D34, D41, B22, D32/D33, the A34 headroom rule), client. Baseline: replayed transcript with the pin rounds |
 | chain, H1 / baseline | 28 / 25 | 29 / 30 | as fidelity |
 | distractor | 6 / 6 | 6 / 6 | as fidelity |
 | multihop | 8 / 8 | 8 / 8 | as fidelity |
@@ -192,8 +191,8 @@ can be put down to the model alone:
 | Spans in_view / paged | 94 / 188 | 25 / 129 | B22 removes the current question's own lines from in-view hits; D34, D41 |
 | Probe-turn tool rounds | 20 (4/2/1/4/5/4) | 11 (4/1/1/2/2/1) | D34, D41, B22 |
 | Content-turn tool calls | 0 (18 requests over 18 content turns) | 48 (47 pin, 1 state; 44 requests) | client (2.1.302), product tool descriptions |
-| Cache | 36/37 (0.973); the miss route-side | 54/55 (0.982); the miss a cold first write | client title request; A28; D36 on the route |
-| Max upstream input | 109,868 | 112,669 | pin rounds in content turns; rotation and headroom rules (A28, A33/A34) |
+| Cache | 36/37 (0.973); the miss's cause not given in run #3's record (route-side, inferred) | 54/55 (0.982); the miss a cold first write | client title request; D36 on the route |
+| Max upstream input | 109,868 | 112,669 | pin rounds in content turns; the A34 headroom rule |
 | Messages requests; epochs; rotations | 44; 7; 6 | 62; 7; 6 | pin rounds, title request, probe rounds |
 | CLI exit | 143 (spend watcher, after the last turn) | 0 | H1 cap (4,007,279 against 6,567,279) |
 | H1 tokens | 3,748,084 | 4,726,388 | as requests |
@@ -302,7 +301,7 @@ decoder). Until then, `run.py check` reports `recall_credited: false` on a 2.1.3
 ## Figures from the Claude Code transcripts (not kept)
 
 These figures were read from the Claude Code session transcripts that this run created. The
-transcripts were deleted after scoring, so the figures cannot be re-derived:
+transcripts were deleted after scoring, so these figures cannot be re-derived:
 
 | Figure | From |
 |---|---|
@@ -312,7 +311,6 @@ transcripts were deleted after scoring, so the figures cannot be re-derived:
 | Pin refusal reasons: 10 for a verified record without a provenance source, 2 for an unknown source type | the verdict run's transcript; the session log has only `ToolError` |
 | Attempt 1's 23 refused calls by tool: 10 search, 10 pin, 3 state | attempt 1's transcript |
 | `permissionMode` `default` on 2.1.302 | attempt 1's transcript and the stub matrix |
-| Recorded betas: 8 | the replay result, built from the verdict run's transcript |
 
 ## Off-path events
 
