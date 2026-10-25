@@ -399,6 +399,20 @@ def test_results_that_are_not_a_refusal_of_a_contexto_tool_do_not_count(results)
     assert anthropic_denied_tools(after_tool_calls(results)) == []
 
 
+def test_a_refusal_counts_only_as_the_result_of_a_contexto_tool_call():
+    # A failed Bash command that prints the refusal text (say, grepping a transcript) is not a refusal.
+    quoted = f"Exit code 1\n{refusal(SEARCH)}"
+    assert anthropic_denied_tools(after_tool_calls([("Bash", quoted, True)])) == []
+    # The true positive next to it still counts, and only for the tool its call named.
+    both = after_tool_calls([("Bash", quoted, True), (RECALL, refusal(RECALL), True)])
+    assert anthropic_denied_tools(both) == [RECALL]
+    assert anthropic_denied_tools(after_tool_calls([(RECALL, refusal(SEARCH), True)])) == []
+    # A result whose call is not in the assistant message right before it does not count either.
+    orphan = after_tool_calls([(RECALL, refusal(RECALL), True)])
+    orphan["messages"][-3]["content"] = [{"type": "text", "text": "no tool call"}]
+    assert anthropic_denied_tools(orphan) == []
+
+
 def test_only_the_newest_user_message_is_read():
     old = after_tool_calls([(SEARCH, refusal(SEARCH), True)])["messages"][1:]
     request = after_tool_calls([(SEARCH, "matches", False)], history=old[:-1])  # the refusal is a turn back
