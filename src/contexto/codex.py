@@ -283,7 +283,9 @@ def _toml(value: object) -> str:
 
 # Exec mode runs with approval policy "never", which refuses every MCP call that needs approval, so
 # recall would never work there (measured in the A6 smoke, docs/research/M2-codex-smoke.md). The
-# contexto tools only read the session store or append to its ledger, so they are pre-approved.
+# contexto tools only touch the user's local data (they read the session store and log their calls, pin
+# and close append to its ledger, contexto_state hashes the files ledger records cite), so they are
+# pre-approved; D44 approves the same tools for Claude Code.
 # codex-cli 0.154.0 accepts auto, prompt, writes, or approve.
 MCP_APPROVAL_MODE = "approve"
 

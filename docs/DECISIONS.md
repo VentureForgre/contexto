@@ -1035,6 +1035,53 @@ the owner's delegation. Open decisions are listed at the end with the options an
   history quotes. The release files of v0.5.1 and earlier do not contain `LICENSE`; the first
   release built after this change does. Contributions are accepted under the same license
   (`CONTRIBUTING.md`).
+- **D44. `contexto run claude` allows Contexto's own MCP tools in its `--settings`.** Claude,
+  2026-10-25, under D0; contract change. The live acceptance run on Claude Opus 5.5 (PR #221,
+  `docs/research/M2-acceptance-opus.md`) found that Claude Code 2.1.302 in `-p` mode refuses every
+  MCP tool call that no permission rule allows ("Claude requested permissions to use
+  mcp__contexto__contexto_search, but you haven't granted it yet."). 2.1.301 let such calls through
+  to its auto-mode classifier. All 23 of the run's Contexto calls were refused, and it scored 18 of
+  54 with no recall until the harness allowed `mcp__contexto`. 2.1.302 is in `TESTED_VERSIONS`, so
+  `contexto run claude -p` on it silently lost recall, and no acceptance 1 detector caught it.
+  - **Rule.** The launcher's flag-level `--settings` adds `permissions.allow` with one rule per tool
+    the MCP server serves, by exact name, under the server name the launcher's `--mcp-config` gives
+    it: `mcp__contexto__contexto_recall`, `_pin`, `_close`, `_state`, `_search`. It is built from
+    `contexto.mcp.TOOLS`, so a new tool is covered when it ships. No other key, rule, or mode.
+  - **Why it is safe.** The five tools touch only the user's own local data. Recall, search, and
+    state read the session store under `$CONTEXTO_HOME` and append `mcp_call` lines to the session
+    log. `contexto_state` also reads and hashes the project files that ledger records cite, inside
+    the session's working directory, to mark records whose sources changed as stale. Pin and close
+    add records to the session's ledger. None runs a command, writes a project file, or reaches the
+    network. Codex's config approves the whole `contexto` server
+    (`default_tools_approval_mode = "approve"`); here the approval is narrower, the five exact names.
+  - **Why exact names.** Measured with zero spend against a local stub on 2.1.302: a server rule
+    (`mcp__contexto`), a wildcard (`mcp__contexto__*`), and exact names all let the tools run, and
+    an exact name covers only that tool. A user's own MCP server that is also named `contexto` and
+    serves a tool of the same name would be covered too; that is a name clash Claude Code does not
+    resolve either.
+  - **Merge with the user's rules (measured, 2.1.302, `-p`).** Flag-level allow rules join the
+    user's: a user's `Bash(touch ...)` allow still ran next to them, and with no user rule that
+    command was still refused, so nothing else is widened. Tools of other servers (`contexto_x`,
+    `contexto2`) were still refused. The user's rules still win: a `deny` rule for a Contexto tool,
+    or `--disallowedTools`, takes it out of the request ("No such tool available"); an `ask` rule
+    outranks the allow and `-p` mode refuses the call. Organization-managed settings were not
+    tested; they can limit permission rules to their own.
+  - **Detection.** A refusal can still happen (an `ask` rule, managed settings, or a future Claude
+    Code that ignores flag-level permissions), and the missing-tools check cannot see it, since the
+    tools are offered. So the tool check also reads each Messages API request's newest user message
+    and logs the first refusal of a Contexto tool as `mcp_tools_denied` (tool names only), and the
+    launcher prints one warning. A result counts only when it answers a Contexto tool call of the
+    assistant message before it and matches 2.1.302's refusal text for that tool, so a failed Bash
+    command that prints the text does not count. A user's "No" at an interactive prompt has other
+    text and does not count either. `mcp_tools_denied` fails an acceptance run, like
+    `mcp_tools_missing`.
+  - **Proof.** On the installed 2.1.302, `contexto run claude -p` against a local stub upstream
+    that makes the model call all five tools. With the old base-URL-only settings, all five calls
+    were refused and the new warning named them. With the rules, all five ran and the MCP server
+    logged an `mcp_call` for each (haiku and opus model ids alike). On 2.1.301,
+    search and recall ran too. In an interactive 2.1.302 session, search and recall ran with no
+    input. `spikes/m2/permissions/permstub.py` repeats the `-p` check (`--before` for the old
+    settings). `TESTED_VERSIONS` is unchanged: 2.1.302 works with the rules.
 
 ## Open decisions
 

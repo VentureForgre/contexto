@@ -47,7 +47,8 @@ same design after Claude Code works.
 contexto run claude ...      (launcher)
   |-- starts proxy on 127.0.0.1:<free port> for session S, upstream = the URL Claude would use
   |-- starts nothing else; Claude Code spawns the MCP server itself from --mcp-config
-  `-- execs: claude --settings <tmp file: env.ANTHROPIC_BASE_URL=proxy> \
+  `-- execs: claude --settings <tmp file: env.ANTHROPIC_BASE_URL=proxy,
+                                         permissions.allow=Contexto's 5 tools (D44)> \
                     --mcp-config <tmp file: contexto mcp --session S> [user args]
 
 proxy (Anthropic Messages API)        mcp server (stdio, JSON-RPC)
@@ -66,6 +67,23 @@ being `$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35); 
 `ANTHROPIC_BASE_URL` in the process environment; else `https://api.anthropic.com`. The launcher's
 own flag-level `--settings` outranks all of these, which is what makes the proxy attachment work.
 Organization-managed settings still outrank `--settings`; document that limit.
+
+Tool permissions (D44): the same `--settings` file sets `permissions.allow` to one rule per Contexto
+MCP tool, by its exact name: `mcp__contexto__contexto_recall`, `_pin`, `_close`, `_state`, and
+`_search`, built from the MCP server's tool list and the server name in `--mcp-config`. No other key,
+rule, or permission mode. Measured with zero spend against a local stub upstream (`-p` mode, isolated
+`CLAUDE_CONFIG_DIR`, fake key): without a rule, Claude Code 2.1.302 refuses every Contexto tool call
+("Claude requested permissions to use mcp__contexto__contexto_search, but you haven't granted it
+yet."), and 2.1.301 hands each call to its auto-mode classifier, which failed against the stub
+("auto mode cannot determine the safety of" the call). With the
+rules, all five tools run on both versions, and in an interactive 2.1.302 session they run with no
+prompt. 2.1.302 honors a server rule (`mcp__contexto`), a wildcard (`mcp__contexto__*`), and exact
+names alike; exact names are the narrowest. Flag-level rules join the user's rules: a user's `allow`
+rule for another tool still works, and the user's `deny` rule, an `ask` rule, and `--disallowedTools`
+still win. A deny or `--disallowedTools` takes the tool out of the request; an ask makes `-p` mode
+refuse it. Tools of other MCP servers, including ones named `contexto_x` and `contexto2`, are still
+refused, and so is a Bash command no rule allows. Not measured: organization-managed settings, which
+may restrict permission rules to their own. `spikes/m2/permissions/permstub.py` repeats the `-p` check.
 Supported upstreams for end users (D35): the vendor API with an API key, or a CLIProxyAPI
 instance (its root for Claude Code, the root plus `/v1` for Codex); setup in `docs/cliproxyapi.md`.
 
@@ -855,6 +873,16 @@ it is first reported and once more after the CLI exits for a repeated exit event
 draw over a line printed mid-run. If the check itself raises, the engine logs `toolcheck_error` with
 the exception's type name only and keeps the request's rewrite.
 
+Refused tools (D44): offered tools can still be refused. On every Messages API request, main or not,
+the check reads the newest user message: a `tool_result` with `is_error` whose text is Claude Code
+2.1.302's refusal ("Claude requested permissions to use <tool>, but you haven't granted it yet.")
+counts when it answers an `mcp__contexto__` tool call of the assistant message before it and the
+refusal names that tool; another tool's result that quotes the text does not. The first one in a session logs `mcp_tools_denied` (`dialect`,
+`main`, `tools`: the refused tools' short names, `elapsed_s`) on that request's `transform_events`,
+and the launcher prints one stderr warning naming the tools, the likely cause (a user's `ask` rule,
+or organization-managed settings), and the README section. A user's "No" at an interactive prompt
+has other text and does not count.
+
 **CLI versions (D38).** The CLI versions Contexto was tested with are one list, `TESTED_VERSIONS` in
 `src/contexto/cliversions.py`; the measured-on constants of the session-start signature, the
 context-block kinds, and the Codex context sections equal the newest tested version of their CLI.
@@ -949,7 +977,8 @@ a no-replayed-thinking baseline.
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
    `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`,
-   `epoch_record_stale`, `mcp_tools_missing`, `toolcheck_error`, `side_room_close_failed` (D40), or
+   `epoch_record_stale`, `mcp_tools_missing`, `mcp_tools_denied` (D44), `toolcheck_error`,
+   `side_room_close_failed` (D40), or
    `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4

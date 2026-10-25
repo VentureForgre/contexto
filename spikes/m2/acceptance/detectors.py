@@ -50,6 +50,7 @@ FAILURE_EVENTS = ("degraded_enter", "store_error", "page_conflict", "fallback_fa
                   "retained_stale",  # a failed snapshot write, contract PR #125 at 01a58a2
                   "epoch_record_stale",  # a failed rule 16 epoch-record write (listed in the contract, missed here)
                   "mcp_tools_missing",  # the main conversation ran without Contexto's MCP tools
+                  "mcp_tools_denied",  # D44: Claude Code refused a Contexto tool for lack of a permission rule
                   "toolcheck_error",  # the missing-tools check itself raised
                   "side_room_close_failed")  # D40: closing an idle side room hit a store failure
 # The recalls the budget prices per probe turn (script.MAX_RECALLS), over D27's probe turns

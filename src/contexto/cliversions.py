@@ -39,9 +39,10 @@ from collections.abc import Mapping
 from typing import Any
 
 # Claude Code 2.1.302: session-start signature, context-block kinds, and the missing-tools notices
-# (spikes/m2/scale/reminders, live run #3). codex-cli 0.154.0: the Responses shapes and acceptance
-# (D30); 0.163.0: the MCP launch and missing-tools check (v0.2.8), and the same context-section
-# openings, rechecked with zero spend for D38.
+# (spikes/m2/scale/reminders), the permission refusal of Contexto's tools in -p mode (D44), and the
+# live acceptance run on Claude Opus 5.5 (PR #221; live run #3 ran on 2.1.301). codex-cli 0.154.0: the
+# Responses shapes and acceptance (D30); 0.163.0: the MCP launch and missing-tools check (v0.2.8),
+# and the same context-section openings, rechecked with zero spend for D38.
 TESTED_VERSIONS: dict[str, tuple[str, ...]] = {
     "claude": ("2.1.302",),
     "codex": ("0.154.0", "0.163.0"),

@@ -83,10 +83,11 @@ The session id is printed on stderr at start. The launcher:
 2. opens the session under `$CONTEXTO_HOME/sessions/<id>/` and starts the proxy on
    `127.0.0.1:<free port>`;
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets only
-   `env.ANTHROPIC_BASE_URL` to the proxy, and an `--mcp-config` file that starts Contexto's MCP
-   server (`python -P -m contexto mcp --session <id>` with the same Python, and `CONTEXTO_HOME`, plus
-   `CONTEXTO_SEARCH_CACHE_MB` when set, in its environment; `-P` keeps your project directory off the
-   import path);
+   `env.ANTHROPIC_BASE_URL` to the proxy and allows Contexto's five MCP tools by name
+   (`permissions.allow`; see [Troubleshooting](#troubleshooting)), and an `--mcp-config` file that
+   starts Contexto's MCP server (`python -P -m contexto mcp --session <id>` with the same Python, and
+   `CONTEXTO_HOME`, plus `CONTEXTO_SEARCH_CACHE_MB` when set, in its environment; `-P` keeps your
+   project directory off the import path);
 4. runs `claude --settings <file> --mcp-config <file> [your args]` in your terminal and returns its
    exit code.
 
@@ -311,6 +312,20 @@ disconnected, so the proxy reads every system message in order and the latest no
 never names MCP tools in its requests, so for Codex the MCP server records in the session when it
 answers Codex's tool list request, and the proxy checks for that record. For Codex, a server that
 crashes after it answered cannot be detected: the record stays.
+
+**"warning: Claude Code refused Contexto's contexto_search ..." ("you haven't granted it yet").**
+The tools are there, but Claude Code would not run them. Claude Code 2.1.302 in `-p` mode refuses
+any MCP tool that no permission rule allows, so without a rule `contexto run claude -p` loses
+recall. The launcher's `--settings` allows exactly `mcp__contexto__contexto_recall`, `_pin`,
+`_close`, `_state`, and `_search`, and nothing else. These tools only touch your own local data:
+they read the session's store under `$CONTEXTO_HOME` and log their calls there, pin and close add
+ledger records, and `contexto_state` reads and hashes the project files that ledger records cite, to
+mark stale records. They run no commands, write no project files, and use no network. Your own
+permission rules still apply on top. A `deny` rule or `--disallowedTools` for one of them takes it
+away. An `ask` rule for one of them outranks the allow, so in `-p` mode Claude Code refuses it and
+this warning appears; remove that rule to let it run. Organization-managed settings may also
+override the allow (not tested). The session log records the refusal as `mcp_tools_denied`, with the
+tool names only.
 
 **"warning: Claude Code X is not a version Contexto was tested with".** Contexto recognises parts of
 Claude Code's and Codex's requests by text the CLI writes, and was tested with the versions the line
