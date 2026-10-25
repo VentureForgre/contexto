@@ -290,7 +290,7 @@ or starts with `--settings=` is refused too. Your own
 `--mcp-config` is allowed and loads alongside Contexto's. It takes several files, so Claude Code reads
 a prompt right after `--mcp-config <file>` as another config file ("MCP config file not found"). Write
 `--mcp-config=<file>`, or put the prompt before it or after a flag such as `-p`. After another flag
-that takes a list, such as `--allowedTools`, the prompt is taken again.
+that takes a list, such as `--allowedTools`, the prompt is read as one of its values.
 
 **"warning: ... running without Contexto's tools".** The model has no `contexto_search` or
 `contexto_recall`, so it cannot get paged-out turns back. Neither Claude Code nor Codex reports an MCP

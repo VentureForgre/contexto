@@ -11,13 +11,17 @@ terminal and are stopped once the stub has the prompt (or, with no prompt, once 
 listed its tools).
 
 Outside connections: Claude Code runs with CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, DISABLE_TELEMETRY,
-DISABLE_ERROR_REPORTING, and DISABLE_AUTOUPDATER set to 1. The `-p` scenarios then open no outside
-connection. The interactive ones still try `downloads.claude.ai:443` and `github.com:443` (2.1.302
-and 2.1.310), so HTTPS_PROXY points at a local proxy in this script that refuses every CONNECT and
-lists the hosts under `blocked`. With it, lsof sampling of Claude Code's sockets every 0.2 s during
-full runs on both versions found only 127.0.0.1; without it, the same sampling found
-downloads.claude.ai. The `--work` directory is made absolute, and an existing one is deleted only if
-it is empty or holds this spike's `.argstub-work` marker.
+DISABLE_ERROR_REPORTING, DISABLE_AUTOUPDATER, and CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL
+set to 1. Without the last one, interactive Claude Code installs the official
+plugin marketplace: it tries `downloads.claude.ai:443` and `github.com:443`, runs `ssh -T ... git@github.com`,
+and runs `git clone` over SSH, which ignores HTTPS_PROXY and uses this machine's SSH key (seen on
+2.1.310 with GIT_SSH_COMMAND pointed at a fake that fails, and in review on 2.1.302). As a second
+guard, HTTPS_PROXY points at a local proxy in this script that refuses every CONNECT and lists the hosts
+under `blocked`. Measured on 2.1.302 and 2.1.310, all eight scenarios: `blocked` stays empty, and
+sampling every descendant process of this script every 0.1 s (ps, and lsof on inet sockets) found no
+git or ssh process and no socket to anything but 127.0.0.1. A sample can miss a very short connection.
+The `--work` directory is made absolute, and an existing one is deleted only if it is empty or holds
+this spike's `.argstub-work` marker.
 
 A scenario passes when Claude Code starts Contexto's MCP server and it lists its tools (so
 `--mcp-config` was applied) and a request reaches the stub with the scenario's prompt in its last user
@@ -77,15 +81,22 @@ CONTEXTO_TOOL = "mcp__contexto__contexto_recall"
 
 # Keep Claude Code from contacting anything but the stub where it can (as the other spikes do).
 QUIET_ENV = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1",
-             "DISABLE_ERROR_REPORTING": "1", "DISABLE_AUTOUPDATER": "1"}
+             "DISABLE_ERROR_REPORTING": "1", "DISABLE_AUTOUPDATER": "1",
+             # Interactive Claude Code otherwise clones the official plugin marketplace with
+             # `git clone git@github.com:...`: over SSH, outside HTTPS_PROXY, with this machine's SSH key.
+             "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1"}
 WORK_MARKER = ".argstub-work"
 
 
 def prepare_work(work: Path) -> Path:
     """``work`` as an absolute path, emptied for this run. Claude Code runs in a subdirectory, so a
     relative CLAUDE_CONFIG_DIR would point elsewhere and Claude Code could fall back to the machine's own
-    login. An existing directory is deleted only if it is empty or holds the marker this spike writes."""
-    work = work.expanduser().resolve()
+    login. An existing directory is deleted only if it is empty or holds the marker this spike writes.
+    ``work`` itself must not be a symlink; links among its parents (such as /tmp on macOS) are fine."""
+    work = work.expanduser().absolute()
+    if work.is_symlink():
+        raise ValueError(f"{work} is a symlink; pass a real directory as --work")
+    work = work.resolve()
     if work.exists():
         if not work.is_dir() or (any(work.iterdir()) and not (work / WORK_MARKER).is_file()):
             raise ValueError(f"{work} exists and was not made by this spike (no {WORK_MARKER}); pick another --work")
