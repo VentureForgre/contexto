@@ -392,10 +392,10 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   reminders, a subagent environment message led by the listing) and carries 5.x nested memory
   that arrives next to a tool result, the newest up to 4,000 tokens. The full live acceptance
   (step 9 of `docs/cli-updates.md`) did not run; a 305,223-token live recall check stands in.
-- D47: follow-ups to D46. A message with Claude Code's synthetic missing tool result carries and
-  shows nothing; files nested memory imports with `@path` are carried within the cap; the cap
-  counts each block as its page; a queued prompt in a role `system` text is not read by the
-  missing-tools check.
+- D47: follow-ups to D46. A tool-result message with Claude Code's synthetic missing result carries
+  nothing and is not read by the missing-tools check (it still goes to the model unchanged); files
+  nested memory imports with `@path` are carried within the cap; the cap counts each block as its
+  page; a queued prompt in a role `system` text is not read by the missing-tools check.
 
 ## Open follow-ups
 
@@ -683,7 +683,7 @@ Needs the owner:
 | v0.5.5 | 9a773ec | #225 (D45, rule 18): the JSON sources rule 18 lists are read through one 512-level nesting limit; a request past it goes upstream untransformed and logs `request_too_deep`; an unreadable page is a clean recall error |
 | v0.5.6 | 302f7d2 | #228: hand-damaged page files are handled the same way everywhere (rule 18): search and the index skip them, recall returns an error; re-paging onto one is a `page_conflict`; a failed read is retried on the next call |
 | v0.5.7 | 3a48fcc | #227 (D46): Claude Code 2.1.310 tested; the missing-tools check reads 4.x tool-search listings, a subagent environment message led by the listing is session start, and 5.x nested memory next to a tool result is carried up to 4,000 tokens; D44 refusals paired across the request |
-| v0.5.8 | 52a96b5 | #230 (D47): a message with Claude Code's synthetic missing tool result carries and shows nothing; nested memory's `@path` imports are carried within the cap; the cap counts each block as its page; a queued prompt in a role `system` text is not read by the missing-tools check; recall tells a failed read from a damaged file |
+| v0.5.8 | 52a96b5 | #230 (D47): a tool-result message with Claude Code's synthetic missing result carries nothing and is not read by the missing-tools check (it still goes to the model unchanged); nested memory's `@path` imports are carried within the cap; the cap counts each block as its page; a queued prompt in a role `system` text is not read by the missing-tools check; recall tells a failed read from a damaged file. Docs: #229 (STATUS, README, contract and decisions accurate to v0.5.7) |
 
 Each is a tag and a GitHub Release on this repository with the wheel and sdist attached; there is
 no package registry release.

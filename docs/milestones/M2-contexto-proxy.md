@@ -920,10 +920,10 @@ lack the tools and are not judged), never `count_tokens`:
   the end of the last such sentence on, and not at all without one (D47). A text that does not start
   with the opening sentence is read whole; on 2.1.302, where a round's attachments share one role
   `system` text, that includes a one-reminder queued prompt placed after other text there (not
-  captured). Any other queued prompt arrives as a user text block that
-  starts with the opening sentence, which is never read. Claude Code's other mid-turn openers
-  ("Another Claude session ...", "A peer session ...") were not measured. A prompt imitating a
-  notice, alone, followed by text, typed after Esc, or queued, is therefore not read; an exact copy
+  captured). Any other queued prompt arrives as a user text block that starts with the opening
+  sentence, which is never read. Claude Code's other mid-turn openers ("Another Claude session
+  ...", "A peer session ...") were not measured. A prompt imitating a notice, alone, followed by
+  text, typed after Esc, or queued in a captured form, is therefore not read; an exact copy
   typed as an earlier block of a several-block prompt would be, which Claude Code does not send. The check reads the system prompt and then those messages and
   blocks, in order, because Claude Code never edits history: an old listing stays when the server
   goes away. Later text overrides earlier text. Names under "The following
