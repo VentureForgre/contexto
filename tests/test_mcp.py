@@ -13,6 +13,7 @@ import sys
 import pytest
 
 from contexto import mcp
+from contexto.canonical import MAX_JSON_DEPTH
 from contexto.store import SessionStore
 from contexto.store.memory import MemoryStore
 
@@ -126,6 +127,29 @@ def test_a_line_too_deep_for_json_is_a_parse_error_and_the_server_keeps_serving(
     replies = [json.loads(line) for line in out.getvalue().splitlines()]
     assert replies[0]["error"]["code"] == mcp.PARSE_ERROR and replies[0]["id"] is None
     assert replies[1] == {"jsonrpc": "2.0", "id": 2, "result": {}}
+
+
+def test_an_id_nested_past_the_limit_is_a_parse_error_with_a_null_id(server):
+    """From Python 3.14 json.loads parses deeper than json.dumps writes; a line nested past
+    MAX_JSON_DEPTH is refused at the parse, so a reply never echoes a value it cannot write."""
+    line = '{"jsonrpc":"2.0","method":"ping","id":' + "[" * MAX_JSON_DEPTH + "]" * MAX_JSON_DEPTH + "}"
+    assert server.handle_line(line) == {"jsonrpc": "2.0", "id": None,
+                                        "error": {"code": mcp.PARSE_ERROR, "message": "Parse error"}}
+    ok = '{"jsonrpc":"2.0","method":"ping","id":1,"params":{"_meta":' + "[" * 500 + "]" * 500 + "}}"
+    assert server.handle_line(ok) == {"jsonrpc": "2.0", "id": 1, "result": {}}  # 502 levels: read
+
+
+def test_a_reply_that_cannot_be_written_becomes_an_internal_error_and_serving_continues(server, monkeypatch):
+    out = io.StringIO()
+    server.stdout = out
+    real = server.handle_line
+    monkeypatch.setattr(server, "handle_line", lambda line: {"jsonrpc": "2.0", "id": {1, 2}, "result": {}}
+                        if '"id":1' in line else real(line))
+    ping = '{"jsonrpc":"2.0","method":"ping","id":%d}\n'
+    assert server.serve([ping % 1, ping % 2]) == 0
+    replies = [json.loads(line) for line in out.getvalue().splitlines()]
+    internal = {"code": mcp.INTERNAL_ERROR, "message": "Internal error"}
+    assert replies == [{"jsonrpc": "2.0", "id": None, "error": internal}, {"jsonrpc": "2.0", "id": 2, "result": {}}]
 
 
 def test_notifications_and_client_responses_get_no_reply(server):

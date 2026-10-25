@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from contexto import paths
-from contexto.canonical import canonical_bytes, canonical_json
+from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
 from contexto.rewrite import CARRIED_TEXT, SESSION_START, UNCLASSIFIED, Dialect
 from contexto.tokens import TokenEstimator
 from contexto.upstream import claude_settings_order
@@ -126,9 +126,9 @@ class ResponsesDialect(Dialect):
         if kind in ("function_call", "custom_tool_call"):
             raw = item.get("arguments") if kind == "function_call" else item.get("input")
             try:
-                args = json.loads(raw) if isinstance(raw, str) else raw
-            except (ValueError, RecursionError):
-                args = raw  # not JSON, or nested too deep to parse: rendered as the string it is
+                args = loads_bounded(raw) if isinstance(raw, str) else raw
+            except ValueError:
+                args = raw  # not JSON, or nested deeper than MAX_JSON_DEPTH: rendered as the string it is
             return [("assistant", {"type": "tool_use", "name": item.get("name", ""),
                                    "input": {} if args is None else args})]
         if kind in ("function_call_output", "custom_tool_call_output"):

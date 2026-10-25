@@ -44,7 +44,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from contexto.canonical import canonical_bytes, canonical_json
+from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
 from contexto.store.catalog import PageCatalog
@@ -811,8 +811,8 @@ class SessionStore(LedgerOps):
             data = canonical_bytes(page)
             if not write_new(path, data):
                 try:
-                    stored = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, ValueError, RecursionError) as e:
+                    stored = loads_bounded(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as e:
                     raise PageConflictError(f"{path} exists but cannot be read: {e}", page_id=page["id"]) from e
                 if not same_content(stored, page):
                     raise PageConflictError(f"{path} exists with different turn or messages", page_id=page["id"])
@@ -876,7 +876,7 @@ class SessionStore(LedgerOps):
         if not page_id.startswith("pg_") or not all(c in "0123456789abcdef" for c in page_id[3:]):
             return None
         try:
-            return current_stub(json.loads((self.pages_dir / f"{page_id}.json").read_text(encoding="utf-8")))
+            return current_stub(loads_bounded((self.pages_dir / f"{page_id}.json").read_text(encoding="utf-8")))
         except FileNotFoundError:
             return None
 

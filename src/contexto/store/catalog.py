@@ -37,7 +37,6 @@ budget is ``CONTEXTO_SEARCH_CACHE_MB`` (default 64), or ``contexto mcp --search-
 from __future__ import annotations
 
 import heapq
-import json
 import os
 import threading
 import zlib
@@ -46,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from contexto.canonical import loads_bounded
 from contexto.store.pages import current_stub, index_line, search_entry
 from contexto.store.search import SearchEntry
 
@@ -367,10 +367,10 @@ class PageCatalog:
 
     def _read(self, path: Path) -> dict[str, Any] | None:
         try:
-            page = current_stub(json.loads(path.read_text(encoding="utf-8")))
+            page = current_stub(loads_bounded(path.read_text(encoding="utf-8")))
             _view(page)  # the fields every reader needs
             return page
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             self._log({"event": "page_unreadable", "path": path.name, "error": str(e)})
             return None
 

@@ -18,12 +18,13 @@ records the first one it resolves so the text stays fixed for the session.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from collections import Counter
 from collections.abc import Iterable
 from typing import Any
+
+from contexto.canonical import loads_bounded
 
 VARIANTS = ("default", "legacy")
 ENV_VAR = "CONTEXTO_RECALL_VARIANT"
@@ -109,8 +110,8 @@ def _parse_json(text: str) -> tuple[bool, list[str]]:
     if not stripped or stripped[0] not in "{[":
         return False, []
     try:
-        return True, _json_keys(json.loads(stripped))
-    except (ValueError, RecursionError):  # not JSON, or nested too deep to parse or walk: read as text
+        return True, _json_keys(loads_bounded(stripped))
+    except ValueError:  # not JSON, or nested deeper than MAX_JSON_DEPTH: read as text
         return False, []
 
 

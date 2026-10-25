@@ -26,6 +26,7 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
+from contexto.canonical import loads_bounded
 from contexto.store.pages import is_context_page
 from contexto.store.render import (
     MATCH_CONTEXT,
@@ -241,14 +242,19 @@ class Server:
                 continue
             response = self.handle_line(line)
             if response is not None:
-                self.stdout.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
+                try:
+                    text = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+                except (ValueError, TypeError, RecursionError) as exc:  # never let one reply kill the server
+                    self._diag(f"unserializable response: {type(exc).__name__}")
+                    text = json.dumps(_error(None, INTERNAL_ERROR, "Internal error"), separators=(",", ":"))
+                self.stdout.write(text + "\n")
                 self.stdout.flush()
         return 0  # end of input is the shutdown signal
 
     def handle_line(self, line: str) -> dict[str, Any] | None:
         try:
-            message = json.loads(line)
-        except (ValueError, RecursionError):  # not JSON, or nested too deep to parse
+            message = loads_bounded(line)
+        except ValueError:  # not JSON, or nested deeper than MAX_JSON_DEPTH
             return _error(None, PARSE_ERROR, "Parse error")
         if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
                 or not isinstance(message.get("method"), str)):

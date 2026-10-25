@@ -68,7 +68,11 @@ def render_page(page: dict[str, Any]) -> str:
             elif kind in ("thinking", "redacted_thinking"):
                 continue
             elif kind == "tool_use":
-                args = json.dumps(block.get("input", {}), ensure_ascii=False, sort_keys=True)
+                tool_input = block.get("input", {})
+                try:
+                    args = json.dumps(tool_input, ensure_ascii=False, sort_keys=True)
+                except (ValueError, TypeError, RecursionError):  # cannot be written: shown as its text
+                    args = tool_input if isinstance(tool_input, str) else f"<{type(tool_input).__name__}>"
                 lines.append(f"tool_use {block.get('name', '')} {args}")
             elif kind == "tool_result":
                 lines.append("tool_result:")

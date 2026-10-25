@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from contexto.canonical import canonical_bytes
+from contexto.canonical import MAX_JSON_DEPTH, canonical_bytes
 from contexto.codex import (
     CHATGPT_MODE,
     CHATGPT_UPSTREAM,
@@ -621,13 +621,16 @@ def test_mcp_server_ignores_a_contexto_package_in_the_working_directory(tmp_path
         assert out.stdout.startswith("contexto ") and "SHADOWED" not in out.stdout
 
 
-def test_call_arguments_nested_too_deep_for_json_render_as_their_string():
-    deep = "[" * 1_000_000 + "]" * 1_000_000  # beyond what json.loads parses
+@pytest.mark.parametrize("depth", [MAX_JSON_DEPTH + 1, 70_000, 1_000_000])  # over the limit; json.loads
+def test_call_arguments_nested_too_deep_for_json_render_as_their_string(depth):  # may parse 70,000, not 1,000,000
+    deep = "[" * depth + "]" * depth
     item = {"type": "function_call", "call_id": "call_0", "name": "exec", "arguments": deep}
     assert RESPONSES.retained_blocks(item) == [("assistant", {"type": "tool_use", "name": "exec", "input": deep})]
+    shallow = dict(item, arguments="[" * MAX_JSON_DEPTH + "]" * MAX_JSON_DEPTH)
+    assert RESPONSES.retained_blocks(shallow)[0][1]["input"] != shallow["arguments"]  # at the limit: parsed
     items = history(8) + [prompt("new prompt")]
     items[items.index(call(0))] = item
     up, st, ev, store = run(items, config=Config(bound=6_000, headroom_floor=500, pin_budget=200, index_budget=2_000))
     assert "rotation" in names(ev) and st.k > 4
     page = next(p for p in store.pages.values() if item in p["messages"])
-    assert render_page(page).count("[") >= 1_000_000  # the arguments, shown as the text they are
+    assert render_page(page).count("[") >= depth  # the arguments, shown as the text they are
