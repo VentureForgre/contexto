@@ -38,13 +38,18 @@ requests. With tool search off, request counts match 2.1.302 in all 13 runs, and
 CLAUDE.md placement is the only change in `features.md` apart from sizes that moved by at most 5
 tokens. On 4.x ids the nested CLAUDE.md was inside the Read result on both versions.
 
-The analysis re-run with D46's code (the matrix's captures do not depend on Contexto's code):
+The three matrices re-run at zero spend after PR #227's round 2 (all 39 runs exit 0, no non-loopback
+line), each analysed with `origin/main` 9a773ec and with D46's code:
 
 | Matrix | runs with the same carried and paged figures | runs that differ, and how |
 |---|---|---|
 | 2.1.302 | 13 of 13 | none |
-| 2.1.310 default | 7 of 13 | the 6 with a nested CLAUDE.md on 5.x ids carry it from its turn on: `carried_blocks_n` 2 to 3, 61 to 64 tokens more at the last turn; in opus55-stream the fallback paged 1 item more (`carried_after_fallback` 11,469 to 7,247 at turn 48) |
-| 2.1.310, tool search off | 7 of 13 | the same 6 runs, 61 to 64 tokens more; no extra fallback paging |
+| 2.1.310 default | 7 of 13 | the 6 with a nested CLAUDE.md on 5.x ids carry it from its turn on: `carried_blocks_n` 2 to 3, 60 to 63 tokens more at the last turn; in opus55-stream the fallback paged 1 item more (`carried_after_fallback` 11,466 to 7,246 at turn 48) |
+| 2.1.310, tool search off | 7 of 13 | the same 6 runs, 61 to 63 tokens more; no extra fallback paging |
+
+In the two 2.1.310 matrices, 342 and 366 nested-memory blocks sit next to Read results; every one is
+in Claude Code's exact form and carried. No other text block sits next to a tool result in any of
+the three matrices.
 
 ## Step 3: hooks, styles, plan mode, effort, MCP (`spikes/m2/carried/live_probe.sh`)
 
@@ -76,8 +81,23 @@ offered with D46; before it, none on the 6 runs on 4.x ids (0 of 84, 84 and 48 o
 Imitated notices (reviewer A, PR #227 round 1): in the 2.1.310 default matrix, 705 of 705
 tool-carrying bodies are judged offered, and 558 of 558 user-message blocks with a notice heading
 are read, under the final rule (one whole reminder, never the last text block of a message without
-a `tool_result`). A typed prompt that is a fake listing, a fake listing followed by text, or a fake
+a `tool_result`, never a block after a `[Request interrupted by user` marker); 328 of 328 with tool
+search off. A typed prompt that is a fake listing, a fake listing followed by text, or a fake
 disconnect notice is not read (tests built on A's captured shape).
+
+Nested memory, zero-spend capture (`claude -p`, scripted stub: three Reads, under `sub/` with a
+`CLAUDE.local.md`, `src/` matched by a path-scoped `.claude/rules/py.md`, and `deep/inner/` under two
+CLAUDE.md files):
+
+| Version, model | where the 4 files arrive |
+|---|---|
+| 2.1.310, claude-opus-5-5 | 4 blocks next to the 3 results in one user message, each one whole reminder starting `<system-reminder>\nContents of ` |
+| 2.1.302, claude-opus-5-5 | one role `system` message holding all 4 |
+| 2.1.310 and 2.1.302, claude-sonnet-4-6 | inside the 3 `tool_result` contents |
+
+The carry is bounded (unit test, one ~1,000-token CLAUDE.md per directory, fallback budget 8,000):
+carried growth after the fallback is 7,769 tokens at 10 directories and 7,891 at 40; the newest
+blocks the fallback never pages total at most 4,000 tokens.
 
 ## Step 5: subagent shapes (`spikes/m2/subagents`)
 
@@ -139,4 +159,4 @@ full routine step 9 did not run.
 | `mcp_tools_missing`, `mcp_tools_denied`, `toolcheck_error` | 0, 0, 0 | 0, 0, 0 |
 | statuses | 200, and 401 on the `HEAD /api/hello` probe | the same |
 
-Total live spend: 305,223 tokens.
+The credited attempt cost 145,080 tokens; both attempts together, 305,223.

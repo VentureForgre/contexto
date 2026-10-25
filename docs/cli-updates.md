@@ -12,7 +12,7 @@ The single list is `TESTED_VERSIONS` in `src/contexto/cliversions.py`, oldest to
 | CLI | Tested | What was tested on it |
 |---|---|---|
 | Claude Code | 2.1.302 | session-start signature (D33), context-block kinds (D32), missing-tools notices, the permission refusal of Contexto's tools in `-p` mode (D44), live acceptance on Claude Opus 5.5 (PR #221, [M2-acceptance-opus.md](research/M2-acceptance-opus.md); live run #3 ran on 2.1.301) |
-| Claude Code | 2.1.310 | steps 1 to 6 below at zero spend, and the D44 permission check ([M2-claude-code-2.1.310.md](research/M2-claude-code-2.1.310.md)); tool search is on by default, and three of its shapes are read differently since D46; a live recall check with Contexto's tools deferred (305,223 tokens), not the full live acceptance |
+| Claude Code | 2.1.310 | steps 1 to 6 below at zero spend, and the D44 permission check ([M2-claude-code-2.1.310.md](research/M2-claude-code-2.1.310.md)); tool search is on by default, and three of its shapes are read differently since D46; a live recall check with Contexto's tools deferred (credited at 145,080 tokens; 305,223 with the first attempt), not the full live acceptance |
 | Codex | 0.154.0 | Responses shapes and context sections, Codex acceptance (D30) |
 | Codex | 0.163.0 | MCP server launch and missing-tools check (v0.2.8); context sections and request shapes rechecked for D38 (Codex steps 1 to 4 below) |
 
@@ -150,7 +150,8 @@ Everything here is zero spend unless marked.
    #3 (`docs/research/M2-acceptance-run3.md`). Only for a change in step 8. When the full run is not
    approved, a short live recall check at a small cost can stand in for the question a change in how
    Contexto's tools are offered raises (2.1.310: a planted fact, paged out, asked for, through
-   deferred tools; D46). Say in the version's decision which of the two ran.
+   deferred tools; D46). The stand-in spends tokens too (305,223 for 2.1.310's two attempts) and needs
+   the owner's approval of its token cap. Say in the version's decision which of the two ran.
 
 ## Routine for a new Codex version
 
