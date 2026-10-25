@@ -1,6 +1,6 @@
 # Milestone 2: Contexto proxy (context virtual memory)
 
-Status: contract, implemented on main (released from v0.1.0; latest v0.5.7). Owner: intake.lead under D0. Date: 2026-10-16.
+Status: contract, implemented on main (released from v0.1.0; latest v0.5.8). Owner: intake.lead under D0. Date: 2026-10-16.
 Why this design: `docs/research/M0-recommendation.md`. Decisions D16 to D21.
 
 ## Outcome
@@ -918,7 +918,9 @@ lack the tools and are not judged), never `count_tokens`:
   "The user sent a new message while you were working:" and holds Claude Code's sentence ending
   "Address the message above as you continue this turn." after the prompt; such a text is read from
   the end of the last such sentence on, and not at all without one (D47). A text that does not start
-  with the opening sentence is read whole. Any other queued prompt arrives as a user text block that
+  with the opening sentence is read whole; on 2.1.302, where a round's attachments share one role
+  `system` text, that includes a one-reminder queued prompt placed after other text there (not
+  captured). Any other queued prompt arrives as a user text block that
   starts with the opening sentence, which is never read. Claude Code's other mid-turn openers
   ("Another Claude session ...", "A peer session ...") were not measured. A prompt imitating a
   notice, alone, followed by text, typed after Esc, or queued, is therefore not read; an exact copy

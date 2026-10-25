@@ -268,9 +268,8 @@ can be put down to the model alone:
   unchanged. This is the departure from default settings stated at the top. The run was retried
   once, and that is the verdict run.
 - **Product bug** (fix in progress as D44, not merged at the time of writing; later: fixed by
-  D44, PR #224). It affects
-  `contexto run claude -p` on Claude Code 2.1.302, the only Claude Code version in
-  `TESTED_VERSIONS`.
+  D44, PR #224). It affects `contexto run claude -p` on Claude Code 2.1.302, the only Claude Code
+  version in `TESTED_VERSIONS`.
   - The launcher's settings set only `ANTHROPIC_BASE_URL`, with no permission rule.
   - Without the user's own allow rule, every Contexto tool call is refused. Contexto still pages
     old turns out, so recall fails silently.

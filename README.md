@@ -35,16 +35,16 @@ What it includes:
 ## Install
 
 Contexto needs Python 3.12 or later and has no runtime dependencies. Install the wheel from the
-latest release, [v0.5.7](https://github.com/VentureForgre/contexto/releases/tag/v0.5.7). It has two
-assets: `contexto-0.5.7-py3-none-any.whl` and `contexto-0.5.7.tar.gz`. It is not on PyPI: the
+latest release, [v0.5.8](https://github.com/VentureForgre/contexto/releases/tag/v0.5.8). It has two
+assets: `contexto-0.5.8-py3-none-any.whl` and `contexto-0.5.8.tar.gz`. It is not on PyPI: the
 PyPI package named `contexto` is an unrelated project, so `pip install contexto` installs the wrong
 thing. Use the release URL or the downloaded wheel.
 
 Straight from the release URL, with no GitHub login:
 
 ```sh
-pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.7/contexto-0.5.7-py3-none-any.whl
-contexto --version                                    # contexto 0.5.7
+pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.8/contexto-0.5.8-py3-none-any.whl
+contexto --version                                    # contexto 0.5.8
 ```
 
 `pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment.
@@ -52,8 +52,8 @@ contexto --version                                    # contexto 0.5.7
 Or download it first with the GitHub CLI:
 
 ```sh
-gh release download v0.5.7 --repo VentureForgre/contexto --pattern 'contexto-0.5.7-py3-none-any.whl'
-uv tool install ./contexto-0.5.7-py3-none-any.whl     # or: pipx install ./contexto-0.5.7-py3-none-any.whl
+gh release download v0.5.8 --repo VentureForgre/contexto --pattern 'contexto-0.5.8-py3-none-any.whl'
+uv tool install ./contexto-0.5.8-py3-none-any.whl     # or: pipx install ./contexto-0.5.8-py3-none-any.whl
 ```
 
 `pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`. To
@@ -388,7 +388,7 @@ MCP process reads every page once (1.6 s at 6,000 synthetic pages). Each query w
 once, so a long query with matches costs more, and the up to 53 pages one search shows are read in
 full with no size cap. Search counts a word once per text of a turn, so a reply that discusses a key
 at length weighs as one passing mention. The full list is in
-[STATUS.md, "Known limitations (v0.5.7)"](STATUS.md#known-limitations-v057).
+[STATUS.md, "Known limitations (v0.5.8)"](STATUS.md#known-limitations-v058).
 
 ## Exit codes
 
