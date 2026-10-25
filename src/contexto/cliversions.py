@@ -40,18 +40,20 @@ from typing import Any
 
 # Claude Code 2.1.302: session-start signature, context-block kinds, and the missing-tools notices
 # (spikes/m2/scale/reminders), the permission refusal of Contexto's tools in -p mode (D44), and the
-# live acceptance run on Claude Opus 5.5 (PR #221; live run #3 ran on 2.1.301). codex-cli 0.154.0: the
+# live acceptance run on Claude Opus 5.5 (PR #221; live run #3 ran on 2.1.301). 2.1.310: the same
+# zero-spend checks (docs/cli-updates.md steps 1 to 6, D45); it turns tool search on by default, and
+# its shapes are 2.1.302's with tool search on (docs/research/M2-claude-code-2.1.310.md). codex-cli 0.154.0: the
 # Responses shapes and acceptance (D30); 0.163.0: the MCP launch and missing-tools check (v0.2.8),
 # and the same context-section openings, rechecked with zero spend for D38.
 TESTED_VERSIONS: dict[str, tuple[str, ...]] = {
-    "claude": ("2.1.302",),
+    "claude": ("2.1.302", "2.1.310"),
     "codex": ("0.154.0", "0.163.0"),
 }
 # D40: the Claude Code versions whose subagent shapes (the Agent call's launch receipt and hand-back,
 # the task-notification notices, the subagent's first prompt) were measured (spikes/m2/subagents/).
 # The engine closes a side room early on those shapes only for these versions; for any other, side
 # rooms only expire. Re-measure with that spike before adding a version.
-SUBAGENT_SHAPES_TESTED: tuple[str, ...] = ("2.1.302",)
+SUBAGENT_SHAPES_TESTED: tuple[str, ...] = ("2.1.302", "2.1.310")
 CLI_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 AT_RISK = {
     "claude": "it may misread the session start and reminders and page text it should carry",

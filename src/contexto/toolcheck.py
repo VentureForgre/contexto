@@ -8,12 +8,14 @@ conversation only (``RewriteEngine.publishes``): subagents and side requests may
 without the tools.
 
 What shows the tools are there, per dialect (measured with zero spend against a local stub, Claude
-Code 2.1.302 and codex-cli 0.163.0, temporary homes and fake keys):
+Code 2.1.302 and 2.1.310 and codex-cli 0.163.0, temporary homes and fake keys):
 
-- Claude Code (Messages API): the request names them. Normally ``tools`` holds
-  ``mcp__contexto__contexto_search`` and the other four by name; with tool search on, ``tools`` holds
-  ``ToolSearch`` and a ``defer_loading`` placeholder, and a role ``system`` message lists every
-  deferred tool by name, one per line. Without the server neither appears. When the server goes away
+- Claude Code (Messages API): the request names them. With tool search off, ``tools`` holds
+  ``mcp__contexto__contexto_search`` and the other four by name. With tool search on (2.1.302 with
+  ``ENABLE_TOOL_SEARCH``; 2.1.310 by default), ``tools`` holds ``ToolSearch`` and a ``defer_loading``
+  placeholder, and Claude Code lists every deferred tool by name, one per line: in a role ``system``
+  message on 5.x model ids, in a ``<system-reminder>`` block of ``messages[0]`` on 4.x ids, where its
+  later notices are ``<system-reminder>`` blocks too. Without the server neither appears. When the server goes away
   later (a resumed session whose server cannot start, or a live one whose server died), Claude Code
   leaves the old listing in history and adds notices: "deferred tools are no longer available" with
   the names, and "MCP servers have disconnected" with ``contexto`` (with tool search off, the tool
@@ -43,7 +45,7 @@ Refused tools (D44): the tools can be offered and still refused. Claude Code 2.1
 refuses an MCP tool that no permission rule allows, and the model gets the tool result "Claude requested
 permissions to use mcp__contexto__contexto_search, but you haven't granted it yet." (``is_error``). The
 launcher's ``--settings`` allows Contexto's tools, but a user's ``ask`` rule for one of them outranks that
-allow (measured, zero spend). So the check also reads the trailing user messages
+allow (measured, zero spend; the same on 2.1.310). So the check also reads the trailing user messages
 (those after the last assistant message) of every Messages API request, main or not, since a refusal loses
 recall in a subagent too. A result counts only when its id names a Contexto tool call of an assistant
 message in the request, so another tool's output that quotes the text does not. The first refusal of a
@@ -73,6 +75,10 @@ _LISTED_TOOL = re.compile(r"^(mcp__contexto__contexto_[a-z_]+)[ \t]*$")
 # Claude Code 2.1.302's refusal of a tool no rule allows (captured with zero spend against a local stub).
 _DENIED = re.compile(r"requested permissions to use (mcp__contexto__contexto_[a-z_]+), but you haven't granted it")
 _SERVER_LINE = re.compile(r"^contexto(?:[ \t(:]|$)")  # "contexto" or "contexto (ENOENT): ..." in a server list
+# A user message's <system-reminder> block that is a deferred-tool listing or an MCP notice (4.x model ids,
+# measured on 2.1.302 with tool search on and on 2.1.310): its first line inside the tag.
+_NOTICE_BLOCK = re.compile(r"\s*<system-reminder>\s*(?:The following deferred tools |\d+ deferred tools are available "
+                           r"again|The following MCP servers |# MCP Server Instructions[ \t]*(?:\r?\n|\Z))")
 
 
 def _named(tool: Any) -> bool:
@@ -88,12 +94,20 @@ def _texts(content: Any) -> list[str]:
 
 
 def _system_texts(request: dict[str, Any]) -> list[str]:
-    """The system prompt, then every role ``system`` message, in order. The user's own messages are not
-    read: naming a tool there says nothing."""
+    """The system prompt, then, in message order, every role ``system`` message and every
+    ``<system-reminder>`` text of a user message: Claude Code puts the deferred-tool listing and the MCP
+    notices in a role ``system`` message on 5.x model ids and in ``<system-reminder>`` blocks of user
+    messages on 4.x ids (2.1.302 with tool search on, and 2.1.310, where it is on by default). Of a user
+    message, only a block whose first line inside the tag is one of those (``_NOTICE_BLOCK``) is read:
+    the user's own text, or a CLAUDE.md quoted in a context block, naming a tool says nothing."""
     texts = _texts(request.get("system"))
     for message in request.get("messages") or []:
-        if isinstance(message, dict) and message.get("role") == "system":
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "system":
             texts += _texts(message.get("content"))
+        elif message.get("role") == "user":
+            texts += [text for text in _texts(message.get("content")) if _NOTICE_BLOCK.match(text)]
     return texts
 
 
@@ -157,9 +171,10 @@ def contexto_notices(texts: list[str]) -> tuple[bool, bool]:
 
 
 def anthropic_tools_offered(request: dict[str, Any]) -> bool | None:
-    """True when a Contexto tool is in ``tools`` by name, or listed as a deferred tool in the system
-    prompt or a role ``system`` message (tool search), and Claude Code's later notices did not take it
-    away (``contexto_notices``); False when not; None for a request with no tool list."""
+    """True when a Contexto tool is in ``tools`` by name, or listed as a deferred tool (tool search) in
+    the system prompt, a role ``system`` message, or a user message's ``<system-reminder>`` block, and
+    Claude Code's later notices did not take it away (``contexto_notices``); False when not; None for a
+    request with no tool list."""
     tools = request.get("tools")
     if not isinstance(tools, list) or not tools:
         return None

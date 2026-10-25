@@ -208,7 +208,38 @@ def test_the_environment_message_is_session_start_with_or_without_output_config(
     assert "output_config" in opus[1] and "output_config" not in sonnet[1]
     assert classify_system(opus, 1) == "session_start"
     assert classify_system(sonnet, 1) == "session_start"  # tagged, no settings fields
-    assert SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION == "2.1.302"
+    assert SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION == "2.1.310"
+
+
+# D45: a subagent's environment message with tool search on (2.1.310 by default), captured with zero
+# spend (spikes/m2/subagents); trimmed after the heading's first line.
+DEFERRED_LISTING = ("The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded "
+                    "— calling them directly will fail with InputValidationError. Use ToolSearch with query "
+                    "\"select:<name>[,<name>...]\" to load tool schemas before calling them:\nCronCreate\nCronDelete\n"
+                    "CronList\nEnterWorktree\nExitWorktree\nMonitor\nNotebookEdit\nSendMessage\nTaskStop\nWebFetch\n"
+                    "WebSearch\n")
+SUBAGENT_ENVIRONMENT = DEFERRED_LISTING + "\n# Environment\nYou have been invoked in the following environment: \n"
+
+
+def test_a_subagent_environment_message_led_by_the_deferred_tool_listing_is_session_start():
+    sub = [{"role": "user", "content": [{"type": "text", "text": "SUB-FG task"}]},
+           {"role": "system", "content": [{"type": "text", "text": SUBAGENT_ENVIRONMENT}]}]
+    assert classify_system(sub, 1) == "session_start"
+    crlf = SUBAGENT_ENVIRONMENT.replace("\n", "\r\n")
+    assert classify_system([sub[0], {"role": "system", "content": crlf}], 1) == "session_start"
+    tagged = f"<system-reminder>\n{SUBAGENT_ENVIRONMENT}</system-reminder>"
+    assert classify_system([sub[0], {"role": "system", "content": tagged}], 1) == "session_start"
+
+
+def test_a_deferred_tool_listing_without_the_environment_heading_is_not_session_start():
+    # An MCP server that connects mid-session: the listing alone, as a later role "system" message.
+    alone = [{"role": "user", "content": "hi"}, {"role": "system", "content": DEFERRED_LISTING + "mcp__probe__x\n"}]
+    assert classify_system(alone, 1) == "carried_text"
+    # The heading must follow the listing's blank line, not sit inside other text.
+    inside = DEFERRED_LISTING + "\nSome other notice.\n# Environment\n"
+    assert classify_system([alone[0], {"role": "system", "content": inside}], 1) == "carried_text"
+    no_blank = DEFERRED_LISTING + "# Environment\n"
+    assert classify_system([alone[0], {"role": "system", "content": no_blank}], 1) == "carried_text"
 
 
 def test_an_effort_change_on_a_reminder_message_is_a_settings_change_not_session_start():
@@ -302,9 +333,9 @@ def test_the_latest_effort_change_survives_an_identical_older_copy_being_paged()
 def test_context_block_kinds_are_recognised_by_their_first_line():
     kinds = [context_block_kind(rem(text)) for text in
              (countdown(3), PLAN_ENTRY, PLAN_EXIT, file_note(4), TASKS, ENVIRONMENT, CLAUDE_MD,
-              "Synthetic reminder nobody has measured")]
+              DEFERRED_LISTING, "Synthetic reminder nobody has measured")]
     assert kinds == ["token_countdown", "plan_mode", "plan_mode", "file_changed", "task_reminder",
-                     "environment", "instructions", None]
+                     "environment", "instructions", "deferred_tools", None]
 
 
 def test_later_turn_start_blocks_are_paged_and_growth_stays_under_the_budget():

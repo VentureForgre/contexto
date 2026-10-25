@@ -113,6 +113,67 @@ def test_claude_tool_search_lists_deferred_tools_in_a_system_message():
     assert anthropic_tools_offered(claude_request(["Bash", "Read"], deferred=["CronCreate", "WebFetch"])) is False
 
 
+# D45: on 4.x model ids (claude-sonnet-4-6) with tool search on, the listing and the notices are
+# <system-reminder> blocks of user messages, not role "system" messages. Captured with zero spend from
+# 2.1.310, where tool search is on by default (the same on 2.1.302 with ENABLE_TOOL_SEARCH): a fresh
+# session, a resume whose server could not start, and a resume with it back. Trimmed where marked.
+def reminder(text: str) -> dict:
+    return {"type": "text", "text": f"<system-reminder>\n{text}\n</system-reminder>"}
+
+
+LISTING_4X = ("The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded — "
+              "calling them directly will fail with InputValidationError. Use ToolSearch with query "
+              "\"select:<name>[,<name>...]\" to load tool schemas before calling them:\nCronCreate\nWebFetch\n")
+INSTRUCTIONS_4X = ("# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use "
+                   "their tools and resources:\n\n## contexto\nContexto keeps this session's older turns in a local "
+                   "store. [trimmed]")
+REMOVED_4X = ("The following deferred tools are no longer available (their MCP server disconnected). Do not search "
+              "for them — ToolSearch will return no match:\n" + "\n".join(CONTEXTO) + "\n\nThis is ambient context "
+              "[trimmed]\n\nThe following MCP servers are configured but failed to connect — their tools (typically "
+              "named mcp__<server>__*) are unavailable for this session:\ncontexto (ENOENT): \"Executable not found "
+              "in $PATH: stdio\"\n\nTreat this as a connection failure [trimmed]")
+DISCONNECTED_4X = ("The following MCP servers have disconnected. Their instructions above no longer apply:\n"
+                   "contexto\n\nThis is ambient context [trimmed]")
+AGAIN_4X = ("5 deferred tools are available again (MCP server reconnected — names announced earlier in this "
+            "conversation): mcp__contexto__* (5). Load via ToolSearch as before.")
+
+
+def claude_request_4x(deferred: list[str]) -> dict:
+    request = claude_request(["Bash", "Read", "ToolSearch"])
+    request["messages"] = [{"role": "user", "content": [
+        reminder("# Environment\n[trimmed]"), reminder(LISTING_4X + "\n".join(deferred)), reminder(INSTRUCTIONS_4X),
+        {"type": "text", "text": "turn 1"}]}]
+    return request
+
+
+def resumed_4x(request: dict, *blocks: str) -> dict:
+    request["messages"] += [{"role": "assistant", "content": [{"type": "text", "text": "OK"}]},
+                            {"role": "user", "content": [*map(reminder, blocks), {"type": "text", "text": "next"}]}]
+    return request
+
+
+def test_claude_4x_tool_search_lists_deferred_tools_in_a_context_block():
+    assert anthropic_tools_offered(claude_request_4x(CONTEXTO)) is True
+    assert anthropic_tools_offered(claude_request_4x([])) is False
+    down = resumed_4x(claude_request_4x(CONTEXTO), REMOVED_4X, DISCONNECTED_4X)
+    assert anthropic_tools_offered(down) is False
+    assert anthropic_tools_offered(resumed_4x(down, AGAIN_4X, INSTRUCTIONS_4X)) is True
+
+
+def test_claude_context_blocks_that_are_not_tool_notices_are_not_read():
+    # A CLAUDE.md that lists the tools, quoted in a context block, and the user's own text say nothing.
+    claude_md = reminder("Codebase and user instructions are shown below.\nContents of CLAUDE.md:\n"
+                         + "\n".join(CONTEXTO))
+    request = claude_request_4x([])
+    request["messages"][0]["content"].insert(1, claude_md)
+    request["messages"][0]["content"].append({"type": "text", "text": "\n".join(CONTEXTO)})
+    assert anthropic_tools_offered(request) is False
+    # The user pasting a listing without the tag is the user's text.
+    request["messages"] += [{"role": "assistant", "content": "OK"},
+                            {"role": "user", "content": "please read this:\n" + LISTING_4X + "\n".join(CONTEXTO)}]
+    assert anthropic_tools_offered(request) is False
+
+
 def test_claude_request_without_tools_is_not_judged():
     # Claude Code's side requests (title, topic, quota) carry no tool list: they say nothing about MCP.
     request = claude_request([])

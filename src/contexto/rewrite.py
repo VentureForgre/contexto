@@ -550,13 +550,21 @@ UNCLASSIFIED = "unclassified"
 # output_config to whatever system message the turn already has (a countdown, a file note, the
 # plan-mode text). On 2.1.301 the session-start message was the same size (about 8,470 characters,
 # spikes/m2/carried finding 1); its text was not kept, so that version is inferred, not measured.
-SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.302"
-SESSION_START_SIGNATURE = re.compile(r"\s*(?:<system-reminder>\s*)?# Environment[ \t]*(?:\r?\n|\Z)")
+# D45: with tool search on (2.1.310's default; 2.1.302 with ENABLE_TOOL_SEARCH), a subagent's
+# environment message starts with the deferred-tool listing ("The following deferred tools are now
+# available via ToolSearch. ...", one name per line, then a blank line) and "# Environment" follows;
+# the main conversation's still starts with "# Environment" (spikes/m2/subagents, zero spend). A
+# listing with no "# Environment" after it (an MCP server connecting mid-session) does not match.
+SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.310"
+SESSION_START_SIGNATURE = re.compile(
+    r"\s*(?:<system-reminder>\s*)?(?:The following deferred tools are now available[^\n]*\n(?:[^\n]+\n)*\r?\n\s*)?"
+    r"# Environment[ \t]*(?:\r?\n|\Z)")
 
 # Documented hook-output signatures (measured on Claude Code 2.1.301 with zero-spend stubs,
-# spikes/m2/carried/README.md findings 7 and 9): the CLI wraps a hook's additionalContext in a role
-# "system" message whose whole text starts with one of these prefixes.
-HOOK_SIGNATURES_CLAUDE_CODE_VERSION = "2.1.301"
+# spikes/m2/carried/README.md findings 7 and 9; the same prefixes on 2.1.310, live_probe.sh): the CLI
+# wraps a hook's additionalContext in a role "system" message whose whole text starts with one of
+# these prefixes.
+HOOK_SIGNATURES_CLAUDE_CODE_VERSION = "2.1.310"
 HOOK_SIGNATURES = (
     re.compile(r"UserPromptSubmit hook additional context: "),
     re.compile(r"PostToolUse:[^\s]+ hook additional context: "),
@@ -663,8 +671,10 @@ def _anthropic_classify_system(messages: list[dict], i: int) -> str:
 # the first four arrive in later turn-start messages; the rest make up messages[0] and are listed so
 # that a later copy (a date change, or a resume that puts session context in the resumed turn's
 # message, spikes/m2/carried finding 6) keeps its latest copy. The fallback keeps the latest block of
-# each kind and may page older ones; blocks of no recognised kind are pageable.
-CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.302"
+# each kind and may page older ones; blocks of no recognised kind are pageable. D45: 2.1.310 turns tool
+# search on by default, and on 4.x ids messages[0] then holds one more block, the deferred-tool listing
+# (the same on 2.1.302 with ENABLE_TOOL_SEARCH); the other kinds and their placement are unchanged.
+CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.310"
 CONTEXT_BLOCK_KINDS = (
     ("token_countdown", re.compile(r"<total_tokens>")),
     ("plan_mode", re.compile(r"Plan mode is active|## Exited Plan Mode")),
@@ -678,6 +688,7 @@ CONTEXT_BLOCK_KINDS = (
     ("instructions", re.compile(r"Codebase and user instructions are shown below")),
     ("date", re.compile(r"Today's date is")),
     ("attribution", re.compile(r"Attribution for git commits")),
+    ("deferred_tools", re.compile(r"The following deferred tools are now available")),
 )
 
 

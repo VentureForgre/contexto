@@ -1082,6 +1082,44 @@ the owner's delegation. Open decisions are listed at the end with the options an
     search and recall ran too. In an interactive 2.1.302 session, search and recall ran with no
     input. `spikes/m2/permissions/permstub.py` repeats the `-p` check (`--before` for the old
     settings). `TESTED_VERSIONS` is unchanged: 2.1.302 works with the rules.
+- **D45. Claude Code 2.1.310 is tested; Contexto reads its tool-search shapes.** Claude, 2026-10-25,
+  under D0; contract change. 2.1.310 became the installed `claude`. The D38 routine
+  (`docs/cli-updates.md`, steps 1 to 6, all zero spend) and the D44 permission check ran on it and on
+  2.1.302 side by side; the numbers are in `docs/research/M2-claude-code-2.1.310.md`.
+  - **What changed.** 2.1.310 turns tool search on by default (2.1.302 only with
+    `ENABLE_TOOL_SEARCH`): `tools` holds `ToolSearch` and a `defer_loading` placeholder, and the other
+    tools, Contexto's included, are listed by name ("The following deferred tools are now available via
+    ToolSearch. ..."). Every request shape matched 2.1.302 with tool search on. With tool search off,
+    2.1.310 matched 2.1.302 apart from one placement: on 5.x ids a nested CLAUDE.md now arrives as a
+    `<system-reminder>` block next to the Read result, not as a role `system` message, so it is paged
+    with its turn, as it already was on 4.x ids.
+  - **Two shapes Contexto misread** (both also on 2.1.302 with tool search on). (1) On 4.x ids the
+    listing and the MCP notices are `<system-reminder>` blocks of user messages, and the missing-tools
+    check read only system text: `contexto run claude -p --model claude-sonnet-4-6` on 2.1.310 logged
+    `mcp_tools_missing` and printed the warning with the tools offered and working. (2) A subagent's
+    environment message starts with the listing and `# Environment` follows it, so it classified as a
+    settings change (it carries `output_config`), pageable by the fallback once superseded, not as
+    session-start: 14 of 14 subagent requests captured. The main conversation's starts with
+    `# Environment` on every id.
+  - **Rule.** The check also reads a user message's `<system-reminder>` block whose first line is a
+    deferred-tool or MCP-server notice or `# MCP Server Instructions`; other user text stays unread.
+    The session-start signature accepts the listing paragraph before `# Environment`; the listing
+    alone (an MCP server connecting mid-session) does not match. `CONTEXT_BLOCK_KINDS` gains
+    `deferred_tools`, the extra block 2.1.310 puts in `messages[0]` on 4.x ids, so a later copy keeps
+    its latest one. Step 2 re-run with the new code gave the same carried and paged figures in all 13
+    runs.
+  - **Versions.** 2.1.310 joins `TESTED_VERSIONS` and `SUBAGENT_SHAPES_TESTED`; the session-start,
+    context-block, and hook measured-on constants name it. The subagent spike's 30-second wait now
+    runs through perl, since 2.1.310 refuses a standalone `sleep 30` and the agent finished at once.
+  - **D44 detection, amended** (PR #224's review). A refusal counts when its `tool_use_id` is a string
+    naming a Contexto call of any assistant message in the request, and every user message after the
+    last assistant message is read, so results split across consecutive user messages in any order
+    count. A non-string id (a list) raised `TypeError`, logged as `toolcheck_error`; it now does not
+    match.
+  - **Not done.** No live run: the routine's step 9 costs millions of tokens (live run #3's H1 and
+    baseline), over this task's 500,000 cap, and its scripted task does not ask for a subagent, so it
+    would not exercise shape (2). Whether a nested CLAUDE.md read in a turn should stay carried after that turn
+    is paged is left open; Contexto treats it as on 4.x ids since D32.
 
 ## Open decisions
 
