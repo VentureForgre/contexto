@@ -88,8 +88,9 @@ The session id is printed on stderr at start. The launcher:
    starts Contexto's MCP server (`python -P -m contexto mcp --session <id>` with the same Python, and
    `CONTEXTO_HOME`, plus `CONTEXTO_SEARCH_CACHE_MB` when set, in its environment; `-P` keeps your
    project directory off the import path);
-4. runs `claude --settings <file> --mcp-config <file> [your args]` in your terminal and returns its
-   exit code.
+4. runs `claude --settings=<file> --mcp-config=<file> [your args]` in your terminal and returns its
+   exit code. Each flag and its file are one argument, so a prompt right after `claude`
+   (`contexto run claude "fix the tests"`) stays a prompt.
 
 Your own Claude Code settings, hooks, and MCP servers still load, and nothing in your Claude
 configuration is edited. Ctrl+C reaches Claude Code as usual; SIGTERM and SIGHUP are forwarded to it.
@@ -284,7 +285,9 @@ the first Claude Code settings file that sets it (in a git worktree, the main ch
 
 **`--settings` is refused (exit 2).** Claude Code accepts one `--settings`, and the launcher uses it to
 route requests through the proxy. Put those settings in your Claude settings files instead. Your own
-`--mcp-config` is allowed and loads alongside Contexto's.
+`--mcp-config` is allowed and loads alongside Contexto's. It takes several files, so Claude Code reads
+a prompt right after `--mcp-config <file>` as another config file ("MCP config file not found"). Write
+`--mcp-config=<file>`, or put the prompt before it or after another flag.
 
 **"warning: ... running without Contexto's tools".** The model has no `contexto_search` or
 `contexto_recall`, so it cannot get paged-out turns back. Neither Claude Code nor Codex reports an MCP

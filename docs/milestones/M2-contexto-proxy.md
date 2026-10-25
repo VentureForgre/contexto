@@ -47,9 +47,11 @@ same design after Claude Code works.
 contexto run claude ...      (launcher)
   |-- starts proxy on 127.0.0.1:<free port> for session S, upstream = the URL Claude would use
   |-- starts nothing else; Claude Code spawns the MCP server itself from --mcp-config
-  `-- execs: claude --settings <tmp file: env.ANTHROPIC_BASE_URL=proxy,
+  `-- execs: claude --settings=<tmp file: env.ANTHROPIC_BASE_URL=proxy,
                                          permissions.allow=Contexto's 5 tools (D44)> \
-                    --mcp-config <tmp file: contexto mcp --session S> [user args]
+                    --mcp-config=<tmp file: contexto mcp --session S> [user args]
+             (one argument per flag: --mcp-config takes several files, so in the two-argument form
+              Claude Code would read a prompt right after `claude` as a config file)
 
 proxy (Anthropic Messages API)        mcp server (stdio, JSON-RPC)
   rewrite engine  ---- store ----       contexto_recall, contexto_pin,
