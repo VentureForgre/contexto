@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from contexto.store import SessionStore
+from contexto.store import PageConflictError, SessionStore
 from contexto.store.pages import render_index
 
 FILLER = "\n".join(f"step {i}: ran the build and checked the output, nothing unusual" for i in range(40))
@@ -113,3 +113,32 @@ def test_page_ids_after_a_restart_and_a_quarantine(tmp_path):
     store.quarantine_page(ids[1])
     assert other.page_ids() == [ids[3], ids[2], ids[0]]
     assert sorted(os.listdir(store.pages_dir)) == sorted(f"{p}.json" for p in (ids[0], ids[2], ids[3]))
+
+
+def deep_record(record: dict, depth: int = 20_000) -> str:
+    """The page record with one message nested ``depth`` levels deeper: past MAX_JSON_DEPTH, and past
+    what json.loads parses on 3.12 (about 10,000 levels)."""
+    return json.dumps({**record, "messages": []})[:-1] + ', "extra": ' + "[" * depth + "]" * depth + "}"
+
+
+def test_a_page_file_nested_past_the_limit_is_logged_unreadable_and_skipped(tmp_path):
+    store = SessionStore(tmp_path, "s1")
+    a, b = store.page_out([page("needle one"), page("needle two")], 1)
+    path = store.pages_dir / f"{b}.json"
+    path.write_text(deep_record(json.loads(path.read_text())))  # not something Contexto writes
+    fresh = SessionStore(tmp_path, "s1")
+    assert fresh.search("needle") == [a]
+    text = fresh.index_text(2_000)
+    assert a in text and b not in text
+    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+    assert {e["path"] for e in log if e["event"] == "page_unreadable"} == {f"{b}.json"}
+
+
+def test_repaging_onto_a_page_file_nested_past_the_limit_is_a_page_conflict(tmp_path):
+    store = SessionStore(tmp_path, "s1")
+    [a] = store.page_out([page("needle")], 1)
+    path = store.pages_dir / f"{a}.json"
+    path.write_text(deep_record(json.loads(path.read_text())))
+    with pytest.raises(PageConflictError) as caught:
+        SessionStore(tmp_path, "s1").page_out([page("needle")], 1)
+    assert caught.value.page_id == a and "cannot be read" in str(caught.value)

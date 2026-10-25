@@ -143,6 +143,27 @@ def test_recall_errors_exit_1(home, capsys):
     assert run(capsys, "recall", pid, "--session", "nope")[0] == 1
 
 
+UNREADABLE_PAGES = [
+    '{"extra":' + "[" * 20_000 + "]" * 20_000 + "}",  # nested past MAX_JSON_DEPTH
+    "{not json",
+    '{"stub": {}, "messages": 5}',  # valid JSON, not a page record
+    '{"id": "PID", "turn": 1, "stub": {}, "messages": 5}',  # a page's fields, but messages is no list
+    "[1, 2]",
+]
+
+
+@pytest.mark.parametrize("content", UNREADABLE_PAGES)
+def test_recall_of_an_unreadable_page_exits_1_with_a_clean_error(home, capsys, content):
+    """Rule 18: a page file that cannot be read is logged page_unreadable; the CLI says so."""
+    store, pid = make(home, "s1", 1_000_000)
+    (store.pages_dir / f"{pid}.json").write_text(content.replace("PID", pid))
+    code, out, err = run(capsys, "recall", pid)
+    assert code == 1 and out == "" and "Traceback" not in err
+    assert f"page {pid} cannot be read in session s1: its stored file is damaged (logged page_unreadable)" in err
+    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+    assert [e["path"] for e in log if e["event"] == "page_unreadable"] == [f"{pid}.json"]
+
+
 def test_session_selection_order(home, capsys, monkeypatch):
     make(home, "old", 1_000_000)
     _, new_pid = make(home, "new", 2_000_000)

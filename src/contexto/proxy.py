@@ -88,6 +88,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, loads_bounded
+
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
     from compression import zstd as _zstd
 except ImportError:  # pragma: no cover - depends on the interpreter
@@ -376,10 +378,14 @@ class _SideDecoder:
             return b""
 
 
-def _numeric(value: Any) -> Any:
-    """Numbers and nested dicts of numbers only (Responses usage keeps input_tokens_details)."""
+def _numeric(value: Any, depth: int = 0) -> Any:
+    """Numbers and nested dicts of numbers only (Responses usage keeps input_tokens_details). A dict
+    nested deeper than ``MAX_SUMMARY_DEPTH`` is dropped, so a deeply nested upstream ``usage`` cannot
+    raise RecursionError out of the relay loop."""
     if isinstance(value, dict):
-        return {str(k): v for k, v in ((k, _numeric(v)) for k, v in value.items()) if v is not None}
+        if depth >= MAX_SUMMARY_DEPTH:
+            return None
+        return {str(k): v for k, v in ((k, _numeric(v, depth + 1)) for k, v in value.items()) if v is not None}
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
@@ -432,8 +438,8 @@ class UsageReader:
             self.feed_event(self._events.flush())
         elif self._buffer and not self._overflow:
             try:
-                body = json.loads(bytes(self._buffer))
-            except (ValueError, RecursionError):  # a deeply nested body is unreadable, not fatal
+                body = loads_bounded(bytes(self._buffer))
+            except ValueError:  # invalid, or nested deeper than MAX_JSON_DEPTH: unreadable, not fatal
                 body = None
             if isinstance(body, dict):
                 if self.api == "responses":
@@ -452,8 +458,8 @@ class UsageReader:
         directly, so one splitter serves both the hold and this reader."""
         data = sse_data(raw)
         try:
-            payload = json.loads(data) if data else None
-        except (ValueError, RecursionError):  # a deeply nested body is unreadable, not fatal
+            payload = loads_bounded(data) if data else None
+        except ValueError:  # invalid, or nested deeper than MAX_JSON_DEPTH: unreadable, not fatal
             return
         if not isinstance(payload, dict):
             return
@@ -687,8 +693,8 @@ def sse_is_comment(raw: bytes) -> bool:
 def _sse_payload(raw: bytes) -> dict[str, Any]:
     data = sse_data(raw)
     try:
-        payload = json.loads(data) if data else {}
-    except (ValueError, RecursionError):  # a deeply nested body is unreadable, not fatal
+        payload = loads_bounded(data) if data else {}
+    except ValueError:  # invalid, or nested deeper than MAX_JSON_DEPTH: unreadable, not fatal
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -1050,14 +1056,21 @@ class _Handler(BaseHTTPRequestHandler):
                    endpoint: str) -> tuple[bytes, Headers, dict[str, Any] | None]:
         owner = self.owner
         try:
-            request = json.loads(body)
-        except (ValueError, RecursionError):
+            request = loads_bounded(body)
+        except JSONTooDeepError:
+            # Rule 18: past MAX_JSON_DEPTH not every Python can serialize or walk the request, so it
+            # is forwarded untransformed (decoded, if it arrived compressed: rule 15) and logged.
+            entry["transform_skipped"] = f"request body nests deeper than {MAX_JSON_DEPTH} levels"
+            owner.log({"event": "request_too_deep", "level": "warning", "endpoint": endpoint,
+                       "limit": MAX_JSON_DEPTH, "epoch": owner.last_epoch})
+            return body, headers, None
+        except ValueError:
             entry["transform_skipped"] = "request body is not JSON"
             return body, headers, None
         if not isinstance(request, dict):
             entry["transform_skipped"] = "request body is not an object"
             return body, headers, None
-        entry["model"] = request.get("model")
+        entry["model"] = _scalar_summary(request.get("model"))  # a client value: never logged raw
         entry["stream"] = bool(request.get("stream"))
         entry["original_message_count"] = len(request.get("messages") or [])
         preserves = getattr(owner.transform, "preserves_input", False) is True

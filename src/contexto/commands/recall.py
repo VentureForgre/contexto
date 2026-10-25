@@ -7,7 +7,7 @@ import sys
 
 from contexto.commands._common import EXIT_OK, add_session_option, fail, say_session
 from contexto.paths import contexto_home
-from contexto.store import SessionNotFoundError, SessionStore
+from contexto.store import PageUnreadableError, SessionNotFoundError, SessionStore
 from contexto.store.render import RECALL_LIMIT, recall_chunk, recall_limit
 from contexto.store.sessions import select_session
 
@@ -33,7 +33,10 @@ def run(args: argparse.Namespace) -> int:
         return fail(str(e))
     say_session(session_id, how)
     store = SessionStore.open_existing(home, session_id)
-    page = store.get_page(args.page_id)
+    try:
+        page = store.get_page(args.page_id)
+    except PageUnreadableError as e:
+        return fail(f"{e} in session {session_id}: its stored file is damaged (logged page_unreadable)")
     if page is None:
         return fail(f"no page {args.page_id!r} in session {session_id}")
     limit, note = recall_limit(*store.window())

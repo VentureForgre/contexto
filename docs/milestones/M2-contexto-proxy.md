@@ -447,6 +447,37 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     30,000-token head) now goes over the bound inside its tool loop where the stuck session's
     minimal window had kept it under; the largest later read kept under the bound is never below
     that of a session with no outlier at the same turn.
+18. **Nesting depth** (D45). Contexto reads JSON that comes from outside it through one bounded
+    reader (`contexto.canonical.loads_bounded`): request and response bodies, SSE events, MCP
+    lines, the tool output the index lists keys from, Codex call arguments, and page files. A
+    document that nests objects and arrays more than `MAX_JSON_DEPTH` = 512 levels (the outermost
+    is level 1) is unreadable, on every Python version, and is handled like invalid JSON:
+    - A request body that deep is forwarded untransformed (decoded, if it arrived compressed:
+      rule 15), with `transform_skipped` on its request entry and one `request_too_deep` event
+      (warning level, with the endpoint and the limit). It is not a transform failure under rule
+      14, but it fails acceptance 1: the Messages API refuses such a request, and the Responses
+      API's limit is unmeasured.
+    - A response body or SSE event that deep is relayed unchanged; its usage, end fields and call
+      ids are not read.
+    - An MCP line that deep gets a JSON-RPC parse error with `id: null`, and the server keeps
+      serving. A reply that cannot be serialized becomes an internal error with `id: null`.
+    - Tool output or Codex call arguments that deep are indexed and rendered as plain text. A page
+      file that deep, or one that is not JSON or not a page record, is logged `page_unreadable`:
+      search and the index skip it, `contexto_recall` and a `contexto_pin` that cites it return a
+      tool error, and `contexto recall` prints an error and exits 1. Paging the same turn onto it
+      again is a `page_conflict`.
+    Why: from Python 3.14, `json.loads` parses about 116,000 levels in a handler thread, but
+    `json.dumps` writes only about 61,500 levels of objects and 104,600 of arrays; on 3.12 the two
+    limits are near 10,000, a few levels apart. A recursive Python walk stops near 1,000. A value
+    read within 512 levels can be serialized, hashed and walked on every supported Python; a test
+    checks this on the running interpreter. Limitation: the Messages API refuses a request body
+    nested more than 127 levels, on `/v1/messages` and `count_tokens` alike, with HTTP 400
+    `invalid_request_error` ("The request body nests arrays and objects more than 127 levels deep,
+    the maximum this API accepts."; measured 2026-10-25 through the owner's proxy,
+    `spikes/m2/deepjson/live_check.py`). So while a message that deep is in what is sent upstream,
+    every request is refused, and Contexto does not remove it. Past 512 levels Contexto never
+    transforms the request, so once such a message is in the CLI's history the session cannot
+    continue, with or without Contexto. The Responses API's limit was not measured.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens (D31); `headroom` 1.25 times the
 largest per-turn growth, decaying and capped per rule 17, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
@@ -980,8 +1011,7 @@ a no-replayed-thinking baseline.
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
    `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`,
    `epoch_record_stale`, `mcp_tools_missing`, `mcp_tools_denied` (D44), `toolcheck_error`,
-   `side_room_close_failed` (D40), or
-   `unclassified_system_message`.
+   `side_room_close_failed` (D40), `request_too_deep` (D45), or `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the
