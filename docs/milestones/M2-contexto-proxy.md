@@ -119,9 +119,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   it). A file such a block imports with `@path` is carried with it (D47): a block of the same form
   after it in the same message, whose `Contents of <path>:` names a file that an earlier carried
   block of the message imports (relative paths resolve against the importing file's directory).
-  A message holding Claude Code's synthetic result `[Tool result missing due to internal error]`
-  carries nothing (D47: a prompt queued during a tool run, then Esc and Enter, can land there with
-  no marker). No other reminder next to a tool result is carried. And the
+  A message holding Claude Code's synthetic result (`is_error` true, text exactly `[Tool result
+  missing due to internal error]`) carries nothing (D47: a prompt queued during a tool run, then Esc
+  and Enter, can land there with no marker). No other reminder next to a tool result is carried. And the
   `role: "system"` messages that the classification below marks as carried. All carried content is
   forwarded in the CLI's current form, never restored from a stored copy.
 - **Classification of `role: "system"` messages**, deterministic and in this order (amended by
@@ -913,10 +913,14 @@ lack the tools and are not judged), never `count_tokens`:
   `tool_result` (the typed prompt's place; a plain-string message is not read), nor after a
   `[Request interrupted by user` block (a prompt typed after Esc lands there, in the tool-result
   message), nor in a message holding the synthetic `[Tool result missing due to internal error]`
-  result (D47). A role `system` text is read without the queued prompts in it: on 5.x ids a prompt
-  typed during a tool run arrives there, from "The user sent a new message while you were working:"
-  to Claude Code's sentence ending "Address the message above as you continue this turn." (D47; the
-  last such sentence ends it, and with none the rest of the text is dropped). A prompt imitating a
+  result (D47). A role `system` text is read without the queued prompt in it: on 5.x ids a prompt
+  typed during a tool run that is one whole reminder arrives as a role `system` text that starts with
+  "The user sent a new message while you were working:" and holds Claude Code's sentence ending
+  "Address the message above as you continue this turn." after the prompt; such a text is read from
+  the end of the last such sentence on, and not at all without one (D47). A text that does not start
+  with the opening sentence is read whole. Any other queued prompt arrives as a user text block that
+  starts with the opening sentence, which is never read. Claude Code's other mid-turn openers
+  ("Another Claude session ...", "A peer session ...") were not measured. A prompt imitating a
   notice, alone, followed by text, typed after Esc, or queued, is therefore not read; an exact copy
   typed as an earlier block of a several-block prompt would be, which Claude Code does not send. The check reads the system prompt and then those messages and
   blocks, in order, because Claude Code never edits history: an old listing stays when the server

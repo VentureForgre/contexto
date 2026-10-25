@@ -854,8 +854,9 @@ def _imports(path: str, text: str) -> set[str]:
 
 
 def _result_missing(block: Any) -> bool:
-    """Claude Code's synthetic result for a tool run it lost (D47)."""
-    if not isinstance(block, dict) or block.get("type") != "tool_result":
+    """Claude Code's synthetic result for a tool run it lost (D47): ``is_error`` true and the marker as its
+    whole text, as every captured one is, so a tool's own output that prints the marker does not count."""
+    if not isinstance(block, dict) or block.get("type") != "tool_result" or block.get("is_error") is not True:
         return False
     content = block.get("content")
     if isinstance(content, str):
@@ -864,7 +865,7 @@ def _result_missing(block: Any) -> bool:
         texts = [b.get("text") for b in content if isinstance(b, dict)]
     else:
         texts = []
-    return any(isinstance(t, str) and t.strip().startswith(TOOL_RESULT_MISSING) for t in texts)
+    return any(isinstance(t, str) and t.strip() == TOOL_RESULT_MISSING for t in texts)
 
 
 def _carried_at(message: dict, turn_start: bool) -> set[int]:

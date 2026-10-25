@@ -1190,9 +1190,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     count. A non-string id (a list) raised `TypeError`, logged as `toolcheck_error`; it now does not
     match. A request whose trailing messages hold no failed result returns before the history is
     scanned.
-  - Amended by D47: the "Still readable" case above is no longer the only one left (a queued prompt
-    on 5.x ids was read too), imported memory files are carried, and the cap counts each block as
-    its page.
+  - Amended by D47, which closes cases D46 missed and adds one rule. Added: a tool-result message with
+    Claude Code's synthetic missing result carries nothing and is not read. Closed: a queued prompt on
+    5.x ids, which the missing-tools check still read; files nested memory imports, which were paged
+    with their turn; and the cap, which now counts each block as its page.
 - **D47. Nested-memory follow-ups to D46.** Claude, 2026-10-25, under D0; contract change. Reviewer
   A's round 3 findings on PR #227, checked at zero spend (loopback stub, temp config dirs, fake key)
   on 2.1.302 and 2.1.310. Every rule below was run over 13,097 captured request bodies (the 19 kept
@@ -1206,19 +1207,25 @@ the owner's delegation. Open decisions are listed at the end with the options an
     rule loses genuine blocks: a Read of a missing file attaches its directory's CLAUDE.md next to the
     error result (2.1.310, claude-opus-5-5, zero-spend capture). Rule: a tool-result message
     with that synthetic result carries nothing, and the missing-tools check reads none of its text
-    blocks. Only the 2 imitations hold that result in the 13,097 bodies. Not measured: a round with a
-    completed Read whose nested memory sat next to another call's synthetic result; that block would
-    page with its turn.
-  - **Queued prompts on 5.x ids.** A prompt typed during a tool run arrives as a role `system` text
-    "The user sent a new message while you were working:\n<prompt>\n\nThis is how Claude Code
-    surfaces messages ... Address the message above as you continue this turn." with other reminders
-    after it (2.1.302 and 2.1.310, claude-opus-5-5). The check read it whole: a queued fake listing
-    gave offered True with no server, a fake disconnect a false warning (4 of 4 runs, also on main
-    before PR #227). Rule: a role `system` text is read without the span from the first opening sentence
-    to the end of the last closing one; with no closing sentence after the opener, the rest is
-    dropped. Text before and after the span is read. The rewrite carries such a message as text,
-    pageable by the fallback, as before. A one-line queued prompt on 2.1.310 also arrived as a user
-    text block with the same opening sentence next to the result; it is neither read nor carried.
+    blocks. A result counts only with `is_error` true and the marker as its whole text, as every
+    captured one has: a Bash `echo` of the marker has `is_error` false and must not stop a Read's
+    nested memory in the same round from being carried (reviewer A, PR #230). Only the 2 imitations
+    hold that result in the 13,097 bodies. In reviewer A's 11 interrupted parallel rounds (a Read and
+    a Bash) per binary, Claude Code never sent the Read's nested memory, so a genuine block next to a
+    synthetic result was not seen.
+  - **Queued prompts on 5.x ids.** A prompt typed during a tool run that is one whole
+    `<system-reminder>` block arrives as a role `system` text "The user sent a new message while you
+    were working:\n<prompt>\n\nThis is how Claude Code surfaces messages ... Address the message
+    above as you continue this turn." with other reminders after it (2.1.302 and 2.1.310,
+    claude-opus-5-5). The check read it whole: a queued fake listing gave offered True with no server,
+    a fake disconnect a false warning (4 of 4 runs, also on main before PR #227). Any other queued
+    prompt (plain text, a reminder followed by text, a one-line mention, the first of two queued
+    prompts) arrives as a user text block next to the result, starting with the opening sentence; it
+    is neither read nor carried (reviewer A, PR #230). Rule: a role `system` text that starts with the
+    opening sentence is read from the end of the last closing sentence on; with no closing sentence,
+    not at all. A text that only quotes the opening sentence later (a nested CLAUDE.md in 2.1.302's
+    role `system` text) is read whole. The rewrite carries such a message as text, pageable by the
+    fallback, as before.
   - **Imported memory.** A file a nested CLAUDE.md imports with `@path` arrives on 2.1.310 with 5.x ids
     as its own whole reminder, `Contents of <path>:`, after the importer in the same message, depth
     first; on 2.1.302 it was in the carried role `system` message. Captured forms: `@docs/x.md`,
@@ -1242,7 +1249,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     bash/x.txt`) and a Write attach that directory's CLAUDE.md next to the result too; both are carried.
     A failed Edit attached nothing.
   - **Still readable by the missing-tools check:** an exact copy of a notice typed as an earlier block of
-    a several-block prompt (D46), and a queued prompt if Claude Code changes its two sentences.
+    a several-block prompt (D46); a queued prompt if Claude Code changes its two sentences; and a
+    message under Claude Code's other mid-turn openers ("Another Claude session sent a message while
+    you were working:", "A peer session sent a message while you were working:"), which were not
+    measured and are not skipped.
 
 ## Open decisions
 

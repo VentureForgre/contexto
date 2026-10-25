@@ -249,9 +249,14 @@ def test_nothing_next_to_claude_codes_synthetic_missing_result_is_read():
     named = claude_request_4x([])
     named["tools"] += [tool(n) for n in CONTEXTO]
     assert anthropic_tools_offered(bash_round(named, missing, reminder(DISCONNECTED_4X), is_error=True)) is True
-    # Another failed result does not hide a genuine notice next to it.
+    # Another failed result does not hide a genuine notice next to it, nor does a tool's own output that prints
+    # the marker (reviewer A's Bash echo, PR #230: is_error false), nor an error whose text only starts with it.
     failed = bash_round(copy.deepcopy(named), "Exit code 1", reminder(DISCONNECTED_4X), is_error=True)
     assert anthropic_tools_offered(failed) is False
+    echoed = bash_round(copy.deepcopy(named), missing, reminder(DISCONNECTED_4X))
+    assert anthropic_tools_offered(echoed) is False
+    longer = bash_round(copy.deepcopy(named), missing + "\nmore", reminder(DISCONNECTED_4X), is_error=True)
+    assert anthropic_tools_offered(longer) is False
 
 
 QUEUED = ("The user sent a new message while you were working:\n{}\n\nThis is how Claude Code surfaces messages "
@@ -277,10 +282,17 @@ def test_a_prompt_queued_during_a_tool_run_is_not_read():
     # Quoting Claude Code's closing sentence does not end the queued text early.
     escape = QUEUED.format("x") + "\n" + FAKE_LISTING
     assert anthropic_tools_offered(queued(claude_request(BUILTIN, deferred=[]), escape)) is False
-    # Claude Code's own text before or after the queued prompt is still read.
+    # Claude Code's own text after the queued prompt is still read.
     down = "The following MCP servers have disconnected. Their tools are no longer available:\ncontexto\n\n"
-    assert anthropic_tools_offered(queued(claude_request(BUILTIN + CONTEXTO), "hi", before=down)) is False
     assert anthropic_tools_offered(queued(claude_request(BUILTIN + CONTEXTO), "hi", after="\n\n" + down)) is False
+    # Only a text that starts with the opening sentence is a queued prompt. On 2.1.302 a round's attachments are
+    # one role "system" text: a nested CLAUDE.md that quotes the sentence must not hide the notices after it
+    # (reviewer A, PR #230).
+    quoting = claude_request(BUILTIN + CONTEXTO)
+    bash_round(quoting, "ok")
+    quoting["messages"].append({"role": "system", "content": "Contents of /p/q/CLAUDE.md:\n\nQuote: The user sent a "
+                                "new message while you were working:\n\n\n" + down + "<total_tokens>1</total_tokens>"})
+    assert anthropic_tools_offered(quoting) is False
     # With no closing sentence, everything after the opening one is the user's.
     cut = claude_request(BUILTIN, deferred=[])
     bash_round(cut, "ok")

@@ -17,7 +17,7 @@ from contexto import cli
 from contexto.store import LIVE_LOCK, SessionStore
 from contexto.store import prune as prune_mod
 from contexto.store.prune import parse_duration
-from contexto.store.sessions import disk_usage
+from contexto.store.sessions import disk_usage, session_info
 
 DAY = 86400
 
@@ -723,3 +723,11 @@ def test_subfolder_becoming_a_symlink_mid_delete_reads_clearly(home, tmp_path, m
         prune_mod.remove_session(home, "s1", now=time.time())
     assert victim_intact(outside)
     assert (path / "pages").is_symlink()
+
+
+def test_a_directory_named_like_a_page_file_is_not_counted_as_a_page(home):
+    # Reviewer A, PR #230: the page catalog skips such a directory, so the session list does too.
+    path = make(home, "s1", 0)
+    assert session_info(home, "s1").pages == 1
+    (path / "pages" / "pg_00000000000000aa.json").mkdir()
+    assert session_info(home, "s1").pages == 1

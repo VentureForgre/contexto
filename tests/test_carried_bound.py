@@ -844,6 +844,21 @@ def test_nothing_next_to_claude_codes_synthetic_missing_result_is_carried():
     assert carried_content(msgs, k)[0] == []
 
 
+@pytest.mark.parametrize("result", [
+    {"content": "[Tool result missing due to internal error]", "is_error": False},  # a Bash echo of the marker
+    {"content": "[Tool result missing due to internal error]\n"},
+    {"content": "[Tool result missing due to internal error] and more", "is_error": True},
+])
+def test_a_result_that_only_looks_like_the_synthetic_one_does_not_stop_the_carry(result):
+    # Reviewer A, PR #230: one round with a Read under plain/ and a Bash that echoes the marker; the Bash result
+    # has is_error false, and plain/CLAUDE.md follows in exact form. Every captured synthetic result has
+    # is_error true and the marker as its whole text.
+    block = capture_block("/p/w/plain/CLAUDE.md", "# plain rules", last=True)
+    msgs = read_turn_with(1, [{"type": "tool_result", "tool_use_id": "toolu_e", **result}, block])
+    msgs += plain_turn(2) + plain_turn(3)
+    assert carried_content(msgs, turn_starts(msgs)[2])[0] == [block]
+
+
 def test_nested_memory_next_to_a_failed_read_is_still_carried():
     # Captured on 2.1.310, claude-opus-5-5: a Read of a missing file under miss/ attaches miss/CLAUDE.md next
     # to the error result, so an error result alone does not mark a typed prompt (reviewer A's suggested rule).
