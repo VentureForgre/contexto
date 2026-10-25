@@ -45,7 +45,7 @@ Measured on 2026-10-24 (claude-haiku-5-5 model id, nonessential traffic off):
 Not captured: the tool result of a foreground subagent interrupted by Esc, since every interactive
 launch ran in the background.
 
-Measured again on 2026-10-25 with 2.1.310 (D45, `docs/research/M2-claude-code-2.1.310.md`): the same shapes. With
+Measured again on 2026-10-25 with 2.1.310 (D46, `docs/research/M2-claude-code-2.1.310.md`): the same shapes. With
 tool search on, its default, a subagent's environment message starts with the deferred-tool listing
 and `# Environment` follows. 2.1.310 refuses a standalone `sleep 30`, so `esc_scenario.py` waits
 through perl.

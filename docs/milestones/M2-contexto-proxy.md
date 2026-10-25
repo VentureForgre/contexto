@@ -120,7 +120,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      the tag on claude-sonnet-5 and claude-fable-5. Settings fields do not decide it: an
      `--effort` change attaches `output_config` to whatever system message that turn already has.
      Position is not used, so resumes of hand-written session files classify correctly. Carried,
-     never paged. D45: with tool search on (Claude Code 2.1.310's default), a subagent's
+     never paged. D46: with tool search on (Claude Code 2.1.310's default), a subagent's
      environment message starts with the deferred-tool listing ("The following deferred tools are
      now available via ToolSearch. ...", one name per line, then a blank line), and `# Environment`
      follows it; that message is session-start too. The listing alone (an MCP server connecting
@@ -157,7 +157,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   signatures: for text messages, output style and plan mode; for context blocks, the first line
   inside the tag (`CONTEXT_BLOCK_KINDS` in `rewrite.py`, measured on 2.1.302 with 4.x ids: token
   countdown, plan mode entry and exit as one kind, file changed on disk, task-tools reminder, and
-  the kinds that make up `messages[0]`, with the deferred-tool listing that 2.1.310 adds there, D45). Superseded items of a recognisable kind are paged first,
+  the kinds that make up `messages[0]`, with the deferred-tool listing that 2.1.310 adds there, D46). Superseded items of a recognisable kind are paged first,
   then unrecognised ones, oldest first by position. Each paged item is its own immutable page (a
   context block is stored as a user message holding that block as sent), listed in the index with
   its first line inside the tag (marked `[earlier system message]` or `[earlier reminder]`, see Store) and recallable.
@@ -842,7 +842,7 @@ lack the tools and are not judged), never `count_tokens`:
 - Messages API: present when `tools` names an `mcp__contexto__` tool, or, with tool search, the
   system prompt or a role `system` message lists one by name on its own line (Claude Code 2.1.302),
   and Claude Code's later notices have not taken it away. On 4.x model ids the listing and the
-  notices are `<system-reminder>` blocks of user messages instead (D45; measured on 2.1.302 with
+  notices are `<system-reminder>` blocks of user messages instead (D46; measured on 2.1.302 with
   tool search on and on 2.1.310, where it is the default), so a user message's block whose first
   line inside the tag is a deferred-tool or MCP-server notice, or `# MCP Server Instructions`, is
   read too; no other user text is. The check reads the system prompt and then those messages and

@@ -12,7 +12,7 @@ The single list is `TESTED_VERSIONS` in `src/contexto/cliversions.py`, oldest to
 | CLI | Tested | What was tested on it |
 |---|---|---|
 | Claude Code | 2.1.302 | session-start signature (D33), context-block kinds (D32), missing-tools notices, the permission refusal of Contexto's tools in `-p` mode (D44), live acceptance on Claude Opus 5.5 (PR #221, [M2-acceptance-opus.md](research/M2-acceptance-opus.md); live run #3 ran on 2.1.301) |
-| Claude Code | 2.1.310 | steps 1 to 6 below at zero spend, and the D44 permission check ([M2-claude-code-2.1.310.md](research/M2-claude-code-2.1.310.md)); tool search is on by default, and two of its shapes are read differently since D45; no live run |
+| Claude Code | 2.1.310 | steps 1 to 6 below at zero spend, and the D44 permission check ([M2-claude-code-2.1.310.md](research/M2-claude-code-2.1.310.md)); tool search is on by default, and two of its shapes are read differently since D46; no live run |
 | Codex | 0.154.0 | Responses shapes and context sections, Codex acceptance (D30) |
 | Codex | 0.163.0 | MCP server launch and missing-tools check (v0.2.8); context sections and request shapes rechecked for D38 (Codex steps 1 to 4 below) |
 
@@ -123,7 +123,7 @@ Everything here is zero spend unless marked.
    the spike's README: the subagent's first prompt, the launch receipt and the hand-back, the
    `<task-notification>` notices in a `system` message and in a `<system-reminder>` user message, and
    a resume's `resumedAgentId`, new turn start, and `SendMessage`-named notice. Check also that the
-   subagent's environment message is still `session_start` (D45: with tool search on it starts with
+   subagent's environment message is still `session_start` (D46: with tool search on it starts with
    the deferred-tool listing). Run the scenarios one at a time: `run.sh` and `drive.py` pick a random
    port from a small range, and two runs at once can reach each other's stub. Append the version to
    `SUBAGENT_SHAPES_TESTED` only if they are unchanged; otherwise update the shapes in

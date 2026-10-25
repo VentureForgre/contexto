@@ -2,7 +2,7 @@
 
 Numbers, ids, counts and booleans only. Every check ran at zero spend: loopback stubs, temporary
 homes and config dirs, fake keys. Each ran on the installed 2.1.310 and, for comparison, on 2.1.302
-(`~/.local/share/claude/versions/`). Code: `origin/main` 7893ceb plus this change (D45).
+(`~/.local/share/claude/versions/`). Code: `origin/main` 7893ceb plus this change (D46).
 
 ## Step 1: first check (`spikes/m2/cliversion/check.sh`)
 
@@ -28,7 +28,7 @@ codex-cli 0.163.0 gave the same result in both runs.
 | `carried_unclassified_k`, summed over every turn of every run | 0 | 0 | 0 |
 | runs listing `# Environment` | 13 | 13 | 13 |
 | main requests, opus55-resume / sonnet46-resume / probe-claude-opus-4-7 | 88 / 98 / 28 | 84 / 84 / 21 | 88 / 98 / 28 |
-| context-block first lines of no kind (before D45) | 0 | 1, in `messages[0]` of the 6 runs on 4.x ids | 0 |
+| context-block first lines of no kind (before D46) | 0 | 1, in `messages[0]` of the 6 runs on 4.x ids | 0 |
 | nested CLAUDE.md on 5.x ids (6 runs) | role `system` message, 79 to 103 tokens | next to the Read result, 99 to 103 tokens | next to the Read result, 99 to 103 tokens |
 
 With tool search on, the task tools and `mcp__contexto__contexto_state` are deferred, and the
@@ -36,7 +36,7 @@ scripted model calls only tools in `tools`, so it skips the turns that call them
 requests. With tool search off, request counts match 2.1.302 in all 13 runs, and the nested
 CLAUDE.md placement is the only change in `features.md` apart from sizes that moved by at most 5
 tokens. On 4.x ids the nested CLAUDE.md was inside the Read result on both versions. The
-analysis re-run with D45's code gave byte-identical `turns.csv`, `requests.csv`, `summary.md`,
+analysis re-run with D46's code gave byte-identical `turns.csv`, `requests.csv`, `summary.md`,
 `features.md`, `reminders.csv` and `table.md` for the 2.1.310 default runs.
 
 ## Step 3: hooks, styles, plan mode, effort, MCP (`spikes/m2/carried/live_probe.sh`)
@@ -54,16 +54,16 @@ listing); in the 3 MCP add, keep and remove turns, a role `system` listing inste
 
 ## Step 4: missing-tools notices (`claude -p`, fresh, `--resume` with the server command missing, `--resume` with it back)
 
-| Capture | role `system` texts byte-identical to 2.1.302 with tool search on | verdict before D45 | verdict with D45 |
+| Capture | role `system` texts byte-identical to 2.1.302 with tool search on | verdict before D46 | verdict with D46 |
 |---|---|---|---|
 | claude-opus-5-5, tool search on | 3 of 3 requests (paths, a `Monitor` name, one skill line aside) | True, False, True | True, False, True |
 | claude-opus-5-5, tool search off | 3 of 3 | True, False, True | True, False, True |
 | claude-sonnet-4-6, tool search on | n/a: the listing and notices are `<system-reminder>` blocks, the same on both versions | False, False, False | True, False, True |
 
 End to end, `contexto run claude -p` on 2.1.310 with a stub upstream: on claude-sonnet-4-6,
-`mcp_tools_missing` 1 before D45 and 0 with it; on claude-opus-5-5, 0 and 0. On 2.1.302 with
-claude-sonnet-4-6 before D45: 0. Every request body of the 13 step 2 runs on 2.1.310 is judged
-offered with D45; before it, none on the 6 runs on 4.x ids (0 of 84, 84 and 48 on the sonnet46 runs,
+`mcp_tools_missing` 1 before D46 and 0 with it; on claude-opus-5-5, 0 and 0. On 2.1.302 with
+claude-sonnet-4-6 before D46: 0. Every request body of the 13 step 2 runs on 2.1.310 is judged
+offered with D46; before it, none on the 6 runs on 4.x ids (0 of 84, 84 and 48 on the sonnet46 runs,
 0 of 21 on each 4.x probe).
 
 ## Step 5: subagent shapes (`spikes/m2/subagents`)
@@ -77,7 +77,7 @@ offered with D45; before it, none on the 6 runs on 4.x ids (0 of 84, 84 and 48 o
 | `drive.py` esc | 8 / 8 | yes | same as above |
 
 Apart from that message and the agent ids, every captured request matched. Classified with the code
-before D45, the 14 subagent environment messages on 2.1.310 were `settings_change`; with D45 they are
+before D46, the 14 subagent environment messages on 2.1.310 were `settings_change`; with D46 they are
 `session_start`, as are the 21 main ones and all 35 on 2.1.302. 2.1.302 with
 `ENABLE_TOOL_SEARCH=true` also starts a subagent's environment message with the listing (fg, 1 run).
 On claude-sonnet-4-6, a subagent's listing is its own block and its environment block keeps kind
@@ -98,4 +98,4 @@ deferred tools ran without a `ToolSearch` call first.
 
 ## Step 6: the suite
 
-`pytest -q`: see the PR. No live run (step 9): D45 says why.
+`pytest -q`: see the PR. No live run (step 9): D46 says why.

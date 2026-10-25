@@ -211,7 +211,7 @@ def test_the_environment_message_is_session_start_with_or_without_output_config(
     assert SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION == "2.1.310"
 
 
-# D45: a subagent's environment message with tool search on (2.1.310 by default), captured with zero
+# D46: a subagent's environment message with tool search on (2.1.310 by default), captured with zero
 # spend (spikes/m2/subagents); trimmed after the heading's first line.
 DEFERRED_LISTING = ("The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded "
                     "— calling them directly will fail with InputValidationError. Use ToolSearch with query "

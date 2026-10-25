@@ -1082,7 +1082,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     search and recall ran too. In an interactive 2.1.302 session, search and recall ran with no
     input. `spikes/m2/permissions/permstub.py` repeats the `-p` check (`--before` for the old
     settings). `TESTED_VERSIONS` is unchanged: 2.1.302 works with the rules.
-- **D45. Claude Code 2.1.310 is tested; Contexto reads its tool-search shapes.** Claude, 2026-10-25,
+- **D46. Claude Code 2.1.310 is tested; Contexto reads its tool-search shapes.** Claude, 2026-10-25,
   under D0; contract change. 2.1.310 became the installed `claude`. The D38 routine
   (`docs/cli-updates.md`, steps 1 to 6, all zero spend) and the D44 permission check ran on it and on
   2.1.302 side by side; the numbers are in `docs/research/M2-claude-code-2.1.310.md`.

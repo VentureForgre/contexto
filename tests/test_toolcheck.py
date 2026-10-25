@@ -113,7 +113,7 @@ def test_claude_tool_search_lists_deferred_tools_in_a_system_message():
     assert anthropic_tools_offered(claude_request(["Bash", "Read"], deferred=["CronCreate", "WebFetch"])) is False
 
 
-# D45: on 4.x model ids (claude-sonnet-4-6) with tool search on, the listing and the notices are
+# D46: on 4.x model ids (claude-sonnet-4-6) with tool search on, the listing and the notices are
 # <system-reminder> blocks of user messages, not role "system" messages. Captured with zero spend from
 # 2.1.310, where tool search is on by default (the same on 2.1.302 with ENABLE_TOOL_SEARCH): a fresh
 # session, a resume whose server could not start, and a resume with it back. Trimmed where marked.

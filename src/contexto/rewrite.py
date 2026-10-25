@@ -550,7 +550,7 @@ UNCLASSIFIED = "unclassified"
 # output_config to whatever system message the turn already has (a countdown, a file note, the
 # plan-mode text). On 2.1.301 the session-start message was the same size (about 8,470 characters,
 # spikes/m2/carried finding 1); its text was not kept, so that version is inferred, not measured.
-# D45: with tool search on (2.1.310's default; 2.1.302 with ENABLE_TOOL_SEARCH), a subagent's
+# D46: with tool search on (2.1.310's default; 2.1.302 with ENABLE_TOOL_SEARCH), a subagent's
 # environment message starts with the deferred-tool listing ("The following deferred tools are now
 # available via ToolSearch. ...", one name per line, then a blank line) and "# Environment" follows;
 # the main conversation's still starts with "# Environment" (spikes/m2/subagents, zero spend). A
@@ -671,7 +671,7 @@ def _anthropic_classify_system(messages: list[dict], i: int) -> str:
 # the first four arrive in later turn-start messages; the rest make up messages[0] and are listed so
 # that a later copy (a date change, or a resume that puts session context in the resumed turn's
 # message, spikes/m2/carried finding 6) keeps its latest copy. The fallback keeps the latest block of
-# each kind and may page older ones; blocks of no recognised kind are pageable. D45: 2.1.310 turns tool
+# each kind and may page older ones; blocks of no recognised kind are pageable. D46: 2.1.310 turns tool
 # search on by default, and on 4.x ids messages[0] then holds one more block, the deferred-tool listing
 # (the same on 2.1.302 with ENABLE_TOOL_SEARCH); the other kinds and their placement are unchanged.
 CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.310"
