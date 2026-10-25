@@ -21,6 +21,9 @@ verdicts as PR comments. A pull request merges only after both reviewers approve
 push needs new verdicts. The project has one owner, and the builder and reviewer agents post from
 the owner's account, so GitHub cannot count their approvals; the two verdicts are a project rule.
 
+Contexto is MIT licensed ([LICENSE](LICENSE)). By opening a pull request you agree that your
+contribution is licensed under the same terms.
+
 Pull requests from forks go through the same review. Workflow runs on pull requests from forks
 need a maintainer's approval (the repository requires approval for all external contributors).
 

@@ -385,3 +385,7 @@ length weighs as one passing mention. The full list is in
 
 Development, tests, and releases: see [CONTRIBUTING.md](CONTRIBUTING.md).
 Reporting a vulnerability, and what the session store holds: see [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -1025,6 +1025,16 @@ the owner's delegation. Open decisions are listed at the end with the options an
     forbids, and would still leave the pull request comments.
   - **CI on fork pull requests.** Since #213, CI and Release run on GitHub-hosted runners, and
     workflow runs on fork pull requests need approval for all external contributors.
+- **D43. Contexto is MIT licensed.** Owner, 2026-10-25. The owner asked for the most permissive
+  common license. MIT is short, widely known, and lets anyone use, change and ship the code with
+  only the notice kept; 0BSD and the Unlicense drop even that, but are less familiar, and Apache-2.0
+  adds patent and notice terms. `LICENSE` holds the MIT text, copyright VentureForgre.
+  `pyproject.toml` sets `license = "MIT"` (the `License-Expression` field) and
+  `license-files = ["LICENSE"]` (ships the file and the `License-File` field) in the wheel and sdist.
+  The grant covers the project's own code and docs at every commit, not third-party text that old
+  history quotes. The release files of v0.5.1 and earlier do not contain `LICENSE`; the first
+  release built after this change does. Contributions are accepted under the same license
+  (`CONTRIBUTING.md`).
 
 ## Open decisions
 

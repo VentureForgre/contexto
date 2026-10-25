@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-10-24 by claude (docs for v0.5.1: D35 to D42, O6 deployed). Decisions taken and still open, with reasons:
+Updated 2026-10-25 by claude (D43: MIT license). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -19,10 +19,10 @@ compaction never fires, and accuracy equals full context.
 - Latest release: v0.5.1 (main e864896, 2026-10-24). See "Open follow-ups" and "What is left"
   below for the remaining work and the items that need the owner.
 - Tests on main (e864896, v0.5.1): 2065 passed, 1 skipped, 1 xfailed on macOS, Python 3.12 (local run, 2026-10-24).
-- The repository is public (D42). GitHub Releases stay the only distribution; there is no package
-  registry release. Tracked files were scrubbed at `HEAD` of the owner's proxy hostname, another
-  private repository's name, statements about the owner's own accounts and plans, and the
-  self-hosted runner's machine name; history was not rewritten.
+- The repository is public (D42) and MIT licensed (D43). GitHub Releases stay the only distribution;
+  there is no package registry release. Tracked files were scrubbed at `HEAD` of the owner's proxy
+  hostname, another private repository's name, statements about the owner's own accounts and plans,
+  and the self-hosted runner's machine name; history was not rewritten.
 - CI and releases run on GitHub-hosted runners (PR #213): Python 3.12 to 3.15 on Ubuntu, 3.12 and
   3.15 on macOS, and Ruff lint. `ci` is a required check in the main ruleset, and workflow runs on
   fork pull requests need approval for all external contributors (D42). GitHub private
@@ -258,6 +258,8 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   its value; chosen on a measured grid (probes, 13-turn cases, five dump sets).
 - D42: the repository goes public (2026-10-24); GitHub Releases stay the only distribution (no
   package registry). D0, D13, and D14 are marked superseded in place.
+- D43: Contexto is MIT licensed (owner, 2026-10-25). The `LICENSE` file and the license metadata
+  ship in the wheel and sdist from the next release on.
 
 ## Open follow-ups
 
@@ -295,8 +297,6 @@ Measured candidates deliberately not pursued (each would need a live run or new 
   cost). Codex at 150,000 is under "Needs the owner".
 
 Needs the owner:
-- A license. The repository is public with no `LICENSE` file, so others have no stated right to
-  use, copy, or change the code. Which license is the owner's choice.
 - Upgrade the host's OpenRig, which predates v0.6.1, to v0.6.1 or later to get the clock fix (O7,
   resolved upstream in OpenRig #124).
 - Search ranking (D41): search ships with text cap 1, page cap 3. Text cap 3, page cap 3 restores
