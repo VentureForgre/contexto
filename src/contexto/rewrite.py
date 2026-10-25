@@ -123,6 +123,8 @@ from __future__ import annotations
 import bisect
 import hashlib
 import math
+import os
+import posixpath
 import re
 import secrets
 import time
@@ -719,11 +721,24 @@ CONTEXT_BLOCK_KINDS = (
 # "[Request interrupted by user ...". The fallback protects the newest of them only up to
 # ``NESTED_PROTECTED_TOKENS``; older ones page oldest first, as on 2.1.302. On 4.x ids the file sits
 # inside the tool_result's own content on both versions and stays paged with its turn.
+# D47: a file such a block imports with ``@path`` arrives as its own block of the same form, after the
+# importer, in the same message (``Contents of <path>:``, any file name), and is carried with it. A
+# message holding Claude Code's synthetic "[Tool result missing due to internal error]" result carries
+# nothing: in 2 of 24 pty captures on 2.1.302 a prompt queued during a tool run, then Esc and Enter,
+# landed there with no interrupt marker. A failed Read still attaches nested memory next to its error
+# result (captured on 2.1.310), so an error result alone is not that sign.
 TOOL_ROUND_CARRIED_KINDS = frozenset({"nested_instructions"})
 NESTED_FORM = re.compile(r"<system-reminder>\nContents of [^\n]*:\n(?:(?!<system-reminder>).)*</system-reminder>\s*\Z",
                          re.DOTALL)
 INTERRUPT_MARKER = "[Request interrupted by user"
+TOOL_RESULT_MISSING = "[Tool result missing due to internal error]"
 NESTED_PROTECTED_TOKENS = 4_000  # half of carried_text_budget's default, so the fallback can still bound growth
+# Claude Code's memory import: ``@`` at the start of a line or after whitespace, then a path up to the next
+# whitespace (``@x.md,`` imports nothing). Captured on 2.1.302 and 2.1.310: ``@docs/x.md``, ``@./x.md`` and
+# ``@../x.md`` resolve against the importing file's directory, an absolute path is kept as written
+# (``/tmp/...`` stays ``/tmp/...``), and imports nest (an imported file's own ``@more.md`` resolves against
+# its directory). Not captured, handled as documented: a backslash-escaped space, a ``#`` fragment, ``~/``.
+_IMPORT = re.compile(r"(?:^|(?<=\s))@((?:[^\s\\]|\\ )+)", re.MULTILINE)
 
 
 def context_block_kind(block: dict) -> str | None:
@@ -811,21 +826,71 @@ def _is_tool_round(message: dict) -> bool:
         isinstance(b, dict) and b.get("type") == "tool_result" for b in _blocks(message))
 
 
+def _first_line(block: dict) -> str:
+    text = block.get("text", "").lstrip().removeprefix(CONTEXT_TAG)
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
+
+
+def _memory_path(block: dict) -> str:
+    """The file a ``Contents of <path>:`` block holds, normalised."""
+    return posixpath.normpath(_first_line(block).removeprefix("Contents of ").removesuffix(":"))
+
+
+def _imports(path: str, text: str) -> set[str]:
+    """The files a memory file at ``path`` imports with ``@path`` (``_IMPORT``), normalised as Claude Code
+    names them in the imported blocks' first lines. A reference inside a code span is listed too; Claude Code
+    sends no block for it, so listing it changes nothing."""
+    out = set()
+    for ref in _IMPORT.findall(text):
+        ref = ref.replace("\\ ", " ").split("#", 1)[0]
+        if not ref:
+            continue
+        if ref.startswith("~/"):
+            ref = os.path.expanduser(ref)
+        elif not ref.startswith("/"):
+            ref = posixpath.join(posixpath.dirname(path), ref)
+        out.add(posixpath.normpath(ref))
+    return out
+
+
+def _result_missing(block: Any) -> bool:
+    """Claude Code's synthetic result for a tool run it lost (D47)."""
+    if not isinstance(block, dict) or block.get("type") != "tool_result":
+        return False
+    content = block.get("content")
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        texts = [b.get("text") for b in content if isinstance(b, dict)]
+    else:
+        texts = []
+    return any(isinstance(t, str) and t.strip().startswith(TOOL_RESULT_MISSING) for t in texts)
+
+
 def _carried_at(message: dict, turn_start: bool) -> set[int]:
     """Indexes of the carried blocks of a message: every context block of a turn start (D32); in a
     tool-result user message, a nested-memory block of Claude Code's exact form next to the results,
-    before any interrupt marker (D46). Nothing else next to a tool result is carried."""
+    before any interrupt marker (D46), and a file it imports, in the same form after it (D47). A message
+    with Claude Code's synthetic missing result carries nothing (D47). Nothing else next to a tool result
+    is carried."""
     blocks = _blocks(message)
     if turn_start:
         return {j for j, b in enumerate(blocks) if is_context_block(b)}
     out: set[int] = set()
+    if any(_result_missing(b) for b in blocks):
+        return out  # a prompt queued, then Esc, can land here with no interrupt marker
+    imported: set[str] = set()
     for j, b in enumerate(blocks):
         if not isinstance(b, dict) or b.get("type") != "text" or not isinstance(b.get("text"), str):
             continue
         if b["text"].startswith(INTERRUPT_MARKER):
             break  # what follows was typed after Esc
-        if NESTED_FORM.match(b["text"]) and context_block_kind(b) in TOOL_ROUND_CARRIED_KINDS:
+        if not NESTED_FORM.match(b["text"]):
+            continue
+        path = _memory_path(b)
+        if context_block_kind(b) in TOOL_ROUND_CARRIED_KINDS or path in imported:
             out.add(j)
+            imported |= _imports(path, b["text"])
     return out
 
 
@@ -855,25 +920,35 @@ def carried_content(messages: list[dict], k: int, paged: frozenset[str] = frozen
     return blocks, [messages[i] for i in indexes]
 
 
-def _supersession_key(block: dict) -> tuple[str, ...] | None:
+def _supersession_key(block: dict, memory: bool = False) -> tuple[str, ...] | None:
     """What a later block of the same key supersedes: its kind; for nested memory, its kind and path (its
-    first line), since another directory's file adds rules rather than replacing them (D46)."""
-    kind = context_block_kind(block)
+    first line), since another directory's file adds rules rather than replacing them (D46). ``memory``: a
+    block carried from a tool round, which is nested memory or a file it imports (D47), keyed by path."""
+    kind = "nested_instructions" if memory else context_block_kind(block)
     if kind != "nested_instructions":
         return None if kind is None else (kind,)
-    text = block.get("text", "").lstrip().removeprefix(CONTEXT_TAG)
-    return (kind, next((line.strip() for line in text.splitlines() if line.strip()), ""))
+    return (kind, _first_line(block))
 
 
-def _nested_over_budget(later: list[tuple[int, int, dict]], newest: dict, estimator: TokenEstimator) -> set:
+def _block_page(block: dict) -> dict:
+    """A paged context block's page: a user message holding that one block, as the CLI sent it."""
+    return {"role": "user", "content": [block]}
+
+
+def _nested_over_budget(later: list[tuple[int, int, dict]], newest: dict, memory: set[int],
+                        estimator: TokenEstimator) -> set:
     """Positions of the latest nested-memory blocks past ``NESTED_PROTECTED_TOKENS``, counted newest first
     (D46): the rest stay protected, so the fallback can bound carried growth however many directories
-    were read."""
-    latest = sorted(((i, j, b) for i, j, b in later if context_block_kind(b) in TOOL_ROUND_CARRIED_KINDS
-                     and newest.get(_supersession_key(b)) == (i, j)), key=lambda x: (x[0], x[1]), reverse=True)
+    were read. Each block counts as its page, the measure carried growth and ``page_carried_text`` use, so
+    the protected blocks add at most the cap to carried growth (D47; counting the text alone left out about
+    9 tokens of block overhead each, reviewer A, PR #227 round 3). ``memory``: indexes of the tool rounds."""
+    latest = sorted(((i, j, b) for i, j, b in later
+                     if (i in memory or context_block_kind(b) in TOOL_ROUND_CARRIED_KINDS)
+                     and newest.get(_supersession_key(b, i in memory)) == (i, j)),
+                    key=lambda x: (x[0], x[1]), reverse=True)
     used, over = 0, set()
     for i, j, b in latest:
-        used += estimator.estimate(b["text"])
+        used += estimate_items(estimator, [_block_page(b)])
         if over or used > NESTED_PROTECTED_TOKENS:
             over.add((i, j))
     return over
@@ -890,10 +965,11 @@ def fallback_candidates(messages: list[dict], k: int, paged: frozenset[str] = fr
     each ``mode_kind``. Context blocks (D32): those of every turn start after the first and the
     nested-memory blocks of tool rounds (D46), never the first turn start's blocks or the latest block of
     each kind. Nested memory (D46): the latest block of each path is protected newest first while the
-    protected ones total at most ``NESTED_PROTECTED_TOKENS``; an older copy of a path is superseded, and
-    a latest one past that budget is listed with the unrecognised items, oldest first, as its 2.1.302
-    form (a carried text message) was. A paged block is stored as a user message holding that one block,
-    as the CLI sent it."""
+    protected ones total at most ``NESTED_PROTECTED_TOKENS``, each counted as its page (D47); an older
+    copy of a path is superseded, and a latest one past that budget is listed with the unrecognised items,
+    oldest first, as its 2.1.302 form (a carried text message) was. A file nested memory imports (D47) is
+    nested memory here, keyed by its own path. A paged block is stored as a user message holding that one
+    block, as the CLI sent it."""
     classes = _system_classes(messages, k)
     protected = protected_systems(messages, k, classes)
     superseded: list[tuple[tuple[int, int], str, dict]] = []
@@ -905,18 +981,19 @@ def fallback_candidates(messages: list[dict], k: int, paged: frozenset[str] = fr
         (superseded if mode_kind(messages[i]) is not None else unrecognised).append(item)
     starts = turn_starts(messages[:k])
     later = [(i, j, b) for i, j, b in carried_blocks(messages, k, paged) if starts and i != starts[0]]
+    memory = {i for i, _, _ in later if not is_turn_start(messages[i])}
     newest = {}
     for i, j, b in later:
-        key = _supersession_key(b)
+        key = _supersession_key(b, i in memory)
         if key is not None:
             newest[key] = (i, j)
-    over_budget = _nested_over_budget(later, newest, estimator or TokenEstimator())
+    over_budget = _nested_over_budget(later, newest, memory, estimator or TokenEstimator())
     for i, j, b in later:
-        kind, key = context_block_kind(b), _supersession_key(b)
+        key = _supersession_key(b, i in memory)
         if key is not None and newest[key] == (i, j) and (i, j) not in over_budget:
             continue
-        item = ((i, j), block_id(i, j, b), {"role": "user", "content": [b]})
-        recognised = kind is not None and (i, j) not in over_budget
+        item = ((i, j), block_id(i, j, b), _block_page(b))
+        recognised = key is not None and (i, j) not in over_budget
         (superseded if recognised else unrecognised).append(item)
     order = lambda item: item[0]  # noqa: E731
     return sorted(superseded, key=order) + sorted(unrecognised, key=order)
@@ -1123,7 +1200,9 @@ def page_carried_text(messages: list[dict], state: EpochState, store: Store, con
     blocks = sum(1 for (i, _), _, page in chosen if page is not messages[i])  # a block's page is a new message
     # Content-free: how many were of no recognisable kind, so a CLI that adds a kind shows up in the log.
     def kind(i: int, page: dict) -> str | None:
-        return context_block_kind(page["content"][0]) if page is not messages[i] else mode_kind(page)
+        if page is messages[i]:
+            return mode_kind(page)
+        return "nested_instructions" if not is_turn_start(messages[i]) else context_block_kind(page["content"][0])
 
     unrecognised = sum(1 for (i, _), _, page in chosen if kind(i, page) is None)
     events.append({"event": "carried_paged", "epoch": state.epoch, "count": len(chosen), "tokens": freed,
