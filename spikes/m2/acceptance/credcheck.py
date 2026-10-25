@@ -37,7 +37,7 @@ def _helper_output(seat_settings: Path) -> str:
     return proc.stdout.strip()
 
 
-def check(seat_settings: Path, timeout: float = 90.0) -> dict[str, Any]:
+def check(seat_settings: Path, timeout: float = 90.0, model: str = driver.MODEL) -> dict[str, Any]:
     claude = shutil.which("claude")
     if claude is None:
         return {"ran": False, "reason": "claude CLI not installed"}
@@ -89,7 +89,7 @@ def check(seat_settings: Path, timeout: float = 90.0) -> dict[str, Any]:
         settings.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{httpd.server_port}"}}))
         env = driver.child_env(tmp / "home", config)
         env.pop("ANTHROPIC_BASE_URL", None)
-        proc = subprocess.Popen([claude, "-p", "--settings", str(settings), "--model", driver.MODEL,
+        proc = subprocess.Popen([claude, "-p", "--settings", str(settings), "--model", model,
                                  "--output-format", "json", "say hi"],
                                 cwd=tmp, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
@@ -111,10 +111,13 @@ def check(seat_settings: Path, timeout: float = 90.0) -> dict[str, Any]:
 
 
 def main(argv: list[str]) -> int:
+    model = driver.MODEL
+    if len(argv) == 3 and argv[1] == "--model":
+        argv, model = argv[:1], argv[2]
     if len(argv) != 1:
-        print("usage: credcheck.py <seat settings file>", file=sys.stderr)
+        print("usage: credcheck.py <seat settings file> [--model MODEL]", file=sys.stderr)
         return 2
-    result = check(Path(argv[0]))
+    result = check(Path(argv[0]), model=model)
     print(json.dumps(result, indent=2), flush=True)
     return 0 if result.get("pass") else 1
 

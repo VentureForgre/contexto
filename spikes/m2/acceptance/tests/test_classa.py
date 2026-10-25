@@ -132,6 +132,7 @@ def test_identical_reminders_are_marked_only_where_the_record_says():
 def test_tool_results_logged_one_per_record_decode_as_the_one_message_sent():
     # Claude Code writes each tool result as its own user record but sends them as one user message;
     # the probe turns behind a tool loop decode only with the merged message (live run #2, request 20).
+    # replay merges them itself now (the Opus run on 2.1.302), and classa uses replay's messages.
     from acceptance import replay
 
     u1 = {"role": "user", "content": [{"type": "text", "text": "PROBE 1"}]}
@@ -149,10 +150,10 @@ def test_tool_results_logged_one_per_record_decode_as_the_one_message_sent():
           {"type": "api-request", "id": "q1", "shapeHash": "s", "params": params, "keep": 0, "tail": [replay.message_hash(u1)]},
           {"type": "api-request", "id": "q2", "shapeHash": "s", "params": params, "base": "q1", "keep": 1,
            "tail": [replay.message_hash(a1), replay.message_hash(merged)]}]
-    with pytest.raises(replay.ReplayError):
-        replay.recorded_messages(cc)  # one record per result: the merged hash is unknown
+    assert replay.recorded_messages(cc)["q2"][2] == merged
     decoded = classa.decode_requests(cc, stop=lambda msgs: False)
     assert decoded["q2"][2] == merged
+    assert classa._known_messages(cc) == replay._known_messages(cc)
 
 
 def test_out_inside_a_git_work_tree_is_refused(tmp_path):

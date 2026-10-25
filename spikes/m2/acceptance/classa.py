@@ -80,29 +80,10 @@ def _ser_len(obj: Any) -> int:
 
 
 def _known_messages(cc: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """replay's known messages plus each run of consecutive tool_result user records merged into one
-    message: Claude Code writes one record per tool result but sends them as one user message (the
-    probe turns' tool loops; live run #2, request 20)."""
-    known = replay._known_messages(cc)
-    run_blocks: list[dict[str, Any]] = []
-
-    def flush() -> None:
-        if len(run_blocks) > 1:
-            merged = {"role": "user", "content": list(run_blocks)}
-            known[replay.message_hash(merged)] = merged
-        run_blocks.clear()
-
-    for r in cc:
-        if r.get("isSidechain") or r.get("type") not in ("user", "assistant"):
-            continue
-        content = (r.get("message") or {}).get("content")
-        if r["type"] == "user" and isinstance(content, list) and content and all(
-                isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
-            run_blocks.extend(content)
-        else:
-            flush()
-    flush()
-    return known
+    """replay's known messages, which include each run of consecutive tool_result user records merged
+    into one message: Claude Code writes one record per tool result but sends them as one user
+    message (the probe turns' tool loops; live run #2, request 20)."""
+    return replay._known_messages(cc)
 
 
 def decode_requests(cc: list[dict[str, Any]], stop: Callable[[list[dict[str, Any]]], bool]) -> dict[str, list[dict[str, Any]]]:

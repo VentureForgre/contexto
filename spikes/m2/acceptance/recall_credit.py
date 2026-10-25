@@ -70,12 +70,12 @@ def turn_answer_indices(session_log: list[dict[str, Any]]) -> list[int]:
     ``tool_use`` block, any tool, so ``stream_hold.held_events == 0`` marks a response with no tool
     call. A log without ``stream_hold`` falls back to "no ``mcp_call`` before the next request",
     which misses non-MCP tools (Bash, Read). Only answered requests count (``answered``), so a failed
-    request the CLI retried (a local 502, or a 2xx cut short upstream) is not a turn end. Codex logs
-    need their own rule: pass ``turn_ends``.
+    request the CLI retried (a local 502, or a 2xx cut short upstream) is not a turn end, and side
+    requests (``side_request``) are skipped. Codex logs need their own rule: pass ``turn_ends``.
     """
     requests = [i for i, ev in enumerate(session_log)
                 if ev.get("event") == "request" and str(ev.get("path") or "").split("?")[0] == "/v1/messages"
-                and answered(ev)]
+                and answered(ev) and not side_request(ev)]
     ends = []
     for n, i in enumerate(requests):
         hold = session_log[i].get("stream_hold")
@@ -87,6 +87,23 @@ def turn_answer_indices(session_log: list[dict[str, Any]]) -> list[int]:
         if not any(session_log[j].get("event") == "mcp_call" for j in range(i + 1, nxt)):
             ends.append(i)
     return ends
+
+
+def side_request(event: dict[str, Any]) -> bool:
+    """A Claude Code side request, which answers no user turn: a request whose original body held one
+    message (the proxy's ``original_message_count``).
+
+    Claude Code 2.1.302 sends a title request as its first Messages request: one user message, no
+    tool list, answered without a tool call, so the stream-hold rule took it for a turn end (the Opus
+    run, 2026-10-25: 25 turn ends against 24, so nothing was credited). It has no ``api-request``
+    record in Claude Code's own transcript. Main-conversation requests held at least two messages in
+    every log measured (the first request of zero-spend stub runs on 2.1.301 and 2.1.302, and every
+    request of the Opus run). 2.1.301 also sent one-message side requests in a tool round, not
+    streamed; they are skipped too. The proxy logs no tool-list flag, and the engine's ``main`` is no marker:
+    the first conversation seen is main, so the title request is logged with ``main: true`` (D38
+    rejects judging by main for the same reason). A log without ``original_message_count`` (older
+    logs, synthetic fixtures) has no side requests."""
+    return event.get("original_message_count") == 1
 
 
 def answered(event: dict[str, Any]) -> bool:

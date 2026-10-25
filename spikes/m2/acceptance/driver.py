@@ -3,8 +3,8 @@
 The launcher (lane A packet A3, proposed shape per builder-1) is
 ``contexto run [--bound N] [--session ID] claude [claude args]``; everything after ``claude`` passes
 through. The driver keeps one process for the whole session, ``claude -p --input-format stream-json
---output-format stream-json --verbose --model claude-haiku-5-5``, so the proxy, its epoch state, and
-the MCP server live for the whole run. Each user turn is one stream-json line on stdin; the turn ends
+--output-format stream-json --verbose --model <model>`` (``MODEL``, claude-haiku-5-5, unless the
+caller passes another), so the proxy, its epoch state, and the MCP server live for the whole run. Each user turn is one stream-json line on stdin; the turn ends
 at the ``result`` event on stdout.
 
 The guard reserves the full output allowance before every turn and stops the run instead of
@@ -35,7 +35,9 @@ from typing import Any, Protocol
 from acceptance.detectors import BILLED_PATHS, request_path
 from contexto.proxy import TRANSFORMED_PATHS
 
-MODEL = "claude-haiku-5-5"
+MODEL = "claude-haiku-5-5"  # the default model; run.py live, check-credential and stubrun take --model
+# Claude Code's permission rule for every tool of the "contexto" MCP server (opt-in, see isolated_config).
+CONTEXTO_ALLOW_RULE = "mcp__contexto"
 KEYHELPER = Path(__file__).resolve().parent / "keyhelper.py"
 _CREDENTIAL_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 
@@ -51,14 +53,22 @@ def inside_git(path: Path) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
-def isolated_config(scratch: Path, seat_settings: Path) -> Path:
-    """Create the isolated CLAUDE_CONFIG_DIR whose only setting is the apiKeyHelper shim."""
+def isolated_config(scratch: Path, seat_settings: Path, allow_contexto_tools: bool = False) -> Path:
+    """Create the isolated CLAUDE_CONFIG_DIR whose only setting is the apiKeyHelper shim.
+
+    With ``allow_contexto_tools`` it also gets a permission allow rule for Contexto's MCP tools
+    (``mcp__contexto``). Off by default: the contract runs acceptance on default Claude Code settings.
+    Claude Code 2.1.302 in ``-p`` mode refuses every MCP tool call without such a rule (2.1.301 ran
+    them), and until the launcher allows Contexto's own tools (D44) a run on 2.1.302 needs it."""
     if not seat_settings.is_file():
         raise ValueError("the seat settings file does not exist")
     config = scratch / "claude-config"
     config.mkdir(parents=True, exist_ok=True)
     helper = " ".join(shlex.quote(x) for x in (sys.executable, str(KEYHELPER), str(seat_settings.resolve())))
-    (config / "settings.json").write_text(json.dumps({"apiKeyHelper": helper}, indent=2) + "\n", encoding="utf-8")
+    settings: dict[str, Any] = {"apiKeyHelper": helper}
+    if allow_contexto_tools:
+        settings["permissions"] = {"allow": [CONTEXTO_ALLOW_RULE]}
+    (config / "settings.json").write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     return config
 
 
@@ -67,9 +77,10 @@ class Transport(Protocol):
     def close(self) -> int: ...
 
 
-def launcher_command(session: str, bound: int, upstream: str, contexto: str = "contexto") -> list[str]:
+def launcher_command(session: str, bound: int, upstream: str, contexto: str = "contexto",
+                     model: str = MODEL) -> list[str]:
     return [contexto, "run", "--bound", str(bound), "--session", session, "--upstream", upstream, "claude", "-p",
-            "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", MODEL]
+            "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", model]
 
 
 # Paths whose 401 or 403 means the credential failed: the model requests the proxy transforms
