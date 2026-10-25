@@ -26,6 +26,7 @@ and not re-measured on 2.1.302.
 | `CONTEXT_BLOCK_KINDS` (first lines inside `<system-reminder>`), `CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION` | `src/contexto/rewrite.py` | `spikes/m2/scale/reminders` |
 | `HOOK_SIGNATURES`, `HOOK_SIGNATURES_CLAUDE_CODE_VERSION` | `src/contexto/rewrite.py` | `spikes/m2/carried` (`live_probe.sh`, `hook_context.py`) |
 | deferred-tool listings and MCP notices | `src/contexto/toolcheck.py` | zero-spend captures described in its docstring |
+| the refusal of a tool no permission rule allows ("... but you haven't granted it yet.", D44) | `src/contexto/toolcheck.py` | `spikes/m2/permissions/permstub.py` (D44) |
 | `CONTEXT_SECTION` (Codex section tags), `CONTEXT_SECTIONS_CODEX_VERSION` | `src/contexto/codex.py` | `spikes/m2/codex/probe.sh` |
 | subagent shapes (`AGENT_TOOLS`, `ASYNC_LAUNCH`, `HAND_BACK`, `NOTICE_OPENINGS`, the `<task-notification>` and `resumedAgentId` patterns), gated by `SUBAGENT_SHAPES_TESTED` (D40) | `src/contexto/rewrite.py`, `src/contexto/cliversions.py` | `spikes/m2/subagents` |
 

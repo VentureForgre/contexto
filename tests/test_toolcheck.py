@@ -25,7 +25,9 @@ from contexto.store.memory import MemoryStore
 from contexto.toolcheck import (
     GRACE_S,
     ToolCheck,
+    anthropic_denied_tools,
     anthropic_tools_offered,
+    denied_tools_message,
     missing_tools_message,
     responses_tools_offered,
 )
@@ -350,6 +352,98 @@ def test_no_main_request_means_no_verdict_and_a_broken_store_is_not_listed():
     check.observe(codex_request(), "responses", main=True)
     assert check.verdict()["server_listed"] is False
     assert ToolCheck(object(), clock=Clock()).observe(codex_request(), "responses", main=True) == []
+
+
+# Refused tools (D44) ---------------------------------------------------------------------------------
+
+def refusal(name: str) -> str:
+    """Claude Code 2.1.302's tool result for a tool no permission rule allows (zero-spend stub, -p mode)."""
+    return f"Claude requested permissions to use {name}, but you haven't granted it yet."
+
+
+def after_tool_calls(results: list[tuple[str, object, bool]], *, history: list[dict] | None = None) -> dict:
+    """A main request carrying the results of the model's tool calls, then the role system message 2.1.302
+    adds after them. ``results``: (tool name, result content, is_error)."""
+    request = claude_request(BUILTIN + CONTEXTO)
+    uses = [{"type": "tool_use", "id": f"toolu_{i}", "name": name, "input": {}}
+            for i, (name, _, _) in enumerate(results)]
+    answers = [{"type": "tool_result", "tool_use_id": f"toolu_{i}", "content": content, "is_error": error}
+               for i, (_, content, error) in enumerate(results)]
+    request["messages"] += [*(history or []), {"role": "assistant", "content": uses},
+                            {"role": "user", "content": answers},
+                            {"role": "system", "content": [{"type": "text", "text": "<total_tokens>1</total_tokens>"}]}]
+    return request
+
+
+SEARCH, RECALL = "mcp__contexto__contexto_search", "mcp__contexto__contexto_recall"
+
+
+def test_refused_contexto_tools_are_named_from_the_newest_user_message():
+    request = after_tool_calls([(SEARCH, refusal(SEARCH), True), (RECALL, refusal(RECALL), True),
+                                (SEARCH, refusal(SEARCH), True)])
+    assert anthropic_denied_tools(request) == [SEARCH, RECALL]
+    listed = after_tool_calls([(RECALL, [{"type": "text", "text": refusal(RECALL)}], True)])
+    assert anthropic_denied_tools(listed) == [RECALL]  # a block list, not only a string
+
+
+@pytest.mark.parametrize("results", [
+    [(SEARCH, "No paged-out turn contains every word of that query.", False)],  # ran
+    [(RECALL, "Unknown page id: pg_0. Page ids appear in the paged-history index.", True)],  # ran, failed
+    [(SEARCH, refusal(SEARCH), False)],  # not an error result
+    [("mcp__contexto_x__contexto_state", refusal("mcp__contexto_x__contexto_state"), True)],  # another server
+    [("Bash", refusal("Bash"), True)],
+    # The user answered "No" at an interactive prompt: a choice, not a missing rule.
+    [(SEARCH, "The user doesn't want to proceed with this tool use. The tool use was rejected.", True)],
+])
+def test_results_that_are_not_a_refusal_of_a_contexto_tool_do_not_count(results):
+    assert anthropic_denied_tools(after_tool_calls(results)) == []
+
+
+def test_only_the_newest_user_message_is_read():
+    old = after_tool_calls([(SEARCH, refusal(SEARCH), True)])["messages"][1:]
+    request = after_tool_calls([(SEARCH, "matches", False)], history=old[:-1])  # the refusal is a turn back
+    assert anthropic_denied_tools(request) == []
+    assert anthropic_denied_tools(claude_request(BUILTIN + CONTEXTO, prompt=refusal(SEARCH))) == []  # user text
+    assert anthropic_denied_tools({"messages": "not a list"}) == []
+    assert anthropic_denied_tools({}) == []
+
+
+def test_a_refusal_is_reported_once_on_any_conversation_and_does_not_touch_the_missing_check():
+    clock = Clock()
+    check = ToolCheck(Marker(), clock=clock, wall=lambda: 0.0)
+    clock.now += 3
+    request = after_tool_calls([(SEARCH, refusal(SEARCH), True), (RECALL, refusal(RECALL), True)])
+    [event] = check.observe(request, "anthropic", main=False)  # a subagent loses recall too
+    assert event == {"event": "mcp_tools_denied", "dialect": "anthropic", "main": False,
+                     "tools": ["contexto_search", "contexto_recall"], "elapsed_s": 3}
+    assert check.observe(request, "anthropic", main=True) == []  # once per session
+    assert check.verdict() is None  # the tools were offered
+    assert check.observe(after_tool_calls([(SEARCH, refusal(SEARCH), True)]), "responses", main=True) == []
+
+
+def test_engine_logs_a_refusal_before_its_request_event():
+    engine = RewriteEngine(MemoryStore(), config=Config(bound=150_000))
+    request = after_tool_calls([(RECALL, refusal(RECALL), True)])
+    _, _, events = engine(request, {}, "/v1/messages")
+    names = [e["event"] for e in events]
+    assert "mcp_tools_denied" in names and names.index("mcp_tools_denied") < len(names) - 1
+    denied = events[names.index("mcp_tools_denied")]
+    assert denied["tools"] == ["contexto_recall"] and "granted" not in json.dumps(denied)  # content-free
+
+
+def test_denied_tools_message_and_notice_log_show_it_once():
+    message = denied_tools_message(["contexto_search", "contexto_recall"])
+    assert all(w in message for w in ["contexto_search, contexto_recall", "haven't granted it yet", "--settings",
+                                      "'ask' rule", "README"]), message
+    assert "its tools" in denied_tools_message(None)
+    err = io.StringIO()
+    log = NoticeLog(ListStore(), err)
+    denied = {"event": "mcp_tools_denied", "dialect": "anthropic", "main": True, "tools": ["contexto_recall"]}
+    log.log({"event": "request", "transform_events": [denied, {"event": "request", "epoch": 0}]})
+    log.log({"event": "request", "transform_events": [denied]})
+    [line] = err.getvalue().splitlines()
+    assert line.startswith("contexto: warning: Claude Code refused Contexto's contexto_recall")
+    assert len(log.store.events) == 2
 
 
 # The engine runs the check on the main conversation ---------------------------------------------------
