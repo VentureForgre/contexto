@@ -1,8 +1,9 @@
 # Claude Code 2.1.310: the D38 routine's checks (2026-10-25)
 
-Numbers, ids, counts and booleans only. Every check ran at zero spend: loopback stubs, temporary
-homes and config dirs, fake keys. Each ran on the installed 2.1.310 and, for comparison, on 2.1.302
-(`~/.local/share/claude/versions/`). Code: `origin/main` 7893ceb plus this change (D46).
+Numbers, ids, counts and booleans only. Every check but the last ran at zero spend: loopback stubs,
+temporary homes and config dirs, fake keys. Each ran on the installed 2.1.310 and, for comparison, on
+2.1.302 (`~/.local/share/claude/versions/`). The live recall check at the end spent 305,223 tokens
+through the owner's proxy. Code: `origin/main` 7893ceb plus this change (D46).
 
 ## Step 1: first check (`spikes/m2/cliversion/check.sh`)
 
@@ -35,9 +36,15 @@ With tool search on, the task tools and `mcp__contexto__contexto_state` are defe
 scripted model calls only tools in `tools`, so it skips the turns that call them: hence fewer
 requests. With tool search off, request counts match 2.1.302 in all 13 runs, and the nested
 CLAUDE.md placement is the only change in `features.md` apart from sizes that moved by at most 5
-tokens. On 4.x ids the nested CLAUDE.md was inside the Read result on both versions. The
-analysis re-run with D46's code gave byte-identical `turns.csv`, `requests.csv`, `summary.md`,
-`features.md`, `reminders.csv` and `table.md` for the 2.1.310 default runs.
+tokens. On 4.x ids the nested CLAUDE.md was inside the Read result on both versions.
+
+The analysis re-run with D46's code (the matrix's captures do not depend on Contexto's code):
+
+| Matrix | runs with the same carried and paged figures | runs that differ, and how |
+|---|---|---|
+| 2.1.302 | 13 of 13 | none |
+| 2.1.310 default | 7 of 13 | the 6 with a nested CLAUDE.md on 5.x ids carry it from its turn on: `carried_blocks_n` 2 to 3, 61 to 64 tokens more at the last turn; in opus55-stream the fallback paged 1 item more (`carried_after_fallback` 11,469 to 7,247 at turn 48) |
+| 2.1.310, tool search off | 7 of 13 | the same 6 runs, 61 to 64 tokens more; no extra fallback paging |
 
 ## Step 3: hooks, styles, plan mode, effort, MCP (`spikes/m2/carried/live_probe.sh`)
 
@@ -65,6 +72,12 @@ End to end, `contexto run claude -p` on 2.1.310 with a stub upstream: on claude-
 claude-sonnet-4-6 before D46: 0. Every request body of the 13 step 2 runs on 2.1.310 is judged
 offered with D46; before it, none on the 6 runs on 4.x ids (0 of 84, 84 and 48 on the sonnet46 runs,
 0 of 21 on each 4.x probe).
+
+Imitated notices (reviewer A, PR #227 round 1): in the 2.1.310 default matrix, 705 of 705
+tool-carrying bodies are judged offered, and 558 of 558 user-message blocks with a notice heading
+are read, under the final rule (one whole reminder, never the last text block of a message without
+a `tool_result`). A typed prompt that is a fake listing, a fake listing followed by text, or a fake
+disconnect notice is not read (tests built on A's captured shape).
 
 ## Step 5: subagent shapes (`spikes/m2/subagents`)
 
@@ -98,4 +111,32 @@ deferred tools ran without a `ToolSearch` call first.
 
 ## Step 6: the suite
 
-`pytest -q`: see the PR. No live run (step 9): D46 says why.
+`pytest -q`: see the PR.
+
+## Live recall with tool search on (PR #227 round 1, B1)
+
+`contexto run claude -p` (stream-json, one process) on 2.1.310 defaults (tool search on, no
+`ENABLE_TOOL_SEARCH`), claude-haiku-5-5, through the owner's proxy with the seat's apiKeyHelper through
+the acceptance shim. Five turns: a fact planted in turn 1, three filler turns, then the question. The
+full routine step 9 did not run.
+
+| Item | Attempt 1 | Attempt 2 |
+|---|---|---|
+| bound | 40,000 | 60,000 |
+| fact | an identifier, in the first 200 characters | a plain phrase, past the 200-character page stub |
+| turn 1 paged before the question | yes (`page_out` first_turn 0) | yes (`page_out` 2 turns from first_turn 0) |
+| `bound_too_small` | 4 (fixed overhead 18,157 to 18,840; window budget below 0) | 0 |
+| question turn tool calls | `ToolSearch` (select: search, recall), `contexto_search` | `contexto_search` (deferred, called directly) |
+| `contexto_search` hits returned / room left | 0 / 0 (`turn_budget` spent) | 1 hit, 3 spans / 16,572 |
+| search result holds the fact | no | yes |
+| fact in the index or epoch record | yes (the identifier, on the index line) | no |
+| answer correct | yes | yes |
+| credited (correct, and the fact came from recall) | no: answered from the index line | yes |
+| requests, with usage | 8 | 7 |
+| tokens (input, cache write, cache read, output) | 160,143 | 145,080 |
+| output tokens | 935 | 198 |
+| max request input | 28,357 | 32,660 |
+| `mcp_tools_missing`, `mcp_tools_denied`, `toolcheck_error` | 0, 0, 0 | 0, 0, 0 |
+| statuses | 200, and 401 on the `HEAD /api/hello` probe | the same |
+
+Total live spend: 305,223 tokens.

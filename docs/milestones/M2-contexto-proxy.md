@@ -107,7 +107,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
 - A **turn** is a turn-start message plus every following assistant, `tool_result` user, and
   `role: "system"` message up to the next turn-start message.
 - **Carried content** is never paged, except under the bounded fallback below: the injected
-  context blocks of any turn-start message (everything but the user's own prompt text), and the
+  context blocks of any turn-start message (everything but the user's own prompt text), a nested
+  CLAUDE.md block (kind `nested_instructions`) next to the results of a tool-result user message
+  (D46: Claude Code 2.1.310 sends one there on 5.x ids, once per session; on 4.x ids it is inside the
+  `tool_result` and is paged with its turn), and the
   `role: "system"` messages that the classification below marks as carried. All carried content is
   forwarded in the CLI's current form, never restored from a stored copy.
 - **Classification of `role: "system"` messages**, deterministic and in this order (amended by
@@ -157,7 +160,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   signatures: for text messages, output style and plan mode; for context blocks, the first line
   inside the tag (`CONTEXT_BLOCK_KINDS` in `rewrite.py`, measured on 2.1.302 with 4.x ids: token
   countdown, plan mode entry and exit as one kind, file changed on disk, task-tools reminder, and
-  the kinds that make up `messages[0]`, with the deferred-tool listing that 2.1.310 adds there, D46). Superseded items of a recognisable kind are paged first,
+  the kinds that make up `messages[0]`, with the deferred-tool listing that 2.1.310 adds there, D46;
+  and the nested CLAUDE.md, superseded only by a later block of the same path, D46). Superseded items
+  of a recognisable kind are paged first,
   then unrecognised ones, oldest first by position. Each paged item is its own immutable page (a
   context block is stored as a user message holding that block as sent), listed in the index with
   its first line inside the tag (marked `[earlier system message]` or `[earlier reminder]`, see Store) and recallable.
@@ -843,9 +848,13 @@ lack the tools and are not judged), never `count_tokens`:
   system prompt or a role `system` message lists one by name on its own line (Claude Code 2.1.302),
   and Claude Code's later notices have not taken it away. On 4.x model ids the listing and the
   notices are `<system-reminder>` blocks of user messages instead (D46; measured on 2.1.302 with
-  tool search on and on 2.1.310, where it is the default), so a user message's block whose first
-  line inside the tag is a deferred-tool or MCP-server notice, or `# MCP Server Instructions`, is
-  read too; no other user text is. The check reads the system prompt and then those messages and
+  tool search on and on 2.1.310, where it is the default), so those blocks are read too. Of a user
+  message, a text block is read only when it is one whole `<system-reminder>` (closing tag at the
+  end, no second opening tag) whose first line inside the tag is a deferred-tool or MCP-server notice
+  or `# MCP Server Instructions`, and never when it is the last text block of a message that holds no
+  `tool_result` (the typed prompt's place; a plain-string message is not read). A prompt imitating a
+  notice is therefore not read; an exact copy typed as an earlier block of a several-block prompt
+  would be, which Claude Code does not send. The check reads the system prompt and then those messages and
   blocks, in order, because Claude Code never edits history: an old listing stays when the server
   goes away. Later text overrides earlier text. Names under "The following
   deferred tools are no longer available" are removed. "N deferred tools are available again ...

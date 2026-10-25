@@ -1084,30 +1084,60 @@ the owner's delegation. Open decisions are listed at the end with the options an
     settings). `TESTED_VERSIONS` is unchanged: 2.1.302 works with the rules.
 - **D46. Claude Code 2.1.310 is tested; Contexto reads its tool-search shapes.** Claude, 2026-10-25,
   under D0; contract change. 2.1.310 became the installed `claude`. The D38 routine
-  (`docs/cli-updates.md`, steps 1 to 6, all zero spend) and the D44 permission check ran on it and on
-  2.1.302 side by side; the numbers are in `docs/research/M2-claude-code-2.1.310.md`.
+  (`docs/cli-updates.md`, steps 1 to 6, all zero spend), the D44 permission check, and a small live
+  recall check ran on it, with 2.1.302 side by side for the zero-spend steps; the numbers are in
+  `docs/research/M2-claude-code-2.1.310.md`.
   - **What changed.** 2.1.310 turns tool search on by default (2.1.302 only with
     `ENABLE_TOOL_SEARCH`): `tools` holds `ToolSearch` and a `defer_loading` placeholder, and the other
     tools, Contexto's included, are listed by name ("The following deferred tools are now available via
     ToolSearch. ..."). Every request shape matched 2.1.302 with tool search on. With tool search off,
-    2.1.310 matched 2.1.302 apart from one placement: on 5.x ids a nested CLAUDE.md now arrives as a
-    `<system-reminder>` block next to the Read result, not as a role `system` message, so it is paged
-    with its turn, as it already was on 4.x ids.
-  - **Two shapes Contexto misread** (both also on 2.1.302 with tool search on). (1) On 4.x ids the
-    listing and the MCP notices are `<system-reminder>` blocks of user messages, and the missing-tools
-    check read only system text: `contexto run claude -p --model claude-sonnet-4-6` on 2.1.310 logged
-    `mcp_tools_missing` and printed the warning with the tools offered and working. (2) A subagent's
-    environment message starts with the listing and `# Environment` follows it, so it classified as a
-    settings change (it carries `output_config`), pageable by the fallback once superseded, not as
-    session-start: 14 of 14 subagent requests captured. The main conversation's starts with
-    `# Environment` on every id.
-  - **Rule.** The check also reads a user message's `<system-reminder>` block whose first line is a
-    deferred-tool or MCP-server notice or `# MCP Server Instructions`; other user text stays unread.
-    The session-start signature accepts the listing paragraph before `# Environment`; the listing
-    alone (an MCP server connecting mid-session) does not match. `CONTEXT_BLOCK_KINDS` gains
-    `deferred_tools`, the extra block 2.1.310 puts in `messages[0]` on 4.x ids, so a later copy keeps
-    its latest one. Step 2 re-run with the new code gave the same carried and paged figures in all 13
-    runs.
+    2.1.310 matched 2.1.302 apart from one placement: on 5.x ids a nested CLAUDE.md (one below the
+    project root, attached once per session when a file under it is first read) now arrives as a
+    `<system-reminder>` block next to the Read result, not as a role `system` message.
+  - **Three shapes Contexto misread.** (1) On 4.x ids the listing and the MCP notices are
+    `<system-reminder>` blocks of user messages (also on 2.1.302 with tool search on), and the
+    missing-tools check read only system text: `contexto run claude -p --model claude-sonnet-4-6` on
+    2.1.310 logged `mcp_tools_missing` and printed the warning with the tools offered and working.
+    (2) A subagent's environment message starts with the listing and `# Environment` follows it (also
+    on 2.1.302 with tool search on), so it classified as a settings change (it carries
+    `output_config`), pageable by the fallback once superseded, not as session-start: 14 of 14
+    subagent requests captured. The main conversation's starts with `# Environment` on every id.
+    (3) The nested CLAUDE.md block on 5.x ids sat in a tool-result message, so it was paged with its
+    turn. Claude Code does not send it again, so the directory's rules were gone for the rest of the
+    session on the default claude-opus-5-5. On 2.1.302 it was carried.
+  - **Rule, missing-tools check.** Of a user message, the check reads a text block only when it is one
+    whole `<system-reminder>` (it ends with the closing tag and holds no second opening tag) whose first
+    line is a deferred-tool or MCP-server notice or `# MCP Server Instructions`, and never the
+    message's last text block when the message holds no `tool_result`, since that is where the typed
+    prompt sits (a plain-string message is all prompt). All 558 genuine notice blocks of the 2.1.310
+    step 2 matrix pass; a prompt that imitates a notice, alone or followed by text, does not (reviewer
+    A's capture). Still readable: an exact copy of a notice typed as an earlier block of a
+    several-block prompt; Claude Code sends a typed prompt as one block. The check only logs and
+    warns; nothing it reads changes what is carried or paged.
+  - **Rule, rewrite.** The session-start signature accepts the listing paragraph before
+    `# Environment`; the listing alone (an MCP server connecting mid-session) does not match.
+    `CONTEXT_BLOCK_KINDS` gains `deferred_tools`, the extra block 2.1.310 puts in `messages[0]` on
+    4.x ids, and `nested_instructions` (first line `Contents of <path>CLAUDE.md:`). A
+    `nested_instructions` block next to the results in a tool-result user message is carried like a
+    turn start's context block once its turn is paged, and not stored in the page. The fallback
+    supersedes one only by a later block of the same path; another directory's file adds rules.
+    Later deferred-tool listings name only the tools that just connected (reviewer A measured one
+    server's tools per listing): they add tools, not replace them. With the kind, the fallback pages an
+    older one first, as superseded, where it paged them oldest first before; that changes the paging
+    order only, since every such block was pageable already, and the listing in `messages[0]` is never
+    paged. On 4.x ids the nested CLAUDE.md is part of the tool_result's own content, on 2.1.302 and
+    2.1.310 alike, and stays paged with its turn; whether to carry it there too is the owner's call.
+  - **Step 2 re-run with the new code.** 2.1.302: the same carried and paged figures in all 13 runs.
+    2.1.310: the same in the 7 runs without a nested CLAUDE.md on 5.x ids; the other 6 carry that block
+    from its turn on (61 to 64 tokens), and in opus55-stream it pushed carried growth over the
+    fallback budget, which then paged one item more.
+  - **Live recall with tool search on.** Claude Code acceptance had never run with Contexto's tools
+    deferred. A short `contexto run claude -p` session on 2.1.310 defaults, claude-haiku-5-5, through
+    the owner's proxy: a plain-phrase fact planted past the 200-character page stub, paged out by
+    filler turns at bound 60,000, then asked for. The model called `contexto_search` (a deferred
+    tool), the result held the fact, the index did not, and the answer was correct: credited. 305,223
+    tokens for both attempts; the first, at bound 40,000, had no recall room and is not credited.
+    The routine's full step 9 (millions of tokens) did not run.
   - **Versions.** 2.1.310 joins `TESTED_VERSIONS` and `SUBAGENT_SHAPES_TESTED`; the session-start,
     context-block, and hook measured-on constants name it. The subagent spike's 30-second wait now
     runs through perl, since 2.1.310 refuses a standalone `sleep 30` and the agent finished at once.
@@ -1115,11 +1145,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     naming a Contexto call of any assistant message in the request, and every user message after the
     last assistant message is read, so results split across consecutive user messages in any order
     count. A non-string id (a list) raised `TypeError`, logged as `toolcheck_error`; it now does not
-    match.
-  - **Not done.** No live run: the routine's step 9 costs millions of tokens (live run #3's H1 and
-    baseline), over this task's 500,000 cap, and its scripted task does not ask for a subagent, so it
-    would not exercise shape (2). Whether a nested CLAUDE.md read in a turn should stay carried after that turn
-    is paged is left open; Contexto treats it as on 4.x ids since D32.
+    match. A request whose trailing messages hold no failed result returns before the history is
+    scanned.
 
 ## Open decisions
 
