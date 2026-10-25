@@ -11,7 +11,7 @@ The single list is `TESTED_VERSIONS` in `src/contexto/cliversions.py`, oldest to
 
 | CLI | Tested | What was tested on it |
 |---|---|---|
-| Claude Code | 2.1.302 | session-start signature (D33), context-block kinds (D32), missing-tools notices, live acceptance run #3 |
+| Claude Code | 2.1.302 | session-start signature (D33), context-block kinds (D32), missing-tools notices, the permission refusal of Contexto's tools in `-p` mode (D44), live acceptance on Claude Opus 5.5 (PR #221, [M2-acceptance-opus.md](research/M2-acceptance-opus.md); live run #3 ran on 2.1.301) |
 | Codex | 0.154.0 | Responses shapes and context sections, Codex acceptance (D30) |
 | Codex | 0.163.0 | MCP server launch and missing-tools check (v0.2.8); context sections and request shapes rechecked for D38 (Codex steps 1 to 4 below) |
 
@@ -26,6 +26,7 @@ and not re-measured on 2.1.302.
 | `CONTEXT_BLOCK_KINDS` (first lines inside `<system-reminder>`), `CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION` | `src/contexto/rewrite.py` | `spikes/m2/scale/reminders` |
 | `HOOK_SIGNATURES`, `HOOK_SIGNATURES_CLAUDE_CODE_VERSION` | `src/contexto/rewrite.py` | `spikes/m2/carried` (`live_probe.sh`, `hook_context.py`) |
 | deferred-tool listings and MCP notices | `src/contexto/toolcheck.py` | zero-spend captures described in its docstring |
+| the refusal of a tool no permission rule allows ("... but you haven't granted it yet.", D44) | `src/contexto/toolcheck.py` | `spikes/m2/permissions/permstub.py` (D44) |
 | `CONTEXT_SECTION` (Codex section tags), `CONTEXT_SECTIONS_CODEX_VERSION` | `src/contexto/codex.py` | `spikes/m2/codex/probe.sh` |
 | subagent shapes (`AGENT_TOOLS`, `ASYNC_LAUNCH`, `HAND_BACK`, `NOTICE_OPENINGS`, the `<task-notification>` and `resumedAgentId` patterns), gated by `SUBAGENT_SHAPES_TESTED` (D40) | `src/contexto/rewrite.py`, `src/contexto/cliversions.py` | `spikes/m2/subagents` |
 
@@ -108,6 +109,12 @@ Everything here is zero spend unless marked.
      kind (`CONTEXT_BLOCK_KINDS`). Note new kinds and changed per-turn placement.
 3. Hooks, output styles, plan mode, effort, MCP changes: `spikes/m2/carried/live_probe.sh` (zero
    tokens, against a fake model). Hook outputs must still start with the `HOOK_SIGNATURES` prefixes.
+   The launcher's command line (about two minutes, against a stub):
+   `python spikes/m2/argv/argstub.py --claude-version <version> --work /tmp/argstub`. The spike deletes
+   only a `--work` it made (one holding `.argstub-work`) or an empty one. If a run from before the
+   marker existed left an unmarked `/tmp/argstub`, remove it first. Every line must say
+   `"pass": true` and `"blocked": []`: a prompt right after `claude`, after flags, after `--`, with
+   `-p`, with `-c -p`, and no prompt.
 4. Missing-tools notices: if the CLI's MCP or tool-search text changed in step 1 or 2, recapture the
    shapes `src/contexto/toolcheck.py` describes (tool search on, a resume with the server off PATH)
    and update `tests/test_toolcheck.py`.

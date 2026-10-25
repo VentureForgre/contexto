@@ -7,18 +7,24 @@ Steps (M2 contract, Architecture):
 2. Open session S in ``contexto.paths.contexto_home()`` and start ``ContextoProxy`` on
    ``127.0.0.1:<free port>`` with the rewrite engine as its transform.
 3. Write two temporary files, mode 0600, in a private temporary directory (never in the user's
-   Claude configuration): a ``--settings`` file whose only content is
-   ``env.ANTHROPIC_BASE_URL = <proxy URL>``, and an ``--mcp-config`` file that makes Claude Code spawn
-   ``contexto mcp --session S`` over stdio with the current interpreter.
-4. Run ``claude --settings <file> --mcp-config <file> [user args]`` as a child with the terminal
-   passed through, wait for it, stop the proxy, delete the temporary files, and return claude's
-   exit code.
+   Claude configuration): a ``--settings`` file holding ``env.ANTHROPIC_BASE_URL = <proxy URL>`` and
+   ``permissions.allow`` with one rule per Contexto MCP tool, by its exact name (D44:
+   ``mcp__contexto__contexto_recall`` and the other four), and an ``--mcp-config`` file that makes
+   Claude Code spawn ``contexto mcp --session S`` over stdio with the current interpreter.
+4. Run ``claude --settings=<file> --mcp-config=<file> [user args]`` (``claude_argv``: one argument per
+   flag, so the variadic ``--mcp-config`` cannot take a prompt right after ``claude``) as a child with
+   the terminal passed through, wait for it, stop the proxy, delete the temporary files, and return
+   claude's exit code.
 
 The user's own settings, hooks, and MCP servers still load: a flag-level ``--settings`` only adds
-the base URL, and it outranks the user, project, and local settings files. Limit: organization-
-managed settings outrank ``--settings``; if they set ``ANTHROPIC_BASE_URL``, Claude Code bypasses
-the proxy and Contexto cannot keep the prompt bounded. ``CLAUDE_CONFIG_DIR`` is never set and no
-user configuration file is edited.
+the base URL and the allow rules. Its base URL outranks the user, project, and local settings files.
+Its allow rules join the user's permission rules rather than replacing them, and the user's ``deny``
+and ``ask`` rules still win over them (measured with zero spend on Claude Code 2.1.302: a deny takes
+the tool out of the request, an ask refuses it in ``-p`` mode). Without the rules, 2.1.302 refuses
+every Contexto tool in ``-p`` mode ("you haven't granted it yet") and the session loses recall.
+Limit: organization-managed settings outrank ``--settings``; if they set ``ANTHROPIC_BASE_URL``,
+Claude Code bypasses the proxy and Contexto cannot keep the prompt bounded. ``CLAUDE_CONFIG_DIR`` is
+never set and no user configuration file is edited.
 
 Signals: Ctrl+C in a terminal reaches every process in the foreground group, so Claude Code gets
 it directly; the launcher ignores SIGINT while claude runs so that an interrupt meant for claude
@@ -34,7 +40,8 @@ plus pins and index). Once the engine measures ``F``, a ``bound_too_small`` even
 budget under 25,000 is shown on stderr once. So is a main conversation running without Contexto's
 MCP tools (``contexto.toolcheck``): neither CLI reports an MCP server that fails to start, so the
 proxy checks and the launcher warns, during the run or at exit, and once more after the CLI exits if
-the session ended still without them. So is a CLI version Contexto was not tested with
+the session ended still without them. So is the first Contexto tool call Claude Code refused for
+lack of a permission rule (``mcp_tools_denied``, D44). So is a CLI version Contexto was not tested with
 (``contexto.cliversions``, D38: ``<cli> --version`` at start; ``contexto run --no-version-check
 <cli>`` or ``CONTEXTO_NO_VERSION_CHECK=1`` skips it). stderr stays quiet otherwise.
 
@@ -60,11 +67,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from contexto.cliversions import launch_check
+from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
+from contexto.mcp import TOOLS as MCP_TOOLS
 from contexto.paths import contexto_home, mcp_env
 from contexto.private import affinity_salt
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import SessionStore
-from contexto.toolcheck import missing_tools_message
+from contexto.toolcheck import denied_tools_message, missing_tools_message
 from contexto.upstream import resolve_upstream
 
 DEFAULT_BOUND = 150_000
@@ -102,18 +111,20 @@ class LaunchOptions:
 
 
 def check_user_args(claude_args: list[str]) -> None:
-    """Fail closed on a user ``--settings``: Claude Code 2.1.301 takes a single ``--settings``, so a
-    second one could replace ours and silently send requests around the proxy. ``--mcp-config`` is
-    variadic and allowed. Arguments after ``--`` are positional for claude and not checked."""
+    """Fail closed on a user ``--settings``: Claude Code takes a single ``--settings``, so a second one
+    could replace ours and silently send requests around the proxy. ``--mcp-config`` is variadic and
+    allowed. Every argument is checked, after a ``--`` too: a ``--`` can be another option's value
+    (``--append-system-prompt -- --settings x.json``), and Claude Code 2.1.302 and 2.1.310 then still
+    read the ``--settings`` after it. So a prompt that is exactly ``--settings`` or starts with
+    ``--settings=`` is refused as well."""
     for arg in claude_args:
-        if arg == "--":
-            return
         if arg == "--settings" or arg.startswith("--settings="):
             raise LaunchError(
                 "--settings in the claude arguments is not supported: Claude Code accepts one --settings, "
                 "and contexto uses it to route requests through its proxy, so a second one could bypass "
                 "the proxy. Put those settings in your Claude settings files instead "
-                "(see README, 'contexto run').", EXIT_USAGE)
+                "(see README, 'contexto run'). Every argument is checked, including those after --, so a "
+                "prompt that is exactly --settings or starts with --settings= is refused too.", EXIT_USAGE)
 
 
 def check_bound(bound: int, allow_large_bound: bool) -> None:
@@ -154,9 +165,10 @@ def start_warning(bound: int, headroom_floor: int | None, overhead: int) -> str 
 
 class NoticeLog:
     """Session log wrapper: everything goes to the store; the engine's first bound_too_small event,
-    first window budget under MIN_WINDOW_BUDGET, and first ``mcp_tools_missing`` (from a request, or
-    logged at exit by ``report_missing_tools``) are also shown on stderr, once each; an exit-time
-    ``mcp_tools_missing`` that repeats a mid-run one is shown once more, after the CLI exited."""
+    first window budget under MIN_WINDOW_BUDGET, first ``mcp_tools_denied`` (D44), and first
+    ``mcp_tools_missing`` (from a request, or logged at exit by ``report_missing_tools``) are also shown
+    on stderr, once each; an exit-time ``mcp_tools_missing`` that repeats a mid-run one is shown once
+    more, after the CLI exited."""
 
     def __init__(self, store: Any, stderr) -> None:
         self.store = store
@@ -175,6 +187,9 @@ class NoticeLog:
                 message = missing_tools_message(inner.get("dialect"), inner.get("server_listed"))
                 self._once("mcp_tools_missing_exit" if repeated else "mcp_tools_missing",
                            ("warning (repeated from the session): " if repeated else "warning: ") + message)
+                continue
+            if inner.get("event") == "mcp_tools_denied":
+                self._once("mcp_tools_denied", "warning: " + denied_tools_message(inner.get("tools")))
                 continue
             if inner is event:
                 continue
@@ -228,19 +243,36 @@ def write_private_json(directory: Path, name: str, payload: dict[str, Any]) -> P
     return path
 
 
+def contexto_tool_rules() -> list[str]:
+    """D44: one permission rule per Contexto MCP tool, by its exact name (``mcp__contexto__contexto_recall``
+    and the other four). They cover only the server ``mcp_payload`` names, and only the tools it serves."""
+    return [f"mcp__{MCP_SERVER_NAME}__{tool['name']}" for tool in MCP_TOOLS]
+
+
 def settings_payload(proxy_url: str) -> dict[str, Any]:
-    return {"env": {"ANTHROPIC_BASE_URL": proxy_url}}
+    """The flag-level ``--settings`` content: the proxy's base URL, and an allow rule for each of Contexto's
+    own MCP tools (D44). Claude Code 2.1.302 refuses an MCP tool in ``-p`` mode unless a rule allows it
+    ("you haven't granted it yet"), so without these rules ``contexto run claude -p`` loses recall."""
+    return {"env": {"ANTHROPIC_BASE_URL": proxy_url}, "permissions": {"allow": contexto_tool_rules()}}
 
 
 def mcp_payload(session_id: str, home: Path) -> dict[str, Any]:
     # Claude Code starts the server in the user's project; -P keeps that directory off sys.path,
     # so a project's own contexto package cannot run in place of the installed server.
-    return {"mcpServers": {"contexto": {
+    return {"mcpServers": {MCP_SERVER_NAME: {
         "type": "stdio",
         "command": sys.executable,
         "args": ["-P", "-m", "contexto", "mcp", "--session", session_id],
         "env": mcp_env(home),
     }}}
+
+
+def claude_argv(claude: str, settings: Path, mcp: Path, claude_args: list[str]) -> list[str]:
+    """The Claude Code command line. Each launcher flag and its file are one ``--flag=<file>`` token:
+    ``--mcp-config`` takes several files, so in the two-token form Claude Code (2.1.302, 2.1.310) also
+    reads the next argument as a config file, and ``contexto run claude "prompt"`` failed with "MCP
+    config file not found". The ``=`` form ends the option at its own token."""
+    return [claude, f"--settings={settings}", f"--mcp-config={mcp}", *claude_args]
 
 
 def exit_code(returncode: int) -> int:
@@ -425,8 +457,7 @@ def _run(options: LaunchOptions, stderr) -> int:
             print(f"contexto: {warning}", file=stderr, flush=True)
             store.log({"event": "window_budget_warning", "bound": options.bound,
                        "assumed_overhead": assumed_overhead()})
-        code = run_child([claude, "--settings", str(settings), "--mcp-config", str(mcp), *options.claude_args],
-                         stderr=stderr)
+        code = run_child(claude_argv(claude, settings, mcp, options.claude_args), stderr=stderr)
         return code
     finally:
         proxy.stop()

@@ -372,7 +372,7 @@ def main(argv: list[str]) -> int:
             return 2
         model = argv[i + 1]
         argv = argv[:i] + argv[i + 2:]
-    allow_contexto_tools = "--allow-contexto-tools" in argv  # the mcp__contexto allow rule, off by default
+    allow_contexto_tools = "--allow-contexto-tools" in argv  # mcp__contexto allow rule; redundant since D44
     argv = [a for a in argv if a != "--allow-contexto-tools"]
     inflate = None
     if "--inflate" in argv:  # --inflate N:FACTOR, a detector proof run

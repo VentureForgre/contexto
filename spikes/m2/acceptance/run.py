@@ -202,7 +202,8 @@ def main(argv: list[str] | None = None) -> int:
     live.add_argument("--model", default=driver.MODEL, help=f"the model Claude Code runs (default: {driver.MODEL})")
     live.add_argument("--allow-contexto-tools", action="store_true",
                       help="add the mcp__contexto permission allow rule to the isolated Claude Code settings; "
-                           "off by default, since the contract runs acceptance on default settings")
+                           "redundant since D44 (the launcher allows Contexto's tools) and it would hide a "
+                           "D44 regression, so keep it off")
     rep = sub.add_parser("replay", help="full-context baseline: one direct request after the H1 run")
     rep.add_argument("--cc-jsonl", type=Path, required=True, help="the H1 run's Claude Code session JSONL")
     rep.add_argument("--out", type=Path, required=True, help="private directory for the answers and counts")

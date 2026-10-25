@@ -27,6 +27,8 @@ from contexto.launcher import (
     assumed_overhead,
     check_bound,
     check_user_args,
+    claude_argv,
+    contexto_tool_rules,
     engine_config,
     exit_code,
     mcp_payload,
@@ -35,6 +37,7 @@ from contexto.launcher import (
     start_warning,
     write_private_json,
 )
+from contexto.mcp import TOOLS as MCP_TOOLS
 from contexto.paths import contexto_home
 
 FAKE_CLAUDE = r'''
@@ -48,8 +51,8 @@ if args == ["--version"]:  # contexto run's version check (D38)
     print(os.environ.get("FAKE_VERSION", "2.1.302 (Claude Code)"))
     sys.exit(0)
 record = {"argv": args, "pid": os.getpid(), "env_base_url": os.environ.get("ANTHROPIC_BASE_URL")}
-for flag, key in (("--settings", "settings"), ("--mcp-config", "mcp")):
-    path = args[args.index(flag) + 1]
+for flag, key in (("--settings=", "settings"), ("--mcp-config=", "mcp")):
+    path = next(a for a in args if a.startswith(flag))[len(flag):]  # the launcher's one-token form
     record[key + "_path"] = path
     record[key] = json.load(open(path))
     record[key + "_mode"] = os.stat(path).st_mode & 0o777
@@ -61,6 +64,12 @@ if os.environ.get("FAKE_REQUEST"):
     if os.environ.get("FAKE_TOOLS"):  # the main conversation's tool list, as Claude Code sends it
         payload["tools"] = [{"name": n, "input_schema": {"type": "object"}}
                             for n in os.environ["FAKE_TOOLS"].split(",")]
+    if os.environ.get("FAKE_DENIED"):  # Claude Code 2.1.302 refused this tool: no permission rule allowed it
+        name = os.environ["FAKE_DENIED"]
+        payload["messages"] += [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": name, "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True,
+             "content": f"Claude requested permissions to use {name}, but you haven't granted it yet."}]}]
     body = json.dumps(payload).encode()
     request = urllib.request.Request(base + "/v1/messages", data=body, method="POST",
                                      headers={"Content-Type": "application/json", "x-api-key": "fake-key"})
@@ -156,9 +165,11 @@ def test_run_wires_settings_mcp_and_args_and_cleans_up(env, upstream, tmp_path):
     assert proc.returncode == 0, err
     record = json.loads(Path(env["FAKE_RECORD"]).read_text())
     argv = record["argv"]
-    assert argv[0] == "--settings" and argv[2] == "--mcp-config" and argv[4:] == ["-p", "hello", "--model", "m"]
+    assert argv[0] == "--settings=" + record["settings_path"] and argv[1] == "--mcp-config=" + record["mcp_path"]
+    assert argv[2:] == ["-p", "hello", "--model", "m"]
     base = record["settings"]["env"]["ANTHROPIC_BASE_URL"]
-    assert record["settings"] == {"env": {"ANTHROPIC_BASE_URL": base}} and base.startswith("http://127.0.0.1:")
+    assert record["settings"] == {"env": {"ANTHROPIC_BASE_URL": base}, "permissions": {"allow": contexto_tool_rules()}}
+    assert base.startswith("http://127.0.0.1:")
     server = record["mcp"]["mcpServers"]["contexto"]
     assert server["command"] == sys.executable and server["args"] == ["-P", "-m", "contexto", "mcp", "--session", "s1"]
     assert server["env"] == {"CONTEXTO_HOME": env["CONTEXTO_HOME"]}
@@ -373,12 +384,28 @@ def test_engine_config_passes_only_set_values():
 
 
 def test_payloads_and_private_files(tmp_path):
-    assert settings_payload("http://127.0.0.1:1") == {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}}
+    assert settings_payload("http://127.0.0.1:1") == {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"},
+                                                      "permissions": {"allow": contexto_tool_rules()}}
     assert mcp_payload("s", tmp_path)["mcpServers"]["contexto"]["args"][-2:] == ["--session", "s"]
     path = write_private_json(tmp_path, "x.json", {"a": 1})
     assert stat.S_IMODE(path.stat().st_mode) == 0o600 and json.loads(path.read_text()) == {"a": 1}
     with pytest.raises(FileExistsError):
         write_private_json(tmp_path, "x.json", {})
+
+
+def test_settings_allow_exactly_contexto_s_own_tools():
+    # D44: Claude Code 2.1.302 refuses an MCP tool in -p mode unless a rule allows it. The rules name each
+    # tool the server serves, under the server name the --mcp-config gives it, and nothing else: no
+    # server-wide or wildcard rule, no deny or ask list, no mode change.
+    rules = contexto_tool_rules()
+    assert rules == ["mcp__contexto__contexto_recall", "mcp__contexto__contexto_pin", "mcp__contexto__contexto_close",
+                     "mcp__contexto__contexto_state", "mcp__contexto__contexto_search"]
+    assert rules == [f"mcp__contexto__{tool['name']}" for tool in MCP_TOOLS]
+    assert list(mcp_payload("s", Path("/h"))["mcpServers"]) == ["contexto"]
+    assert all("*" not in rule and "(" not in rule for rule in rules)
+    payload = settings_payload("http://127.0.0.1:1")
+    assert set(payload) == {"env", "permissions"} and set(payload["permissions"]) == {"allow"}
+    assert set(payload["env"]) == {"ANTHROPIC_BASE_URL"}
 
 
 def test_exit_code_maps_signals():
@@ -449,7 +476,8 @@ def test_bound_too_small_notice_without_full_sizing(tmp_path, event):
     assert "keeps only the new turn" in line and "may exceed the bound" in line and "unrotated" not in line
 
 
-@pytest.mark.parametrize("user_args", [["--settings", "mine.json"], ["-p", "hi", "--settings={}"]])
+@pytest.mark.parametrize("user_args", [["--settings", "mine.json"], ["-p", "hi", "--settings={}"],
+                                       ["--append-system-prompt", "--", "--settings", "mine.json", "-p", "x"]])
 def test_user_settings_are_refused_before_anything_starts(env, upstream, tmp_path, user_args):
     proc = launch(env, "--upstream", upstream, "--session", "r1", "claude", *user_args, cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
@@ -466,13 +494,38 @@ def test_user_mcp_config_passes_through(env, upstream, tmp_path):
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == 0, err
     argv = json.loads(Path(env["FAKE_RECORD"]).read_text())["argv"]
-    assert argv[2] == "--mcp-config" and argv[4:] == ["--mcp-config", str(mine), "-p", "x"]
+    assert argv[1].startswith("--mcp-config=") and argv[2:] == ["--mcp-config", str(mine), "-p", "x"]
+
+
+@pytest.mark.parametrize("user_args", [["hello there"], ["hello", "-p"], [], ["--model", "m", "hello"]])
+def test_user_arguments_follow_the_launcher_flags_unchanged(env, upstream, tmp_path, user_args):
+    # A prompt right after `claude` must stay a prompt: in the two-token form `--mcp-config <file>`,
+    # Claude Code's variadic --mcp-config took it as a second config file ("MCP config file not found").
+    proc = launch(env, "--upstream", upstream, "--session", "r3", "claude", *user_args, cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    record = json.loads(Path(env["FAKE_RECORD"]).read_text())
+    assert record["argv"] == ["--settings=" + record["settings_path"], "--mcp-config=" + record["mcp_path"],
+                              *user_args]
+
+
+def test_claude_argv_joins_each_flag_with_its_file():
+    argv = claude_argv("/bin/claude", Path("/t/settings.json"), Path("/t/mcp.json"), ["a prompt", "-p"])
+    assert argv == ["/bin/claude", "--settings=/t/settings.json", "--mcp-config=/t/mcp.json", "a prompt", "-p"]
+    # No launcher flag is followed by a separate value token that a variadic option could extend.
+    assert not any(arg in ("--settings", "--mcp-config") for arg in argv)
 
 
 def test_check_user_args():
     check_user_args(["-p", "x", "--mcp-config", "a.json", "b.json"])
-    check_user_args(["-p", "--", "--settings"])  # positional after --, not a flag
-    for args in (["--settings", "f"], ["--settings=f"], ["-p", "x", "--settings", "f"]):
+    check_user_args(["a prompt", "--mcp-config=a.json"])
+    check_user_args(["-p", "--", "a prompt naming --settings"])  # only an argument that is the flag is refused
+    for args in (["--settings", "f"], ["--settings=f"], ["-p", "x", "--settings", "f"], ["a prompt", "--settings={}"],
+                 ["--settings="], ["--settings"],
+                 # A -- can be another option's value; Claude Code 2.1.302 and 2.1.310 still read the
+                 # --settings after it, so the check does not stop at --.
+                 ["--append-system-prompt", "--", "--settings", "x.json"], ["-p", "--", "--settings=x.json"],
+                 ["-p", "--", "--settings"]):
         with pytest.raises(LaunchError):
             check_user_args(args)
 
@@ -587,3 +640,18 @@ def test_claude_with_contexto_tools_gets_no_warning(env, upstream, tmp_path):
     assert proc.returncode == 0, err
     assert "warning" not in err and "Contexto's tools" not in err
     assert not [e for e in session_log(env, "t2") if str(e.get("event")).startswith("mcp_tools")]
+
+
+def test_claude_refusing_contexto_tools_gets_one_warning(env, upstream, tmp_path):
+    """D44: the tools are offered but Claude Code refuses them for lack of a permission rule (what 2.1.302
+    did in -p mode before the launcher's --settings allowed them; a user's 'ask' rule still does it)."""
+    env.update(FAKE_REQUEST="1", FAKE_TOOLS="Bash,mcp__contexto__contexto_search,mcp__contexto__contexto_recall",
+               FAKE_DENIED="mcp__contexto__contexto_recall")
+    proc = launch(env, "--upstream", upstream, "--session", "t3", "claude", "-p", "hello", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    warnings = [line for line in err.splitlines() if "warning" in line]
+    assert len(warnings) == 1 and "Claude Code refused Contexto's contexto_recall" in warnings[0], err
+    [denied] = [e for e in session_log(env, "t3") for e in [e, *e.get("transform_events", [])]
+                if e.get("event") == "mcp_tools_denied"]
+    assert denied["tools"] == ["contexto_recall"] and denied["main"] is True

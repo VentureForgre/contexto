@@ -46,6 +46,9 @@ The contract runs acceptance with `claude-haiku-5-5` pinned and on **default Cla
    See "Attempt 1 and the fixes". A product fix is in progress (D44: the launcher allows
    Contexto's own tools). It was not merged when this record was written.
 
+   Fixed by D44 (PR #224): the launcher's `--settings` allows Contexto's five tools, and a refused
+   Contexto tool now logs `mcp_tools_denied`, an acceptance 1 failure event.
+
 The verdicts below hold for the verdict run with the allow rule.
 
 ## Verdicts
@@ -273,6 +276,8 @@ can be put down to the model alone:
   - Neither `mcp_tools_missing` nor any failure event fires, since the tools are listed and the CLI
     refuses each call.
   - In an interactive session the CLI may ask the user instead. That was not tested [untested].
+  - Fixed by D44 (PR #224). The fix's zero-spend checks also covered an interactive 2.1.302
+    session: with the launcher's allow rules, the calls ran with no prompt.
 
 **Two scoring corrections for Claude Code 2.1.302.** These are harness errors, not product
 failures. Both are applied at run time by scripts outside the repository, and no harness file

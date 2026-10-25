@@ -38,6 +38,17 @@ answered ``tools/list``, how many main requests lacked the tools, seconds since 
 still lacked the tools logs ``mcp_tools_missing`` again (``repeated``), since a warning printed mid-run
 can be drawn over by the CLI's TUI. The launcher shows ``missing_tools_message`` on stderr once during
 the run and once after the CLI exits.
+
+Refused tools (D44): the tools can be offered and still refused. Claude Code 2.1.302 in ``-p`` mode
+refuses an MCP tool that no permission rule allows, and the model gets the tool result "Claude requested
+permissions to use mcp__contexto__contexto_search, but you haven't granted it yet." (``is_error``). The
+launcher's ``--settings`` allows Contexto's tools, but a user's ``ask`` rule for one of them outranks that
+allow (measured, zero spend). So the check also reads the newest user message of every Messages API
+request, main or not, since a refusal loses recall in a subagent too. A result counts only when it answers
+a Contexto tool call of the assistant message before it, so another tool's output that quotes the text does
+not. The first refusal of a Contexto tool logs ``mcp_tools_denied`` with the tools' names (never other
+content); the launcher shows it once. A
+user who answers "No" at an interactive prompt gets other text, which does not count: that was a choice.
 """
 
 from __future__ import annotations
@@ -58,6 +69,8 @@ GRACE_S = 30.0
 WALL_SLACK_S = 2.0
 DIALECTS = frozenset({"anthropic", "responses"})
 _LISTED_TOOL = re.compile(r"^(mcp__contexto__contexto_[a-z_]+)[ \t]*$")
+# Claude Code 2.1.302's refusal of a tool no rule allows (captured with zero spend against a local stub).
+_DENIED = re.compile(r"requested permissions to use (mcp__contexto__contexto_[a-z_]+), but you haven't granted it")
 _SERVER_LINE = re.compile(r"^contexto(?:[ \t(:]|$)")  # "contexto" or "contexto (ENOENT): ..." in a server list
 
 
@@ -153,6 +166,41 @@ def anthropic_tools_offered(request: dict[str, Any]) -> bool | None:
     return (offered or any(_named(t) for t in tools)) and not down
 
 
+def _contexto_calls(message: dict[str, Any]) -> dict[str, str]:
+    """The Contexto tool calls in an assistant message, by ``tool_use`` id."""
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else []
+    return {b["id"]: b["name"] for b in blocks
+            if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str) and _named(b)}
+
+
+def anthropic_denied_tools(request: dict[str, Any]) -> list[str]:
+    """Contexto tools Claude Code refused for lack of a permission rule, in the request's newest user message.
+    A ``tool_result`` counts only when it has ``is_error``, answers a Contexto tool call (``mcp__contexto__``)
+    of the assistant message before it, and its text is the refusal naming that same tool: another tool's
+    result that quotes the refusal text (a failed Bash command printing it) does not. Only the newest user
+    message is read, so a refusal counts on the request that first carries it; role ``system`` messages
+    around it are skipped."""
+    messages = [m for m in request.get("messages") or [] if isinstance(m, dict) and m.get("role") != "system"]
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") != "user":
+            continue
+        previous = messages[index - 1] if index > 0 else None
+        calls = _contexto_calls(previous) if isinstance(previous, dict) and previous.get("role") == "assistant" else {}
+        denied: list[str] = []
+        content = messages[index].get("content")
+        for block in content if isinstance(content, list) else []:
+            if not (isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error")):
+                continue
+            name = calls.get(block.get("tool_use_id"))
+            if name is None:
+                continue
+            if any(name in _DENIED.findall(text) for text in _texts(block.get("content"))) and name not in denied:
+                denied.append(name)
+        return denied
+    return []
+
+
 def _names_tree(tools: Any, depth: int = 0) -> bool:
     """A Contexto tool or namespace named anywhere in a Responses tool list (namespaces nest tools)."""
     if not isinstance(tools, list) or depth > 3:
@@ -188,6 +236,7 @@ class ToolCheck:
         self.reported = False
         self._exit_judged = False
         self._listed = False
+        self.denied_reported = False
 
     def listed(self) -> bool:
         """Has the MCP server answered tools/list since this engine started? Once true, stays true."""
@@ -201,7 +250,25 @@ class ToolCheck:
         return self._listed
 
     def observe(self, request: dict[str, Any], dialect: str, *, main: bool) -> list[dict[str, Any]]:
-        if not main or dialect not in DIALECTS:
+        if dialect not in DIALECTS:
+            return []
+        denied = self._denied(request, dialect, main)
+        return [*denied, *self._offered(request, dialect, main)]
+
+    def _denied(self, request: dict[str, Any], dialect: str, main: bool) -> list[dict[str, Any]]:
+        """The first refusal of a Contexto tool, on any Messages API request (D44)."""
+        if self.denied_reported or dialect != "anthropic":
+            return []
+        names = anthropic_denied_tools(request)
+        if not names:
+            return []
+        self.denied_reported = True
+        return [{"event": "mcp_tools_denied", "dialect": dialect, "main": main,
+                 "tools": [name.removeprefix(TOOL_PREFIX) for name in names],
+                 "elapsed_s": int(self.clock() - self.started)}]
+
+    def _offered(self, request: dict[str, Any], dialect: str, main: bool) -> list[dict[str, Any]]:
+        if not main:
             return []
         if dialect == "anthropic":
             present = anthropic_tools_offered(request)
@@ -238,6 +305,16 @@ class ToolCheck:
     def _event(self, at: str) -> dict[str, Any]:
         return {"event": "mcp_tools_missing", "dialect": self.dialect, "at": at, "server_listed": self.listed(),
                 "requests": self.missing_requests, "elapsed_s": int(self.clock() - self.started)}
+
+
+def denied_tools_message(tools: Any) -> str:
+    """The launcher's stderr warning for an ``mcp_tools_denied`` event."""
+    names = [t for t in tools if isinstance(t, str)] if isinstance(tools, list) else []
+    named = ", ".join(names) or "its tools"
+    return (f"Claude Code refused Contexto's {named} (\"you haven't granted it yet\"), so paged-out turns may not "
+            "be recalled. contexto run allows its own tools in the --settings it passes; a permission 'ask' rule "
+            "matching mcp__contexto__ tools outranks that allow, and organization-managed settings can too. "
+            "See README, Troubleshooting.")
 
 
 def missing_tools_message(dialect: Any, server_listed: Any) -> str:
