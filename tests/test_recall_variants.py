@@ -233,6 +233,15 @@ def test_file_paths_are_listed_unless_they_are_a_value_or_list_item():
     assert salient_identifiers([text]) == ["conf/app.toml", "README.md", "path", "x"]
 
 
+def test_text_nested_too_deep_for_json_is_read_as_text():
+    """json.loads raises RecursionError on it (before Python 3.14), or the key walk does (from 3.14):
+    either way the text is not JSON to the index, and a line of it is not a JSON line."""
+    deep = "[" * 50_000 + "]" * 50_000
+    assert salient_identifiers([deep]) == []
+    assert salient_identifiers(['{"a":' * 50_000 + "1" + "}" * 50_000]) == ["a"]  # "a": is in key position
+    assert salient_identifiers([f"mode=fast\n{deep}\n" + '{"service_name": "x"}']) == ["mode", "service_name"]
+
+
 def test_the_json_lines_scan_is_linear_on_a_large_tool_output():
     """B13: 8 MB of mixed JSON Lines and log lines. Linear takes well under a second; the earlier
     quadratic scan took over ten seconds here (and 2.3 s on 2 MB in reviewer-1's probe)."""

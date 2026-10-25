@@ -37,7 +37,6 @@ budget is ``CONTEXTO_SEARCH_CACHE_MB`` (default 64), or ``contexto mcp --search-
 from __future__ import annotations
 
 import heapq
-import json
 import os
 import threading
 import zlib
@@ -46,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from contexto.canonical import loads_bounded
 from contexto.store.pages import current_stub, index_line, search_entry
 from contexto.store.search import SearchEntry
 
@@ -367,7 +367,7 @@ class PageCatalog:
 
     def _read(self, path: Path) -> dict[str, Any] | None:
         try:
-            page = current_stub(json.loads(path.read_text(encoding="utf-8")))
+            page = current_stub(loads_bounded(path.read_text(encoding="utf-8")))
             _view(page)  # the fields every reader needs
             return page
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
@@ -388,3 +388,14 @@ def _view(page: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(turn, int) or isinstance(turn, bool):
         raise TypeError("page turn is not an integer")
     return {"id": page["id"], "turn": turn, "stub": stub}
+
+
+def check_page(page: Any) -> dict[str, Any]:
+    """``page`` if it has the shape of a page record (``_view``'s fields and a ``messages`` list),
+    else TypeError or KeyError: what ``get_page`` returns must be safe to render and recall."""
+    if not isinstance(page, dict):
+        raise TypeError("page record is not an object")
+    _view(page)
+    if not isinstance(page["messages"], list):
+        raise TypeError("page messages is not a list")
+    return page

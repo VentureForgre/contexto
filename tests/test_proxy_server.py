@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 import contexto.proxy as proxy_module
+from contexto.canonical import MAX_JSON_DEPTH
 from contexto.proxy import (
     END_ALLOWLISTS,
     THINKING_BINDING_BETA,
@@ -197,7 +198,7 @@ class Upstream(BaseHTTPRequestHandler):
             self.end_headers()
             compressor = __import__("zlib").compressobj(9, 8, 16 + 15) if gz else None
             for event in STREAM:
-                chunk = sse(event)
+                chunk = event if isinstance(event, bytes) else sse(event)  # bytes: a raw event, sent as is
                 if compressor:
                     chunk = compressor.compress(chunk) + compressor.flush(__import__("zlib").Z_SYNC_FLUSH)
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
@@ -218,7 +219,8 @@ class Upstream(BaseHTTPRequestHandler):
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
         for event in RESPONSES_STREAM:
-            chunk = b"event: " + event["type"].encode() + b"\ndata: " + json.dumps(event).encode() + b"\n\n"
+            chunk = event if isinstance(event, bytes) else (
+                b"event: " + event["type"].encode() + b"\ndata: " + json.dumps(event).encode() + b"\n\n")
             self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
             self.wfile.flush()
             time.sleep(0.1)
@@ -985,16 +987,56 @@ def test_unserializable_transform_result_falls_back_to_original_bytes(make_proxy
     assert log.requests()[0]["transform_error"] == "serialize: TypeError"
 
 
-def test_deeply_nested_json_is_forwarded_untouched(make_proxy):
+@pytest.mark.parametrize("depth", [MAX_JSON_DEPTH + 1, 100_000])  # just over; parsable or not, by Python version
+def test_a_request_nested_past_the_limit_is_forwarded_untouched_and_logged(make_proxy, depth):
+    """Rule 18: no transform, the CLI's own bytes, transform_skipped on the entry and one
+    request_too_deep event (not transform_error: the API refuses such a request anyway)."""
     Upstream.mode = "json"
-    proxy, log = make_proxy(transform=StubEngine("drop-first"))
-    body = b'{"model":"m","stream":false,"messages":[],"x":' + b"[" * 100_000 + b"]" * 100_000 + b"}"
+    engine = StubEngine("drop-first")
+    proxy, log = make_proxy(transform=engine)
+    inner = depth - 2  # the body object and "x"'s outermost list are levels 1 and 2
+    body = b'{"model":"m","stream":false,"messages":[],"x":[' + b"[" * inner + b"]" * inner + b"]}"
     response, _ = call(proxy, "POST", "/v1/messages", body, AUTH)
-    assert response.status == 200 and Upstream.received[0][3] == body
-    # Whether parsing hits the recursion limit depends on the Python version; either way the
-    # body is forwarded untouched and nothing crashes.
-    assert log.requests()[0].get("transform_skipped") in (None, "request body is not JSON")
-    assert not [e for e in log.events if e["event"] == "proxy_error"]
+    assert response.status == 200 and Upstream.received[0][3] == body and engine.calls == []
+    entry = log.requests()[0]
+    assert entry["transform_skipped"] == f"request body nests deeper than {MAX_JSON_DEPTH} levels"
+    assert "transform_error" not in entry
+    [event] = [e for e in log.events if e["event"] == "request_too_deep"]
+    assert event["endpoint"] == "/v1/messages" and event["limit"] == MAX_JSON_DEPTH and event["level"] == "warning"
+    assert not [e for e in log.events if e["event"] in ("proxy_error", "transform_error")]
+
+
+def test_a_request_nested_exactly_to_the_limit_is_transformed(make_proxy):
+    Upstream.mode = "json"
+    engine = StubEngine("drop-first")
+    proxy, log = make_proxy(transform=engine)
+    inner = MAX_JSON_DEPTH - 2
+    messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"},
+                {"role": "user", "content": "c"}]
+    body = (b'{"model":"m","stream":false,"messages":' + json.dumps(messages).encode()
+            + b',"x":[' + b"[" * inner + b"]" * inner + b"]}")
+    response, _ = call(proxy, "POST", "/v1/messages", body, AUTH)
+    assert response.status == 200 and engine.calls == [("/v1/messages", 3)]
+    assert json.loads(Upstream.received[0][3])["messages"] == messages[2:]  # the transform's output was sent
+    assert not [e for e in log.events if e["event"] == "request_too_deep"]
+
+
+def test_a_nested_model_value_is_summarized_in_the_log(make_proxy):
+    """The request's model goes into the entry and upstream_4xx: summarized like any client value, so
+    a nested one cannot break redaction and drop the entry from the log."""
+    Upstream.mode = "error"
+    proxy, log = make_proxy()
+    model = json.loads(nested(400))
+    body = json.dumps({"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]}).encode()
+    response, _ = call(proxy, "POST", "/v1/messages", body, AUTH)
+    assert response.status == 400
+    entry = log.requests()[0]
+    got = entry["model"]
+    for _ in range(proxy_module.MAX_SUMMARY_DEPTH):
+        got = got["a"]
+    assert got == "<dict>"
+    [event] = [e for e in log.events if e["event"] == "upstream_4xx"]
+    assert event["model"] == entry["model"]
 
 
 def test_malformed_framing_gets_a_400_not_a_dropped_connection(make_proxy):
@@ -1655,7 +1697,7 @@ def test_scalar_summary_replaces_containers_below_the_depth_limit():
     assert proxy_module._scalar_summary([[1, "x"]]) == [[1, "x"]]
 
 
-@pytest.mark.parametrize("depth", [2000, 200_000])  # 2000 parses; 200,000 is beyond what json.loads can parse
+@pytest.mark.parametrize("depth", [200, 2_000, 200_000])  # under MAX_JSON_DEPTH (512), over it, far over
 def test_a_deeply_nested_transformation_cannot_break_the_reader(depth):
     item = '{"type":"thinking_dropped","detail":' + nested(depth) + "}"
     event = b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":3},' \
@@ -1663,12 +1705,89 @@ def test_a_deeply_nested_transformation_cannot_break_the_reader(depth):
     stream = read_transformations(event + sse_body(delta_event([DROP])))
     body = read_transformations(b'{"usage":{"input_tokens":3},"input_transformations":[' + item.encode() + b"]}",
                                 "application/json")
-    if depth == 2000:
+    if depth < MAX_JSON_DEPTH:
         assert stream.input_transformations[0]["type"] == "thinking_dropped"
         assert len(stream.input_transformations) == 2 and stream.usage["input_tokens"] == 3
         assert body.input_transformations[0]["type"] == "thinking_dropped"
-    else:  # an unparseable event or body is skipped, as invalid JSON is
+    else:  # too deep to read, on every Python: skipped as invalid JSON is, and the reader keeps reading
         assert same(stream.input_transformations, [DROP]) and body.input_transformations is None
+
+
+def test_numeric_drops_dicts_below_the_depth_limit():
+    limit = proxy_module.MAX_SUMMARY_DEPTH
+    got = proxy_module._numeric({"n": 1, "d": json.loads(nested(limit + 5)), "s": "x", "b": True})
+    assert got["n"] == 1 and set(got) == {"n", "d"}
+    for _ in range(limit - 2):
+        got = got["d" if "d" in got else "a"]
+    assert got == {"a": {}}  # the dict at the limit is dropped, so its parent is empty
+
+
+def deep_usage(depth: int) -> dict:
+    return {"input_tokens": 5, "output_tokens": 2, "input_tokens_details": json.loads(nested(depth))}
+
+
+@pytest.mark.parametrize("depth", [100, 3_000])  # past MAX_SUMMARY_DEPTH (16); past MAX_JSON_DEPTH (512)
+def test_a_deeply_nested_responses_usage_cannot_break_the_reader(depth):
+    """Under MAX_JSON_DEPTH, _numeric stops at MAX_SUMMARY_DEPTH and the usage is read; over it, the
+    event or body is unreadable and skipped. Either way feed_event and finish do not raise."""
+    completed = responses_end("completed", status="completed", usage=deep_usage(depth))
+    for body, content_type in ((sse_body(completed), "text/event-stream"),
+                               (json.dumps(completed["response"]).encode(), "application/json")):
+        reader = UsageReader(content_type, "responses")
+        reader.feed(body)
+        reader.finish()
+        if depth < MAX_JSON_DEPTH:
+            assert reader.usage["input_tokens"] == 5 and reader.usage["output_tokens"] == 2
+        else:
+            assert reader.usage == {}
+
+
+@pytest.mark.parametrize("depth", [100, 3_000])
+def test_a_deeply_nested_responses_usage_is_relayed_and_logged(make_proxy, monkeypatch, depth):
+    stream = [*RESPONSES_STREAM[:-1], responses_end("completed", status="completed", usage=deep_usage(depth))]
+    monkeypatch.setattr(f"{__name__}.RESPONSES_STREAM", stream)
+    proxy, log = make_proxy()
+    response, data = call(proxy, "POST", "/responses", RESPONSES_BYTES, AUTH)
+    assert response.status == 200 and data == sse_body(*stream)  # relayed unchanged
+    entry = log.requests()[0]
+    assert entry["status"] == 200
+    if depth < MAX_JSON_DEPTH:
+        assert entry["usage"]["input_tokens"] == 5 and entry["end_event"] == "completed"
+    else:  # the end event was unreadable: no usage, and the stream reads as ended without one
+        assert "usage" not in entry or not entry["usage"]
+
+
+def test_an_event_too_deep_for_json_reads_as_no_payload():
+    """_sse_payload reads an event nested past MAX_JSON_DEPTH as no payload, like invalid JSON."""
+    raw = b'event: content_block_start\ndata: {"type":"content_block_start","content_block":' \
+        + nested(MAX_JSON_DEPTH).encode() + b"}\n\n"
+    assert proxy_module._sse_payload(raw) == {}
+    assert proxy_module.sse_event_type(raw) == "content_block_start"  # from the event: line
+    shallow = raw.replace(nested(MAX_JSON_DEPTH).encode(), nested(MAX_JSON_DEPTH - 2).encode())
+    assert proxy_module._sse_payload(shallow)["type"] == "content_block_start"  # 1 + 510 levels
+
+
+def test_an_event_too_deep_for_json_is_relayed_and_the_stream_still_read(make_proxy, monkeypatch):
+    """A whole relay with one unreadable event: it is relayed as sent, and the events around it are
+    read (usage, the stop reason, and a tool call the stream hold holds until the message_delta)."""
+    deep = b"[" * 1_000_000 + b"]" * 1_000_000  # beyond what json.loads parses on any real stack
+    unreadable = b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":' \
+        + deep + b"}\n\n"
+    tool = {"type": "content_block_start", "index": 1,
+            "content_block": {"type": "tool_use", "id": "toolu_9", "name": "Read", "input": {}}}
+    stream = [STREAM[0], unreadable, tool, {"type": "content_block_stop", "index": 1},
+              {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 42}},
+              {"type": "message_stop"}]
+    monkeypatch.setattr(f"{__name__}.STREAM", stream)
+    engine = StubEngine()
+    proxy, log = make_proxy(transform=engine, observe_usage=engine.observe_usage)  # the stream hold reads each event
+    response, data = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    assert response.status == 200
+    assert data == b"".join(e if isinstance(e, bytes) else sse(e) for e in stream)  # relayed unchanged
+    entry = log.requests()[0]
+    assert entry["status"] == 200 and entry["usage"]["input_tokens"] == 12 and entry["usage"]["output_tokens"] == 42
+    assert entry["stop_reason"] == "tool_use" and "transform_error" not in entry
+    assert entry["stream_hold"] == {"held_events": 2, "triggered": True}  # the tool call, held until the delta
 
 
 @pytest.mark.parametrize("engine_mode", ["identity", "raise"])  # raise: the transform-error path (rule 14)

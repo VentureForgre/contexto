@@ -19,6 +19,7 @@ from contexto.rewrite import (
     EpochState,
     RewriteEngine,
     StoreCalls,
+    _drop_cache_control,
     at_turn_start,
     classify_system,
     is_turn_start,
@@ -1769,6 +1770,68 @@ def test_a_conversation_that_publishes_at_its_rotation_is_main_even_if_the_reque
     assert len(store.windows) == published + 1  # B's rotation published B's window
     assert engine._main == keyed(ANTHROPIC, b)
     assert engine.states[keyed(ANTHROPIC, a)].published_window is None
+
+
+# Deeply nested JSON in tool content -------------------------------------------------------------
+
+DEEP_TEXT = "[" * 50_000 + "]" * 50_000  # json.loads fails before 3.14; from 3.14 it parses but is too deep to walk
+LISTED = Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=2_000)  # every page has its line
+
+
+def more_turns(msgs, first, count):
+    return msgs + [m for t in range(first, first + count) for m in (user(f"prompt {t} {FILL}"),
+                                                                    assistant(f"answer {t} {FILL}"))]
+
+
+def with_tool_turn(call, result):
+    """history(6) with a tool call and its result in turn 0, the first turn to be paged out."""
+    msgs = history(6)
+    msgs[2:2] = [call, result]
+    return msgs
+
+
+@pytest.mark.parametrize("kind", ["session", "memory"])
+def test_a_paged_out_tool_result_too_deep_for_json_keeps_every_later_request_paging(tmp_path, kind):
+    """The index lists a page's JSON keys. A tool result nested too deep to parse or walk is read as
+    text, so its page's index line builds; a RecursionError there failed every later transform."""
+    store = SessionStore(tmp_path, "deep-json") if kind == "session" else MemoryStore(key=b"k" * 32)
+    msgs = with_tool_turn(tool_use(1), tool_result(1, DEEP_TEXT)) + [user("new prompt 6")]
+    _, st, ev, _ = run(msgs, store=store, config=LISTED)
+    assert "rotation" in names(ev) and st.k > 4
+    assert " turn 0: prompt 0" in store.index_text(LISTED.index_budget)  # the deep page is listed
+    later = more_turns(msgs + [assistant(f"answer 6 {FILL}")], 7, 6) + [user("new prompt 13")]
+    _, st2, ev2, _ = run(later, state=st, store=store, config=LISTED)
+    assert "rotation" in names(ev2) and st2.k > st.k  # it still pages
+    assert " turn 0: prompt 0" in store.index_text(LISTED.index_budget)
+    _, st3, ev3, _ = run(later + [assistant("done")] + [user("one more")], state=st2, store=store, config=LISTED)
+    assert names(ev3)[-1] == "request" and not st3.degraded
+
+
+def test_cache_control_is_dropped_at_any_depth_in_order():
+    message = {"role": "assistant", "cache_control": {"type": "ephemeral"}, "content": [
+        {"type": "tool_use", "input": {"b": [{"cache_control": 1, "x": {"y": [1, {"cache_control": 2, "z": 3}]}}],
+                                       "a": 2}, "cache_control": {"type": "ephemeral"}}]}
+    got = _drop_cache_control(message)
+    assert got == {"role": "assistant", "content": [{"type": "tool_use", "input": {"b": [{"x": {"y": [1, {"z": 3}]}}],
+                                                                                  "a": 2}}]}
+    assert list(got["content"][0]["input"]) == ["b", "a"] and "cache_control" in message  # a copy, in order
+    assert _drop_cache_control("text") == "text" and _drop_cache_control([]) == []
+
+
+def test_a_tool_input_deeper_than_the_recursion_limit_is_hashed_and_paged():
+    """json.loads parses far deeper than Python recurses. A model's tool input that deep, in a message
+    carrying cache_control, is normalised with a stack, not recursion, so the transform still pages."""
+    deep = json.loads('{"a":' * 5_000 + "1" + "}" * 5_000)
+    marked = {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": deep,
+                                                "cache_control": {"type": "ephemeral"}}]}
+    plain = {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": deep}]}
+    assert message_hash(marked) == message_hash(plain)
+    msgs = with_tool_turn(marked, tool_result(1)) + [user("new prompt 6")]
+    _, st, ev, store = run(msgs, config=LISTED)
+    assert "rotation" in names(ev) and st.k > 4
+    later = more_turns(msgs + [assistant(f"answer 6 {FILL}")], 7, 6) + [user("new prompt 13")]
+    _, st2, ev2, _ = run(later, state=st, store=store, config=LISTED)
+    assert "rotation" in names(ev2) and st2.k > st.k
 
 
 def test_the_ratio_restore_waits_for_a_request_on_the_recorded_model():

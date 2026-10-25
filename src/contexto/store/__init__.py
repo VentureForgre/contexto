@@ -44,18 +44,18 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from contexto.canonical import canonical_bytes, canonical_json
+from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
-from contexto.store.catalog import PageCatalog
+from contexto.store.catalog import PageCatalog, check_page
 from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, current_stub, render_index, same_content
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 from contexto.store.search import rank
 
-__all__ = ["SessionStore", "PageConflictError", "PageNotFoundError", "KeyFileError", "SessionNotFoundError",
-           "redact"]
+__all__ = ["SessionStore", "PageConflictError", "PageNotFoundError", "PageUnreadableError", "KeyFileError",
+           "SessionNotFoundError", "redact"]
 
 _PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")
 
@@ -413,6 +413,12 @@ class SessionNotFoundError(LookupError):
 
 class PageNotFoundError(LookupError):
     """``quarantine_page`` was given a page that is neither stored nor already quarantined."""
+
+
+class PageUnreadableError(ValueError):
+    """``get_page``: the page file exists but cannot be read (not UTF-8, not JSON, nested deeper than
+    ``MAX_JSON_DEPTH``, or valid JSON without a page record's shape). It is logged ``page_unreadable``
+    first. A ValueError, so a pin that cites the page is refused like any other invalid source."""
 
 
 class KeyFileError(RuntimeError):
@@ -811,7 +817,7 @@ class SessionStore(LedgerOps):
             data = canonical_bytes(page)
             if not write_new(path, data):
                 try:
-                    stored = json.loads(path.read_text(encoding="utf-8"))
+                    stored = loads_bounded(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError) as e:
                     raise PageConflictError(f"{path} exists but cannot be read: {e}", page_id=page["id"]) from e
                 if not same_content(stored, page):
@@ -872,13 +878,19 @@ class SessionStore(LedgerOps):
         self._catalog.set_text_budget(budget_bytes)
 
     def get_page(self, page_id: str) -> dict[str, Any] | None:
-        """The page record for ``page_id``, or None if this store has no such page."""
+        """The page record for ``page_id``, or None if this store has no such page. Raises
+        ``PageUnreadableError``, after logging ``page_unreadable``, when the file cannot be read or is not
+        a page record (rule 18)."""
         if not page_id.startswith("pg_") or not all(c in "0123456789abcdef" for c in page_id[3:]):
             return None
+        path = self.pages_dir / f"{page_id}.json"
         try:
-            return current_stub(json.loads((self.pages_dir / f"{page_id}.json").read_text(encoding="utf-8")))
+            return current_stub(check_page(loads_bounded(path.read_text(encoding="utf-8"))))
         except FileNotFoundError:
             return None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            self.log({"event": "page_unreadable", "path": path.name, "error": str(e)})
+            raise PageUnreadableError(f"page {page_id} cannot be read") from None
 
     def page_ids(self) -> list[str]:
         """Every page id in this store, newest turn first."""

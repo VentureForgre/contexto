@@ -1148,6 +1148,25 @@ the owner's delegation. Open decisions are listed at the end with the options an
     match. A request whose trailing messages hold no failed result returns before the history is
     scanned.
 
+- **D45. One nesting limit for JSON read from outside Contexto.** PR #225,
+  2026-10-25. Reviewers of #222 found deeply nested JSON crash paths: a tool result too deep for
+  `json.loads`, or too deep to walk, failed every later transform, so paging stopped for the session.
+  PR #225 first caught `RecursionError` at each parse. Its review found the gap that leaves: from
+  Python 3.14, `json.loads` parses deeper (about 116,000 levels) than `json.dumps` can write (about
+  61,500 objects, 104,600 arrays), and on 3.12 there is a band of a few levels near 10,000. A tool input in
+  that band parsed, then `canonical_bytes` raised on every later request; an MCP request `id` that
+  deep killed the MCP server when its reply was written. Decision: every document from outside
+  Contexto is read by `loads_bounded`, which measures nesting without recursion and refuses more
+  than `MAX_JSON_DEPTH` = 512 levels as a `ValueError`, so each caller's existing invalid-JSON path
+  handles it (contract rule 18). A request past the limit is forwarded untransformed and logged
+  `request_too_deep`. 512 rather than the 2,000 first suggested: it is four times the Messages API's
+  own limit (127 levels, measured), far below every Python's `dumps` limit, and below Python's
+  default recursion limit of 1,000 with room for the proxy's stack, so recursive walkers
+  (`redact`, the index's key listing) need no depth guards of their own. Measuring depth costs
+  about a quarter of `json.loads` on real requests, and up to about as much as `json.loads` on a
+  body made of tiny containers. A request past the limit fails acceptance 1 (`request_too_deep` is
+  a failure event), since the Responses API's own limit is unmeasured.
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.
