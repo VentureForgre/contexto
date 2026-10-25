@@ -47,7 +47,7 @@ from typing import Any
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
-from contexto.store.catalog import PageCatalog
+from contexto.store.catalog import PageCatalog, check_page
 from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, current_stub, render_index, same_content
 from contexto.store.recall import lists_identifiers
@@ -417,8 +417,8 @@ class PageNotFoundError(LookupError):
 
 class PageUnreadableError(ValueError):
     """``get_page``: the page file exists but cannot be read (not UTF-8, not JSON, nested deeper than
-    ``MAX_JSON_DEPTH``, or not a page record). It is logged ``page_unreadable`` first. A ValueError,
-    so a pin that cites the page is refused like any other invalid source."""
+    ``MAX_JSON_DEPTH``, or valid JSON without a page record's shape). It is logged ``page_unreadable``
+    first. A ValueError, so a pin that cites the page is refused like any other invalid source."""
 
 
 class KeyFileError(RuntimeError):
@@ -879,12 +879,13 @@ class SessionStore(LedgerOps):
 
     def get_page(self, page_id: str) -> dict[str, Any] | None:
         """The page record for ``page_id``, or None if this store has no such page. Raises
-        ``PageUnreadableError``, after logging ``page_unreadable``, when the file cannot be read (rule 18)."""
+        ``PageUnreadableError``, after logging ``page_unreadable``, when the file cannot be read or is not
+        a page record (rule 18)."""
         if not page_id.startswith("pg_") or not all(c in "0123456789abcdef" for c in page_id[3:]):
             return None
         path = self.pages_dir / f"{page_id}.json"
         try:
-            return current_stub(loads_bounded(path.read_text(encoding="utf-8")))
+            return current_stub(check_page(loads_bounded(path.read_text(encoding="utf-8"))))
         except FileNotFoundError:
             return None
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:

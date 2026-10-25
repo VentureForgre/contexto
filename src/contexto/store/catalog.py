@@ -388,3 +388,14 @@ def _view(page: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(turn, int) or isinstance(turn, bool):
         raise TypeError("page turn is not an integer")
     return {"id": page["id"], "turn": turn, "stub": stub}
+
+
+def check_page(page: Any) -> dict[str, Any]:
+    """``page`` if it has the shape of a page record (``_view``'s fields and a ``messages`` list),
+    else TypeError or KeyError: what ``get_page`` returns must be safe to render and recall."""
+    if not isinstance(page, dict):
+        raise TypeError("page record is not an object")
+    _view(page)
+    if not isinstance(page["messages"], list):
+        raise TypeError("page messages is not a list")
+    return page

@@ -462,8 +462,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     - An MCP line that deep gets a JSON-RPC parse error with `id: null`, and the server keeps
       serving. A reply that cannot be serialized becomes an internal error with `id: null`.
     - Tool output or Codex call arguments that deep are indexed and rendered as plain text. A page
-      file that deep is logged `page_unreadable` and skipped; paging the same turn onto it again
-      is a `page_conflict`.
+      file that deep, or one that is not JSON or not a page record, is logged `page_unreadable`:
+      search and the index skip it, `contexto_recall` and a `contexto_pin` that cites it return a
+      tool error, and `contexto recall` prints an error and exits 1. Paging the same turn onto it
+      again is a `page_conflict`.
     Why: from Python 3.14, `json.loads` parses about 116,000 levels in a handler thread, but
     `json.dumps` writes only about 61,500 levels of objects and 104,600 of arrays; on 3.12 the two
     limits are near 10,000, a few levels apart. A recursive Python walk stops near 1,000. A value

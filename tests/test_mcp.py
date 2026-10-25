@@ -204,10 +204,14 @@ def damage(store: SessionStore, page_id: str, depth: int = 20_000) -> None:
     (store.pages_dir / f"{page_id}.json").write_text(f'{{"id":"{page_id}","extra":{deep}}}')
 
 
-def test_an_unreadable_page_is_a_tool_error_logged_and_left_out_of_search(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shape", ["deep", "not a page"])
+def test_an_unreadable_page_is_a_tool_error_logged_and_left_out_of_search(tmp_path, monkeypatch, shape):
     store = SessionStore(tmp_path, "s1")
     bad, good = store.page_out([TURN_A, TURN_B], first_turn=1)
-    damage(store, bad)
+    if shape == "deep":
+        damage(store, bad)
+    else:  # valid JSON with a page's id, turn and stub, but no list of messages
+        (store.pages_dir / f"{bad}.json").write_text(json.dumps({"id": bad, "turn": 1, "stub": {}, "messages": 5}))
     server = mcp.Server(store, io.StringIO(), io.StringIO())
     result = tool(server, "contexto_recall", {"page_id": bad})["result"]
     assert result["isError"] is True and result["content"][0]["text"] == \

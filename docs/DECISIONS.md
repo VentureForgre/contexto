@@ -1083,7 +1083,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     input. `spikes/m2/permissions/permstub.py` repeats the `-p` check (`--before` for the old
     settings). `TESTED_VERSIONS` is unchanged: 2.1.302 works with the rules.
 
-- **D45. One nesting limit for JSON read from outside Contexto (provisional number).** PR #225,
+- **D45. One nesting limit for JSON read from outside Contexto.** PR #225,
   2026-10-25. Reviewers of #222 found deeply nested JSON crash paths: a tool result too deep for
   `json.loads`, or too deep to walk, failed every later transform, so paging stopped for the session.
   PR #225 first caught `RecursionError` at each parse. Its review found the gap that leaves: from
