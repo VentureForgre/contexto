@@ -264,13 +264,12 @@ QUEUED = ("The user sent a new message while you were working:\n{}\n\nThis is ho
           "than as a separate conversation turn. Address the message above as you continue this turn.")
 
 
-def queued(request: dict, pasted: str, before: str = "", after: str = "\n\n<total_tokens>14999890 tokens left"
-           "</total_tokens>") -> dict:
+def queued(request: dict, pasted: str, after: str = "\n\n<total_tokens>14999890 tokens left</total_tokens>") -> dict:
     """5.x ids (pty capture, 2.1.302 and 2.1.310, claude-opus-5-5): a prompt typed during a tool run arrives
     as a role "system" text after the result, between two sentences of Claude Code's."""
     bash_round(request, "(Bash completed with no output)")
     request["messages"].append({"role": "system", "content": [{"type": "text",
-                                                               "text": before + QUEUED.format(pasted) + after}]})
+                                                               "text": QUEUED.format(pasted) + after}]})
     return request
 
 

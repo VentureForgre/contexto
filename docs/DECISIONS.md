@@ -1192,8 +1192,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     scanned.
   - Amended by D47, which closes cases D46 missed and adds one rule. Added: a tool-result message with
     Claude Code's synthetic missing result carries nothing and is not read. Closed: a queued prompt on
-    5.x ids, which the missing-tools check still read; files nested memory imports, which were paged
-    with their turn; and the cap, which now counts each block as its page.
+    5.x ids, which the missing-tools check still read, and files nested memory imports, which were
+    paged with their turn. Changed: the cap counts each block as its page.
 - **D47. Nested-memory follow-ups to D46.** Claude, 2026-10-25, under D0; contract change. Reviewer
   A's round 3 findings on PR #227, checked at zero spend (loopback stub, temp config dirs, fake key)
   on 2.1.302 and 2.1.310. Every rule below was run over 13,097 captured request bodies (the 19 kept
@@ -1252,7 +1252,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     a several-block prompt (D46); a queued prompt if Claude Code changes its two sentences; and a
     message under Claude Code's other mid-turn openers ("Another Claude session sent a message while
     you were working:", "A peer session sent a message while you were working:"), which were not
-    measured and are not skipped.
+    measured and are not skipped. Also, not captured: on 2.1.302 a round's attachments share one
+    role `system` text, so a one-reminder queued prompt placed after other text there (for example a
+    nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
+    (reviewer B, PR #230 round 2).
 
 ## Open decisions
 
