@@ -1047,10 +1047,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
     the MCP server serves, by exact name, under the server name the launcher's `--mcp-config` gives
     it: `mcp__contexto__contexto_recall`, `_pin`, `_close`, `_state`, `_search`. It is built from
     `contexto.mcp.TOOLS`, so a new tool is covered when it ships. No other key, rule, or mode.
-  - **Why it is safe.** The five tools act only on the user's own local session store under
-    `$CONTEXTO_HOME`: recall, search, and state read it, and pin and close add records to its
-    ledger. None runs a command, touches the user's files, or reaches the network. Codex's config
-    already pre-approves them the same way (`default_tools_approval_mode = "approve"`).
+  - **Why it is safe.** The five tools touch only the user's own local data. Recall, search, and
+    state read the session store under `$CONTEXTO_HOME` and append `mcp_call` lines to the session
+    log. `contexto_state` also reads and hashes the project files that ledger records cite, inside
+    the session's working directory, to mark records whose sources changed as stale. Pin and close
+    add records to the session's ledger. None runs a command, writes a project file, or reaches the
+    network. Codex's config approves the whole `contexto` server
+    (`default_tools_approval_mode = "approve"`); here the approval is narrower, the five exact names.
   - **Why exact names.** Measured with zero spend against a local stub on 2.1.302: a server rule
     (`mcp__contexto`), a wildcard (`mcp__contexto__*`), and exact names all let the tools run, and
     an exact name covers only that tool. A user's own MCP server that is also named `contexto` and
@@ -1067,8 +1070,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     Code that ignores flag-level permissions), and the missing-tools check cannot see it, since the
     tools are offered. So the tool check also reads each Messages API request's newest user message
     and logs the first refusal of a Contexto tool as `mcp_tools_denied` (tool names only), and the
-    launcher prints one warning. It matches 2.1.302's refusal text; a user's "No" at an interactive
-    prompt has other text and does not count. `mcp_tools_denied` fails an acceptance run, like
+    launcher prints one warning. A result counts only when it answers a Contexto tool call of the
+    assistant message before it and matches 2.1.302's refusal text for that tool, so a failed Bash
+    command that prints the text does not count. A user's "No" at an interactive prompt has other
+    text and does not count either. `mcp_tools_denied` fails an acceptance run, like
     `mcp_tools_missing`.
   - **Proof.** On the installed 2.1.302, `contexto run claude -p` against a local stub upstream
     that makes the model call all five tools. With the old base-URL-only settings, all five calls

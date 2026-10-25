@@ -313,16 +313,19 @@ never names MCP tools in its requests, so for Codex the MCP server records in th
 answers Codex's tool list request, and the proxy checks for that record. For Codex, a server that
 crashes after it answered cannot be detected: the record stays.
 
-**"warning: Claude Code refused Contexto's contexto_search ..." ("you haven't granted it yet").** The
-tools are there, but Claude Code would not run them. Claude Code 2.1.302 in `-p` mode refuses any MCP
-tool that no permission rule allows, so without a rule `contexto run claude -p` loses recall. The
-launcher's `--settings` allows exactly `mcp__contexto__contexto_recall`, `_pin`, `_close`, `_state`,
-and `_search`, and nothing else. These tools only read the session's own store under
-`$CONTEXTO_HOME` and add to its ledger. Your own permission rules still apply on top. A `deny` rule or
-`--disallowedTools` for one of them takes it away. An `ask` rule for one of them outranks the allow,
-so in `-p` mode Claude Code refuses it and this warning appears; remove that rule to let it run.
-Organization-managed settings may also override the allow (not tested). The session log records the
-refusal as `mcp_tools_denied`, with the tool names only.
+**"warning: Claude Code refused Contexto's contexto_search ..." ("you haven't granted it yet").**
+The tools are there, but Claude Code would not run them. Claude Code 2.1.302 in `-p` mode refuses
+any MCP tool that no permission rule allows, so without a rule `contexto run claude -p` loses
+recall. The launcher's `--settings` allows exactly `mcp__contexto__contexto_recall`, `_pin`,
+`_close`, `_state`, and `_search`, and nothing else. These tools only touch your own local data:
+they read the session's store under `$CONTEXTO_HOME` and log their calls there, pin and close add
+ledger records, and `contexto_state` reads and hashes the project files that ledger records cite, to
+mark stale records. They run no commands, write no project files, and use no network. Your own
+permission rules still apply on top. A `deny` rule or `--disallowedTools` for one of them takes it
+away. An `ask` rule for one of them outranks the allow, so in `-p` mode Claude Code refuses it and
+this warning appears; remove that rule to let it run. Organization-managed settings may also
+override the allow (not tested). The session log records the refusal as `mcp_tools_denied`, with the
+tool names only.
 
 **"warning: Claude Code X is not a version Contexto was tested with".** Contexto recognises parts of
 Claude Code's and Codex's requests by text the CLI writes, and was tested with the versions the line
