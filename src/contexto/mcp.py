@@ -11,7 +11,8 @@ Only protocol messages are written to stdout. Diagnostics go to stderr, and ever
 recorded through ``store.log`` with names, ids, and sizes, never text content.
 
 The store is the session's ``contexto.store.SessionStore`` (lane B packets B1 and B2): it provides
-``get_page(page_id) -> dict | None`` (keys ``id``, ``turn``, ``messages``, ``stub``),
+``get_page(page_id) -> dict | None`` (keys ``id``, ``turn``, ``messages``, ``stub``; raises
+``PageUnreadableError`` for a page file it cannot read),
 ``search(query) -> list[str]`` (every word of the query, case-insensitively, best first; D34), ``pin(kind, text, *,
 supersedes, epistemic, provenance) -> str``, ``close(obligation_id, note) -> str``,
 ``state_text() -> str``, and ``log(event)``. ``pin`` and ``close`` raise ``ValueError`` on
@@ -27,6 +28,7 @@ from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
 from contexto.canonical import loads_bounded
+from contexto.store import PageUnreadableError
 from contexto.store.pages import is_context_page
 from contexto.store.render import (
     MATCH_CONTEXT,
@@ -362,7 +364,10 @@ class Server:
         if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
             raise ToolError("offset must be a non-negative integer")
         _reject_extra(args, {"page_id", "offset"})
-        page = self.store.get_page(page_id)
+        try:
+            page = self.store.get_page(page_id)
+        except PageUnreadableError:
+            raise ToolError(f"Page {page_id} cannot be read: its stored file is damaged.") from None
         if page is None:
             raise ToolError(f"Unknown page id: {page_id}. Page ids appear in the paged-history index.")
         limit, note = recall_limit(*self._window())
@@ -455,11 +460,18 @@ class Server:
         text = texts[0] if texts else BUDGET_SPENT
         return [{"type": "text", "text": text}], None, {"chars": len(text) if texts else 0, **budget}
 
+    def _readable_page(self, page_id: str) -> dict[str, Any]:
+        """The page, or {} when it is gone or unreadable (logged by the store) since search listed it."""
+        try:
+            return self.store.get_page(page_id) or {}
+        except PageUnreadableError:
+            return {}
+
     def _tool_search(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], None, dict[str, Any]]:
         _reject_extra(args, {"query"})
         query = _require_str(args, "query")
         found = self.store.search(query)  # best first (D34)
-        pages = [(page_id, self.store.get_page(page_id) or {}) for page_id in found[:SEARCH_LIMIT + SEARCH_MORE_LIMIT]]
+        pages = [(page_id, self._readable_page(page_id)) for page_id in found[:SEARCH_LIMIT + SEARCH_MORE_LIMIT]]
         # The best pages are chosen by relevance and shown newest first, so among them the newest statement
         # of a fact comes first (D28); the next best are listed newest first too. In each part turn pages
         # come first and paged context blocks after them, under their own line (D34).

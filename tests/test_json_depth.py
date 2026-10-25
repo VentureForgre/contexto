@@ -10,6 +10,8 @@ import pytest
 
 import contexto.canonical as canonical
 from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, canonical_bytes, loads_bounded, nesting_exceeds
+from contexto.store import redact
+from contexto.store.recall import _json_keys
 from contexto.store.render import render_page
 
 
@@ -58,33 +60,28 @@ def recurse(depth: int, then):
     return then() if depth == 0 else recurse(depth - 1, then)
 
 
-def walk(value: object) -> int:
-    """A recursive walk with one frame per level (comprehensions are inlined), like redact and _json_keys."""
-    if isinstance(value, dict):
-        return 1 + max([walk(v) for v in value.values()], default=0)
-    if isinstance(value, list):
-        return 1 + max([walk(v) for v in value], default=0)
-    return 0
-
-
 @pytest.mark.parametrize("make", [dicts, lists])
 def test_every_value_within_the_limit_can_be_written_and_walked_on_this_python(make):
     """The limit sits well below this interpreter's json.dumps limit (about 61,500 objects on 3.14, about
     10,000 on 3.12) and its recursion limit, so a request read within it can be serialized, hashed,
-    and walked: checked here in a handler-like thread, under 200 frames of Python stack."""
+    and walked by the recursive walkers (``redact``, the index's ``_json_keys``): checked here in a
+    handler-like thread, under 200 frames of Python stack."""
     assert MAX_JSON_DEPTH + 300 < sys.getrecursionlimit()
     results: list[object] = []
 
     def check():
         value = loads_bounded(make(MAX_JSON_DEPTH))
         wrapped = {"messages": [{"content": [{"input": value}]}]}  # what the store and the engine add
-        results.append((len(canonical_bytes(wrapped)), walk(value), json.loads(json.dumps(wrapped)) == wrapped))
+        keys = _json_keys(value)
+        results.append((len(canonical_bytes(wrapped)), redact(wrapped) == wrapped,
+                        keys == (["a"] * MAX_JSON_DEPTH if make is dicts else []),
+                        json.loads(json.dumps(wrapped)) == wrapped))
 
     for target in (lambda: recurse(200, check), check):
         thread = threading.Thread(target=target)
         thread.start()
         thread.join()
-    assert len(results) == 2 and all(n > 0 and depth >= MAX_JSON_DEPTH - 1 and same for n, depth, same in results)
+    assert len(results) == 2 and all(n > 0 and redacted and listed and same for n, redacted, listed, same in results)
 
 
 @pytest.mark.parametrize("kind", [dict, list])

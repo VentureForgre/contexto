@@ -1051,7 +1051,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   own limit (127 levels, measured), far below every Python's `dumps` limit, and below Python's
   default recursion limit of 1,000 with room for the proxy's stack, so recursive walkers
   (`redact`, the index's key listing) need no depth guards of their own. Measuring depth costs
-  about a third of `json.loads` (1.7 ms against 4.7 ms on a 4 MB request).
+  about a quarter of `json.loads` on real requests, and up to about as much as `json.loads` on a
+  body made of tiny containers. A request past the limit fails acceptance 1 (`request_too_deep` is
+  a failure event), since the Responses API's own limit is unmeasured.
 
 ## Open decisions
 

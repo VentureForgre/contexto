@@ -961,6 +961,15 @@ def test_turn_room_low_fails_acceptance_1():
     assert r.failure_events == {"turn_room_low": 1} and not r.verdicts()["no_failure_events"]
 
 
+def test_request_too_deep_fails_acceptance_1():
+    # Rule 18 (D45): the proxy logs request_too_deep as its own session-log line when it forwards a
+    # request nested past MAX_JSON_DEPTH untransformed.
+    assert "request_too_deep" in detectors.FAILURE_EVENTS
+    line = {"event": "request_too_deep", "level": "warning", "endpoint": "/v1/messages", "limit": 512}
+    r = detectors.analyze([_req(1, 90_000), line], [], bound=150_000)
+    assert r.failure_events == {"request_too_deep": 1} and not r.verdicts()["no_failure_events"]
+
+
 def test_retained_stale_fails_acceptance_1():
     # A failed snapshot write logs retained_stale, an acceptance 1 failure (contract PR #125 at 01a58a2),
     # whether it arrives as a request's transform event or as its own session-log line.

@@ -432,9 +432,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     lines, the tool output the index lists keys from, Codex call arguments, and page files. A
     document that nests objects and arrays more than `MAX_JSON_DEPTH` = 512 levels (the outermost
     is level 1) is unreadable, on every Python version, and is handled like invalid JSON:
-    - A request body that deep is forwarded as the CLI sent it, untransformed, with
-      `transform_skipped` on its request entry and one `request_too_deep` event (warning level,
-      with the endpoint and the limit). It is not a transform failure under rule 14.
+    - A request body that deep is forwarded untransformed (decoded, if it arrived compressed:
+      rule 15), with `transform_skipped` on its request entry and one `request_too_deep` event
+      (warning level, with the endpoint and the limit). It is not a transform failure under rule
+      14, but it fails acceptance 1: the Messages API refuses such a request, and the Responses
+      API's limit is unmeasured.
     - A response body or SSE event that deep is relayed unchanged; its usage, end fields and call
       ids are not read.
     - An MCP line that deep gets a JSON-RPC parse error with `id: null`, and the server keeps
@@ -976,8 +978,8 @@ a no-replayed-thinking baseline.
    reported. The run also fails on any event that
    means the product left its designed path: `degraded_enter`, `store_error`, `page_conflict`,
    `fallback_failed`, `transform_error`, `turn_room_missing`, `turn_room_low`, `retained_stale`,
-   `epoch_record_stale`, `mcp_tools_missing`, `toolcheck_error`, `side_room_close_failed` (D40), or
-   `unclassified_system_message`.
+   `epoch_record_stale`, `mcp_tools_missing`, `toolcheck_error`, `side_room_close_failed` (D40),
+   `request_too_deep` (D45), or `unclassified_system_message`.
 2. **Fidelity:** the L2f harder probes, in the chain-heavy mix (deep supersession chains are the
    only probe type that failed at small contexts in the two scored pilots, measured by builder-4
    in PR #22: deep chains 5/8 at about 12k, and 29/30 overall at 15,002 counted tokens with the

@@ -51,7 +51,8 @@ FAILURE_EVENTS = ("degraded_enter", "store_error", "page_conflict", "fallback_fa
                   "epoch_record_stale",  # a failed rule 16 epoch-record write (listed in the contract, missed here)
                   "mcp_tools_missing",  # the main conversation ran without Contexto's MCP tools
                   "toolcheck_error",  # the missing-tools check itself raised
-                  "side_room_close_failed")  # D40: closing an idle side room hit a store failure
+                  "side_room_close_failed",  # D40: closing an idle side room hit a store failure
+                  "request_too_deep")  # D45: a request nested past MAX_JSON_DEPTH went upstream untransformed
 # The recalls the budget prices per probe turn (script.MAX_RECALLS), over D27's probe turns
 # (script.PROBE_TURNS). A cost guard only (intake, 2026-10-16): the model is not told about it, and
 # ``recalls_over_budget`` reports it without failing any verdict.

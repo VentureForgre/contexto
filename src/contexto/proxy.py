@@ -1059,7 +1059,7 @@ class _Handler(BaseHTTPRequestHandler):
             request = loads_bounded(body)
         except JSONTooDeepError:
             # Rule 18: past MAX_JSON_DEPTH not every Python can serialize or walk the request, so it
-            # is forwarded as the CLI sent it, untransformed, and logged (the API refuses it anyway).
+            # is forwarded untransformed (decoded, if it arrived compressed: rule 15) and logged.
             entry["transform_skipped"] = f"request body nests deeper than {MAX_JSON_DEPTH} levels"
             owner.log({"event": "request_too_deep", "level": "warning", "endpoint": endpoint,
                        "limit": MAX_JSON_DEPTH, "epoch": owner.last_epoch})

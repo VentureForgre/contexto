@@ -198,6 +198,30 @@ def test_recall_exactly_at_the_limit_has_no_continuation():
     assert len(result["content"]) == 1
 
 
+def damage(store: SessionStore, page_id: str, depth: int = 20_000) -> None:
+    """Rewrite a page file nested past MAX_JSON_DEPTH (and past json.loads on 3.12): rule 18 unreadable."""
+    deep = "[" * depth + "]" * depth
+    (store.pages_dir / f"{page_id}.json").write_text(f'{{"id":"{page_id}","extra":{deep}}}')
+
+
+def test_an_unreadable_page_is_a_tool_error_logged_and_left_out_of_search(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path, "s1")
+    bad, good = store.page_out([TURN_A, TURN_B], first_turn=1)
+    damage(store, bad)
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    result = tool(server, "contexto_recall", {"page_id": bad})["result"]
+    assert result["isError"] is True and result["content"][0]["text"] == \
+        f"Page {bad} cannot be read: its stored file is damaged."
+    pinned = tool(server, "contexto_pin", {"kind": "decision", "text": "keep it", "provenance": [
+        {"type": "page", "locator": bad}]})["result"]
+    assert pinned["isError"] is True and "cannot be read" in pinned["content"][0]["text"]
+    monkeypatch.setattr(store, "search", lambda query: [bad, good])  # listed before the file was damaged
+    found = tool(server, "contexto_search", {"query": "x"})["result"]
+    assert found["isError"] is False and good in found["content"][0]["text"]
+    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+    assert [e["path"] for e in log if e["event"] == "page_unreadable"] == [f"{bad}.json"] * 3
+
+
 @pytest.mark.parametrize("args", [{"page_id": "pg_ffffffffffffffff"}, {"page_id": ""}, {},
                                   {"page_id": "PAGE", "offset": -1}, {"page_id": "PAGE", "offset": True},
                                   {"page_id": "PAGE", "extra": 1}])
