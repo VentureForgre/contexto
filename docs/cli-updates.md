@@ -111,7 +111,8 @@ Everything here is zero spend unless marked.
    tokens, against a fake model). Hook outputs must still start with the `HOOK_SIGNATURES` prefixes.
    The launcher's command line (about two minutes, against a stub):
    `python spikes/m2/argv/argstub.py --claude-version <version> --work /tmp/argstub`. Every line must
-   say `"pass": true`: a prompt right after `claude`, after flags, with `-p`, and no prompt.
+   say `"pass": true`: a prompt right after `claude`, after flags, after `--`, with `-p`, with `-c -p`,
+   and no prompt.
 4. Missing-tools notices: if the CLI's MCP or tool-search text changed in step 1 or 2, recapture the
    shapes `src/contexto/toolcheck.py` describes (tool search on, a resume with the server off PATH)
    and update `tests/test_toolcheck.py`.

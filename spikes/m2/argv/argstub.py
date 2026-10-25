@@ -10,6 +10,15 @@ CONTEXTO_HOME, so the user's own settings are not read. Interactive scenarios ru
 terminal and are stopped once the stub has the prompt (or, with no prompt, once the MCP server has
 listed its tools).
 
+Outside connections: Claude Code runs with CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, DISABLE_TELEMETRY,
+DISABLE_ERROR_REPORTING, and DISABLE_AUTOUPDATER set to 1. The `-p` scenarios then open no outside
+connection. The interactive ones still try `downloads.claude.ai:443` and `github.com:443` (2.1.302
+and 2.1.310), so HTTPS_PROXY points at a local proxy in this script that refuses every CONNECT and
+lists the hosts under `blocked`. With it, lsof sampling of Claude Code's sockets every 0.2 s during
+full runs on both versions found only 127.0.0.1; without it, the same sampling found
+downloads.claude.ai. The `--work` directory is made absolute, and an existing one is deleted only if
+it is empty or holds this spike's `.argstub-work` marker.
+
 A scenario passes when Claude Code starts Contexto's MCP server and it lists its tools (so
 `--mcp-config` was applied) and a request reaches the stub with the scenario's prompt in its last user
 message (so `--settings` was applied: the stub is only reachable through the proxy's base URL). In
@@ -35,6 +44,7 @@ import os
 import pty
 import shutil
 import signal
+import socketserver
 import subprocess
 import sys
 import threading
@@ -56,9 +66,51 @@ SCENARIOS = [  # name, claude arguments, prompt marker (None: no prompt), run in
     ("prompt_after_flags", ["-p", "--model", MODEL, "--output-format", "json", "ARGSTUB_AFTER_FLAGS"],
      "ARGSTUB_AFTER_FLAGS", False),
     ("print_prompt", ["-p", "ARGSTUB_PRINT", "--model", MODEL], "ARGSTUB_PRINT", False),
+    ("dashdash_prompt", ["-p", "--model", MODEL, "--", "ARGSTUB_DASHDASH"], "ARGSTUB_DASHDASH", False),
+    ("dashdash_first_interactive", ["--", "ARGSTUB_DASHDASH_TTY"], "ARGSTUB_DASHDASH_TTY", True),
+    # -c continues the newest conversation in the scratch directory, which an earlier scenario left;
+    # with --only and no earlier conversation it has nothing to continue.
+    ("prompt_first_continue_print", ["ARGSTUB_CONTINUE", "-c", "-p", "--model", MODEL], "ARGSTUB_CONTINUE", False),
     ("no_prompt_interactive", [], None, True),
 ]
 CONTEXTO_TOOL = "mcp__contexto__contexto_recall"
+
+# Keep Claude Code from contacting anything but the stub where it can (as the other spikes do).
+QUIET_ENV = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1",
+             "DISABLE_ERROR_REPORTING": "1", "DISABLE_AUTOUPDATER": "1"}
+WORK_MARKER = ".argstub-work"
+
+
+def prepare_work(work: Path) -> Path:
+    """``work`` as an absolute path, emptied for this run. Claude Code runs in a subdirectory, so a
+    relative CLAUDE_CONFIG_DIR would point elsewhere and Claude Code could fall back to the machine's own
+    login. An existing directory is deleted only if it is empty or holds the marker this spike writes."""
+    work = work.expanduser().resolve()
+    if work.exists():
+        if not work.is_dir() or (any(work.iterdir()) and not (work / WORK_MARKER).is_file()):
+            raise ValueError(f"{work} exists and was not made by this spike (no {WORK_MARKER}); pick another --work")
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    (work / WORK_MARKER).write_text("scratch directory of a Contexto spike; deleted on its next run\n")
+    return work
+
+
+class RefusingProxy(socketserver.ThreadingTCPServer):
+    """HTTPS_PROXY for Claude Code: answers each CONNECT with 403 and records its host:port."""
+
+    daemon_threads = True
+
+    def __init__(self, state: dict) -> None:
+        state.setdefault("blocked", [])
+
+        class Handler(socketserver.StreamRequestHandler):
+            def handle(self) -> None:
+                parts = self.rfile.readline().decode("latin-1").split()
+                if len(parts) >= 2:
+                    state["blocked"].append(parts[1] if parts[0] == "CONNECT" else f"{parts[0]} {parts[1]}")
+                self.wfile.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+
+        super().__init__(("127.0.0.1", 0), Handler)
 
 
 def make_handler(state: dict):
@@ -173,7 +225,8 @@ def run_scenario(launcher: list[str], args: list[str], marker: str | None, tty: 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--claude-version", required=True)
-    parser.add_argument("--work", type=Path, required=True, help="scratch directory, replaced on each run")
+    parser.add_argument("--work", type=Path, required=True,
+                        help="scratch directory, replaced on each run (only one this spike made, or an empty one)")
     parser.add_argument("--form", choices=sorted(FORMS), default="joined")
     parser.add_argument("--only", help="run only this scenario")
     a = parser.parse_args()
@@ -185,13 +238,15 @@ def main() -> int:
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(state))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_address[1]}"
+    refuser = RefusingProxy(state)
+    threading.Thread(target=refuser.serve_forever, daemon=True).start()
+    https_proxy = f"http://127.0.0.1:{refuser.server_address[1]}"
     form = FORMS[a.form]
     launcher = ([sys.executable, "-I", "-c", PATCHED.format(form=form)] if form
                 else [sys.executable, "-I", "-m", "contexto"])
     try:
-        if a.work.exists():
-            shutil.rmtree(a.work)
-        config, home, scratch, bindir = (a.work / d for d in ("cfg", "home", "scratch", "bin"))
+        work = prepare_work(a.work)
+        config, home, scratch, bindir = (work / d for d in ("cfg", "home", "scratch", "bin"))
         for d in (config, home, scratch, bindir):
             d.mkdir(parents=True)
         scratch = scratch.resolve()
@@ -203,13 +258,16 @@ def main() -> int:
         (bindir / "claude").symlink_to(binary)
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("OPENRIG_", "CLAUDE_CODE_", "CLAUDECODE"))
-               and k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")}
-        env.update(CLAUDE_CONFIG_DIR=str(config), CONTEXTO_HOME=str(home), PATH=f"{bindir}:{env['PATH']}",
-                   CONTEXTO_NO_VERSION_CHECK="1")
+               and k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
+               and k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
+        env.update(CLAUDE_CONFIG_DIR=str(config), CONTEXTO_HOME=str(home), PATH=f"{bindir}:{env['PATH']}", **QUIET_ENV,
+                   CONTEXTO_NO_VERSION_CHECK="1", HTTPS_PROXY=https_proxy, https_proxy=https_proxy,
+                   NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
         for i, (name, args, marker, tty) in enumerate(SCENARIOS):
             if a.only and name != a.only:
                 continue
             state["requests"].clear()
+            state["blocked"].clear()
             result = run_scenario(launcher, args, marker, tty, f"argv{i}", url, scratch, home, env, state)
             prompted = None if marker is None else any(marker in r["last_user"] for r in state["requests"])
             tools = any(r["contexto_tools"] for r in state["requests"])
@@ -217,12 +275,14 @@ def main() -> int:
             ok = listed and (result["running"] if marker is None else prompted and (tty or tools))
             print(json.dumps({"claude_version": a.claude_version, "form": a.form, "scenario": name,
                               "pass": ok, "requests": len(state["requests"]), "prompt_seen": prompted,
-                              "contexto_tools": tools, "mcp_listed": listed, **result}), flush=True)
+                              "contexto_tools": tools, "mcp_listed": listed,
+                              "blocked": sorted(set(state["blocked"])), **result}), flush=True)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         print(f"argstub: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:
         server.shutdown()
+        refuser.shutdown()
     return 0
 
 
