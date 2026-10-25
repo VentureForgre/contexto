@@ -80,7 +80,7 @@ def test_symlink_is_refused(spike, tmp_path, target_kind):
             (target / spike.WORK_MARKER).write_text("")
     link = tmp_path / "work"
     link.symlink_to(target)
-    with pytest.raises(ValueError, match="symlink"):
+    with pytest.raises(ValueError, match="is a symlink"):
         spike.prepare_work(link)
     assert link.is_symlink() and target.exists()
     if target_kind == "unmarked_dir":
