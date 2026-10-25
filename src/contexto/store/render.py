@@ -39,8 +39,9 @@ def render_page(page: dict[str, Any]) -> str:
     """Render a page's messages as plain text, thinking omitted. Deterministic for a given page.
 
     Any value inside ``messages`` may be damaged in a page file a person edited: a message, content,
-    block, or text of the wrong type is shown as ``[malformed ... omitted]``, so this never raises for
-    a page ``check_page`` passed (rule 18).
+    block, text, tool output, or Codex item type of the wrong type is shown as ``[malformed ...
+    omitted]`` in its place, so this never raises for a page ``check_page`` passed (rule 18), and a
+    partly damaged output does not read as complete.
 
     A page from a Codex session holds Responses API items (M2 B20); each is rendered by
     ``_responses_lines``, the same way the engine's retained-window snapshot renders it (A14)."""
@@ -92,6 +93,8 @@ def render_page(page: dict[str, Any]) -> str:
                             lines.append(_text(part))
                         else:
                             lines.append(f"[{part.get('type', 'block')} omitted]")
+                elif inner is not None:  # a number or an object: damaged, not an empty output
+                    lines.append("[malformed content omitted]")
             else:
                 lines.append(f"[{kind} omitted]")
     return "\n".join(lines)

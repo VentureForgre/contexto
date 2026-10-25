@@ -61,19 +61,34 @@ def test_search_drops_quarantined_pages_and_rereads_a_changed_file(tmp_path):
     assert store.search("haystack") == [a]
 
 
-def test_an_unreadable_page_is_logged_each_call_and_skipped(tmp_path):
+def test_an_unreadable_page_is_logged_once_until_its_file_changes_and_skipped(tmp_path):
+    """Logged once per file, not at every index build and search: each request builds the index, so one
+    damaged page added a line per request (reviewers on PR #228). Changed, it is read and logged again."""
     store = SessionStore(tmp_path, "s1")
     [a] = store.page_out([page("needle")], 1)
-    (store.pages_dir / "pg_00000000000000ff.json").write_text("{not json")
+    bad = store.pages_dir / "pg_00000000000000ff.json"
+    bad.write_text("{not json")
+
+    def logged() -> list[str]:
+        log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+        return [e["path"] for e in log if e["event"] == "page_unreadable"]
+
     assert store.search("needle") == [a] and store.search("needle") == [a]
-    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
-    assert [e["path"] for e in log if e["event"] == "page_unreadable"] == ["pg_00000000000000ff.json"] * 2
+    assert a in store.index_text(400) and store.page_ids() == [a]
+    assert logged() == ["pg_00000000000000ff.json"]
+    bad.write_text("{still not json")  # another size: the file changed
+    assert store.search("needle") == [a] and store.index_text(400)
+    assert logged() == ["pg_00000000000000ff.json"] * 2
+    bad.unlink()
+    assert store.search("needle") == [a] and logged() == ["pg_00000000000000ff.json"] * 2
 
 
 @pytest.mark.parametrize("stub", ["not an object", None])
-def test_repaging_a_stored_page_with_a_malformed_stub_returns_its_id(tmp_path, stub):
-    """A stored page with the same content keeps its id even when its stub was tampered with: the catalog
-    leaves it to the next listing, which logs it (reviewer-1 on PR #204)."""
+def test_repaging_a_stored_page_with_a_malformed_stub_is_a_page_conflict(tmp_path, stub):
+    """A stored page with the same content but a tampered stub is no page record (rule 18). Re-paging
+    it used to return its id (reviewer-1 on PR #204), and the page then stayed out of the index and
+    search for good. A conflict lets the engine quarantine the file and page the turn afresh (rule 14;
+    reviewers on PR #228)."""
     store = SessionStore(tmp_path, "s1")
     [a] = store.page_out([page("needle")], 1)
     path = store.pages_dir / f"{a}.json"
@@ -81,10 +96,11 @@ def test_repaging_a_stored_page_with_a_malformed_stub_returns_its_id(tmp_path, s
     record["stub"] = stub
     path.write_text(json.dumps(record))
     fresh = SessionStore(tmp_path, "s1")
-    assert fresh.page_out([page("needle")], 1) == [a]
-    assert fresh.search("needle") == []
-    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
-    assert [e["path"] for e in log if e["event"] == "page_unreadable"] == [f"{a}.json"]
+    with pytest.raises(PageConflictError) as e:
+        fresh.page_out([page("needle")], 1)
+    assert e.value.page_id == a and fresh.search("needle") == []
+    fresh.quarantine_page(a)
+    assert fresh.page_out([page("needle")], 1) == [a] and fresh.search("needle") == [a]
 
 
 @pytest.mark.parametrize("variant", ["default", "legacy"])

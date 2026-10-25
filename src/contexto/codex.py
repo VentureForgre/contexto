@@ -70,6 +70,21 @@ def _parts(item: dict) -> list:
     return content if isinstance(content, list) else []
 
 
+def _damaged_block() -> dict:
+    """The block ``retained_blocks`` gives for a part or output of the wrong type (a damaged page file):
+    ``render_page`` shows it as ``[malformed text omitted]`` and search skips it, as for a Messages API
+    text block whose text is not a string, so a partly damaged output does not read as complete."""
+    return {"type": "text", "text": None}
+
+
+def _is_damaged_part(part: Any) -> bool:
+    """A part no Responses API request holds: not an object, a non-string ``type``, or a text part whose
+    text is not a string. Other part types (images, files) are left out on purpose."""
+    if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+        return True
+    return part["type"] in TEXT_PART_TYPES and not isinstance(part.get("text"), str)
+
+
 def _is_message(item: dict) -> bool:
     return item.get("type", "message") == "message"
 
@@ -124,10 +139,15 @@ class ResponsesDialect(Dialect):
         reads like a paged one: message text parts (not context sections), calls as ``tool_use``, call
         outputs as ``tool_result``. Reasoning, images, and other items are not searchable."""
         kind = item.get("type", "message")
+        if not isinstance(kind, str):  # a damaged page file: shown as damaged, not left out unseen
+            return [(item.get("role", "unknown"), _damaged_block())]
         if kind == "message":
             role = item.get("role", "unknown")
-            return [(role, {"type": "text", "text": p["text"]}) for p in _parts(item)
-                    if _is_text_part(p) and not is_context_part(p)]
+            content = item.get("content")
+            if content is not None and not isinstance(content, (str, list)):
+                return [(role, _damaged_block())]
+            return [(role, _damaged_block() if _is_damaged_part(p) else {"type": "text", "text": p["text"]})
+                    for p in _parts(item) if _is_damaged_part(p) or (_is_text_part(p) and not is_context_part(p))]
         if kind in ("function_call", "custom_tool_call"):
             raw = item.get("arguments") if kind == "function_call" else item.get("input")
             try:
@@ -138,8 +158,13 @@ class ResponsesDialect(Dialect):
                                    "input": {} if args is None else args})]
         if kind in ("function_call_output", "custom_tool_call_output"):
             out = item.get("output")
-            content = out if isinstance(out, str) else [
-                {"type": "text", "text": p["text"]} for p in (out if isinstance(out, list) else []) if _is_text_part(p)]
+            if isinstance(out, str):
+                content = out
+            elif isinstance(out, list):
+                content = [_damaged_block() if _is_damaged_part(p) else {"type": "text", "text": p["text"]}
+                           for p in out if _is_damaged_part(p) or _is_text_part(p)]
+            else:  # None: no output; anything else is damaged
+                content = [] if out is None else [_damaged_block()]
             return [("user", {"type": "tool_result", "content": content})]
         return []
 

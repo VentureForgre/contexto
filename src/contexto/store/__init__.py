@@ -44,7 +44,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
+from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
 from contexto.store.catalog import PageCatalog, load_page
@@ -807,8 +807,9 @@ class SessionStore(LedgerOps):
         """Write one page per turn (turn numbers from ``first_turn``); return their ids in order.
 
         Re-paging an existing id is a no-op that keeps the stored page, even if the stub or the
-        estimates were computed differently when it was written; ``PageConflictError`` only when the
-        stored ``{turn, messages}`` differ under the same id (contract PR #47).
+        estimates were computed differently when it was written; ``PageConflictError`` when the stored
+        ``{turn, messages}`` differ under the same id (contract PR #47), or when the stored file cannot be
+        read as a page record with that id (rule 18).
         """
         ids = []
         for offset, turn in enumerate(turns):
@@ -817,10 +818,13 @@ class SessionStore(LedgerOps):
             data = canonical_bytes(page)
             if not write_new(path, data):
                 try:
-                    stored = loads_bounded(path.read_text(encoding="utf-8"))
-                except (OSError, ValueError) as e:
-                    raise PageConflictError(f"{path} exists but cannot be read: {e}", page_id=page["id"]) from e
-                if not isinstance(stored, dict) or not same_content(stored, page):
+                    stored = load_page(path.read_text(encoding="utf-8"), page["id"])
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                    # Not a page record, or another id (rule 18): a conflict, which quarantines the
+                    # file and pages the turn afresh (rule 14), rather than a page the index skips forever.
+                    raise PageConflictError(f"{path} exists but cannot be read: {e}",
+                                            page_id=page["id"]) from e
+                if not same_content(stored, page):
                     raise PageConflictError(f"{path} exists with different turn or messages", page_id=page["id"])
                 page = stored  # the stored page stands, stub included
             self._catalog.add(path, page)  # the index needs no read of a page this process wrote (D34)
@@ -885,7 +889,7 @@ class SessionStore(LedgerOps):
             return None
         path = self.pages_dir / f"{page_id}.json"
         try:
-            return load_page(path.read_text(encoding="utf-8"))
+            return load_page(path.read_text(encoding="utf-8"), page_id)
         except FileNotFoundError:
             return None
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:

@@ -1214,6 +1214,35 @@ def test_persistent_conflict_on_a_session_store_quarantines_the_file_and_repages
     assert list((store.dir / "quarantine").glob(f"{page['id']}.*.json"))  # moved aside, never deleted
 
 
+@pytest.mark.parametrize("damage", ["id removed", "stub {}", "id 5", "id null", "another id"])
+def test_repaging_onto_a_damaged_page_record_is_a_conflict_that_repairs_it(tmp_path, damage):
+    """Rule 18: paging a turn onto its file that holds no page record, or another page's id, is a
+    page_conflict, so the file is quarantined and the turn paged afresh (rule 14). Before, a removed id
+    raised KeyError on every request, a bad stub kept the page out of the index for good, and a wrong
+    id went to the engine as a page id (reviewers on PR #228)."""
+    store = SessionStore(tmp_path, "repage")
+    msgs = history(6) + [user("new prompt")]
+    run(msgs, store=store)
+    first, second = sorted(store.pages_dir.glob("pg_*.json"), key=lambda p: json.loads(p.read_text())["turn"])[:2]
+    page = json.loads(first.read_text())
+    record = dict(page)
+    if damage == "id removed":
+        del record["id"]
+    elif damage == "stub {}":
+        record["stub"] = {}
+    else:
+        record["id"] = {"id 5": 5, "id null": None, "another id": second.stem}[damage]
+    first.write_text(json.dumps(record))  # not something Contexto writes
+    # The epoch state was lost (epoch.json missing): the same conversation pages turn 0 again.
+    _, st, ev, _ = run(msgs, store=store)
+    assert ev[0]["event"] == "page_conflict" and ev[0]["page_id"] == page["id"] and st.degraded
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert names(ev2)[:2] == ["page_conflict", "degraded_leave"] and not st2.degraded
+    assert json.loads(first.read_text()) == page  # repaired: re-paged under its id from the messages
+    assert list((store.dir / "quarantine").glob(f"{page['id']}.*.json"))
+    assert f"{page['id']} turn 0: prompt 0" in store.index_text(LISTED.index_budget)
+
+
 def test_failure_after_pages_were_written_rewrites_them_identically_on_the_retry():
     store = FaultyStore()
     msgs = history(6) + [user("new prompt")]

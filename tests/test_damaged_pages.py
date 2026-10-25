@@ -126,8 +126,8 @@ def test_a_page_check_page_passes_is_read_by_every_reader_whatever_its_messages_
     passed = refused = 0
     for page in damaged(SAMPLES[name]):
         try:
-            page = load_page(json.dumps(page))
-        except (TypeError, KeyError):
+            page = load_page(json.dumps(page), SAMPLES[name]["id"])
+        except (TypeError, KeyError, ValueError):
             refused += 1
             continue
         read_every_way(page)
@@ -230,10 +230,61 @@ def test_a_page_that_is_no_page_record_is_logged_and_skipped_everywhere(tmp_path
     assert {e["path"] for e in log(fresh) if e["event"] == "page_unreadable"} == {f"{bad}.json"}
 
 
-@pytest.mark.parametrize("content", ["5", "[]", '"page"', "null"])
-def test_repaging_onto_a_page_file_that_holds_no_object_is_a_page_conflict(tmp_path, content):
+@pytest.mark.parametrize("content", ["5", "[]", '"page"', "null", "STUB", "NO ID", "ID 5", "OTHER ID"])
+def test_repaging_onto_a_page_file_that_holds_no_page_record_is_a_page_conflict(tmp_path, content):
     store = SessionStore(tmp_path, "s1")
-    [pid] = store.page_out([MESSAGES_TURN], 1)
-    (store.pages_dir / f"{pid}.json").write_text(content)
-    with pytest.raises(PageConflictError):
+    pid, other = store.page_out([MESSAGES_TURN, RESPONSES_TURN], 1)
+    path = store.pages_dir / f"{pid}.json"
+    record = json.loads(path.read_text())
+    edits = {"STUB": {**record, "stub": {}}, "NO ID": {k: v for k, v in record.items() if k != "id"},
+             "ID 5": {**record, "id": 5}, "OTHER ID": {**record, "id": other}}
+    path.write_text(json.dumps(edits[content]) if content in edits else content)
+    with pytest.raises(PageConflictError) as e:
         SessionStore(tmp_path, "s1").page_out([MESSAGES_TURN], 1)
+    assert e.value.page_id == pid
+
+
+def test_a_page_file_whose_record_names_another_id_is_skipped_everywhere(tmp_path):
+    """Search and the index would list it under the id it names, which recall cannot find (reviewer A on
+    PR #228): it is no page record of the file it is in."""
+    store = SessionStore(tmp_path, "s1")
+    bad, good = store.page_out([MESSAGES_TURN, RESPONSES_TURN], 1)
+    path = store.pages_dir / f"{bad}.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "id": "pg_00000000000000ff"}))
+    fresh = SessionStore(tmp_path, "s1")
+    assert fresh.page_ids() == [good] and "pg_00000000000000ff" not in fresh.index_text(2_000)
+    assert fresh.search("garnet-4821") == []
+    with pytest.raises(PageUnreadableError):
+        fresh.get_page(bad)
+    assert fresh.get_page("pg_00000000000000ff") is None
+
+
+def test_a_damaged_tool_result_or_codex_output_shows_a_marker_not_an_empty_output():
+    page = {"turn": 1, "messages": [
+        {"role": "user", "content": [{"type": "tool_result", "content": 5},
+                                     {"type": "tool_result", "content": {"text": "x"}},
+                                     {"type": "tool_result", "content": None}]},
+        {"type": "function_call_output", "call_id": "c1", "output": 5},
+        {"type": "function_call_output", "call_id": "c2", "output": [{"type": "input_text", "text": 5},
+                                                                    {"type": "input_text", "text": "ok"}]},
+        {"type": "function_call_output", "call_id": "c3", "output": None},
+        {"type": "message", "role": "user", "content": [{"type": ["input_text"], "text": "x"},
+                                                        {"type": "input_image", "image_url": "data:"},
+                                                        {"type": "input_text", "text": "kept"}]},
+        {"type": "message", "role": "assistant", "content": 5},
+        {"type": 5, "role": "assistant", "content": [{"type": "output_text", "text": "x"}]},
+    ]}
+    assert render_page(page).split("\n") == [
+        "[turn 1] user:",
+        "tool_result:", "[malformed content omitted]",
+        "tool_result:", "[malformed content omitted]",
+        "tool_result:",  # no content: an empty output
+        "[turn 1] user:", "tool_result:", "[malformed text omitted]",
+        "[turn 1] user:", "tool_result:", "[malformed text omitted]", "ok",
+        "[turn 1] user:", "tool_result:",
+        "[turn 1] user:", "[malformed text omitted]", "kept",  # the image is left out, as before
+        "[turn 1] assistant:", "[malformed text omitted]",
+        "[turn 1] assistant:", "[malformed text omitted]",  # an item whose type is not a string
+    ]
+    text = search_entry({**page, "id": "pg_0000000000000001", "stub": build_stub(page["messages"])}).text
+    assert b"malformed" not in text and b"ok" in text and b"kept" in text
