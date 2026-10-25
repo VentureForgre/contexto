@@ -11,9 +11,10 @@ Steps (M2 contract, Architecture):
    ``permissions.allow`` with one rule per Contexto MCP tool, by its exact name (D44:
    ``mcp__contexto__contexto_recall`` and the other four), and an ``--mcp-config`` file that makes
    Claude Code spawn ``contexto mcp --session S`` over stdio with the current interpreter.
-4. Run ``claude --settings <file> --mcp-config <file> [user args]`` as a child with the terminal
-   passed through, wait for it, stop the proxy, delete the temporary files, and return claude's
-   exit code.
+4. Run ``claude --settings=<file> --mcp-config=<file> [user args]`` (``claude_argv``: one argument per
+   flag, so the variadic ``--mcp-config`` cannot take a prompt right after ``claude``) as a child with
+   the terminal passed through, wait for it, stop the proxy, delete the temporary files, and return
+   claude's exit code.
 
 The user's own settings, hooks, and MCP servers still load: a flag-level ``--settings`` only adds
 the base URL and the allow rules. Its base URL outranks the user, project, and local settings files.
@@ -110,18 +111,20 @@ class LaunchOptions:
 
 
 def check_user_args(claude_args: list[str]) -> None:
-    """Fail closed on a user ``--settings``: Claude Code 2.1.301 takes a single ``--settings``, so a
-    second one could replace ours and silently send requests around the proxy. ``--mcp-config`` is
-    variadic and allowed. Arguments after ``--`` are positional for claude and not checked."""
+    """Fail closed on a user ``--settings``: Claude Code takes a single ``--settings``, so a second one
+    could replace ours and silently send requests around the proxy. ``--mcp-config`` is variadic and
+    allowed. Every argument is checked, after a ``--`` too: a ``--`` can be another option's value
+    (``--append-system-prompt -- --settings x.json``), and Claude Code 2.1.302 and 2.1.310 then still
+    read the ``--settings`` after it. So a prompt that is exactly ``--settings`` or starts with
+    ``--settings=`` is refused as well."""
     for arg in claude_args:
-        if arg == "--":
-            return
         if arg == "--settings" or arg.startswith("--settings="):
             raise LaunchError(
                 "--settings in the claude arguments is not supported: Claude Code accepts one --settings, "
                 "and contexto uses it to route requests through its proxy, so a second one could bypass "
                 "the proxy. Put those settings in your Claude settings files instead "
-                "(see README, 'contexto run').", EXIT_USAGE)
+                "(see README, 'contexto run'). Every argument is checked, including those after --, so a "
+                "prompt that is exactly --settings or starts with --settings= is refused too.", EXIT_USAGE)
 
 
 def check_bound(bound: int, allow_large_bound: bool) -> None:
@@ -262,6 +265,14 @@ def mcp_payload(session_id: str, home: Path) -> dict[str, Any]:
         "args": ["-P", "-m", "contexto", "mcp", "--session", session_id],
         "env": mcp_env(home),
     }}}
+
+
+def claude_argv(claude: str, settings: Path, mcp: Path, claude_args: list[str]) -> list[str]:
+    """The Claude Code command line. Each launcher flag and its file are one ``--flag=<file>`` token:
+    ``--mcp-config`` takes several files, so in the two-token form Claude Code (2.1.302, 2.1.310) also
+    reads the next argument as a config file, and ``contexto run claude "prompt"`` failed with "MCP
+    config file not found". The ``=`` form ends the option at its own token."""
+    return [claude, f"--settings={settings}", f"--mcp-config={mcp}", *claude_args]
 
 
 def exit_code(returncode: int) -> int:
@@ -446,8 +457,7 @@ def _run(options: LaunchOptions, stderr) -> int:
             print(f"contexto: {warning}", file=stderr, flush=True)
             store.log({"event": "window_budget_warning", "bound": options.bound,
                        "assumed_overhead": assumed_overhead()})
-        code = run_child([claude, "--settings", str(settings), "--mcp-config", str(mcp), *options.claude_args],
-                         stderr=stderr)
+        code = run_child(claude_argv(claude, settings, mcp, options.claude_args), stderr=stderr)
         return code
     finally:
         proxy.stop()

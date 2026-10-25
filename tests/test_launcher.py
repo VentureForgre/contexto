@@ -27,6 +27,7 @@ from contexto.launcher import (
     assumed_overhead,
     check_bound,
     check_user_args,
+    claude_argv,
     contexto_tool_rules,
     engine_config,
     exit_code,
@@ -50,8 +51,8 @@ if args == ["--version"]:  # contexto run's version check (D38)
     print(os.environ.get("FAKE_VERSION", "2.1.302 (Claude Code)"))
     sys.exit(0)
 record = {"argv": args, "pid": os.getpid(), "env_base_url": os.environ.get("ANTHROPIC_BASE_URL")}
-for flag, key in (("--settings", "settings"), ("--mcp-config", "mcp")):
-    path = args[args.index(flag) + 1]
+for flag, key in (("--settings=", "settings"), ("--mcp-config=", "mcp")):
+    path = next(a for a in args if a.startswith(flag))[len(flag):]  # the launcher's one-token form
     record[key + "_path"] = path
     record[key] = json.load(open(path))
     record[key + "_mode"] = os.stat(path).st_mode & 0o777
@@ -164,7 +165,8 @@ def test_run_wires_settings_mcp_and_args_and_cleans_up(env, upstream, tmp_path):
     assert proc.returncode == 0, err
     record = json.loads(Path(env["FAKE_RECORD"]).read_text())
     argv = record["argv"]
-    assert argv[0] == "--settings" and argv[2] == "--mcp-config" and argv[4:] == ["-p", "hello", "--model", "m"]
+    assert argv[0] == "--settings=" + record["settings_path"] and argv[1] == "--mcp-config=" + record["mcp_path"]
+    assert argv[2:] == ["-p", "hello", "--model", "m"]
     base = record["settings"]["env"]["ANTHROPIC_BASE_URL"]
     assert record["settings"] == {"env": {"ANTHROPIC_BASE_URL": base}, "permissions": {"allow": contexto_tool_rules()}}
     assert base.startswith("http://127.0.0.1:")
@@ -474,7 +476,8 @@ def test_bound_too_small_notice_without_full_sizing(tmp_path, event):
     assert "keeps only the new turn" in line and "may exceed the bound" in line and "unrotated" not in line
 
 
-@pytest.mark.parametrize("user_args", [["--settings", "mine.json"], ["-p", "hi", "--settings={}"]])
+@pytest.mark.parametrize("user_args", [["--settings", "mine.json"], ["-p", "hi", "--settings={}"],
+                                       ["--append-system-prompt", "--", "--settings", "mine.json", "-p", "x"]])
 def test_user_settings_are_refused_before_anything_starts(env, upstream, tmp_path, user_args):
     proc = launch(env, "--upstream", upstream, "--session", "r1", "claude", *user_args, cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
@@ -491,13 +494,38 @@ def test_user_mcp_config_passes_through(env, upstream, tmp_path):
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == 0, err
     argv = json.loads(Path(env["FAKE_RECORD"]).read_text())["argv"]
-    assert argv[2] == "--mcp-config" and argv[4:] == ["--mcp-config", str(mine), "-p", "x"]
+    assert argv[1].startswith("--mcp-config=") and argv[2:] == ["--mcp-config", str(mine), "-p", "x"]
+
+
+@pytest.mark.parametrize("user_args", [["hello there"], ["hello", "-p"], [], ["--model", "m", "hello"]])
+def test_user_arguments_follow_the_launcher_flags_unchanged(env, upstream, tmp_path, user_args):
+    # A prompt right after `claude` must stay a prompt: in the two-token form `--mcp-config <file>`,
+    # Claude Code's variadic --mcp-config took it as a second config file ("MCP config file not found").
+    proc = launch(env, "--upstream", upstream, "--session", "r3", "claude", *user_args, cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    record = json.loads(Path(env["FAKE_RECORD"]).read_text())
+    assert record["argv"] == ["--settings=" + record["settings_path"], "--mcp-config=" + record["mcp_path"],
+                              *user_args]
+
+
+def test_claude_argv_joins_each_flag_with_its_file():
+    argv = claude_argv("/bin/claude", Path("/t/settings.json"), Path("/t/mcp.json"), ["a prompt", "-p"])
+    assert argv == ["/bin/claude", "--settings=/t/settings.json", "--mcp-config=/t/mcp.json", "a prompt", "-p"]
+    # No launcher flag is followed by a separate value token that a variadic option could extend.
+    assert not any(arg in ("--settings", "--mcp-config") for arg in argv)
 
 
 def test_check_user_args():
     check_user_args(["-p", "x", "--mcp-config", "a.json", "b.json"])
-    check_user_args(["-p", "--", "--settings"])  # positional after --, not a flag
-    for args in (["--settings", "f"], ["--settings=f"], ["-p", "x", "--settings", "f"]):
+    check_user_args(["a prompt", "--mcp-config=a.json"])
+    check_user_args(["-p", "--", "a prompt naming --settings"])  # only an argument that is the flag is refused
+    for args in (["--settings", "f"], ["--settings=f"], ["-p", "x", "--settings", "f"], ["a prompt", "--settings={}"],
+                 ["--settings="], ["--settings"],
+                 # A -- can be another option's value; Claude Code 2.1.302 and 2.1.310 still read the
+                 # --settings after it, so the check does not stop at --.
+                 ["--append-system-prompt", "--", "--settings", "x.json"], ["-p", "--", "--settings=x.json"],
+                 ["-p", "--", "--settings"]):
         with pytest.raises(LaunchError):
             check_user_args(args)
 
