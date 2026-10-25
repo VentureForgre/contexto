@@ -8,7 +8,6 @@ import http.client
 import json
 import socket
 import struct
-import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
@@ -1547,8 +1546,9 @@ def test_the_entry_carries_the_ending_and_the_relay_is_byte_identical(make_proxy
 
 # input_transformations merged across a response's events (--observe-thinking) ----------------------
 
-DROP = {"type": "thinking_dropped", "reason": "end_user_binding_mismatch", "location": "messages.1"}
-DROP_2 = {"type": "thinking_dropped", "reason": "end_user_binding_mismatch", "location": "messages.3"}
+# Real items carry a ``path`` (PR #220, M0 probes), no ``location``. These two differ only by path.
+DROP = {"type": "thinking_dropped", "reason": "end_user_binding_mismatch", "path": "messages.1.content.0"}
+DROP_2 = {"type": "thinking_dropped", "reason": "end_user_binding_mismatch", "path": "messages.3.content.0"}
 
 
 def start_event(transformations=None, under_usage=False) -> dict:
@@ -1565,86 +1565,130 @@ def delta_event(transformations=None, under_usage=False) -> dict:
     return event
 
 
-def read_transformations(body: bytes, content_type: str = "text/event-stream") -> list | None:
+def read_transformations(body: bytes, content_type: str = "text/event-stream") -> UsageReader:
     reader = UsageReader(content_type)
     for i in range(0, len(body), 7):  # split mid-event, as a network would
         reader.feed(body[i:i + 7])
     reader.finish()
-    return reader.input_transformations
+    return reader
 
 
-@pytest.mark.parametrize("start_usage", [False, True], ids=["start-top", "start-usage"])
-@pytest.mark.parametrize("delta_usage", [False, True], ids=["delta-top", "delta-usage"])
+def same(got, want) -> bool:
+    """Equal as JSON: checks order, and keeps 1 and True apart (they are equal in Python)."""
+    return json.dumps(got) == json.dumps(want)
+
+
 @pytest.mark.parametrize("start, delta, want", [
     ([DROP], [], [DROP]),  # an empty later list does not erase the drop report
     ([DROP], [DROP_2], [DROP, DROP_2]),  # a different later list adds to it, first seen first
-    ([DROP], [DROP_2, DROP], [DROP, DROP_2]),  # equal summaries are kept once
+    ([DROP, DROP_2], [DROP_2, DROP], [DROP, DROP_2]),  # a report repeated in a later event is not counted twice
+    ([DROP, DROP], [DROP], [DROP, DROP]),  # an item repeated within one list keeps its count
+    ([DROP], [DROP, DROP_2, DROP], [DROP, DROP_2, DROP]),  # the most in any one list wins
     ([], [DROP], [DROP]),
     ([], [], []),  # present only as empty lists: still logged, it shows the beta reached the API
     (None, [], []),
-    ([DROP], None, [DROP]),
     (None, None, None),  # never present: not logged
-], ids=["drop-then-empty", "drop-then-other", "dedup", "empty-then-drop", "empty-empty", "absent-empty",
-        "drop-absent", "absent"])
-def test_sse_transformations_are_merged_across_start_and_delta(start, delta, want, start_usage, delta_usage):
-    body = sse_body(start_event(start, start_usage), delta_event(delta, delta_usage), {"type": "message_stop"})
-    assert read_transformations(body) == want
+], ids=["drop-then-empty", "drop-then-other", "repeat-across-events", "repeat-within-list", "more-later",
+        "empty-then-drop", "empty-empty", "absent-empty", "absent"])
+def test_sse_transformations_merge_across_start_and_delta(start, delta, want):
+    body = sse_body(start_event(start), delta_event(delta, under_usage=True), {"type": "message_stop"})
+    reader = read_transformations(body)
+    assert same(reader.input_transformations, want) and not reader.input_transformations_truncated
 
 
-def test_sse_transformations_at_both_levels_of_one_event_are_merged():
-    start = start_event([DROP])
-    start["message"]["usage"]["input_transformations"] = [DROP_2, DROP]
-    delta = delta_event([])
+def test_sse_transformations_at_both_levels_of_one_event_merge():
+    start = start_event([DROP], under_usage=True)
+    start["message"]["input_transformations"] = []
+    delta = delta_event([DROP_2])
     delta["usage"]["input_transformations"] = []
-    assert read_transformations(sse_body(start, delta)) == [DROP, DROP_2]
+    assert same(read_transformations(sse_body(start, delta)).input_transformations, [DROP, DROP_2])
 
 
 @pytest.mark.parametrize("top, usage, want", [
-    ([DROP], [], [DROP]),
-    ([], [DROP], [DROP]),
-    ([DROP], [DROP_2, DROP], [DROP, DROP_2]),
+    ([DROP, DROP], [DROP_2, DROP], [DROP, DROP, DROP_2]),
     ([], [], []),
-    ([DROP], None, [DROP]),
-    (None, [], []),
     (None, None, None),
 ])
-def test_json_body_transformations_are_merged_across_top_level_and_usage(top, usage, want):
+def test_json_body_transformations_merge_across_top_level_and_usage(top, usage, want):
     body = {"id": "msg_2", "type": "message", "content": [], "stop_reason": "end_turn", "usage": {"input_tokens": 7}}
     if top is not None:
         body["input_transformations"] = top
     if usage is not None:
         body["usage"]["input_transformations"] = usage
-    assert read_transformations(json.dumps(body).encode(), "application/json") == want
+    assert same(read_transformations(json.dumps(body).encode(), "application/json").input_transformations, want)
 
 
-def test_transformations_keep_at_most_the_cap_of_distinct_items():
+@pytest.mark.parametrize("later, truncated", [(32, False), (42, True)])
+def test_transformations_are_capped_and_a_cut_is_flagged(later, truncated):
     cap = proxy_module.MAX_INPUT_TRANSFORMATIONS
-    first = [dict(DROP, location=f"messages.{i}") for i in range(cap - 2)]
-    later = [dict(DROP, location=f"messages.{i}") for i in range(cap + 10)]  # repeats the first, then more
-    got = read_transformations(sse_body(start_event(first), delta_event(later)))
-    assert got == later[:cap] and len(got) == cap
+    assert cap == 32
+    items = [dict(DROP, path=f"messages.{i}.content.0") for i in range(later)]
+    reader = read_transformations(sse_body(start_event(items[:cap - 2]), delta_event(items)))  # repeats, then more
+    assert same(reader.input_transformations, items[:cap])
+    assert reader.input_transformations_truncated is truncated
 
 
 def test_transformation_summaries_are_compared_as_json_not_python_equality():
-    one, true = {"type": "x", "n": 1}, {"type": "x", "n": True}  # 1 == True in Python
-    assert read_transformations(sse_body(start_event([one]), delta_event([true, one]))) == [one, true]
+    one, true = {"type": "x", "n": 1}, {"type": "x", "n": True}
+    reader = read_transformations(sse_body(start_event([one]), delta_event([true, one])))
+    assert same(reader.input_transformations, [one, true])
 
 
 def test_transformation_items_are_summarized_before_they_are_compared():
-    long_a, long_b = dict(DROP, detail="a" * 200), dict(DROP, detail="b" * 200)  # same summary: "<200 chars>"
-    got = read_transformations(sse_body(start_event([long_a]), delta_event([long_b])))
-    assert got == [dict(DROP, detail="<200 chars>")]
+    long_a, long_b = dict(DROP, path="a" * 200), dict(DROP, path="b" * 200)  # both summarize to "<200 chars>"
+    summary = dict(DROP, path="<200 chars>")
+    across = read_transformations(sse_body(start_event([long_a]), delta_event([long_b])))
+    within = read_transformations(sse_body(start_event([long_a, long_b])))
+    assert same(across.input_transformations, [summary]) and same(within.input_transformations, [summary, summary])
+
+
+def nested(depth: int) -> str:
+    return '{"a":' * depth + "1" + "}" * depth
+
+
+def test_scalar_summary_replaces_containers_below_the_depth_limit():
+    limit = proxy_module.MAX_SUMMARY_DEPTH
+    got = proxy_module._scalar_summary(json.loads(nested(limit + 5)))
+    for _ in range(limit):
+        got = got["a"]
+    assert got == "<dict>"
+    assert proxy_module._scalar_summary([[1, "x"]]) == [[1, "x"]]
+
+
+@pytest.mark.parametrize("depth", [2000, 200_000])  # 2000 parses; 200,000 is beyond what json.loads can parse
+def test_a_deeply_nested_transformation_cannot_break_the_reader(depth):
+    item = '{"type":"thinking_dropped","detail":' + nested(depth) + "}"
+    event = b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":3},' \
+            b'"input_transformations":[' + item.encode() + b"]}}\n\n"
+    stream = read_transformations(event + sse_body(delta_event([DROP])))
+    body = read_transformations(b'{"usage":{"input_tokens":3},"input_transformations":[' + item.encode() + b"]}",
+                                "application/json")
+    if depth == 2000:
+        assert stream.input_transformations[0]["type"] == "thinking_dropped"
+        assert len(stream.input_transformations) == 2 and stream.usage["input_tokens"] == 3
+        assert body.input_transformations[0]["type"] == "thinking_dropped"
+    else:  # an unparseable event or body is skipped, as invalid JSON is
+        assert same(stream.input_transformations, [DROP]) and body.input_transformations is None
 
 
 @pytest.mark.parametrize("engine_mode", ["identity", "raise"])  # raise: the transform-error path (rule 14)
 def test_logged_transformations_keep_a_drop_report_a_later_event_omits(make_proxy, monkeypatch, engine_mode):
     stream = [start_event([DROP]), {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
               delta_event([], under_usage=True), delta_event([DROP_2]), {"type": "message_stop"}]
-    monkeypatch.setattr(sys.modules[Upstream.__module__], "STREAM", stream)  # what the stub upstream sends
+    monkeypatch.setattr(f"{__name__}.STREAM", stream)  # what the stub upstream sends
     proxy, log = make_proxy(transform=StubEngine(engine_mode), observe_thinking=True)
     response, data = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
     assert response.status == 200 and data == sse(*stream)  # relayed unchanged
     entry = log.requests()[0]
     assert ("transform_error" in entry) == (engine_mode == "raise")
     assert THINKING_BINDING_BETA in Upstream.received[0][2]["anthropic-beta"]
-    assert entry["input_transformations"] == [DROP, DROP_2]
+    assert same(entry["input_transformations"], [DROP, DROP_2]) and "input_transformations_truncated" not in entry
+
+
+def test_logged_transformations_carry_the_truncated_flag_when_cut(make_proxy, monkeypatch):
+    items = [dict(DROP, path=f"messages.{i}.content.0") for i in range(40)]
+    monkeypatch.setattr(f"{__name__}.STREAM", [start_event(items), delta_event([]), {"type": "message_stop"}])
+    proxy, log = make_proxy(observe_thinking=True)
+    call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    entry = log.requests()[0]
+    assert same(entry["input_transformations"], items[:32]) and entry["input_transformations_truncated"] is True
