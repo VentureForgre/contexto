@@ -67,6 +67,7 @@ class Stub:
     # usage outruns the engine's estimate and a real over_bound is logged (a detector proof run).
     inflate: tuple[int, float] | None = None
     auth_fail_at: int | None = None  # answer this Messages request (0-based) with 401: an auth-stop run
+    model: str = driver.MODEL  # the model named in the stub's replies
     records: list[dict[str, Any]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -116,7 +117,7 @@ class Stub:
                 cached = tokens // 2 if index else 0
                 usage = {"input_tokens": tokens - cached, "cache_creation_input_tokens": 0,
                          "cache_read_input_tokens": cached}
-                message = {"id": f"msg_stub_{index}", "type": "message", "role": "assistant", "model": driver.MODEL}
+                message = {"id": f"msg_stub_{index}", "type": "message", "role": "assistant", "model": stub.model}
                 if not stream:
                     self._send_json({**message, "content": [{"type": "text", "text": "OK"}], "stop_reason": "end_turn",
                                      "stop_sequence": None, "usage": {**usage, "output_tokens": 2}})
@@ -246,11 +247,14 @@ def summarize(stub_records: list[dict], session_log: list[dict], script_turns: i
 
 def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = budget.Params(),
             seed: int = 20261016, turn_bytes: int = 40_000, timeout: float = 1_800.0,
-            inflate: tuple[int, float] | None = None, fault: tuple[str, int] | None = None) -> dict[str, Any]:
+            inflate: tuple[int, float] | None = None, fault: tuple[str, int] | None = None,
+            model: str = driver.MODEL, allow_contexto_tools: bool = False) -> dict[str, Any]:
     """H1 through run.run_h1, live's own function, with the stub as its upstream and the live gate's
     approval. ``fault`` drives a stop branch: ("auth", n) answers the n-th Messages request (0-based)
     with 401, so the spend watcher's model-path auth stop fires; ("raise", n) raises a harness error
-    after turn n (0-based), so the H1 record is written on the error path and the error re-raised."""
+    after turn n (0-based), so the H1 record is written on the error path and the error re-raised.
+    ``model`` and ``allow_contexto_tools`` go to run_h1 as live's ``--model`` and
+    ``--allow-contexto-tools`` do."""
     from acceptance import run
 
     if shutil.which("claude") is None:
@@ -261,7 +265,7 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
         key = credcheck._helper_output(seat_settings)
     except (RuntimeError, OSError):
         return {"ran": False, "reason": "the seat's apiKeyHelper did not produce a key; output not shown"}
-    stub = Stub(key, inflate=inflate, auth_fail_at=fault[1] if fault and fault[0] == "auth" else None)
+    stub = Stub(key, inflate=inflate, auth_fail_at=fault[1] if fault and fault[0] == "auth" else None, model=model)
     del key
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), stub.handler())
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -271,7 +275,8 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
     home = scratch / "contexto-home"
     session_log = home / "sessions" / session / "log.jsonl"
     result: dict[str, Any] = {"ran": True, "scratch": str(scratch), "session": session, "turn_bytes": turn_bytes,
-                              "fault": list(fault) if fault else None}
+                              "fault": list(fault) if fault else None, "model": model,
+                              "allow_contexto_tools": allow_contexto_tools}
     deadline = time.monotonic() + timeout
 
     def inject(index: int) -> None:
@@ -282,7 +287,8 @@ def dry_run(seat_settings: Path, contexto: str, out: Path, p: budget.Params = bu
 
     try:
         status = run.run_h1(s, b, p, b.h1_worst + b.baseline_replay_worst, scratch, home, session, seat_settings,
-                            f"http://127.0.0.1:{httpd.server_port}", contexto, inject=inject)
+                            f"http://127.0.0.1:{httpd.server_port}", contexto, inject=inject, model=model,
+                            allow_contexto_tools=allow_contexto_tools)
         if status != 0:
             result.update({"ran": False, "reason": f"run_h1 returned {status}"})
     except Exception as exc:  # noqa: BLE001  run_h1 re-raises a harness error after writing the H1 record
@@ -358,6 +364,16 @@ def main(argv: list[str]) -> int:
             return 2
         fault = (kind, int(n))
         argv = argv[:i] + argv[i + 2:]
+    model = driver.MODEL
+    if "--model" in argv:  # --model M, the model Claude Code runs (default claude-haiku-5-5)
+        i = argv.index("--model")
+        if i + 1 >= len(argv):
+            print("--model takes a model name", file=sys.stderr)
+            return 2
+        model = argv[i + 1]
+        argv = argv[:i] + argv[i + 2:]
+    allow_contexto_tools = "--allow-contexto-tools" in argv  # the mcp__contexto allow rule, off by default
+    argv = [a for a in argv if a != "--allow-contexto-tools"]
     inflate = None
     if "--inflate" in argv:  # --inflate N:FACTOR, a detector proof run
         i = argv.index("--inflate")
@@ -366,11 +382,12 @@ def main(argv: list[str]) -> int:
         argv = argv[:i] + argv[i + 2:]
     if len(argv) not in (3, 4):
         print("usage: stubrun.py <seat settings file> <contexto executable> <output dir> [turn kbytes, default 40]"
-              " [--inflate N:FACTOR] [--fault auth:N|raise:N]\n       stubrun.py check-paths <output dir>...",
+              " [--inflate N:FACTOR] [--fault auth:N|raise:N] [--model M] [--allow-contexto-tools]\n       stubrun.py check-paths <output dir>...",
               file=sys.stderr)
         return 2
     turn_bytes = int(argv[3]) * 1_000 if len(argv) == 4 else 40_000
-    result = dry_run(Path(argv[0]), argv[1], Path(argv[2]), turn_bytes=turn_bytes, inflate=inflate, fault=fault)
+    result = dry_run(Path(argv[0]), argv[1], Path(argv[2]), turn_bytes=turn_bytes, inflate=inflate, fault=fault,
+                     model=model, allow_contexto_tools=allow_contexto_tools)
     print(json.dumps({k: v for k, v in result.items() if k != "rows"}, indent=1, default=str), flush=True)
     if fault:  # a stop-path run passes when it stopped on the branch it drove and wrote the record
         record = result.get("h1_record") or {}

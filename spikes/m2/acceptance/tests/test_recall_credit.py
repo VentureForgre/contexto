@@ -210,6 +210,54 @@ def test_a_spurious_or_missing_turn_end_fails_closed_when_the_count_is_expected(
     assert supplied["credited"] == 0 and supplied["reason"].startswith("turn answers do not match")
 
 
+# Claude Code 2.1.302's title side request (the Opus run, 2026-10-25)
+
+
+def _held(messages, held=0):
+    """A Messages request as the proxy logs it: its original message count and its stream hold."""
+    return {**_req(), "original_message_count": messages, "stream_hold": {"triggered": True, "held_events": held}}
+
+
+def test_the_title_side_request_is_not_a_turn_end():
+    """2.1.302's first Messages request is a one-message title request answered with no tool call."""
+    log = [_held(1), _held(2, held=38), _call("contexto_search", HIT), _held(5), _held(8)]
+    assert recall_credit.turn_answer_indices(log) == [3, 4]
+    assert recall_credit.side_request(log[0]) and not recall_credit.side_request(log[1])
+
+
+def test_the_title_request_no_longer_shifts_the_probe_turns():
+    """Without the skip this log had one turn end too many and credited nothing (25 against 24)."""
+    good = [_held(2), _held(5), _held(8, held=9), _call("contexto_search", HIT), _held(11), _held(14),
+            _held(17)]  # a content turn, then four probe turns; the hit in probe turn 2, before its answer
+    with_title = [_held(1), *good]
+    for log in (good, with_title):
+        r = recall_credit.credit([PROBE], ANSWERED, log, [PAGE], probe_turn_ids=TURNS, expected_turns=5)
+        assert r["credited"] == 1 and "reason" not in r
+    side_as_turn = [{**with_title[0], "original_message_count": 2}, *good]  # what the old rule saw
+    r = recall_credit.credit([PROBE], ANSWERED, side_as_turn, [PAGE], probe_turn_ids=TURNS, expected_turns=5)
+    assert r["credited"] == 0 and r["reason"] == "turn answers do not match the script (6 found, 5 expected)"
+
+
+def test_a_side_request_inside_a_tool_round_does_not_cut_the_round():
+    """2.1.301 sent one-message side requests, not streamed, between a tool call and its result. With
+    no stream hold, the mcp_call fallback looks past them to the next main request."""
+    side = {**_req(), "original_message_count": 1}
+    log = [{**_req(), "original_message_count": 2}, side, side, _call("contexto_search", HIT),
+           {**_req(), "original_message_count": 5}]
+    assert recall_credit.turn_answer_indices(log) == [4]
+
+
+def test_logs_without_one_message_requests_keep_their_turn_ends():
+    """2.1.301-shaped and older logs: the same ends whether or not the counts are logged."""
+    bare = [_req(), _req(), _call("contexto_search", HIT), _req(), _req()]
+    counted = [{**ev, "original_message_count": 2 + 3 * i} if ev["event"] == "request" else ev
+               for i, ev in enumerate(bare)]
+    held = [_held(2), _held(5, held=4), _held(8), _held(11)]
+    assert recall_credit.turn_answer_indices(bare) == recall_credit.turn_answer_indices(counted) == [0, 3, 4]
+    assert recall_credit.turn_answer_indices(held) == [0, 2, 3]
+    assert not any(recall_credit.side_request(ev) for ev in [*bare, *counted, *held, {**_req(), "original_message_count": 0}])
+
+
 # B30 (lane A's Codex live run): the original plant wins, whatever order the pages come in
 
 

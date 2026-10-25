@@ -27,6 +27,7 @@ class FakeTransport:
     """Stands in for StreamJsonTransport: answers each turn and logs it as the proxy would."""
 
     made: list[FakeTransport] = []
+    configs: list[bool] = []  # allow_contexto_tools of each isolated_config call (the live fixture)
 
     def __init__(self, command, cwd, env, session_log=None, approved=None, reserve=0):
         self.command, self.env, self.session_log = command, env, session_log
@@ -53,7 +54,14 @@ class FakeTransport:
 def live(tmp_path, monkeypatch):
     FakeTransport.made = []
     monkeypatch.setattr(driver, "StreamJsonTransport", FakeTransport)
-    monkeypatch.setattr(driver, "isolated_config", lambda scratch, seat: scratch / "config")
+    configs = []
+
+    def isolated_config(scratch, seat, allow_contexto_tools=False):
+        configs.append(allow_contexto_tools)
+        return scratch / "config"
+
+    monkeypatch.setattr(driver, "isolated_config", isolated_config)
+    FakeTransport.configs = configs
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://owner-proxy.invalid")
     seat = tmp_path / "settings.json"
     seat.write_text("{}", encoding="utf-8")
@@ -61,9 +69,9 @@ def live(tmp_path, monkeypatch):
     s, b = run.plan(params=p)
     home = tmp_path / "home"
 
-    def go(inject=None, approved=None):
+    def go(inject=None, approved=None, **options):
         return run.run_h1(s, b, p, approved or b.h1_worst + b.baseline_replay_worst, tmp_path / "scratch", home,
-                          "sess", seat, "http://127.0.0.1:9", "/venv/bin/contexto", inject=inject)
+                          "sess", seat, "http://127.0.0.1:9", "/venv/bin/contexto", inject=inject, **options)
 
     def record():
         return json.loads((home / "acceptance-sess-h1.json").read_text(encoding="utf-8"))
@@ -101,6 +109,19 @@ def test_a_clean_run_sends_every_turn_and_keeps_all_probe_answers(live):
     assert r["session"] == "sess" and r["answers_file"] == "acceptance-sess-answers.txt"
     assert len(answers()) == script.PROBE_TURNS
     assert set(r["paths"]) == set(run.LIVE_PATHS) - {"stop_handled", "error_handled"}
+    # The defaults: Haiku, and default Claude Code settings (no allow rule), named in the record.
+    assert t.command[-2:] == ["--model", "claude-haiku-5-5"] and FakeTransport.configs == [False]
+    assert r["model"] == "claude-haiku-5-5" and r["allow_contexto_tools"] is False
+
+
+def test_the_model_and_the_allow_rule_reach_the_launcher_and_the_record(live):
+    s, b, p, go, record, answers = live
+    assert go(model="claude-opus-5-5", allow_contexto_tools=True) == 0
+    t = FakeTransport.made[0]
+    assert t.command[-2:] == ["--model", "claude-opus-5-5"] and t.command.count("--model") == 1
+    assert FakeTransport.configs == [True]
+    r = record()
+    assert r["model"] == "claude-opus-5-5" and r["allow_contexto_tools"] is True
 
 
 def test_a_harness_error_at_a_probe_turn_writes_the_record_then_reraises(live):
