@@ -463,10 +463,9 @@ Needs the owner:
   On Opus, cross-credential replays reported no drop, so the signal cannot show Opus drops. Cache
   misses and dropped thinking were traced to the proxy spreading one session's requests across
   credentials.
-- O7: resolved upstream. OpenRig fixed the context-usage clock bug (UTC parsed as local time) in
-  its PR #124 (commit 4a920dba), first released in v0.6.1. The host's OpenRig predates v0.6.1;
-  upgrading it is the owner's to do, and the rig has been down since 2026-10-17 (Process notes).
-  No report is needed.
+- O7: done. OpenRig fixed the context-usage clock bug (UTC parsed as local time) in its PR #124
+  (commit 4a920dba), first released in v0.6.1, and the host was upgraded to OpenRig 0.7.0 on
+  2026-10-25. No report is needed.
 
 ## O6 (upstream affinity), resolved by D36: deployed 2026-10-24
 

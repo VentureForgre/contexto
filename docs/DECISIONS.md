@@ -1226,8 +1226,8 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   was left to the owner, since intake did not touch the proxy (D11); D36's owner request covers the
   proxy-side work.
 - **O7. OpenRig context-usage clock bug.** Resolved upstream: OpenRig fixed it in its PR #124
-  (commit 4a920dba), first released in v0.6.1, so no report is needed. The host's OpenRig predates
-  v0.6.1; upgrading it is the owner's to do. Not Contexto code. Kept here for its evidence. Measured by
+  (commit 4a920dba), first released in v0.6.1, so no report is needed. The host was upgraded to
+  OpenRig 0.7.0 on 2026-10-25, which includes the fix. Not Contexto code. Kept here for its evidence. Measured by
   lane 1: every seat's context usage reads `stale_generation` because tenure boot times are stored
   in UTC without `Z` and parsed as local time (UTC-5), blinding `rig ps`, `whoami`, and compaction
   planning for about 5 hours after boot.
