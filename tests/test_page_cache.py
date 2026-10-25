@@ -84,6 +84,26 @@ def test_an_unreadable_page_is_logged_once_until_its_file_changes_and_skipped(tm
     assert store.search("needle") == [a] and logged() == ["pg_00000000000000ff.json"] * 2
 
 
+def test_a_page_file_that_is_not_utf8_is_damaged_content_not_a_failed_read(tmp_path):
+    """Not UTF-8 is damaged content, like bad JSON: logged once, with no ``will_retry``, until the file changes."""
+    store = SessionStore(tmp_path, "s1")
+    [a] = store.page_out([page("needle")], 1)
+    (store.pages_dir / "pg_00000000000000fe.json").write_bytes(b'{"id": "\xff\xfe"}')
+    for _ in range(3):
+        assert store.search("needle") == [a] and a in store.index_text(400) and store.page_ids() == [a]
+    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+    failed = [e for e in log if e["event"] == "page_unreadable"]
+    assert [e["path"] for e in failed] == ["pg_00000000000000fe.json"] and "will_retry" not in failed[0]
+
+
+def test_a_directory_named_like_a_page_file_is_not_listed(tmp_path):
+    store = SessionStore(tmp_path, "s1")
+    [a] = store.page_out([page("needle")], 1)
+    (store.pages_dir / "pg_00000000000000aa.json").mkdir()
+    assert store.search("needle") == [a] and a in store.index_text(400) and store.page_ids() == [a]
+    assert not (store.dir / "log.jsonl").exists()  # nothing logged: it is not a page file
+
+
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads a file whatever its mode")
 def test_a_page_file_that_could_not_be_opened_is_read_again_on_the_next_call(tmp_path):
     """A failed read (here permission denied, later fixed) says nothing about the page: it is logged and

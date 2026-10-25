@@ -366,8 +366,9 @@ class Server:
         _reject_extra(args, {"page_id", "offset"})
         try:
             page = self.store.get_page(page_id)
-        except PageUnreadableError:
-            raise ToolError(f"Page {page_id} cannot be read: its stored file is damaged.") from None
+        except PageUnreadableError as exc:
+            cause = "its stored file is damaged" if exc.damaged else "reading its stored file failed"
+            raise ToolError(f"Page {page_id} cannot be read: {cause}.") from None
         if page is None:
             raise ToolError(f"Unknown page id: {page_id}. Page ids appear in the paged-history index.")
         limit, note = recall_limit(*self._window())

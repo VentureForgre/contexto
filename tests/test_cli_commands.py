@@ -164,6 +164,16 @@ def test_recall_of_an_unreadable_page_exits_1_with_a_clean_error(home, capsys, c
     assert [e["path"] for e in log if e["event"] == "page_unreadable"] == [f"{pid}.json"]
 
 
+def test_recall_of_a_page_file_whose_read_fails_says_so_not_damaged(home, capsys):
+    store, pid = make(home, "s1", 1_000_000)
+    path = store.pages_dir / f"{pid}.json"
+    path.unlink()
+    path.mkdir()  # reading it raises IsADirectoryError, an OSError: nothing says the content is damaged
+    code, out, err = run(capsys, "recall", pid)
+    assert code == 1 and out == "" and "Traceback" not in err
+    assert f"page {pid} cannot be read in session s1: reading its stored file failed (logged page_unreadable)" in err
+
+
 def test_session_selection_order(home, capsys, monkeypatch):
     make(home, "old", 1_000_000)
     _, new_pid = make(home, "new", 2_000_000)

@@ -155,8 +155,9 @@ class PageCatalog:
             self._evict()
 
     def entries(self) -> list[Entry]:
-        """Every readable page. An unreadable page is logged ``page_unreadable`` once and left out, here and
-        in search, until its file changes."""
+        """Every readable page. A page whose content is damaged is logged ``page_unreadable`` once and left
+        out, here and in search, until its file changes; one whose read failed (an OSError) is logged and
+        left out this time, and read again on the next call."""
         with self._lock:
             out = []
             for name, signature in self._listing().items():
@@ -179,8 +180,9 @@ class PageCatalog:
         """What ``contexto.store.search.rank`` reads: every page, with its text where it is held as it is
         (else None), the ``fetch`` that gives the page at an index (decompressing held text, else reading
         the file), and the file names listed. A page read from its file is held if the budget takes it;
-        either way its id, turn, and kind are kept, and a page that cannot be read is logged
-        ``page_unreadable`` once and left out until its file changes."""
+        either way its id, turn, and kind are kept. A page whose content is damaged is logged
+        ``page_unreadable`` once and left out until its file changes; one whose read failed is logged and
+        left out this time, and read again on the next call."""
         with self._lock:
             listing = [(name, signature) for name, signature in self._listing().items()
                        if self._unreadable.get(name) != signature]
@@ -238,7 +240,7 @@ class PageCatalog:
         try:
             with os.scandir(self.pages_dir) as it:
                 for de in it:
-                    if de.name.startswith("pg_") and de.name.endswith(".json"):
+                    if de.name.startswith("pg_") and de.name.endswith(".json") and de.is_file():
                         try:
                             listing[de.name] = _signature(de.stat())
                         except FileNotFoundError:  # quarantined between the listing and the stat

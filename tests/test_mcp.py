@@ -204,6 +204,18 @@ def damage(store: SessionStore, page_id: str, depth: int = 20_000) -> None:
     (store.pages_dir / f"{page_id}.json").write_text(f'{{"id":"{page_id}","extra":{deep}}}')
 
 
+def test_recall_of_a_page_file_whose_read_fails_does_not_call_it_damaged(tmp_path):
+    store = SessionStore(tmp_path, "s1")
+    [bad] = store.page_out([TURN_A], first_turn=1)
+    path = store.pages_dir / f"{bad}.json"
+    path.unlink()
+    path.mkdir()  # an OSError on read
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    result = tool(server, "contexto_recall", {"page_id": bad})["result"]
+    assert result["isError"] is True and result["content"][0]["text"] == \
+        f"Page {bad} cannot be read: reading its stored file failed."
+
+
 @pytest.mark.parametrize("shape", ["deep", "not a page"])
 def test_an_unreadable_page_is_a_tool_error_logged_and_left_out_of_search(tmp_path, monkeypatch, shape):
     store = SessionStore(tmp_path, "s1")
