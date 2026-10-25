@@ -11,7 +11,7 @@ The single list is `TESTED_VERSIONS` in `src/contexto/cliversions.py`, oldest to
 
 | CLI | Tested | What was tested on it |
 |---|---|---|
-| Claude Code | 2.1.302 | session-start signature (D33), context-block kinds (D32), missing-tools notices, the permission refusal of Contexto's tools in `-p` mode (D44), live acceptance on Claude Opus 5.5 (PR #221; live run #3 ran on 2.1.301) |
+| Claude Code | 2.1.302 | session-start signature (D33), context-block kinds (D32), missing-tools notices, the permission refusal of Contexto's tools in `-p` mode (D44), live acceptance on Claude Opus 5.5 (PR #221, [M2-acceptance-opus.md](research/M2-acceptance-opus.md); live run #3 ran on 2.1.301) |
 | Codex | 0.154.0 | Responses shapes and context sections, Codex acceptance (D30) |
 | Codex | 0.163.0 | MCP server launch and missing-tools check (v0.2.8); context sections and request shapes rechecked for D38 (Codex steps 1 to 4 below) |
 

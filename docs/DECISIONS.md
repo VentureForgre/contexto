@@ -1036,13 +1036,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
   release built after this change does. Contributions are accepted under the same license
   (`CONTRIBUTING.md`).
 - **D44. `contexto run claude` allows Contexto's own MCP tools in its `--settings`.** Claude,
-  2026-10-25, under D0; contract change. The live acceptance run on Claude Opus 5.5 (record PR #221)
-  found that Claude Code 2.1.302 in `-p` mode refuses every MCP tool call that no permission rule
-  allows ("Claude requested permissions to use mcp__contexto__contexto_search, but you haven't
-  granted it yet."). 2.1.301 let such calls through to its auto-mode classifier. All 23 of the run's
-  Contexto calls were refused, and it scored 18 of 54 with no recall until the harness allowed
-  `mcp__contexto`. 2.1.302 is in `TESTED_VERSIONS`, so `contexto run claude -p` on it silently lost
-  recall.
+  2026-10-25, under D0; contract change. The live acceptance run on Claude Opus 5.5 (PR #221,
+  `docs/research/M2-acceptance-opus.md`) found that Claude Code 2.1.302 in `-p` mode refuses every
+  MCP tool call that no permission rule allows ("Claude requested permissions to use
+  mcp__contexto__contexto_search, but you haven't granted it yet."). 2.1.301 let such calls through
+  to its auto-mode classifier. All 23 of the run's Contexto calls were refused, and it scored 18 of
+  54 with no recall until the harness allowed `mcp__contexto`. 2.1.302 is in `TESTED_VERSIONS`, so
+  `contexto run claude -p` on it silently lost recall, and no acceptance 1 detector caught it.
   - **Rule.** The launcher's flag-level `--settings` adds `permissions.allow` with one rule per tool
     the MCP server serves, by exact name, under the server name the launcher's `--mcp-config` gives
     it: `mcp__contexto__contexto_recall`, `_pin`, `_close`, `_state`, `_search`. It is built from
