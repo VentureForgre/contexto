@@ -53,7 +53,9 @@ the CLI unchanged (rule 6). Upstream errors are forwarded unchanged and never re
 
 ``observe_thinking`` (off by default) adds the ``thinking-binding-controls-2026-08-01`` beta to
 ``anthropic-beta`` so that silently dropped thinking blocks are reported back as
-``input_transformations`` and logged. It changes the request: one more beta flag upstream.
+``input_transformations`` and logged: every distinct item the response reports, across its events,
+in first-seen order (at most ``MAX_INPUT_TRANSFORMATIONS``). It changes the request: one more beta
+flag upstream.
 
 Upstream affinity (D36): with ``affinity_key`` set and an upstream whose host name is not a vendor
 API host (``VENDOR_HOSTS``, compared after IDNA normalization), every forwarded request carries
@@ -127,6 +129,7 @@ UPSTREAM_TIMEOUT_S = 900
 STOP_DRAIN_S = 2.0  # how long stop() waits for in-flight requests to finish and log
 RETRYABLE_PHASES = frozenset({"connect", "tls", "send"})  # before the body is fully written (rule 8, PR #95)
 MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_INPUT_TRANSFORMATIONS = 32  # distinct input_transformations items kept per response
 # Hop-by-hop headers (RFC 9110 7.6.1) plus Host and Content-Length, which the proxy sets itself.
 HOP_BY_HOP = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection",
@@ -394,7 +397,8 @@ class UsageReader:
         self.api = api
         self.sse = "text/event-stream" in (content_type or "").lower()
         self.usage: dict[str, Any] = {}
-        self.input_transformations: list[Any] | None = None
+        self.input_transformations: list[Any] | None = None  # merged across events, see _take_transformations
+        self._transformation_keys: set[str] = set()
         self.end_event: str | None = None  # Responses stream: completed, incomplete, or failed
         self.ending: dict[str, str] = {}  # response_status, incomplete_reason, error_code, stop_reason, error_type
         self.responses_client_calls: bool | None = None  # D40: from a Responses output list, when read
@@ -531,10 +535,26 @@ class UsageReader:
             self.usage.update({k: v for k, v in usage.items() if k in USAGE_KEYS and isinstance(v, int)})
 
     def _take_transformations(self, container: dict[str, Any]) -> None:
+        """Merge an ``input_transformations`` list (at the top level or under ``usage``) into the
+        response's record. The field can appear in ``message_start`` and again in ``message_delta``,
+        so every distinct item summary is kept in first-seen order, up to
+        ``MAX_INPUT_TRANSFORMATIONS``; an empty or different later list never erases an earlier
+        report. A field seen only as empty lists still records ``[]``: its presence shows the beta
+        reached the API."""
         for holder in (container, container.get("usage") if isinstance(container.get("usage"), dict) else {}):
             value = holder.get("input_transformations")
-            if isinstance(value, list):
-                self.input_transformations = [_scalar_summary(v) for v in value]
+            if not isinstance(value, list):
+                continue
+            if self.input_transformations is None:
+                self.input_transformations = []
+            for item in value:
+                if len(self.input_transformations) >= MAX_INPUT_TRANSFORMATIONS:
+                    return
+                summary = _scalar_summary(item)
+                key = json.dumps(summary, sort_keys=True)  # 1 and True are equal in Python, not here
+                if key not in self._transformation_keys:
+                    self._transformation_keys.add(key)
+                    self.input_transformations.append(summary)
 
 
 # Server-sent events (WHATWG HTML, "Parsing an event stream"): a line ends at CRLF, LF, or a CR not
