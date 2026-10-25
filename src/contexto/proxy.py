@@ -53,7 +53,10 @@ the CLI unchanged (rule 6). Upstream errors are forwarded unchanged and never re
 
 ``observe_thinking`` (off by default) adds the ``thinking-binding-controls-2026-08-01`` beta to
 ``anthropic-beta`` so that silently dropped thinking blocks are reported back as
-``input_transformations`` and logged. It changes the request: one more beta flag upstream.
+``input_transformations`` and logged, merged across the response's events (at most
+``MAX_INPUT_TRANSFORMATIONS`` items, with ``input_transformations_truncated`` when more were
+reported; see ``UsageReader._take_transformations``). It changes the request: one more beta flag
+upstream.
 
 Upstream affinity (D36): with ``affinity_key`` set and an upstream whose host name is not a vendor
 API host (``VENDOR_HOSTS``, compared after IDNA normalization), every forwarded request carries
@@ -127,6 +130,8 @@ UPSTREAM_TIMEOUT_S = 900
 STOP_DRAIN_S = 2.0  # how long stop() waits for in-flight requests to finish and log
 RETRYABLE_PHASES = frozenset({"connect", "tls", "send"})  # before the body is fully written (rule 8, PR #95)
 MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_INPUT_TRANSFORMATIONS = 32  # input_transformations items logged per response
+MAX_SUMMARY_DEPTH = 16  # _scalar_summary: deeper dicts and lists become a placeholder
 # Hop-by-hop headers (RFC 9110 7.6.1) plus Host and Content-Length, which the proxy sets itself.
 HOP_BY_HOP = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection",
@@ -332,16 +337,20 @@ def decode_request_body(body: bytes, encoding: str, limit: int = MAX_DECODED_BOD
     raise EncodedBodyError("the body could not be decoded")
 
 
-def _scalar_summary(value: Any) -> Any:
-    """Keep numbers, booleans, and short strings; reduce anything else to its size."""
+def _scalar_summary(value: Any, depth: int = 0) -> Any:
+    """Keep numbers, booleans, and short strings; reduce anything else to its size. A dict or list
+    nested deeper than ``MAX_SUMMARY_DEPTH`` becomes its type name (``<dict>``, ``<list>``), so a
+    deeply nested upstream value cannot raise RecursionError out of the relay loop."""
     if isinstance(value, (bool, int, float)) or value is None:
         return value
     if isinstance(value, str):
         return value if len(value) <= 80 else f"<{len(value)} chars>"
+    if isinstance(value, (dict, list)) and depth >= MAX_SUMMARY_DEPTH:
+        return f"<{type(value).__name__}>"
     if isinstance(value, dict):
-        return {str(k): _scalar_summary(v) for k, v in value.items()}
+        return {str(k): _scalar_summary(v, depth + 1) for k, v in value.items()}
     if isinstance(value, list):
-        return [_scalar_summary(v) for v in value[:50]]
+        return [_scalar_summary(v, depth + 1) for v in value[:50]]
     return f"<{type(value).__name__}>"
 
 
@@ -394,7 +403,9 @@ class UsageReader:
         self.api = api
         self.sse = "text/event-stream" in (content_type or "").lower()
         self.usage: dict[str, Any] = {}
-        self.input_transformations: list[Any] | None = None
+        self.input_transformations: list[Any] | None = None  # merged across events, see _take_transformations
+        self.input_transformations_truncated = False  # True when the cap left an item out
+        self._transformation_counts: dict[str, int] = {}  # summary key -> how many times it is logged
         self.end_event: str | None = None  # Responses stream: completed, incomplete, or failed
         self.ending: dict[str, str] = {}  # response_status, incomplete_reason, error_code, stop_reason, error_type
         self.responses_client_calls: bool | None = None  # D40: from a Responses output list, when read
@@ -422,7 +433,7 @@ class UsageReader:
         elif self._buffer and not self._overflow:
             try:
                 body = json.loads(bytes(self._buffer))
-            except ValueError:
+            except (ValueError, RecursionError):  # a deeply nested body is unreadable, not fatal
                 body = None
             if isinstance(body, dict):
                 if self.api == "responses":
@@ -442,7 +453,7 @@ class UsageReader:
         data = sse_data(raw)
         try:
             payload = json.loads(data) if data else None
-        except ValueError:
+        except (ValueError, RecursionError):  # a deeply nested body is unreadable, not fatal
             return
         if not isinstance(payload, dict):
             return
@@ -531,10 +542,39 @@ class UsageReader:
             self.usage.update({k: v for k, v in usage.items() if k in USAGE_KEYS and isinstance(v, int)})
 
     def _take_transformations(self, container: dict[str, Any]) -> None:
+        """Merge an ``input_transformations`` list (at the top level or under ``usage``) into the
+        response's record.
+
+        The reader accepts the field in ``message_start``, ``message_delta``, a JSON body, and under
+        ``usage`` in each. The live O6 check (PR #220) saw streams carry it only in ``message_start``,
+        so no erasure has been observed; the merge is defensive, in case a later event repeats the
+        field with fewer or other items. Lists merge by multiplicity: each distinct item summary is
+        logged as many times as the most it appears in any one list, in first-seen order. So a single
+        list is logged as given, and a report repeated in a later event is not counted twice. An empty
+        later list never erases earlier items. A field seen only as empty lists records ``[]``: its
+        presence shows the beta reached the API.
+
+        At most ``MAX_INPUT_TRANSFORMATIONS`` items are logged. When the cap leaves an item out,
+        ``input_transformations_truncated`` is set and the entry carries
+        ``input_transformations_truncated: true``."""
         for holder in (container, container.get("usage") if isinstance(container.get("usage"), dict) else {}):
             value = holder.get("input_transformations")
-            if isinstance(value, list):
-                self.input_transformations = [_scalar_summary(v) for v in value]
+            if not isinstance(value, list):
+                continue
+            if self.input_transformations is None:
+                self.input_transformations = []
+            seen: dict[str, int] = {}  # occurrences in this list so far
+            for item in value:
+                summary = _scalar_summary(item)
+                key = json.dumps(summary, sort_keys=True)  # 1 and True are equal in Python, not here
+                seen[key] = seen.get(key, 0) + 1
+                if seen[key] <= self._transformation_counts.get(key, 0):
+                    continue  # already logged this many times
+                if len(self.input_transformations) >= MAX_INPUT_TRANSFORMATIONS:
+                    self.input_transformations_truncated = True
+                    return
+                self._transformation_counts[key] = seen[key]
+                self.input_transformations.append(summary)
 
 
 # Server-sent events (WHATWG HTML, "Parsing an event stream"): a line ends at CRLF, LF, or a CR not
@@ -648,7 +688,7 @@ def _sse_payload(raw: bytes) -> dict[str, Any]:
     data = sse_data(raw)
     try:
         payload = json.loads(data) if data else {}
-    except ValueError:
+    except (ValueError, RecursionError):  # a deeply nested body is unreadable, not fatal
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -1233,6 +1273,8 @@ class _Handler(BaseHTTPRequestHandler):
         entry.update(status=response.status, response_bytes=response_bytes, duration_ms=_ms(started), usage=usage)
         if reader.input_transformations is not None:
             entry["input_transformations"] = reader.input_transformations
+            if reader.input_transformations_truncated:
+                entry["input_transformations_truncated"] = True
         if decoder.supported:
             entry.update(reader.end_fields())  # packet A23: how the response ended, content-free
         else:
