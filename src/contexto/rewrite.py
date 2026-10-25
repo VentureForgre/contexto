@@ -689,7 +689,15 @@ CONTEXT_BLOCK_KINDS = (
     ("date", re.compile(r"Today's date is")),
     ("attribution", re.compile(r"Attribution for git commits")),
     ("deferred_tools", re.compile(r"The following deferred tools are now available")),
+    ("nested_instructions", re.compile(r"Contents of .*CLAUDE\.md:[ \t]*\Z")),
 )
+# D46: a nested CLAUDE.md (a CLAUDE.md below the project root, which Claude Code attaches once per session
+# when a file under it is first read). On 2.1.302 with 5.x ids it was a role "system" message, carried as
+# text. On 2.1.310 with 5.x ids it is a <system-reminder> text block next to the Read result, in the
+# tool-result user message, so it would be paged with its turn and its rules lost for the rest of the
+# session. Such a block is carried like a turn start's context block (``carried_blocks``). On 4.x ids it
+# sits inside the tool_result's own content on both versions and stays paged with its turn.
+TOOL_ROUND_CARRIED_KINDS = frozenset({"nested_instructions"})
 
 
 def context_block_kind(block: dict) -> str | None:
@@ -772,16 +780,31 @@ def reclassified_carried(messages: list[dict], k: int, paged: frozenset[str]) ->
     return sum(1 for i in indexes if settings_fields(messages[i]) is None and message_hash(messages[i]) in paged)
 
 
+def _is_tool_round(message: dict) -> bool:
+    return message.get("role") == "user" and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in _blocks(message))
+
+
+def _carried_here(message: dict, block: Any, turn_start: bool) -> bool:
+    """Every context block of a turn start (D32); in a tool-result user message, a context block of a
+    ``TOOL_ROUND_CARRIED_KINDS`` kind next to the results (D46)."""
+    if not is_context_block(block):
+        return False
+    return turn_start or context_block_kind(block) in TOOL_ROUND_CARRIED_KINDS
+
+
 def carried_blocks(messages: list[dict], k: int, paged: frozenset[str] = frozenset()) -> list[tuple[int, int, dict]]:
-    """(message index, block index, block) for every context block of the turn starts in M[0..k) that the
-    fallback has not paged (D32), in original order."""
+    """(message index, block index, block) for every carried context block in M[0..k) that the fallback
+    has not paged, in original order: the context blocks of the turn starts (D32) and the nested CLAUDE.md
+    blocks next to tool results (D46)."""
     out = []
     for i in range(k):
         m = messages[i]
-        if not is_turn_start(m):
+        start = is_turn_start(m)
+        if not start and not _is_tool_round(m):
             continue
         for j, b in enumerate(_blocks(m)):
-            if is_context_block(b) and not (paged and block_id(i, j, b) in paged):
+            if _carried_here(m, b, start) and not (paged and block_id(i, j, b) in paged):
                 out.append((i, j, b))
     return out
 
@@ -795,6 +818,16 @@ def carried_content(messages: list[dict], k: int, paged: frozenset[str] = frozen
     return blocks, [messages[i] for i in indexes]
 
 
+def _supersession_key(block: dict) -> tuple[str, ...] | None:
+    """What a later block of the same key supersedes: its kind; for a nested CLAUDE.md, its kind and path
+    (its first line), since another directory's file adds rules rather than replacing them (D46)."""
+    kind = context_block_kind(block)
+    if kind != "nested_instructions":
+        return None if kind is None else (kind,)
+    text = block.get("text", "").lstrip().removeprefix(CONTEXT_TAG)
+    return (kind, next((line.strip() for line in text.splitlines() if line.strip()), ""))
+
+
 def fallback_candidates(messages: list[dict], k: int,
                         paged: frozenset[str] = frozenset()) -> list[tuple[tuple[int, int], str, dict]]:
     """What the bounded fallback may page from M[0..k), in the order it pages: (position, identity in
@@ -803,8 +836,9 @@ def fallback_candidates(messages: list[dict], k: int,
 
     System messages (D33): carried text and settings changes, never the session-start message, a
     settings-only message, the latest settings change per settings key, or the latest text message of
-    each ``mode_kind``. Context blocks (D32): those of every turn start after the first, never the first
-    turn start's blocks or the latest block of each ``context_block_kind``. A paged block is stored as a
+    each ``mode_kind``. Context blocks (D32): those of every turn start after the first and the nested
+    CLAUDE.md blocks of tool rounds (D46), never the first turn start's blocks or the latest block of each
+    ``_supersession_key`` (a kind; for a nested CLAUDE.md, a kind and path). A paged block is stored as a
     user message holding that one block, as the CLI sent it."""
     classes = _system_classes(messages, k)
     protected = protected_systems(messages, k, classes)
@@ -819,12 +853,12 @@ def fallback_candidates(messages: list[dict], k: int,
     later = [(i, j, b) for i, j, b in carried_blocks(messages, k, paged) if starts and i != starts[0]]
     newest = {}
     for i, j, b in later:
-        kind = context_block_kind(b)
-        if kind is not None:
-            newest[kind] = (i, j)
+        key = _supersession_key(b)
+        if key is not None:
+            newest[key] = (i, j)
     for i, j, b in later:
-        kind = context_block_kind(b)
-        if kind is not None and newest[kind] == (i, j):
+        kind, key = context_block_kind(b), _supersession_key(b)
+        if key is not None and newest[key] == (i, j):
             continue
         item = ((i, j), block_id(i, j, b), {"role": "user", "content": [b]})
         (superseded if kind is not None else unrecognised).append(item)
@@ -840,8 +874,9 @@ def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
         m = messages[i]
         if is_system_like(m) and classify_system(messages, i) != HOOK_OUTPUT:
             continue
-        if is_turn_start(m) and any(is_context_block(b) for b in _blocks(m)):
-            m = {**m, "content": [b for b in _blocks(m) if not is_context_block(b)]}
+        start = is_turn_start(m)
+        if (start or _is_tool_round(m)) and any(_carried_here(m, b, start) for b in _blocks(m)):
+            m = {**m, "content": [b for b in _blocks(m) if not _carried_here(m, b, start)]}
         out.append(m)
     return out
 

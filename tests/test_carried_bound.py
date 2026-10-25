@@ -30,9 +30,12 @@ from contexto.rewrite import (
     carried_tokens,
     classify_system,
     context_block_kind,
+    fallback_candidates,
     message_hash,
     message_text,
     page_carried_text,
+    strip_carried,
+    transform_messages,
     turn_starts,
 )
 from contexto.store.memory import MemoryStore
@@ -607,3 +610,70 @@ def test_a_record_this_version_wrote_resumes_without_carried_reclassified():
         after = RewriteEngine(store, config=Config(**RESUME_CONFIG))
         _, _, events = after(request(msgs + turn_5x(40, opus)[:2]), {}, MESSAGES)
         assert "epoch_resumed" in names(events) and "carried_reclassified" not in names(events), opus
+
+
+# D46: a nested CLAUDE.md on 5.x ids stays carried -------------------------------------------------
+
+def nested_md(directory: str) -> dict:
+    """2.1.310 on 5.x ids (opus55-stream capture, path shortened): the block next to the Read result."""
+    return {"type": "text", "text": f"<system-reminder>\nContents of /p/project/{directory}/CLAUDE.md:\n\n"
+                                    f"# Nested rules for {directory}/\n\n"
+                                    f"- Files in {directory}/ are synthetic fixtures.\n\n</system-reminder>"}
+
+
+def read_turn(t: int, directory: str, inside: bool = False) -> list[dict]:
+    """Turn ``t`` reads a file under ``directory``. 5.x ids (2.1.310): the nested CLAUDE.md is a block next
+    to the tool_result; ``inside``: 4.x ids, where it is part of the tool_result's own content."""
+    use = {"type": "tool_use", "id": f"toolu_{t}", "name": "Read", "input": {"file_path": f"{directory}/x.txt"}}
+    result = {"type": "tool_result", "tool_use_id": f"toolu_{t}", "content": f"x in {directory} {FILL}"}
+    if inside:
+        result["content"] = [{"type": "text", "text": result["content"]}, nested_md(directory)]
+        tail = [result]
+    else:
+        tail = [result, nested_md(directory)]
+    return [{"role": "user", "content": f"Turn {t}. Read {directory}/x.txt"},
+            {"role": "assistant", "content": [use]}, {"role": "user", "content": tail},
+            {"role": "assistant", "content": [{"type": "text", "text": f"Read it. {FILL}"}]}]
+
+
+def plain_turn(t: int) -> list[dict]:
+    return [{"role": "user", "content": f"Turn {t}. {FILL}"},
+            {"role": "assistant", "content": [{"type": "text", "text": f"Done. {FILL}"}]}]
+
+
+def test_a_nested_claude_md_is_a_recognised_kind():
+    assert context_block_kind(nested_md("sub")) == "nested_instructions"
+    assert context_block_kind(rem("Contents of /p/notes.md:\nx")) is None  # only a CLAUDE.md, as measured
+
+
+def test_a_nested_claude_md_next_to_a_tool_result_is_carried_when_its_turn_is_paged():
+    msgs = read_turn(1, "sub") + plain_turn(2) + plain_turn(3)
+    k = turn_starts(msgs)[2]
+    blocks, _ = carried_content(msgs, k)
+    assert blocks == [nested_md("sub")]
+    page = strip_carried(msgs, 0, k)
+    assert all(nested_md("sub") not in m["content"] for m in page if isinstance(m["content"], list))
+    assert [b["type"] for b in page[2]["content"]] == ["tool_result"]  # the result itself is paged
+    forwarded = transform_messages(msgs, EpochState(k=k, initial_carried=0))
+    assert forwarded[0]["content"][0] == nested_md("sub")  # carried ahead of the first retained turn
+    # Retained, it stays where Claude Code put it and is sent once.
+    whole = transform_messages(msgs, EpochState(k=0, initial_carried=0))
+    assert sum(json.dumps(m).count("Nested rules for sub/") for m in whole) == 1
+
+
+def test_a_nested_claude_md_inside_a_tool_result_stays_paged_with_its_turn():
+    # 4.x ids, on 2.1.302 and 2.1.310 alike: part of the Read result, paged with its turn (D46 leaves it).
+    msgs = read_turn(1, "sub", inside=True) + plain_turn(2) + plain_turn(3)
+    k = turn_starts(msgs)[2]
+    assert carried_content(msgs, k)[0] == []
+    assert "Nested rules for sub/" in json.dumps(strip_carried(msgs, 0, k))
+
+
+def test_the_fallback_keeps_the_latest_nested_claude_md_of_each_directory():
+    msgs = read_turn(1, "sub") + read_turn(2, "lib") + read_turn(3, "sub") + plain_turn(4)
+    k = turn_starts(msgs)[3]
+    paged = [ident for (i, j), ident, page in fallback_candidates(msgs, k)
+             if context_block_kind(page["content"][0]) == "nested_instructions"]
+    assert len(paged) == 1  # only turn 1's sub/ copy is superseded; lib/ and the newest sub/ are kept
+    first_sub = msgs.index(read_turn(1, "sub")[2])
+    assert [p for p in fallback_candidates(msgs, k) if p[2]["content"][0] == nested_md("sub")][0][0][0] == first_sub
