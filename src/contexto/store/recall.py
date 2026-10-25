@@ -110,7 +110,7 @@ def _parse_json(text: str) -> tuple[bool, list[str]]:
         return False, []
     try:
         return True, _json_keys(json.loads(stripped))
-    except ValueError:
+    except (ValueError, RecursionError):  # not JSON, or nested too deep to parse or walk: read as text
         return False, []
 
 

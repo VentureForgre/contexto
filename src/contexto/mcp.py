@@ -248,7 +248,7 @@ class Server:
     def handle_line(self, line: str) -> dict[str, Any] | None:
         try:
             message = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):  # not JSON, or nested too deep to parse
             return _error(None, PARSE_ERROR, "Parse error")
         if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
                 or not isinstance(message.get("method"), str)):

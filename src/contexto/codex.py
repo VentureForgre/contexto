@@ -127,8 +127,8 @@ class ResponsesDialect(Dialect):
             raw = item.get("arguments") if kind == "function_call" else item.get("input")
             try:
                 args = json.loads(raw) if isinstance(raw, str) else raw
-            except ValueError:
-                args = raw  # not JSON: rendered as the string it is
+            except (ValueError, RecursionError):
+                args = raw  # not JSON, or nested too deep to parse: rendered as the string it is
             return [("assistant", {"type": "tool_use", "name": item.get("name", ""),
                                    "input": {} if args is None else args})]
         if kind in ("function_call_output", "custom_tool_call_output"):

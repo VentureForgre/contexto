@@ -278,11 +278,27 @@ def at_turn_start(messages: list[dict]) -> bool:
 # Normalisation and hashing (rule 10) ------------------------------------------------------------
 
 def _drop_cache_control(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        return {k: _drop_cache_control(v) for k, v in obj.items() if k != "cache_control"}
-    if isinstance(obj, list):
-        return [_drop_cache_control(v) for v in obj]
-    return obj
+    """A copy of ``obj`` without ``cache_control`` keys at any depth. It walks with a stack, not
+    recursion, so a tool input nested deeper than Python's recursion limit (json.loads parses much
+    deeper) cannot raise RecursionError out of the transform."""
+    if not isinstance(obj, (dict, list)):
+        return obj
+    root: Any = {} if isinstance(obj, dict) else []
+    stack = [(obj, root)]
+    while stack:
+        source, copy = stack.pop()
+        pairs = ((k, v) for k, v in source.items() if k != "cache_control") if isinstance(source, dict) \
+            else enumerate(source)
+        for key, value in pairs:
+            child = value
+            if isinstance(value, (dict, list)):
+                child = {} if isinstance(value, dict) else []
+                stack.append((value, child))
+            if isinstance(copy, dict):
+                copy[key] = child
+            else:
+                copy.append(child)
+    return root
 
 
 def _anthropic_normalise(message: dict) -> dict:

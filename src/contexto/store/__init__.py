@@ -812,7 +812,7 @@ class SessionStore(LedgerOps):
             if not write_new(path, data):
                 try:
                     stored = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, ValueError) as e:
+                except (OSError, ValueError, RecursionError) as e:
                     raise PageConflictError(f"{path} exists but cannot be read: {e}", page_id=page["id"]) from e
                 if not same_content(stored, page):
                     raise PageConflictError(f"{path} exists with different turn or messages", page_id=page["id"])

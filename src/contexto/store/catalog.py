@@ -370,7 +370,7 @@ class PageCatalog:
             page = current_stub(json.loads(path.read_text(encoding="utf-8")))
             _view(page)  # the fields every reader needs
             return page
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
             self._log({"event": "page_unreadable", "path": path.name, "error": str(e)})
             return None
 

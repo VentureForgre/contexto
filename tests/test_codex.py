@@ -28,6 +28,7 @@ from contexto.codex import (
 )
 from contexto.rewrite import MESSAGES, Config, RewriteEngine, rewrite
 from contexto.store.memory import MemoryStore
+from contexto.store.render import render_page
 from contexto.tokens import TokenEstimator
 
 FILL = "synthetic filler text " * 90
@@ -618,3 +619,15 @@ def test_mcp_server_ignores_a_contexto_package_in_the_working_directory(tmp_path
                              text=True, timeout=30, env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
         assert out.returncode == 0, out.stderr
         assert out.stdout.startswith("contexto ") and "SHADOWED" not in out.stdout
+
+
+def test_call_arguments_nested_too_deep_for_json_render_as_their_string():
+    deep = "[" * 1_000_000 + "]" * 1_000_000  # beyond what json.loads parses
+    item = {"type": "function_call", "call_id": "call_0", "name": "exec", "arguments": deep}
+    assert RESPONSES.retained_blocks(item) == [("assistant", {"type": "tool_use", "name": "exec", "input": deep})]
+    items = history(8) + [prompt("new prompt")]
+    items[items.index(call(0))] = item
+    up, st, ev, store = run(items, config=Config(bound=6_000, headroom_floor=500, pin_budget=200, index_budget=2_000))
+    assert "rotation" in names(ev) and st.k > 4
+    page = next(p for p in store.pages.values() if item in p["messages"])
+    assert render_page(page).count("[") >= 1_000_000  # the arguments, shown as the text they are

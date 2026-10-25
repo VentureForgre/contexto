@@ -376,10 +376,14 @@ class _SideDecoder:
             return b""
 
 
-def _numeric(value: Any) -> Any:
-    """Numbers and nested dicts of numbers only (Responses usage keeps input_tokens_details)."""
+def _numeric(value: Any, depth: int = 0) -> Any:
+    """Numbers and nested dicts of numbers only (Responses usage keeps input_tokens_details). A dict
+    nested deeper than ``MAX_SUMMARY_DEPTH`` is dropped, so a deeply nested upstream ``usage`` cannot
+    raise RecursionError out of the relay loop."""
     if isinstance(value, dict):
-        return {str(k): v for k, v in ((k, _numeric(v)) for k, v in value.items()) if v is not None}
+        if depth >= MAX_SUMMARY_DEPTH:
+            return None
+        return {str(k): v for k, v in ((k, _numeric(v, depth + 1)) for k, v in value.items()) if v is not None}
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 

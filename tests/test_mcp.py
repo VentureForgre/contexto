@@ -118,6 +118,16 @@ def test_malformed_input_and_unknowns_are_protocol_errors(server, line, code):
     assert server.handle_line(line)["error"]["code"] == code
 
 
+def test_a_line_too_deep_for_json_is_a_parse_error_and_the_server_keeps_serving(server):
+    deep = '{"jsonrpc":"2.0","id":1,"method":"ping","params":' + "[" * 1_000_000 + "]" * 1_000_000 + "}"
+    out = io.StringIO()
+    server.stdout = out
+    assert server.serve([deep + "\n", json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"]) == 0
+    replies = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert replies[0]["error"]["code"] == mcp.PARSE_ERROR and replies[0]["id"] is None
+    assert replies[1] == {"jsonrpc": "2.0", "id": 2, "result": {}}
+
+
 def test_notifications_and_client_responses_get_no_reply(server):
     assert server.handle_line(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})) is None
     assert server.handle_line(json.dumps({"jsonrpc": "2.0", "method": "ping"})) is None

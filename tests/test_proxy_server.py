@@ -10,6 +10,7 @@ import socket
 import struct
 import threading
 import time
+import types
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
@@ -197,7 +198,7 @@ class Upstream(BaseHTTPRequestHandler):
             self.end_headers()
             compressor = __import__("zlib").compressobj(9, 8, 16 + 15) if gz else None
             for event in STREAM:
-                chunk = sse(event)
+                chunk = event if isinstance(event, bytes) else sse(event)  # bytes: a raw event, sent as is
                 if compressor:
                     chunk = compressor.compress(chunk) + compressor.flush(__import__("zlib").Z_SYNC_FLUSH)
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
@@ -218,7 +219,8 @@ class Upstream(BaseHTTPRequestHandler):
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
         for event in RESPONSES_STREAM:
-            chunk = b"event: " + event["type"].encode() + b"\ndata: " + json.dumps(event).encode() + b"\n\n"
+            chunk = event if isinstance(event, bytes) else (
+                b"event: " + event["type"].encode() + b"\ndata: " + json.dumps(event).encode() + b"\n\n")
             self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
             self.wfile.flush()
             time.sleep(0.1)
@@ -1655,7 +1657,8 @@ def test_scalar_summary_replaces_containers_below_the_depth_limit():
     assert proxy_module._scalar_summary([[1, "x"]]) == [[1, "x"]]
 
 
-@pytest.mark.parametrize("depth", [2000, 200_000])  # 2000 parses; 200,000 is beyond what json.loads can parse
+# 2000 parses. Whether 200,000 does depends on the Python version and, from 3.14, on the stack size.
+@pytest.mark.parametrize("depth", [2000, 200_000])
 def test_a_deeply_nested_transformation_cannot_break_the_reader(depth):
     item = '{"type":"thinking_dropped","detail":' + nested(depth) + "}"
     event = b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":3},' \
@@ -1667,8 +1670,78 @@ def test_a_deeply_nested_transformation_cannot_break_the_reader(depth):
         assert stream.input_transformations[0]["type"] == "thinking_dropped"
         assert len(stream.input_transformations) == 2 and stream.usage["input_tokens"] == 3
         assert body.input_transformations[0]["type"] == "thinking_dropped"
-    else:  # an unparseable event or body is skipped, as invalid JSON is
-        assert same(stream.input_transformations, [DROP]) and body.input_transformations is None
+    else:  # parsed, or skipped as invalid JSON is: either way the reader keeps reading
+        got = stream.input_transformations
+        assert same(got, [DROP]) or (len(got) == 2 and got[0]["type"] == "thinking_dropped" and same(got[1], DROP))
+        assert body.input_transformations is None or body.input_transformations[0]["type"] == "thinking_dropped"
+
+
+def test_numeric_drops_dicts_below_the_depth_limit():
+    limit = proxy_module.MAX_SUMMARY_DEPTH
+    got = proxy_module._numeric({"n": 1, "d": json.loads(nested(limit + 5)), "s": "x", "b": True})
+    assert got["n"] == 1 and set(got) == {"n", "d"}
+    for _ in range(limit - 2):
+        got = got["d" if "d" in got else "a"]
+    assert got == {"a": {}}  # the dict at the limit is dropped, so its parent is empty
+
+
+DEEP_USAGE = {"input_tokens": 5, "output_tokens": 2, "input_tokens_details": json.loads(nested(3_000))}
+
+
+def test_a_deeply_nested_responses_usage_cannot_break_the_reader():
+    """_numeric walks usage; nested deeper than MAX_SUMMARY_DEPTH it stops, so feed_event does not raise."""
+    completed = responses_end("completed", status="completed", usage=DEEP_USAGE)
+    for body, content_type in ((sse_body(completed), "text/event-stream"),
+                               (json.dumps(completed["response"]).encode(), "application/json")):
+        reader = UsageReader(content_type, "responses")
+        reader.feed(body)
+        reader.finish()
+        assert reader.usage["input_tokens"] == 5 and reader.usage["output_tokens"] == 2
+
+
+def test_a_deeply_nested_responses_usage_is_relayed_and_logged(make_proxy, monkeypatch):
+    stream = [*RESPONSES_STREAM[:-1], responses_end("completed", status="completed", usage=DEEP_USAGE)]
+    monkeypatch.setattr(f"{__name__}.RESPONSES_STREAM", stream)
+    proxy, log = make_proxy()
+    response, data = call(proxy, "POST", "/responses", RESPONSES_BYTES, AUTH)
+    assert response.status == 200 and data == sse_body(*stream)  # relayed unchanged
+    entry = log.requests()[0]
+    assert entry["status"] == 200 and entry["usage"]["input_tokens"] == 5 and entry["end_event"] == "completed"
+
+
+def test_an_event_too_deep_for_json_reads_as_no_payload(monkeypatch):
+    """_sse_payload treats a RecursionError from json.loads like invalid JSON; forced here, since from
+    Python 3.14 how deep json.loads gets depends on the stack size."""
+    def too_deep(data):
+        raise RecursionError("synthetic")
+
+    raw = b"event: content_block_start\ndata: {}\n\n"
+    monkeypatch.setattr(proxy_module, "json", types.SimpleNamespace(loads=too_deep))
+    assert proxy_module._sse_payload(raw) == {}
+    assert proxy_module.sse_event_type(raw) == "content_block_start"  # from the event: line
+
+
+def test_an_event_too_deep_for_json_is_relayed_and_the_stream_still_read(make_proxy, monkeypatch):
+    """A whole relay with one unreadable event: it is relayed as sent, and the events around it are
+    read (usage, the stop reason, and a tool call the stream hold holds until the message_delta)."""
+    deep = b"[" * 1_000_000 + b"]" * 1_000_000  # beyond what json.loads parses on any real stack
+    unreadable = b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":' \
+        + deep + b"}\n\n"
+    tool = {"type": "content_block_start", "index": 1,
+            "content_block": {"type": "tool_use", "id": "toolu_9", "name": "Read", "input": {}}}
+    stream = [STREAM[0], unreadable, tool, {"type": "content_block_stop", "index": 1},
+              {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 42}},
+              {"type": "message_stop"}]
+    monkeypatch.setattr(f"{__name__}.STREAM", stream)
+    engine = StubEngine()
+    proxy, log = make_proxy(transform=engine, observe_usage=engine.observe_usage)  # the stream hold reads each event
+    response, data = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    assert response.status == 200
+    assert data == b"".join(e if isinstance(e, bytes) else sse(e) for e in stream)  # relayed unchanged
+    entry = log.requests()[0]
+    assert entry["status"] == 200 and entry["usage"]["input_tokens"] == 12 and entry["usage"]["output_tokens"] == 42
+    assert entry["stop_reason"] == "tool_use" and "transform_error" not in entry
+    assert entry["stream_hold"] == {"held_events": 2, "triggered": True}  # the tool call, held until the delta
 
 
 @pytest.mark.parametrize("engine_mode", ["identity", "raise"])  # raise: the transform-error path (rule 14)
