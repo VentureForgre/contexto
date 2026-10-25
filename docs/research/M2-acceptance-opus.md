@@ -267,7 +267,8 @@ can be put down to the model alone:
   beside the key helper, through the same wrapper. Contexto, the launcher and the harness files are
   unchanged. This is the departure from default settings stated at the top. The run was retried
   once, and that is the verdict run.
-- **Product bug** (fix in progress as D44, not merged at the time of writing). It affects
+- **Product bug** (fix in progress as D44, not merged at the time of writing; later: fixed by
+  D44, PR #224). It affects
   `contexto run claude -p` on Claude Code 2.1.302, the only Claude Code version in
   `TESTED_VERSIONS`.
   - The launcher's settings set only `ANTHROPIC_BASE_URL`, with no permission rule.

@@ -61,26 +61,31 @@ compaction never fires, and accuracy equals full context.
   raises `toolcheck_error`.
 - PR #226 (v0.5.4): `contexto run claude "prompt"` (a prompt right after `claude`) failed on Claude
   Code 2.1.302 and 2.1.310 with "MCP config file not found", because the variadic `--mcp-config`
-  took the prompt as a file. The launcher now passes `--settings=<file> --mcp-config=<file>`.
-  The user `--settings` guard now checks every claude argument, including those after `--`: a
-  `--settings` after a `--` that was another option's value could bypass the proxy. A prompt that
-  is exactly `--settings` or starts with `--settings=` is now refused (exit 2), even after `--`.
+  took the prompt as a file. The launcher now passes `--settings=<file> --mcp-config=<file>`. The
+  user `--settings` guard now checks every claude argument, including those after `--`: a
+  `--settings` after a `--` that was another option's value could bypass the proxy. A prompt that is
+  exactly `--settings` or starts with `--settings=` is now refused (exit 2), even after `--`.
   `spikes/m2/argv/argstub.py` checks the launcher's command line in eight scenarios at zero spend,
   for each new Claude Code version (`docs/cli-updates.md` step 3). argstub and permstub keep Claude
-  Code on loopback, with no plugin-marketplace SSH clone, and delete only a `--work` they made.
-- D45 (PR #225, v0.5.5; contract rule 18): every JSON document from outside Contexto is read
-  through one 512-level nesting limit. A request past it is forwarded untransformed and logged
+  Code on loopback, with no plugin-marketplace SSH clone, and delete only a `--work` they made or an
+  existing empty directory.
+- D45 (PR #225, v0.5.5; contract rule 18): the JSON sources rule 18 lists (request and response
+  bodies, SSE events, MCP lines, the tool output the index lists keys from, Codex call arguments,
+  and page files) are read through one 512-level nesting limit. The user's own settings files are
+  still read with plain `json.loads`. A request past it is forwarded untransformed and logged
   `request_too_deep`, so a deep tool result or input no longer stops paging for the session. The
   Messages API itself refuses bodies nested more than 127 levels (measured 2026-10-25, 3,840
   tokens).
 - PR #228 (v0.5.6): every page file is read through one check (`load_page`, `check_page`), so a
-  hand-damaged page is logged `page_unreadable` and skipped the same way by the index, search and
-  recall. Before, a bad stub or `messages` failed every index build and paging stopped. Inside
-  `messages`, a value of the wrong type is shown as `[malformed ... omitted]` and is not searched.
-  `contexto_search` leaves out a page that went bad after it was listed. Re-paging onto a page
-  file that is not a page record, or names another id, is a `page_conflict` that quarantines and
-  re-pages it. A page file whose content is unreadable is logged once per process until it changes;
-  a failed read (permissions, too many open files) is retried on the next call.
+  hand-damaged page is logged `page_unreadable` and handled the same way everywhere (rule 18):
+  search and the index skip it, `contexto_recall` and a `contexto_pin` that cites it return a tool
+  error, and `contexto recall` exits 1. Before, a bad stub or `messages` failed every index build
+  and paging stopped. Inside `messages`, a value of the wrong type is shown as `[malformed ...
+  omitted]` and is not searched. `contexto_search` leaves out a page that went bad after it was
+  listed. Re-paging onto a page file that is not a page record, or names another id, is a
+  `page_conflict` that quarantines and re-pages it. Search and the index log a page file whose
+  content is unreadable once per process until it changes, and each recall or pin of it logs it
+  again; a failed read (permissions, too many open files) is retried on the next call.
 - PR #222 (v0.5.2, defensive): with `--observe-thinking`, a response's `input_transformations` are
   merged across `message_start` and `message_delta` (top level and under `usage`) by count, in
   first-seen order, capped at 32 items with `input_transformations_truncated: true` when cut. A
@@ -92,10 +97,11 @@ compaction never fires, and accuracy equals full context.
   message led by the deferred-tool listing is session start; new context-block kinds
   `deferred_tools` and `nested_instructions`. Nested memory (`CLAUDE.md`, `CLAUDE.local.md`,
   `.claude/rules/*.md` below the root) on 5.x ids arrives next to the Read result on 2.1.310 and is
-  carried again once its turn is paged, with the newest protected only up to 4,000 tokens (7,891
-  tokens of carried growth at 40 directories, against 49,549 without the cap). On 4.x ids it is
-  still paged with its turn (see "Needs the owner"). Numbers:
-  `docs/research/M2-claude-code-2.1.310.md`.
+  carried again once its turn is paged, with the newest protected only up to 4,000 tokens. Carried
+  growth after the fallback, one ~1,000-token CLAUDE.md per directory: on #227 reviewer A's fixture,
+  7,421 tokens at 40 directories with the cap against 49,549 without it; on the PR's own fixture,
+  7,769 at 10 directories and 7,891 at 40. On 4.x ids it is still paged with its turn (see "Needs
+  the owner"). Numbers: `docs/research/M2-claude-code-2.1.310.md`.
 - Harness (PR #223): the Claude Code 2.1.302 scoring fixes from the Opus run are in
   `spikes/m2/acceptance`: `--model` on `live`, `check-credential` and `stubrun` (default
   claude-haiku-5-5); an opt-in `--allow-contexto-tools`, redundant since D44 and best left off,
@@ -382,9 +388,8 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
 
 Each would be its own pull request.
 
-- Nested memory after D46: a follow-up is in progress on branch
-  `claude/nested-memory-followups`, not merged. The gaps #227's reviewers measured are under
-  "Known limitations".
+- Nested memory and the missing-tools check after D46: open as PR #230 (D47), not merged. The gaps
+  #227's reviewers measured are under "Known limitations".
 - Not started: a byte budget per search on the pages `contexto_search` reads (D41 follow-up): it
   reads and renders up to 53 pages per search with no cap on their size (18.5 MB of page JSON for
   one multi-word query at 3,000 pages sized like real turns; at most 53 times the largest page). For
@@ -426,7 +431,8 @@ Measured candidates deliberately not pursued (each would need a live run or new 
 Needs the owner:
 - Nested memory on Claude 4.x model ids (D46): a nested `CLAUDE.md`, `CLAUDE.local.md` or
   `.claude/rules/*.md` arrives inside the Read tool result there, on 2.1.302 and 2.1.310 alike, so
-  it is paged with its turn, and Claude Code does not send it again in that session. On 5.x ids
+  it is paged with its turn. On claude-opus-5-5 (2.1.310) Claude Code was measured to send a nested
+  CLAUDE.md once per session; on 4.x ids that rests on D46's "attached once per session". On 5.x ids
   it is now carried. Whether to carry it on 4.x ids too is the owner's call.
 - Search ranking (D41): search ships with text cap 1, page cap 3. Text cap 3, page cap 3 restores
   main's two D34 scenarios (a reply that discusses a key in one text outranks newer passing
@@ -570,14 +576,21 @@ Needs the owner:
   re-run the routine in `docs/cli-updates.md` when the CLI changes. Resuming an epoch record
   written before v0.4.0 can carry one message the old code had paged (logged as
   `carried_reclassified`).
-- Nested memory (D46, #227's round-3 review, zero spend; a follow-up is in progress, not
-  merged): on 4.x ids it is paged with its turn (see "Needs the owner"). On 5.x ids on 2.1.310 a
-  file a nested `CLAUDE.md` imports with `@path` arrives as its own block and is still paged with
-  its turn. The 4,000-token cap counts text tokens, while carried growth counts whole blocks: 166
-  to 173 tiny protected blocks held 3,979 to 3,984 tokens of text but added 5,203 to 5,373 of
-  carried growth, still under the 8,000 budget. In 2 of 24 queue-then-Esc runs on 2.1.302 a
-  typed prompt landed next to a tool result with no interrupt marker, where a prompt that imitates
-  a nested `CLAUDE.md` would be carried.
+- Nested memory (D46, #227's round-3 review, zero spend; open as PR #230 (D47), not merged): on 4.x
+  ids it is paged with its turn (see "Needs the owner"). On 5.x ids on 2.1.310 a file a nested
+  `CLAUDE.md` imports with `@path` arrives as its own block and is still paged with its turn. The
+  4,000-token cap counts text tokens, while carried growth counts whole blocks: 166 to 173 tiny
+  protected blocks held 3,979 to 3,984 tokens of text but added 5,203 to 5,373 of carried growth,
+  still under the 8,000 budget. In 2 of 24 queue-then-Esc runs on 2.1.302 a typed prompt landed next
+  to a tool result with no interrupt marker, where a prompt that imitates a nested `CLAUDE.md` would
+  be carried.
+- Missing-tools check (D46, #227's round-3 review, zero spend; open as PR #230 (D47), not merged):
+  on 5.x ids, already on main before #227, a prompt queued during a tool run arrives as a role
+  `system` message ("The user sent a new message while you were working: ..."), which the check
+  reads whole. A queued fake listing reads as the tools offered with no Contexto server, and a
+  queued fake disconnect gives a false missing-tools warning (4 of 4 runs, 2.1.302 and 2.1.310). On
+  claude-sonnet-4-6, a fake listing pasted in the queue-then-Esc case (no interrupt marker) is read
+  as the tools offered. The check only logs and warns; it does not change what is paged.
 - CLI versions (D38): Contexto is tested with Claude Code 2.1.302 and 2.1.310 and codex-cli 0.154.0
   and 0.163.0 (`TESTED_VERSIONS`, `src/contexto/cliversions.py`). 2.1.310 was tested at zero spend
   plus one live recall check (D46), not a full live acceptance. `contexto run` warns once on stderr
@@ -651,7 +664,7 @@ Needs the owner:
 | v0.5.3 | 7893ceb | #224 (D44): `contexto run claude` allows Contexto's five MCP tools by exact name in its `--settings`; a refused Contexto tool logs `mcp_tools_denied` and warns once |
 | v0.5.4 | 0ff4ca5 | #226: the launcher passes `--settings=<file> --mcp-config=<file>`, so a prompt right after `claude` is no longer read as an MCP config file; the user `--settings` guard checks arguments after `--` too |
 | v0.5.5 | 9a773ec | #225 (D45, rule 18): JSON from outside Contexto is read through one 512-level nesting limit; a request past it goes upstream untransformed and logs `request_too_deep`; an unreadable page is a clean recall error |
-| v0.5.6 | 302f7d2 | #228: hand-damaged page files are skipped the same way by the index, search and recall; re-paging onto one is a `page_conflict`; a failed read is retried on the next call |
+| v0.5.6 | 302f7d2 | #228: hand-damaged page files are handled the same way everywhere (rule 18): search and the index skip them, recall returns an error; re-paging onto one is a `page_conflict`; a failed read is retried on the next call |
 | v0.5.7 | 3a48fcc | #227 (D46): Claude Code 2.1.310 tested; the missing-tools check reads 4.x tool-search listings, a subagent environment message led by the listing is session start, and 5.x nested memory next to a tool result is carried up to 4,000 tokens; D44 refusals paired across the request |
 
 Each is a tag and a GitHub Release on this repository with the wheel and sdist attached; there is

@@ -1160,6 +1160,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     directories are read: with one ~1,000-token CLAUDE.md per directory, growth after the fallback is
     7,769 tokens at 10 directories and 7,891 at 40 (reviewer A measured 49,549 at 40 without the cap,
     and 7,153 for the 2.1.302 form). Paged blocks stay recallable through their index line.
+    (Later, 2026-10-25, from #227's round-3 review: the two fixtures differ. On reviewer A's fixture
+    growth with the cap is 7,419 tokens at 10 directories and 7,421 at 40, against 12,374 and 49,549
+    without it; 7,769 and 7,891 are the PR's own fixture.)
     Later deferred-tool listings name only the tools that just connected (reviewer A measured one
     server's tools per listing): they add tools, not replace them. With the kind, the fallback pages an
     older one first, as superseded, where it paged them oldest first before; that changes the paging
@@ -1227,8 +1230,8 @@ All open decisions are intake's to make under D0 unless marked otherwise.
   proxy-side work.
 - **O7. OpenRig context-usage clock bug.** Resolved upstream: OpenRig fixed it in its PR #124
   (commit 4a920dba), first released in v0.6.1, so no report is needed. The host was upgraded to
-  OpenRig 0.7.0 on 2026-10-25, which includes the fix. Not Contexto code. Kept here for its evidence. Measured by
-  lane 1: every seat's context usage reads `stale_generation` because tenure boot times are stored
-  in UTC without `Z` and parsed as local time (UTC-5), blinding `rig ps`, `whoami`, and compaction
-  planning for about 5 hours after boot.
+  OpenRig 0.7.0 on 2026-10-25, which includes the fix. Not Contexto code. Kept here for its
+  evidence. Measured by lane 1: every seat's context usage reads `stale_generation` because tenure
+  boot times are stored in UTC without `Z` and parsed as local time (UTC-5), blinding `rig ps`,
+  `whoami`, and compaction planning for about 5 hours after boot.
 
