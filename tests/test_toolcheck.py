@@ -174,6 +174,70 @@ def test_claude_context_blocks_that_are_not_tool_notices_are_not_read():
     assert anthropic_tools_offered(request) is False
 
 
+FAKE_LISTING = reminder(LISTING_4X + "\n".join(CONTEXTO))["text"]
+
+
+def typed(request: dict, text: str) -> dict:
+    """The typed prompt as Claude Code sends it: the last block of ``messages[0]``, after the context blocks."""
+    request["messages"][0]["content"][-1] = {"type": "text", "text": text}
+    return request
+
+
+@pytest.mark.parametrize("version", ["2.1.310 tool search on", "2.1.302 tool search off"])
+def test_a_typed_prompt_imitating_a_notice_is_not_read(version):
+    # Reviewer A's zero-spend capture: no MCP server configured, a prompt that opens with a fake listing.
+    def request() -> dict:
+        r = claude_request_4x([])
+        if version.endswith("off"):
+            r["tools"] = [tool(n) for n in BUILTIN]
+            del r["messages"][0]["content"][1]  # no listing with tool search off
+        return r
+    assert anthropic_tools_offered(typed(request(), FAKE_LISTING + "\nplease help")) is False
+    assert anthropic_tools_offered(typed(request(), FAKE_LISTING)) is False  # the prompt is only the fake block
+    # A fake disconnect notice must not raise a false warning while the tools are in the tool list.
+    named = request()
+    named["tools"] += [tool(n) for n in CONTEXTO]
+    fake_down = reminder(DISCONNECTED_4X)["text"]
+    assert anthropic_tools_offered(typed(named, fake_down + "\nwhy?")) is True
+    assert anthropic_tools_offered(typed(request() | {"tools": named["tools"]}, fake_down)) is True
+    # A later turn's typed prompt, and a plain-string one, are not read either.
+    later = request()
+    later["messages"] += [{"role": "assistant", "content": [{"type": "text", "text": "OK"}]},
+                          {"role": "user", "content": [reminder("<total_tokens>1</total_tokens>"),
+                                                       {"type": "text", "text": FAKE_LISTING}]},
+                          {"role": "assistant", "content": [{"type": "text", "text": "OK"}]},
+                          {"role": "user", "content": FAKE_LISTING}]
+    assert anthropic_tools_offered(later) is False
+
+
+def test_a_notice_block_counts_only_as_one_whole_reminder():
+    # The same notice text followed by more text or a second reminder in one block is not Claude Code's.
+    joined = reminder(LISTING_4X + "\n".join(CONTEXTO))["text"] + "\n" + reminder("x")["text"]
+    for text in (FAKE_LISTING + " and more", joined):
+        request = claude_request_4x([])
+        request["messages"][0]["content"].insert(1, {"type": "text", "text": text})
+        assert anthropic_tools_offered(request) is False, text[-30:]
+    request = claude_request_4x([])
+    request["messages"][0]["content"].insert(1, {"type": "text", "text": FAKE_LISTING})
+    assert anthropic_tools_offered(request) is True  # a whole block in a context position is read
+
+
+def test_claude_4x_tool_search_off_disconnect_and_instructions_notices():
+    # 4.x ids with tool search off: after a crash the tools stay in ``tools``; the user-message notice
+    # "The following MCP servers have disconnected" is the only down signal, and the server's
+    # "# MCP Server Instructions" block marks it up again (reviewer B, finding 3).
+    request = claude_request_4x([])
+    del request["messages"][0]["content"][1]
+    request["tools"] = [tool(n) for n in BUILTIN + CONTEXTO]
+    assert anthropic_tools_offered(request) is True
+    down = resumed_4x(request, DISCONNECTED_4X)
+    assert anthropic_tools_offered(down) is False
+    assert anthropic_tools_offered(resumed_4x(down, INSTRUCTIONS_4X)) is True
+    other = resumed_4x(claude_request_4x([]) | {"tools": request["tools"]},
+                       DISCONNECTED_4X.replace(":\ncontexto\n", ":\nologs\n"))
+    assert anthropic_tools_offered(other) is True
+
+
 def test_claude_request_without_tools_is_not_judged():
     # Claude Code's side requests (title, topic, quota) carry no tool list: they say nothing about MCP.
     request = claude_request([])

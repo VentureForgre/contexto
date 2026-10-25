@@ -79,6 +79,15 @@ _SERVER_LINE = re.compile(r"^contexto(?:[ \t(:]|$)")  # "contexto" or "contexto 
 # measured on 2.1.302 with tool search on and on 2.1.310): its first line inside the tag.
 _NOTICE_BLOCK = re.compile(r"\s*<system-reminder>\s*(?:The following deferred tools |\d+ deferred tools are available "
                            r"again|The following MCP servers |# MCP Server Instructions[ \t]*(?:\r?\n|\Z))")
+CONTEXT_TAG, CONTEXT_END = "<system-reminder>", "</system-reminder>"
+
+
+def _notice_block(text: str) -> bool:
+    """One whole reminder whose first line is a notice: it opens with the tag and that heading, ends with the
+    closing tag, and holds no second opening tag (every genuine notice block in the 2.1.310 step 2 matrix has
+    that form; a typed prompt that starts with an imitation and goes on with text does not)."""
+    return (_NOTICE_BLOCK.match(text) is not None and text.rstrip().endswith(CONTEXT_END)
+            and text.count(CONTEXT_TAG) == 1)
 
 
 def _named(tool: Any) -> bool:
@@ -98,16 +107,25 @@ def _system_texts(request: dict[str, Any]) -> list[str]:
     ``<system-reminder>`` text of a user message: Claude Code puts the deferred-tool listing and the MCP
     notices in a role ``system`` message on 5.x model ids and in ``<system-reminder>`` blocks of user
     messages on 4.x ids (2.1.302 with tool search on, and 2.1.310, where it is on by default). Of a user
-    message, only a block whose first line inside the tag is one of those (``_NOTICE_BLOCK``) is read:
-    the user's own text, or a CLAUDE.md quoted in a context block, naming a tool says nothing."""
+    message, a text block is read only when it is one whole ``<system-reminder>`` whose first line is one
+    of those notices (``_notice_block``), and never when it is the message's last text block and the
+    message holds no ``tool_result``: that position is the typed prompt (a plain-string message is all
+    prompt), and no genuine notice block sat there in the 2.1.310 matrix. So a prompt that imitates a
+    notice, alone or followed by text, is not read, nor is a CLAUDE.md quoted in a context block. What
+    remains readable is a user's earlier text block of a message with several, typed as one exact copy of
+    a notice; Claude Code sends a prompt as one block, so this was not seen."""
     texts = _texts(request.get("system"))
     for message in request.get("messages") or []:
         if not isinstance(message, dict):
             continue
         if message.get("role") == "system":
             texts += _texts(message.get("content"))
-        elif message.get("role") == "user":
-            texts += [text for text in _texts(message.get("content")) if _NOTICE_BLOCK.match(text)]
+        elif message.get("role") == "user" and isinstance(message.get("content"), list):
+            blocks = [b for b in message["content"] if isinstance(b, dict)]
+            text_at = [i for i, b in enumerate(blocks) if b.get("type") == "text" and isinstance(b.get("text"), str)]
+            if text_at and not any(b.get("type") == "tool_result" for b in blocks):
+                text_at = text_at[:-1]  # the typed prompt
+            texts += [blocks[i]["text"] for i in text_at if _notice_block(blocks[i]["text"])]
     return texts
 
 
@@ -207,21 +225,19 @@ def anthropic_denied_tools(request: dict[str, Any]) -> list[str]:
         if message.get("role") != "user":
             break
         trailing.insert(0, message)
-    if not trailing:
-        return []
+    errors = [b for m in trailing for b in (m.get("content") if isinstance(m.get("content"), list) else [])
+              if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("is_error")]
+    if not errors:
+        return []  # most requests: no failed result, so no scan of the history
     calls = _contexto_calls(messages[:len(messages) - len(trailing)])
     denied: list[str] = []
-    for message in trailing:
-        content = message.get("content")
-        for block in content if isinstance(content, list) else []:
-            if not (isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error")):
-                continue
-            tool_use_id = block.get("tool_use_id")
-            name = calls.get(tool_use_id) if isinstance(tool_use_id, str) else None
-            if name is None:
-                continue
-            if any(name in _DENIED.findall(text) for text in _texts(block.get("content"))) and name not in denied:
-                denied.append(name)
+    for block in errors:
+        tool_use_id = block.get("tool_use_id")
+        name = calls.get(tool_use_id) if isinstance(tool_use_id, str) else None
+        if name is None:
+            continue
+        if any(name in _DENIED.findall(text) for text in _texts(block.get("content"))) and name not in denied:
+            denied.append(name)
     return denied
 
 
