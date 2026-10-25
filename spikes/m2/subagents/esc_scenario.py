@@ -35,7 +35,9 @@ def reply(body):
     if "SUB-" in first:
         if n == 0:
             secs = {"esc": "30", "fg": "1", "bgidle": "20", "stop": "30"}[MODE]
-            return "sub", [tool(n, "Bash", {"command": f"sleep {secs}", "description": "sub work"})], "tool_use"
+            # Claude Code 2.1.310 refuses a standalone `sleep 30` ("Blocked: standalone sleep 30. ..."), so the
+            # subagent would finish at once; perl waits the same time on 2.1.302 and 2.1.310.
+            return "sub", [tool(n, "Bash", {"command": f"perl -e 'sleep {secs}'", "description": "sub work"})], "tool_use"
         return "sub", [{"type": "text", "text": "subagent result"}], "end_turn"
     if "MAIN-RUN" in first:
         if n == 0:

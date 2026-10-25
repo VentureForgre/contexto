@@ -713,7 +713,7 @@ def test_post_tool_use_hook_messages_are_paged_and_carried_stays_flat():
 
 def test_documented_hook_signatures_and_version():
     from contexto.rewrite import HOOK_SIGNATURES_CLAUDE_CODE_VERSION, is_hook_output
-    assert HOOK_SIGNATURES_CLAUDE_CODE_VERSION == "2.1.301"
+    assert HOOK_SIGNATURES_CLAUDE_CODE_VERSION == "2.1.310"  # live_probe.sh re-measured the prefixes
     assert is_hook_output(hook_system(1)) and is_hook_output(post_tool_hook(2, "Bash"))
     assert not is_hook_output({"role": "system", "content": "Some hook additional context: x"})
     assert not is_hook_output({"role": "system", "content": [{"type": "image", "source": {}}]})

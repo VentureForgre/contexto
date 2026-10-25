@@ -109,7 +109,14 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
 - A **turn** is a turn-start message plus every following assistant, `tool_result` user, and
   `role: "system"` message up to the next turn-start message.
 - **Carried content** is never paged, except under the bounded fallback below: the injected
-  context blocks of any turn-start message (everything but the user's own prompt text), and the
+  context blocks of any turn-start message (everything but the user's own prompt text), a
+  nested-memory block (kind `nested_instructions`: a `CLAUDE.md`, `CLAUDE.local.md`, or
+  `.claude/rules/*.md` below the project root) next to the results of a tool-result user message
+  (D46: Claude Code 2.1.310 sends one per file there on 5.x ids, once per session; on 4.x ids it is
+  inside the `tool_result` and is paged with its turn). Such a block is carried only in Claude
+  Code's exact form, one whole reminder starting `<system-reminder>\nContents of `, and only before
+  any `[Request interrupted by user` block of that message (a prompt typed after Esc lands after
+  it); no other reminder next to a tool result is carried. And the
   `role: "system"` messages that the classification below marks as carried. All carried content is
   forwarded in the CLI's current form, never restored from a stored copy.
 - **Classification of `role: "system"` messages**, deterministic and in this order (amended by
@@ -122,7 +129,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      the tag on claude-sonnet-5 and claude-fable-5. Settings fields do not decide it: an
      `--effort` change attaches `output_config` to whatever system message that turn already has.
      Position is not used, so resumes of hand-written session files classify correctly. Carried,
-     never paged.
+     never paged. D46: with tool search on (Claude Code 2.1.310's default), a subagent's
+     environment message starts with the deferred-tool listing ("The following deferred tools are
+     now available via ToolSearch. ...", one name per line, then a blank line), and `# Environment`
+     follows it; that message is session-start too. The listing alone (an MCP server connecting
+     mid-session) is not.
   2. **Settings**: (a) **settings-only**: empty content plus settings fields. Carried, latest per
      settings key (rule 13). (b) **Settings change** (D33): text-only content plus settings fields
      without the step 1 signature, measured as an effort change riding on a countdown, a file note,
@@ -155,7 +166,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   signatures: for text messages, output style and plan mode; for context blocks, the first line
   inside the tag (`CONTEXT_BLOCK_KINDS` in `rewrite.py`, measured on 2.1.302 with 4.x ids: token
   countdown, plan mode entry and exit as one kind, file changed on disk, task-tools reminder, and
-  the kinds that make up `messages[0]`). Superseded items of a recognisable kind are paged first,
+  the kinds that make up `messages[0]`, with the deferred-tool listing that 2.1.310 adds there, D46;
+  and nested memory, D46: the latest block of each path is protected, newest first, only while the
+  protected ones total at most 4,000 tokens; an older copy of a path is superseded, and a latest one
+  past the cap pages with the unrecognised items). Superseded items
+  of a recognisable kind are paged first,
   then unrecognised ones, oldest first by position. Each paged item is its own immutable page (a
   context block is stored as a user message holding that block as sent), listed in the index with
   its first line inside the tag (marked `[earlier system message]` or `[earlier reminder]`, see Store) and recallable.
@@ -882,9 +897,19 @@ lack the tools and are not judged), never `count_tokens`:
 
 - Messages API: present when `tools` names an `mcp__contexto__` tool, or, with tool search, the
   system prompt or a role `system` message lists one by name on its own line (Claude Code 2.1.302),
-  and Claude Code's later notices have not taken it away. The check reads the system prompt and then
-  every role `system` message, in order, because Claude Code never edits history: an old listing
-  stays when the server goes away. Later text overrides earlier text. Names under "The following
+  and Claude Code's later notices have not taken it away. On 4.x model ids the listing and the
+  notices are `<system-reminder>` blocks of user messages instead (D46; measured on 2.1.302 with
+  tool search on and on 2.1.310, where it is the default), so those blocks are read too. Of a user
+  message, a text block is read only when it is one whole `<system-reminder>` (closing tag at the
+  end, no second opening tag) whose first line inside the tag is a deferred-tool or MCP-server notice
+  or `# MCP Server Instructions`, and never when it is the last text block of a message that holds no
+  `tool_result` (the typed prompt's place; a plain-string message is not read), nor after a
+  `[Request interrupted by user` block (a prompt typed after Esc lands there, in the tool-result
+  message). A prompt imitating a notice, alone, followed by text, or typed after Esc, is therefore
+  not read; an exact copy typed as an earlier block of a several-block prompt would be, which Claude
+  Code does not send. The check reads the system prompt and then those messages and
+  blocks, in order, because Claude Code never edits history: an old listing stays when the server
+  goes away. Later text overrides earlier text. Names under "The following
   deferred tools are no longer available" are removed. "N deferred tools are available again ...
   `mcp__contexto__*`" offers them again. `contexto` under "The following MCP servers have
   disconnected" or "... failed to connect" marks the server down (with tool search off, `tools` keeps
@@ -919,10 +944,13 @@ draw over a line printed mid-run. If the check itself raises, the engine logs `t
 the exception's type name only and keeps the request's rewrite.
 
 Refused tools (D44): offered tools can still be refused. On every Messages API request, main or not,
-the check reads the newest user message: a `tool_result` with `is_error` whose text is Claude Code
-2.1.302's refusal ("Claude requested permissions to use <tool>, but you haven't granted it yet.")
-counts when it answers an `mcp__contexto__` tool call of the assistant message before it and the
-refusal names that tool; another tool's result that quotes the text does not. The first one in a session logs `mcp_tools_denied` (`dialect`,
+the check reads the trailing user messages (every user message after the last assistant message,
+role `system` messages among them skipped; the results may be split across them in any order): a
+`tool_result` with `is_error` whose text is Claude Code 2.1.302's refusal ("Claude requested
+permissions to use <tool>, but you haven't granted it yet.", the same on 2.1.310) counts when its
+`tool_use_id` is a string naming an `mcp__contexto__` tool call of an assistant message in the request
+and the refusal names that tool; another tool's result that quotes the text does not, nor does a
+result whose id is not a string. The first one in a session logs `mcp_tools_denied` (`dialect`,
 `main`, `tools`: the refused tools' short names, `elapsed_s`) on that request's `transform_events`,
 and the launcher prints one stderr warning naming the tools, the likely cause (a user's `ask` rule,
 or organization-managed settings), and the README section. A user's "No" at an interactive prompt

@@ -8,12 +8,14 @@ conversation only (``RewriteEngine.publishes``): subagents and side requests may
 without the tools.
 
 What shows the tools are there, per dialect (measured with zero spend against a local stub, Claude
-Code 2.1.302 and codex-cli 0.163.0, temporary homes and fake keys):
+Code 2.1.302 and 2.1.310 and codex-cli 0.163.0, temporary homes and fake keys):
 
-- Claude Code (Messages API): the request names them. Normally ``tools`` holds
-  ``mcp__contexto__contexto_search`` and the other four by name; with tool search on, ``tools`` holds
-  ``ToolSearch`` and a ``defer_loading`` placeholder, and a role ``system`` message lists every
-  deferred tool by name, one per line. Without the server neither appears. When the server goes away
+- Claude Code (Messages API): the request names them. With tool search off, ``tools`` holds
+  ``mcp__contexto__contexto_search`` and the other four by name. With tool search on (2.1.302 with
+  ``ENABLE_TOOL_SEARCH``; 2.1.310 by default), ``tools`` holds ``ToolSearch`` and a ``defer_loading``
+  placeholder, and Claude Code lists every deferred tool by name, one per line: in a role ``system``
+  message on 5.x model ids, in a ``<system-reminder>`` block of ``messages[0]`` on 4.x ids, where its
+  later notices are ``<system-reminder>`` blocks too. Without the server neither appears. When the server goes away
   later (a resumed session whose server cannot start, or a live one whose server died), Claude Code
   leaves the old listing in history and adds notices: "deferred tools are no longer available" with
   the names, and "MCP servers have disconnected" with ``contexto`` (with tool search off, the tool
@@ -43,12 +45,13 @@ Refused tools (D44): the tools can be offered and still refused. Claude Code 2.1
 refuses an MCP tool that no permission rule allows, and the model gets the tool result "Claude requested
 permissions to use mcp__contexto__contexto_search, but you haven't granted it yet." (``is_error``). The
 launcher's ``--settings`` allows Contexto's tools, but a user's ``ask`` rule for one of them outranks that
-allow (measured, zero spend). So the check also reads the newest user message of every Messages API
-request, main or not, since a refusal loses recall in a subagent too. A result counts only when it answers
-a Contexto tool call of the assistant message before it, so another tool's output that quotes the text does
-not. The first refusal of a Contexto tool logs ``mcp_tools_denied`` with the tools' names (never other
-content); the launcher shows it once. A
-user who answers "No" at an interactive prompt gets other text, which does not count: that was a choice.
+allow (measured, zero spend; the same on 2.1.310). So the check also reads the trailing user messages
+(those after the last assistant message) of every Messages API request, main or not, since a refusal loses
+recall in a subagent too. A result counts only when its id names a Contexto tool call of an assistant
+message in the request, so another tool's output that quotes the text does not. The first refusal of a
+Contexto tool logs ``mcp_tools_denied`` with the tools' names (never other content); the launcher shows it
+once. A user who answers "No" at an interactive prompt gets other text, which does not count: that was a
+choice.
 """
 
 from __future__ import annotations
@@ -72,6 +75,20 @@ _LISTED_TOOL = re.compile(r"^(mcp__contexto__contexto_[a-z_]+)[ \t]*$")
 # Claude Code 2.1.302's refusal of a tool no rule allows (captured with zero spend against a local stub).
 _DENIED = re.compile(r"requested permissions to use (mcp__contexto__contexto_[a-z_]+), but you haven't granted it")
 _SERVER_LINE = re.compile(r"^contexto(?:[ \t(:]|$)")  # "contexto" or "contexto (ENOENT): ..." in a server list
+# A user message's <system-reminder> block that is a deferred-tool listing or an MCP notice (4.x model ids,
+# measured on 2.1.302 with tool search on and on 2.1.310): its first line inside the tag.
+_NOTICE_BLOCK = re.compile(r"\s*<system-reminder>\s*(?:The following deferred tools |\d+ deferred tools are available "
+                           r"again|The following MCP servers |# MCP Server Instructions[ \t]*(?:\r?\n|\Z))")
+CONTEXT_TAG, CONTEXT_END = "<system-reminder>", "</system-reminder>"
+INTERRUPT_MARKER = "[Request interrupted by user"  # contexto.rewrite.INTERRUPT_MARKER: Esc during a tool run
+
+
+def _notice_block(text: str) -> bool:
+    """One whole reminder whose first line is a notice: it opens with the tag and that heading, ends with the
+    closing tag, and holds no second opening tag (every genuine notice block in the 2.1.310 step 2 matrix has
+    that form; a typed prompt that starts with an imitation and goes on with text does not)."""
+    return (_NOTICE_BLOCK.match(text) is not None and text.rstrip().endswith(CONTEXT_END)
+            and text.count(CONTEXT_TAG) == 1)
 
 
 def _named(tool: Any) -> bool:
@@ -87,12 +104,35 @@ def _texts(content: Any) -> list[str]:
 
 
 def _system_texts(request: dict[str, Any]) -> list[str]:
-    """The system prompt, then every role ``system`` message, in order. The user's own messages are not
-    read: naming a tool there says nothing."""
+    """The system prompt, then, in message order, every role ``system`` message and every
+    ``<system-reminder>`` text of a user message: Claude Code puts the deferred-tool listing and the MCP
+    notices in a role ``system`` message on 5.x model ids and in ``<system-reminder>`` blocks of user
+    messages on 4.x ids (2.1.302 with tool search on, and 2.1.310, where it is on by default). Of a user
+    message, a text block is read only when it is one whole ``<system-reminder>`` whose first line is one
+    of those notices (``_notice_block``), and never when it is the message's last text block and the
+    message holds no ``tool_result``: that position is the typed prompt (a plain-string message is all
+    prompt), and no genuine notice block sat there in the 2.1.310 matrix. Nor is any text block after
+    a ``[Request interrupted by user`` block: a prompt typed after Esc lands there, in the tool-result
+    message, after that marker (reviewer A's pty captures on 2.1.302 and 2.1.310). So a prompt that
+    imitates a notice, alone, followed by text, or typed after Esc, is not read, nor is a CLAUDE.md
+    quoted in a context block. What remains readable is a user's earlier text block of a message with
+    several, typed as one exact copy of a notice; Claude Code sends a typed prompt as one block, so this
+    was not seen."""
     texts = _texts(request.get("system"))
     for message in request.get("messages") or []:
-        if isinstance(message, dict) and message.get("role") == "system":
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "system":
             texts += _texts(message.get("content"))
+        elif message.get("role") == "user" and isinstance(message.get("content"), list):
+            blocks = [b for b in message["content"] if isinstance(b, dict)]
+            text_at = [i for i, b in enumerate(blocks) if b.get("type") == "text" and isinstance(b.get("text"), str)]
+            marker = next((n for n, i in enumerate(text_at) if blocks[i]["text"].startswith(INTERRUPT_MARKER)), None)
+            if marker is not None:
+                text_at = text_at[:marker]  # what follows the marker was typed after Esc
+            elif text_at and not any(b.get("type") == "tool_result" for b in blocks):
+                text_at = text_at[:-1]  # the typed prompt
+            texts += [blocks[i]["text"] for i in text_at if _notice_block(blocks[i]["text"])]
     return texts
 
 
@@ -156,9 +196,10 @@ def contexto_notices(texts: list[str]) -> tuple[bool, bool]:
 
 
 def anthropic_tools_offered(request: dict[str, Any]) -> bool | None:
-    """True when a Contexto tool is in ``tools`` by name, or listed as a deferred tool in the system
-    prompt or a role ``system`` message (tool search), and Claude Code's later notices did not take it
-    away (``contexto_notices``); False when not; None for a request with no tool list."""
+    """True when a Contexto tool is in ``tools`` by name, or listed as a deferred tool (tool search) in
+    the system prompt, a role ``system`` message, or a user message's ``<system-reminder>`` block, and
+    Claude Code's later notices did not take it away (``contexto_notices``); False when not; None for a
+    request with no tool list."""
     tools = request.get("tools")
     if not isinstance(tools, list) or not tools:
         return None
@@ -166,39 +207,45 @@ def anthropic_tools_offered(request: dict[str, Any]) -> bool | None:
     return (offered or any(_named(t) for t in tools)) and not down
 
 
-def _contexto_calls(message: dict[str, Any]) -> dict[str, str]:
-    """The Contexto tool calls in an assistant message, by ``tool_use`` id."""
-    content = message.get("content")
-    blocks = content if isinstance(content, list) else []
-    return {b["id"]: b["name"] for b in blocks
-            if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str) and _named(b)}
+def _contexto_calls(messages: list[dict[str, Any]]) -> dict[str, str]:
+    """The Contexto tool calls of the assistant messages, by ``tool_use`` id."""
+    calls: dict[str, str] = {}
+    for message in messages:
+        content = message.get("content") if message.get("role") == "assistant" else None
+        for b in content if isinstance(content, list) else []:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str) and _named(b):
+                calls[b["id"]] = b["name"]
+    return calls
 
 
 def anthropic_denied_tools(request: dict[str, Any]) -> list[str]:
-    """Contexto tools Claude Code refused for lack of a permission rule, in the request's newest user message.
-    A ``tool_result`` counts only when it has ``is_error``, answers a Contexto tool call (``mcp__contexto__``)
-    of the assistant message before it, and its text is the refusal naming that same tool: another tool's
-    result that quotes the refusal text (a failed Bash command printing it) does not. Only the newest user
-    message is read, so a refusal counts on the request that first carries it; role ``system`` messages
-    around it are skipped."""
+    """Contexto tools Claude Code refused for lack of a permission rule, in the request's trailing user
+    messages (every user message after the last assistant message; role ``system`` messages among them are
+    skipped). A ``tool_result`` counts only when it has ``is_error``, its ``tool_use_id`` is a string naming a
+    Contexto tool call (``mcp__contexto__``) of an assistant message in the request, and its text is the
+    refusal naming that same tool: another tool's result that quotes the refusal text (a failed Bash command
+    printing it) does not. The results may be split across those user messages in any order. Only the
+    trailing user messages are read, so a refusal counts on the request that first carries it."""
     messages = [m for m in request.get("messages") or [] if isinstance(m, dict) and m.get("role") != "system"]
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].get("role") != "user":
+    trailing: list[dict[str, Any]] = []
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            break
+        trailing.insert(0, message)
+    errors = [b for m in trailing for b in (m.get("content") if isinstance(m.get("content"), list) else [])
+              if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("is_error")]
+    if not errors:
+        return []  # most requests: no failed result, so no scan of the history
+    calls = _contexto_calls(messages[:len(messages) - len(trailing)])
+    denied: list[str] = []
+    for block in errors:
+        tool_use_id = block.get("tool_use_id")
+        name = calls.get(tool_use_id) if isinstance(tool_use_id, str) else None
+        if name is None:
             continue
-        previous = messages[index - 1] if index > 0 else None
-        calls = _contexto_calls(previous) if isinstance(previous, dict) and previous.get("role") == "assistant" else {}
-        denied: list[str] = []
-        content = messages[index].get("content")
-        for block in content if isinstance(content, list) else []:
-            if not (isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error")):
-                continue
-            name = calls.get(block.get("tool_use_id"))
-            if name is None:
-                continue
-            if any(name in _DENIED.findall(text) for text in _texts(block.get("content"))) and name not in denied:
-                denied.append(name)
-        return denied
-    return []
+        if any(name in _DENIED.findall(text) for text in _texts(block.get("content"))) and name not in denied:
+            denied.append(name)
+    return denied
 
 
 def _names_tree(tools: Any, depth: int = 0) -> bool:

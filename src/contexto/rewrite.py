@@ -566,13 +566,21 @@ UNCLASSIFIED = "unclassified"
 # output_config to whatever system message the turn already has (a countdown, a file note, the
 # plan-mode text). On 2.1.301 the session-start message was the same size (about 8,470 characters,
 # spikes/m2/carried finding 1); its text was not kept, so that version is inferred, not measured.
-SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.302"
-SESSION_START_SIGNATURE = re.compile(r"\s*(?:<system-reminder>\s*)?# Environment[ \t]*(?:\r?\n|\Z)")
+# D46: with tool search on (2.1.310's default; 2.1.302 with ENABLE_TOOL_SEARCH), a subagent's
+# environment message starts with the deferred-tool listing ("The following deferred tools are now
+# available via ToolSearch. ...", one name per line, then a blank line) and "# Environment" follows;
+# the main conversation's still starts with "# Environment" (spikes/m2/subagents, zero spend). A
+# listing with no "# Environment" after it (an MCP server connecting mid-session) does not match.
+SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.310"
+SESSION_START_SIGNATURE = re.compile(
+    r"\s*(?:<system-reminder>\s*)?(?:The following deferred tools are now available[^\n]*\n(?:[^\n]+\n)*\r?\n\s*)?"
+    r"# Environment[ \t]*(?:\r?\n|\Z)")
 
 # Documented hook-output signatures (measured on Claude Code 2.1.301 with zero-spend stubs,
-# spikes/m2/carried/README.md findings 7 and 9): the CLI wraps a hook's additionalContext in a role
-# "system" message whose whole text starts with one of these prefixes.
-HOOK_SIGNATURES_CLAUDE_CODE_VERSION = "2.1.301"
+# spikes/m2/carried/README.md findings 7 and 9; the same prefixes on 2.1.310, live_probe.sh): the CLI
+# wraps a hook's additionalContext in a role "system" message whose whole text starts with one of
+# these prefixes.
+HOOK_SIGNATURES_CLAUDE_CODE_VERSION = "2.1.310"
 HOOK_SIGNATURES = (
     re.compile(r"UserPromptSubmit hook additional context: "),
     re.compile(r"PostToolUse:[^\s]+ hook additional context: "),
@@ -679,8 +687,10 @@ def _anthropic_classify_system(messages: list[dict], i: int) -> str:
 # the first four arrive in later turn-start messages; the rest make up messages[0] and are listed so
 # that a later copy (a date change, or a resume that puts session context in the resumed turn's
 # message, spikes/m2/carried finding 6) keeps its latest copy. The fallback keeps the latest block of
-# each kind and may page older ones; blocks of no recognised kind are pageable.
-CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.302"
+# each kind and may page older ones; blocks of no recognised kind are pageable. D46: 2.1.310 turns tool
+# search on by default, and on 4.x ids messages[0] then holds one more block, the deferred-tool listing
+# (the same on 2.1.302 with ENABLE_TOOL_SEARCH); the other kinds and their placement are unchanged.
+CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.310"
 CONTEXT_BLOCK_KINDS = (
     ("token_countdown", re.compile(r"<total_tokens>")),
     ("plan_mode", re.compile(r"Plan mode is active|## Exited Plan Mode")),
@@ -694,7 +704,26 @@ CONTEXT_BLOCK_KINDS = (
     ("instructions", re.compile(r"Codebase and user instructions are shown below")),
     ("date", re.compile(r"Today's date is")),
     ("attribution", re.compile(r"Attribution for git commits")),
+    ("deferred_tools", re.compile(r"The following deferred tools are now available")),
+    ("nested_instructions", re.compile(
+        r"Contents of .*(?:CLAUDE(?:\.local)?\.md|[/\\]\.claude[/\\]rules[/\\].+\.md):[ \t]*\Z")),
 )
+# D46: nested memory, which Claude Code attaches once per session when a file under it is first read: a
+# CLAUDE.md or CLAUDE.local.md below the project root, or a path-scoped .claude/rules/*.md. On 2.1.302 with
+# 5.x ids it was a role "system" message, carried as text. On 2.1.310 with 5.x ids each file is its own
+# <system-reminder> text block next to the Read results, in the tool-result user message, so it would be
+# paged with its turn and its rules lost for the rest of the session (zero-spend captures,
+# docs/research/M2-claude-code-2.1.310.md). Such a block is carried like a turn start's context block
+# (``carried_blocks``) when it has Claude Code's exact form (``NESTED_FORM``: one whole reminder) and comes
+# before any interrupt marker: a prompt typed after Esc lands in that message after
+# "[Request interrupted by user ...". The fallback protects the newest of them only up to
+# ``NESTED_PROTECTED_TOKENS``; older ones page oldest first, as on 2.1.302. On 4.x ids the file sits
+# inside the tool_result's own content on both versions and stays paged with its turn.
+TOOL_ROUND_CARRIED_KINDS = frozenset({"nested_instructions"})
+NESTED_FORM = re.compile(r"<system-reminder>\nContents of [^\n]*:\n(?:(?!<system-reminder>).)*</system-reminder>\s*\Z",
+                         re.DOTALL)
+INTERRUPT_MARKER = "[Request interrupted by user"
+NESTED_PROTECTED_TOKENS = 4_000  # half of carried_text_budget's default, so the fallback can still bound growth
 
 
 def context_block_kind(block: dict) -> str | None:
@@ -777,16 +806,42 @@ def reclassified_carried(messages: list[dict], k: int, paged: frozenset[str]) ->
     return sum(1 for i in indexes if settings_fields(messages[i]) is None and message_hash(messages[i]) in paged)
 
 
+def _is_tool_round(message: dict) -> bool:
+    return message.get("role") == "user" and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in _blocks(message))
+
+
+def _carried_at(message: dict, turn_start: bool) -> set[int]:
+    """Indexes of the carried blocks of a message: every context block of a turn start (D32); in a
+    tool-result user message, a nested-memory block of Claude Code's exact form next to the results,
+    before any interrupt marker (D46). Nothing else next to a tool result is carried."""
+    blocks = _blocks(message)
+    if turn_start:
+        return {j for j, b in enumerate(blocks) if is_context_block(b)}
+    out: set[int] = set()
+    for j, b in enumerate(blocks):
+        if not isinstance(b, dict) or b.get("type") != "text" or not isinstance(b.get("text"), str):
+            continue
+        if b["text"].startswith(INTERRUPT_MARKER):
+            break  # what follows was typed after Esc
+        if NESTED_FORM.match(b["text"]) and context_block_kind(b) in TOOL_ROUND_CARRIED_KINDS:
+            out.add(j)
+    return out
+
+
 def carried_blocks(messages: list[dict], k: int, paged: frozenset[str] = frozenset()) -> list[tuple[int, int, dict]]:
-    """(message index, block index, block) for every context block of the turn starts in M[0..k) that the
-    fallback has not paged (D32), in original order."""
+    """(message index, block index, block) for every carried context block in M[0..k) that the fallback
+    has not paged, in original order: the context blocks of the turn starts (D32) and the nested CLAUDE.md
+    blocks next to tool results (D46)."""
     out = []
     for i in range(k):
         m = messages[i]
-        if not is_turn_start(m):
+        start = is_turn_start(m)
+        if not start and not _is_tool_round(m):
             continue
+        carried = _carried_at(m, start)
         for j, b in enumerate(_blocks(m)):
-            if is_context_block(b) and not (paged and block_id(i, j, b) in paged):
+            if j in carried and not (paged and block_id(i, j, b) in paged):
                 out.append((i, j, b))
     return out
 
@@ -800,17 +855,45 @@ def carried_content(messages: list[dict], k: int, paged: frozenset[str] = frozen
     return blocks, [messages[i] for i in indexes]
 
 
-def fallback_candidates(messages: list[dict], k: int,
-                        paged: frozenset[str] = frozenset()) -> list[tuple[tuple[int, int], str, dict]]:
+def _supersession_key(block: dict) -> tuple[str, ...] | None:
+    """What a later block of the same key supersedes: its kind; for nested memory, its kind and path (its
+    first line), since another directory's file adds rules rather than replacing them (D46)."""
+    kind = context_block_kind(block)
+    if kind != "nested_instructions":
+        return None if kind is None else (kind,)
+    text = block.get("text", "").lstrip().removeprefix(CONTEXT_TAG)
+    return (kind, next((line.strip() for line in text.splitlines() if line.strip()), ""))
+
+
+def _nested_over_budget(later: list[tuple[int, int, dict]], newest: dict, estimator: TokenEstimator) -> set:
+    """Positions of the latest nested-memory blocks past ``NESTED_PROTECTED_TOKENS``, counted newest first
+    (D46): the rest stay protected, so the fallback can bound carried growth however many directories
+    were read."""
+    latest = sorted(((i, j, b) for i, j, b in later if context_block_kind(b) in TOOL_ROUND_CARRIED_KINDS
+                     and newest.get(_supersession_key(b)) == (i, j)), key=lambda x: (x[0], x[1]), reverse=True)
+    used, over = 0, set()
+    for i, j, b in latest:
+        used += estimator.estimate(b["text"])
+        if over or used > NESTED_PROTECTED_TOKENS:
+            over.add((i, j))
+    return over
+
+
+def fallback_candidates(messages: list[dict], k: int, paged: frozenset[str] = frozenset(),
+                        estimator: TokenEstimator | None = None) -> list[tuple[tuple[int, int], str, dict]]:
     """What the bounded fallback may page from M[0..k), in the order it pages: (position, identity in
     ``paged_carried``, the page's one message). Superseded items of a recognisable kind come first,
     then unrecognised ones, each oldest first by position.
 
     System messages (D33): carried text and settings changes, never the session-start message, a
     settings-only message, the latest settings change per settings key, or the latest text message of
-    each ``mode_kind``. Context blocks (D32): those of every turn start after the first, never the first
-    turn start's blocks or the latest block of each ``context_block_kind``. A paged block is stored as a
-    user message holding that one block, as the CLI sent it."""
+    each ``mode_kind``. Context blocks (D32): those of every turn start after the first and the
+    nested-memory blocks of tool rounds (D46), never the first turn start's blocks or the latest block of
+    each kind. Nested memory (D46): the latest block of each path is protected newest first while the
+    protected ones total at most ``NESTED_PROTECTED_TOKENS``; an older copy of a path is superseded, and
+    a latest one past that budget is listed with the unrecognised items, oldest first, as its 2.1.302
+    form (a carried text message) was. A paged block is stored as a user message holding that one block,
+    as the CLI sent it."""
     classes = _system_classes(messages, k)
     protected = protected_systems(messages, k, classes)
     superseded: list[tuple[tuple[int, int], str, dict]] = []
@@ -824,15 +907,17 @@ def fallback_candidates(messages: list[dict], k: int,
     later = [(i, j, b) for i, j, b in carried_blocks(messages, k, paged) if starts and i != starts[0]]
     newest = {}
     for i, j, b in later:
-        kind = context_block_kind(b)
-        if kind is not None:
-            newest[kind] = (i, j)
+        key = _supersession_key(b)
+        if key is not None:
+            newest[key] = (i, j)
+    over_budget = _nested_over_budget(later, newest, estimator or TokenEstimator())
     for i, j, b in later:
-        kind = context_block_kind(b)
-        if kind is not None and newest[kind] == (i, j):
+        kind, key = context_block_kind(b), _supersession_key(b)
+        if key is not None and newest[key] == (i, j) and (i, j) not in over_budget:
             continue
         item = ((i, j), block_id(i, j, b), {"role": "user", "content": [b]})
-        (superseded if kind is not None else unrecognised).append(item)
+        recognised = kind is not None and (i, j) not in over_budget
+        (superseded if recognised else unrecognised).append(item)
     order = lambda item: item[0]  # noqa: E731
     return sorted(superseded, key=order) + sorted(unrecognised, key=order)
 
@@ -845,8 +930,10 @@ def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
         m = messages[i]
         if is_system_like(m) and classify_system(messages, i) != HOOK_OUTPUT:
             continue
-        if is_turn_start(m) and any(is_context_block(b) for b in _blocks(m)):
-            m = {**m, "content": [b for b in _blocks(m) if not is_context_block(b)]}
+        start = is_turn_start(m)
+        carried = _carried_at(m, start) if start or _is_tool_round(m) else set()
+        if carried:
+            m = {**m, "content": [b for j, b in enumerate(_blocks(m)) if j not in carried]}
         out.append(m)
     return out
 
@@ -1024,7 +1111,7 @@ def page_carried_text(messages: list[dict], state: EpochState, store: Store, con
     if growth <= config.carried_text_budget:
         return state
     chosen, freed = [], 0
-    for item in fallback_candidates(messages, state.k, state.paged_carried):
+    for item in fallback_candidates(messages, state.k, state.paged_carried, estimator):
         if growth - freed <= config.carried_text_budget:
             break
         chosen.append(item)

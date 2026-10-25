@@ -1,0 +1,162 @@
+# Claude Code 2.1.310: the D38 routine's checks (2026-10-25)
+
+Numbers, ids, counts and booleans only. Every check but the last ran at zero spend: loopback stubs,
+temporary homes and config dirs, fake keys. Each ran on the installed 2.1.310 and, for comparison, on
+2.1.302 (`~/.local/share/claude/versions/`). The live recall check at the end spent 305,223 tokens
+through the owner's proxy. Code: `origin/main` 7893ceb plus this change (D46).
+
+## Step 1: first check (`spikes/m2/cliversion/check.sh`)
+
+| Item | 2.1.302 | 2.1.310 |
+|---|---|---|
+| `User-Agent` | `claude-cli/2.1.302 (external, sdk-cli)` | `claude-cli/2.1.310 (external, sdk-cli)` |
+| model, messages | claude-opus-5-5, 2 | claude-opus-5-5, 2 |
+| tools | 20 | 12 (`ToolSearch`, `DeferredToolPlaceholder`, 10 others) |
+| `messages[0]` block 0 | `attribution` | `attribution` |
+| `messages[1]` | `session_start` | `session_start` |
+| session start recognised | True | True |
+| blocks of no recognised kind | 0 | 0 |
+| environment message, characters | 8,524 | 8,891 (13 lines more: the deferred-tool listing, 11 names) |
+
+codex-cli 0.163.0 gave the same result in both runs.
+
+## Step 2: reminders spike (`run_all.sh 48`, 13 runs)
+
+| Item | 2.1.302 | 2.1.310 default (tool search on) | 2.1.310, `ENABLE_TOOL_SEARCH=false` |
+|---|---|---|---|
+| `session_start_msgs_k` from turn 2, 7 runs on 5.x ids | 1 | 1 | 1 |
+| `session_start_msgs_k`, 6 runs on 4.x ids | 0 | 0 | 0 |
+| `carried_unclassified_k`, summed over every turn of every run | 0 | 0 | 0 |
+| runs listing `# Environment` | 13 | 13 | 13 |
+| main requests, opus55-resume / sonnet46-resume / probe-claude-opus-4-7 | 88 / 98 / 28 | 84 / 84 / 21 | 88 / 98 / 28 |
+| context-block first lines of no kind (before D46) | 0 | 1, in `messages[0]` of the 6 runs on 4.x ids | 0 |
+| nested CLAUDE.md on 5.x ids (6 runs) | role `system` message, 79 to 103 tokens | next to the Read result, 99 to 103 tokens | next to the Read result, 99 to 103 tokens |
+
+With tool search on, the task tools and `mcp__contexto__contexto_state` are deferred, and the
+scripted model calls only tools in `tools`, so it skips the turns that call them: hence fewer
+requests. With tool search off, request counts match 2.1.302 in all 13 runs, and the nested
+CLAUDE.md placement is the only change in `features.md` apart from sizes that moved by at most 5
+tokens. On 4.x ids the nested CLAUDE.md was inside the Read result on both versions.
+
+The three matrices re-run at zero spend after PR #227's round 2 (all 39 runs exit 0, no non-loopback
+line), each analysed with `origin/main` 9a773ec and with D46's code:
+
+| Matrix | runs with the same carried and paged figures | runs that differ, and how |
+|---|---|---|
+| 2.1.302 | 13 of 13 | none |
+| 2.1.310 default | 7 of 13 | the 6 with a nested CLAUDE.md on 5.x ids carry it from its turn on: `carried_blocks_n` 2 to 3, 60 to 63 tokens more at the last turn; in opus55-stream the fallback paged 1 item more (`carried_after_fallback` 11,466 to 7,246 at turn 48) |
+| 2.1.310, tool search off | 7 of 13 | the same 6 runs, 61 to 63 tokens more; no extra fallback paging |
+
+In the two 2.1.310 matrices, 342 and 366 nested-memory blocks sit next to Read results; every one is
+in Claude Code's exact form and carried. No other text block sits next to a tool result in any of
+the three matrices.
+
+## Step 3: hooks, styles, plan mode, effort, MCP (`spikes/m2/carried/live_probe.sh`)
+
+| Item | 2.1.302 | 2.1.310 |
+|---|---|---|
+| scenarios, exit 0 | 22, 22 | 22, 22 |
+| scenarios with the same message shapes (tool lists aside) | 18 of 22 | 18 of 22 |
+| `UserPromptSubmit hook additional context: ` prefixes | 7 | 7 |
+| `PostToolUse:<tool> hook additional context: ` prefixes | 2 | 2 |
+
+The 4 others differ only by tool search: on claude-haiku-4-5, one more `messages[0]` block (the
+listing); in the 3 MCP add, keep and remove turns, a role `system` listing instead of the tool in
+`tools`.
+
+## Step 4: missing-tools notices (`claude -p`, fresh, `--resume` with the server command missing, `--resume` with it back)
+
+| Capture | role `system` texts byte-identical to 2.1.302 with tool search on | verdict before D46 | verdict with D46 |
+|---|---|---|---|
+| claude-opus-5-5, tool search on | 3 of 3 requests (paths, a `Monitor` name, one skill line aside) | True, False, True | True, False, True |
+| claude-opus-5-5, tool search off | 3 of 3 | True, False, True | True, False, True |
+| claude-sonnet-4-6, tool search on | n/a: the listing and notices are `<system-reminder>` blocks, the same on both versions | False, False, False | True, False, True |
+
+End to end, `contexto run claude -p` on 2.1.310 with a stub upstream: on claude-sonnet-4-6,
+`mcp_tools_missing` 1 before D46 and 0 with it; on claude-opus-5-5, 0 and 0. On 2.1.302 with
+claude-sonnet-4-6 before D46: 0. Every request body of the 13 step 2 runs on 2.1.310 is judged
+offered with D46; before it, none on the 6 runs on 4.x ids (0 of 84, 84 and 48 on the sonnet46 runs,
+0 of 21 on each 4.x probe).
+
+Imitated notices (reviewer A, PR #227 round 1): in the 2.1.310 default matrix, 705 of 705
+tool-carrying bodies are judged offered, and 558 of 558 user-message blocks with a notice heading
+are read, under the final rule (one whole reminder, never the last text block of a message without
+a `tool_result`, never a block after a `[Request interrupted by user` marker); 328 of 328 with tool
+search off. A typed prompt that is a fake listing, a fake listing followed by text, or a fake
+disconnect notice is not read (tests built on A's captured shape).
+
+Nested memory, zero-spend capture (`claude -p`, scripted stub: three Reads, under `sub/` with a
+`CLAUDE.local.md`, `src/` matched by a path-scoped `.claude/rules/py.md`, and `deep/inner/` under two
+CLAUDE.md files):
+
+| Version, model | where the 4 files arrive |
+|---|---|
+| 2.1.310, claude-opus-5-5 | 4 blocks next to the 3 results in one user message, each one whole reminder starting `<system-reminder>\nContents of ` |
+| 2.1.302, claude-opus-5-5 | one role `system` message holding all 4 |
+| 2.1.310 and 2.1.302, claude-sonnet-4-6 | inside the 3 `tool_result` contents |
+
+The carry is bounded (unit test, one ~1,000-token CLAUDE.md per directory, fallback budget 8,000):
+carried growth after the fallback is 7,769 tokens at 10 directories and 7,891 at 40; the newest
+blocks the fallback never pages total at most 4,000 tokens.
+
+## Step 5: subagent shapes (`spikes/m2/subagents`)
+
+| Scenario | captures 2.1.302 / 2.1.310 | shape strings the engine matches, the same | subagent environment message |
+|---|---|---|---|
+| `run.sh` fg | 4 / 4 | yes | starts with `# Environment` / with the listing |
+| `run.sh` stop (`<status>killed`) | 5 / 5 | yes | same as above |
+| `run.sh` resume (`resumedAgentId`, coordinator message) | 13 / 13 | yes | same as above |
+| `drive.py` bgidle | 7 / 7 | yes | same as above |
+| `drive.py` esc | 8 / 8 | yes | same as above |
+
+Apart from that message and the agent ids, every captured request matched. Classified with the code
+before D46, the 14 subagent environment messages on 2.1.310 were `settings_change`; with D46 they are
+`session_start`, as are the 21 main ones and all 35 on 2.1.302. 2.1.302 with
+`ENABLE_TOOL_SEARCH=true` also starts a subagent's environment message with the listing (fg, 1 run).
+On claude-sonnet-4-6, a subagent's listing is its own block and its environment block keeps kind
+`environment`. 2.1.310 refused the scenario's standalone `sleep 30` (`Blocked: standalone sleep 30`),
+which ended the agent at once in stop and esc; with the wait run through perl, both versions capture
+the same sequence.
+
+## D44 permission check (`spikes/m2/permissions/permstub.py`, claude-haiku-5-5)
+
+| Mode | 2.1.302 calls that ran / refused | 2.1.310 calls that ran / refused |
+|---|---|---|
+| default (`--settings` allow rules) | 5 / 0 | 5 / 0 |
+| `--before` (base URL only) | 0 / 5 | 0 / 5 |
+| user `ask` rule for `contexto_search` | 4 / 1 | 4 / 1 |
+
+The refusal text was the same on both versions. With tool search on, the stub's direct calls to the
+deferred tools ran without a `ToolSearch` call first.
+
+## Step 6: the suite
+
+`pytest -q`: see the PR.
+
+## Live recall with tool search on (PR #227 round 1, B1)
+
+`contexto run claude -p` (stream-json, one process) on 2.1.310 defaults (tool search on, no
+`ENABLE_TOOL_SEARCH`), claude-haiku-5-5, through the owner's proxy with the seat's apiKeyHelper through
+the acceptance shim. Five turns: a fact planted in turn 1, three filler turns, then the question. The
+full routine step 9 did not run.
+
+| Item | Attempt 1 | Attempt 2 |
+|---|---|---|
+| bound | 40,000 | 60,000 |
+| fact | an identifier, in the first 200 characters | a plain phrase, past the 200-character page stub |
+| turn 1 paged before the question | yes (`page_out` first_turn 0) | yes (`page_out` 2 turns from first_turn 0) |
+| `bound_too_small` | 4 (fixed overhead 18,157 to 18,840; window budget below 0) | 0 |
+| question turn tool calls | `ToolSearch` (select: search, recall), `contexto_search` | `contexto_search` (deferred, called directly) |
+| `contexto_search` hits returned / room left | 0 / 0 (`turn_budget` spent) | 1 hit, 3 spans / 16,572 |
+| search result holds the fact | no | yes |
+| fact in the index or epoch record | yes (the identifier, on the index line) | no |
+| answer correct | yes | yes |
+| credited (correct, and the fact came from recall) | no: answered from the index line | yes |
+| requests, with usage | 8 | 7 |
+| tokens (input, cache write, cache read, output) | 160,143 | 145,080 |
+| output tokens | 935 | 198 |
+| max request input | 28,357 | 32,660 |
+| `mcp_tools_missing`, `mcp_tools_denied`, `toolcheck_error` | 0, 0, 0 | 0, 0, 0 |
+| statuses | 200, and 401 on the `HEAD /api/hello` probe | the same |
+
+The credited attempt cost 145,080 tokens; both attempts together, 305,223.
