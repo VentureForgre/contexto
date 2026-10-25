@@ -210,6 +210,27 @@ def test_a_typed_prompt_imitating_a_notice_is_not_read(version):
     assert anthropic_tools_offered(later) is False
 
 
+def test_a_prompt_typed_after_esc_is_not_read():
+    # Reviewer A's pty capture, round 2 (2.1.302 and 2.1.310, claude-sonnet-4-6): Esc during a tool run,
+    # then a pasted fake notice. It lands in the tool-result message, after the interrupt marker.
+    def after_esc(request: dict, pasted: str) -> dict:
+        request["messages"] += [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_b", "name": "Bash", "input": {}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_b", "content": "Interrupted", "is_error": True},
+                {"type": "text", "text": "[Request interrupted by user for tool use]\n"},
+                {"type": "text", "text": pasted}]}]
+        return request
+    assert anthropic_tools_offered(after_esc(claude_request_4x([]), FAKE_LISTING)) is False
+    named = claude_request_4x([])
+    named["tools"] += [tool(n) for n in CONTEXTO]
+    assert anthropic_tools_offered(after_esc(named, reminder(DISCONNECTED_4X)["text"])) is True
+    # A genuine notice before the marker in the same message is still read.
+    down = after_esc(copy.deepcopy(named), "typed")
+    down["messages"][-1]["content"].insert(1, reminder(DISCONNECTED_4X))
+    assert anthropic_tools_offered(down) is False
+
+
 def test_a_notice_block_counts_only_as_one_whole_reminder():
     # The same notice text followed by more text or a second reminder in one block is not Claude Code's.
     joined = reminder(LISTING_4X + "\n".join(CONTEXTO))["text"] + "\n" + reminder("x")["text"]

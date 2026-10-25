@@ -80,6 +80,7 @@ _SERVER_LINE = re.compile(r"^contexto(?:[ \t(:]|$)")  # "contexto" or "contexto 
 _NOTICE_BLOCK = re.compile(r"\s*<system-reminder>\s*(?:The following deferred tools |\d+ deferred tools are available "
                            r"again|The following MCP servers |# MCP Server Instructions[ \t]*(?:\r?\n|\Z))")
 CONTEXT_TAG, CONTEXT_END = "<system-reminder>", "</system-reminder>"
+INTERRUPT_MARKER = "[Request interrupted by user"  # contexto.rewrite.INTERRUPT_MARKER: Esc during a tool run
 
 
 def _notice_block(text: str) -> bool:
@@ -110,10 +111,13 @@ def _system_texts(request: dict[str, Any]) -> list[str]:
     message, a text block is read only when it is one whole ``<system-reminder>`` whose first line is one
     of those notices (``_notice_block``), and never when it is the message's last text block and the
     message holds no ``tool_result``: that position is the typed prompt (a plain-string message is all
-    prompt), and no genuine notice block sat there in the 2.1.310 matrix. So a prompt that imitates a
-    notice, alone or followed by text, is not read, nor is a CLAUDE.md quoted in a context block. What
-    remains readable is a user's earlier text block of a message with several, typed as one exact copy of
-    a notice; Claude Code sends a prompt as one block, so this was not seen."""
+    prompt), and no genuine notice block sat there in the 2.1.310 matrix. Nor is any text block after
+    a ``[Request interrupted by user`` block: a prompt typed after Esc lands there, in the tool-result
+    message, after that marker (reviewer A's pty captures on 2.1.302 and 2.1.310). So a prompt that
+    imitates a notice, alone, followed by text, or typed after Esc, is not read, nor is a CLAUDE.md
+    quoted in a context block. What remains readable is a user's earlier text block of a message with
+    several, typed as one exact copy of a notice; Claude Code sends a typed prompt as one block, so this
+    was not seen."""
     texts = _texts(request.get("system"))
     for message in request.get("messages") or []:
         if not isinstance(message, dict):
@@ -123,7 +127,10 @@ def _system_texts(request: dict[str, Any]) -> list[str]:
         elif message.get("role") == "user" and isinstance(message.get("content"), list):
             blocks = [b for b in message["content"] if isinstance(b, dict)]
             text_at = [i for i, b in enumerate(blocks) if b.get("type") == "text" and isinstance(b.get("text"), str)]
-            if text_at and not any(b.get("type") == "tool_result" for b in blocks):
+            marker = next((n for n, i in enumerate(text_at) if blocks[i]["text"].startswith(INTERRUPT_MARKER)), None)
+            if marker is not None:
+                text_at = text_at[:marker]  # what follows the marker was typed after Esc
+            elif text_at and not any(b.get("type") == "tool_result" for b in blocks):
                 text_at = text_at[:-1]  # the typed prompt
             texts += [blocks[i]["text"] for i in text_at if _notice_block(blocks[i]["text"])]
     return texts
