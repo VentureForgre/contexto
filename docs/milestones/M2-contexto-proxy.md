@@ -466,7 +466,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       file that deep, or one that is not JSON or not a page record, is logged `page_unreadable`:
       search and the index skip it, `contexto_recall` and a `contexto_pin` that cites it return a
       tool error, and `contexto recall` prints an error and exits 1. Search and the index log it
-      once per process until the file changes; each recall or pin of it logs it again. Paging the
+      once per process until the file changes; each recall or pin of it logs it again. A read
+      that fails (permissions, too many open files, an I/O error) is logged with `will_retry`
+      and the page is skipped for that call only. Paging the
       same turn onto it again is a `page_conflict`, so the file is quarantined and the turn paged
       afresh (rule 14). A page record is an object with a string `id` equal to the id its file is
       named by, an integer `turn`, a `messages` list, and a `stub` whose `user_text` is a string,

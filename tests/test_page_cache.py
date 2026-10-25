@@ -1,5 +1,6 @@
 """The per-process page cache behind search, the index, and page ids (D34, ``contexto.store.catalog``)."""
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -81,6 +82,45 @@ def test_an_unreadable_page_is_logged_once_until_its_file_changes_and_skipped(tm
     assert logged() == ["pg_00000000000000ff.json"] * 2
     bad.unlink()
     assert store.search("needle") == [a] and logged() == ["pg_00000000000000ff.json"] * 2
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads a file whatever its mode")
+def test_a_page_file_that_could_not_be_opened_is_read_again_on_the_next_call(tmp_path):
+    """A failed read (here permission denied, later fixed) says nothing about the page: it is logged and
+    skipped this time, not kept as unreadable, since its size and times do not change when it is fixed
+    (reviewers A and B on PR #228)."""
+    store = SessionStore(tmp_path, "s1")
+    [a] = store.page_out([page("needle")], 1)
+    path = store.pages_dir / f"{a}.json"
+    fresh = SessionStore(tmp_path, "s1")  # a restarted process, which reads every page
+    path.chmod(0o000)
+    try:
+        assert fresh.search("needle") == [] and a not in fresh.index_text(400) and fresh.page_ids() == []
+    finally:
+        path.chmod(0o600)
+    assert fresh.search("needle") == [a] and a in fresh.index_text(400) and fresh.page_ids() == [a]
+    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+    failed = [e for e in log if e["event"] == "page_unreadable"]
+    assert failed and all(e["path"] == f"{a}.json" and e["will_retry"] is True for e in failed)
+
+
+@pytest.mark.parametrize("call", ["search", "index_text"])
+def test_one_read_that_fails_with_too_many_open_files_is_retried_on_the_next_call(tmp_path, monkeypatch, call):
+    store = SessionStore(tmp_path, "s1")
+    [a] = store.page_out([page("needle")], 1)
+    fresh = SessionStore(tmp_path, "s1")
+    read_text = Path.read_text
+    failures = [OSError(errno.EMFILE, "Too many open files")]
+
+    def flaky(self, *args, **kwargs):
+        if self.name == f"{a}.json" and failures:
+            raise failures.pop()
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    first = fresh.search("needle") if call == "search" else fresh.index_text(400)
+    assert not failures and a not in first
+    assert fresh.search("needle") == [a] and a in fresh.index_text(400)
 
 
 @pytest.mark.parametrize("stub", ["not an object", None])

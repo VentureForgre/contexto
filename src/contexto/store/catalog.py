@@ -117,8 +117,9 @@ class PageCatalog:
         self.pages_dir = pages_dir
         self._log = log
         self._entries: dict[str, Entry] = {}  # by file name
-        # Files that could not be read, by name, with the signature they had: logged once, then skipped
-        # without a read until the file changes or goes (reviewers on PR #228)
+        # Files whose content is no page record, by name, with the signature they had: logged once, then
+        # skipped without a read until the file changes or goes (reviewers on PR #228). A read that failed
+        # (OSError: permissions, too many open files, an I/O error) is not kept: the next call reads again.
         self._unreadable: dict[str, Signature] = {}
         self._lock = threading.Lock()
         self._budget = text_budget  # None: no limit
@@ -163,9 +164,10 @@ class PageCatalog:
                     continue
                 entry = self._entries.get(name)
                 if entry is None or entry.view is None:
-                    page = self._read(self.pages_dir / name)
+                    page, damaged = self._read(self.pages_dir / name)
                     if page is None:
-                        self._unreadable[name] = signature
+                        if damaged:
+                            self._unreadable[name] = signature
                         continue
                     if entry is None:
                         entry = self._entries[name] = Entry(signature, None)
@@ -222,7 +224,7 @@ class PageCatalog:
         line = entry.lines.get(salient)
         if line is not None:
             return line
-        page = self._read(self.pages_dir / f"{entry.id}.json") if salient else entry.view
+        page = self._read(self.pages_dir / f"{entry.id}.json")[0] if salient else entry.view
         if page is None:  # unreadable now (logged): the line without identifiers, not kept
             return index_line(entry.view, False)
         line = entry.lines[salient] = index_line(page, salient)
@@ -355,17 +357,19 @@ class PageCatalog:
                 held = packed = None
         if packed is not None:
             return held._replace(text=zlib.decompress(packed))
-        page = self._read(self.pages_dir / name)
+        page, damaged = self._read(self.pages_dir / name)
         found = None
         if page is not None:
             try:
                 found = search_entry(page)
             except (KeyError, TypeError, AttributeError) as e:
                 self._log({"event": "page_unreadable", "path": name, "error": str(e)})
+                damaged = True
         with self._lock:
             if found is None:
                 self._drop(name)
-                self._unreadable[name] = signature
+                if damaged:
+                    self._unreadable[name] = signature
                 return None
             entry = self._entries.get(name)
             if entry is None or entry.signature != signature:
@@ -376,12 +380,28 @@ class PageCatalog:
             self._hold(name, entry, found, signature[1])
         return found
 
-    def _read(self, path: Path) -> dict[str, Any] | None:
+    def _read(self, path: Path) -> tuple[dict[str, Any] | None, bool]:
+        """The page in ``path`` and False, or None and whether its content is damaged: True when the file
+        was read but is not a page record (not UTF-8, not JSON, too deep, or the wrong shape), False when
+        the read itself failed (OSError), which may not happen again. Either is logged ``page_unreadable``;
+        a failed read adds ``will_retry`` (not for a file gone since the listing, which the next listing
+        leaves out)."""
         try:
-            return load_page(path.read_text(encoding="utf-8"), path.name.removesuffix(".json"))
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            event = {"event": "page_unreadable", "path": path.name, "error": str(e)}
+            if not isinstance(e, FileNotFoundError):
+                event["will_retry"] = True
+            self._log(event)
+            return None, False
+        except ValueError as e:  # not UTF-8
             self._log({"event": "page_unreadable", "path": path.name, "error": str(e)})
-            return None
+            return None, True
+        try:
+            return load_page(text, path.name.removesuffix(".json")), False
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            self._log({"event": "page_unreadable", "path": path.name, "error": str(e)})
+            return None, True
 
 
 def _view(page: dict[str, Any]) -> dict[str, Any]:
