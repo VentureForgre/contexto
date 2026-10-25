@@ -1214,6 +1214,35 @@ def test_persistent_conflict_on_a_session_store_quarantines_the_file_and_repages
     assert list((store.dir / "quarantine").glob(f"{page['id']}.*.json"))  # moved aside, never deleted
 
 
+@pytest.mark.parametrize("damage", ["id removed", "stub {}", "id 5", "id null", "another id"])
+def test_repaging_onto_a_damaged_page_record_is_a_conflict_that_repairs_it(tmp_path, damage):
+    """Rule 18: paging a turn onto its file that holds no page record, or another page's id, is a
+    page_conflict, so the file is quarantined and the turn paged afresh (rule 14). Before, a removed id
+    raised KeyError on every request, a bad stub kept the page out of the index for good, and a wrong
+    id went to the engine as a page id (reviewers on PR #228)."""
+    store = SessionStore(tmp_path, "repage")
+    msgs = history(6) + [user("new prompt")]
+    run(msgs, store=store)
+    first, second = sorted(store.pages_dir.glob("pg_*.json"), key=lambda p: json.loads(p.read_text())["turn"])[:2]
+    page = json.loads(first.read_text())
+    record = dict(page)
+    if damage == "id removed":
+        del record["id"]
+    elif damage == "stub {}":
+        record["stub"] = {}
+    else:
+        record["id"] = {"id 5": 5, "id null": None, "another id": second.stem}[damage]
+    first.write_text(json.dumps(record))  # not something Contexto writes
+    # The epoch state was lost (epoch.json missing): the same conversation pages turn 0 again.
+    _, st, ev, _ = run(msgs, store=store)
+    assert ev[0]["event"] == "page_conflict" and ev[0]["page_id"] == page["id"] and st.degraded
+    _, st2, ev2, _ = run(turn_start_after(msgs, 6), state=st, store=store)
+    assert names(ev2)[:2] == ["page_conflict", "degraded_leave"] and not st2.degraded
+    assert json.loads(first.read_text()) == page  # repaired: re-paged under its id from the messages
+    assert list((store.dir / "quarantine").glob(f"{page['id']}.*.json"))
+    assert f"{page['id']} turn 0: prompt 0" in store.index_text(LISTED.index_budget)
+
+
 def test_failure_after_pages_were_written_rewrites_them_identically_on_the_retry():
     store = FaultyStore()
     msgs = history(6) + [user("new prompt")]
@@ -1805,6 +1834,31 @@ def test_a_paged_out_tool_result_too_deep_for_json_keeps_every_later_request_pag
     assert " turn 0: prompt 0" in store.index_text(LISTED.index_budget)
     _, st3, ev3, _ = run(later + [assistant("done")] + [user("one more")], state=st2, store=store, config=LISTED)
     assert names(ev3)[-1] == "request" and not st3.degraded
+
+
+@pytest.mark.parametrize("change", [{"messages": 5}, {"stub": {}}, {"stub": {"user_text": "x", "tools": [5],
+                                                                              "paths": []}}, {"turn": None}])
+def test_a_hand_damaged_page_file_is_skipped_and_every_later_request_keeps_paging(tmp_path, change):
+    """Rule 18: a page file edited into something that is no page record (here keeping a valid id) is
+    logged page_unreadable and left out of the index. The index used to read its stub, and the
+    KeyError or TypeError failed every later transform, so paging stopped."""
+    store = SessionStore(tmp_path, "damaged")
+    msgs = history(6) + [user("new prompt 6")]
+    _, st, ev, _ = run(msgs, store=store, config=LISTED)
+    assert "rotation" in names(ev)
+    bad = next(p for p in store.page_ids() if f"{p} turn 0: prompt 0" in store.index_text(LISTED.index_budget))
+    path = store.pages_dir / f"{bad}.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), **change}))  # not something Contexto writes
+    later = more_turns(msgs + [assistant(f"answer 6 {FILL}")], 7, 6) + [user("new prompt 13")]
+    _, st2, ev2, _ = run(later, state=st, store=store, config=LISTED)
+    assert "rotation" in names(ev2) and st2.k > st.k  # it still pages
+    index = store.index_text(LISTED.index_budget)
+    assert bad not in index and " turn 1: prompt 1" in index
+    assert bad not in store.page_ids() and bad not in store.search("prompt")
+    _, st3, ev3, _ = run(later + [assistant("done")] + [user("one more")], state=st2, store=store, config=LISTED)
+    assert names(ev3)[-1] == "request" and not st3.degraded
+    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+    assert {e["path"] for e in log if e["event"] == "page_unreadable"} == {f"{bad}.json"}
 
 
 def test_cache_control_is_dropped_at_any_depth_in_order():

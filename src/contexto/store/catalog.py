@@ -117,6 +117,10 @@ class PageCatalog:
         self.pages_dir = pages_dir
         self._log = log
         self._entries: dict[str, Entry] = {}  # by file name
+        # Files whose content is no page record, by name, with the signature they had: logged once, then
+        # skipped without a read until the file changes or goes (reviewers on PR #228). A read that failed
+        # (OSError: permissions, too many open files, an I/O error) is not kept: the next call reads again.
+        self._unreadable: dict[str, Signature] = {}
         self._lock = threading.Lock()
         self._budget = text_budget  # None: no limit
         self._held_bytes = 0
@@ -151,15 +155,19 @@ class PageCatalog:
             self._evict()
 
     def entries(self) -> list[Entry]:
-        """Every readable page. An unreadable page is logged ``page_unreadable`` on every call, as before,
-        and left out."""
+        """Every readable page. An unreadable page is logged ``page_unreadable`` once and left out, here and
+        in search, until its file changes."""
         with self._lock:
             out = []
             for name, signature in self._listing().items():
+                if self._unreadable.get(name) == signature:
+                    continue
                 entry = self._entries.get(name)
                 if entry is None or entry.view is None:
-                    page = self._read(self.pages_dir / name)
+                    page, damaged = self._read(self.pages_dir / name)
                     if page is None:
+                        if damaged:
+                            self._unreadable[name] = signature
                         continue
                     if entry is None:
                         entry = self._entries[name] = Entry(signature, None)
@@ -172,9 +180,10 @@ class PageCatalog:
         (else None), the ``fetch`` that gives the page at an index (decompressing held text, else reading
         the file), and the file names listed. A page read from its file is held if the budget takes it;
         either way its id, turn, and kind are kept, and a page that cannot be read is logged
-        ``page_unreadable`` and left out."""
+        ``page_unreadable`` once and left out until its file changes."""
         with self._lock:
-            listing = list(self._listing().items())
+            listing = [(name, signature) for name, signature in self._listing().items()
+                       if self._unreadable.get(name) != signature]
             self._listed_bytes = sum(signature[1] for _, signature in listing)
             out = []
             for name, _ in listing:
@@ -200,10 +209,11 @@ class PageCatalog:
         except OSError:
             return  # the next listing reads it
         try:
-            view = _view(current_stub(page))
-        except (KeyError, TypeError, AttributeError):
+            view = _view(check_page(current_stub(page), path.name.removesuffix(".json")))
+        except (KeyError, TypeError, ValueError, AttributeError):
             return  # a stored page with a malformed stub: the next listing reads it, and logs it
         with self._lock:
+            self._unreadable.pop(path.name, None)
             known = self._entries.get(path.name)
             if known is None or known.signature != signature:
                 self._drop(path.name)
@@ -214,7 +224,7 @@ class PageCatalog:
         line = entry.lines.get(salient)
         if line is not None:
             return line
-        page = self._read(self.pages_dir / f"{entry.id}.json") if salient else entry.view
+        page = self._read(self.pages_dir / f"{entry.id}.json")[0] if salient else entry.view
         if page is None:  # unreadable now (logged): the line without identifiers, not kept
             return index_line(entry.view, False)
         line = entry.lines[salient] = index_line(page, salient)
@@ -237,6 +247,8 @@ class PageCatalog:
             listing = {}
         for name in [n for n, e in self._entries.items() if listing.get(n) != e.signature]:
             self._drop(name)
+        for name in [n for n, signature in self._unreadable.items() if listing.get(n) != signature]:
+            del self._unreadable[name]  # changed or gone: read it again
         return listing
 
     def _drop(self, name: str) -> None:
@@ -345,16 +357,19 @@ class PageCatalog:
                 held = packed = None
         if packed is not None:
             return held._replace(text=zlib.decompress(packed))
-        page = self._read(self.pages_dir / name)
+        page, damaged = self._read(self.pages_dir / name)
         found = None
         if page is not None:
             try:
                 found = search_entry(page)
             except (KeyError, TypeError, AttributeError) as e:
                 self._log({"event": "page_unreadable", "path": name, "error": str(e)})
+                damaged = True
         with self._lock:
             if found is None:
                 self._drop(name)
+                if damaged:
+                    self._unreadable[name] = signature
                 return None
             entry = self._entries.get(name)
             if entry is None or entry.signature != signature:
@@ -365,37 +380,84 @@ class PageCatalog:
             self._hold(name, entry, found, signature[1])
         return found
 
-    def _read(self, path: Path) -> dict[str, Any] | None:
+    def _read(self, path: Path) -> tuple[dict[str, Any] | None, bool]:
+        """The page in ``path`` and False, or None and whether its content is damaged: True when the file
+        was read but is not a page record (not UTF-8, not JSON, too deep, or the wrong shape), False when
+        the read itself failed (OSError), which may not happen again. Either is logged ``page_unreadable``;
+        a failed read adds ``will_retry`` (not for a file gone since the listing, which the next listing
+        leaves out)."""
         try:
-            page = current_stub(loads_bounded(path.read_text(encoding="utf-8")))
-            _view(page)  # the fields every reader needs
-            return page
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            event = {"event": "page_unreadable", "path": path.name, "error": str(e)}
+            if not isinstance(e, FileNotFoundError):
+                event["will_retry"] = True
+            self._log(event)
+            return None, False
+        except ValueError as e:  # not UTF-8
             self._log({"event": "page_unreadable", "path": path.name, "error": str(e)})
-            return None
+            return None, True
+        try:
+            return load_page(text, path.name.removesuffix(".json")), False
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            self._log({"event": "page_unreadable", "path": path.name, "error": str(e)})
+            return None, True
 
 
 def _view(page: dict[str, Any]) -> dict[str, Any]:
-    """The fields every reader needs. A page whose id is not a string or whose turn is not an integer is
-    damaged: it is refused here, so it is logged unreadable and left out, rather than breaking the sort
-    of every search and index (reviewer-1 on PR #215)."""
-    stub = page["stub"]
-    if not isinstance(stub, dict):
-        raise TypeError("page stub is not an object")
+    """The fields the index and page ids read, of a page ``check_page`` passed."""
+    return {"id": page["id"], "turn": page["turn"], "stub": page["stub"]}
+
+
+def check_page(page: Any, page_id: str | None = None) -> dict[str, Any]:
+    """``page`` if it is a page record, else TypeError or KeyError, or ValueError for another id
+    (contract rule 18).
+
+    A page record is an object with a string ``id`` (equal to ``page_id``, the id its file is named
+    by, when given), an integer ``turn`` (not a bool), a ``messages`` list, and a ``stub`` object whose
+    ``user_text`` is a string, whose ``tools`` and ``paths`` are lists of strings, and whose
+    ``system_text`` and ``reminder_text``, when present, are strings. Those are every field the index
+    line, search, and the sort of pages read outside ``messages``. A file whose record names another id
+    would be listed by search and the index under that id, which recall cannot find (reviewer A on
+    PR #228).
+
+    Nothing inside ``messages`` is checked. Every reader of a page's messages (``render_page``, the
+    stub rule, search, the identifiers the index lists) skips a message, block, or field of the wrong
+    type, and ``render_page`` shows it as ``[malformed ... omitted]``. So for a page that passes,
+    ``render_page``, ``search_entry``, and ``index_line`` return without raising, and recall, search, and
+    the index all read it (``tests/test_damaged_pages.py`` damages each field of sample pages to check
+    this). Every page file is read through it, by ``load_page``; a file that fails is logged
+    ``page_unreadable`` and left out of the index and search, and recalling it is an error. A page whose
+    id or turn has the wrong type would break the sort of every search and index (reviewer-1 on PR #215);
+    one whose stub has the wrong shape would fail every index build, and so every request (PR #225)."""
+    if not isinstance(page, dict):
+        raise TypeError("page record is not an object")
     if not isinstance(page["id"], str):
         raise TypeError("page id is not a string")
+    if page_id is not None and page["id"] != page_id:
+        raise ValueError("page id is not the id its file is named by")
     turn = page["turn"]
     if not isinstance(turn, int) or isinstance(turn, bool):
         raise TypeError("page turn is not an integer")
-    return {"id": page["id"], "turn": turn, "stub": stub}
-
-
-def check_page(page: Any) -> dict[str, Any]:
-    """``page`` if it has the shape of a page record (``_view``'s fields and a ``messages`` list),
-    else TypeError or KeyError: what ``get_page`` returns must be safe to render and recall."""
-    if not isinstance(page, dict):
-        raise TypeError("page record is not an object")
-    _view(page)
     if not isinstance(page["messages"], list):
         raise TypeError("page messages is not a list")
+    stub = page["stub"]
+    if not isinstance(stub, dict):
+        raise TypeError("page stub is not an object")
+    if not isinstance(stub["user_text"], str):
+        raise TypeError("page stub user_text is not a string")
+    for name in ("system_text", "reminder_text"):
+        if name in stub and not isinstance(stub[name], str):
+            raise TypeError(f"page stub {name} is not a string")
+    for name in ("tools", "paths"):
+        values = stub[name]
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            raise TypeError(f"page stub {name} is not a list of strings")
     return page
+
+
+def load_page(text: str, page_id: str) -> dict[str, Any]:
+    """The page record in the text of page ``page_id``'s file, its stub rebuilt if it is a pre-v0.1.3
+    Codex stub (``current_stub``). Raises ValueError (not JSON, nested deeper than ``MAX_JSON_DEPTH``, or
+    another id), or TypeError or KeyError (not a page record: ``check_page``)."""
+    return current_stub(check_page(loads_bounded(text), page_id))

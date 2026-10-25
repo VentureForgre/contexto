@@ -309,7 +309,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
 14. **Transform failures.** Expected failures never reuse the component that failed, and only the
     terminal step below may forward the CLI's original request:
     - **Degraded mode** (every request sent in it is logged with `degraded: true`) is entered on `page_conflict` (a stored page differs in
-      `{turn, messages}` under its id, which can only mean corruption) or `store_error` (the store
+      `{turn, messages}` under its id, or its file holds no page record with that id, rule 18;
+      either can only mean corruption) or `store_error` (the store
       cannot be read or written). In degraded mode the engine pages nothing and never rotates: it
       sends the last good transform (the current `E`, with its in-memory `pinned_text` and
       `index_text`) extended append-only with the new messages. That is always protocol-valid,
@@ -464,8 +465,19 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     - Tool output or Codex call arguments that deep are indexed and rendered as plain text. A page
       file that deep, or one that is not JSON or not a page record, is logged `page_unreadable`:
       search and the index skip it, `contexto_recall` and a `contexto_pin` that cites it return a
-      tool error, and `contexto recall` prints an error and exits 1. Paging the same turn onto it
-      again is a `page_conflict`.
+      tool error, and `contexto recall` prints an error and exits 1. Search and the index log it
+      once per process until the file changes; each recall or pin of it logs it again. A read
+      that fails (permissions, too many open files, an I/O error) is logged with `will_retry`
+      and the page is skipped for that call only. Paging the
+      same turn onto it again is a `page_conflict`, so the file is quarantined and the turn paged
+      afresh (rule 14). A page record is an object with a string `id` equal to the id its file is
+      named by, an integer `turn`, a `messages` list, and a `stub` whose `user_text` is a string,
+      whose `tools` and `paths` are lists of strings, and whose `system_text` and
+      `reminder_text`, if present, are strings (`contexto.store.catalog.check_page`). Inside
+      `messages`, a message, content, block, text, tool output or Codex item type of the wrong
+      type is not searched and is rendered as `[malformed ... omitted]` in its place, so the rest
+      of the page can still be recalled and searched, and a partly damaged tool output does not
+      read as complete.
     Why: from Python 3.14, `json.loads` parses about 116,000 levels in a handler thread, but
     `json.dumps` writes only about 61,500 levels of objects and 104,600 of arrays; on 3.12 the two
     limits are near 10,000, a few levels apart. A recursive Python walk stops near 1,000. A value
@@ -845,8 +857,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   read from its file at each search and let go after it; a page that would be compressed and let go
   first, or that is larger than the budget even compressed, is not held. A page removed while a
   search runs is left out (the search runs again on a new listing when a listed file is gone at its
-  end, up to 3 passes, then returns the last result), and a page whose id is
-  not a string or whose turn is not an integer is logged `page_unreadable` and left out. Search
+  end, up to 3 passes, then returns the last result), and a page file rule 18 calls unreadable
+  (not JSON, too deep, or not a page record) is logged `page_unreadable` and left out. Search
   results do not depend on the budget. Limitations: a store larger than the budget's compressed
   capacity reads every page outside it at each search; at 6,000 synthetic pages (184 MiB of text,
   all held compressed at 64 MB) a search takes 0.26 to 0.41 s at 64 MB against 0.10 to 0.25 s with

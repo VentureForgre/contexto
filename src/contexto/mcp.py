@@ -460,18 +460,30 @@ class Server:
         text = texts[0] if texts else BUDGET_SPENT
         return [{"type": "text", "text": text}], None, {"chars": len(text) if texts else 0, **budget}
 
-    def _readable_page(self, page_id: str) -> dict[str, Any]:
-        """The page, or {} when it is gone or unreadable (logged by the store) since search listed it."""
-        try:
-            return self.store.get_page(page_id) or {}
-        except PageUnreadableError:
-            return {}
+    def _readable_pages(self, found: list[str]) -> tuple[list[str], list[tuple[str, dict[str, Any]]]]:
+        """The first ``SEARCH_LIMIT + SEARCH_MORE_LIMIT`` pages of ``found`` that can still be read, with
+        their records, and ``found`` without the pages read on the way that were gone or unreadable
+        (logged by the store) since search listed them: the reply leaves those out, rather than showing a
+        row with no turn. Later pages are not read, so the count of further matches can still include
+        one that went bad meanwhile (search itself skips unreadable pages)."""
+        pages, dropped = [], set()
+        for page_id in found:
+            if len(pages) == SEARCH_LIMIT + SEARCH_MORE_LIMIT:
+                break
+            try:
+                page = self.store.get_page(page_id)
+            except PageUnreadableError:
+                page = None
+            if page is None:
+                dropped.add(page_id)
+            else:
+                pages.append((page_id, page))
+        return [page_id for page_id in found if page_id not in dropped], pages
 
     def _tool_search(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], None, dict[str, Any]]:
         _reject_extra(args, {"query"})
         query = _require_str(args, "query")
-        found = self.store.search(query)  # best first (D34)
-        pages = [(page_id, self._readable_page(page_id)) for page_id in found[:SEARCH_LIMIT + SEARCH_MORE_LIMIT]]
+        found, pages = self._readable_pages(self.store.search(query))  # best first (D34)
         # The best pages are chosen by relevance and shown newest first, so among them the newest statement
         # of a fact comes first (D28); the next best are listed newest first too. In each part turn pages
         # come first and paged context blocks after them, under their own line (D34).

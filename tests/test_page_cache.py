@@ -1,5 +1,6 @@
 """The per-process page cache behind search, the index, and page ids (D34, ``contexto.store.catalog``)."""
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -61,19 +62,73 @@ def test_search_drops_quarantined_pages_and_rereads_a_changed_file(tmp_path):
     assert store.search("haystack") == [a]
 
 
-def test_an_unreadable_page_is_logged_each_call_and_skipped(tmp_path):
+def test_an_unreadable_page_is_logged_once_until_its_file_changes_and_skipped(tmp_path):
+    """Logged once per file, not at every index build and search: each request builds the index, so one
+    damaged page added a line per request (reviewers on PR #228). Changed, it is read and logged again."""
     store = SessionStore(tmp_path, "s1")
     [a] = store.page_out([page("needle")], 1)
-    (store.pages_dir / "pg_00000000000000ff.json").write_text("{not json")
+    bad = store.pages_dir / "pg_00000000000000ff.json"
+    bad.write_text("{not json")
+
+    def logged() -> list[str]:
+        log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+        return [e["path"] for e in log if e["event"] == "page_unreadable"]
+
     assert store.search("needle") == [a] and store.search("needle") == [a]
+    assert a in store.index_text(400) and store.page_ids() == [a]
+    assert logged() == ["pg_00000000000000ff.json"]
+    bad.write_text("{still not json")  # another size: the file changed
+    assert store.search("needle") == [a] and store.index_text(400)
+    assert logged() == ["pg_00000000000000ff.json"] * 2
+    bad.unlink()
+    assert store.search("needle") == [a] and logged() == ["pg_00000000000000ff.json"] * 2
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads a file whatever its mode")
+def test_a_page_file_that_could_not_be_opened_is_read_again_on_the_next_call(tmp_path):
+    """A failed read (here permission denied, later fixed) says nothing about the page: it is logged and
+    skipped this time, not kept as unreadable, since its size and times do not change when it is fixed
+    (reviewers A and B on PR #228)."""
+    store = SessionStore(tmp_path, "s1")
+    [a] = store.page_out([page("needle")], 1)
+    path = store.pages_dir / f"{a}.json"
+    fresh = SessionStore(tmp_path, "s1")  # a restarted process, which reads every page
+    path.chmod(0o000)
+    try:
+        assert fresh.search("needle") == [] and a not in fresh.index_text(400) and fresh.page_ids() == []
+    finally:
+        path.chmod(0o600)
+    assert fresh.search("needle") == [a] and a in fresh.index_text(400) and fresh.page_ids() == [a]
     log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
-    assert [e["path"] for e in log if e["event"] == "page_unreadable"] == ["pg_00000000000000ff.json"] * 2
+    failed = [e for e in log if e["event"] == "page_unreadable"]
+    assert failed and all(e["path"] == f"{a}.json" and e["will_retry"] is True for e in failed)
+
+
+@pytest.mark.parametrize("call", ["search", "index_text"])
+def test_one_read_that_fails_with_too_many_open_files_is_retried_on_the_next_call(tmp_path, monkeypatch, call):
+    store = SessionStore(tmp_path, "s1")
+    [a] = store.page_out([page("needle")], 1)
+    fresh = SessionStore(tmp_path, "s1")
+    read_text = Path.read_text
+    failures = [OSError(errno.EMFILE, "Too many open files")]
+
+    def flaky(self, *args, **kwargs):
+        if self.name == f"{a}.json" and failures:
+            raise failures.pop()
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    first = fresh.search("needle") if call == "search" else fresh.index_text(400)
+    assert not failures and a not in first
+    assert fresh.search("needle") == [a] and a in fresh.index_text(400)
 
 
 @pytest.mark.parametrize("stub", ["not an object", None])
-def test_repaging_a_stored_page_with_a_malformed_stub_returns_its_id(tmp_path, stub):
-    """A stored page with the same content keeps its id even when its stub was tampered with: the catalog
-    leaves it to the next listing, which logs it (reviewer-1 on PR #204)."""
+def test_repaging_a_stored_page_with_a_malformed_stub_is_a_page_conflict(tmp_path, stub):
+    """A stored page with the same content but a tampered stub is no page record (rule 18). Re-paging
+    it used to return its id (reviewer-1 on PR #204), and the page then stayed out of the index and
+    search for good. A conflict lets the engine quarantine the file and page the turn afresh (rule 14;
+    reviewers on PR #228)."""
     store = SessionStore(tmp_path, "s1")
     [a] = store.page_out([page("needle")], 1)
     path = store.pages_dir / f"{a}.json"
@@ -81,10 +136,11 @@ def test_repaging_a_stored_page_with_a_malformed_stub_returns_its_id(tmp_path, s
     record["stub"] = stub
     path.write_text(json.dumps(record))
     fresh = SessionStore(tmp_path, "s1")
-    assert fresh.page_out([page("needle")], 1) == [a]
-    assert fresh.search("needle") == []
-    log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
-    assert [e["path"] for e in log if e["event"] == "page_unreadable"] == [f"{a}.json"]
+    with pytest.raises(PageConflictError) as e:
+        fresh.page_out([page("needle")], 1)
+    assert e.value.page_id == a and fresh.search("needle") == []
+    fresh.quarantine_page(a)
+    assert fresh.page_out([page("needle")], 1) == [a] and fresh.search("needle") == [a]
 
 
 @pytest.mark.parametrize("variant", ["default", "legacy"])
