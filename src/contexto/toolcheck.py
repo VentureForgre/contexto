@@ -81,6 +81,24 @@ _NOTICE_BLOCK = re.compile(r"\s*<system-reminder>\s*(?:The following deferred to
                            r"again|The following MCP servers |# MCP Server Instructions[ \t]*(?:\r?\n|\Z))")
 CONTEXT_TAG, CONTEXT_END = "<system-reminder>", "</system-reminder>"
 INTERRUPT_MARKER = "[Request interrupted by user"  # contexto.rewrite.INTERRUPT_MARKER: Esc during a tool run
+TOOL_RESULT_MISSING = "[Tool result missing due to internal error]"  # contexto.rewrite.TOOL_RESULT_MISSING
+# D47: on 5.x ids a prompt typed during a tool run (queued) arrives inside a role "system" text between these
+# two sentences of Claude Code's (2.1.302 and 2.1.310, reviewer A's pty captures); other reminders may follow.
+QUEUED_OPEN = "The user sent a new message while you were working:"
+QUEUED_CLOSE = ("This is how Claude Code surfaces messages the user sends mid-turn \u2014 within the running turn, "
+                "often alongside the next tool result, rather than as a separate conversation turn. Address the "
+                "message above as you continue this turn.")
+
+
+def _without_queued(text: str) -> str:
+    """A role ``system`` text without the queued prompts in it: from the first ``QUEUED_OPEN`` to the end of
+    the last ``QUEUED_CLOSE``. The prompt can quote the closing sentence, but Claude Code's own comes after
+    it, so the last one ends the user's text; with no closing sentence after the opener, the rest is dropped."""
+    start = text.find(QUEUED_OPEN)
+    if start < 0:
+        return text
+    end = text.rfind(QUEUED_CLOSE)
+    return text[:start] + (text[end + len(QUEUED_CLOSE):] if end > start else "")
 
 
 def _notice_block(text: str) -> bool:
@@ -89,6 +107,13 @@ def _notice_block(text: str) -> bool:
     that form; a typed prompt that starts with an imitation and goes on with text does not)."""
     return (_NOTICE_BLOCK.match(text) is not None and text.rstrip().endswith(CONTEXT_END)
             and text.count(CONTEXT_TAG) == 1)
+
+
+def _result_missing(block: dict) -> bool:
+    """Claude Code's synthetic result for a tool run it lost (contexto.rewrite._result_missing)."""
+    if block.get("type") != "tool_result":
+        return False
+    return any(text.strip().startswith(TOOL_RESULT_MISSING) for text in _texts(block.get("content")))
 
 
 def _named(tool: Any) -> bool:
@@ -113,22 +138,28 @@ def _system_texts(request: dict[str, Any]) -> list[str]:
     message holds no ``tool_result``: that position is the typed prompt (a plain-string message is all
     prompt), and no genuine notice block sat there in the 2.1.310 matrix. Nor is any text block after
     a ``[Request interrupted by user`` block: a prompt typed after Esc lands there, in the tool-result
-    message, after that marker (reviewer A's pty captures on 2.1.302 and 2.1.310). So a prompt that
-    imitates a notice, alone, followed by text, or typed after Esc, is not read, nor is a CLAUDE.md
-    quoted in a context block. What remains readable is a user's earlier text block of a message with
-    several, typed as one exact copy of a notice; Claude Code sends a typed prompt as one block, so this
-    was not seen."""
+    message, after that marker (reviewer A's pty captures on 2.1.302 and 2.1.310), nor any text block
+    of a message holding Claude Code's synthetic "[Tool result missing due to internal error]" result,
+    where a prompt queued during a tool run, then Esc and Enter, landed with no marker (D47). A role
+    ``system`` text is read without the queued prompts in it (``_without_queued``): on 5.x ids a prompt
+    typed during a tool run arrives there, between Claude Code's two sentences. So a prompt that
+    imitates a notice, alone, followed by text, typed after Esc, or queued, is not read, nor is a
+    CLAUDE.md quoted in a context block. What remains readable is a user's earlier text block of a
+    message with several, typed as one exact copy of a notice; Claude Code sends a typed prompt as one
+    block, so this was not seen."""
     texts = _texts(request.get("system"))
     for message in request.get("messages") or []:
         if not isinstance(message, dict):
             continue
         if message.get("role") == "system":
-            texts += _texts(message.get("content"))
+            texts += [_without_queued(text) for text in _texts(message.get("content"))]
         elif message.get("role") == "user" and isinstance(message.get("content"), list):
             blocks = [b for b in message["content"] if isinstance(b, dict)]
             text_at = [i for i, b in enumerate(blocks) if b.get("type") == "text" and isinstance(b.get("text"), str)]
             marker = next((n for n, i in enumerate(text_at) if blocks[i]["text"].startswith(INTERRUPT_MARKER)), None)
-            if marker is not None:
+            if any(_result_missing(b) for b in blocks):
+                text_at = []  # a prompt queued, then Esc, can land next to this result with no marker
+            elif marker is not None:
                 text_at = text_at[:marker]  # what follows the marker was typed after Esc
             elif text_at and not any(b.get("type") == "tool_result" for b in blocks):
                 text_at = text_at[:-1]  # the typed prompt
