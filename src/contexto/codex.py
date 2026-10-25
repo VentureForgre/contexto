@@ -74,9 +74,15 @@ def _is_message(item: dict) -> bool:
     return item.get("type", "message") == "message"
 
 
+def _is_text_part(part: Any) -> bool:
+    """A text part with string text. Any other value is skipped, so a damaged page file renders and is
+    searched without raising (an unhashable ``type`` cannot be looked up in a set)."""
+    return (isinstance(part, dict) and isinstance(part.get("type"), str) and part["type"] in TEXT_PART_TYPES
+            and isinstance(part.get("text"), str))
+
+
 def is_context_part(part: Any) -> bool:
-    return (isinstance(part, dict) and part.get("type") in TEXT_PART_TYPES
-            and isinstance(part.get("text"), str) and bool(CONTEXT_SECTION.match(part["text"])))
+    return _is_text_part(part) and bool(CONTEXT_SECTION.match(part["text"]))
 
 
 class ResponsesDialect(Dialect):
@@ -121,8 +127,7 @@ class ResponsesDialect(Dialect):
         if kind == "message":
             role = item.get("role", "unknown")
             return [(role, {"type": "text", "text": p["text"]}) for p in _parts(item)
-                    if isinstance(p, dict) and p.get("type") in TEXT_PART_TYPES and isinstance(p.get("text"), str)
-                    and not is_context_part(p)]
+                    if _is_text_part(p) and not is_context_part(p)]
         if kind in ("function_call", "custom_tool_call"):
             raw = item.get("arguments") if kind == "function_call" else item.get("input")
             try:
@@ -134,8 +139,7 @@ class ResponsesDialect(Dialect):
         if kind in ("function_call_output", "custom_tool_call_output"):
             out = item.get("output")
             content = out if isinstance(out, str) else [
-                {"type": "text", "text": p["text"]} for p in out or [] if isinstance(p, dict)
-                and p.get("type") in TEXT_PART_TYPES and isinstance(p.get("text"), str)]
+                {"type": "text", "text": p["text"]} for p in (out if isinstance(out, list) else []) if _is_text_part(p)]
             return [("user", {"type": "tool_result", "content": content})]
         return []
 

@@ -47,9 +47,9 @@ from typing import Any
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
 from contexto.paths import session_dir
 from contexto.private import open_private, private_dir, write_new
-from contexto.store.catalog import PageCatalog, check_page
+from contexto.store.catalog import PageCatalog, load_page
 from contexto.store.ledger import Ledger, LedgerCorruptError
-from contexto.store.pages import build_page, current_stub, render_index, same_content
+from contexto.store.pages import build_page, render_index, same_content
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 from contexto.store.search import rank
@@ -820,7 +820,7 @@ class SessionStore(LedgerOps):
                     stored = loads_bounded(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError) as e:
                     raise PageConflictError(f"{path} exists but cannot be read: {e}", page_id=page["id"]) from e
-                if not same_content(stored, page):
+                if not isinstance(stored, dict) or not same_content(stored, page):
                     raise PageConflictError(f"{path} exists with different turn or messages", page_id=page["id"])
                 page = stored  # the stored page stands, stub included
             self._catalog.add(path, page)  # the index needs no read of a page this process wrote (D34)
@@ -885,7 +885,7 @@ class SessionStore(LedgerOps):
             return None
         path = self.pages_dir / f"{page_id}.json"
         try:
-            return current_stub(check_page(loads_bounded(path.read_text(encoding="utf-8"))))
+            return load_page(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:

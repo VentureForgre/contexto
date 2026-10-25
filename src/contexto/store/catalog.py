@@ -200,7 +200,7 @@ class PageCatalog:
         except OSError:
             return  # the next listing reads it
         try:
-            view = _view(current_stub(page))
+            view = _view(check_page(current_stub(page)))
         except (KeyError, TypeError, AttributeError):
             return  # a stored page with a malformed stub: the next listing reads it, and logs it
         with self._lock:
@@ -367,35 +367,60 @@ class PageCatalog:
 
     def _read(self, path: Path) -> dict[str, Any] | None:
         try:
-            page = current_stub(loads_bounded(path.read_text(encoding="utf-8")))
-            _view(page)  # the fields every reader needs
-            return page
+            return load_page(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             self._log({"event": "page_unreadable", "path": path.name, "error": str(e)})
             return None
 
 
 def _view(page: dict[str, Any]) -> dict[str, Any]:
-    """The fields every reader needs. A page whose id is not a string or whose turn is not an integer is
-    damaged: it is refused here, so it is logged unreadable and left out, rather than breaking the sort
-    of every search and index (reviewer-1 on PR #215)."""
-    stub = page["stub"]
-    if not isinstance(stub, dict):
-        raise TypeError("page stub is not an object")
+    """The fields the index and page ids read, of a page ``check_page`` passed."""
+    return {"id": page["id"], "turn": page["turn"], "stub": page["stub"]}
+
+
+def check_page(page: Any) -> dict[str, Any]:
+    """``page`` if it is a page record, else TypeError or KeyError (contract rule 18).
+
+    A page record is an object with a string ``id``, an integer ``turn`` (not a bool), a ``messages``
+    list, and a ``stub`` object whose ``user_text`` is a string, whose ``tools`` and ``paths`` are lists
+    of strings, and whose ``system_text`` and ``reminder_text``, when present, are strings. Those are
+    every field the index line, search, and the sort of pages read outside ``messages``.
+
+    Nothing inside ``messages`` is checked. Every reader of a page's messages (``render_page``, the
+    stub rule, search, the identifiers the index lists) skips a message, block, or field of the wrong
+    type, and ``render_page`` shows it as ``[malformed ... omitted]``. So for a page that passes,
+    ``render_page``, ``search_entry``, and ``index_line`` return without raising, and recall, search, and
+    the index all read it (``tests/test_damaged_pages.py`` damages each field of sample pages to check
+    this). Every page file is read through it, by ``load_page``; a file that fails is logged
+    ``page_unreadable`` and left out of the index and search, and recalling it is an error. A page whose
+    id or turn has the wrong type would break the sort of every search and index (reviewer-1 on PR #215);
+    one whose stub has the wrong shape would fail every index build, and so every request (PR #225)."""
+    if not isinstance(page, dict):
+        raise TypeError("page record is not an object")
     if not isinstance(page["id"], str):
         raise TypeError("page id is not a string")
     turn = page["turn"]
     if not isinstance(turn, int) or isinstance(turn, bool):
         raise TypeError("page turn is not an integer")
-    return {"id": page["id"], "turn": turn, "stub": stub}
-
-
-def check_page(page: Any) -> dict[str, Any]:
-    """``page`` if it has the shape of a page record (``_view``'s fields and a ``messages`` list),
-    else TypeError or KeyError: what ``get_page`` returns must be safe to render and recall."""
-    if not isinstance(page, dict):
-        raise TypeError("page record is not an object")
-    _view(page)
     if not isinstance(page["messages"], list):
         raise TypeError("page messages is not a list")
+    stub = page["stub"]
+    if not isinstance(stub, dict):
+        raise TypeError("page stub is not an object")
+    if not isinstance(stub["user_text"], str):
+        raise TypeError("page stub user_text is not a string")
+    for name in ("system_text", "reminder_text"):
+        if name in stub and not isinstance(stub[name], str):
+            raise TypeError(f"page stub {name} is not a string")
+    for name in ("tools", "paths"):
+        values = stub[name]
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            raise TypeError(f"page stub {name} is not a list of strings")
     return page
+
+
+def load_page(text: str) -> dict[str, Any]:
+    """The page record in a page file's ``text``, its stub rebuilt if it is a pre-v0.1.3 Codex stub
+    (``current_stub``). Raises ValueError (not JSON, or nested deeper than ``MAX_JSON_DEPTH``), or
+    TypeError or KeyError (not a page record: ``check_page``)."""
+    return current_stub(check_page(loads_bounded(text)))

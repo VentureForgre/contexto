@@ -57,7 +57,13 @@ def _user_text(message: dict[str, Any]) -> str:
     content = message.get("content")
     if isinstance(content, str):
         return content
-    return "\n".join(b.get("text", "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text")
+    return "\n".join(b.get("text", "") for b in (content if isinstance(content, list) else []) if _is_text(b))
+
+
+def _is_text(block: Any) -> bool:
+    """A text block whose text is a string. Search, the stub, and the index skip any other text, as
+    ``render_page`` does (a damaged page file, rule 18)."""
+    return isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text", ""), str)
 
 
 def _view(turn: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -72,12 +78,13 @@ def _texts(turn: list[dict[str, Any]]):
         if isinstance(content, str):
             yield content
             continue
-        for block in content or []:
+        for block in content if isinstance(content, list) else []:
             if not isinstance(block, dict):
                 continue
             kind = block.get("type")
             if kind == "text":
-                yield block.get("text", "")
+                if _is_text(block):
+                    yield block.get("text", "")
             elif kind == "tool_use":
                 tool_input = block.get("input")
                 if isinstance(tool_input, str):  # a Codex custom_tool_call's raw input (B23)
@@ -90,7 +97,7 @@ def _texts(turn: list[dict[str, Any]]):
                 if isinstance(inner, str):
                     yield inner
                 for b in inner if isinstance(inner, list) else []:
-                    if isinstance(b, dict) and b.get("type") == "text":
+                    if _is_text(b):
                         yield b.get("text", "")
 
 
@@ -156,7 +163,7 @@ def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = block.get("name")
-                if name and name not in tools:
+                if isinstance(name, str) and name and name not in tools:
                     tools.append(name)
                 for key in _PATH_KEYS:
                     tool_input = block.get("input")

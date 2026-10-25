@@ -221,7 +221,9 @@ def test_an_unreadable_page_is_a_tool_error_logged_and_left_out_of_search(tmp_pa
     assert pinned["isError"] is True and "cannot be read" in pinned["content"][0]["text"]
     monkeypatch.setattr(store, "search", lambda query: [bad, good])  # listed before the file was damaged
     found = tool(server, "contexto_search", {"query": "x"})["result"]
-    assert found["isError"] is False and good in found["content"][0]["text"]
+    text = found["content"][0]["text"]
+    assert found["isError"] is False and good in text
+    assert bad not in text and "(turn None)" not in text and "more matching pages" not in text  # left out
     log = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
     assert [e["path"] for e in log if e["event"] == "page_unreadable"] == [f"{bad}.json"] * 3
 

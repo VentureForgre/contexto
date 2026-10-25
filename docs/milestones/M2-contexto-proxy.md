@@ -465,7 +465,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       file that deep, or one that is not JSON or not a page record, is logged `page_unreadable`:
       search and the index skip it, `contexto_recall` and a `contexto_pin` that cites it return a
       tool error, and `contexto recall` prints an error and exits 1. Paging the same turn onto it
-      again is a `page_conflict`.
+      again is a `page_conflict`. A page record is an object with a string `id`, an integer
+      `turn`, a `messages` list, and a `stub` whose `user_text` is a string, whose `tools` and
+      `paths` are lists of strings, and whose `system_text` and `reminder_text`, if present, are
+      strings (`contexto.store.catalog.check_page`). Inside `messages`, a value of the wrong type
+      is not searched and is rendered as `[malformed ... omitted]`, so the rest of the page can
+      still be recalled and searched.
     Why: from Python 3.14, `json.loads` parses about 116,000 levels in a handler thread, but
     `json.dumps` writes only about 61,500 levels of objects and 104,600 of arrays; on 3.12 the two
     limits are near 10,000, a few levels apart. A recursive Python walk stops near 1,000. A value
@@ -845,8 +850,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   read from its file at each search and let go after it; a page that would be compressed and let go
   first, or that is larger than the budget even compressed, is not held. A page removed while a
   search runs is left out (the search runs again on a new listing when a listed file is gone at its
-  end, up to 3 passes, then returns the last result), and a page whose id is
-  not a string or whose turn is not an integer is logged `page_unreadable` and left out. Search
+  end, up to 3 passes, then returns the last result), and a page file that
+  is not a page record (rule 18) is logged `page_unreadable` and left out. Search
   results do not depend on the budget. Limitations: a store larger than the budget's compressed
   capacity reads every page outside it at each search; at 6,000 synthetic pages (184 MiB of text,
   all held compressed at 64 MB) a search takes 0.26 to 0.41 s at 64 MB against 0.10 to 0.25 s with

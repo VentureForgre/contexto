@@ -38,11 +38,16 @@ def recall_limit(window_tokens: int | None, bytes_per_token: float | None) -> tu
 def render_page(page: dict[str, Any]) -> str:
     """Render a page's messages as plain text, thinking omitted. Deterministic for a given page.
 
+    Any value inside ``messages`` may be damaged in a page file a person edited: a message, content,
+    block, or text of the wrong type is shown as ``[malformed ... omitted]``, so this never raises for
+    a page ``check_page`` passed (rule 18).
+
     A page from a Codex session holds Responses API items (M2 B20); each is rendered by
     ``_responses_lines``, the same way the engine's retained-window snapshot renders it (A14)."""
     lines: list[str] = []
     turn = page.get("turn")
-    for message in page.get("messages") or []:
+    messages = page.get("messages")
+    for message in messages if isinstance(messages, list) else []:
         if not isinstance(message, dict):
             lines.append("[malformed message omitted]")
             continue
@@ -64,7 +69,7 @@ def render_page(page: dict[str, Any]) -> str:
                 continue
             kind = block.get("type")
             if kind == "text":
-                lines.append(block.get("text", ""))
+                lines.append(_text(block))
             elif kind in ("thinking", "redacted_thinking"):
                 continue
             elif kind == "tool_use":
@@ -84,12 +89,19 @@ def render_page(page: dict[str, Any]) -> str:
                         if not isinstance(part, dict):
                             lines.append("[malformed block omitted]")
                         elif part.get("type") == "text":
-                            lines.append(part.get("text", ""))
+                            lines.append(_text(part))
                         else:
                             lines.append(f"[{part.get('type', 'block')} omitted]")
             else:
                 lines.append(f"[{kind} omitted]")
     return "\n".join(lines)
+
+
+def _text(block: dict[str, Any]) -> str:
+    """A text block's text; a placeholder when it is not a string (a damaged page file, which search
+    does not read either: ``contexto.store.pages``)."""
+    text = block.get("text", "")
+    return text if isinstance(text, str) else "[malformed text omitted]"
 
 
 def is_responses_item(message: dict[str, Any]) -> bool:

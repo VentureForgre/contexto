@@ -1084,7 +1084,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     settings). `TESTED_VERSIONS` is unchanged: 2.1.302 works with the rules.
 
 - **D45. One nesting limit for JSON read from outside Contexto.** PR #225,
-  2026-10-25. Reviewers of #222 found deeply nested JSON crash paths: a tool result too deep for
+  2026-10-25. (PR #225 gave the number as provisional while D44 was unmerged; the note was dropped
+  once D44 merged and the number was confirmed. The Responses API's depth limit is still
+  unmeasured.) Reviewers of #222 found deeply nested JSON crash paths: a tool result too deep for
   `json.loads`, or too deep to walk, failed every later transform, so paging stopped for the session.
   PR #225 first caught `RecursionError` at each parse. Its review found the gap that leaves: from
   Python 3.14, `json.loads` parses deeper (about 116,000 levels) than `json.dumps` can write (about
