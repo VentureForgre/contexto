@@ -19,7 +19,8 @@ and runs `git clone` over SSH, which ignores HTTPS_PROXY and uses this machine's
 guard, HTTPS_PROXY points at a local proxy in this script that refuses every CONNECT and lists the hosts
 under `blocked`. Measured on 2.1.302 and 2.1.310, all eight scenarios: `blocked` stays empty, and
 sampling every descendant process of this script every 0.1 s (ps, and lsof on inet sockets) found no
-git or ssh process and no socket to anything but 127.0.0.1. A sample can miss a very short connection.
+ssh process, no git command that contacts a remote (Claude Code runs local git commands), and no socket
+to anything but 127.0.0.1. A sample can miss a very short connection.
 The `--work` directory is made absolute, and an existing one is deleted only if it is empty or holds
 this spike's `.argstub-work` marker.
 

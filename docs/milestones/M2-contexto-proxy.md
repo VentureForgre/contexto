@@ -116,7 +116,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   inside the `tool_result` and is paged with its turn). Such a block is carried only in Claude
   Code's exact form, one whole reminder starting `<system-reminder>\nContents of `, and only before
   any `[Request interrupted by user` block of that message (a prompt typed after Esc lands after
-  it); no other reminder next to a tool result is carried. And the
+  it). A file such a block imports with `@path` is carried with it (D47): a block of the same form
+  after it in the same message, whose `Contents of <path>:` names a file that an earlier carried
+  block of the message imports (relative paths resolve against the importing file's directory).
+  A message holding Claude Code's synthetic result `[Tool result missing due to internal error]`
+  carries nothing (D47: a prompt queued during a tool run, then Esc and Enter, can land there with
+  no marker). No other reminder next to a tool result is carried. And the
   `role: "system"` messages that the classification below marks as carried. All carried content is
   forwarded in the CLI's current form, never restored from a stored copy.
 - **Classification of `role: "system"` messages**, deterministic and in this order (amended by
@@ -168,8 +173,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
   countdown, plan mode entry and exit as one kind, file changed on disk, task-tools reminder, and
   the kinds that make up `messages[0]`, with the deferred-tool listing that 2.1.310 adds there, D46;
   and nested memory, D46: the latest block of each path is protected, newest first, only while the
-  protected ones total at most 4,000 tokens; an older copy of a path is superseded, and a latest one
-  past the cap pages with the unrecognised items). Superseded items
+  protected ones total at most 4,000 tokens, each counted as its page, the measure carried growth uses
+  (D47); an older copy of a path is superseded, and a latest one past the cap pages with the
+  unrecognised items; a file nested memory imports counts as nested memory, keyed by its own path).
+  Superseded items
   of a recognisable kind are paged first,
   then unrecognised ones, oldest first by position. Each paged item is its own immutable page (a
   context block is stored as a user message holding that block as sent), listed in the index with
@@ -905,9 +912,13 @@ lack the tools and are not judged), never `count_tokens`:
   or `# MCP Server Instructions`, and never when it is the last text block of a message that holds no
   `tool_result` (the typed prompt's place; a plain-string message is not read), nor after a
   `[Request interrupted by user` block (a prompt typed after Esc lands there, in the tool-result
-  message). A prompt imitating a notice, alone, followed by text, or typed after Esc, is therefore
-  not read; an exact copy typed as an earlier block of a several-block prompt would be, which Claude
-  Code does not send. The check reads the system prompt and then those messages and
+  message), nor in a message holding the synthetic `[Tool result missing due to internal error]`
+  result (D47). A role `system` text is read without the queued prompts in it: on 5.x ids a prompt
+  typed during a tool run arrives there, from "The user sent a new message while you were working:"
+  to Claude Code's sentence ending "Address the message above as you continue this turn." (D47; the
+  last such sentence ends it, and with none the rest of the text is dropped). A prompt imitating a
+  notice, alone, followed by text, typed after Esc, or queued, is therefore not read; an exact copy
+  typed as an earlier block of a several-block prompt would be, which Claude Code does not send. The check reads the system prompt and then those messages and
   blocks, in order, because Claude Code never edits history: an old listing stays when the server
   goes away. Later text overrides earlier text. Names under "The following
   deferred tools are no longer available" are removed. "N deferred tools are available again ...
