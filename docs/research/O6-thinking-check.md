@@ -18,7 +18,8 @@ time here is UTC.
 - The proxy keeps only the last value it sees (`UsageReader._take_transformations`,
   `proxy.py:533-537`). A drop reported in `message_start` and followed by an empty list in
   `message_delta` would be logged as `[]`. A separate fix is pending in PR #222 (in review, not
-  merged): it makes the proxy keep every distinct item across events. This run does not change
+  merged): it makes the proxy keep every distinct item across events. (Later: PR #222 merged on
+  2026-10-25 and shipped in v0.5.2; it merges the lists by count.) This run does not change
   `src`. In every streamed response that was
   read event by event (16 on `claude-haiku-5-5`, 1 on `claude-opus-5-5`), the field came only in
   `message_start`, and `message_delta` never carried it. The last-wins reading would not have hidden
