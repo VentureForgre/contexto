@@ -265,6 +265,77 @@ def test_decoding_stops_at_the_probe_request_so_a_later_unresolvable_record_is_h
         replay.build_request(early, PROBE, 32_000)
 
 
+def _parallel_records() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Claude Code 2.1.302's shape for parallel tool calls: one assistant message with three tool_use
+    blocks, then one user record per tool_result, with an attachment and a sidechain record inside
+    the run. The requests name the merged message, first with two results, then with all three."""
+    H = replay.message_hash
+    u1 = {"role": "user", "content": [{"type": "text", "text": "turn 1"}]}
+    a1 = {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{k}", "name": "Read", "input": {}}
+                                           for k in (1, 2, 3)]}
+    results = [{"type": "tool_result", "tool_use_id": f"t{k}", "content": f"result {k}"} for k in (1, 2, 3)]
+    two = {"role": "user", "content": results[:2]}
+    three = {"role": "user", "content": results}
+    params = {"model": "claude-opus-5-5", "max_tokens": 10, "betas": []}
+    records = [
+        {"type": "api-request-shape", "shapeHash": "sh", "shape": {"system": [], "tools": []}},
+        {"type": "api-request-blob", "hash": H(u1), "message": u1},
+        {"type": "api-request", "id": "q1", "shapeHash": "sh", "params": params, "keep": 0, "tail": [H(u1)]},
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant", "content": a1["content"]}},
+        {"type": "user", "message": {"role": "user", "content": results[:1]}},
+        {"type": "attachment", "attachment": {"type": "queued_command"}},
+        {"type": "user", "message": {"role": "user", "content": results[1:2]}},
+        {"type": "queue-operation", "operation": "enqueue"},
+        {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [{"type": "text", "text": "x"}]}},
+        {"type": "api-request", "id": "q2", "shapeHash": "sh", "params": params, "base": "q1", "keep": 1,
+         "tail": [H(a1), H(two)]},
+        {"type": "user", "message": {"role": "user", "content": results[2:]}},
+        {"type": "api-request", "id": "q3", "shapeHash": "sh", "params": params, "base": "q1", "keep": 1,
+         "tail": [H(a1), H(three)]},
+    ]
+    return records, {"u1": u1, "a1": a1, "two": two, "three": three, "results": results}
+
+
+def test_parallel_tool_results_decode_as_the_one_message_sent():
+    records, m = _parallel_records()
+    decoded = replay.recorded_messages(records)
+    assert decoded["q2"] == [m["u1"], m["a1"], m["two"]]
+    assert decoded["q3"] == [m["u1"], m["a1"], m["three"]]
+
+
+def test_the_merge_only_adds_and_only_within_a_run():
+    records, m = _parallel_records()
+    H = replay.message_hash
+    known = replay._known_messages(records)
+    single = {"role": "user", "content": m["results"][:1]}
+    assert known[H(single)] == single  # each record alone is still known, as before
+    # Not a prefix of the run: never registered, so a request naming it still fails closed.
+    tail = {"role": "user", "content": m["results"][1:]}
+    assert H(tail) not in known
+    bad = [*records, {"type": "api-request", "id": "q4", "shapeHash": "sh", "params": {}, "base": "q1", "keep": 1,
+                      "tail": [H(m["a1"]), H(tail)]}]
+    with pytest.raises(replay.ReplayError):
+        replay.recorded_messages(bad)
+    # A user text record or an assistant record ends a run.
+    for breaker in ({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "next"}]}},
+                    {"type": "assistant", "message": {"id": "m2", "role": "assistant", "content": [{"type": "text", "text": "ok"}]}}):
+        split = [*records[:5], breaker, *records[5:]]
+        assert H(m["two"]) not in replay._known_messages(split)
+
+
+def test_the_merge_changes_nothing_a_2_1_301_log_already_decoded(monkeypatch):
+    records = _records()
+    before = replay._known_messages(records)
+    monkeypatch.setattr(replay, "_merged_tool_results", lambda cc: [])
+    assert replay._known_messages(records) == before  # no tool-result runs: nothing added
+    records, _ = _parallel_records()
+    without = replay._known_messages(records)
+    monkeypatch.undo()
+    with_merge = replay._known_messages(records)
+    assert all(with_merge[h] == msg for h, msg in without.items())
+    assert len(with_merge) == len(without) + 2  # the two prefixes, nothing else
+
+
 def test_a_display_count_tokens_rejects_becomes_omitted_and_is_labeled():
     recs = _records()
     for r in recs:

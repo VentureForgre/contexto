@@ -6,9 +6,9 @@ From the repository root:
     python3 spikes/m2/acceptance/run.py score --h1 ANSWERS --h1-record H1JSON --baseline ANSWERS \
         --baseline-result REPLAYJSON [--partial]
     python3 spikes/m2/acceptance/run.py check --session-log PATH --cc-jsonl PATH [--bound 100000]
-    python3 spikes/m2/acceptance/run.py check-credential --seat-settings PATH        # zero spend
+    python3 spikes/m2/acceptance/run.py check-credential --seat-settings PATH [--model M]   # zero spend
     python3 spikes/m2/acceptance/run.py live --approved TOKENS --scratch DIR --home DIR --session ID \
-        --seat-settings PATH [--upstream URL]
+        --seat-settings PATH [--upstream URL] [--model M] [--allow-contexto-tools]
 The live mode refuses to start without an approved token figure that covers the plan, or with a
 plan below 2.5 times the bound; the guard stops before passing the approval, and the first 401 or
 403 stops the run. Nothing here has been run live.
@@ -199,6 +199,10 @@ def main(argv: list[str] | None = None) -> int:
     live.add_argument("--seat-settings", type=Path, required=True,
                       help="the seat's settings file whose apiKeyHelper the run uses, read-only")
     live.add_argument("--upstream", default=None, help="upstream base URL (default: $ANTHROPIC_BASE_URL)")
+    live.add_argument("--model", default=driver.MODEL, help=f"the model Claude Code runs (default: {driver.MODEL})")
+    live.add_argument("--allow-contexto-tools", action="store_true",
+                      help="add the mcp__contexto permission allow rule to the isolated Claude Code settings; "
+                           "off by default, since the contract runs acceptance on default settings")
     rep = sub.add_parser("replay", help="full-context baseline: one direct request after the H1 run")
     rep.add_argument("--cc-jsonl", type=Path, required=True, help="the H1 run's Claude Code session JSONL")
     rep.add_argument("--out", type=Path, required=True, help="private directory for the answers and counts")
@@ -216,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--turn-kbytes", type=int, default=40)
     cred = sub.add_parser("check-credential")
     cred.add_argument("--seat-settings", type=Path, required=True)
+    cred.add_argument("--model", default=driver.MODEL, help=f"the model Claude Code asks for (default: {driver.MODEL})")
     rc = sub.add_parser("reach", help="offline: can contexto_search reach every probe's answer page")
     rc.add_argument("--session-dir", type=Path, required=True, help="a run's sessions/<id> directory (pages/)")
     rc.add_argument("--seed", type=int, default=script.DEFAULT_SEED)
@@ -237,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "check-credential":
         from acceptance import credcheck
 
-        result = credcheck.check(args.seat_settings)
+        result = credcheck.check(args.seat_settings, model=args.model)
         print(json.dumps(result, indent=2))
         return 0 if result.get("pass") else 1
 
@@ -353,7 +358,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     # live: gates on the same Budget that dry-run and approval-table print
     upstream = args.upstream or os.environ.get("ANTHROPIC_BASE_URL")
-    return run_h1(s, b, params, args.approved, args.scratch, args.home, args.session, args.seat_settings, upstream)
+    return run_h1(s, b, params, args.approved, args.scratch, args.home, args.session, args.seat_settings, upstream,
+                  model=args.model, allow_contexto_tools=args.allow_contexto_tools)
 
 
 # Every live-only branch run_h1 can take. The H1 record lists the ones a run took; a dry run fails
@@ -365,11 +371,14 @@ LIVE_PATHS = ("gate_passed", "estimates_cover_turns", "watcher_started", "conten
 
 def run_h1(s: script.Script, b: budget.Budget, params: budget.Params, approved: int, scratch: Path, home: Path,
            session: str, seat_settings: Path, upstream: str | None, contexto: str = "contexto",
-           inject: Callable[[int], None] | None = None) -> int:
+           inject: Callable[[int], None] | None = None, model: str = driver.MODEL,
+           allow_contexto_tools: bool = False) -> int:
     """H1 through the real launcher. Live calls this with the owner's upstream; the stub dry run calls
     it with a local, non-forwarding one, and nothing else differs. ``inject`` (dry runs only) is
     called after each finished turn with its index and may raise, to drive the stop and error
-    branches. The H1 record is written however the run ends; a harness error is re-raised after it."""
+    branches. ``model`` is passed to Claude Code; ``allow_contexto_tools`` adds the ``mcp__contexto``
+    allow rule to the isolated settings (``driver.isolated_config``). The H1 record names both. The
+    H1 record is written however the run ends; a harness error is re-raised after it."""
     if b.history_tokens < 2.5 * params.bound:
         print(f"refusing: planned history {b.history_tokens:,} is below 2.5x the bound ({int(2.5 * params.bound):,})",
               file=sys.stderr)
@@ -401,12 +410,13 @@ def run_h1(s: script.Script, b: budget.Budget, params: budget.Params, approved: 
         print(f"refusing: {len(estimates)} spend estimates for {len(s.turns)} turns", file=sys.stderr)
         return 2
     taken = {"gate_passed", "estimates_cover_turns"}
-    config = driver.isolated_config(scratch, seat_settings)
+    config = driver.isolated_config(scratch, seat_settings, allow_contexto_tools=allow_contexto_tools)
     env = driver.child_env(home, config)
     env.pop("ANTHROPIC_BASE_URL", None)  # the launcher points Claude Code at its proxy; nothing goes around it
     session_log = home / "sessions" / session / "log.jsonl"
-    transport = driver.StreamJsonTransport(driver.launcher_command(session, params.bound, upstream, contexto), scratch,
-                                           env, session_log, approved=h1_cap, reserve=params.max_tokens_reserve)
+    command = driver.launcher_command(session, params.bound, upstream, contexto, model)
+    transport = driver.StreamJsonTransport(command, scratch, env, session_log, approved=h1_cap,
+                                           reserve=params.max_tokens_reserve)
     if transport.watcher is not None:
         taken.add("watcher_started")
     run = driver.Run(transport, h1_cap, params.max_tokens_reserve, estimates)
@@ -439,7 +449,8 @@ def run_h1(s: script.Script, b: budget.Budget, params: budget.Params, approved: 
     spend = h1_spend(run.spent, detectors.read_jsonl(session_log) if session_log.exists() else [],
                      abnormal=status != 0, reserve=params.max_tokens_reserve)
     taken.add("record_written")
-    record = {**spend, "session": session, "turns": run.turns, "stream_compactions": transport.compactions, "cli_exit": cli_exit,
+    record = {**spend, "session": session, "model": model, "allow_contexto_tools": allow_contexto_tools,
+              "turns": run.turns, "stream_compactions": transport.compactions, "cli_exit": cli_exit,
               "approved": approved, "h1_cap": h1_cap, "baseline_worst": b.baseline_replay_worst,
               "planned_turns": len(s.turns), "turns_completed": len(answers),
               "probe_turns_completed": len(probe_answers), "stopped": stopped, "answers_file": answers_name,

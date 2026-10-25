@@ -83,7 +83,8 @@ def message_hash(message: dict[str, Any]) -> str:
 def _known_messages(cc_records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Every message a request record can name, by hash: request blobs, user records, and assistant
     replies. Claude Code writes one assistant record per content block (thinking, then text) under
-    the same message id, so consecutive records of one message are merged first, as it sent them."""
+    the same message id, so consecutive records of one message are merged first, as it sent them.
+    Parallel tool results are merged too (``_merged_tool_results``)."""
     known: dict[str, dict[str, Any]] = {}
     current_id, current = None, None
 
@@ -113,7 +114,43 @@ def _known_messages(cc_records: list[dict[str, Any]]) -> dict[str, dict[str, Any
             user = {"role": m.get("role"), "content": m.get("content")}
             known[message_hash(user)] = user
     flush()
+    for h, merged in _merged_tool_results(cc_records):
+        known.setdefault(h, merged)
     return known
+
+
+def _tool_results_only(content: Any) -> bool:
+    return isinstance(content, list) and bool(content) and all(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+
+
+def _merged_tool_results(cc_records: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    """The user messages Claude Code built from consecutive tool-result records, with their hashes.
+
+    Claude Code writes each result of a parallel tool call as its own ``user`` record but sends them
+    as one user message (live run #2, a probe turn's tool loop; the Opus run on 2.1.302: 31 of 182
+    request hashes unresolved without the merge, 0 with it). A run is the
+    consecutive non-sidechain ``user`` records whose content is only ``tool_result`` blocks; any
+    other ``user`` or ``assistant`` record ends it, and records of other kinds (attachments, queue
+    operations) do not. Every prefix of two or more records is returned, since a request may have
+    been sent with part of a run. The caller only adds these, so a request still decodes only from
+    hashes the CLI recorded."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    blocks: list[Any] = []
+    records = 0
+    for r in cc_records:
+        kind = r.get("type")
+        if r.get("isSidechain") or kind not in ("user", "assistant") or not isinstance(r.get("message"), dict):
+            continue
+        content = r["message"].get("content")
+        if kind == "user" and _tool_results_only(content):
+            blocks, records = blocks + list(content), records + 1
+            if records > 1:
+                merged = {"role": r["message"].get("role"), "content": list(blocks)}
+                out.append((message_hash(merged), merged))
+        else:
+            blocks, records = [], 0
+    return out
 
 
 def recorded_messages(cc_records: list[dict[str, Any]],

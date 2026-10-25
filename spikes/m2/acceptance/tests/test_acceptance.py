@@ -263,6 +263,97 @@ def test_isolated_config_names_only_the_helper_shim(tmp_path):
     assert "SECRET-HELPER-COMMAND" not in written and "env" not in json.loads(written)
 
 
+def test_launcher_command_takes_the_model_and_defaults_to_haiku():
+    assert driver.MODEL == "claude-haiku-5-5"
+    default = driver.launcher_command("s", 150_000, "http://127.0.0.1:9")
+    opus = driver.launcher_command("s", 150_000, "http://127.0.0.1:9", "/venv/bin/contexto", "claude-opus-5-5")
+    assert opus[0] == "/venv/bin/contexto" and opus[-2:] == ["--model", "claude-opus-5-5"]
+    assert opus[1:-1] == default[1:-1]  # nothing else differs
+
+
+def test_isolated_config_adds_the_contexto_allow_rule_only_when_asked(tmp_path):
+    seat = tmp_path / "seat.json"
+    seat.write_text(json.dumps({"apiKeyHelper": "echo SECRET-HELPER-COMMAND"}))
+    default = json.loads((driver.isolated_config(tmp_path / "a", seat) / "settings.json").read_text())
+    assert set(default) == {"apiKeyHelper"}  # default Claude Code settings: no permission rule
+    allowed = json.loads((driver.isolated_config(tmp_path / "b", seat, allow_contexto_tools=True)
+                          / "settings.json").read_text())
+    assert allowed == {"apiKeyHelper": default["apiKeyHelper"].replace(str(tmp_path / "a"), str(tmp_path / "b")),
+                       "permissions": {"allow": ["mcp__contexto"]}}
+    assert "SECRET-HELPER-COMMAND" not in json.dumps(allowed)
+
+
+def test_live_and_check_credential_pass_the_model_and_the_allow_flag(monkeypatch, tmp_path):
+    from acceptance import credcheck
+
+    seen = []
+    monkeypatch.setattr(run, "run_h1", lambda *a, **kw: seen.append(kw) or 0)
+    monkeypatch.setattr(credcheck, "check", lambda seat, **kw: seen.append(kw) or {"pass": True})
+    live = ["live", "--approved", "1", "--scratch", str(tmp_path), "--home", str(tmp_path), "--session", "s",
+            "--seat-settings", str(tmp_path / "seat.json"), "--upstream", "http://127.0.0.1:9"]
+    assert run.main(live) == 0
+    assert run.main([*live, "--model", "claude-opus-5-5", "--allow-contexto-tools"]) == 0
+    assert run.main(["check-credential", "--seat-settings", str(tmp_path / "seat.json")]) == 0
+    assert run.main(["check-credential", "--seat-settings", str(tmp_path / "seat.json"), "--model", "claude-opus-5-5"]) == 0
+    assert seen == [{"model": "claude-haiku-5-5", "allow_contexto_tools": False},
+                    {"model": "claude-opus-5-5", "allow_contexto_tools": True},
+                    {"model": "claude-haiku-5-5"}, {"model": "claude-opus-5-5"}]
+
+
+@pytest.mark.parametrize("model", [None, "claude-opus-5-5"])
+def test_credcheck_asks_claude_for_the_given_model(monkeypatch, tmp_path, model):
+    # A fake claude records its arguments and exits: zero spend, no request.
+    from acceptance import credcheck
+
+    argv_file = tmp_path / "argv.json"
+    fake = tmp_path / "claude"
+    fake.write_text(f"#!{sys.executable}\nimport json, sys\n"
+                    f"open({str(argv_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(credcheck.shutil, "which", lambda name: str(fake))
+    seat = tmp_path / "seat.json"
+    seat.write_text(json.dumps({"apiKeyHelper": "echo test-key-not-real"}))
+    result = credcheck.check(seat, timeout=30) if model is None else credcheck.check(seat, timeout=30, model=model)
+    assert result["ran"] and not result["request_seen"] and not result["pass"]
+    argv = json.loads(argv_file.read_text())
+    assert argv[argv.index("--model") + 1] == (model or "claude-haiku-5-5")
+
+
+def test_stubrun_passes_the_model_and_the_allow_flag(monkeypatch, tmp_path):
+    from acceptance import stubrun
+
+    seen = []
+    monkeypatch.setattr(stubrun, "dry_run", lambda *a, **kw: seen.append(kw) or {"ran": True})
+    base = [str(tmp_path / "seat.json"), "/venv/bin/contexto", str(tmp_path / "out")]
+    assert stubrun.main(base) == 0
+    assert stubrun.main([*base, "70", "--model", "claude-opus-5-5", "--allow-contexto-tools"]) == 0
+    assert stubrun.main([*base, "--model"]) == 2  # a missing value is refused, not taken as a path
+    assert [(kw["model"], kw["allow_contexto_tools"], kw["turn_bytes"]) for kw in seen] == [
+        ("claude-haiku-5-5", False, 40_000), ("claude-opus-5-5", True, 70_000)]
+
+
+def test_the_stub_upstream_names_the_runs_model():
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from threading import Thread
+
+    from acceptance import stubrun
+
+    models = []
+    for kwargs in ({}, {"model": "claude-opus-5-5"}):
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), stubrun.Stub("k", **kwargs).handler())
+        Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_port}/v1/messages", method="POST",
+                                         data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode())
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                models.append(json.loads(resp.read())["model"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+    assert models == ["claude-haiku-5-5", "claude-opus-5-5"]
+
+
 def test_child_env_drops_credentials_and_sets_the_config_dir(monkeypatch, tmp_path):
     for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
         monkeypatch.setenv(var, "x")

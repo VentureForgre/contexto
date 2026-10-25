@@ -61,6 +61,8 @@ contexto run --bound 150000 --session <id> --upstream <url> claude -p --input-fo
 
 - This is lane A's launcher (PR #40). Contexto's options come before `claude`, and everything
   after it passes through unchanged.
+- The model is `claude-haiku-5-5` unless `run.py live --model` names another (see "Other models and
+  Claude Code 2.1.302" below).
 - Each user turn is one stream-json line on stdin. A turn ends at the `result` event.
 - The scratch directory must not be inside any git work tree, checked with `git rev-parse
   --is-inside-work-tree`, so a nested directory is refused too.
@@ -614,6 +616,9 @@ run's isolated config directory:
   content block (thinking, then text) under one message id; merged, they hash to what it sent.
 - `api-request-shape` (matched by `shapeHash`): the system prompt and tools; the request's
   `params`: model, betas, thinking, output config.
+- Claude Code writes each result of a parallel tool call as its own `user` record but sends them as
+  one user message. The decoder also knows every merged prefix of a run of consecutive tool-result
+  records (2.1.302 Opus run: 31 of 182 request hashes resolved only this way).
 - The first request that holds the probe turn is replayed with all its messages, system messages
   included. A hash that resolves to nothing stops the replay; nothing is guessed or synthesized.
 
@@ -673,6 +678,46 @@ with its reminder, then the probe turn and its reminder), with 21 tools and abou
   change itself and reports it in `changes_from_recorded`.
 - **Result.** count_tokens 437,447 input; spend 447,659; the baseline scored 44 of 54. The beta set
   is the 10 listed above, labeled a no-replayed-thinking baseline.
+
+## Other models and Claude Code 2.1.302 (2026-10-25)
+
+The Opus 5.5 acceptance run on Claude Code 2.1.302 needed three changes that it made with scripts
+outside the repository. They are now part of the harness.
+
+**Model.** `run.py live`, `run.py check-credential`, and `stubrun.py` take `--model`; the default
+stays `claude-haiku-5-5` (`driver.MODEL`). The model reaches the `claude` command line, the H1
+record (`model`), and the stub upstream's replies. `run.py replay` takes the model from the H1
+request's recorded params, as before.
+
+```
+python3 spikes/m2/acceptance/run.py check-credential --seat-settings PATH --model claude-opus-5-5
+python3 spikes/m2/acceptance/stubrun.py <seat settings> <contexto> <out dir> --model claude-opus-5-5
+python3 spikes/m2/acceptance/run.py live ... --model claude-opus-5-5 [--allow-contexto-tools]
+```
+
+**Allow rule, opt-in.** `--allow-contexto-tools` (on `live` and `stubrun.py`) adds
+`"permissions": {"allow": ["mcp__contexto"]}` to the isolated Claude Code settings, beside the
+apiKeyHelper. It is off by default, since the contract runs acceptance on default Claude Code
+settings, and the H1 record says whether it was on (`allow_contexto_tools`). On 2.1.302, `claude
+-p` refuses every Contexto tool call without such a rule (2.1.301 ran them). D44, which makes
+`contexto run` allow Contexto's own tools, was not merged when this was written; once it is, the
+flag should not be needed.
+
+**Title side request.** On 2.1.302 the first Messages request is a title request: one message, no
+tool list, answered with no tool call, and absent from Claude Code's own `api-request` records. The
+stream-hold rule counted it as a turn end, so the Opus run had 25 turn ends against 24 and `check`
+credited nothing. `recall_credit.turn_answer_indices` now skips any request whose
+`original_message_count` is 1 (`side_request`). The proxy logs no tool-list flag, and the engine's
+`main` is no marker: the title request comes first, so it is logged as main. Main-conversation
+requests held two or more messages in every log measured, on 2.1.301 and 2.1.302. A log without
+`original_message_count` is read as before. On the Opus run's private session log, `run.py check`
+with `--session-dir` and `--answers` now finds 24 turn ends and credits q_p_03 through
+`contexto_search` (acceptance 3 true), with no script outside the repository.
+
+**Parallel tool results.** See the replay decoder above. The merge only adds candidates: a request
+still decodes only from hashes the CLI recorded, and a log with no tool-result runs decodes exactly
+as before. `classa.py` uses the same merge. The Opus run's transcript was deleted, so this part was
+not re-checked on it; the tests use synthetic records of the 2.1.302 shape.
 
 ## Open questions
 
