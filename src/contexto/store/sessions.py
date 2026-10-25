@@ -109,7 +109,7 @@ def session_ids(home: Path) -> list[str]:
 def session_info(home: Path, session_id: str) -> SessionInfo:
     store = SessionStore.open_existing(home, session_id)
     created, last = _times(store.dir)
-    pages = len(list(store.pages_dir.glob("pg_*.json"))) if store.pages_dir.is_dir() else 0
+    pages = sum(1 for p in store.pages_dir.glob("pg_*.json") if p.is_file()) if store.pages_dir.is_dir() else 0
     try:
         records = len(store.ledger.records())
     except LedgerError:

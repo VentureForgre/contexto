@@ -416,9 +416,14 @@ class PageNotFoundError(LookupError):
 
 
 class PageUnreadableError(ValueError):
-    """``get_page``: the page file exists but cannot be read (not UTF-8, not JSON, nested deeper than
-    ``MAX_JSON_DEPTH``, or valid JSON without a page record's shape). It is logged ``page_unreadable``
-    first. A ValueError, so a pin that cites the page is refused like any other invalid source."""
+    """``get_page``: the page file exists but its read failed (an OSError, ``damaged`` False) or its
+    content is not a page record (not UTF-8, not JSON, nested deeper than ``MAX_JSON_DEPTH``, or valid JSON
+    without a page record's shape; ``damaged`` True). It is logged ``page_unreadable`` first. A ValueError,
+    so a pin that cites the page is refused like any other invalid source."""
+
+    def __init__(self, message: str, *, damaged: bool = True) -> None:
+        super().__init__(message)
+        self.damaged = damaged
 
 
 class KeyFileError(RuntimeError):
@@ -894,7 +899,7 @@ class SessionStore(LedgerOps):
             return None
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             self.log({"event": "page_unreadable", "path": path.name, "error": str(e)})
-            raise PageUnreadableError(f"page {page_id} cannot be read") from None
+            raise PageUnreadableError(f"page {page_id} cannot be read", damaged=not isinstance(e, OSError)) from None
 
     def page_ids(self) -> list[str]:
         """Every page id in this store, newest turn first."""

@@ -36,7 +36,8 @@ def run(args: argparse.Namespace) -> int:
     try:
         page = store.get_page(args.page_id)
     except PageUnreadableError as e:
-        return fail(f"{e} in session {session_id}: its stored file is damaged (logged page_unreadable)")
+        cause = "its stored file is damaged" if e.damaged else "reading its stored file failed"
+        return fail(f"{e} in session {session_id}: {cause} (logged page_unreadable)")
     if page is None:
         return fail(f"no page {args.page_id!r} in session {session_id}")
     limit, note = recall_limit(*store.window())

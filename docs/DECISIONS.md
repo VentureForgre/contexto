@@ -1190,6 +1190,69 @@ the owner's delegation. Open decisions are listed at the end with the options an
     count. A non-string id (a list) raised `TypeError`, logged as `toolcheck_error`; it now does not
     match. A request whose trailing messages hold no failed result returns before the history is
     scanned.
+  - Amended by D47, which closes cases D46 missed and adds one rule. Added: a tool-result message with
+    Claude Code's synthetic missing result carries nothing and is not read. Closed: a queued prompt on
+    5.x ids, which the missing-tools check still read; files nested memory imports, which were paged
+    with their turn; and the cap, which now counts each block as its page.
+- **D47. Nested-memory follow-ups to D46.** Claude, 2026-10-25, under D0; contract change. Reviewer
+  A's round 3 findings on PR #227, checked at zero spend (loopback stub, temp config dirs, fake key)
+  on 2.1.302 and 2.1.310. Every rule below was run over 13,097 captured request bodies (the 19 kept
+  reminders matrices and every capture of PR #227's reviews and builders) with the code before and
+  after: the only differences are the rejected imitations and the newly carried imports.
+  - **Synthetic missing result.** In 2 of 24 pty runs on 2.1.302, a prompt queued during a tool run,
+    then Esc and Enter, arrived as `[tool_result "[Tool result missing due to internal error]"
+    (is_error), prompt]` with no interrupt marker: a pasted exact-form CLAUDE.md was carried on
+    claude-opus-5-5, and a pasted listing was read as a notice on claude-sonnet-4-6. Reviewer A
+    suggested carrying and reading only when the message has a `tool_result` that is not an error. That
+    rule loses genuine blocks: a Read of a missing file attaches its directory's CLAUDE.md next to the
+    error result (2.1.310, claude-opus-5-5, zero-spend capture). Rule: a tool-result message
+    with that synthetic result carries nothing, and the missing-tools check reads none of its text
+    blocks. A result counts only with `is_error` true and the marker as its whole text, as every
+    captured one has: a Bash `echo` of the marker has `is_error` false and must not stop a Read's
+    nested memory in the same round from being carried (reviewer A, PR #230). Only the 2 imitations
+    hold that result in the 13,097 bodies. In reviewer A's 11 interrupted parallel rounds (a Read and
+    a Bash) per binary, Claude Code never sent the Read's nested memory, so a genuine block next to a
+    synthetic result was not seen.
+  - **Queued prompts on 5.x ids.** A prompt typed during a tool run that is one whole
+    `<system-reminder>` block arrives as a role `system` text "The user sent a new message while you
+    were working:\n<prompt>\n\nThis is how Claude Code surfaces messages ... Address the message
+    above as you continue this turn." with other reminders after it (2.1.302 and 2.1.310,
+    claude-opus-5-5). The check read it whole: a queued fake listing gave offered True with no server,
+    a fake disconnect a false warning (4 of 4 runs, also on main before PR #227). Any other queued
+    prompt (plain text, a reminder followed by text, a one-line mention, the first of two queued
+    prompts) arrives as a user text block next to the result, starting with the opening sentence; it
+    is neither read nor carried (reviewer A, PR #230). Rule: a role `system` text that starts with the
+    opening sentence is read from the end of the last closing sentence on; with no closing sentence,
+    not at all. A text that only quotes the opening sentence later (a nested CLAUDE.md in 2.1.302's
+    role `system` text) is read whole. The rewrite carries such a message as text, pageable by the
+    fallback, as before.
+  - **Imported memory.** A file a nested CLAUDE.md imports with `@path` arrives on 2.1.310 with 5.x ids
+    as its own whole reminder, `Contents of <path>:`, after the importer in the same message, depth
+    first; on 2.1.302 it was in the carried role `system` message. Captured forms: `@docs/x.md`,
+    `@./x.md`, `@../x.md` and an imported file's own `@more.md` resolve against the importing file's
+    directory (normalised), an absolute path is kept as written (`/tmp/...` is not resolved to
+    `/private/tmp/...`); a reference in a code span, a missing file, and a reference followed by a
+    comma send nothing; `@~/x.md` sent nothing in the `-p` capture, so its form is not known. Rule: such
+    a block is carried when it has the exact form and its path is one an earlier carried block of the
+    same message imports (`@` at a line start or after whitespace, up to whitespace; `~/` is expanded,
+    a `#` fragment dropped). The fallback
+    treats it as nested memory keyed by its own path, inside the same 4,000-token cap, and the
+    `carried_paged` event counts it as recognised.
+  - **Cap measure.** The cap counted block text while carried growth counts each block's JSON, so with
+    many tiny files (one directory per Read) the protected blocks added up to 5,373 tokens of growth
+    (reviewer A). Each block now counts as its page (`estimate_items` of a user message holding it), the
+    measure `page_carried_text` frees by; the sum of those is at least the blocks' share of growth. With
+    500 and 2,000 tiny files at budget 0 the protected blocks add 4,000 and 3,907 tokens (125 and 121
+    blocks; before, 166 blocks and 5,312 and 5,360 tokens); the ~1,000-token fixture is unchanged
+    (7,769 at 10 directories, 7,891 at 40).
+  - **Also observed.** On 2.1.310 with claude-opus-5-5, a Bash command that reads a file (`cat
+    bash/x.txt`) and a Write attach that directory's CLAUDE.md next to the result too; both are carried.
+    A failed Edit attached nothing.
+  - **Still readable by the missing-tools check:** an exact copy of a notice typed as an earlier block of
+    a several-block prompt (D46); a queued prompt if Claude Code changes its two sentences; and a
+    message under Claude Code's other mid-turn openers ("Another Claude session sent a message while
+    you were working:", "A peer session sent a message while you were working:"), which were not
+    measured and are not skipped.
 
 ## Open decisions
 

@@ -97,7 +97,9 @@ CLAUDE.md files):
 
 The carry is bounded (unit test, one ~1,000-token CLAUDE.md per directory, fallback budget 8,000):
 carried growth after the fallback is 7,769 tokens at 10 directories and 7,891 at 40; the newest
-blocks the fallback never pages total at most 4,000 tokens.
+blocks the fallback never pages total at most 4,000 tokens, each counted as its page (D47; before
+D47 the cap counted block text only, and with many tiny files the protected blocks added up to 5,373
+tokens of carried growth, reviewer A, PR #227 round 3).
 
 ## Step 5: subagent shapes (`spikes/m2/subagents`)
 
@@ -160,3 +162,27 @@ full routine step 9 did not run.
 | statuses | 200, and 401 on the `HEAD /api/hello` probe | the same |
 
 The credited attempt cost 145,080 tokens; both attempts together, 305,223.
+
+## D47 follow-ups (PR #227 round 3, zero spend)
+
+Nested memory, `claude -p` against the subagent spike's stub, temp `HOME` and config dir, one tool call
+per request: a Read under `imp/` (whose CLAUDE.md imports seven ways), a Read of a missing file under
+`miss/`, a failed Edit under `edit/`, a Write under `write/`, and a Bash `cat` under `bash/`, each
+directory with its own CLAUDE.md.
+
+| Item | 2.1.310, claude-opus-5-5 | 2.1.302, claude-opus-5-5 |
+|---|---|---|
+| imported files | own blocks after the importer, depth first, each `Contents of <path>:` | in the role `system` message |
+| imports sent | `@docs/x.md`, `@./x.md`, `@../x.md`, nested `@more.md`, two absolute paths | the same |
+| imports not sent | a code span, a missing file, `@x.md,` (comma), `@~/x.md` | the same |
+| failed Read (`File does not exist`) | its CLAUDE.md next to the error result | in the role `system` message |
+| failed Edit | nothing | nothing |
+| Write, Bash `cat` | their CLAUDE.md next to the result | in the role `system` message |
+
+On claude-sonnet-4-6 (2.1.310) the files were inside the `tool_result` contents, as in D46.
+
+The D47 rules were run over 13,097 captured request bodies (the reminders matrices and the PR #227
+review captures) with the code before and after. Differences: the imported files of the two import
+captures are now carried; the two synthetic-missing-result imitations are no longer carried or read;
+the queued fakes in role `system` texts are no longer read. No other carried block, read text, or
+fallback candidate changed.

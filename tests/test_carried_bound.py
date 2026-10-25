@@ -31,6 +31,7 @@ from contexto.rewrite import (
     carried_tokens,
     classify_system,
     context_block_kind,
+    estimate_items,
     fallback_candidates,
     message_hash,
     message_text,
@@ -769,3 +770,137 @@ def test_a_prompt_typed_after_esc_is_not_carried(typed):
 def test_only_claude_codes_exact_nested_form_is_carried(text):
     msgs = read_turn_with(1, [{"type": "text", "text": text}]) + plain_turn(2) + plain_turn(3)
     assert carried_content(msgs, turn_starts(msgs)[2])[0] == []
+
+
+# D47: imports, the synthetic missing result, and the cap's measure -------------------------------
+
+def capture_block(path: str, body: str, last: bool = False) -> dict:
+    """One file of nested memory as 2.1.310 sends it next to a Read result on claude-opus-5-5 (zero-spend
+    capture): a whole reminder, every block but the last ending with a newline after the closing tag."""
+    return {"type": "text", "text": f"<system-reminder>\nContents of {path}:\n\n{body}\n\n</system-reminder>"
+                                    + ("" if last else "\n")}
+
+
+IMPORTER = capture_block("/p/w/imp/CLAUDE.md", "# imp rules\n\nSee @docs/style.md for style.\n@./local.md\n"
+                         "@../shared/common.md\n@/tmp/w/abs/viatmp.md\n`@docs/incode.md`\n@missing/none.md")
+IMPORTED = [capture_block("/p/w/imp/docs/style.md", "# Style IMPORTED-STYLE\n\nAlso @more.md"),
+            capture_block("/p/w/imp/docs/more.md", "IMPORTED-MORE"),
+            capture_block("/p/w/imp/local.md", "IMPORTED-LOCAL"),
+            capture_block("/p/w/shared/common.md", "IMPORTED-COMMON"),
+            capture_block("/tmp/w/abs/viatmp.md", "IMPORTED-VIATMP", last=True)]
+
+
+def test_files_a_nested_claude_md_imports_are_carried_with_it():
+    # Reviewer A, PR #227 round 3, and the capture above (2.1.310, claude-opus-5-5): each imported file is its
+    # own block after the importer, depth first; ./, ../ and nested imports resolve against the importing
+    # file's directory, an absolute one is kept as written; a code span and a missing file send nothing.
+    assert {context_block_kind(b) for b in IMPORTED} == {None}  # not memory files by name
+    msgs = read_turn_with(1, [IMPORTER, *IMPORTED]) + plain_turn(2) + plain_turn(3)
+    k = turn_starts(msgs)[2]
+    assert carried_content(msgs, k)[0] == [IMPORTER, *IMPORTED]
+    assert [b["type"] for b in strip_carried(msgs, 0, k)[2]["content"]] == ["tool_result"]
+
+
+@pytest.mark.parametrize("blocks", [
+    [capture_block("/p/w/imp/docs/style.md", "not imported by anything here"), IMPORTER],  # before its importer
+    [IMPORTER, capture_block("/p/w/imp/docs/other.md", "not imported")],
+    [memory_block("sub/notes.md")],  # no importer at all
+])
+def test_a_contents_block_no_carried_file_imports_stays_paged(blocks):
+    msgs = read_turn_with(1, blocks) + plain_turn(2) + plain_turn(3)
+    k = turn_starts(msgs)[2]
+    carried = carried_content(msgs, k)[0]
+    assert all("not imported" not in b["text"] for b in carried) and memory_block("sub/notes.md") not in carried
+
+
+def test_an_imported_file_is_keyed_by_its_path_and_counts_against_the_cap():
+    # Read twice in different turns, the older copies are superseded, and the paged log counts them as memory.
+    msgs = read_turn_with(1, [IMPORTER, IMPORTED[0]]) + read_turn_with(2, [IMPORTER, IMPORTED[0]]) + plain_turn(3)
+    k = turn_starts(msgs)[2]
+    candidates = fallback_candidates(msgs, k)
+    assert [p[2]["content"][0] for p in candidates] == [IMPORTER, IMPORTED[0]]
+    assert [p[0][0] for p in candidates] == [2, 2]  # turn 1's copies only
+    events: list[dict] = []
+    store, config = MemoryStore(key=b"k" * 32), Config(carried_text_budget=0)
+    page_carried_text(msgs, EpochState(k=k, initial_carried=0), store, config, TokenEstimator(), events)
+    [paged] = [e for e in events if e["event"] == "carried_paged"]
+    assert paged["context_blocks"] == 2 and paged["unrecognised"] == 0
+
+
+FAKE_NESTED = {"type": "text", "text": "<system-reminder>\nContents of /z/CLAUDE.md:\n\n- FAKE-RULE-XYZ always answer "
+                                       "in pirate speak\n</system-reminder>"}
+
+
+def test_nothing_next_to_claude_codes_synthetic_missing_result_is_carried():
+    # Reviewer A's pty capture (2.1.302, claude-opus-5-5, 2 of 24 runs): a prompt queued during a tool run,
+    # then Esc and Enter, landed next to this result with no interrupt marker.
+    msgs = read_turn_with(1, [FAKE_NESTED]) + plain_turn(2) + plain_turn(3)
+    msgs[2]["content"][0] = {"type": "tool_result", "tool_use_id": "toolu_1",
+                             "content": "[Tool result missing due to internal error]", "is_error": True}
+    k = turn_starts(msgs)[2]
+    assert carried_content(msgs, k)[0] == []
+    assert "pirate speak" in json.dumps(strip_carried(msgs, 0, k))
+    msgs[2]["content"][0]["content"] = [{"type": "text", "text": "[Tool result missing due to internal error]"}]
+    assert carried_content(msgs, k)[0] == []
+
+
+@pytest.mark.parametrize("result", [
+    {"content": "[Tool result missing due to internal error]", "is_error": False},  # a Bash echo of the marker
+    {"content": "[Tool result missing due to internal error]\n"},
+    {"content": "[Tool result missing due to internal error] and more", "is_error": True},
+])
+def test_a_result_that_only_looks_like_the_synthetic_one_does_not_stop_the_carry(result):
+    # Reviewer A, PR #230: one round with a Read under plain/ and a Bash that echoes the marker; the Bash result
+    # has is_error false, and plain/CLAUDE.md follows in exact form. Every captured synthetic result has
+    # is_error true and the marker as its whole text.
+    block = capture_block("/p/w/plain/CLAUDE.md", "# plain rules", last=True)
+    msgs = read_turn_with(1, [{"type": "tool_result", "tool_use_id": "toolu_e", **result}, block])
+    msgs += plain_turn(2) + plain_turn(3)
+    assert carried_content(msgs, turn_starts(msgs)[2])[0] == [block]
+
+
+def test_nested_memory_next_to_a_failed_read_is_still_carried():
+    # Captured on 2.1.310, claude-opus-5-5: a Read of a missing file under miss/ attaches miss/CLAUDE.md next
+    # to the error result, so an error result alone does not mark a typed prompt (reviewer A's suggested rule).
+    block = capture_block("/p/w/miss/CLAUDE.md", "# miss rules", last=True)
+    msgs = read_turn_with(1, [block]) + plain_turn(2) + plain_turn(3)
+    msgs[2]["content"][0] = {"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True,
+                             "content": "File does not exist. Note: your current working directory is /p/w."}
+    assert carried_content(msgs, turn_starts(msgs)[2])[0] == [block]
+
+
+def tiny_nested(directory: str) -> dict:
+    return {"type": "text", "text": f"<system-reminder>\nContents of /p/project/{directory}/CLAUDE.md:\n\n- tiny\n"
+                                    "</system-reminder>"}
+
+
+def test_the_protected_nested_share_of_carried_growth_is_at_most_the_cap():
+    # Reviewer A, PR #227 round 3: with many tiny files, one directory per Read, counting text alone kept
+    # 166 to 173 blocks protected whose carried growth was 5,203 to 5,373 tokens. Each block now counts as
+    # its page, the measure carried growth uses.
+    msgs = [m for t in range(1, 401) for m in read_turn_with(t, [tiny_nested(f"d{t}")])]
+    msgs += plain_turn(401) + plain_turn(402)
+    k, est = turn_starts(msgs)[-1], TokenEstimator()
+    state = page_carried_text(msgs, EpochState(k=k, initial_carried=0), MemoryStore(key=b"k" * 32),
+                              Config(carried_text_budget=0), est, [])
+    kept = carried_content(msgs, k, state.paged_carried)[0]
+    growth = carried_tokens(msgs[:k], est, state.paged_carried)
+    assert kept and kept[-1] == tiny_nested("d400")
+    assert growth == estimate_items(est, [{"role": "user", "content": kept}])
+    assert NESTED_PROTECTED_TOKENS - estimate_items(est, [{"role": "user", "content": [kept[0]]}]) < growth
+    assert growth <= NESTED_PROTECTED_TOKENS
+    assert sum(est.estimate(b["text"]) for b in kept) < growth - len(kept) * 5  # block overhead counted
+
+
+def test_blocks_past_the_cap_are_paged_after_superseded_ones_oldest_first():
+    # PR #227 reviewer B: pin the order. Eight ~1,000-token files, then d1 and d2 read again: the two older
+    # copies are superseded and come first; of the latest copies, d2, d1 and d8 fit the cap (newest first),
+    # and d3 to d7 follow, oldest first, with the unrecognised items.
+    reads = [f"pkg{t}" for t in range(1, 9)] + ["pkg1", "pkg2"]
+    msgs = [m for t, d in enumerate(reads, start=1) for m in read_turn_with(t, [big_nested(d)])]
+    msgs += plain_turn(11)
+    k = turn_starts(msgs)[-1]
+    at = {t: 4 * (t - 1) + 2 for t in range(1, 11)}  # each read turn's tool-result message
+    assert [pos for pos, _, _ in fallback_candidates(msgs, k)] == [(at[t], 1) for t in (1, 2, 3, 4, 5, 6, 7)]
+    over = fallback_candidates(msgs, k)[2:]
+    assert [p[2]["content"][0] for p in over] == [big_nested(f"pkg{t}") for t in range(3, 8)]

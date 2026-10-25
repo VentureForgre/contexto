@@ -114,7 +114,7 @@ Everything here is zero spend unless marked.
      to each `run_session.py` call, and compare that run with the previous version's.
 3. Hooks, output styles, plan mode, effort, MCP changes: `spikes/m2/carried/live_probe.sh` (zero
    tokens, against a fake model). Hook outputs must still start with the `HOOK_SIGNATURES` prefixes.
-   The launcher's command line (about two minutes, against a stub):
+   The launcher's command line (about 10 s per version, against a stub):
    `python spikes/m2/argv/argstub.py --claude-version <version> --work /tmp/argstub`. The spike deletes
    only a `--work` it made (one holding `.argstub-work`) or an empty one. If a run from before the
    marker existed left an unmarked `/tmp/argstub`, remove it first. Every line must say
