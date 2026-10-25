@@ -284,10 +284,13 @@ the first Claude Code settings file that sets it (in a git worktree, the main ch
 `--settings`. If they set `ANTHROPIC_BASE_URL`, Claude Code talks to that URL directly.
 
 **`--settings` is refused (exit 2).** Claude Code accepts one `--settings`, and the launcher uses it to
-route requests through the proxy. Put those settings in your Claude settings files instead. Your own
+route requests through the proxy. Put those settings in your Claude settings files instead. Every
+argument after `claude` is checked, including those after `--`, so a prompt that is exactly `--settings`
+or starts with `--settings=` is refused too. Your own
 `--mcp-config` is allowed and loads alongside Contexto's. It takes several files, so Claude Code reads
 a prompt right after `--mcp-config <file>` as another config file ("MCP config file not found"). Write
-`--mcp-config=<file>`, or put the prompt before it or after another flag.
+`--mcp-config=<file>`, or put the prompt before it or after a flag such as `-p`. After another flag
+that takes a list, such as `--allowedTools`, the prompt is taken again.
 
 **"warning: ... running without Contexto's tools".** The model has no `contexto_search` or
 `contexto_recall`, so it cannot get paged-out turns back. Neither Claude Code nor Codex reports an MCP

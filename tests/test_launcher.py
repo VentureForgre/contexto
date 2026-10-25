@@ -476,7 +476,8 @@ def test_bound_too_small_notice_without_full_sizing(tmp_path, event):
     assert "keeps only the new turn" in line and "may exceed the bound" in line and "unrotated" not in line
 
 
-@pytest.mark.parametrize("user_args", [["--settings", "mine.json"], ["-p", "hi", "--settings={}"]])
+@pytest.mark.parametrize("user_args", [["--settings", "mine.json"], ["-p", "hi", "--settings={}"],
+                                       ["--append-system-prompt", "--", "--settings", "mine.json", "-p", "x"]])
 def test_user_settings_are_refused_before_anything_starts(env, upstream, tmp_path, user_args):
     proc = launch(env, "--upstream", upstream, "--session", "r1", "claude", *user_args, cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
@@ -517,10 +518,14 @@ def test_claude_argv_joins_each_flag_with_its_file():
 
 def test_check_user_args():
     check_user_args(["-p", "x", "--mcp-config", "a.json", "b.json"])
-    check_user_args(["-p", "--", "--settings"])  # positional after --, not a flag
     check_user_args(["a prompt", "--mcp-config=a.json"])
+    check_user_args(["-p", "--", "a prompt naming --settings"])  # only an argument that is the flag is refused
     for args in (["--settings", "f"], ["--settings=f"], ["-p", "x", "--settings", "f"], ["a prompt", "--settings={}"],
-                 ["--settings="], ["--settings"]):
+                 ["--settings="], ["--settings"],
+                 # A -- can be another option's value; Claude Code 2.1.302 and 2.1.310 still read the
+                 # --settings after it, so the check does not stop at --.
+                 ["--append-system-prompt", "--", "--settings", "x.json"], ["-p", "--", "--settings=x.json"],
+                 ["-p", "--", "--settings"]):
         with pytest.raises(LaunchError):
             check_user_args(args)
 

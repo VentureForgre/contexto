@@ -111,18 +111,20 @@ class LaunchOptions:
 
 
 def check_user_args(claude_args: list[str]) -> None:
-    """Fail closed on a user ``--settings``: Claude Code 2.1.301 takes a single ``--settings``, so a
-    second one could replace ours and silently send requests around the proxy. ``--mcp-config`` is
-    variadic and allowed. Arguments after ``--`` are positional for claude and not checked."""
+    """Fail closed on a user ``--settings``: Claude Code takes a single ``--settings``, so a second one
+    could replace ours and silently send requests around the proxy. ``--mcp-config`` is variadic and
+    allowed. Every argument is checked, after a ``--`` too: a ``--`` can be another option's value
+    (``--append-system-prompt -- --settings x.json``), and Claude Code 2.1.302 and 2.1.310 then still
+    read the ``--settings`` after it. So a prompt that is exactly ``--settings`` or starts with
+    ``--settings=`` is refused as well."""
     for arg in claude_args:
-        if arg == "--":
-            return
         if arg == "--settings" or arg.startswith("--settings="):
             raise LaunchError(
                 "--settings in the claude arguments is not supported: Claude Code accepts one --settings, "
                 "and contexto uses it to route requests through its proxy, so a second one could bypass "
                 "the proxy. Put those settings in your Claude settings files instead "
-                "(see README, 'contexto run').", EXIT_USAGE)
+                "(see README, 'contexto run'). Every argument is checked, including those after --, so a "
+                "prompt that is exactly --settings or starts with --settings= is refused too.", EXIT_USAGE)
 
 
 def check_bound(bound: int, allow_large_bound: bool) -> None:
