@@ -370,6 +370,7 @@ def served_budget(tmp_path, monkeypatch, argv, env=None):
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr("contexto.mcp.serve_stdio", lambda store: seen.append(store) or 0)
+    SessionStore(tmp_path, "s1")  # the server serves an existing session only (D57)
     assert cli.main(["mcp", "--session", "s1", "--home", str(tmp_path), *argv]) == 0
     return seen[0]._catalog.text_budget, seen[0]
 

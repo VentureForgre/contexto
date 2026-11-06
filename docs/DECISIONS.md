@@ -1274,9 +1274,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     pages exactly as before. The rotation keeps `reason: "head_change"`; `window_minimal` and
     `bound_too_small` are logged as for any rotation.
   - **Measured head.** Usage measures the head once, at the conversation's first request, so `F` kept
-    the old head after a change. The engine now keeps the byte size of the head its fingerprint names
-    and, at a head-change turn start, adds the change in bytes at the measured ratio (rounded toward
-    the measured value) to the measured head. In a measured engine run where a server adds about 7,600
+    the old head after a change. The engine now keeps the byte size of the head it measured and, at a
+    head-change turn start, adds the change in bytes at the measured ratio (rounded up) to the
+    measured head. In a measured engine run where a server adds about 7,600
     tokens of tools at bound 30,000, `F` went from 480 to 8,920. Not recorded in the epoch record: a
     resumed engine takes it from the request, whose head the record's fingerprint must match.
   - **Pre-send check.** Every forwarded request, rotated or not, is checked against the estimate of
@@ -1291,10 +1291,75 @@ the owner's delegation. Open decisions are listed at the end with the options an
     22-read turn (the live shape): sent 51,050 to 51,406 → 20,681 to 21,037, room -16,406 → 13,963 or
     more. Each for tools added, system changed and model switched; the same runs with no head change
     are unchanged. 15 of the 23 new tests fail on main.
-  - **Limits.** If the head changes before the first usage is measured and that usage comes from a
-    request with the new head, the change is counted twice at the next head-change turn start
-    (higher `F`, so more paging, never an overrun). The pre-send check uses the estimator; real
-    usage over the bound is still logged after the response, as before.
+  - **Limits.** The pre-send check uses the estimator; real usage over the bound is still logged after
+    the response, as before.
+  - **Rule 4's first measurement, amended** (PR #244, from the reviews of PRs #232 and #244). The head
+    was the first measured request's input minus the estimate of its non-carried messages made before
+    the send. For a conversation's first request that estimate is close; when the first usage arrives
+    later or the first request already carries a long history, it is made before the session's ratio is
+    known, counts tool output at the seed's 1.5 bytes per token, and runs thousands of tokens high, so
+    the head came out low, often 0, for the rest of the session, with or without a head change. `W`
+    came out too large, `choose_k` kept the window, `turn_room_low` went unlogged, and turn starts went
+    over the bound. The first usage arrives late when earlier responses carry usage Contexto cannot
+    read (a 200 without usage, a stream cut before it, Esc), or after `usage_unattributed`; the first
+    request carries a long history when a conversation starts with no epoch record it can resume (a
+    restarted proxy, `--resume` after a CLI upgrade or a settings change). A 429 or 529 is not a
+    case: the client retries the same body, and the retry is measured. D49's own Limits bullet (the
+    change counted twice when the head changes before the first usage) was also real; its first
+    version said the double count covers the low head, which holds only when the change is larger
+    than the head lost.
+    - **Rule.** The non-carried messages count at the measured request's own ratio, their share of its
+      bytes (as the estimator counts them), or at the estimate made before the send when that is lower,
+      so the head errs high. The head's byte size is re-based on the measured request, so a head change
+      before the first usage is in the measurement and counted once. Both window sizes are kept only
+      while the head is unmeasured.
+    - **Usage with no input count** (`output_tokens` alone) is a response without usage. It was read
+      as a real input of 0: the head 0 for the session, the next request estimated as 0 plus its new
+      messages, and a recall room published from the output alone. Now nothing is measured or
+      published, and the next request logs `usage_missing` and is estimated whole (rule 3), as after a
+      200 with no usage. If no usage ever has an input count, the head is never measured and the
+      estimator stands in at its seeds for the whole session (every request estimated whole, tool
+      output at 1.5 bytes per token); real usage over the bound cannot be logged, so the pre-send check
+      is the only bound check, and the recall room stays as last published, or unpublished.
+    - **Measured, engine (zero spend, real usage at the sent bytes over a fixed ratio, before →
+      after).** PR #244's repro (bound 30,000, a 20,000-token system prompt, real head 20,095, first
+      usage at read 26 of a loop): head 490 → 20,694; turn starts 2 and 3 skipped paging
+      (`rotation_noop`) and 4 and 5 went out at 32,047 and 32,031 real tokens, `over_bound` → every
+      turn start pages to 20,657 to 20,710, as with usage from the first request. Bound 60,000, the
+      same system prompt, an MCP server's 30 tools connecting at read 6 (real head 28,535), first usage
+      at the last read: `F` 28,299, 22,226 and 19,189 for 12, 20 and 24 reads → 29,183 to 29,399; with
+      no server (real head 20,095), 11,419 to 2,309 → 20,743 to 20,959. Bound 30,000 with the server on
+      a 49-token head (real head 8,489), first usage at read 0, 1, 4, 7, 8, 12: `F` 8,920, 8,741,
+      8,741, 12,048, 11,290, 8,741 → 8,921 to 9,137 (the change counted once). A first request with 18
+      reads of history at bound 60,000: head 6,563 → 20,550 against 20,095, `W` 28,437 → 14,450, later
+      turn starts 25,732 to 25,806 real → 20,742 to 20,816. Codex at bound 60,000, first usage after 26
+      calls: at 4.5 bytes per token the head 18,896 → 22,401 against 22,238; at 3.5 unchanged (28,800
+      against 28,591); at 2.5 unchanged and high (46,628 against 40,028), where the estimate before the
+      send is the lower window. A33's seat replay (`spikes/m2/acceptance`, 92k head, 4 bytes per token):
+      the lowest `W` 18,838 → 18,594 (with D51's pin sentence), the head no longer 244 low; rotations
+      and cost unchanged.
+    - **Measured, proxy** (the real `ContextoProxy` and engine over HTTP, a stub upstream counting 3.2
+      bytes per token, first usage at request 1, 8 or 12, before → after). A 13,100-token head with the
+      server at bound 30,000 (real 23,617): usage without an input count, head 9,266 to 9,276, turn
+      starts up to 28,416 real, room -416 → head 23,838 to 24,112, turn starts at most 24,283, room
+      3,717 with `turn_room_low` logged, the same as the 529 control. A 20,000-token head with the server
+      at 60,000 (real 31,211): without an input count, head 9,258 → 31,426 to 31,716, room -1,064 →
+      3,035 as the control; without usage, head 30,925 to 35,375 → 31,426 to 31,716. A 20,000-token head
+      at 30,000 (real 21,979): without an input count, head 0 and turn starts at 32,975 real, over the
+      bound → head 22,168 to 22,428, turn starts at most 22,645; without usage at request 12, head
+      14,034, turn starts 26,779 → 22,428 and 22,645. A first request with 10, 18 or 40 reads of history
+      and a 28,000-token head (real 27,979): head 21,555, 16,001 and 732 → 28,407, 28,590 and 29,072.
+      Over the head, rule 4 counts the request's JSON around its messages and the carried text, 130 to
+      1,100 tokens in these runs. On main, 38 of the 46 new engine tests and 17 of the 30 proxy tests
+      fail (the 529 controls and some runs without usage pass).
+    - **Limits.** Byte share assumes the head and the window tokenize alike. Tool output usually has
+      fewer bytes per token than the head's prose and JSON, which puts the head high; a window with more
+      bytes per token than the head would put it low by that difference, unless the estimate before the
+      send is lower. As before, a conversation whose first request already rotates (`k > 0`) never
+      measures its head; the estimator stands in. With the head measured right, a head too large for
+      `min_turn_room` (bound 60,000, a 28,000-token head) leaves A12 nothing to restore, so later turn
+      starts keep their window (about 34,200 real, room 806, `turn_room_low` logged once) where the low
+      head used to page; PR #232 review B's finding 1, still open.
 - **D51. Standing rules are pinned when stated; Contexto's search, recall and state calls are not indexed.** Claude,
   2026-11-05, under D0; contract change. The QA run of 2026-11-05 (reports verify-obligations and
   live-fidelity) found three things.
@@ -1846,6 +1911,92 @@ the owner's delegation. Open decisions are listed at the end with the options an
     conversation after `/clear` (none of the four measured did), a later `/resume` of it would return
     only by turn starts. A second interactive Claude Code pointed at the same proxy with no parent
     id (not a supported setup) takes main at its first turn start; while both send, once.
+
+- **D57. User-facing command fixes from the 2026-11-05 QA run.** Claude, 2026-11-05, under D0; contract
+  change. The install, docs-audit, live-claude, store-mcp and launcher-ux reports, reproduced at zero
+  spend on v0.5.8 with stub CLIs and synthetic stores; 42 new or extended tests fail on v0.5.8 and pass
+  after.
+  - **Finding a page id.** No command printed one: `sessions show` gave counts only, and `state` gave the
+    model's instructions ending "The page index below lists the paged turns" with no index below. Now
+    `sessions show` lists the pages, newest first (the 20 newest; all with `--all`; `page_list` in
+    `--json`), and `contexto search WORDS` runs the store search the MCP tool uses and prints each hit's
+    index line and matching lines with their offsets. `recall` takes the page id and offset both print,
+    and refuses a malformed id before building a path: a 300-character `pg_` id was read as a file name,
+    failed with ENAMETOOLONG, and was logged `page_unreadable`. The search prints its own lines rather
+    than the tool's reply, which is shaped by the turn's recall room and phrased for the model.
+  - **A readable `state`.** The default view is the pinned records, or "No pinned records.", then how
+    many turns are paged out. On a session with no pages, the model text opened with "Earlier turns of
+    this conversation are paged out of your context" (live-claude finding 3). `--raw` keeps the model text
+    for diagnosis. The MCP tool's text is unchanged here.
+  - **4xx counted once.** The proxy logs each upstream 4xx as its `request` entry and as `upstream_4xx`,
+    and `sessions show` counted both: 12 for 6 `HEAD /api/hello` 401s (live-claude finding 2). `request`
+    entries are no longer counted, and `upstream_4xx_model` separates the model paths, since Claude Code
+    sends that keyless probe at every launch.
+  - **Id prefixes.** The README writes `7f3a`; `sessions show 87df` said "no session". A unique prefix now
+    names a session for the read-only commands (`recall`, `search`, `state`, `sessions show`); an exact id
+    wins, and an ambiguous prefix names up to 5 matches and exits 1. `sessions prune --session` takes the
+    full id only: with prefixes, `prune --session w --yes` deleted the one session starting with `w`, so
+    a mistyped or already deleted id removed a session nobody named, and a cleanup run twice deleted
+    `test-2` the second time (reviewer A, PR #241). A prune id that only starts existing ids exits 2 and
+    names them; an unknown id still exits 1. `mcp` and `run` keep exact ids: one is written by the
+    launcher, and the other creates the session when it is absent, so a prefix there would open the
+    wrong store or a new one.
+    `run --session 5238` made a new empty session `5238`, which the readers then preferred (exact id
+    first) to `52385048...` (reviewer B, PR #241); `run` now refuses an id that is not a session but
+    the start of existing ids, exit 2, naming them, for claude and codex (in `launcher.open_session`).
+    A new full id still creates its session.
+  - **The live session.** Inside a fresh `contexto run claude` that had not paged yet, `contexto state`
+    and `contexto search` answered from an older session with content: the default skipped the live
+    empty session, and nothing told the CLI its session (reviewer A, PR #241). `run` now sets
+    `CONTEXTO_SESSION=<id>` for claude and codex, and the default never skips a session another process
+    holds open (its `live.lock`, probed as prune probes it).
+  - **`--session` edges.** `--session ''` was taken as "not given" and quietly used another session; it is
+    now an invalid id, for the readers, `proxy`, and `run` with either CLI. An id over 255 bytes crashed
+    `recall`, `state` and `sessions show` with a traceback (Errno 63); `paths.session_dir` now refuses it,
+    so every command reports it in one line.
+  - **No junk sessions.** On a fresh home, `proxy --upstream not-a-url`, `proxy --port 1`, `run --upstream
+    ftp://x claude`, `run claude --version` and `mcp --session typo-id` each left a session directory, and
+    the docs-audit run had 7 empty rows in `sessions list`. A failed launch's empty session then became the
+    default for `state` and `recall`. Now `mcp` serves only an existing session; `proxy` and `run claude`
+    remove a session they created when the proxy cannot start, through prune's lock check (the store
+    releases its own lock first, `SessionStore.release`); `run claude` with only `--version`, `-v`,
+    `--help` or `-h` runs claude without a session or proxy; and the default skips sessions with no pages
+    and no ledger records unless another process holds them open. Not changed here: a failed `run codex`
+    still leaves its session (codex.py,
+    whose launch order the codex-launch area changes), and a session whose CLI never sent a request is
+    kept, since its log records the launch and the exit code.
+  - **Validation and exit codes.** `--bound 10` started with a warning of "-79,990 tokens" while `--bound 10
+    --headroom-floor 25000`, the default spelled out, was refused. The default floor is now checked like a
+    given one: a bound not above 25,000 without `--headroom-floor` is a usage error (the engine's headroom
+    is never below the floor, rule 17). `proxy --port -1` or `70000` printed an `OverflowError` traceback;
+    it is now a usage error, exit 2. `run` exited 2 when the store could not open (`CONTEXTO_HOME` a file,
+    or read-only); 2 stays the usage error, including an invalid session id, and a store that cannot open
+    is 1, like a proxy that cannot start, for claude and codex. (After D55 merged, `run` refuses a home
+    that is a file up front as a usage error, exit 2, unchanged; the stricter check is kept, and 1 is for a
+    home that exists but cannot be written.) `sessions list` on a home that is a file
+    said "No sessions" and exited 0, `state` and `search` said "no sessions under <file>/sessions", and
+    `prune` printed a raw `[Errno 20]`; every reader now says "<home> is not a directory (check
+    $CONTEXTO_HOME)" and exits 1. `sessions show --json` marks a cut list with `page_list_truncated`.
+    A pages directory that cannot be read gave `sessions show` and `search` a `PermissionError` traceback
+    with this change (reviewer A); `show` and `state` now print the summary or the pins and one error line,
+    `search` one line, all exit 1.
+  - **Help text.** `run` and the top-level help name Codex; `mcp` says the CLI spawns it; `proxy --help`
+    no longer shows "``contexto proxy``: ... (M2 contract, CLI)"; `recall`'s `PAGE_ID` and `sessions
+    show`'s `ID` have help. The `--codex-auth` help still cites D35 (codex.py, the codex-launch area).
+  - **Review round 2 (reviewers A and B).** `contexto proxy --session` goes through the same check as
+    `run`: an id that only starts existing sessions is refused with exit 2, so it cannot create a session
+    that hides the one meant. `sessions prune --session ''` is an invalid id (exit 1) again, checked
+    before the prefix rule, which had reported it as the start of every session. `run --help` and
+    `proxy --help` say `--session` takes the full id; the readers' default names "or one in use".
+  - **Round 4 (re-check after D55 and its follow-ups merged).** `run codex` with a `CONTEXTO_HOME` that
+    is a file exited 1, while `run claude` refuses it up front with 2 (D55): `launcher.open_session`, which
+    both CLIs use, now checks the home, so codex exits 2 too. Whether the launch created its session is now
+    recorded in `pick_session`, where the D55 follow-ups open the store; a test makes the proxy's bind fail in
+    `run claude` and checks that a session the launch created is removed and an existing one is kept.
+  - **Merge re-check after D52.** `contexto proxy --session ''` exited 1 while `run` exits 2; an invalid
+    `proxy --session` id (empty, or over 255 bytes) is now a usage error, exit 2, checked before the store
+    opens. D52's removal of a session a refused Codex launch created is kept as the one mechanism for
+    `run codex`; `run claude` and `proxy` keep `discard_new_session`, so no launch removes a session twice.
 
 - **D58. The store and the MCP server stay up and say what is wrong.** Claude, 2026-11-05, under D0;
   contract change. From the 2026-11-05 QA run on main 4e2c4cd (store-mcp, verify-surrogate,

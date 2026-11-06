@@ -291,7 +291,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    the previous request sent in this conversation got its usage; when it did not (a 4xx or 5xx, a
    dropped stream, a response without usage, or a request still in flight), the whole request is
    estimated instead, logged content-free as `usage_missing` (epoch only) when that replaces a real
-   input. Usage is paired only with the request it measured, identified by its message count and
+   input. Usage with no input count (`output_tokens` alone) is a response without usage (D49 as
+   amended). Usage is paired only with the request it measured, identified by its message count and
    its last message's hash (rule 10): usage for any other request (the CLI's original, forwarded
    after `transform_error`, or an older request still in flight) never feeds the ratio, the last
    real input, the measured head, or `estimate_error`, and logs `usage_unattributed` (the epoch,
@@ -304,10 +305,13 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    usage with the bound and the estimate: log `over_bound` from real usage when it exceeds the
    bound, and `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
-   index), in tokens, taken from measured usage once available (the first request's input is the
-   head) and from the estimator before that. After a head change (rule 6) the measured head is
-   adjusted by the estimated size of the change in `system` and `tools` bytes, so a server that adds
-   tools or a model switch counts in `F` (D49). The window budget is `W = bound - headroom - F`, and
+   index), in tokens, taken from measured usage once available and from the estimator before that.
+   The first measured request's input, minus its non-carried messages, is the head; the messages
+   count at that request's own ratio (their share of its bytes), or at the estimate made before the
+   send when that is lower, so the head errs high whenever the first usage arrives (D49 as amended).
+   After a head change (rule 6) the measured head is adjusted by the estimated size of the change in
+   `system` and `tools` bytes since the measured request, so a server that adds tools or a model
+   switch counts in `F` once (D49). The window budget is `W = bound - headroom - F`, and
    the retained window after rotation targets `window_fraction * W` (default 0.5), so the window
    can grow before the next trigger. Choose the smallest `k` (retain as many recent turns as fit)
    within that target, retaining the newest complete turn and the new turn (except under the
@@ -1189,8 +1193,54 @@ checked. The routine for testing a new version is `docs/cli-updates.md`.
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run
 the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
-`contexto sessions prune`, `contexto recall <page id>`, `contexto state`. Exit codes and `--help`
-documented in README.
+`contexto sessions prune`, `contexto recall <page id>`, `contexto search <words>`, `contexto state`.
+Exit codes and `--help` documented in README.
+
+Store-reading commands (D57). A session is named by its id or a unique prefix of it (an exact id
+wins; a prefix of several ids is an error naming them, exit 1) in `--session` and `CONTEXTO_SESSION`
+for `recall`, `search`, and `state`, and in `sessions show ID`. `sessions prune --session`,
+`contexto mcp --session`, `contexto proxy --session`, and `contexto run --session` take exact ids only.
+`prune`, `proxy`, and `run` refuse, with exit 2 and the matching ids named, an id that is not a session
+but the start of existing ids: prune is irreversible, and a new session under a prefix would hide the
+one meant from the readers (an exact id wins). A new full id still creates its session in `proxy` and
+`run`. An empty `--session` is an
+invalid id, never "not given", in every command. An id longer than 255 bytes is invalid everywhere
+(`paths.session_dir`). A `CONTEXTO_HOME` that exists but is not a directory is one error for every
+reader: "<home> is not a directory (check $CONTEXTO_HOME)", exit 1. `contexto run` sets
+`CONTEXTO_SESSION=<id>` in the environment of the CLI it runs, claude or codex, so the CLI's shell
+commands name its session. With no `--session` or `CONTEXTO_SESSION`, `recall`, `search`, and
+`state` use the most recently active session that has pages or ledger records or that another
+process holds open (its `live.lock`, probed as prune probes it, without the idle grace), else the
+most recent session; stderr names the choice (`most recent`, `most recent with pages or pins, or in
+use`, `--session`, `CONTEXTO_SESSION`).
+- `sessions show` lists the pages after the summary, newest first, one index line each without the
+  identifiers (`pg_<id> turn N: <opening user text> [tools] [files]`): the 20 newest, all with
+  `--all`; `--json` adds `page_list` (`id`, `turn`, `line`) under the same limit,
+  `page_list_truncated`, and `upstream_4xx_model`. A pages directory that cannot be read leaves the
+  summary printed (`page_list` null in `--json`) and a one-line error, exit 1; `search` reports it in
+  one line and `state` after the pins, exit 1. `upstream_4xx` counts each upstream 4xx once (the proxy's `request` entries
+  are not counted, only the separate events), and `upstream_4xx_model` those on the transformed
+  model paths, apart from Claude Code's keyless `HEAD /api/hello` probe.
+- `search WORDS... [--session ID] [--limit N]` (default 10) runs the store search `contexto_search`
+  uses (pages holding every word, best first, D34) and prints each hit's index line, then its last
+  three matching lines with context, each with the offset `recall PAGE_ID --offset N` reads from.
+  Paged-out turns only. No hit: a line on stderr, exit 0.
+- `recall` refuses an argument that is not a page id (`pg_` and 16 hex digits) before any path is
+  built, exit 1.
+- `state` prints the pinned records by group, or "No pinned records.", then how many turns are
+  paged out and the commands that list and search them. `state --raw` prints the `contexto_state`
+  text the model gets, uncapped.
+- `contexto mcp` serves an existing session only, and creates none: an unknown id exits 1. A
+  session that `contexto proxy` or `contexto run claude` created is removed again when the proxy
+  cannot start (the removal goes through prune's lock check, so a session another process opened is
+  kept). `contexto run claude --version`, `-v`, `--help`, or `-h` alone runs claude directly, with no
+  session or proxy.
+- `contexto proxy --port` outside 0 to 65535, and an invalid `--session` id (`''` included), are
+  usage errors (exit 2), as in `contexto run`. `contexto run` exits 2 for
+  a usage error (including an invalid session id and a `--bound` not above the headroom floor,
+  whether the floor is given or the 25,000 default) and 1 when the proxy or the session store
+  cannot start (for example `CONTEXTO_HOME` is read-only; a `CONTEXTO_HOME` that is a file is refused
+  first, exit 2, D55).
 
 `contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated
 blocks under the session directory, symlinks counted as links) and a total. `contexto sessions

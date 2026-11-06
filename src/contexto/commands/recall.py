@@ -7,9 +7,12 @@ import sys
 
 from contexto.commands._common import EXIT_OK, add_session_option, fail, say_session
 from contexto.paths import contexto_home
-from contexto.store import PageUnreadableError, SessionNotFoundError, SessionStore
+from contexto.store import PageUnreadableError, SessionNotFoundError, SessionStore, check_page_id
 from contexto.store.render import RECALL_LIMIT, recall_chunk, recall_limit
 from contexto.store.sessions import select_session
+
+PAGE_ID_FORM = ("page ids are pg_ and 16 hex digits, as `contexto sessions show` and `contexto search` "
+                "print them")
 
 
 def register(subparsers) -> None:
@@ -17,11 +20,14 @@ def register(subparsers) -> None:
         "recall", help="print a paged-out turn",
         description=f"Print a paged-out turn as plain text, thinking omitted, at most {RECALL_LIMIT:,} "
                     "characters at a time and about a quarter of the session's window budget (the same "
-                    "rendering and limit as the MCP contexto_recall tool).")
-    parser.add_argument("page_id", metavar="PAGE_ID")
+                    "rendering and limit as the MCP contexto_recall tool). `contexto sessions show` lists "
+                    "the page ids; `contexto search` finds them with the offsets of their matching lines.")
+    parser.add_argument("page_id", metavar="PAGE_ID",
+                        help="the page to print, for example pg_0123456789abcdef")
     add_session_option(parser)
     parser.add_argument("--offset", type=int, default=0, metavar="N",
-                        help="character offset to continue from (default 0)")
+                        help="character offset to continue from, or a matching line's offset from "
+                             "`contexto search` (default 0)")
     parser.set_defaults(func=run)
 
 
@@ -32,6 +38,10 @@ def run(args: argparse.Namespace) -> int:
     except SessionNotFoundError as e:
         return fail(str(e))
     say_session(session_id, how)
+    try:
+        check_page_id(args.page_id)
+    except ValueError:
+        return fail(f"no page {args.page_id[:40]!r} in session {session_id}: {PAGE_ID_FORM}")
     store = SessionStore.open_existing(home, session_id)
     try:
         page = store.get_page(args.page_id)

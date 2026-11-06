@@ -530,3 +530,15 @@ def test_a_late_or_duplicate_response_never_makes_a_headless_main_idle(order):
     loop = main_request([*conversation("HEADLESS lead prompt", 1), tool_use(1), tool_result(1, text)], OLD)
     events = send(engine, loop, OLD, entrypoint="sdk-cli")
     assert events[-1]["main"] is True and "over_bound" not in [e["event"] for e in events]
+
+
+@pytest.mark.parametrize("released", [True, False, None])
+def test_a_response_without_an_input_count_still_sets_busy_or_idle(released):
+    """D49 amended (#244) returns early from observe_usage on usage with no input count; D50 (#238) reads
+    every response for a client call. A response without usage must still mark the lead busy (a call
+    may be pending) or idle (it released none), or a headless /clear could never hand over."""
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    lead = main_request(conversation("HEADLESS lead prompt", 1), OLD)
+    engine(lead, headers(OLD, "sdk-cli"), MESSAGES)
+    engine.observe_usage(MESSAGES, {"output_tokens": 5}, lead, tool_calls=released)
+    assert engine._idle[keyed(ANTHROPIC, lead)] is (released is False)

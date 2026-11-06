@@ -115,6 +115,10 @@ def external_edit(proj: Path, rel: str, t: int) -> None:
 
 
 def mcp_config(root: Path) -> Path:
+    # `contexto mcp` serves an existing session only (D57); `contexto proxy` would create it at launch.
+    subprocess.run([str(REPO / ".venv/bin/python"), "-c", "import sys; from pathlib import Path; from contexto.store import "
+                    "SessionStore; SessionStore(Path(sys.argv[1]), 'spike-reminders')", str(root / "contexto_home")],
+                   check=True)
     cfg = {"mcpServers": {"contexto": {"command": str(REPO / ".venv/bin/contexto"),
                                        "args": ["mcp", "--session", "spike-reminders",
                                                 "--home", str(root / "contexto_home")]}}}

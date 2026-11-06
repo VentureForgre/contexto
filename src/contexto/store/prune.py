@@ -289,6 +289,18 @@ def remove_session(home: Path, session_id: str, *, now: float, grace: float = AC
     return size
 
 
+def discard_new_session(store) -> None:
+    """Remove a session the current command created and then failed to start (D57), so a failed launch
+    leaves no empty session behind. Releases the store's lock first: the store must not be used after.
+    The session stays if another process has opened it meanwhile, or if it cannot be removed."""
+    store.release()
+    try:
+        # No idle grace: the session was just created; only the lock says whether another process has it.
+        remove_session(store.home, store.session_id, now=0.0, grace=float("-inf"))
+    except (SessionLiveError, SessionNotFoundError, ValueError, OSError):
+        pass
+
+
 @dataclass(frozen=True)
 class Candidate:
     id: str
