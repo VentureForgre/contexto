@@ -13,11 +13,13 @@ written back to disk.
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+from contexto.private import open_regular
 from contexto.store.model import Record, Source
 
 _CHUNK = 1 << 20
@@ -111,10 +113,11 @@ def _inside(root: Path, locator: str) -> Path | None:
 
 
 def _file_sha256(path: Path) -> str | None:
-    """SHA-256 hex of a regular file, or None if it is missing or unreadable."""
+    """SHA-256 hex of a regular file, or None if it is missing, unreadable, or not a regular file (a FIFO
+    is refused without blocking, D58)."""
     try:
         digest = hashlib.sha256()
-        with path.open("rb") as f:
+        with os.fdopen(open_regular(path, follow=True), "rb") as f:
             while chunk := f.read(_CHUNK):
                 digest.update(chunk)
         return digest.hexdigest()

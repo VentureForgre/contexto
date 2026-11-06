@@ -38,8 +38,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from contexto.canonical import canonical_json
-from contexto.private import open_private, private_dir
+from contexto.canonical import canonical_bytes
+from contexto.private import NotRegularFileError, open_private, private_dir, read_regular, write_all
 from contexto.store.model import (
     GENESIS_PREV,
     Record,
@@ -123,7 +123,7 @@ def _decode(number: int, raw: bytes, obj: object) -> tuple[Record | None, str | 
     expected_id = compute_id(obj)
     if record.id != expected_id:
         return record, f"line {number}: id mismatch (stored {record.id}, computed {expected_id})"
-    if canonical_json(record.to_dict()).encode("utf-8") != raw:
+    if canonical_bytes(record.to_dict()) != raw:
         return record, f"line {number}: not canonical JSON"
     return record, None
 
@@ -154,13 +154,6 @@ def _fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-
-
-def _write_all(fd: int, data: bytes) -> None:
-    view = memoryview(data)
-    while view:
-        written = os.write(fd, view)
-        view = view[written:]
 
 
 def _draft_fields(draft: dict) -> dict:
@@ -209,9 +202,11 @@ class Ledger:
 
     def _read(self) -> bytes:
         try:
-            return self.path.read_bytes()
+            return read_regular(self.path)
         except FileNotFoundError:
             return b""
+        except NotRegularFileError as e:  # a FIFO or directory in its place, refused without blocking (D58)
+            raise LedgerCorruptError(f"{LEDGER_FILE} is not a regular file") from e
 
     def _lines(self) -> list[_Line]:
         return _parse(self._read())
@@ -271,7 +266,7 @@ class Ledger:
             created = not self.path.exists()
             fd = open_private(self.path, os.O_WRONLY | os.O_APPEND)
             try:
-                _write_all(fd, canonical_json(record.to_dict()).encode("utf-8") + b"\n")
+                write_all(fd, canonical_bytes(record.to_dict()) + b"\n")
                 os.fsync(fd)
             finally:
                 os.close(fd)
@@ -339,7 +334,7 @@ class Ledger:
                 attempt += 1
                 continue
             try:
-                _write_all(fd, data)
+                write_all(fd, data)
                 os.fsync(fd)
             finally:
                 os.close(fd)
@@ -365,6 +360,6 @@ class MemoryLedger:
 
     def append(self, draft: dict, precondition=None) -> Record:
         record = _chain(_draft_fields(draft), self.head(), self._records, precondition)
-        self._lines.append(canonical_json(record.to_dict()).encode("utf-8"))
+        self._lines.append(canonical_bytes(record.to_dict()))
         self._records.append(record)
         return record

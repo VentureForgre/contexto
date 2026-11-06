@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from contexto.canonical import loads_bounded
+from contexto.private import read_regular_text
 from contexto.store.pages import current_stub, index_line, search_entry
 from contexto.store.search import SearchEntry
 
@@ -389,7 +390,7 @@ class PageCatalog:
         a failed read adds ``will_retry`` (not for a file gone since the listing, which the next listing
         leaves out)."""
         try:
-            text = path.read_text(encoding="utf-8")
+            text = read_regular_text(path)  # a FIFO in a page's place is refused without blocking (D58)
         except OSError as e:
             event = {"event": "page_unreadable", "path": path.name, "error": str(e)}
             if not isinstance(e, FileNotFoundError):

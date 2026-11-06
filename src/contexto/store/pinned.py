@@ -14,7 +14,7 @@ from contexto.store.state import State
 from contexto.tokens import estimate_tokens
 
 GROUPS = ("Open obligations:", "Active decisions:", "Verified facts:")
-_FACT_KINDS = ("event", "artifact", "reference")
+FACT_KINDS = ("event", "artifact", "reference")
 
 
 def _one_line(text: str) -> str:
@@ -28,7 +28,7 @@ def pinned_items(state: State) -> list[tuple[str, Record]]:
     open_ids = {r.id for r in state.open_obligations}
     items = [(GROUPS[0], r) for r in newest if r.id in open_ids]
     items += [(GROUPS[1], r) for r in newest if r.kind == "decision"]
-    items += [(GROUPS[2], r) for r in newest if r.kind in _FACT_KINDS and r.epistemic == "verified"]
+    items += [(GROUPS[2], r) for r in newest if r.kind in FACT_KINDS and r.epistemic == "verified"]
     return [(g, r) for g, r in items if r.id not in conflicted or g == GROUPS[1]]
 
 

@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
 
-from contexto.canonical import canonical_json
+from contexto.canonical import canonical_bytes
 
 KINDS = ("event", "decision", "obligation", "artifact", "reference", "closure")
 EPISTEMICS = ("verified", "reported", "summary", "hypothesis")
@@ -195,7 +195,7 @@ def compute_id(record_dict: dict) -> str:
     draft["prev"] = GENESIS_PREV
     payload = Record.from_dict(draft).to_dict()
     del payload["id"], payload["prev"]
-    digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(canonical_bytes(payload)).hexdigest()
     return ID_PREFIX + digest[:24]
 
 
