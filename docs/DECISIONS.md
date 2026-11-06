@@ -1257,8 +1257,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
     (reviewer B, PR #230 round 2).
 
-- **D50. Main follows Claude Code's session id across `/clear` and `/resume`, and a side request
-  that arrives first stays main only until the first prompt.** Claude, 2026-11-05, under D0; contract
+- **D50. Main follows Claude Code's session id across `/clear` and `/resume`, and its compaction
+  summary across `/compact`; a side request that arrives first stays main only until the first
+  prompt.** Claude, 2026-11-05, under D0; contract
   change. The engine keys a conversation by its first prompt and handed main over only at a turn
   start with strictly more turn starts than main (contract PR #125). QA's verify-clear and
   live-realworld F2 (v0.5.8): after `/clear` the new conversation has one turn start, so it stayed a
@@ -1292,8 +1293,24 @@ the owner's delegation. Open decisions are listed at the end with the options an
     `CLAUDE_CODE_ENTRYPOINT` and only turns its own `cli` into `sdk-cli` in print mode. The child has
     its own id and no parent. With the second version of this rule the child took main, and the
     lead, whose run has one turn start, never took it back.
+  - **Compaction** (reviewer B round 2, PR #238: live on 2.1.314 and 2.1.318, all 8 requests after a
+    `/compact` were side, and with the old room spent `contexto_state` returned nothing). Captured
+    on 2.1.314 and 2.1.318 against the stub, both manual `/compact` and auto-compaction (the stub
+    reported 995,000 input tokens on a turn; 190,000 did not trigger it). The session id does not
+    change. Claude Code first sends the summary request on main's own key: main's history with the
+    instructions appended to its last prompt. The compacted conversation's first message is then a
+    user message whose content is a plain string: "This session is being continued from a previous
+    conversation that ran out of context. The summary below covers the earlier portion of the
+    conversation.", a newline, then the summary. After it come a role `system` message, the last
+    message from before compaction kept verbatim (main's last response, which no earlier request
+    held), and the new prompt, which after `/compact` also holds the command's blocks. The same
+    form came from both versions and both triggers. It is a new key with two turn starts, so before
+    this rule it never outgrew main. Every subagent request (8 on 2.1.302 to 2.1.318, and the
+    compaction runs' 4) and the in-process teammate's carry `X-Claude-Code-Agent-Id`; no main, side,
+    nested or headless request does.
   - **Rule.** At a turn start, a conversation also takes over main when its session id differs from
-    main's, both its entrypoint and main's are `cli` (the interactive CLI), and either no conversation has been main in that session yet
+    main's, its entrypoint is main's, main is idle unless both are the interactive `cli` (see
+    headless below), and either no conversation has been main in that session yet
     (`new_cli_session`, after `/clear`), or it was the first conversation main in its session, and
     that session lost main to another session's id and has sent no request of this conversation
     since (`resumed_cli_session`, after `/resume`). It also takes over when main has never sent a
@@ -1301,17 +1318,41 @@ the owner's delegation. Open decisions are listed at the end with the options an
     seen with a tool list takes over by these, so side requests never do. A subagent carries main's
     id, so it never does either. A background subagent the old conversation launched before `/clear`
     keeps the old id, and the old conversation was that session's main, so it does not take over. A
-    request with `parent_session_id` never takes over by any rule. Requiring `cli` on both sides keeps
-    out a `claude -p` or SDK process run from a tool: `/clear` and `/resume` exist only in the
-    interactive CLI, and a child carries an `sdk-*` entrypoint, its own or a headless lead's
-    inherited `sdk-cli`. Under a headless lead only the turn-start rule applies, as before D50. The
-    quiet check means two sessions both sending trade main at most once: the one that lost main by
+    request with `parent_session_id` or `X-Claude-Code-Agent-Id` never takes over by any rule, so a
+    subagent that auto-compacts, or that `SendMessage` resumed more often than main has turns, never
+    becomes main. A conversation also takes over with reason `compacted` when its session id and
+    entrypoint are main's and its first message is that summary, with the exact string
+    start; a prompt that quotes it is a list with context blocks and does not match. It becomes its
+    session's main, replacing the first one, since `/resume` of the session loads the compacted
+    transcript. Its own epoch starts at 0 under the bound like any new conversation, and the old
+    conversation's pins and pages stay in the session store. Requiring main's entrypoint keeps out
+    a `claude -p` or SDK process run from an interactive lead's tool, since it sends `sdk-*`.
+  - **Headless** (reviewer A round 3: `/clear` and `/compact` are declared `supportsNonInteractive`
+    in 2.1.318; round 2 wrongly said they exist only in the interactive CLI). Captured on 2.1.314
+    and 2.1.318 with `claude -p --input-format stream-json --output-format stream-json` against the
+    stub: two prompts, `/compact`, a prompt, `/clear`, a prompt. `/compact` keeps the session id and
+    sends the same summary form as interactive; `/clear` starts a new id, User-Agent
+    `(external, sdk-cli)`, no parent, a tool list, and the same first message as an interactive
+    `/clear` (the command's blocks, then the prompt). `/resume` is not declared `supportsNonInteractive`
+    in the binary, so it was not run. A nested
+    `claude -p` under a headless lead has the same shape: a new id under the lead's inherited
+    `sdk-cli`. What tells them apart is main's state: the nested child runs inside one of main's
+    tool calls (main's latest response released a client call, the Bash running it), and a
+    headless `/clear` follows main's final response. So for equal entrypoints other than `cli`, the
+    two session-id rules also need main idle: its latest response released no client tool call
+    (the proxy's `tool_calls` is False, not unknown) and it has sent no request since. Compaction
+    keeps the session id, which a nested child never shares, so `compacted` needs no idle check. In
+    the interactive CLI the idle check is not applied, since after Esc main's latest response can
+    still show a call that was cancelled and never runs. The quiet check means two sessions both sending trade main at most once: the one that lost main by
     id and kept sending returns only by turn starts, and the other one, having lost by turn starts,
     never returns by id. Two sessions that take turns, each idle while the other is prompted, pass
     the quiet check at every switch and follow the one prompted (10 switches in 10 alternations,
-    reviewer A round 2). That is safe because each switch happens at the prompted session's turn
-    start, when the other is idle and has no call in flight, so no tool call is charged against a
-    room it does not belong to, and each switch is logged. Main is decided once per request, before
+    reviewer A round 2), each switch logged. Within one Claude Code process (`/clear`, `/resume`,
+    `/compact`) the switch is at the process's own next prompt, when its old conversation has no
+    call left to run. Two interactive processes on one proxy are not a supported setup, and there
+    the bound holds only while the session losing main is idle: a switch during its pending tool
+    call charges that call against the new main's room (reviewer A round 3: 1,884 tokens against a
+    500-token room). The turn-start rule on main opens the same window. Main is decided once per request, before
     the transform, and never moves at a response: at round 2 a response of a session whose request
     was in flight when another took over moved main back with no event (reviewer A). A session's main is the first conversation main in it, so a
     subagent that outgrew main does not replace it, and a later `/resume` still returns to the
@@ -1330,7 +1371,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
     or nested request takes main, and the lead stays main throughout. In the engine test of the live case
     (old room spent: bound 4,000, real input 3,600), `contexto_state` returned the budget-spent
     notice before and returns the pin after the new conversation's first request; `contexto_search`
-    finds the old conversation's paged turn.
+    finds the old conversation's paged turn. The same holds after `/compact` (reviewer B's repro).
+    Replaying the four compaction captures: before, every request of the compacted conversation was
+    side (4 of 4 on each); after, it is main from its first request (`compacted`). The two
+    stream-json captures: before, the compacted and the cleared conversations were side; after,
+    `compacted` and `new_cli_session` at their first request, with each response's `tool_calls`
+    as the stub's reply gives it. The earlier seven captures replay unchanged, the headless lead's
+    nested `claude -p` staying side.
   - **Options considered.** Stop charging a stale main once another conversation has started a turn
     (QA's fallback). Rejected: a subagent's first request is a turn start inside main's tool loop,
     so main's own calls would then be bounded by the side room alone and could overfill main's
@@ -1343,8 +1390,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
     measured). After a
     restart whose epoch record holds another conversation, the new main still writes no record until
     it has more turn starts than the record's (rule 16, unchanged), so that conversation can resume
-    only by rotating once. A subagent resumed by `SendMessage` more often than main has turns can
-    still take over by the turn-start rule. If a Claude Code version sent a request of the old
+    only by rotating once. A subagent on a Claude Code that stopped sending `X-Claude-Code-Agent-Id`
+    could again take over by the turn-start rule. In a headless session, `/clear` right after an
+    SDK `interrupt()` (main's latest response released a call), or with a proxy that could not tell
+    whether the response held a client call, falls back to the turn-start rule; a nested `claude -p`
+    started in the background that sends its first request after the lead ended its turn takes
+    main until the lead's next prompt, which takes it back by its id or its turn starts. If a Claude Code version sent a request of the old
     conversation after `/clear` (none of the four measured did), a later `/resume` of it would return
     only by turn starts. A second interactive Claude Code pointed at the same proxy with no parent
     id (not a supported setup) takes main at its first turn start; while both send, once.

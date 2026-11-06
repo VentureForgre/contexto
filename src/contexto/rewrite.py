@@ -1649,6 +1649,7 @@ def keyed(dialect: Dialect, request: dict) -> str:
 
 
 CLAUDE_CODE_SESSION_HEADER = "x-claude-code-session-id"
+CLAUDE_CODE_AGENT_HEADER = "x-claude-code-agent-id"
 # Claude Code's User-Agent: claude-cli/<version> (<user type>, <entrypoint>[, agent-sdk/...][, ...])
 _CLAUDE_CODE_ENTRYPOINT = re.compile(r"claude-cli/\S+ \([^,()]*,\s*([^,()\s]+)")
 
@@ -1659,6 +1660,7 @@ class ClaudeCodeSession(NamedTuple):
     id: str
     parent: str | None  # metadata.user_id's parent_session_id: set by an agent-team teammate
     entrypoint: str | None  # the User-Agent's entrypoint: cli (interactive), sdk-cli (claude -p), sdk-ts, ...
+    agent: bool = False  # X-Claude-Code-Agent-Id is set: a subagent's or an in-process teammate's request
 
 
 def claude_code_session(request: dict, headers: dict[str, str]) -> ClaudeCodeSession | None:
@@ -1670,7 +1672,8 @@ def claude_code_session(request: dict, headers: dict[str, str]) -> ClaudeCodeSes
     requests carry ``parent_session_id`` (the lead's id; an in-process teammate keeps the lead's own
     id, a tmux one has its own), and a ``claude -p`` run from the Bash tool has its own id and the
     entrypoint ``sdk-cli``, where the interactive CLI's is ``cli``; under a headless lead (itself
-    ``sdk-cli``) the child inherits the lead's ``sdk-cli``."""
+    ``sdk-cli``) the child inherits the lead's ``sdk-cli``. Every subagent request (2.1.302 to 2.1.318)
+    and an in-process teammate's carry ``X-Claude-Code-Agent-Id``; no request of main's does."""
     meta = request.get("metadata")
     user_id = meta.get("user_id") if isinstance(meta, dict) else None
     try:
@@ -1685,8 +1688,25 @@ def claude_code_session(request: dict, headers: dict[str, str]) -> ClaudeCodeSes
     parent = fields.get("parent_session_id")
     agent = next((v for k, v in headers.items() if k.lower() == "user-agent"), None)
     match = _CLAUDE_CODE_ENTRYPOINT.match(agent) if isinstance(agent, str) else None
+    agent_id = next((v for k, v in headers.items() if k.lower() == CLAUDE_CODE_AGENT_HEADER), None)
     return ClaudeCodeSession(session, parent if isinstance(parent, str) and parent else None,
-                             match.group(1) if match else None)
+                             match.group(1) if match else None, bool(agent_id))
+
+
+# D50: the start of the first message of a conversation Claude Code compacted (/compact, and auto-compaction),
+# a plain string; measured on 2.1.314 and 2.1.318.
+CLAUDE_CODE_COMPACTION_SUMMARY = ("This session is being continued from a previous conversation that ran out of "
+                                  "context. The summary below covers the earlier portion of the conversation.\n")
+
+
+def compaction_summary(messages: list[dict]) -> bool:
+    """D50: the request is of a conversation Claude Code compacted: its first message is the summary, a
+    user message whose content is a string starting with ``CLAUDE_CODE_COMPACTION_SUMMARY``. The
+    rest of the compacted conversation follows it: the last messages from before compaction, kept
+    verbatim, then the new prompt."""
+    first = messages[0] if messages else None
+    content = first.get("content") if isinstance(first, dict) and first.get("role") == "user" else None
+    return isinstance(content, str) and content.startswith(CLAUDE_CODE_COMPACTION_SUMMARY)
 
 
 def window_record(store: Store) -> tuple[float, str | None] | None:
@@ -1974,6 +1994,10 @@ class RewriteEngine:
         # that conversation has stayed quiet since; and why main last moved, for main_changed.
         self._cli_sessions: dict[str, ClaudeCodeSession | None] = {}
         self._judged: set[str] = set()
+        self._compacted: set[str] = set()  # the keys whose first message is Claude Code's compaction summary
+        # D50: per conversation key, whether it is idle: its latest response released no client tool call
+        # and it has sent no request since (a headless /clear qualifies; a nested claude -p never does).
+        self._idle: dict[str, bool] = {}
         self._session_mains: dict[str, str] = {}
         self._displaced: dict[str, bool] = {}
         self._main_reason: str | None = None
@@ -2022,10 +2046,13 @@ class RewriteEngine:
         # request-time publish, the epoch record, and the response-time publish all read self._main.
         if dialect.name == "anthropic":
             self._cli_sessions[key] = claude_code_session(request, headers)
+            if compaction_summary(request.get(dialect.field) or []):
+                self._compacted.add(key)
         if dialect.judges_session_start(request):
             self._judged.add(key)
         previous = self._main
         main = self.publishes(key, request.get(dialect.field) or [], dialect)
+        self._idle[key] = False  # in flight until a response without a client tool call
         if previous is not None and previous != self._main:  # content-free: a reason and a count, no id
             resumed.append({"event": "main_changed", "reason": self._main_reason,
                             "turn_starts": self._turn_starts[key]})
@@ -2223,8 +2250,11 @@ class RewriteEngine:
                 self._displaced[lost.id] = True
             if session:
                 self._displaced.pop(session.id, None)
-        if session and session.parent is None and main in self._judged:
-            self._session_mains.setdefault(session.id, main)
+        if session and session.parent is None and not session.agent and main in self._judged:
+            if self._main_reason == "compacted" and previous != main:  # /resume loads the compacted transcript
+                self._session_mains[session.id] = main
+            else:
+                self._session_mains.setdefault(session.id, main)
         return key == self._main
 
     def _set_main(self, key: str) -> None:
@@ -2260,26 +2290,40 @@ class RewriteEngine:
           A session that kept sending beside the new main regains main only by the turn-start rule,
           so two sessions both sending cannot trade main at each turn start; two that take turns
           (one idle while the other is prompted) do follow the one prompted.
+        - ``compacted``: its session id and entrypoint are main's and its first message is
+          Claude Code's compaction summary (``compaction_summary``): ``/compact`` and auto-compaction
+          keep the session id but start a new first message, so a new key with two turn starts. It
+          becomes its session's main, since ``/resume`` of that session loads the compacted transcript.
         - ``after_side_request``: main is a conversation never seen with a tool list, which happens
           when a side request is the session's first request; the user's first prompt ties it at one
           turn start.
 
-        The session rules apply only when both this conversation and main run in the interactive CLI
-        (User-Agent entrypoint ``cli``), the only mode with ``/clear`` and ``/resume``. A ``claude -p``
-        or SDK child run from a tool has its own id and ``sdk-cli``, ``sdk-ts`` or ``sdk-py``, or, under
-        a headless lead, the lead's inherited ``sdk-cli``, so it never qualifies.
-        A child session (``parent_session_id``: an agent-team teammate) never takes over at all.
+        The session rules need this conversation's User-Agent entrypoint to be main's. In the
+        interactive CLI (``cli``) that is enough: a ``claude -p`` or SDK child run from a tool sends
+        ``sdk-cli``, ``sdk-ts`` or ``sdk-py``. Headless sessions (``sdk-*``) also run ``/clear`` and
+        ``/compact`` (``claude -p --input-format stream-json``, the Agent SDK), but there a nested
+        ``claude -p`` inherits the lead's ``sdk-cli`` and has its own id like a cleared session, so a
+        new or resumed session id takes over only while main is idle (``_idle``): a nested child runs
+        inside one of main's tool calls, and a headless ``/clear`` follows main's final response.
+        In the interactive CLI main may be mid-call when another interactive process on the same
+        proxy (not a supported setup) is prompted; that call is then charged against the new room.
+        A child session (``parent_session_id``: an agent-team teammate) and a subagent's request
+        (``X-Claude-Code-Agent-Id``) never take over at all, by any rule.
         Codex requests carry no Claude Code session id, so only the turn-start rule applies to them."""
         session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
-        if session and session.parent:
+        if session and (session.parent or session.agent):
             return None
         if key in self._judged:
-            if session and current and session.id != current.id and session.entrypoint == current.entrypoint == "cli":
+            same_mode = bool(session and current and session.entrypoint and session.entrypoint == current.entrypoint)
+            if (same_mode and session.id != current.id
+                    and (session.entrypoint == "cli" or self._idle.get(main, False))):
                 owner = self._session_mains.get(session.id)
                 if owner is None:
                     return "new_cli_session"
                 if owner == key and self._displaced.get(session.id):
                     return "resumed_cli_session"
+            if key in self._compacted and same_mode and session.id == current.id:
+                return "compacted"
             if main not in self._judged:
                 return "after_side_request"
         return "more_turn_starts" if turn_starts > self._turn_starts.get(main, 0) else None
@@ -2437,6 +2481,7 @@ class RewriteEngine:
         state = self.states.get(key)
         if state is None:
             return []
+        self._idle[key] = tool_calls is False  # unknown (None) is not idle
         token = _DIALECT.set(dialect)
         try:
             identity = usage_identity(request.get(dialect.field) or [])

@@ -16,21 +16,23 @@ import io
 import json
 
 from contexto import mcp
-from contexto.rewrite import ANTHROPIC, MESSAGES, RewriteEngine, keyed
+from contexto.rewrite import ANTHROPIC, CLAUDE_CODE_COMPACTION_SUMMARY, MESSAGES, RewriteEngine, keyed
 from contexto.store.memory import MemoryStore
 from test_codex import CONFIG as CODEX_CONFIG
 from test_codex import history as codex_history
 from test_codex import prompt as codex_prompt
 from test_codex import request as codex_request
-from test_rewrite import CONFIG, FILL, conversation, history, request, user
+from test_rewrite import CONFIG, FILL, assistant, conversation, ctx_block, history, request, settings_only, user
 
 RESPONSES_PATH = "/v1/responses"
 OLD, NEW = "237dedfa-8ca9-43b9-ad3c-4a6ebcb1a084", "916e1695-b1be-43de-abe8-eb4ffa7e0931"
 SUBAGENT_TOOLS = [{"name": "Bash", "input_schema": {"type": "object"}}]
 
 
-def headers(session: str | None, entrypoint: str = "cli") -> dict[str, str]:
+def headers(session: str | None, entrypoint: str = "cli", agent: bool = False) -> dict[str, str]:
     found = {"User-Agent": f"claude-cli/2.1.314 (external, {entrypoint})"}
+    if agent:
+        found["X-Claude-Code-Agent-Id"] = "a36c784c53af45cc0"
     return {**found, "X-Claude-Code-Session-Id": session} if session else found
 
 
@@ -55,9 +57,9 @@ def subagent_request(session: str, turns: int = 1) -> dict:
 
 
 def send(engine: RewriteEngine, req: dict, session: str | None, input_tokens: int = 300,
-         entrypoint: str = "cli") -> list[dict]:
-    _, _, events = engine(req, headers(session, entrypoint), MESSAGES)
-    engine.observe_usage(MESSAGES, {"input_tokens": input_tokens}, req)
+         entrypoint: str = "cli", agent: bool = False, tool_calls: bool | None = None) -> list[dict]:
+    _, _, events = engine(req, headers(session, entrypoint, agent), MESSAGES)
+    engine.observe_usage(MESSAGES, {"input_tokens": input_tokens}, req, tool_calls=tool_calls)
     return events
 
 
@@ -303,7 +305,7 @@ def test_a_claude_p_under_a_headless_lead_never_takes_main():
     store = MemoryStore(key=b"k" * 32)
     engine = RewriteEngine(store, config=CONFIG)
     lead = lambda loop: main_request(conversation("NESTED-RUN run claude -p", 1, mid_loop=loop), OLD)  # noqa: E731
-    send(engine, lead(False), OLD, input_tokens=3_000, entrypoint="sdk-cli")
+    send(engine, lead(False), OLD, input_tokens=3_000, entrypoint="sdk-cli", tool_calls=True)  # the Bash call
     room, record = store.turn_room(), store.epoch_record()
     events = send(engine, main_request(conversation("NESTED-P hello", 1), NESTED), NESTED, entrypoint="sdk-cli")
     assert events[-1]["main"] is False and changes(events) == []
@@ -355,3 +357,136 @@ def test_a_deeply_nested_user_id_is_no_session_id():
     deep = request(conversation("after clear", 1), metadata={"user_id": "[" * 100_000 + "]" * 100_000})
     _, _, events = engine(deep, headers(None), MESSAGES)
     assert events[-1]["event"] == "request" and events[-1]["main"] is False
+
+
+# /compact and auto-compaction (reviewer B round 2, PR #238) ------------------------------------------
+
+SUMMARY = (CLAUDE_CODE_COMPACTION_SUMMARY
+           + "\n<system-reminder>\n<tools-used-before-summary>Agent</tools-used-before-summary>\n</system-reminder>"
+           "\nSummary:\nsynthetic summary of the earlier turns\n\nThe messages after this summary are the most recent "
+           "messages from before compaction, kept verbatim.")
+
+
+def compacted(prompt: str, manual: bool = True, kept: str = "synthetic last reply") -> list[dict]:
+    """The compacted conversation as Claude Code 2.1.314 and 2.1.318 sent it: the summary (a plain
+    string), a role system message, the last message from before compaction kept verbatim, then the
+    new prompt, which after /compact also holds the command's blocks."""
+    if manual:
+        command = [{"type": "text", "text": "<local-command-caveat>synthetic caveat</local-command-caveat>\n"},
+                   {"type": "text", "text": "<command-name>/compact</command-name>\n"},
+                   {"type": "text", "text": "<local-command-stdout>Compacted</local-command-stdout>\n"}]
+        middle = settings_only()
+    else:
+        command, middle = [], {"role": "system", "content": "synthetic date note"}
+    new = {"role": "user", "content": [ctx_block(), *command, {"type": "text", "text": prompt}]}
+    return [{"role": "user", "content": SUMMARY}, middle, assistant(kept), new]
+
+
+def compaction_request(messages: list[dict]) -> list[dict]:
+    """Claude Code's request for the summary: main's own history, the ask appended to its last prompt."""
+    last = messages[-1]
+    ask = {"type": "text", "text": "CRITICAL: Respond with TEXT ONLY. synthetic summary instructions"}
+    return [*messages[:-1], {"role": "user", "content": [*last["content"], ask]}]
+
+
+def test_after_compact_the_compacted_conversation_is_main_with_pins_and_pages():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    old = main_request(old_conversation(), OLD)
+    send(engine, old, OLD, input_tokens=3_600)
+    tool(store, "contexto_pin", {"kind": "decision", "text": "release codename BLUEFIN"})
+    assert tool(store, "contexto_state", {})[1]["turn_budget"] == "spent"
+    send(engine, main_request(compaction_request(old["messages"]), OLD), OLD, input_tokens=3_700)
+    send(engine, side_request("synthetic side request", OLD), OLD)
+    events = send(engine, main_request(compacted("AFTER-COMPACT turn"), OLD), OLD)
+    assert events[-1]["main"] is True and changes(events) == ["compacted"]
+    assert "over_bound" not in [e["event"] for e in events] and store.turn_room()[1] > 0
+    text, event = tool(store, "contexto_state", {})
+    assert "release codename BLUEFIN" in text and event["chars"] > 0
+    text, event = tool(store, "contexto_search", {"query": "BLUEFIN"})
+    assert event["hits"] >= 1 and "BLUEFIN" in text
+    later = main_request([*compacted("AFTER-COMPACT turn"), assistant("a"), user("THREE next turn")], OLD)
+    assert send(engine, later, OLD)[-1]["main"] is True
+
+
+def test_auto_compaction_hands_over_the_same_way():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 6), OLD), OLD)
+    events = send(engine, main_request(compacted("AFTER-COMPACT turn", manual=False), OLD), OLD)
+    assert events[-1]["main"] is True and changes(events) == ["compacted"]
+
+
+def test_resume_after_compact_returns_to_the_compacted_conversation():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 6), OLD), OLD)
+    send(engine, main_request(compacted("AFTER-COMPACT turn"), OLD), OLD)
+    assert changes(send(engine, main_request(conversation("after clear", 1), NEW), NEW)) == ["new_cli_session"]
+    resumed = main_request([*compacted("AFTER-COMPACT turn"), assistant("a"), user("after resume")], OLD)
+    assert changes(send(engine, resumed, OLD)) == ["resumed_cli_session"]
+
+
+def test_only_claude_codes_own_compaction_summary_hands_over():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 6), OLD), OLD)
+    quoted = main_request(conversation(CLAUDE_CODE_COMPACTION_SUMMARY + "typed by the user", 1), OLD)
+    assert send(engine, quoted, OLD)[-1]["main"] is False  # a prompt, in a list with its context blocks
+    shapes = [compacted("p1"), compacted("p2")]
+    shapes[1][0] = {"role": "user", "content": SUMMARY.replace("ran out of context", "ended")}
+    assert send(engine, main_request(shapes[1], OLD), OLD)[-1]["main"] is False
+    subagent = request(compacted("SUB-TASK continued"), tools=SUBAGENT_TOOLS, metadata=metadata(OLD))
+    assert send(engine, subagent, OLD, agent=True)[-1]["main"] is False  # a compacted subagent
+    assert send(engine, main_request(shapes[0], OLD), OLD, entrypoint="sdk-cli")[-1]["main"] is False
+    teammate_compacted = request(compacted("p3"), metadata=metadata(TEAM, parent=OLD))
+    assert send(engine, teammate_compacted, TEAM)[-1]["main"] is False
+    assert send(engine, main_request(shapes[0], OLD), OLD)[-1]["main"] is True
+
+
+def test_a_subagent_never_takes_main_even_with_more_turn_starts():
+    """Every subagent request carries X-Claude-Code-Agent-Id (2.1.302 to 2.1.318)."""
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 2), OLD), OLD)
+    assert send(engine, subagent_request(OLD, turns=5), OLD, agent=True)[-1]["main"] is False
+
+
+# Headless /clear and /compact (reviewer A round 3, PR #238) -------------------------------------------
+
+def cleared(prompt: str) -> list[dict]:
+    """The first request after /clear (2.1.314 and 2.1.318, interactive and stream-json alike): the
+    command's blocks, then the prompt, in the first message."""
+    blocks = [ctx_block(), {"type": "text", "text": "<command-name>/clear</command-name>\n"},
+              {"type": "text", "text": "<local-command-stdout></local-command-stdout>\n"},
+              {"type": "text", "text": prompt}]
+    return [{"role": "user", "content": blocks}, settings_only()]
+
+
+def test_a_headless_clear_hands_over_while_main_is_idle():
+    """`claude -p --input-format stream-json` on 2.1.318 and 2.1.314: /clear starts a new session id
+    under sdk-cli, after main's final response."""
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    old = main_request(old_conversation(), OLD)
+    send(engine, old, OLD, input_tokens=3_600, entrypoint="sdk-cli", tool_calls=False)
+    tool(store, "contexto_pin", {"kind": "decision", "text": "release codename BLUEFIN"})
+    events = send(engine, main_request(cleared("TWO-A after clear"), NEW), NEW, entrypoint="sdk-cli")
+    assert events[-1]["main"] is True and changes(events) == ["new_cli_session"]
+    text, event = tool(store, "contexto_state", {})
+    assert "release codename BLUEFIN" in text and event["chars"] > 0
+    assert tool(store, "contexto_search", {"query": "BLUEFIN"})[1]["hits"] >= 1
+
+
+def test_under_a_headless_lead_a_new_session_waits_for_main_to_be_idle():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    lead = main_request(conversation("NESTED-RUN run claude -p", 1), OLD)
+    nested = main_request(conversation("NESTED-P hello", 1), NESTED)
+    for released in (True, None):  # a client call released, or the proxy could not tell
+        send(engine, lead, OLD, entrypoint="sdk-cli", tool_calls=released)
+        assert send(engine, nested, NESTED, entrypoint="sdk-cli")[-1]["main"] is False
+    engine(lead, headers(OLD, "sdk-cli"), MESSAGES)  # main's request in flight, no response yet
+    assert send(engine, nested, NESTED, entrypoint="sdk-cli")[-1]["main"] is False
+
+
+def test_a_headless_compaction_hands_over():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 6), OLD), OLD, entrypoint="sdk-cli", tool_calls=True)
+    events = send(engine, main_request(compacted("AFTER-COMPACT turn"), OLD), OLD, entrypoint="sdk-cli")
+    assert events[-1]["main"] is True and changes(events) == ["compacted"]
