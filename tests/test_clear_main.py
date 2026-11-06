@@ -14,11 +14,19 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 
 import pytest
 
 from contexto import mcp
-from contexto.rewrite import ANTHROPIC, CLAUDE_CODE_COMPACTION_SUMMARY, MESSAGES, RewriteEngine, keyed
+from contexto.rewrite import (
+    ANTHROPIC,
+    CLAUDE_CODE_COMPACTION_SUMMARY,
+    MESSAGES,
+    RewriteEngine,
+    compaction_summary,
+    keyed,
+)
 from contexto.store.memory import MemoryStore
 from test_codex import CONFIG as CODEX_CONFIG
 from test_codex import history as codex_history
@@ -382,9 +390,10 @@ SUMMARY = (CLAUDE_CODE_COMPACTION_SUMMARY
 
 
 def compacted(prompt: str, manual: bool = True, kept: str = "synthetic last reply") -> list[dict]:
-    """The compacted conversation as Claude Code 2.1.314 and 2.1.318 sent it: the summary (a plain
-    string), a role system message, the last message from before compaction kept verbatim, then the
-    new prompt, which after /compact also holds the command's blocks."""
+    """A compacted conversation in the form D50 recorded (2.1.314 and 2.1.318 with the attribution reminder
+    off): the summary (a plain string), a role system message, the last message from before compaction
+    kept verbatim, then the new prompt, which after /compact also holds the command's blocks. The forms
+    the CLI sends by default are in the capture fixture below (D59)."""
     if manual:
         command = [{"type": "text", "text": "<local-command-caveat>synthetic caveat</local-command-caveat>\n"},
                    {"type": "text", "text": "<command-name>/compact</command-name>\n"},
@@ -535,10 +544,142 @@ def test_a_late_or_duplicate_response_never_makes_a_headless_main_idle(order):
 @pytest.mark.parametrize("released", [True, False, None])
 def test_a_response_without_an_input_count_still_sets_busy_or_idle(released):
     """D49 amended (#244) returns early from observe_usage on usage with no input count; D50 (#238) reads
-    every response for a client call. A response without usage must still mark the lead busy (a call
-    may be pending) or idle (it released none), or a headless /clear could never hand over."""
+    every response for a client call. A response without usage must still mark the lead idle (it
+    released no call) or busy (a call may be pending), or a headless /clear could never hand over. For
+    the busy case the lead is made idle first, by a complete response (review of #244): a fresh request
+    is already busy, so otherwise a busy mark skipped by the early return would go unnoticed."""
     engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
     lead = main_request(conversation("HEADLESS lead prompt", 1), OLD)
+    key = keyed(ANTHROPIC, lead)
     engine(lead, headers(OLD, "sdk-cli"), MESSAGES)
+    if released is False:
+        engine.observe_usage(MESSAGES, {"output_tokens": 5}, lead, tool_calls=False)
+        assert engine._idle[key] is True
+        return
+    engine.observe_usage(MESSAGES, {"input_tokens": 300, "output_tokens": 5}, lead, tool_calls=False)
+    assert engine._idle[key] is True
     engine.observe_usage(MESSAGES, {"output_tokens": 5}, lead, tool_calls=released)
-    assert engine._idle[keyed(ANTHROPIC, lead)] is (released is False)
+    assert engine._idle[key] is False
+
+
+# Auto-compaction inside a tool loop (review of #238, D59) ----------------------------------------------
+
+def compacted_loop() -> list[dict]:
+    """The request that continues a tool loop after Claude Code auto-compacts it (2.1.314 and 2.1.318): the
+    summary, a role system message, then the pending tool_use and its result, with no new prompt."""
+    return [{"role": "user", "content": SUMMARY}, {"role": "system", "content": "synthetic date note"},
+            tool_use(1), tool_result(1, "ok")]
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "sdk-cli"])
+def test_an_auto_compaction_inside_a_tool_loop_hands_over_at_once(entrypoint):
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    old = main_request(old_conversation(), OLD)
+    send(engine, old, OLD, input_tokens=3_600, entrypoint=entrypoint, tool_calls=True)
+    tool(store, "contexto_pin", {"kind": "decision", "text": "release codename BLUEFIN"})
+    send(engine, main_request(compaction_request(old["messages"]), OLD), OLD, input_tokens=3_700,
+         entrypoint=entrypoint, tool_calls=False)
+    assert tool(store, "contexto_state", {})[1]["turn_budget"] == "spent"
+    events = send(engine, main_request(compacted_loop(), OLD), OLD, entrypoint=entrypoint, tool_calls=True)
+    assert events[-1]["main"] is True and changes(events) == ["compacted"]
+    assert "over_bound" not in [e["event"] for e in events] and store.turn_room()[1] > 0
+    text, event = tool(store, "contexto_state", {})
+    assert "release codename BLUEFIN" in text and event["chars"] > 0
+    assert tool(store, "contexto_search", {"query": "BLUEFIN"})[1]["hits"] >= 1
+
+
+@pytest.mark.parametrize("summary_answered", [True, None])
+def test_a_compaction_inside_a_tool_loop_waits_while_main_may_have_a_call_out(summary_answered):
+    """Not while main's newest request may hold a client call (its response released one, the proxy
+    could not tell, or it is unanswered): that call would be charged against the new room."""
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    old = main_request(old_conversation(), OLD)
+    send(engine, old, OLD, input_tokens=3_600, tool_calls=True)
+    summary = main_request(compaction_request(old["messages"]), OLD)
+    if summary_answered:
+        send(engine, summary, OLD, input_tokens=3_700, tool_calls=None)
+    else:
+        engine(summary, headers(OLD), MESSAGES)  # in flight
+    events = send(engine, main_request(compacted_loop(), OLD), OLD, tool_calls=True)
+    assert events[-1]["main"] is False and changes(events) == []
+    events = send(engine, main_request([*compacted_loop(), assistant("done"), user("next prompt")], OLD), OLD)
+    assert events[-1]["main"] is True and changes(events) == ["compacted"]  # its next prompt, as before
+
+
+def test_only_main_s_own_compaction_takes_over_inside_a_tool_loop():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 6), OLD), OLD, tool_calls=False)
+    subagent = request(compacted_loop(), tools=SUBAGENT_TOOLS, metadata=metadata(OLD))
+    assert send(engine, subagent, OLD, agent=True)[-1]["main"] is False
+    assert send(engine, main_request(compacted_loop(), NEW), NEW)[-1]["main"] is False  # another session
+    assert send(engine, main_request(compacted_loop(), OLD), OLD, entrypoint="sdk-cli")[-1]["main"] is False
+
+
+def test_a_late_request_of_an_older_compaction_does_not_retake_main():
+    """Reviewer A, PR #246: the mid-loop handover held for any compaction of main's session, so a late
+    request of an older one took main back and pointed a later /resume at it."""
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    first = [{"role": "user", "content": SUMMARY}, assistant("ok"), user("prompt one " + FILL)]
+    send(engine, main_request(first, OLD), OLD, input_tokens=900, tool_calls=False)
+    second = [{"role": "user", "content": SUMMARY + " second compaction"}, assistant("ok"), user("prompt two")]
+    assert changes(send(engine, main_request(second, OLD), OLD, tool_calls=False)) == ["compacted"]
+    late = main_request([*first, tool_use(3), tool_result(3, "x")], OLD)
+    events = send(engine, late, OLD, tool_calls=False)
+    assert events[-1]["main"] is False and changes(events) == []
+
+
+# Claude Code's real compaction requests (review of #246, D59) ------------------------------------------
+# Captured from 2.1.314 and 2.1.318 against a loopback stub (tests/fixtures/make_compaction_shapes.py):
+# headless /compact, headless auto-compaction and interactive /compact with the default attribution
+# reminder on, and with it off headless /compact (2.1.318) and auto-compaction (2.1.314).
+
+SHAPES = json.loads((Path(__file__).parent / "fixtures" / "compaction_shapes_2_1_31x.json").read_text())
+SESSION_IDS = {1: OLD, 2: NEW}
+
+
+def replay(captured: list[dict]) -> list[tuple[bool, list[str], bool]]:
+    """Each captured request through one engine, in order: (main, main_changed reasons, compacted shape).
+    The response usage is what the stub reported; only the auto-compaction's first response held a call."""
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32))
+    out = []
+    for captured_request in captured:
+        req = {"model": "claude-sonnet-5-5", "max_tokens": 32_000, "messages": captured_request["messages"],
+               "metadata": metadata(SESSION_IDS[captured_request["session"]])}
+        if captured_request["tools"]:
+            req["tools"] = SUBAGENT_TOOLS
+        session = SESSION_IDS[captured_request["session"]]
+        found = {"User-Agent": captured_request["user_agent"], "X-Claude-Code-Session-Id": session}
+        _, _, events = engine(req, found, MESSAGES)
+        engine.observe_usage(MESSAGES, {"input_tokens": 1_200}, req, tool_calls=False)
+        out.append((events[-1]["main"], changes(events), compaction_summary(req["messages"])))
+    return out
+
+
+@pytest.mark.parametrize("version, scenario", [(v, s) for v in sorted(SHAPES) for s in sorted(SHAPES[v])])
+def test_claude_codes_real_compaction_hands_main_over(version, scenario):
+    """On 2.1.314 and 2.1.318 the compacted conversation's first user message starts with Claude Code's
+    attribution <system-reminder> block, then the summary block: D50's plain-string test never matched
+    it, so the compacted conversation stayed a side conversation (reviewer B, PR #246)."""
+    captured = SHAPES[version][scenario]
+    rows = replay(captured)
+    assert [row[2] for row in rows] == [False] * (len(rows) - 1) + [True], rows  # only the last is compacted
+    assert rows[-1][:2] == (True, ["compacted"]), rows
+    # Before it, main's own requests (the prompt and the summary request) were main; the interactive
+    # CLI's title requests carry no tool list and are side.
+    assert all(row[0] for row, req in zip(rows[:-1], captured) if req["tools"]), rows
+
+
+@pytest.mark.parametrize("content, matches", [
+    (CLAUDE_CODE_COMPACTION_SUMMARY + "\nSummary:\nx", True),  # attribution off, auto-compaction
+    ([{"type": "text", "text": CLAUDE_CODE_COMPACTION_SUMMARY + "\nSummary:\nx"}], True),  # off, /compact
+    ([ctx_block("attribution"), ctx_block(), {"type": "text", "text": CLAUDE_CODE_COMPACTION_SUMMARY + "\nx"}], True),
+    ([ctx_block(), {"type": "text", "text": CLAUDE_CODE_COMPACTION_SUMMARY + "typed by the user"}], False),
+    (CLAUDE_CODE_COMPACTION_SUMMARY + "typed by the user", False),  # a prompt that quotes the sentence
+    ([{"type": "text", "text": "a prompt"}, {"type": "text", "text": CLAUDE_CODE_COMPACTION_SUMMARY + "\nx"}], False),
+    ([{"type": "image", "source": {}}, {"type": "text", "text": CLAUDE_CODE_COMPACTION_SUMMARY + "\nx"}], False),
+    ([ctx_block()], False), ([], False), (None, False),
+])
+def test_the_compaction_summary_is_found_after_leading_reminder_blocks(content, matches):
+    assert compaction_summary([{"role": "user", "content": content}, settings_only()]) is matches
+    assert compaction_summary([{"role": "assistant", "content": content}]) is False

@@ -387,7 +387,7 @@ class FakeLauncher:
     EXIT_INTERRUPTED = 130
     interrupted = False
 
-    def check_cli_version(self, cli, binary, store, *, enabled=True, stderr=None):
+    def check_cli_version(self, cli, binary, store, *, enabled=True, stderr=None, installed=None):
         self.calls["version_check"] = (cli, binary, enabled)
         return not self.interrupted
 
@@ -405,7 +405,8 @@ def codex_bin(tmp_path, monkeypatch):
     stub = bindir / "codex"
     stub.write_text('#!/bin/sh\n'
                     'case "$1" in\n'
-                    '--version) [ -n "$STUB_CODEX_NO_VERSION" ] && exit 1\n'
+                    '--version) [ -n "$STUB_CODEX_VERSION_LOG" ] && echo run >> "$STUB_CODEX_VERSION_LOG"\n'
+                    '  [ -n "$STUB_CODEX_NO_VERSION" ] && exit 1\n'
                     '  echo "codex-cli ${STUB_CODEX_VERSION:-0.166.0}" ;;\n'
                     '--help) printf "%s\\n" "${STUB_CODEX_HELP:-Usage: codex [OPTIONS] [PROMPT]}" ;;\n'
                     'esac\n'
@@ -949,6 +950,24 @@ def test_run_codex_without_a_readable_version_asks_codex_help_then_warns(tmp_pat
     err, event = launch("H2")  # help lists it: passed, no warning
     assert seen["argv"] == [codex_bin, "--no-daemon"] and "background app-server" not in err
     assert event["no_daemon"] is True and event["codex_version_error"] == "exit_1"
+
+
+@pytest.mark.parametrize("codex_args", [[], ["exec", "hi"]], ids=["tui", "exec"])
+def test_run_codex_reads_the_codex_version_once(tmp_path, monkeypatch, codex_bin, codex_args):
+    """Review of #236: ``codex --version`` ran for the --no-daemon gate and again for the version check,
+    so a hanging one cost its 3 s timeout twice."""
+    from contexto import launcher
+
+    runs = tmp_path / "version-runs"
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    monkeypatch.setenv("STUB_CODEX_VERSION_LOG", str(runs))
+    monkeypatch.setattr(launcher, "run_child", lambda argv, env=None, *, stderr=None: 0)
+    args = parse("--session", "V1", "--upstream", "http://127.0.0.1:9", "--codex-key-helper", "echo k", "codex",
+                 *codex_args)
+    assert run_codex(args, stderr=io.StringIO()) == 0
+    assert runs.read_text().splitlines() == ["run"]
+    check = next(e for e in log_events(tmp_path / "ctx", "V1") if e["event"] == "cli_version_check")
+    assert check["version"] == "0.166.0" and check["tested"] is True and "error" not in check
 
 
 @pytest.mark.parametrize("codex_args,refused", [

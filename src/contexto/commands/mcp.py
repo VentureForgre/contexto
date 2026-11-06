@@ -42,8 +42,8 @@ def _megabytes(value: str) -> int:
 
 
 def run(args: argparse.Namespace) -> int:
-    from contexto.mcp import serve_stdio
-    from contexto.store import SessionStore
+    from contexto.mcp import UnopenedStore, serve_stdio
+    from contexto.store import LockFileDamagedError, SessionStore
 
     # The same resolution as the other subcommands, and --home under the same rule (B24): a client that
     # writes --home=~/y without a shell gets the expanded absolute path, not a literal ./~/y.
@@ -53,6 +53,9 @@ def run(args: argparse.Namespace) -> int:
         if not os.path.lexists(session_dir(home, args.session)):
             raise ValueError(f"no session {args.session!r} under {home / 'sessions'}")
         store = SessionStore(home, args.session)
+    except LockFileDamagedError as exc:  # each tool call says so, naming the file (D59)
+        print(f"contexto mcp: {exc}", file=sys.stderr)
+        return serve_stdio(UnopenedStore(args.session, exc))
     except (OSError, ValueError) as exc:  # stderr only: stdout carries the protocol
         print(f"contexto mcp: cannot start: {exc}", file=sys.stderr)
         return 1

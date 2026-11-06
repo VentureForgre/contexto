@@ -1825,13 +1825,15 @@ def test_logged_transformations_carry_the_truncated_flag_when_cut(make_proxy, mo
 
 @pytest.mark.parametrize("extra, reason", [
     ({"Host": "rebind.evil.example:{port}"}, "host"),  # a DNS-rebound page names its own host
-    ({"Host": "127.0.0.1:1"}, "host"),
-    ({"Host": "127.0.0.1"}, "host"),
     ({"Host": "localhost.evil.example:{port}"}, "host"),
+    ({"Host": "localhost.:{port}"}, "host"),
+    ({"Host": "evil@127.0.0.1:{port}"}, "host"),
+    ({"Host": "127.0.0.1:x{port}"}, "host"),
     ({"Origin": "https://evil.example"}, "origin"),  # a browser sends Origin on every POST, no-cors too
     ({"Origin": "null"}, "origin"),
     ({"Origin": "http://127.0.0.1:{port}"}, "origin"),  # a page on a local dev server is still a page
-], ids=["rebound_host", "other_port", "no_port", "lookalike_host", "origin", "null_origin", "loopback_origin"])
+], ids=["rebound_host", "lookalike_host", "trailing_dot", "userinfo", "bad_port", "origin", "null_origin",
+        "loopback_origin"])
 def test_a_request_not_from_the_local_cli_is_refused_and_never_reaches_the_engine(make_proxy, extra, reason):
     engine = StubEngine("drop-first")
     proxy, log = make_proxy(transform=engine, observe_usage=engine.observe_usage)
@@ -1869,7 +1871,9 @@ def test_a_missing_or_repeated_host_is_refused(make_proxy, head):
     assert [e["reason"] for e in log.events if e["event"] == "request_refused"] == ["host"]
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1:{port}", "localhost:{port}", "LocalHost:{port}"])
+@pytest.mark.parametrize("host", ["127.0.0.1:{port}", "localhost:{port}", "LocalHost:{port}",
+                                  # D59: an SSH forward or a port-80 proxy sends another port or none
+                                  "localhost:9000", "127.0.0.1:1", "127.0.0.1", "localhost"])
 def test_the_hosts_the_cli_sends_are_served_unchanged(make_proxy, host):
     proxy, log = make_proxy()
     response, data = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, {**AUTH, "Host": host.format(port=proxy.port)})
@@ -1986,6 +1990,47 @@ def test_a_client_leaving_before_the_response_head_closes_upstream_and_logs_the_
     assert record["closed"] and record["closed_at"] - left_at < 1.0
     assert entry["client_aborted"] is True and entry["upstream_phase"] == "wait_headers" and "status" not in entry
     assert entry["epoch"] == {"k": 0} and len(received) == 1  # the transform is on record, nothing resent
+    assert [e for e in log.events if e["event"] in ("proxy_error", "upstream_retry")] == []
+
+
+@pytest.mark.parametrize("api, path, body, stream", [
+    ("messages", "/v1/messages", REQUEST_BYTES, STREAM),
+    ("responses", "/v1/responses", RESPONSES_BYTES, RESPONSES_STREAM),
+], ids=["messages", "responses"])
+def test_a_client_leaving_after_the_last_event_is_not_an_abort(make_proxy, scripted_upstream, api, path, body,
+                                                               stream):
+    # Review of #239: a client that returns on message_stop (or response.completed) and closes before
+    # the chunk terminator was logged client_aborted, though it had the whole response.
+    record: dict[str, Any] = {}
+    last = sse(stream[-1])
+
+    def terminator_late(sock: socket.socket, got: bytearray) -> None:
+        read_request(sock, got)
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+        for raw in [sse(e) for e in stream]:
+            sock.sendall(b"%x\r\n%s\r\n" % (len(raw), raw))
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not _peer_closed(sock):
+            time.sleep(0.01)
+        record["closed"] = _peer_closed(sock)
+        try:
+            sock.sendall(b"0\r\n\r\n")
+        except OSError:
+            pass
+
+    url, _ = scripted_upstream(terminator_late)
+    engine = StubEngine()
+    proxy, log = make_proxy(upstream=url, transform=engine, observe_usage=engine.observe_usage)
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(request_head(proxy, path) + b"Content-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
+        reply = b""
+        while last not in reply:
+            reply += sock.recv(65536)
+    entry = log.requests()[0]
+    wait_for(record, "closed")
+    assert record["closed"]  # the proxy still shut upstream for the leaving client
+    assert entry["status"] == 200 and entry["usage"] and "client_aborted" not in entry and "error" not in entry
     assert [e for e in log.events if e["event"] in ("proxy_error", "upstream_retry")] == []
 
 

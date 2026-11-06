@@ -1898,20 +1898,30 @@ def claude_code_session(request: dict, headers: dict[str, str]) -> ClaudeCodeSes
                              match.group(1) if match else None, bool(agent_id))
 
 
-# D50: the start of the first message of a conversation Claude Code compacted (/compact, and auto-compaction),
-# a plain string; measured on 2.1.314 and 2.1.318.
+# D50, D59: the start of the summary that opens a conversation Claude Code compacted (/compact, and
+# auto-compaction), after any leading <system-reminder> blocks; measured on 2.1.314 and 2.1.318.
 CLAUDE_CODE_COMPACTION_SUMMARY = ("This session is being continued from a previous conversation that ran out of "
                                   "context. The summary below covers the earlier portion of the conversation.\n")
 
 
 def compaction_summary(messages: list[dict]) -> bool:
-    """D50: the request is of a conversation Claude Code compacted: its first message is the summary, a
-    user message whose content is a string starting with ``CLAUDE_CODE_COMPACTION_SUMMARY``. The
-    rest of the compacted conversation follows it: the last messages from before compaction, kept
-    verbatim, then the new prompt."""
+    """D50, D59: the request is of a conversation Claude Code compacted: its first message is a user
+    message whose first text, after any leading ``<system-reminder>`` text blocks, starts with
+    ``CLAUDE_CODE_COMPACTION_SUMMARY`` and a blank line. Measured on 2.1.314 and 2.1.318, interactive
+    and headless, for ``/compact`` and auto-compaction: with Claude Code's attribution reminder on
+    (the default) the content is a list, the reminder block and then the summary block (after
+    ``/compact`` the command's blocks and the new prompt follow in the same message); with it off, a
+    list starting with the summary (``/compact``) or a plain string (auto-compaction). Every capture
+    has the blank line, then Claude Code's ``<tools-used-before-summary>`` reminder; a prompt that
+    starts with the sentence and goes on in the same paragraph does not match."""
     first = messages[0] if messages else None
     content = first.get("content") if isinstance(first, dict) and first.get("role") == "user" else None
-    return isinstance(content, str) and content.startswith(CLAUDE_CODE_COMPACTION_SUMMARY)
+    text = content if isinstance(content, str) else None
+    for block in content if isinstance(content, list) else ():
+        text = block.get("text") if isinstance(block, dict) and block.get("type") == "text" else None
+        if not isinstance(text, str) or not text.startswith("<system-reminder>"):
+            break
+    return isinstance(text, str) and text.startswith(CLAUDE_CODE_COMPACTION_SUMMARY + "\n")
 
 
 def window_record(store: Store) -> tuple[float, str | None] | None:
@@ -2455,7 +2465,7 @@ class RewriteEngine:
         choice is re-evaluated (``_takes_over``): it becomes main with strictly more turn starts than
         the current main (a tie keeps the current one), so a subagent or side request, with about one
         turn start, never takes over, or by D50's Claude Code rules; main never changes inside a tool
-        loop. The window (``set_window``) follows
+        loop, except to Claude Code's compaction of main itself (D59). The window (``set_window``) follows
         the same choice, committed before the transform; when main moves away from a conversation, its
         last publish is forgotten, since the new main replaces the store's window, so it publishes again
         if it becomes main again."""
@@ -2491,7 +2501,24 @@ class RewriteEngine:
             reason = self._takes_over(key, main, len(starts))
             if reason:
                 main, self._main_reason = key, reason
+        elif (key != main and key not in self._turn_starts and self._compacts(key, main)
+              and self._idle.get(main, False)):
+            # D59: a compaction that keeps a pending tool_use and its result after the summary sends them
+            # under the new key with no turn start. It continues main's own loop, and main's newest
+            # request (the summary request) was answered with no client tool call, so no call of the old
+            # conversation is outstanding to be charged to the new room. Only at the compacted
+            # conversation's first request: a late request of an older compaction keeps out.
+            main, self._main_reason = key, "compacted"
         return main, len(starts)
+
+    def _compacts(self, key: str, main: str) -> bool:
+        """D50: ``key`` is Claude Code's compaction of ``main``: seen with a request the dialect judges,
+        its first message the compaction summary, in main's own session id and entrypoint, and neither a
+        child session nor a subagent."""
+        session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
+        return bool(key in self._judged and key in self._compacted and session and current
+                    and not session.parent and not session.agent and session.entrypoint
+                    and session.entrypoint == current.entrypoint and session.id == current.id)
 
     def _takes_over(self, key: str, main: str, turn_starts: int) -> str | None:
         """D50: why the conversation ``key``, at a turn start, replaces ``main``, or None. The turn-start
@@ -2513,6 +2540,8 @@ class RewriteEngine:
           Claude Code's compaction summary (``compaction_summary``): ``/compact`` and auto-compaction
           keep the session id but start a new first message, so a new key with two turn starts. It
           becomes its session's main, since ``/resume`` of that session loads the compacted transcript.
+          A compaction that keeps a pending tool call hands over at its first request, which has no turn
+          start (``_main_after``, D59).
         - ``after_side_request``: main is a conversation never seen with a tool list, which happens
           when a side request is the session's first request; the user's first prompt ties it at one
           turn start.
@@ -2541,7 +2570,7 @@ class RewriteEngine:
                     return "new_cli_session"
                 if owner == key and self._displaced.get(session.id):
                     return "resumed_cli_session"
-            if key in self._compacted and same_mode and session.id == current.id:
+            if self._compacts(key, main):
                 return "compacted"
             if main not in self._judged:
                 return "after_side_request"
@@ -2711,8 +2740,9 @@ class RewriteEngine:
             _DIALECT.reset(token)
         # D50: any response that may hold a client call (True, or unknown) leaves the conversation busy,
         # whichever request it answers; only the newest request's response without one makes it idle.
-        # A late end of a request the CLI gave up on and retried is not the newest request's. This runs
-        # before the input-count check below, so a response without usage still marks a pending call.
+        # A late end of a request the CLI gave up on and retried, if it arrives first, counts as the newest
+        # request's response; the retry's own response, if it may hold a call, makes main busy again. This
+        # runs before the input-count check below, so a response without usage still marks a pending call.
         if tool_calls is not False:
             self._idle[key] = False
         elif identity == state.pending_usage:

@@ -73,7 +73,7 @@ from contexto.store.records import LedgerOps
 from contexto.store.search import rank
 
 __all__ = ["SessionStore", "PageConflictError", "PageNotFoundError", "PageUnreadableError", "KeyFileError",
-           "SessionNotFoundError", "redact"]
+           "LockFileDamagedError", "SessionNotFoundError", "redact"]
 
 _PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")
 
@@ -125,6 +125,8 @@ def hold_live(session_path: Path) -> tuple[int, bool]:
         try:
             private_dir(path.parent)
             fd = open_private(path, os.O_RDWR | os.O_NOFOLLOW)
+        except NotRegularFileError as e:  # a symlink, FIFO or directory in its place (D59)
+            raise LockFileDamagedError(path, e) from e
         except FileNotFoundError as e:
             if os.path.lexists(path.parent):  # not removed by prune: retrying cannot fix it
                 if path.parent.is_symlink():
@@ -467,6 +469,17 @@ class KeyFileError(RuntimeError, ValueError):
     trusted. A ValueError too, so a command that reports a session it cannot open reports this (D58)."""
 
 
+class LockFileDamagedError(NotRegularFileError):
+    """A symlink, FIFO or directory stands where ``meta.lock`` or ``live.lock`` should be (D59). A retry
+    cannot help, so it is reported as damage naming the file: deleting it lets the next open make a new
+    one. A ``NotRegularFileError``, so every caller that reports a session it cannot open reports this."""
+
+    def __init__(self, path: Path, cause: NotRegularFileError) -> None:
+        self.file = path.name
+        self.reason = "it " + str(cause).removeprefix(f"{path} ")  # "it is a symlink", "it is a directory", ...
+        super().__init__(f"{path} is damaged ({self.reason}); delete it, and Contexto makes a new one")
+
+
 def redact(event: Any) -> Any:
     """Copy of ``event`` with credential-bearing keys replaced, at any depth.
 
@@ -748,7 +761,10 @@ class SessionStore(LedgerOps):
         The new file is written privately, fsynced, and renamed into place, so a concurrent reader
         sees either the old or the new complete file, and no writer drops another writer's field.
         """
-        lock = open_private(self.dir / "meta.lock", os.O_RDWR)
+        try:
+            lock = open_private(self.dir / "meta.lock", os.O_RDWR)
+        except NotRegularFileError as e:  # a symlink, FIFO or directory in its place (D59)
+            raise LockFileDamagedError(self.dir / "meta.lock", e) from e
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
             meta = self._meta()

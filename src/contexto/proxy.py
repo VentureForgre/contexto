@@ -98,6 +98,8 @@ except ImportError:  # pragma: no cover - depends on the interpreter
     _zstd = None
 
 LISTEN_HOST = "127.0.0.1"
+# The Host values the local CLI sends (D53, D59): the loopback address or localhost, any port or none.
+LOCAL_HOST_HEADER = re.compile(r"(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?")
 # Contract rule 15 (PR #58): decoded request bodies are capped. A request carries the CLI's whole
 # local history, which may legitimately be many times the bound, so the cap guards against a
 # decompression bomb rather than enforcing the bound.
@@ -418,6 +420,7 @@ class UsageReader:
         self.input_transformations_truncated = False  # True when the cap left an item out
         self._transformation_counts: dict[str, int] = {}  # summary key -> how many times it is logged
         self.end_event: str | None = None  # Responses stream: completed, incomplete, or failed
+        self.ended = False  # a stream's last event was read: message_stop, or a Responses end event
         self.ending: dict[str, str] = {}  # response_status, incomplete_reason, error_code, stop_reason, error_type
         self.responses_client_calls: bool | None = None  # D40: from a Responses output list, when read
         self.call_ids: list[str] = []  # D40: ids of the client tool calls seen, in order
@@ -471,6 +474,7 @@ class UsageReader:
         if self.api == "responses":
             if payload.get("type") in RESPONSE_END_EVENTS:
                 self.end_event = payload["type"].split(".", 1)[1]
+                self.ended = True
                 if isinstance(payload.get("response"), dict):
                     self._take_responses_usage(payload["response"])
                     self._take_responses_end(payload["response"])
@@ -478,6 +482,8 @@ class UsageReader:
                 self._take_call_id(payload.get("item"))
             elif payload.get("type") == "error":
                 self._keep("error_code", payload.get("code"))
+        elif payload.get("type") == "message_stop":
+            self.ended = True
         elif payload.get("type") == "content_block_start":
             self._take_call_id(payload.get("content_block"))
         elif payload.get("type") == "error":
@@ -1080,12 +1086,13 @@ class _Handler(BaseHTTPRequestHandler):
         """Why the request is not from the local CLI (``"origin"`` or ``"host"``), or None (D53).
         Claude Code and Codex send one Host, the proxy's own address, and no Origin. A browser sends
         Origin on every POST and preflight, a no-cors text/plain POST included, and a DNS-rebound
-        page sends its own name as Host, so neither can drive the proxy or write to the store."""
+        page sends its own name as Host, so neither can drive the proxy or write to the store. The
+        name is checked, not the port (D59): a browser cannot put another port in Host on a
+        connection to this socket, and an SSH or container forward to it sends its own port."""
         if self.headers.get("Origin") is not None:
             return "origin"
         hosts = self.headers.get_all("Host") or []
-        port = self.server.server_address[1]
-        if len(hosts) != 1 or hosts[0].strip().lower() not in (f"{LISTEN_HOST}:{port}", f"localhost:{port}"):
+        if len(hosts) != 1 or not LOCAL_HOST_HEADER.fullmatch(hosts[0].strip().lower()):
             return "host"
         return None
 
@@ -1306,6 +1313,9 @@ class _Handler(BaseHTTPRequestHandler):
         held = b""
         relay_ok = True
         observed = False
+        # D59: the client has the stream's last event, so a close after it (before the terminator) is
+        # not an abort: a CLI may return on message_stop or response.completed.
+        delivered_end = False
         feedback = (original is not None and entry["path"] in USAGE_FEEDBACK_PATHS and 200 <= response.status < 300)
 
         def observe() -> None:
@@ -1338,10 +1348,12 @@ class _Handler(BaseHTTPRequestHandler):
                 raise _UpstreamReadError from exc
 
         def write_events(events: list[bytes]) -> None:
+            nonlocal delivered_end
             for raw in events:
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(raw), raw))
             if events:
                 self.wfile.flush()
+            delivered_end = reader.ended and (hold is None or not hold.held)
 
         try:
             # The head is written inside the relay's try, so a client gone before it arrives is
@@ -1371,6 +1383,7 @@ class _Handler(BaseHTTPRequestHandler):
                         self.wfile.write(held)
                     held = chunk
                 self.wfile.flush()
+                delivered_end = chunked and reader.ended
             if hold is not None:
                 if tail := splitter.flush():  # a final event without its blank line (see SSEEventSplitter)
                     reader.feed_event(tail)
@@ -1385,7 +1398,8 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             relay_ok = False
         except (BrokenPipeError, ConnectionResetError):
-            entry["client_aborted"] = True
+            if not delivered_end:
+                entry["client_aborted"] = True
             self.close_connection = True
             relay_ok = False
         except OSError as exc:
@@ -1396,7 +1410,8 @@ class _Handler(BaseHTTPRequestHandler):
             conn.close()
             if watch.gone:  # the client left and upstream was shut for it: whatever failed after is that
                 entry.pop("error", None)
-                entry["client_aborted"] = True
+                if not delivered_end:
+                    entry["client_aborted"] = True
                 self.close_connection = True
                 relay_ok = False
             if hold is not None and hold.held:  # upstream failed mid-hold: observe, then release in order
