@@ -37,7 +37,10 @@ What it includes:
 - Word search over paged-out turns ([MCP tools](#mcp-tools-the-model-gets)).
 - A separate recall budget for each subagent, so subagents cannot use up the main conversation's
   room.
-- `contexto sessions list`, `show` and `prune` to see sessions and delete old ones.
+- `contexto sessions list`, `show` and `prune` to see sessions and delete old ones, and
+  `contexto search`, `recall` and `state` to read what a session stored.
+- Resuming a Claude Code conversation (`--resume`, `--continue`) through the Contexto session that
+  served it, so its pages and pins carry over.
 - A per-session `X-Session-Affinity` header for proxies that spread requests over several accounts,
   so a session's prompt cache stays on one ([Troubleshooting](#troubleshooting)).
 - A warning when Claude Code or Codex is a version Contexto was not tested with. New CLI versions
@@ -51,9 +54,10 @@ to the same model with the whole history in its context (the baseline).
 
 | Run | Result | Record |
 |---|---|---|
+| Claude Code 2.1.318, claude-haiku-5-5, bound 150,000 | 52 of 54 answered correctly, against 47 for the baseline. No compaction. Largest request 110,465 tokens. Cache reused on 38 of 38 eligible requests. Claude Code's defaults, tool search on, so Contexto's tools load through it. | [M2-acceptance-run4.md](docs/research/M2-acceptance-run4.md) |
 | Claude Code 2.1.301, claude-haiku-5-5, bound 150,000 | 51 of 54 answered correctly, against 48 for the baseline. No compaction. Largest request 109,868 tokens. Prompt cache reused on 36 of 37 eligible requests. | [M2-acceptance-run3.md](docs/research/M2-acceptance-run3.md) |
 | Claude Code 2.1.302, claude-opus-5-5, bound 150,000 | 53 of 54, against 54 for the baseline. No compaction. Cache reused on 54 of 55 eligible requests. The run added the permission rule that `contexto run` now sets itself. | [M2-acceptance-opus.md](docs/research/M2-acceptance-opus.md) |
-| Codex 0.163.0, gpt-6-astra, bound 150,000 | History of about 233,000 tokens (about 1.55 times the bound; 375,922 as the test harness prices them) with no compaction. Largest request 108,565 tokens. All 61 requests succeeded. No baseline was run. | [M2-codex-acceptance-150k.md](docs/research/M2-codex-acceptance-150k.md) |
+| Codex 0.163.0, gpt-6-astra, bound 150,000 | History of about 233,000 tokens (about 1.56 times the bound; 375,922 as the test harness prices them) with no compaction. Largest request 108,565 tokens. All 61 requests succeeded. No baseline was run. | [M2-codex-acceptance-150k.md](docs/research/M2-codex-acceptance-150k.md) |
 
 In the claude-haiku-5-5 run, Contexto used 46.6% fewer input tokens than plain Claude Code would have
 for the same session, and cost 49.7% less. The plain Claude Code figures are modeled from measured
@@ -62,15 +66,15 @@ requests, not run end to end ([M2-usage-savings-run3.md](docs/research/M2-usage-
 ## Install
 
 Contexto needs Python 3.12 or later, macOS or Linux, and has no runtime dependencies. Install the
-wheel from the latest release, [v0.5.8](https://github.com/VentureForgre/contexto/releases/tag/v0.5.8).
+wheel from the latest release, [v0.5.23](https://github.com/VentureForgre/contexto/releases/tag/v0.5.23).
 It is not on PyPI: the PyPI package named `contexto` is an unrelated project, so
 `pip install contexto` installs the wrong thing. Use the release URL or the downloaded wheel.
 
 Straight from the release URL, with no GitHub login:
 
 ```sh
-pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.8/contexto-0.5.8-py3-none-any.whl
-contexto --version                                    # contexto 0.5.8
+pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.23/contexto-0.5.23-py3-none-any.whl
+contexto --version                                    # contexto 0.5.23
 ```
 
 `pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment.
@@ -78,8 +82,8 @@ contexto --version                                    # contexto 0.5.8
 Or download it first with the GitHub CLI:
 
 ```sh
-gh release download v0.5.8 --repo VentureForgre/contexto --pattern 'contexto-0.5.8-py3-none-any.whl'
-uv tool install ./contexto-0.5.8-py3-none-any.whl     # or: pipx install ./contexto-0.5.8-py3-none-any.whl
+gh release download v0.5.23 --repo VentureForgre/contexto --pattern 'contexto-0.5.23-py3-none-any.whl'
+uv tool install ./contexto-0.5.23-py3-none-any.whl   # or: pipx install ./contexto-0.5.23-py3-none-any.whl
 ```
 
 `pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`.
@@ -89,7 +93,7 @@ You also need `claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
 ### Checking the download
 
 Contexto sees every prompt and every auth header your CLI sends, so check that the wheel came from
-this repository's release workflow. Releases after v0.5.8 carry a `SHA256SUMS` asset and a GitHub
+this repository's release workflow. Releases from v0.5.13 on carry a `SHA256SUMS` asset and a GitHub
 build provenance attestation:
 
 ```sh
@@ -98,9 +102,9 @@ shasum -a 256 -c SHA256SUMS --ignore-missing          # Linux: sha256sum -c SHA2
 gh attestation verify contexto-<version>-py3-none-any.whl --repo VentureForgre/contexto
 ```
 
-For v0.5.8 and earlier, compare `shasum -a 256 contexto-0.5.8-py3-none-any.whl` with the digest
+For v0.5.12 and earlier, compare `shasum -a 256 contexto-<version>-py3-none-any.whl` with the digest
 GitHub records for the asset:
-`gh release view v0.5.8 --repo VentureForgre/contexto --json assets --jq '.assets[] | .name + " " + .digest'`.
+`gh release view v<version> --repo VentureForgre/contexto --json assets --jq '.assets[] | .name + " " + .digest'`.
 
 The build is reproducible: rebuilding the wheel from the release tag with the same uv version gives
 the same bytes. [RELEASING.md](RELEASING.md#verifying-a-release) has the commands.
@@ -137,6 +141,21 @@ Your own Claude Code settings, hooks and MCP servers still load, and nothing in 
 configuration is edited. Ctrl+C reaches Claude Code as usual. What the launcher does is under
 [`contexto run`](#contexto-run).
 
+**Resuming.** `contexto run claude --resume <id>` (also `-r <id>` or `-r<id>`) and
+`contexto run claude --continue` (also `-c`, `-pc`) reuse the Contexto session that served that
+conversation (for `--continue`, the last one used in this directory), so pages, pins and
+obligations carry over. `--session ID` always wins. When Claude Code exits, Contexto prints the
+command that resumes through it; Claude Code's own hint (`claude --resume <id>`) bypasses Contexto.
+`--resume` without an id opens Claude Code's picker, which Contexto cannot follow, so that launch
+gets a new session. A session another launch has open is never picked automatically. A
+`--fork-session` fork keeps the original's session: both branches share its pages, pins and recall
+room, and switching between them re-rotates. Pass `--session NEW` to give the fork its own store.
+
+`/clear`, `/resume` and `/compact` (and auto-compaction) work inside `contexto run`, interactive
+and headless. After `/clear` the new conversation is the main one from its first prompt, so pins,
+search and recall work there, and `/resume` of the earlier conversation makes that one main again.
+This relies on Claude Code's session id, measured on 2.1.302 to 2.1.318.
+
 ### Codex (API-key mode)
 
 ```sh
@@ -146,15 +165,23 @@ contexto run --codex-key-helper 'my-key-command' codex
 
 Codex gets its key from a helper command that prints it: `--codex-key-helper`, else
 `$CONTEXTO_CODEX_KEY_HELPER`, else the `apiKeyHelper` from your Claude Code settings. Codex runs the
-helper itself; Contexto never reads or stores the key. The command is split into words the way a
-shell would split it, then run without a shell, so `~`, `$VAR`, pipes and redirects are not
-expanded. Wrap such a command as `sh -c '...'`. This applies to a reused `apiKeyHelper` too.
+helper itself; Contexto never reads or stores the key. Codex runs it with `/bin/sh -c`, as Claude
+Code runs `apiKeyHelper`, so `~`, `$VAR` and pipes work.
+
+A helper or base URL from a project's `.claude/` files counts only when Claude Code has recorded the
+folder as trusted (run `claude` there once and accept the trust dialog). Otherwise Contexto ignores
+it and says which file; pass `--codex-key-helper` (or set `CONTEXTO_CODEX_KEY_HELPER`) and
+`--codex-upstream` instead. With no helper left the launch stops (exit 2) and leaves no session
+behind. While `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set (for example on a runner that checks out
+content it does not trust), no folder counts as trusted, and no project `.claude/` settings file is
+used for any CLI ([Troubleshooting](#troubleshooting)).
 
 Codex requests go to `--codex-upstream`, else `$CONTEXTO_CODEX_UPSTREAM`, else (API-key mode) the
-upstream Claude Code would use plus `/v1`, or (ChatGPT mode) the ChatGPT Codex backend. The API-key
-default is right only for a CLIProxyAPI root. **With an OpenAI API key, pass
-`--codex-upstream https://api.openai.com/v1`** (or set `CONTEXTO_CODEX_UPSTREAM`); otherwise Codex's
-requests, and its key, go to `https://api.anthropic.com/v1`.
+upstream Claude Code would use plus `/v1`, which suits a CLIProxyAPI root, or (ChatGPT mode) the
+ChatGPT Codex backend. **With an OpenAI API key, pass `--codex-upstream https://api.openai.com/v1`**
+(or set `CONTEXTO_CODEX_UPSTREAM`). If Claude Code's upstream is Anthropic's API, Contexto refuses
+(exit 2) rather than send the key there. The session line names where the upstream came from, for
+example `contexto: session <id> (bound 150,000, upstream env, codex auth apikey, engine rewrite)`.
 
 `contexto run codex` sets `CODEX_HOME` to `$CONTEXTO_HOME/sessions/<id>/codex-home` (mode 0700) and
 writes a `config.toml` there (mode 0600) that:
@@ -167,7 +194,11 @@ writes a `config.toml` there (mode 0600) that:
   `CONTEXTO_HOME` (plus `CONTEXTO_SEARCH_CACHE_MB` when set) in its `env` table, because Codex starts
   MCP servers with a restricted environment.
 
-On exit the `config.toml` is deleted and the directory is kept, so Codex can resume its rollouts.
+Interactive Codex launches pass `--no-daemon` (Codex 0.156.0 and later), so Codex's background
+app-server is not left running per session; `codex agents`, which needs that server, is refused
+unless `--remote` sends it elsewhere. On exit Contexto deletes `config.toml` and `packages/` and keeps
+the rest of the directory, so Codex can resume its rollouts: `contexto run --session <id> codex
+resume --last`.
 Because `CODEX_HOME` is new, your own `~/.codex` configuration is not loaded in this mode. Install
 Contexto (an editable install is fine) rather than running it from a checkout with
 `PYTHONPATH=src`, because Codex starts the MCP server with a restricted environment.
