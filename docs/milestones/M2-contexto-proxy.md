@@ -600,8 +600,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   them (`contexto_search` with an exact key, name, or identifier, then `contexto_recall` with a page
   id); that the model does this before relying on a detail from an earlier turn and before
   answering that something is unknown; that it records decisions and obligations with
-  `contexto_pin` and closes finished ones with `contexto_close`; and one worked example of a
-  search followed by a recall. The preamble is placed before any carried context in the first
+  `contexto_pin` and closes finished ones with `contexto_close`; that it pins a standing rule,
+  preference, or obligation the user states (whenever, from now on, always, never) as an obligation
+  as soon as it is stated, even when its reply is one word, and keeps it open until the user
+  withdraws it, because an unpinned one leaves view when
+  its turn is paged (D51); and one worked example of a search followed by a recall. The preamble is placed before any carried context in the first
   retained turn-start message. Measured (PR #70 experiment, 415,413 tokens): with the earlier
   mechanism-only line the model made 0 tool calls in the H1 run; with this text it searched for
   all four paged-only keys in its first response. Over budget: list the newest, then a
@@ -614,7 +617,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 
 ## MCP server
 
-`contexto mcp --session S`, stdio JSON-RPC per the MCP spec, tools:
+`contexto mcp --session S`, stdio JSON-RPC per the MCP spec. Its `instructions` (sent at
+`initialize` and `server/discover`) name the tools and say when to use each, and tell the model to
+pin a standing rule, preference, or obligation the user states as an obligation at once, with the
+pin arguments (`{"kind": "obligation", "text": ...}`), even when its reply is one word, and to keep
+it open until the user withdraws it (D51): the
+preamble is sent only from the first rotation, and the instructions are what the model sees in the
+turns before it, usually where such rules are given. Tools:
 
 - `contexto_recall(page_id)` returns the page's messages rendered as plain text (thinking omitted),
   exactly, up to a per-call limit with `offset` for more. The limit is the smaller of 32,000
@@ -809,7 +818,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
-- `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
+- `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record. Its
+  description names only the kinds it accepts (`event`, `decision`, `obligation`, `artifact`,
+  `reference`) and says what the pinned state shows: open obligations and active decisions, and an
+  event, artifact, or reference only when verified (`epistemic: verified`, with a provenance source;
+  D51).
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
 - `contexto_search(query)`: word search over page stubs and text (D34). The query is split on
@@ -819,7 +832,22 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   every page the earlier exact, case-sensitive rule matched still matches. A query with no words
   (whitespace only) matches nothing, where the earlier rule matched almost every page. Case is
   folded one character at a time, with every final sigma written as `σ`, so a word folds the same
-  in the query and on the page. Matching pages are ranked in three groups: turn pages holding the
+  in the query and on the page. Search does not read the inputs and outputs of Contexto's search,
+  recall, and state calls (D51): a call is one of them when its tool name is
+  `mcp__contexto__contexto_search`, `_recall`, or `_state` (Claude Code, and Codex calling it
+  directly), or when it is Codex's code-mode `exec` call whose code (a custom tool's input, or the
+  string fields of a function call's JSON arguments) has no comment and in which every mention of
+  `tools` is a literal call of one of them (`tools["mcp__contexto__contexto_search"](` or
+  `tools.mcp__contexto__contexto_search(`), so any other way of reaching a tool keeps the call
+  searchable; the output is paired with its call by `tool_use_id` or `call_id` within the turn.
+  Their replies hold copies of older pages or of the pinned state, and as the newest page holding
+  them a search reply outranked the pages it quoted (QA, 2026-11-05). `contexto_pin` and
+  `contexto_close` calls are the model's own words and stay searchable. The page keeps the calls
+  verbatim and `contexto_recall` returns them; the stub's paths, the index line's identifiers, the
+  matching lines a reply shows (matched on the rendered page with those lines blanked at the same
+  offsets, and a context line inside them left out), and the retained-window entries leave them
+  out. A page written before this rule that holds such a call has its stub rebuilt from its messages
+  when read, in memory only (the file and id are unchanged). Matching pages are ranked in three groups: turn pages holding the
   whole query as typed (case-insensitively), then turn pages holding only its words, then pages
   holding only paged context blocks (system messages and Codex `developer` items, or user messages
   made only of `<system-reminder>` blocks, D32; recognised from the messages, whatever the stub),

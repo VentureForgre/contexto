@@ -1295,6 +1295,83 @@ the owner's delegation. Open decisions are listed at the end with the options an
     request with the new head, the change is counted twice at the next head-change turn start
     (higher `F`, so more paging, never an overrun). The pre-send check uses the estimator; real
     usage over the bound is still logged after the response, as before.
+- **D51. Standing rules are pinned when stated; Contexto's search, recall and state calls are not indexed.** Claude,
+  2026-11-05, under D0; contract change. The QA run of 2026-11-05 (reports verify-obligations and
+  live-fidelity) found three things.
+  - **Standing rules were lost.** A "whenever X, do Y" rule placed after other content in its
+    message is outside the 200-character index snippet, so once its turn paged out it was gone
+    unless the model had pinned it, and the model pinned 1 of 16 such rules. The preamble's pin line
+    is sent only from the first rotation (`rewrite.py`, `state.k == 0`), so in the first turns, where
+    rules are usually given, the model sees only the MCP server instructions. Rule: both the
+    instructions and the preamble's pin line tell the model to pin a standing rule, preference, or
+    obligation the user states (whenever, from now on, always, never) as an obligation at once, even
+    when its reply is one word, and to keep it open until the user withdraws it, because an unpinned
+    one leaves view when its turn is paged; the instructions also give the pin arguments, since Claude
+    Code defers the tool's schema. The words "keep it open until the user withdraws it" were added
+    after the live run (reviewer B on PR #242: the same texts say to close an obligation when done, so
+    a model could close a rule after applying it once) and were not measured live.
+  - **Measured live** (claude-haiku-5-5 through the owner's proxy, Claude Code 2.1.314, bound
+    60,000, one `contexto run ... claude -p --resume` per turn, Write, Edit and Bash disallowed so no
+    rule could survive in Claude Code's auto-memory). Each session gave 4 rules, 2 natural and 2 terse
+    ("Rule: ... Reply with just: OK"), each after a 2.5 KB log, then 2 pads of 14 KB. Before the
+    trigger turns every rule turn was in the pages and none was in the retained window.
+    - Shipped wording (main 4e2c4cd), rules ISO dates, Kelvin too, half-day estimates and "Bluebird":
+      0 of 4 rules pinned, 0 of 4 applied, 0 of 1 fact pinned.
+    - D51 wording, the same rules and prompts: 4 of 4 pinned, 4 of 4 applied, 0 of 1 fact pinned.
+    - D51 wording, 4 other rules (sizes in MiB or GiB, steps labelled a) b) c), a closing ticket line,
+      prices in EUR): 4 of 4 pinned, 4 of 4 applied, 0 of 2 facts pinned.
+    - Shipped answers: "Thursday, November 26, 2026", 325°F (163°C) with no kelvin, "the database",
+      "half a day to a day" and "two to three days". D51 answers: 2026-11-26, "about 163°C or 436 K",
+      "Bluebird at 100% CPU", "1 to 2 half-days", and in the second session every answer followed all
+      4 rules. Asked to list its standing rules there, the model listed 4 of 4 with no tool call.
+    - In both sessions the first rule was pinned in the first turn, before any preamble, from the
+      instructions alone. No fact turn ("FYI the staging cluster has 12 nodes ...") was pinned.
+    - Cost: a rule turn takes a second request for the pin, a mean of 45,000 tokens (39,687 to
+      52,467) against 21,426 for the shipped arm's rule turns after its first (the first turn of a
+      session, 60,671, includes the session start); fact turns cost the
+      same (21,421 to 22,897). The first `contexto_pin` load through ToolSearch gave one `head_changed`
+      epoch reset per session (live-fidelity finding 4). The added text is sent on every request:
+      the instructions grow from 426 to 695 characters and the preamble's pin line from 138 to 368
+      (122 to 199 and 40 to 106 tokens by the estimator, which errs high) in the measured wording,
+      and to 741 and 414 (212 and 119 tokens) with the keep-open words.
+    - Health: 41 requests, all 200, largest input 33,127 of 60,000, no `over_bound`, no compaction,
+      one `turn_room_low` per session (bound 60,000; live-fidelity finding 6). Spend 865,443 of the
+      1,200,000 budget (shipped 233,817, D51 294,747 and 336,879).
+    - Limits: one model, n=8 rules with the new wording, rules stated in their own turn. A rule the
+      model does not pin is still lost once paged; the index carries only its turn's first 200
+      characters.
+  - **Search echo.** A turn that ran `contexto_search` holds, once paged, copies of lines from older
+    pages; as the newest page holding them it ranked above its sources and was shown first, so a
+    stale value could lead the reply. Rule: the inputs and outputs of Contexto's search, recall and
+    state calls (`mcp__contexto__contexto_search`, `_recall`, `_state` by name, and a Codex code-mode
+    `exec` call in whose code every mention of `tools` is a literal call of one of those, with no
+    comment) are kept verbatim for recall but are not texts of the page for search, the stub's paths,
+    the index line's identifiers, the matching lines a reply shows, or the retained-window entries.
+    `contexto_pin` and `contexto_close` calls stay searchable: their inputs are the model's own words,
+    not copies, and a decision superseded out of the pinned state is still found on its page
+    (reviewer B on PR #242). Measured
+    offline on the QA repro (a codename changed Juniper, Tamarind, Obsidian, with probe turns that
+    searched for it; `tests/test_own_tool_echo.py`): with 2 probes, main's reply led with Juniper
+    (an echo page's nested `> 519: > 488: > 3305:` line) and now leads with Obsidian; with 3 probes,
+    main showed only the newest echo page in detail and listed the Obsidian source compactly, and now
+    shows the Obsidian source in detail. The probe pages still match on their own question and
+    answer, so in this repro they keep 2 of the 3 detailed places, and the Juniper and Tamarind
+    sources are listed compactly. A page written before D51 that holds such a call has its stub
+    rebuilt when read, in memory only, so its echoed paths no longer rank it first for a path search.
+    - The `exec` rule fails safe (reviewer A on PR #242): code that reaches a tool any other way
+      (destructuring `tools`, an alias, `tools[n]`, `tools?.x`, a reference not called at once, a
+      call of any other tool) or that has a comment stays searchable, since hiding a shell command's
+      output would lose it from search; recall has it either way. A function-call `exec` is read
+      from the string fields of its JSON arguments, so escaped quotes neither hide a shell call nor
+      miss a search call (reviewer B).
+  - **`contexto_pin` description.** It named a kind "fact" the tool rejects, and said every record
+    stays in the pinned state, which shows an event, artifact, or reference only when verified (a
+    `reference` pinned with the default `epistemic: reported` was never shown). The description
+    now names the accepted kinds and says that. The behaviour is unchanged.
+  - The tool definitions grow from 2,827 to 2,985 bytes and the MCP instructions, part of Claude
+    Code's system prompt, from 426 to 741, so the acceptance harness's head is 47,786 (47,628 before);
+    its preamble base follows the fixed lines by the estimator, 380 tokens (300 before).
+
 - **D52. Settings files as Claude Code reads them, and project settings for Codex only from a
   trusted folder.** Claude, 2026-11-05, under D0; contract change. QA run 2026-11-05 (verify-security
   B and C, security finding 2, launcher-ux finding 1). All measurements with real Claude Code 2.1.314

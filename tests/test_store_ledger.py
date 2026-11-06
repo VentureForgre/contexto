@@ -94,7 +94,7 @@ def test_pinned_text_budget_and_omitted_count(store):
     ids = [store.pin("obligation", f"duty number {i} with some words") for i in range(40)]
     full = store.state_text().splitlines()
     assert len(full) == len(DEFAULT_LINES) + 1 + 40  # opening lines, the group heading, the items
-    capped = store.pinned_text(400).splitlines()
+    capped = store.pinned_text(480).splitlines()  # the opening lines are about 380 tokens (D51)
     shown = [line for line in capped if line.startswith("- ")]
     assert capped[0] == PINNED_FIRST_LINE and 0 < len(shown) < 40
     assert capped[-1] == f"({40 - len(shown)} more pinned items omitted; call contexto_state for the full list)"
