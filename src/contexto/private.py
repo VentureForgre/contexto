@@ -12,6 +12,7 @@ continues, and a temporary file is removed when its write fails (``write_new``, 
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import secrets
@@ -24,21 +25,26 @@ AFFINITY_SALT_FILE = "affinity.salt"
 AFFINITY_SALT_BYTES = 32
 
 
-def private_dir(path: Path) -> Path:
-    """Create ``path`` and any missing parents as 0700; force ``path`` itself to 0700."""
+def private_dir(path: Path, *, narrow: bool = True) -> Path:
+    """Create ``path`` and any missing parents as 0700; force an existing ``path`` to 0700 too, unless
+    ``narrow`` is false (a directory the user chose, such as ``$CONTEXTO_HOME``, D55). A ``path`` that
+    exists and is not a directory raises NotADirectoryError before any mode is changed."""
     path = Path(path)
     missing = []
     p = path
     while not p.exists():
         missing.append(p)
         p = p.parent
+    if not missing and not path.is_dir():
+        raise NotADirectoryError(errno.ENOTDIR, "not a directory", str(path))
     for d in reversed(missing):
         try:
             os.mkdir(d, DIR_MODE)
         except FileExistsError:
             pass
         os.chmod(d, DIR_MODE)
-    os.chmod(path, DIR_MODE)
+    if narrow:
+        os.chmod(path, DIR_MODE)
     return path
 
 
@@ -201,7 +207,7 @@ def affinity_salt(home: Path) -> bytes:
     a hex salt of the right size (ValueError otherwise)."""
     path = Path(home) / AFFINITY_SALT_FILE
     if not path.exists():
-        private_dir(Path(home))
+        private_dir(Path(home), narrow=False)
         # A losing racer's write_new returns False and reads the winner's complete salt below.
         write_new(path, secrets.token_bytes(AFFINITY_SALT_BYTES).hex().encode("ascii"))
     # O_NOFOLLOW: a symlink raises OSError (ELOOP). O_NONBLOCK: a FIFO opens at once and fails the

@@ -119,7 +119,10 @@ INSTRUCTIONS = (
     "from the paged-history index to read a paged-out turn word for word before relying on its "
     "details. Use contexto_pin to record decisions and obligations as you make them, contexto_close "
     "when an obligation is done, contexto_state for the full pinned state, and contexto_search for "
-    "an exact substring when you do not know the page id."
+    "an exact substring when you do not know the page id. When the user states a standing rule, "
+    "preference, or obligation (whenever, from now on, always, never), pin it at once with contexto_pin "
+    "{\"kind\": \"obligation\", \"text\": ...}, even if your reply is one word, and keep it open until "
+    "the user withdraws it: once its turn is paged out, only what is pinned stays in view."
 )
 
 
@@ -166,9 +169,10 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "contexto_pin",
         "description": (
-            "Record a decision, obligation, fact, artifact, or reference in this session's ledger so it "
-            "stays in the pinned state after older turns are paged out. To replace an earlier record, "
-            "list its id in supersedes."
+            "Record a decision or an obligation (a user's standing rule or preference is one) in this "
+            "session's ledger: open obligations and active decisions stay in the pinned state after older "
+            "turns are paged out; an event, artifact, or reference does only when verified (epistemic "
+            "verified, with a provenance source). To replace an earlier record, list its id in supersedes."
         ),
         "inputSchema": {
             "type": "object",
@@ -744,12 +748,13 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     matched in its JSON-escaped form too, as ``render_page`` prints it (B18).
     """
     rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
-    text = render_page(page) if page.get("messages") is not None else ""
+    # Search, recall, and state calls are blanked at their offsets, so no line of an earlier reply is shown (D51).
+    text = render_page(page, searchable=True) if page.get("messages") is not None else ""
     q = Query.parse(query)
     on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only
     shown, total = match_lines(text, q, last=True) if on_page else ([], 0)  # the LAST matching lines (B21)
-    rows += [(f"{'>' if is_match else ' '} {start}: {text}", (page_id, start, end))
-             for start, end, is_match, text in shown]
+    rows += [(f"{'>' if is_match else ' '} {start}: {line}", (page_id, start, end))
+             for start, end, is_match, line in shown if is_match or not _blanked(text, start, end)]
     if not shown:  # the match is in the stub only: show the stub line as the matching line
         rows.append((f"> stub: {_stub_line(page.get('stub'))}", None))
     elif total > MATCHES_PER_PAGE:  # earlier statements stay reachable from the first match's offset
@@ -759,10 +764,15 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     return rows
 
 
+def _blanked(text: str, start: int, end: int) -> bool:
+    """A context line of a blanked call (``render_page(..., searchable=True)``): spaces only, not empty."""
+    return end > start and not text[start:end].strip()
+
+
 def _more_row(page_id: str, page: dict[str, Any], query: str) -> Row:
     """A further matching page, compactly: page id, turn, and where its first and last matching lines
     start (``@first..last``, one offset when they coincide; B21, contract PR #134)."""
-    text = render_page(page) if page.get("messages") is not None else ""
+    text = render_page(page, searchable=True) if page.get("messages") is not None else ""
     q = Query.parse(query)
     starts = matching_line_starts(text, q) if q is not None and text_matches(text, q) else []
     if not starts:

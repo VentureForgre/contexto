@@ -19,7 +19,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                     "that keeps the upstream prompt under --bound. Contexto options go before "
                     "'claude'; everything after 'claude' is passed to Claude Code unchanged.",
         epilog="Exit codes: Claude Code's own code; 128+N if it died from signal N; 2 usage error; "
-               "1 proxy failed to start; 127 'claude' not found on PATH; 130 Ctrl+C during the version check.")
+               "1 proxy failed to start; 127 'claude' not found on PATH or not runnable; 130 Ctrl+C during the "
+               "version check.")
     parser.add_argument("--bound", type=int, default=DEFAULT_BOUND,
                         help=f"upstream prompt bound in tokens (default {DEFAULT_BOUND:,}; "
                              f"above {BOUND_GUARD:,} needs --allow-large-bound)")
@@ -29,7 +30,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                         help="share of the window budget kept as recent turns after a rotation (default 0.5)")
     parser.add_argument("--headroom-floor", type=int, default=None,
                         help="minimum headroom below the bound that triggers a rotation (default 25,000)")
-    parser.add_argument("--session", default=None, help="session id (default: a new one, printed at start)")
+    parser.add_argument("--session", default=None,
+                        help="session id (default: the one that served 'claude --resume <id>' or, for "
+                             "'claude --continue', the last one used in this directory; else a new one, "
+                             "printed at start)")
     parser.add_argument("--upstream", default=None,
                         help="upstream base URL (default: what Claude Code would use from this directory)")
     parser.add_argument("--observe-thinking", action="store_true",

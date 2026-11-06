@@ -29,14 +29,31 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 
 # The head (Params.head), derived (intake 2026-10-16 09:42Z). 47,600 is the engine's fixed overhead F
 # measured in the stub dry runs through the launcher (dry runs #1 to #4, main up to c8f0b08): system,
-# tools and preamble. The part of it this repo controls is Contexto's own tool definitions in Claude
-# Code's request form; when they change, the head moves by their byte change at OTHER_BYTES_PER_TOKEN.
-# B19 and B21 (main 8571095, dry run #5) grew them from 2,743 to 2,827 bytes: 47,600 + ceil(84 / 3.0) =
-# 47,628. test_head_follows_contexto_tool_bytes fails when the definitions change without this.
+# tools and preamble. The parts of it this repo controls are Contexto's own tool definitions in Claude
+# Code's request form and the MCP server instructions, which Claude Code puts in its system prompt
+# ("# MCP Server Instructions"); when either changes, the head moves by its byte change at
+# OTHER_BYTES_PER_TOKEN. B19 and B21 (main 8571095, dry run #5) grew the definitions from 2,743 to 2,827
+# bytes: 47,600 + ceil(84 / 3.0) = 47,628. D51 grew them to 2,985 bytes and the instructions from 426 to
+# 741: 47,600 + ceil(242 / 3.0) + ceil(315 / 3.0) = 47,786. test_head_follows_contexto_tool_bytes fails
+# when either changes without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
-CONTEXTO_TOOL_BYTES = 2_827  # main 8571095
-HEAD = HEAD_MEASURED + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
+CONTEXTO_TOOL_BYTES = 2_985  # D51
+CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE = 426  # main c8f0b08 (unchanged until D51)
+CONTEXTO_INSTRUCTIONS_BYTES = 741  # D51
+HEAD = (HEAD_MEASURED
+        + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
+        + math.ceil((CONTEXTO_INSTRUCTIONS_BYTES - CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN))
+
+
+def fixed_preamble_tokens() -> int:
+    """The pinned text's fixed opening lines (``contexto.store.recall.DEFAULT_LINES``) by the engine's
+    estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it."""
+    from contexto.store.recall import DEFAULT_LINES
+    from contexto.tokens import estimate_tokens
+
+    return estimate_tokens("\n".join(DEFAULT_LINES))
+
 
 # Tool-loop rounds, calibrated on live run #3 (main fbb1303, 2026-10-16; intake 10:06Z). Its probe
 # turns took 5/3/2/5/6/5 Messages requests: 4/2/1/4/5/4 tool-loop rounds after the first request, 20
@@ -64,7 +81,7 @@ class Params:
     head: int = HEAD  # the engine's fixed overhead F, derived above (M0 figure: 54,500)
     window_fraction: float = 0.5  # rule 4: retained window targets this share of W
     reply_tokens: int = 20  # "OK" plus a little thinking per build turn
-    preamble_base: int = 300  # the preamble's fixed lines
+    preamble_base: int = field(default_factory=fixed_preamble_tokens)  # the preamble's fixed lines
     index_tokens_per_page: int = 60
     pinned_tokens: int = 1_500  # what the model pins over the run [inferred]
     probe_output: int = 4_000  # answers plus thinking on the probe turn [measured: 4,169 in L2f pilot 3]

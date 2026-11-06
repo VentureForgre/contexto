@@ -15,7 +15,8 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
   (recorded by lane A's engine with ``set_window``; recall sizes chunks from them), and the recall
   rooms: ``turn_room`` (the main conversation's) and ``side_rooms`` (D40, one per side request
   lineage in a tool loop, keyed by an engine-chosen id, each with its publish time; expired after
-  ``SIDE_ROOM_TTL_S``). Writers
+  ``SIDE_ROOM_TTL_S``), and ``cli_sessions`` (D55: the CLI conversations the session served, recorded
+  by the launcher with ``record_cli_session``, so a resume finds the session). Writers
   serialize on ``meta.lock``; the file is replaced atomically, so readers never see a partial file.
 - ``log.jsonl``: the session log, one canonical JSON event per line. A line cut short (a full disk)
   is never joined to the next event: that event starts on a new line (D58).
@@ -40,6 +41,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import json
+import math
 import os
 import re
 import secrets
@@ -85,6 +87,7 @@ def check_page_id(page_id: Any) -> str:
 KEY_BYTES = 32
 
 LIVE_LOCK = "live.lock"
+CLI_SESSIONS_KEPT = 64  # record_cli_session: CLI conversation ids kept per CLI (a /clear or a fork adds one)
 LIVE_ATTEMPTS = 8  # hold_live: tries before giving up on a session that keeps being deleted
 
 
@@ -258,6 +261,10 @@ def _hex64(v: Any) -> bool:
 
 def _is_epoch_version(v: Any) -> bool:
     return type(v) is int and v == EPOCH_VERSION  # not True, 1.0, or "1"
+
+
+def _seen_at(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def _nat(v: Any) -> bool:
@@ -483,8 +490,10 @@ class SessionStore(LedgerOps):
         self.clock: Callable[[], float] = time.time
         self.dir = session_dir(home, session_id)
         self.pages_dir = self.dir / "pages"
-        # Narrow an existing wide CONTEXTO_HOME and sessions/ too, not only directories we create.
-        private_dir(Path(home))
+        # CONTEXTO_HOME is created 0700, but an existing one keeps the mode its user gave it (D55); a
+        # home that is not a directory is refused before anything is changed. sessions/ and everything
+        # under it is Contexto's own and is narrowed even when it exists.
+        private_dir(Path(home), narrow=False)
         private_dir(Path(home) / "sessions")
         refuse_symlinked_session(self.dir)
         # Creates the session directory and locks it before anything else is created in it, so prune
@@ -778,6 +787,30 @@ class SessionStore(LedgerOps):
     def clear_mcp_listed(self) -> None:
         """Forget the record before a launch starts its engine, so only this launch's server can count."""
         self._update_meta({"mcp_listed_at": None})
+
+    def record_cli_session(self, cli: str, cli_session: str, seen_at: float | None = None) -> None:
+        """Record that this session served the CLI's conversation ``cli_session`` (Claude Code's session
+        id), last seen at ``seen_at`` (wall-clock seconds, default now), so ``contexto run claude --resume
+        <id>`` and ``--continue`` find this session again (D55). Stored as ``cli_sessions: {cli: {id:
+        seen_at}}``; a time never moves back, and only the newest ``CLI_SESSIONS_KEPT`` ids per CLI are kept."""
+        seen_at = time.time() if seen_at is None else float(seen_at)
+
+        def change(meta: dict[str, Any]) -> dict[str, Any]:
+            every = meta.get("cli_sessions")
+            every = dict(every) if isinstance(every, dict) else {}
+            ids = every.get(cli)
+            ids = {k: v for k, v in ids.items() if _seen_at(v)} if isinstance(ids, dict) else {}
+            ids[cli_session] = max(seen_at, ids.get(cli_session, seen_at))
+            every[cli] = dict(sorted(ids.items(), key=lambda kv: kv[1])[-CLI_SESSIONS_KEPT:])
+            return {"cli_sessions": every}
+
+        self._modify_meta(change)
+
+    def cli_sessions(self, cli: str) -> dict[str, float]:
+        """The CLI conversations this session served, id -> last seen; empty when none were recorded."""
+        every = self._meta().get("cli_sessions")
+        ids = every.get(cli) if isinstance(every, dict) else None
+        return {k: float(v) for k, v in ids.items() if _seen_at(v)} if isinstance(ids, dict) else {}
 
     def mcp_listed_at(self) -> float | None:
         """When the MCP server last answered ``tools/list``; None when never recorded or cleared."""

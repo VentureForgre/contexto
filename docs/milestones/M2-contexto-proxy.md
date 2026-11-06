@@ -18,7 +18,9 @@ same design after Claude Code works.
   them (`.github/workflows/ci.yml`).
 - Data lives under `$CONTEXTO_HOME` (default `~/.contexto`), one directory per session:
   `sessions/<session id>/`. Nothing in it is committed. Everything under `$CONTEXTO_HOME` is
-  private to the user: directories `0700`, files `0600`, created atomically (secrets such as the
+  private to the user: directories `0700`, files `0600`, created atomically. A home Contexto creates
+  is `0700`; an existing one keeps the mode its user gave it, and one that is not a directory is
+  refused before any mode is changed (D55) (secrets such as the
   page key are written to a temporary file and renamed, never left empty by a race). Never edit the user's Claude or Codex
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
@@ -227,8 +229,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    would actually restore a room of at least `min_turn_room`; otherwise the engine does not rotate
    for the room and logs `turn_room_low` once per epoch. When both triggers fire at the same turn
    start, the room-sized target is used if that rotation would restore the room and page at least
-   as far as the bound trigger's target; otherwise the bound trigger's own target applies. A head
-   change and the minimal window keep their own sizing. A turn that starts below `min_turn_room`
+   as far as the bound trigger's target; otherwise the bound trigger's own target applies. The
+   minimal window keeps its own sizing; a head change is sized like these (rule 6, D49). A turn that starts below `min_turn_room`
    and still publishes a room below it after the decision logs `turn_room_low`, once per epoch. This keeps a small bound from rotating on
    every turn (reviewer-2: a plain re-trigger would thrash at bounds of 42,000 to 100,000).
    `budget.simulate` models both conditions. Estimate = last upstream
@@ -250,7 +252,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    bound, and `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
    index), in tokens, taken from measured usage once available (the first request's input is the
-   head) and from the estimator before that. The window budget is `W = bound - headroom - F`, and
+   head) and from the estimator before that. After a head change (rule 6) the measured head is
+   adjusted by the estimated size of the change in `system` and `tools` bytes, so a server that adds
+   tools or a model switch counts in `F` (D49). The window budget is `W = bound - headroom - F`, and
    the retained window after rotation targets `window_fraction * W` (default 0.5), so the window
    can grow before the next trigger. Choose the smallest `k` (retain as many recent turns as fit)
    within that target, retaining the newest complete turn and the new turn (except under the
@@ -264,15 +268,24 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    log `window_minimal`; this keeps the request under the bound at the cost of the previous turn's
    verbatim text. Only if `W` is not positive or cannot hold even the new turn, log
    `bound_too_small` and still rotate to the minimal window (the new turn alone), which is
-   smaller than sending unrotated; the launcher warns at start when the measured
-   head leaves less than 25,000 tokens of window budget and suggests a larger `--bound`. Example
+   smaller than sending unrotated; the launcher warns at start when a typical head (28,000
+   tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
+   seat) leaves less than 25,000 tokens of window budget, says that recall will barely fit or, at a
+   budget of 0 or less, not fit at all, and suggests a larger `--bound` (D55). Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
    OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
    thinking strips will be frequent at 150k for large heads (see O3).
 5. **Never rotate inside a tool loop** (D17). A turn that grows past the bound is sent as is and
-   recorded as over-bound in the session log; the next turn start rotates.
+   recorded as over-bound in the session log; the next turn start rotates. Every request forwarded,
+   rotated or not, is checked before the send against the estimate of what is sent: over the bound,
+   it is logged `over_bound` with `source: "estimate"` and `in_tool_loop` (D49). Only
+   `in_tool_loop: true`, and degraded mode under rule 14, are the logged exception; at a turn start
+   it goes with `bound_too_small` or means the rotation's sizing did not hold.
 6. **Head change.** If the CLI's `system` or `tools` change (byte fingerprint), start a new epoch at
-   the next turn start; never rewrite them.
+   the next turn start; never rewrite them. The cached prefix is lost anyway, so the epoch starts
+   even when nothing is paged. It is sized like any other rotation (D49): rule 4's target, the
+   minimal window and `bound_too_small` when `W` cannot hold the newest complete turn, and rule 3's
+   room target when that restores `min_turn_room`; the rotation event keeps `reason: "head_change"`.
 7. **Usage.** Return the upstream `usage` unchanged. The CLI therefore sees the bounded prompt's
    real size.
 8. **Errors.** Forward upstream errors unchanged. Never retry by silently changing the request.
@@ -571,8 +584,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   them (`contexto_search` with an exact key, name, or identifier, then `contexto_recall` with a page
   id); that the model does this before relying on a detail from an earlier turn and before
   answering that something is unknown; that it records decisions and obligations with
-  `contexto_pin` and closes finished ones with `contexto_close`; and one worked example of a
-  search followed by a recall. The preamble is placed before any carried context in the first
+  `contexto_pin` and closes finished ones with `contexto_close`; that it pins a standing rule,
+  preference, or obligation the user states (whenever, from now on, always, never) as an obligation
+  as soon as it is stated, even when its reply is one word, and keeps it open until the user
+  withdraws it, because an unpinned one leaves view when
+  its turn is paged (D51); and one worked example of a search followed by a recall. The preamble is placed before any carried context in the first
   retained turn-start message. Measured (PR #70 experiment, 415,413 tokens): with the earlier
   mechanism-only line the model made 0 tool calls in the H1 run; with this text it searched for
   all four paged-only keys in its first response. Over budget: list the newest, then a
@@ -585,16 +601,22 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 
 ## MCP server
 
-`contexto mcp --session S`, stdio JSON-RPC per the MCP spec. Errors (D58): an id that is not a
-string, a number or null is an invalid request (`-32600`, `id: null`); `params` that is present and
-not an object or null, or a tool name that is not a string, is invalid params (`-32602`). A tool
-that fails returns a tool result with `isError: true`, never a JSON-RPC error, and the call is
-logged `mcp_call` with `ok: false` and the error class: on a damaged ledger, `contexto_pin`,
+`contexto mcp --session S`, stdio JSON-RPC per the MCP spec. Its `instructions` (sent at
+`initialize` and `server/discover`) name the tools and say when to use each, and tell the model to
+pin a standing rule, preference, or obligation the user states as an obligation at once, with the
+pin arguments (`{"kind": "obligation", "text": ...}`), even when its reply is one word, and to keep
+it open until the user withdraws it (D51): the
+preamble is sent only from the first rotation, and the instructions are what the model sees in the
+turns before it, usually where such rules are given. Errors (D58): an id that is not a string, a
+number or null is an invalid request (`-32600`, `id: null`); `params` that is present and not an
+object or null, or a tool name that is not a string, is invalid params (`-32602`). A tool that fails
+returns a tool result with `isError: true`, never a JSON-RPC error, and the call is logged
+`mcp_call` with `ok: false` and the error class: on a damaged ledger, `contexto_pin`,
 `contexto_close` and `contexto_state` say the ledger is damaged and name `contexto sessions show
-<session>`; any other unexpected failure says the call failed with its error class. An error
-echoes a value from the request at most 100 characters long, with its length noted, and a tool
-error's text is at most 1,000 characters. A page id that is not `pg_` and exactly 16 lowercase hex
-digits is an unknown page, never read. Tools:
+<session>`; any other unexpected failure says the call failed with its error class. An error echoes
+a value from the request at most 100 characters long, with its length noted, and a tool error's text
+is at most 1,000 characters. A page id that is not `pg_` and exactly 16 lowercase hex digits is an
+unknown page, never read. Tools:
 
 - `contexto_recall(page_id)` returns the page's messages rendered as plain text (thinking omitted),
   exactly, up to a per-call limit with `offset` for more. The limit is the smaller of 32,000
@@ -730,15 +752,21 @@ digits is an unknown page, never read. Tools:
       age, room, and spend.
     - Closing when the agent stops. A side room closes before its expiry only on evidence in main's
       own history that every run of the subagent holding it has stopped (measured on Claude Code
-      2.1.302 against a scripted stub, `spikes/m2/subagents/`). The subagent is matched by its first
-      prompt: its first user message carries a `<system-reminder>` block and then main's `Agent`
-      (or `Task`) call's `prompt`, unchanged. A stop is one of two measured shapes: the call's
-      result is a foreground hand-back (it starts `[Subagent hand-back]`), or a
-      `<task-notification>` names the call's tool-use id, or the id of a `SendMessage` call whose
+      2.1.302, 2.1.310, 2.1.314 and 2.1.318 against a scripted stub, `spikes/m2/subagents/`). The
+      subagent is matched by its first prompt: its first user message carries a `<system-reminder>`
+      block and then main's `Agent` (or `Task`) call's `prompt`, unchanged. A stop is one of two
+      measured shapes: the call's result is a foreground hand-back (it starts `[Subagent hand-back]`),
+      or a `<task-notification>` names the call's tool-use id, or the id of a `SendMessage` call whose
       result says it resumed that call's agent (`resumedAgentId`; a resumed run's notice names the
       `SendMessage`). A notice counts only where the CLI puts it: in a `system` message (during
       main's tool loop), or in a user message whose content, or first text block, opens with the
       `<system-reminder>` wrapper or `[SYSTEM NOTIFICATION - NOT USER INPUT]` (while main is idle).
+      D56: since Claude Code 2.1.312 a run that used tools is reported with their names first, in a
+      `<tools-used-before-summary>` element. Before a hand-back it is indented above the frame, and it
+      is skipped there; while main is idle it is a `<system-reminder>` text block of its own, and the
+      notice then counts in the next text block only if that block opens with the wrapper; in a
+      `system` message it opens the notice's text, which is searched whole. A tools-used element
+      anywhere else changes nothing.
       A notice in assistant text, or pasted into a human message, never counts. The background
       launch receipt (`Async agent launched successfully.`) is not a stop; an error result means the
       call started no agent; any other result shape leaves the call unknown, so its prompt's rooms
@@ -783,9 +811,12 @@ digits is an unknown page, never read. Tools:
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
-- `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record. A
-  `text` of whitespace only is refused. Pinning an `event`, `artifact` or `reference` that is not
-  `verified` says in its reply that the pinned state will not show it (D58).
+- `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record. Its
+  description names only the kinds it accepts (`event`, `decision`, `obligation`, `artifact`,
+  `reference`) and says what the pinned state shows: open obligations and active decisions, and an
+  event, artifact, or reference only when verified (`epistemic: verified`, with a provenance source;
+  D51). A `text` of whitespace only is refused. Pinning an `event`, `artifact` or `reference` that is
+  not `verified` says in its reply that the pinned state will not show it (D58).
 - `contexto_close(obligation_id, note)` appends a closure. A `note` of whitespace only is refused.
 - `contexto_state()` returns the full pinned state without the budget cap.
 - `contexto_search(query)`: word search over page stubs and text (D34). The query is split on
@@ -795,7 +826,22 @@ digits is an unknown page, never read. Tools:
   every page the earlier exact, case-sensitive rule matched still matches. A query with no words
   (whitespace only) matches nothing, where the earlier rule matched almost every page. Case is
   folded one character at a time, with every final sigma written as `σ`, so a word folds the same
-  in the query and on the page. Matching pages are ranked in three groups: turn pages holding the
+  in the query and on the page. Search does not read the inputs and outputs of Contexto's search,
+  recall, and state calls (D51): a call is one of them when its tool name is
+  `mcp__contexto__contexto_search`, `_recall`, or `_state` (Claude Code, and Codex calling it
+  directly), or when it is Codex's code-mode `exec` call whose code (a custom tool's input, or the
+  string fields of a function call's JSON arguments) has no comment and in which every mention of
+  `tools` is a literal call of one of them (`tools["mcp__contexto__contexto_search"](` or
+  `tools.mcp__contexto__contexto_search(`), so any other way of reaching a tool keeps the call
+  searchable; the output is paired with its call by `tool_use_id` or `call_id` within the turn.
+  Their replies hold copies of older pages or of the pinned state, and as the newest page holding
+  them a search reply outranked the pages it quoted (QA, 2026-11-05). `contexto_pin` and
+  `contexto_close` calls are the model's own words and stay searchable. The page keeps the calls
+  verbatim and `contexto_recall` returns them; the stub's paths, the index line's identifiers, the
+  matching lines a reply shows (matched on the rendered page with those lines blanked at the same
+  offsets, and a context line inside them left out), and the retained-window entries leave them
+  out. A page written before this rule that holds such a call has its stub rebuilt from its messages
+  when read, in memory only (the file and id are unchanged). Matching pages are ranked in three groups: turn pages holding the
   whole query as typed (case-insensitively), then turn pages holding only its words, then pages
   holding only paged context blocks (system messages and Codex `developer` items, or user messages
   made only of `<system-reminder>` blocks, D32; recognised from the messages, whatever the stub),
@@ -983,14 +1029,16 @@ request's `transform_events`, before the engine's request event. The exit event 
 after `proxy_stop`, written under the transform lock (skipped if a stuck request holds the lock for 2
 seconds). The launcher prints the warning on stderr, naming the likely cause and the fix, once when
 it is first reported and once more after the CLI exits for a repeated exit event, because a TUI can
-draw over a line printed mid-run. If the check itself raises, the engine logs `toolcheck_error` with
+draw over a line printed mid-run. `contexto run claude` holds every such line while Claude Code runs
+and prints it after Claude Code exits (D55); an exit-time repeat of a line still held is not printed
+twice. If the check itself raises, the engine logs `toolcheck_error` with
 the exception's type name only and keeps the request's rewrite.
 
 Refused tools (D44): offered tools can still be refused. On every Messages API request, main or not,
 the check reads the trailing user messages (every user message after the last assistant message,
 role `system` messages among them skipped; the results may be split across them in any order): a
 `tool_result` with `is_error` whose text is Claude Code 2.1.302's refusal ("Claude requested
-permissions to use <tool>, but you haven't granted it yet.", the same on 2.1.310) counts when its
+permissions to use <tool>, but you haven't granted it yet.", the same on 2.1.310, 2.1.314 and 2.1.318) counts when its
 `tool_use_id` is a string naming an `mcp__contexto__` tool call of an assistant message in the request
 and the refusal names that tool; another tool's result that quotes the text does not, nor does a
 result whose id is not a string. The first one in a session logs `mcp_tools_denied` (`dialect`,
@@ -1051,6 +1099,48 @@ checked against the selected entry), so a symlink swapped in at any moment canno
 or create anything outside the checked directory. Failures are per session; the exit code is 1 if
 any failed or if the session named by `--session` was skipped, with `contexto: error:` on stderr.
 A store resumed while prune deletes its session waits, starts empty, and prints a warning.
+
+**`contexto run claude` lifecycle (D55).**
+- Resume. Every request's Claude Code session id (the `X-Claude-Code-Session-Id` header, else the
+  `session_id` in `metadata.user_id`) is recorded in the session's `meta.json` as
+  `cli_sessions.claude.<id>` = last seen (wall-clock seconds; written at its first request in a launch
+  and again at exit; the newest 64 kept). The id never enters the session log. Claude Code keeps the id
+  across `--resume` and `--continue` and names its transcript after it (new only with
+  `--fork-session`; measured on 2.1.314). Without `--session`, `claude --resume <id>` (or `-r <id>`,
+  `--resume=<id>`) reuses the session that served `<id>`, and `claude --continue` (`-c`) the session
+  that last served Claude Code with this working directory; the launcher prints which, and for
+  `--resume` names any other session that served the id too. With no match, `--resume` without an id
+  (Claude Code's picker, which Contexto cannot follow), or a picked session whose `live.lock` another
+  process holds (another launch has it open: two launches on one store would share its epoch record
+  and recall room, rule 16), it prints why on stderr and opens a new session; at exit it then names
+  any other session that served the conversation, since the conversation is split across two stores.
+  Arguments after `--` are not read, nor the value of a Claude Code 2.1.314 option that takes one
+  (`--append-system-prompt --continue` is a prompt). `--session` always wins and is never questioned.
+  If a `--continue` lands in a conversation the chosen session never served (one run without
+  Contexto), a warning says so at exit; not with `--fork-session`, whose new id continues the same
+  history. After Claude Code exits, when a request named a Claude Code session, the
+  launcher prints `contexto run --session S [the launch's Contexto options] claude --resume <id>` with
+  the last id seen, because Claude Code's own exit hint (`claude --resume <id>`) bypasses Contexto.
+- Signals. SIGTERM, SIGHUP and SIGQUIT are forwarded to Claude Code while it runs; SIGUSR1, SIGUSR2
+  and SIGALRM end it with SIGTERM; SIGINT is ignored by the launcher (the terminal delivers it). Before
+  Claude Code starts (the version check) and after it exits, those six signals run the launcher's
+  cleanup (proxy stop, temporary files, `exit` event) and exit 128 + N; the version check's process
+  group is killed on the way. The forwarding handlers are installed before Claude Code is spawned, and
+  a signal that arrives during the spawn is sent once it exists. SIGKILL cannot be caught: a watchdog
+  process in its own session reads a pipe from the launcher (`pid <n>` at the spawn, `exited` once
+  Claude Code is reaped, `done` from the cleanup) and, when the pipe closes without `done`, sends
+  Claude Code SIGTERM unless it has exited (a reaped pid may be reused) and deletes the temporary
+  directory. The session log then has no `exit` event; if the
+  watchdog is killed too, the temporary directory (proxy URL, tool names, session id, home path; no
+  secrets) stays in `$TMPDIR`.
+- Checks before any session is opened, each a usage error (exit 2) unless noted: Contexto's own
+  `contexto run` options right after `claude` (the message shows the command with them moved before
+  `claude`); a malformed upstream URL, named with its source; a `$CONTEXTO_HOME` that is not a
+  directory; and `${` in the home, the session id or the interpreter path, which Claude Code would
+  expand in the MCP config (2.1.314 expands `${VAR}` and `${VAR:-x}` in `command`, `args` and `env`,
+  keeps `$VAR`, and has no escape). A `claude` on PATH that is not executable, a broken symlink or a
+  directory is named with what is wrong (exit 127). The MCP server gets `--session=<id>` as one
+  argument, so an id starting with `-` stays a value.
 
 ## Lanes
 
