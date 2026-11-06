@@ -35,6 +35,8 @@ EXPECTED = {
     "pdflib-indirect-length-7.pdf": 7,
     # an incremental save that deleted 30 of 40 pages: the superseded page tree still lists them (D48 round 4)
     "pymupdf-incremental-deleted-40-to-10.pdf": 10,
+    # uncompressed pages that show a minimal PDF's objects as text (D48 round 6: the walk read them)
+    "reportlab-uncompressed-listing-20.pdf": 20,
 }
 
 
@@ -45,6 +47,31 @@ def reportlab(pages: int) -> bytes:
     pdf = canvas.Canvas(buffer, invariant=1)  # invariant: no dates or ids, so the bytes are reproducible
     for page in range(pages):
         pdf.drawString(72, 720, f"Synthetic page {page + 1} of {pages}.")
+        pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+LISTING = [
+    "%PDF-1.4", "1 0 obj", "<< /Type /Catalog /Pages 2 0 R >>", "endobj", "2 0 obj",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>", "endobj", "3 0 obj",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>", "endobj", "4 0 obj",
+    "<< /Length 44 >>", "stream", "BT /F1 24 Tf 72 720 Td (Hello) Tj ET", "endstream", "endobj",
+    "trailer << /Root 1 0 R >>", "%%EOF",
+]
+
+
+def reportlab_listing(pages: int) -> bytes:
+    """Pages that show a minimal PDF's source as text, in uncompressed content streams."""
+    from reportlab.pdfgen import canvas
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, invariant=1, pageCompression=0)
+    for page in range(pages):
+        pdf.setFont("Courier", 10)
+        pdf.drawString(72, 750, f"Synthetic tutorial page {page + 1} of {pages}: a minimal PDF")
+        for line, text in enumerate(LISTING):
+            pdf.drawString(72, 720 - 14 * line, text)
         pdf.showPage()
     pdf.save()
     return buffer.getvalue()
@@ -216,6 +243,7 @@ def main() -> None:
         "pdflib-indirect-length-1.pdf": pdflib_like(1),
         "pdflib-indirect-length-7.pdf": pdflib_like(7),
         "pymupdf-incremental-deleted-40-to-10.pdf": pymupdf_deleted(40, 10),
+        "reportlab-uncompressed-listing-20.pdf": reportlab_listing(20),
     }
     for name, data in made.items():
         (OUT / name).write_bytes(data)

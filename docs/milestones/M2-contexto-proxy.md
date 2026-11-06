@@ -310,38 +310,47 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    tokens after scaling its long edge down to 2,576 pixels, between 64 and 4,784, with the size read
    from the PNG, JPEG, GIF, or WebP header, and 4,784 when it cannot be read (a URL, a file id,
    another format); a PDF costs 4,568 tokens a page (3,000 text tokens plus a page image at 1,568),
-   its pages counted as a renderer draws them: from the latest catalog's page tree, each node by its
-   latest definition (an incremental update appends newer ones), the root's count or the page objects
-   it reaches through `/Kids`, whichever is larger, so pages an incremental save deleted and nodes no
-   catalog reaches do not count. When the catalog's tree cannot be read, the larger of the page objects
-   (in object streams too, Flate or stored without a filter, each object number once) and the largest
-   page-tree count. Every fallback errs high: a PDF with neither, or that cannot be decoded, is one
-   page per 3 KB; a PDF with an object stream that cannot be read (another filter, a predictor,
-   encryption, or a bound below) is its page tree's count, else 600 pages (the API's limit); a PDF with
-   more page objects or tree nodes than a document has is 600; a document by URL or file id is 10
-   pages; a document of plain text or content blocks is text. Parsing a PDF never raises and is
-   bounded: at most 32 MB of base64, 128 object streams, 2 MB read per stream and 4 MB per PDF, and,
-   over the whole PDF with its object streams, 10,000 page objects and 1,000 tree nodes, each read
-   through a bounded window. Counts are cached by content (65,536 PDFs, least recently used dropped).
-   The proxy calls the engine's `prime` with each request before it takes its transform lock, which
-   counts the request's PDFs into that cache, so the transform finds them counted.
+   its pages counted as a renderer draws them: from the page tree of the catalog the last trailer (or
+   cross-reference stream) names in `/Root`, else the latest catalog, each node by its latest
+   definition (an incremental update appends newer ones), the root's count or the page objects it
+   reaches through `/Kids`, whichever is larger, so pages an incremental save deleted and nodes no
+   catalog reaches do not count. Stream bodies are skipped, to their direct `/Length` (a page can
+   show PDF syntax as text), and a page object that no tree node lists in any definition, or whose
+   number cannot be read, counts as well. When the catalog's tree cannot be read (or past 20,000
+   `/Kids` references), the larger of the page objects (in object streams too, Flate or stored
+   without a filter, each object number once) and the largest page-tree count. Every fallback errs
+   high: a PDF with neither, or that cannot be decoded, is one page per 3 KB; a PDF with an object
+   stream that cannot be read (another filter, a predictor, encryption, or a bound below) is its page
+   tree's count, else 600 pages (the API's limit); a PDF with more page objects, tree nodes or
+   streams than a document has is 600; a document by URL or file id is 10 pages; a document of plain
+   text or content blocks is text. Parsing a PDF never raises and is bounded: at most 32 MB of
+   base64, 128 object streams, 2 MB read per stream and 4 MB per PDF, and, over the whole PDF with
+   its object streams, 10,000 page objects, 1,000 tree nodes and 20,000 streams, each read through a
+   bounded window. Counts are cached by content (65,536 PDFs, least recently used dropped). The proxy
+   calls the engine's `prime` with each request before it takes its transform lock, which counts the
+   request's PDFs into that cache, so the transform finds them counted. On Claude, a PDF's real cost
+   is learned from the first measured request that carries it, when it is the only PDF of that
+   request not learned yet: the usage less the text (at the measured ratio, else the 3.5 seed) and
+   the other media (learned PDFs at their cost, images at their floor), kept between its floor and
+   its estimate; it prices that PDF for the rest of the session.
    The ratio is learned from text only: each observed request's media bytes are left out of its
-   bytes, and its media's cost out of its real tokens. That cost lies at or under the media's estimate
-   and is meant to lie at or over their floor (on Claude 95% of the image formula on the older
-   1,568-pixel, 1,568-token limit, 0 for an image of unknown size, and 1,000 tokens a PDF page for the
-   pages its page tree draws: numbered page objects a `/Kids` array references, at most the tree's
-   count, at least one; on Codex 0, since OpenAI's tile prices go lower), though the floor can run high.
-   A request that only appends to the last measured one (same epoch, window, degraded state and head,
-   and every message that request sent unchanged, by rule 10's hashes) and carries the same media
-   teaches the ratio its difference from it: the bytes and tokens it added. Otherwise, with a measured ratio, the media are charged the cost
-   that keeps the ratio, at most their estimate, so a request with media can lower the ratio but never
-   raise it; when that cost would be under the floor, the request is not learned. Before a ratio is
-   measured, the media are charged their floor, and a request whose media has a floor is learned only
-   when estimate minus floor is within 10% of its usage; a floor that would put the text above 3.5 bytes
-   a token (the text seed) ran high and none is taken off. A request whose learned ratio lands outside
-   1.5 to 6 bytes a token is not learned. After every response, compare real usage with the
-   bound and the estimate: log `over_bound` from real usage when it exceeds the bound, and
-   `estimate_error` when real usage exceeds the estimate by more than 10%.
+   bytes, and its media's cost out of its real tokens. That cost lies at or under the media's
+   estimate and is meant to lie at or over their floor (on Claude 95% of the image formula on the
+   older 1,568-pixel, 1,568-token limit, 0 for an image of unknown size, and 1,000 tokens a PDF page
+   for the pages its page tree draws: numbered page objects a `/Kids` array references, at most the
+   tree's count, at least one; on Codex 0, since OpenAI's tile prices go lower), though the floor can
+   run high. A request that only appends to the last measured one (same epoch, window, degraded state
+   and head, and every message of that request unchanged, by rule 10's hashes of the request's
+   messages before the transform) and carries the same media teaches the ratio its difference from
+   it: the bytes and tokens it added. Otherwise, with a measured ratio, the media are charged the
+   cost that keeps the ratio, at most their estimate, so a request with media can lower the ratio but
+   never raise it; when that cost would be under the floor, the request is not learned. Before a
+   ratio is measured, the media are charged their floor, and a request whose media has a floor is
+   learned only when estimate minus floor is within 10% of its usage; a floor that would put the text
+   above 3.5 bytes a token (the text seed) ran high and none is taken off. A request whose learned
+   ratio lands outside 1.5 to 6 bytes a token is not learned. After every response, compare real
+   usage with the bound and the estimate: log `over_bound` from real usage when it exceeds the bound,
+   and `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
    index), in tokens, taken from measured usage once available and from the estimator before that.
    The first measured request's input, minus its non-carried messages, is the head; the messages
@@ -369,8 +378,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    log `window_minimal`; this keeps the request under the bound at the cost of the previous turn's
    verbatim text. Only if `W` is not positive or cannot hold even the new turn, log
    `bound_too_small` and still rotate to the minimal window (the new turn alone), which is
-   smaller than sending unrotated; the launcher warns at start when a typical head (28,000
-   tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
+   smaller than sending unrotated. When the new turn would fit `W` with its media at their floor, the
+   shortfall is only the generous allowance for a PDF or image not measured yet (D48): the event says
+   `media_allowance`, and the launcher says the media are estimated generously until their first
+   response rather than suggesting a larger `--bound`; the launcher warns at start when a typical
+   head (28,000 tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
    seat) leaves less than 25,000 tokens of window budget, says that recall will barely fit or, at a
    budget of 0 or less, that it may not fit at all (a "may": measured heads ran as low as 15,689), and
    suggests a larger `--bound` (D55). Example

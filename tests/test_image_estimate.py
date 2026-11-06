@@ -1041,3 +1041,159 @@ def test_a_100_page_pdf_in_the_first_request_at_800k(tmp_path):
     _, _, control_w = _first_request(tmp_path / "control", None, 456_800, 800_000)
     assert true_head <= head <= 2.05 * true_head  # 2ef88a4: 376,643 for a true head of about 16,700
     assert w >= 0.95 * control_w and w <= 800_000 - 25_000 - true_head  # at least the control's, never over
+
+
+# Round 6: objects shown inside content streams, the trailer's catalog, a bounded walk (reviewer A) ----------
+
+def _listing_pdf(pages: int, *, length_marked: bool = True) -> bytes:
+    """``pages`` pages whose uncompressed content streams show a minimal PDF's objects as text (a decoy
+    catalog and a 1-page tree, and the word endstream), as reportlab writes with pageCompression=0."""
+    shown = (b"BT (1 0 obj) Tj (<< /Type /Catalog /Pages 2 0 R >>) Tj (2 0 obj) Tj "
+             b"(<< /Type /Pages /Kids [3 0 R] /Count 1 >>) Tj (3 0 obj) Tj (<< /Type /Page /Parent 2 0 R >>) Tj "
+             b"(stream) Tj (endstream) Tj (endobj) Tj ET")
+    kids = b" ".join(b"%d 0 R" % (3 + 2 * i) for i in range(pages))
+    objs = [b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
+            b"2 0 obj << /Type /Pages /Count %d /Kids [ %s ] >> endobj\n" % (pages, kids)]
+    for i in range(pages):
+        page, content = 3 + 2 * i, 4 + 2 * i
+        objs.append(b"%d 0 obj << /Type /Page /Parent 2 0 R /Contents %d 0 R >> endobj\n" % (page, content))
+        length = b"/Length %d" % len(shown) if length_marked else b"/Length 999 0 R"
+        objs.append(b"%d 0 obj << %s >>\nstream\n" % (content, length) + shown + b"\nendstream\nendobj\n")
+    return b"%PDF-1.4\n" + b"".join(objs) + b"trailer << /Size %d /Root 1 0 R >>\n%%%%EOF\n" % (4 + 2 * pages)
+
+
+@pytest.mark.parametrize("pages", [20, 100])
+def test_objects_shown_inside_content_streams_are_not_read(pages):
+    """Round 6: the walk took the latest /Type /Catalog and /Type /Pages by position, including text in a
+    page's content stream, so a tutorial PDF counted 1 page; a 100-page one was estimated at 40,187 for a real
+    193,939 on a 150k bound, unflagged. Stream bodies are skipped, to their direct /Length."""
+    assert pdf_page_count(base64.b64encode(_listing_pdf(pages)).decode()) == (pages, True, pages)
+
+
+def test_a_stream_without_a_direct_length_ends_at_its_endstream():
+    # Text saying "endstream" can end such a stream early; the rest of that page's text is then read, but
+    # the trailer's catalog still names the real tree.
+    assert pdf_page_count(base64.b64encode(_listing_pdf(20, length_marked=False)).decode()).pages == 20
+
+
+def test_the_catalog_is_the_one_the_trailer_names():
+    pages = 300
+    kids = b" ".join(b"%d 0 R" % (i + 3) for i in range(pages))
+    body = [b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
+            b"2 0 obj << /Type /Pages /Count %d /Kids [ %s ] >> endobj\n" % (pages, kids)]
+    body += [b"%d 0 obj << /Type /Page /Parent 2 0 R >> endobj\n" % (i + 3) for i in range(pages)]
+    body += [b"900 0 obj << /Type /Catalog /Pages 901 0 R >> endobj\n",  # appended, unreferenced
+             b"901 0 obj << /Type /Pages /Count 1 /Kids [ 3 0 R ] >> endobj\n"]
+    raw = b"%PDF-1.4\n" + b"".join(body) + b"trailer << /Size 902 /Root 1 0 R >>\n%%EOF\n"
+    assert pdf_page_count(base64.b64encode(raw).decode()) == (300, True, 300)  # 3ac7984: (1, True, 1)
+
+
+def test_a_crafted_wide_tree_is_bounded_in_memory_and_time():
+    """Round 6: keeping every node's /Kids list took a 990-node, 1,000-reference tree to 41 MB a PDF."""
+    objs = [b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"]
+    for n in range(990):
+        kids = b" ".join(b"%d 0 R" % (2 + (n + 1 + k) % 990) for k in range(1_000))
+        objs.append(b"%d 0 obj << /Type /Pages /Count 600 /Kids [ %s ] >> endobj\n" % (n + 2, kids))
+    raw = b"%PDF-1.4\n" + b"".join(objs) + b"trailer << /Root 1 0 R >>\n"
+    result, seconds, peak = _timed_count(raw)
+    assert result[0] == 600 and seconds < 0.5 and peak < 25 << 20
+
+
+# Round 6: a PDF's real cost, learned from its first response, and the launcher's advice (reviewer B) --------
+
+def test_a_pdfs_real_cost_is_learned_from_its_first_response(tmp_path):
+    """Round 6: a PDF of 20 typical pages (1,583 each) was estimated at 4,568 a page on every request. The
+    first measured request that carries it gives its real cost, kept between its floor and estimate."""
+    eng = _engine(tmp_path)
+    pages, cost = 20, 20 * 1_583
+    doc = _pdf_block(base64.b64decode(pdf_b64(pages, filler=pages * 800)))
+    msgs: list[dict] = []
+    for turn in range(5):
+        msgs.append({"role": "user", "content": [{"type": "text", "text": f"turn {turn} " + "talk " * 400},
+                                                 *([doc] if turn == 2 else [])]})
+        req = {**HEAD, "messages": list(msgs)}
+        upstream, _, events = eng(req, {}, EP)
+        stripped, found = split_media(upstream["messages"])
+        real = math.ceil(len(canonical_json({**upstream, "messages": stripped})) / 3.0) + cost * len(found)
+        estimate = next(e for e in events if e["event"] == "request")["estimate"]
+        if turn > 2:
+            assert real * 0.99 <= estimate <= real * 1.01  # 3ac7984: 110,000 for 50,000 on every request
+        eng.observe_usage(EP, {"input_tokens": real, "output_tokens": 10}, req)
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
+    (learned,) = eng.estimator.document_tokens.values()
+    assert pages * 1_000 <= learned <= pages * PDF_PAGE_TOKENS and abs(learned - cost) <= cost * 0.02
+
+
+def test_two_new_pdfs_in_one_request_are_not_learned(tmp_path):
+    eng = _engine(tmp_path)
+    docs = [_pdf_block(base64.b64decode(pdf_b64(5, filler=4_000 + i))) for i in range(2)]
+    req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "read both"}, *docs]}]}
+    upstream, _, _ = eng(req, {}, EP)
+    eng.observe_usage(EP, {"input_tokens": _real_usage(upstream) + 2 * 5 * 1_583, "output_tokens": 10}, req)
+    assert eng.estimator.document_tokens == {}  # the split between them is not known
+
+
+def test_codex_documents_keep_their_estimate():
+    eng = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config())
+    pdf = {"type": "input_file", "filename": "a.pdf", "file_data": "data:application/pdf;base64," + pdf_b64(5)}
+    req = {"model": "gpt-6-astra", "input": [{"type": "message", "role": "user", "content": [pdf]}]}
+    eng(req, {}, "/v1/responses")
+    eng.observe_usage("/v1/responses", {"input_tokens": 20_000}, req)
+    assert eng.estimator.document_tokens == {}  # OpenAI's document price is not bounded by Claude's floors
+
+
+def _midpaste(tmp_path, pages: int, *, bound: int = 150_000, text_only: bool = False) -> list[dict]:
+    """About 24k of history, then a PDF of ``pages`` typical pages (or text, ``text_only``) pasted with the
+    next prompt. Returns that request's events."""
+    eng = _engine(tmp_path, bound=bound)
+    rng = random.Random(4)
+    msgs: list[dict] = []
+    doc = _pdf_block(base64.b64decode(pdf_b64(pages, filler=pages * 800)))
+    for turn in range(3):
+        extra = [] if turn < 2 else [{"type": "text", "text": "w" * 40_000} if text_only else doc]
+        msgs.append({"role": "user", "content": [{"type": "text", "text": f"turn {turn} " + "talk " * 400}, *extra]})
+        req = {**HEAD, "messages": list(msgs)}
+        upstream, _, events = eng(req, {}, EP)
+        if turn == 2:
+            return events
+        eng.observe_usage(EP, {"input_tokens": _real_usage(upstream), "output_tokens": 10}, req)
+        for r in range(2):
+            msgs += [{"role": "assistant", "content": [{"type": "tool_use", "id": f"t{turn}{r}", "name": "Read",
+                                                        "input": {}}]},
+                     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{turn}{r}",
+                                                   "content": " ".join(rng.choices(["def", "x", "="], k=3_000))}]}]
+            req = {**HEAD, "messages": list(msgs)}
+            upstream, _, _ = eng(req, {}, EP)
+            eng.observe_usage(EP, {"input_tokens": _real_usage(upstream), "output_tokens": 10}, req)
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
+    return []
+
+
+def test_a_large_pdf_pasted_at_a_turn_start_is_not_advised_as_a_small_bound(tmp_path):
+    """Round 6: 25 typical pages (real 57,606 on a 150k bound) logged bound_too_small, and the launcher told
+    the user to restart with a larger --bound. The turn fits with the PDF at its floor, so the event says the
+    shortfall is the media allowance; a bound that is really too small still says so."""
+    events = _midpaste(tmp_path / "pdf", 25)
+    (small,) = [e for e in events if e["event"] == "bound_too_small"]
+    assert small.get("media_allowance") is True
+    real_small = [e for e in _midpaste(tmp_path / "text", 25, bound=30_000, text_only=True)
+                  if e["event"] == "bound_too_small"]
+    assert real_small and not real_small[0].get("media_allowance")
+
+
+def test_the_launcher_explains_a_media_allowance_and_still_warns_of_a_small_bound():
+    import io
+
+    from contexto.launcher import NoticeLog
+
+    class Store:
+        def log(self, event):
+            pass
+
+    err = io.StringIO()
+    notices = NoticeLog(Store(), err)
+    sizing = {"event": "bound_too_small", "bound": 150_000, "fixed_overhead": 45_242, "window_budget": 79_758}
+    notices.log({"event": "request", "transform_events": [{**sizing, "media_allowance": True}]})
+    assert "estimated generously" in err.getvalue() and "larger --bound" not in err.getvalue()
+    notices.log({"event": "request", "transform_events": [sizing]})  # a later, genuine one still shows
+    assert "Restart with a larger --bound" in err.getvalue()
