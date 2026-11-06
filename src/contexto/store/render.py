@@ -11,6 +11,7 @@ import json
 import re
 from typing import Any
 
+from contexto.canonical import loads_bounded
 from contexto.store.search import Query, matching_lines
 
 RECALL_LIMIT = 32_000  # characters per contexto_recall call, at most
@@ -36,36 +37,56 @@ def recall_limit(window_tokens: int | None, bytes_per_token: float | None) -> tu
     return limit, f"chunks are {limit:,} characters, about a quarter of this session's window budget"
 
 
-# Contexto's own MCP tools as the CLIs name them (D51): Claude Code, and Codex calling one directly, prefix
-# the server's name; Codex's code mode calls them from the JavaScript of its exec tool, as
-# tools["mcp__contexto__contexto_search"](...) or tools.mcp__contexto__contexto_search(...).
+# Contexto's own MCP tools whose results copy older pages or the pinned state (D51): search, recall, and
+# state. contexto_pin and contexto_close are not among them: their inputs are the model's own words, and
+# stay searchable. Claude Code, and Codex calling one directly, prefix the server's name; Codex's code mode
+# calls them from the JavaScript of its exec tool, as tools["mcp__contexto__contexto_search"](...) or
+# tools.mcp__contexto__contexto_search(...).
 OWN_TOOL_PREFIX = "mcp__contexto__"
+ECHO_TOOLS = tuple(OWN_TOOL_PREFIX + name for name in ("contexto_search", "contexto_recall", "contexto_state"))
 CODE_MODE_TOOL = "exec"
+_ECHO_NAME = "(?:" + "|".join(ECHO_TOOLS) + ")"
 _TOOLS_WORD = re.compile(r"\btools\b")
-# A literal call of one of Contexto's tools on the code-mode tools object: the whole reference and its "(".
-_OWN_CODE_CALL = re.compile(r"""\btools\s*(?:\[\s*(["'`])mcp__contexto__\w+\1\s*\]|\.mcp__contexto__\w+)\s*\(""")
+# A literal call of one of those tools on the code-mode tools object: the whole reference and its "(".
+_ECHO_CODE_CALL = re.compile(r"""\btools\s*(?:\[\s*(["'`])""" + _ECHO_NAME + r"""\1\s*\]|\.""" + _ECHO_NAME
+                             + r""")\s*\(""")
 _CALL_TYPES = ("function_call", "custom_tool_call")
 _OUTPUT_TYPES = ("function_call_output", "custom_tool_call_output")
 
 
-def _own_call(name: Any, arguments: Any) -> bool:
-    """A call of one of Contexto's own tools. An exec call counts only when every mention of ``tools`` in
-    its code is a literal call of a Contexto tool (at least one) and the code has no comment: any other
-    way of reaching a tool (destructuring, an alias, a computed or optional member, escaped quotes) may
-    run another tool, whose output must stay searchable, so such a call is not counted (D51)."""
-    if isinstance(name, str) and name.startswith(OWN_TOOL_PREFIX):
+def _code(arguments: Any) -> str | None:
+    """The code of a code-mode call: a custom tool's input as it is, or the string fields of a function
+    call's JSON arguments (their quotes unescaped), None for anything else."""
+    if not isinstance(arguments, str):
+        return None
+    try:
+        decoded = loads_bounded(arguments)
+    except ValueError:
+        return arguments
+    if isinstance(decoded, dict):
+        return "\n".join(v for v in decoded.values() if isinstance(v, str))
+    return decoded if isinstance(decoded, str) else arguments
+
+
+def _own_call(name: Any, code: str | None) -> bool:
+    """A call of search, recall, or state. An exec call counts only when every mention of ``tools`` in its
+    code is a literal call of one of them (at least one) and the code has no comment: any other way of
+    reaching a tool (destructuring, an alias, a computed or optional member, another tool) may run a
+    tool whose output must stay searchable, so such a call is not counted (D51)."""
+    if isinstance(name, str) and name in ECHO_TOOLS:
         return True
-    if name != CODE_MODE_TOOL or not isinstance(arguments, str) or "//" in arguments or "/*" in arguments:
+    if name != CODE_MODE_TOOL or code is None or "//" in code or "/*" in code:
         return False
-    own = len(_OWN_CODE_CALL.findall(arguments))
-    return own > 0 and own == len(_TOOLS_WORD.findall(arguments))
+    echo = len(_ECHO_CODE_CALL.findall(code))
+    return echo > 0 and echo == len(_TOOLS_WORD.findall(code))
 
 
 def own_call_ids(messages: Any) -> set[str]:
-    """The ids of a turn's calls of Contexto's own tools: ``tool_use`` ids (Messages API) and ``call_id``
-    of calls (Responses API). Their inputs and results are kept verbatim in the page, for recall, but
-    search, the stub, and the index do not read them: a search result is a copy of older pages, and as
-    the newest page holding it, it outranked the pages it quoted (D51)."""
+    """The ids of a turn's calls of Contexto's search, recall, and state tools (``ECHO_TOOLS``):
+    ``tool_use`` ids (Messages API) and ``call_id`` of calls (Responses API). Their inputs and results
+    are kept verbatim in the page, for recall, but search, the stub, and the index do not read them: a
+    search result is a copy of older pages, and as the newest page holding it, it outranked the pages
+    it quoted (D51). Pin and close calls are the model's own words and stay searchable."""
     ids: set[str] = set()
     for message in messages if isinstance(messages, list) else []:
         if not isinstance(message, dict):
@@ -74,13 +95,13 @@ def own_call_ids(messages: Any) -> set[str]:
             call_id = message.get("call_id")
             kind = message.get("type")
             if kind in _CALL_TYPES and isinstance(call_id, str) and _own_call(
-                    message.get("name"), message.get("arguments" if kind == "function_call" else "input")):
+                    message.get("name"), _code(message.get("arguments" if kind == "function_call" else "input"))):
                 ids.add(call_id)
             continue
         content = message.get("content") if message.get("role") == "assistant" else None
         for block in content if isinstance(content, list) else []:
             if (isinstance(block, dict) and block.get("type") == "tool_use" and isinstance(block.get("id"), str)
-                    and _own_call(block.get("name"), block.get("input"))):
+                    and _own_call(block.get("name"), None)):
                 ids.add(block["id"])
     return ids
 
@@ -116,7 +137,7 @@ def render_page(page: dict[str, Any], searchable: bool = False) -> str:
     A page from a Codex session holds Responses API items (M2 B20); each is rendered by
     ``_responses_lines``, the same way the engine's retained-window snapshot renders it (A14).
 
-    With ``searchable``, the lines of Contexto's own tool calls and results (``own_call_ids``) are
+    With ``searchable``, the lines of Contexto's search, recall, and state calls and results (``own_call_ids``) are
     blanked to spaces, so search matches no line in them while every offset stays the offset of the
     same line in the verbatim text that recall reads (D51)."""
     lines: list[str] = []

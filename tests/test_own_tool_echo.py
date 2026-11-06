@@ -174,8 +174,33 @@ OWN = {
                              "return r;"),
     "codex_exec_dot": codex_turn("custom_tool_call", "exec",
                                  'return await tools.mcp__contexto__contexto_recall({page_id: "ECHOED-QUERY"});'),
+    "claude_state": [{"role": "user", "content": "what was it"},
+                     {"role": "assistant", "content": [{"type": "tool_use", "id": "t1",
+                                                        "name": "mcp__contexto__contexto_state",
+                                                        "input": {"note": "ECHOED-QUERY"}}]},
+                     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": OUTPUT}]}],
+    # Reviewer B on PR #242: exec as a function call whose JSON arguments hold the code (quotes escaped).
+    "codex_exec_json_arguments": codex_turn("function_call", "exec", {
+        "code": 'return await tools["mcp__contexto__contexto_search"]({query: "ECHOED-QUERY"});'}),
 }
+def claude_call(name, tool_input, output):
+    return [{"role": "user", "content": "what was it"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": name, "input": tool_input}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": output}]}]
+
+
 OTHER = {
+    # Reviewer B on PR #242: pin and close inputs are the model's own words, not copies of older pages.
+    "claude_pin": claude_call("mcp__contexto__contexto_pin", {"kind": "decision", "text": "ECHOED-QUERY"},
+                              "Recorded decision rec_1. ECHOED-MARKER"),
+    "claude_close": claude_call("mcp__contexto__contexto_close", {"obligation_id": "rec_1", "note": "ECHOED-QUERY"},
+                                "Closed rec_1 with rec_2. ECHOED-MARKER"),
+    "codex_pin": codex_turn("function_call", "mcp__contexto__contexto_pin",
+                            {"kind": "decision", "text": "ECHOED-QUERY"}),
+    "exec_search_and_pin": codex_turn("custom_tool_call", "exec",
+                                      'await tools.mcp__contexto__contexto_search({query: "a"});\n'
+                                      'return await tools.mcp__contexto__contexto_pin({kind: "decision", '
+                                      'text: "ECHOED-QUERY"});'),
     "claude_other_tool": [{"role": "user", "content": "what was it"},
                           {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
                                                              "input": {"command": "ECHOED-QUERY"}}]},
@@ -188,7 +213,7 @@ OTHER = {
     "exec_no_tool": codex_turn("custom_tool_call", "exec", 'return "ECHOED-QUERY";'),
     # Reviewer A on PR #242: other ways the code can reach a tool. Any mention of tools that is not a
     # literal Contexto call keeps the whole call searchable.
-    "exec_destructured": codex_turn("custom_tool_call", "exec",
+    "exec_destructured": codex_turn("custom_tool_call", "exec",  # also reviewer B's shape
                                     "const { exec_command } = tools;\n"
                                     'await tools.mcp__contexto__contexto_search({query: "a"});\n'
                                     'return await exec_command({cmd: "grep -rn ECHOED-QUERY src"});'),

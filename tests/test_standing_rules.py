@@ -24,16 +24,16 @@ PIN = next(t for t in mcp.TOOLS if t["name"] == "contexto_pin")
 @pytest.mark.parametrize("text", [mcp.INSTRUCTIONS, RULE_LINES[2]], ids=["instructions", "preamble"])
 def test_both_texts_say_to_pin_a_standing_rule_at_once_even_for_a_one_word_reply(text):
     for needed in ("standing rule", "preference", "whenever", "from now on", "contexto_pin", "obligation",
-                   "one word", "paged"):
+                   "one word", "keep it open until the user withdraws it", "paged"):
         assert needed in text, needed
 
 
 def test_the_instructions_give_the_pin_arguments_and_stay_short():
     # Claude Code defers the tool, so its schema is not loaded when the rule is stated (QA live-fidelity 5).
     assert '{"kind": "obligation", "text": ...}' in mcp.INSTRUCTIONS
-    # Both texts are sent on every request: by the estimator the D51 sentence adds 77 tokens to the
-    # instructions (122 to 199) and 66 to the pin line (40 to 106).
-    assert len(mcp.INSTRUCTIONS) <= 700 and len(RULE_LINES[2]) <= 380
+    # Both texts are sent on every request: by the estimator the D51 sentence adds 90 tokens to the
+    # instructions (122 to 212) and 79 to the pin line (40 to 119).
+    assert len(mcp.INSTRUCTIONS) <= 750 and len(RULE_LINES[2]) <= 420
 
 
 def test_the_pin_description_names_only_kinds_the_tool_accepts():

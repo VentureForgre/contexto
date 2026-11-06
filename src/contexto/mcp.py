@@ -104,8 +104,8 @@ INSTRUCTIONS = (
     "when an obligation is done, contexto_state for the full pinned state, and contexto_search for "
     "an exact substring when you do not know the page id. When the user states a standing rule, "
     "preference, or obligation (whenever, from now on, always, never), pin it at once with contexto_pin "
-    "{\"kind\": \"obligation\", \"text\": ...}, even if your reply is one word: once its turn is paged "
-    "out, only what is pinned stays in view."
+    "{\"kind\": \"obligation\", \"text\": ...}, even if your reply is one word, and keep it open until "
+    "the user withdraws it: once its turn is paged out, only what is pinned stays in view."
 )
 
 
@@ -700,7 +700,7 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     matched in its JSON-escaped form too, as ``render_page`` prints it (B18).
     """
     rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
-    # Contexto's own calls are blanked at their offsets, so no line of an earlier reply is shown (D51).
+    # Search, recall, and state calls are blanked at their offsets, so no line of an earlier reply is shown (D51).
     text = render_page(page, searchable=True) if page.get("messages") is not None else ""
     q = Query.parse(query)
     on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only

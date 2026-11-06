@@ -1617,9 +1617,9 @@ def retained_entries(messages: list[dict], k: int, dialect: Dialect) -> list[dic
     that message (the newest equals ``turn_id``); ``message_index`` is the position in the CLI's full
     history; ``text`` is the block rendered by ``render_page``, the renderer recall uses, so a line
     found in view reads like the same line in a page. Carried system messages and injected context
-    blocks are not turn text and are left out; thinking and images are never included, nor the calls
-    and results of Contexto's own tools, which search does not read in a page either (D51). The entries
-    hold conversation text: they go to the store only, never to a log or an event."""
+    blocks are not turn text and are left out; thinking and images are never included, nor Contexto's
+    search, recall, and state calls and results, which search does not read in a page either (D51). The
+    entries hold conversation text: they go to the store only, never to a log or an event."""
     turn = bisect.bisect_left(_turn_starts(messages, dialect), k)  # turn starts in M[:k]
     own = own_call_ids(messages[k:])
     entries = []
