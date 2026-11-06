@@ -72,11 +72,15 @@ if os.environ.get("FAKE_REQUEST"):
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True,
              "content": f"Claude requested permissions to use {name}, but you haven't granted it yet."}]}]
     body = json.dumps(payload).encode()
-    request = urllib.request.Request(base + "/v1/messages", data=body, method="POST",
-                                     headers={"Content-Type": "application/json", "x-api-key": "fake-key"})
+    headers = {"Content-Type": "application/json", "x-api-key": "fake-key"}
+    if os.environ.get("FAKE_CLAUDE_SESSION"):  # Claude Code's own session id, the same as its transcript's name
+        headers["X-Claude-Code-Session-Id"] = os.environ["FAKE_CLAUDE_SESSION"]
+    request = urllib.request.Request(base + "/v1/messages", data=body, method="POST", headers=headers)
     with urllib.request.urlopen(request, timeout=10) as response:
         record["response_status"] = response.status
         response.read()  # to the end, as Claude Code does: the proxy logs the entry before the last bytes
+    if os.environ.get("FAKE_SAY"):  # the CLI's own output while it still owns the terminal
+        print(os.environ["FAKE_SAY"], file=sys.stderr, flush=True)
 # Write atomically: the tests wait for this file to appear and then read it at once.
 with open(os.environ["FAKE_RECORD"] + ".tmp", "w") as f:
     json.dump(record, f)
@@ -172,7 +176,7 @@ def test_run_wires_settings_mcp_and_args_and_cleans_up(env, upstream, tmp_path):
     assert record["settings"] == {"env": {"ANTHROPIC_BASE_URL": base}, "permissions": {"allow": contexto_tool_rules()}}
     assert base.startswith("http://127.0.0.1:")
     server = record["mcp"]["mcpServers"]["contexto"]
-    assert server["command"] == sys.executable and server["args"] == ["-P", "-m", "contexto", "mcp", "--session", "s1"]
+    assert server["command"] == sys.executable and server["args"] == ["-P", "-m", "contexto", "mcp", "--session=s1"]
     assert server["env"] == {"CONTEXTO_HOME": env["CONTEXTO_HOME"]}
     assert record["settings_mode"] == record["mcp_mode"] == 0o600 and record["settings_dir_mode"] == 0o700
     assert record["env_base_url"] is None  # the base URL travels only in the --settings file
@@ -394,12 +398,19 @@ def test_claude_version_runs_without_a_session_or_proxy(env, tmp_path):
     assert not (Path(env["CONTEXTO_HOME"]) / "sessions").exists()
 
 
-def test_an_unusable_contexto_home_exits_1_not_2(env, upstream, tmp_path):
-    """D57: 2 is a usage error; a store that cannot be opened is Contexto failing to start (1)."""
-    Path(env["CONTEXTO_HOME"]).write_text("")  # a file where the data directory should be
-    proc = launch(env, "--upstream", upstream, "claude", cwd=tmp_path)
-    _, err = proc.communicate(timeout=30)
-    assert proc.returncode == 1 and "cannot open session" in err and "Traceback" not in err
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only directory")
+def test_an_unwritable_contexto_home_exits_1_not_2(env, upstream, tmp_path):
+    """D57: 2 is a usage error; a store that cannot be opened is Contexto failing to start (1). A home that
+    is a file is refused up front as a usage error (D55, test_a_contexto_home_that_is_a_file_is_refused_unchanged)."""
+    home = Path(env["CONTEXTO_HOME"])
+    home.mkdir()
+    home.chmod(0o500)  # kept as the user made it (D55), so sessions/ cannot be created
+    try:
+        proc = launch(env, "--upstream", upstream, "claude", cwd=tmp_path)
+        _, err = proc.communicate(timeout=30)
+    finally:
+        home.chmod(0o700)
+    assert proc.returncode == 1 and "cannot open session" in err and "Traceback" not in err, err
     assert not Path(env["FAKE_RECORD"]).exists()
 
 
@@ -408,7 +419,8 @@ def test_an_invalid_upstream_leaves_no_session(env, tmp_path):
     proc = launch(env, "--upstream", "ftp://x", "claude", cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == EXIT_USAGE and "invalid upstream" in err
-    assert list((Path(env["CONTEXTO_HOME"]) / "sessions").iterdir()) == []
+    sessions = Path(env["CONTEXTO_HOME"]) / "sessions"  # refused before any session opens (D55)
+    assert not sessions.exists() or list(sessions.iterdir()) == []
 
 
 def test_large_bound_is_allowed_with_the_flag(env, upstream, tmp_path):
@@ -446,7 +458,9 @@ def test_engine_config_passes_only_set_values():
 def test_payloads_and_private_files(tmp_path):
     assert settings_payload("http://127.0.0.1:1") == {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"},
                                                       "permissions": {"allow": contexto_tool_rules()}}
-    assert mcp_payload("s", tmp_path)["mcpServers"]["contexto"]["args"][-2:] == ["--session", "s"]
+    assert mcp_payload("s", tmp_path)["mcpServers"]["contexto"]["args"][-1] == "--session=s"
+    # An id starting with "-" stays the option's value (security QA 2026-11-05, finding 7).
+    assert mcp_payload("-x", tmp_path)["mcpServers"]["contexto"]["args"][-1] == "--session=-x"
     path = write_private_json(tmp_path, "x.json", {"a": 1})
     assert stat.S_IMODE(path.stat().st_mode) == 0o600 and json.loads(path.read_text()) == {"a": 1}
     with pytest.raises(FileExistsError):
@@ -473,18 +487,24 @@ def test_exit_code_maps_signals():
 
 
 def test_start_warning_depends_on_bound_and_assumed_overhead(env, upstream, tmp_path):
+    # D55: the assumed overhead is the measured one on 2.1.314 (18,641 to 27,925 with tool search on).
+    assert ASSUMED_OVERHEAD_DEFAULT == 28_000
     assert start_warning(150_000, None, ASSUMED_OVERHEAD_DEFAULT) is None
     assert start_warning(150_000, None, ASSUMED_OVERHEAD_OPENRIG) is None
-    warning = start_warning(100_000, None, ASSUMED_OVERHEAD_DEFAULT)
-    assert "below 25,000" in warning and "--bound 130,000" in warning
+    assert start_warning(100_000, None, ASSUMED_OVERHEAD_DEFAULT) is None  # 47,000 of window budget
+    warning = start_warning(70_000, None, ASSUMED_OVERHEAD_DEFAULT)
+    assert "about 17,000" in warning and "below 25,000" in warning and "--bound 103,000" in warning
+    assert "recall" in warning  # says plainly what a small window costs
+    negative = start_warning(50_000, None, ASSUMED_OVERHEAD_DEFAULT)
+    assert "leaves no window budget" in negative and "recall will not fit" in negative
     assert assumed_overhead({}) == ASSUMED_OVERHEAD_DEFAULT
     assert assumed_overhead({"OPENRIG_SESSION_NAME": "x"}) == ASSUMED_OVERHEAD_OPENRIG
     quiet = launch(env, "--upstream", upstream, "--session", "w1", "claude", cwd=tmp_path)
     _, err = quiet.communicate(timeout=30)
     assert err.count("contexto:") == 1  # only the session line
-    noisy = launch(env, "--upstream", upstream, "--bound", "100000", "--session", "w2", "claude", cwd=tmp_path)
+    noisy = launch(env, "--upstream", upstream, "--bound", "70000", "--session", "w2", "claude", cwd=tmp_path)
     _, err = noisy.communicate(timeout=30)
-    assert "window budget about 20,000" in err
+    assert "window budget about 17,000" in err
     assert any(e["event"] == "window_budget_warning" for e in session_log(env, "w2"))
 
 
@@ -715,3 +735,480 @@ def test_claude_refusing_contexto_tools_gets_one_warning(env, upstream, tmp_path
     [denied] = [e for e in session_log(env, "t3") for e in [e, *e.get("transform_events", [])]
                 if e.get("event") == "mcp_tools_denied"]
     assert denied["tools"] == ["contexto_recall"] and denied["main"] is True
+
+
+# D55: resume through Contexto, signals, deferred notices, and launcher messages
+
+CLAUDE_A = "0acd81f6-1f21-40f8-ab64-5c09545905cf"
+CLAUDE_B = "f816b535-d6ba-4c7a-ace7-0fba5c7df367"
+
+
+def session_from(err: str) -> str:
+    [line] = [line for line in err.splitlines() if line.startswith("contexto: session ")]
+    return line.split()[2]
+
+
+def meta(env, session) -> dict:
+    return json.loads((Path(env["CONTEXTO_HOME"]) / "sessions" / session / "meta.json").read_text())
+
+
+def first_run(env, upstream, cwd, claude_session=CLAUDE_A, *args) -> str:
+    """A launch without --session whose fake claude makes one request as Claude Code session ``claude_session``."""
+    run_env = dict(env, FAKE_REQUEST="1", FAKE_CLAUDE_SESSION=claude_session)
+    proc = launch(run_env, "--upstream", upstream, *args, "claude", "-p", "first", cwd=cwd)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    return session_from(err)
+
+
+def test_a_launch_records_claude_s_session_id_and_prints_how_to_resume_through_contexto(env, upstream, tmp_path):
+    proc = launch(dict(env, FAKE_REQUEST="1", FAKE_CLAUDE_SESSION=CLAUDE_A), "--upstream", upstream, "--bound",
+                  "120000", "claude", "-p", "first", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    session = session_from(err)
+    assert list(meta(env, session)["cli_sessions"]["claude"]) == [CLAUDE_A]
+    hint = err.splitlines()[-1]
+    assert hint == (f"contexto: resume this conversation through Contexto with: contexto run --session {session} "
+                    f"--bound 120000 --upstream {upstream} claude --resume {CLAUDE_A}")
+    assert "claude_session" not in json.dumps(session_log(env, session))  # the id stays out of the log
+
+
+def test_resume_by_claude_session_id_reuses_its_contexto_session(env, upstream, tmp_path):
+    session = first_run(env, upstream, tmp_path)
+    first_run(env, upstream, tmp_path, CLAUDE_B)  # another conversation, another Contexto session
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    proc = launch(dict(env, FAKE_REQUEST="1", FAKE_CLAUDE_SESSION=CLAUDE_A), "--upstream", upstream, "claude",
+                  "--resume", CLAUDE_A, "-p", "second", cwd=elsewhere)  # by id: the directory does not matter
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert session_from(err) == session
+    assert f"Claude Code session {CLAUDE_A} was served by Contexto session {session}" in err
+    assert [e["event"] for e in session_log(env, session)].count("launch") == 2
+    record = json.loads(Path(env["FAKE_RECORD"]).read_text())
+    assert record["mcp"]["mcpServers"]["contexto"]["args"][-1] == f"--session={session}"
+
+
+@pytest.mark.parametrize("form", [["--continue"], ["-c"]])
+def test_continue_reuses_the_latest_contexto_session_of_this_directory(env, upstream, tmp_path, form):
+    first_run(env, upstream, tmp_path, CLAUDE_A)
+    latest = first_run(env, upstream, tmp_path, CLAUDE_B)
+    proc = launch(dict(env, FAKE_REQUEST="1", FAKE_CLAUDE_SESSION=CLAUDE_B), "--upstream", upstream, "claude",
+                  *form, "-p", "again", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert session_from(err) == latest and "warning" not in err
+
+
+def test_continue_elsewhere_and_an_unknown_resume_say_so_and_start_a_new_session(env, upstream, tmp_path):
+    served = first_run(env, upstream, tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    proc = launch(env, "--upstream", upstream, "claude", "--continue", cwd=other)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert session_from(err) != served
+    assert "no Contexto session has served Claude Code in this directory" in err
+    proc = launch(env, "--upstream", upstream, "claude", "--resume", CLAUDE_B, "-p", "x", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert session_from(err) != served and f"no Contexto session has served Claude Code session {CLAUDE_B}" in err
+    proc = launch(env, "--upstream", upstream, "claude", "--resume", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert session_from(err) != served and "picker" in err
+
+
+def test_an_explicit_session_wins_over_resume(env, upstream, tmp_path):
+    first_run(env, upstream, tmp_path)
+    proc = launch(env, "--upstream", upstream, "--session", "mine", "claude", "--resume", CLAUDE_A, cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert session_from(err) == "mine" and "served" not in err
+
+
+def test_continue_that_lands_in_another_conversation_is_reported_at_exit(env, upstream, tmp_path):
+    session = first_run(env, upstream, tmp_path, CLAUDE_A)
+    # Claude Code continued a conversation this Contexto session never served (one run without Contexto).
+    proc = launch(dict(env, FAKE_REQUEST="1", FAKE_CLAUDE_SESSION=CLAUDE_B), "--upstream", upstream, "claude",
+                  "--continue", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert session_from(err) == session
+    assert f"Claude Code continued session {CLAUDE_B}" in err and "warning" in err
+
+
+@pytest.mark.parametrize("args, expected", [
+    (["-p", "x"], None), (["--continue"], ("continue", None)), (["-p", "-c", "x"], ("continue", None)),
+    (["--resume", CLAUDE_A, "-p"], ("resume", CLAUDE_A)), (["-r", CLAUDE_A], ("resume", CLAUDE_A)),
+    ([f"--resume={CLAUDE_A}"], ("resume", CLAUDE_A)), (["--resume"], ("resume", None)),
+    (["--resume", "-p", "x"], ("resume", None)), (["-p", "--", "--continue"], None),
+    # Reviewer A, PR #240: a value of an option that takes one is not an option, even with a leading "-".
+    (["--append-system-prompt", "--continue"], None), (["--model", "-c", "-p"], None),
+    (["--add-dir", "a", "-c"], ("continue", None)), (["--session-id", "-r", "x"], None),
+])
+def test_resume_request(args, expected):
+    assert launcher.resume_request(args) == expected
+
+
+def test_claude_session_of_a_request():
+    meta_user = json.dumps({"device_id": "d", "account_uuid": "", "session_id": CLAUDE_B})
+    assert launcher.claude_session({"X-Claude-Code-Session-Id": CLAUDE_A}, {}) == CLAUDE_A
+    assert launcher.claude_session({"x-claude-code-session-id": CLAUDE_A}, {}) == CLAUDE_A
+    assert launcher.claude_session({}, {"metadata": {"user_id": meta_user}}) == CLAUDE_B
+    assert launcher.claude_session({}, {"metadata": {"user_id": f"user_ab_account__session_{CLAUDE_B}"}}) == CLAUDE_B
+    for headers, request in (({}, {}), ({"X-Claude-Code-Session-Id": "../x"}, {}),
+                             ({}, {"metadata": {"user_id": "{not json"}}), ({}, {"metadata": "x"})):
+        assert launcher.claude_session(headers, request) is None
+
+
+def test_session_recorder_passes_attributes_and_never_fails_a_request(tmp_path):
+    calls = []
+
+    class Engine:
+        preserves_input = True
+
+        def __call__(self, request, headers, endpoint):
+            calls.append(endpoint)
+            return request, headers, []
+
+        def tools_verdict(self):
+            return None
+
+    class BrokenStore:
+        def record_cli_session(self, cli, cli_session, seen_at=None):
+            raise OSError("disk full")
+
+    recorder = launcher.SessionRecorder(Engine(), BrokenStore())
+    assert recorder({"m": 1}, {"X-Claude-Code-Session-Id": CLAUDE_A}, "/v1/messages") == ({"m": 1}, {
+        "X-Claude-Code-Session-Id": CLAUDE_A}, [])
+    assert recorder.preserves_input is True and recorder.tools_verdict() is None
+    assert recorder.last == CLAUDE_A and calls == ["/v1/messages"]
+
+
+def test_contexto_options_after_claude_get_a_hint_and_nothing_starts(env, upstream, tmp_path):
+    proc = launch(env, "--upstream", upstream, "claude", "--session", "foo", "--bound=1000", "-p", "hi", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE
+    assert "--session after 'claude' is a Contexto option" in err
+    assert "contexto run --session foo --bound=1000 claude -p hi" in err
+    assert not Path(env["FAKE_RECORD"]).exists() and not (Path(env["CONTEXTO_HOME"]) / "sessions").exists()
+
+
+def test_run_options_list_matches_the_parser():
+    from contexto import cli
+
+    parser = cli.build_parser()
+    run = parser._subparsers._group_actions[0].choices["run"]
+    names = {s for a in run._actions for s in a.option_strings if s.startswith("--") and s != "--help"}
+    assert set(launcher.RUN_OPTIONS) == {n for n in names if not n.startswith("--codex")}
+
+
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_a_malformed_upstream_url_is_a_usage_error_naming_its_source(env, tmp_path, how):
+    args = ["--upstream", "http://[::1"] if how == "flag" else []
+    if how == "env":
+        env["ANTHROPIC_BASE_URL"] = "http://[bad"
+    proc = launch(env, *args, "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE and "Traceback" not in err, err
+    assert "invalid upstream" in err and f"(from {how})" in err
+    assert not (Path(env["CONTEXTO_HOME"]) / "sessions").exists()  # no empty session left behind
+
+
+def test_a_contexto_home_that_is_a_file_is_refused_unchanged(env, upstream, tmp_path):
+    home = tmp_path / "home-file"
+    home.write_text("x")
+    home.chmod(0o644)
+    env["CONTEXTO_HOME"] = str(home)
+    proc = launch(env, "--upstream", upstream, "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE and "is not a directory" in err, err
+    assert stat.S_IMODE(home.stat().st_mode) == 0o644
+
+
+def test_an_existing_contexto_home_keeps_its_mode(env, upstream, tmp_path):
+    home = Path(env["CONTEXTO_HOME"])
+    home.mkdir()
+    home.chmod(0o750)
+    proc = launch(env, "--upstream", upstream, "--session", "m1", "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert stat.S_IMODE(home.stat().st_mode) == 0o750
+    assert stat.S_IMODE((home / "sessions").stat().st_mode) == 0o700  # Contexto's own directories stay private
+
+
+@pytest.mark.parametrize("where", ["home", "session"])
+def test_a_variable_reference_claude_code_would_expand_is_refused(env, upstream, tmp_path, where):
+    # Claude Code 2.1.314 expands ${VAR} (not $VAR) in an MCP config's command, args and env, with no escape.
+    args = ["--session", "s-${CTXP}"] if where == "session" else []
+    if where == "home":
+        env["CONTEXTO_HOME"] = str(tmp_path / "h-${CTXP}")
+    proc = launch(dict(env, CTXP="X"), "--upstream", upstream, *args, "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE and "${" in err and "would expand" in err, err
+    assert not Path(env["FAKE_RECORD"]).exists()
+
+
+def test_a_plain_dollar_is_kept(env, upstream, tmp_path):
+    env["CONTEXTO_HOME"] = str(tmp_path / "h-$CTXP")
+    proc = launch(env, "--upstream", upstream, "--session", "d1", "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+
+
+@pytest.mark.parametrize("kind, message", [("not-executable", "is not executable"),
+                                           ("broken-symlink", "is a broken symlink"),
+                                           ("directory", "is a directory")])
+def test_an_unusable_claude_is_named_with_what_is_wrong(env, upstream, tmp_path, kind, message):
+    bad = tmp_path / "badbin"
+    bad.mkdir()
+    target = bad / "claude"
+    if kind == "not-executable":
+        target.write_text("#!/bin/sh\n")
+        target.chmod(0o644)
+    elif kind == "broken-symlink":
+        target.symlink_to(tmp_path / "gone")
+    else:
+        target.mkdir()
+    env["PATH"] = f"{bad}{os.pathsep}/usr/bin:/bin"
+    proc = launch(env, "--upstream", upstream, "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 127 and str(target) in err and message in err, err
+    assert "not found on PATH" not in err
+
+
+def test_notice_log_holds_messages_while_the_cli_owns_the_terminal(tmp_path):
+    import io
+
+    store, err = FakeStore(tmp_path, "s"), io.StringIO()
+    notices = NoticeLog(store, err)
+    notices.hold()
+    small = {"event": "request", "transform_events": [{"event": "rotation", "fixed_overhead": 20_903,
+                                                       "window_budget": 14_097}]}
+    missing = {"event": "mcp_tools_missing", "dialect": "anthropic", "at": "request", "server_listed": False}
+    notices.log(small)
+    notices.log({"event": "request", "transform_events": [missing]})
+    notices.log(dict(missing, at="exit", repeated=True))
+    assert err.getvalue() == "" and len(store.events) == 3  # logged at once, shown later
+    notices.release()
+    lines = err.getvalue().splitlines()
+    assert len(lines) == 2  # the exit-time repeat of a warning not yet shown adds nothing
+    assert "measured window budget 14,097" in lines[0] and "without Contexto's tools" in lines[1]
+    notices.log(small)
+    notices.log({"event": "mcp_tools_denied", "tools": ["contexto_recall"]})
+    assert len(err.getvalue().splitlines()) == 3  # released: shown at once
+
+
+def _tmp_env(env, tmp_path) -> Path:
+    tmp = tmp_path / "tmpdir"
+    tmp.mkdir()
+    env["TMPDIR"] = str(tmp)
+    return tmp
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_during_the_version_check_cleans_up(env, upstream, tmp_path, signum):
+    tmp = _tmp_env(env, tmp_path)
+    marker = tmp_path / "version-running"
+    env["FAKE_VERSION_HANG"] = str(marker)
+    env.pop("CONTEXTO_NO_VERSION_CHECK", None)
+    proc = launch(env, "--upstream", upstream, "--session", "g1", "claude", cwd=tmp_path)
+    wait_for(marker)
+    proc.send_signal(signum)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 128 + signum and "Traceback" not in err, err
+    assert not list(tmp.glob("contexto-run-*"))
+    assert not Path(env["FAKE_RECORD"]).exists()
+    events = session_log(env, "g1")
+    assert events[-1] == dict(events[-1], event="exit", code=128 + signum)
+
+
+@pytest.mark.parametrize("signum, child_gets", [(signal.SIGQUIT, signal.SIGQUIT), (signal.SIGUSR1, signal.SIGTERM),
+                                                (signal.SIGUSR2, signal.SIGTERM)])
+def test_other_terminating_signals_end_claude_and_clean_up(env, upstream, tmp_path, signum, child_gets):
+    tmp = _tmp_env(env, tmp_path)
+    env["FAKE_SLEEP"] = "60"
+    proc = launch(env, "--upstream", upstream, "--session", "g2", "claude", cwd=tmp_path)
+    wait_for(Path(env["FAKE_RECORD"]))
+    proc.send_signal(signum)
+    proc.communicate(timeout=30)
+    assert proc.returncode == 128 + child_gets
+    assert not list(tmp.glob("contexto-run-*"))
+    assert session_log(env, "g2")[-1]["event"] == "exit"
+
+
+def test_claude_does_not_outlive_a_killed_launcher(env, upstream, tmp_path):
+    """SIGKILL cannot be caught: the watchdog sees the launcher's pipe close, ends claude with SIGTERM and
+    removes the temporary files."""
+    tmp = _tmp_env(env, tmp_path)
+    env["FAKE_SLEEP"] = "120"
+    proc = launch(env, "--upstream", upstream, "--session", "g3", "claude", cwd=tmp_path)
+    wait_for(Path(env["FAKE_RECORD"]))
+    pid = json.loads(Path(env["FAKE_RECORD"]).read_text())["pid"]
+    try:
+        proc.kill()
+        proc.communicate(timeout=30)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("claude outlived the launcher")
+        while list(tmp.glob("contexto-run-*")) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not list(tmp.glob("contexto-run-*"))
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_a_warning_raised_while_claude_runs_is_printed_after_it_exits(env, upstream, tmp_path):
+    """D55: a line written while Claude Code's TUI owns the terminal lands in its input box."""
+    env.update(FAKE_REQUEST="1", FAKE_TOOLS="Bash,mcp__contexto__contexto_search,mcp__contexto__contexto_recall",
+               FAKE_DENIED="mcp__contexto__contexto_recall", FAKE_SAY="claude-still-running")
+    proc = launch(env, "--upstream", upstream, "--session", "t4", "claude", "-p", "hello", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    warning = next(line for line in err.splitlines() if "refused Contexto's contexto_recall" in line)
+    assert err.index("claude-still-running") < err.index(warning)
+
+
+# Reviewer A on PR #240
+
+
+@pytest.mark.parametrize("args", [["--resume", CLAUDE_A], ["--continue"]])
+def test_an_automatically_picked_session_another_launch_has_open_is_not_shared(env, upstream, tmp_path, args):
+    from contexto.store import SessionStore
+
+    served = first_run(env, upstream, tmp_path)
+    held = SessionStore(Path(env["CONTEXTO_HOME"]), served)  # holds live.lock, as a running launch does
+    try:
+        proc = launch(dict(env, FAKE_REQUEST="1", FAKE_CLAUDE_SESSION=CLAUDE_A), "--upstream", upstream,
+                      "claude", *args, "-p", "again", cwd=tmp_path)
+        _, err = proc.communicate(timeout=30)
+        assert proc.returncode == 0, err
+        assert session_from(err) != served and "another launch has open" in err
+        assert f"pass --session {served} before 'claude' to share it" in err
+        # At exit: the conversation is now in two stores, and the earlier one is named.
+        assert f"Claude Code session {CLAUDE_A} was also served by Contexto session {served}" in err
+        proc = launch(env, "--upstream", upstream, "--session", served, "claude", "--resume", CLAUDE_A, cwd=tmp_path)
+        _, err = proc.communicate(timeout=30)
+        assert session_from(err) == served  # an explicit --session is never questioned
+    finally:
+        del held
+
+
+def test_resume_names_the_other_sessions_that_served_the_id(tmp_path):
+    import io
+
+    from contexto.store import SessionStore
+
+    for name, seen_at in (("older", 100.0), ("newer", 200.0)):
+        store = SessionStore(tmp_path, name)
+        store.record_cli_session("claude", CLAUDE_A, seen_at)
+        del store
+    err = io.StringIO()
+    choice = launcher.choose_session(LaunchOptions(claude_args=["--resume", CLAUDE_A]), tmp_path, tmp_path, err)
+    assert choice.session_id == "newer" and not choice.unmatched
+    assert "served by Contexto session newer (newest; also served by older" in err.getvalue()
+
+
+@pytest.mark.parametrize("fork", [False, True])
+def test_continue_with_fork_session_is_not_reported_as_another_conversation(tmp_path, fork):
+    import io
+
+    class Recorder:
+        last, seen = CLAUDE_B, {CLAUDE_B: 1.0}
+
+    args = ["-c", "--fork-session"] if fork else ["-c"]
+    err = io.StringIO()
+    launcher.after_exit(LaunchOptions(claude_args=args), tmp_path, "s", Recorder(),
+                        launcher.SessionChoice("s", continued={CLAUDE_A}), err)
+    assert ("pages and pins come from another conversation" in err.getvalue()) is not fork
+    assert err.getvalue().splitlines()[-1].endswith(f"claude --resume {CLAUDE_B}")
+
+
+def test_flush_never_raises_even_when_the_seen_ids_change_under_it():
+    class GrowingStore:
+        def __init__(self, recorder):
+            self.recorder = recorder
+
+        def record_cli_session(self, cli, cli_session, seen_at=None):
+            self.recorder.seen[f"late-{len(self.recorder.seen)}"] = 1.0  # a late handler thread adds an id
+
+    recorder = launcher.SessionRecorder(lambda r, h, e: (r, h, []), None)
+    recorder.store = GrowingStore(recorder)
+    recorder.seen = {CLAUDE_A: 1.0, CLAUDE_B: 2.0}
+    recorder.flush()
+
+
+def _sleeper() -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+@pytest.mark.parametrize("forgotten", [False, True])
+def test_the_watchdog_signals_only_a_child_it_was_not_told_has_exited(tmp_path, forgotten):
+    from contexto.store.memory import MemoryStore
+
+    tmp = tmp_path / "contexto-run-x"
+    tmp.mkdir()
+    child = _sleeper()
+    try:
+        watchdog = launcher.Watchdog.start(tmp, MemoryStore())
+        watchdog.watch(child.pid)
+        if forgotten:
+            watchdog.forget()  # what run_child sends once the child is reaped: its pid may be reused
+        watchdog.process.stdin.close()  # the launcher died without "done"
+        watchdog.process.wait(timeout=10)
+        assert not tmp.exists()
+        if forgotten:
+            with pytest.raises(subprocess.TimeoutExpired):
+                child.wait(timeout=0.5)
+        else:
+            assert child.wait(timeout=10) == -signal.SIGTERM
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_signal_before_the_child_exists_is_forwarded_once_it_does():
+    forwarding = launcher._ChildSignals()
+    previous = forwarding.install()
+    child = None
+    try:
+        forwarding._forward(signal.SIGUSR1, None)  # arrives during the spawn
+        child = _sleeper()
+        forwarding.attach(child)
+        assert child.wait(timeout=10) == -signal.SIGTERM
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+def test_run_child_tells_the_watchdog_the_child_was_reaped():
+    sent = []
+
+    class Watch:
+        def watch(self, pid):
+            sent.append(("pid", pid))
+
+        def forget(self):
+            sent.append(("exited",))
+
+    assert launcher.run_child([sys.executable, "-c", "raise SystemExit(4)"], watchdog=Watch()) == 4
+    assert [m[0] for m in sent] == ["pid", "exited"]
+
+
+def test_an_empty_session_option_is_an_invalid_id(env, upstream, tmp_path):
+    """D57: `--session ''` is refused, not taken as "not given" (with #240's resume choice in between)."""
+    proc = launch(env, "--upstream", upstream, "--session", "", "claude", "-p", "hi", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE and "invalid session id: ''" in err and "Traceback" not in err, err
+    assert not Path(env["FAKE_RECORD"]).exists()

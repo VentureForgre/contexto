@@ -419,10 +419,16 @@ def test_prune_refuses_an_empty_session_id_as_invalid_not_as_a_prefix(home, caps
     assert code == 1 and out == "" and "invalid session id: ''" in err and sessions(home) == ["s1"]
 
 
-def test_proxy_refuses_a_session_id_that_only_starts_an_existing_one(home, capsys):
+def test_proxy_refuses_a_session_id_that_only_starts_an_existing_one(home):
+    import subprocess
+
     make(home, "52385048abc", 1_000_000)
-    code, out, err = run(capsys, "proxy", "--session", "5238", "--upstream", "http://127.0.0.1:9")
-    assert code == 2 and out == "" and "is not a session but the start of session 52385048abc" in err
+    # In a child with a timeout: a proxy that wrongly starts serves until killed, so the test fails, not hangs.
+    proc = subprocess.run([sys.executable, "-m", "contexto", "proxy", "--session", "5238", "--upstream",
+                           "http://127.0.0.1:9"], capture_output=True, text=True, timeout=30,
+                          env={**os.environ, "CONTEXTO_HOME": str(home)})
+    assert proc.returncode == 2 and proc.stdout == "", proc.stderr
+    assert "is not a session but the start of session 52385048abc" in proc.stderr
     assert sessions(home) == ["52385048abc"]
 
 

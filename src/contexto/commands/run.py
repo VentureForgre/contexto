@@ -20,7 +20,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                     "'claude' or 'codex'; everything after it is passed to the CLI unchanged.",
         epilog="Exit codes: the CLI's own code; 128+N if it died from signal N; 2 usage error; "
                "1 Contexto could not start (the proxy, or the session store under $CONTEXTO_HOME); "
-               "127 'claude' or 'codex' not found; 130 Ctrl+C during the version check.")
+               "127 'claude' or 'codex' not found on PATH or not runnable; 130 Ctrl+C during the version check.")
     parser.add_argument("--bound", type=int, default=DEFAULT_BOUND,
                         help=f"upstream prompt bound in tokens (default {DEFAULT_BOUND:,}; "
                              f"above {BOUND_GUARD:,} needs --allow-large-bound)")
@@ -32,7 +32,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                         help="minimum headroom below the bound that triggers a rotation (default 25,000; "
                              "must be below the bound)")
     parser.add_argument("--session", default=None,
-                        help="full session id to resume or create (default: a new one, printed at start)")
+                        help="full session id to resume or create (default: the one that served "
+                             "'claude --resume <id>' or, for 'claude --continue', the last one used in this "
+                             "directory; else a new one, printed at start)")
     parser.add_argument("--upstream", default=None,
                         help="upstream base URL (default: what Claude Code would use from this directory)")
     parser.add_argument("--observe-thinking", action="store_true",

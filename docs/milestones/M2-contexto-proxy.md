@@ -18,7 +18,9 @@ same design after Claude Code works.
   them (`.github/workflows/ci.yml`).
 - Data lives under `$CONTEXTO_HOME` (default `~/.contexto`), one directory per session:
   `sessions/<session id>/`. Nothing in it is committed. Everything under `$CONTEXTO_HOME` is
-  private to the user: directories `0700`, files `0600`, created atomically (secrets such as the
+  private to the user: directories `0700`, files `0600`, created atomically. A home Contexto creates
+  is `0700`; an existing one keeps the mode its user gave it, and one that is not a directory is
+  refused before any mode is changed (D55) (secrets such as the
   page key are written to a temporary file and renamed, never left empty by a race). Never edit the user's Claude or Codex
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
@@ -266,8 +268,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    log `window_minimal`; this keeps the request under the bound at the cost of the previous turn's
    verbatim text. Only if `W` is not positive or cannot hold even the new turn, log
    `bound_too_small` and still rotate to the minimal window (the new turn alone), which is
-   smaller than sending unrotated; the launcher warns at start when the measured
-   head leaves less than 25,000 tokens of window budget and suggests a larger `--bound`. Example
+   smaller than sending unrotated; the launcher warns at start when a typical head (28,000
+   tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
+   seat) leaves less than 25,000 tokens of window budget, says that recall will barely fit or, at a
+   budget of 0 or less, not fit at all, and suggests a larger `--bound` (D55). Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
    OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
    thinking strips will be frequent at 150k for large heads (see O3).
@@ -566,8 +570,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   them (`contexto_search` with an exact key, name, or identifier, then `contexto_recall` with a page
   id); that the model does this before relying on a detail from an earlier turn and before
   answering that something is unknown; that it records decisions and obligations with
-  `contexto_pin` and closes finished ones with `contexto_close`; and one worked example of a
-  search followed by a recall. The preamble is placed before any carried context in the first
+  `contexto_pin` and closes finished ones with `contexto_close`; that it pins a standing rule,
+  preference, or obligation the user states (whenever, from now on, always, never) as an obligation
+  as soon as it is stated, even when its reply is one word, and keeps it open until the user
+  withdraws it, because an unpinned one leaves view when
+  its turn is paged (D51); and one worked example of a search followed by a recall. The preamble is placed before any carried context in the first
   retained turn-start message. Measured (PR #70 experiment, 415,413 tokens): with the earlier
   mechanism-only line the model made 0 tool calls in the H1 run; with this text it searched for
   all four paged-only keys in its first response. Over budget: list the newest, then a
@@ -580,7 +587,13 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 
 ## MCP server
 
-`contexto mcp --session S`, stdio JSON-RPC per the MCP spec, tools:
+`contexto mcp --session S`, stdio JSON-RPC per the MCP spec. Its `instructions` (sent at
+`initialize` and `server/discover`) name the tools and say when to use each, and tell the model to
+pin a standing rule, preference, or obligation the user states as an obligation at once, with the
+pin arguments (`{"kind": "obligation", "text": ...}`), even when its reply is one word, and to keep
+it open until the user withdraws it (D51): the
+preamble is sent only from the first rotation, and the instructions are what the model sees in the
+turns before it, usually where such rules are given. Tools:
 
 - `contexto_recall(page_id)` returns the page's messages rendered as plain text (thinking omitted),
   exactly, up to a per-call limit with `offset` for more. The limit is the smaller of 32,000
@@ -775,7 +788,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
-- `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
+- `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record. Its
+  description names only the kinds it accepts (`event`, `decision`, `obligation`, `artifact`,
+  `reference`) and says what the pinned state shows: open obligations and active decisions, and an
+  event, artifact, or reference only when verified (`epistemic: verified`, with a provenance source;
+  D51).
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
 - `contexto_search(query)`: word search over page stubs and text (D34). The query is split on
@@ -785,7 +802,22 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   every page the earlier exact, case-sensitive rule matched still matches. A query with no words
   (whitespace only) matches nothing, where the earlier rule matched almost every page. Case is
   folded one character at a time, with every final sigma written as `σ`, so a word folds the same
-  in the query and on the page. Matching pages are ranked in three groups: turn pages holding the
+  in the query and on the page. Search does not read the inputs and outputs of Contexto's search,
+  recall, and state calls (D51): a call is one of them when its tool name is
+  `mcp__contexto__contexto_search`, `_recall`, or `_state` (Claude Code, and Codex calling it
+  directly), or when it is Codex's code-mode `exec` call whose code (a custom tool's input, or the
+  string fields of a function call's JSON arguments) has no comment and in which every mention of
+  `tools` is a literal call of one of them (`tools["mcp__contexto__contexto_search"](` or
+  `tools.mcp__contexto__contexto_search(`), so any other way of reaching a tool keeps the call
+  searchable; the output is paired with its call by `tool_use_id` or `call_id` within the turn.
+  Their replies hold copies of older pages or of the pinned state, and as the newest page holding
+  them a search reply outranked the pages it quoted (QA, 2026-11-05). `contexto_pin` and
+  `contexto_close` calls are the model's own words and stay searchable. The page keeps the calls
+  verbatim and `contexto_recall` returns them; the stub's paths, the index line's identifiers, the
+  matching lines a reply shows (matched on the rendered page with those lines blanked at the same
+  offsets, and a context line inside them left out), and the retained-window entries leave them
+  out. A page written before this rule that holds such a call has its stub rebuilt from its messages
+  when read, in memory only (the file and id are unchanged). Matching pages are ranked in three groups: turn pages holding the
   whole query as typed (case-insensitively), then turn pages holding only its words, then pages
   holding only paged context blocks (system messages and Codex `developer` items, or user messages
   made only of `<system-reminder>` blocks, D32; recognised from the messages, whatever the stub),
@@ -972,7 +1004,9 @@ request's `transform_events`, before the engine's request event. The exit event 
 after `proxy_stop`, written under the transform lock (skipped if a stuck request holds the lock for 2
 seconds). The launcher prints the warning on stderr, naming the likely cause and the fix, once when
 it is first reported and once more after the CLI exits for a repeated exit event, because a TUI can
-draw over a line printed mid-run. If the check itself raises, the engine logs `toolcheck_error` with
+draw over a line printed mid-run. `contexto run claude` holds every such line while Claude Code runs
+and prints it after Claude Code exits (D55); an exit-time repeat of a line still held is not printed
+twice. If the check itself raises, the engine logs `toolcheck_error` with
 the exception's type name only and keeps the request's rewrite.
 
 Refused tools (D44): offered tools can still be refused. On every Messages API request, main or not,
@@ -1028,10 +1062,11 @@ Exit codes and `--help` documented in README.
 Store-reading commands (D57). A session is named by its id or a unique prefix of it (an exact id
 wins; a prefix of several ids is an error naming them, exit 1) in `--session` and `CONTEXTO_SESSION`
 for `recall`, `search`, and `state`, and in `sessions show ID`. `sessions prune --session`,
-`contexto mcp --session`, and `contexto run --session` take exact ids only. `prune` and `run` refuse,
-with exit 2 and the matching ids named, an id that is not a session but the start of existing ids:
-prune is irreversible, and a new session under a prefix would hide the one meant from the readers
-(an exact id wins). A new full id still creates its session in `run`. An empty `--session` is an
+`contexto mcp --session`, `contexto proxy --session`, and `contexto run --session` take exact ids only.
+`prune`, `proxy`, and `run` refuse, with exit 2 and the matching ids named, an id that is not a session
+but the start of existing ids: prune is irreversible, and a new session under a prefix would hide the
+one meant from the readers (an exact id wins). A new full id still creates its session in `proxy` and
+`run`. An empty `--session` is an
 invalid id, never "not given", in every command. An id longer than 255 bytes is invalid everywhere
 (`paths.session_dir`). A `CONTEXTO_HOME` that exists but is not a directory is one error for every
 reader: "<home> is not a directory (check $CONTEXTO_HOME)", exit 1. `contexto run` sets
@@ -1066,7 +1101,8 @@ use`, `--session`, `CONTEXTO_SESSION`).
 - `contexto proxy --port` outside 0 to 65535 is a usage error (exit 2). `contexto run` exits 2 for
   a usage error (including an invalid session id and a `--bound` not above the headroom floor,
   whether the floor is given or the 25,000 default) and 1 when the proxy or the session store
-  cannot start (for example `CONTEXTO_HOME` is a file or read-only).
+  cannot start (for example `CONTEXTO_HOME` is read-only; a `CONTEXTO_HOME` that is a file is refused
+  first, exit 2, D55).
 
 `contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated
 blocks under the session directory, symlinks counted as links) and a total. `contexto sessions
@@ -1083,6 +1119,48 @@ checked against the selected entry), so a symlink swapped in at any moment canno
 or create anything outside the checked directory. Failures are per session; the exit code is 1 if
 any failed or if the session named by `--session` was skipped, with `contexto: error:` on stderr.
 A store resumed while prune deletes its session waits, starts empty, and prints a warning.
+
+**`contexto run claude` lifecycle (D55).**
+- Resume. Every request's Claude Code session id (the `X-Claude-Code-Session-Id` header, else the
+  `session_id` in `metadata.user_id`) is recorded in the session's `meta.json` as
+  `cli_sessions.claude.<id>` = last seen (wall-clock seconds; written at its first request in a launch
+  and again at exit; the newest 64 kept). The id never enters the session log. Claude Code keeps the id
+  across `--resume` and `--continue` and names its transcript after it (new only with
+  `--fork-session`; measured on 2.1.314). Without `--session`, `claude --resume <id>` (or `-r <id>`,
+  `--resume=<id>`) reuses the session that served `<id>`, and `claude --continue` (`-c`) the session
+  that last served Claude Code with this working directory; the launcher prints which, and for
+  `--resume` names any other session that served the id too. With no match, `--resume` without an id
+  (Claude Code's picker, which Contexto cannot follow), or a picked session whose `live.lock` another
+  process holds (another launch has it open: two launches on one store would share its epoch record
+  and recall room, rule 16), it prints why on stderr and opens a new session; at exit it then names
+  any other session that served the conversation, since the conversation is split across two stores.
+  Arguments after `--` are not read, nor the value of a Claude Code 2.1.314 option that takes one
+  (`--append-system-prompt --continue` is a prompt). `--session` always wins and is never questioned.
+  If a `--continue` lands in a conversation the chosen session never served (one run without
+  Contexto), a warning says so at exit; not with `--fork-session`, whose new id continues the same
+  history. After Claude Code exits, when a request named a Claude Code session, the
+  launcher prints `contexto run --session S [the launch's Contexto options] claude --resume <id>` with
+  the last id seen, because Claude Code's own exit hint (`claude --resume <id>`) bypasses Contexto.
+- Signals. SIGTERM, SIGHUP and SIGQUIT are forwarded to Claude Code while it runs; SIGUSR1, SIGUSR2
+  and SIGALRM end it with SIGTERM; SIGINT is ignored by the launcher (the terminal delivers it). Before
+  Claude Code starts (the version check) and after it exits, those six signals run the launcher's
+  cleanup (proxy stop, temporary files, `exit` event) and exit 128 + N; the version check's process
+  group is killed on the way. The forwarding handlers are installed before Claude Code is spawned, and
+  a signal that arrives during the spawn is sent once it exists. SIGKILL cannot be caught: a watchdog
+  process in its own session reads a pipe from the launcher (`pid <n>` at the spawn, `exited` once
+  Claude Code is reaped, `done` from the cleanup) and, when the pipe closes without `done`, sends
+  Claude Code SIGTERM unless it has exited (a reaped pid may be reused) and deletes the temporary
+  directory. The session log then has no `exit` event; if the
+  watchdog is killed too, the temporary directory (proxy URL, tool names, session id, home path; no
+  secrets) stays in `$TMPDIR`.
+- Checks before any session is opened, each a usage error (exit 2) unless noted: Contexto's own
+  `contexto run` options right after `claude` (the message shows the command with them moved before
+  `claude`); a malformed upstream URL, named with its source; a `$CONTEXTO_HOME` that is not a
+  directory; and `${` in the home, the session id or the interpreter path, which Claude Code would
+  expand in the MCP config (2.1.314 expands `${VAR}` and `${VAR:-x}` in `command`, `args` and `env`,
+  keeps `$VAR`, and has no escape). A `claude` on PATH that is not executable, a broken symlink or a
+  directory is named with what is wrong (exit 127). The MCP server gets `--session=<id>` as one
+  argument, so an id starting with `-` stays a value.
 
 ## Lanes
 
