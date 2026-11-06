@@ -7,10 +7,13 @@ the workflow:
 
 1. runs CI (`.github/workflows/ci.yml`) and stops if it fails;
 2. computes the next version from the Conventional Commits since the last `v*` tag;
-3. stamps that version into the runner's copy of `pyproject.toml` and builds the sdist and wheel;
+3. stamps that version into the runner's copy of `pyproject.toml`, builds the sdist and wheel, and
+   writes `SHA256SUMS` for them;
 4. creates the tag `v{version}` on the merged commit and pushes only that tag;
-5. creates a GitHub Release whose notes list those commits by type, and attaches the sdist and wheel
-   (one upload, made by the workflow after its checks).
+5. creates a GitHub build provenance attestation for the sdist and wheel
+   (`actions/attest-build-provenance`);
+6. creates a GitHub Release whose notes list those commits by type, and attaches the sdist, the
+   wheel, and `SHA256SUMS` (one upload, made by the workflow after its checks).
 
 Otherwise it exits successfully without doing anything.
 
@@ -47,7 +50,8 @@ CI gate, no tag, no release, and no upload. A manual dispatch does nothing eithe
   `pyproject.toml` keeps its static `version`; the release build overwrites it in the runner's
   checkout only (`uv version <v> --frozen`), and `.github/scripts/release-build.sh` fails the release
   unless both artifacts' metadata carry the computed version. The released wheel's version always
-  equals its tag; the `version` field on `main` is not the release version.
+  equals its tag. The `version` field on `main` is the placeholder `0.0.0+checkout`, so a build or
+  install from a checkout cannot be taken for a release.
 
 Tag creation is not restricted by any ruleset, so `GITHUB_TOKEN` with `contents: write` can push the
 tag and create the release. A tag pushed with `GITHUB_TOKEN` does not trigger other workflows.
@@ -95,7 +99,34 @@ no releasable commit, PSR proposes `v0.0.0`; the workflow treats that as nothing
 - **No `pyproject.toml`:** a releasable commit still gets a tag and a GitHub Release with notes; the
   build step prints that there is nothing to build, and no assets are attached.
 - **With `pyproject.toml` (`uv_build` backend and a static version, as on `main`):** the build hook
-  stamps the computed version and runs `uv build`, and both artifacts are attached.
+  stamps the computed version, runs `uv build`, and writes `SHA256SUMS`; both artifacts and the
+  checksums are attached.
+
+`uv_build` puts the checkout's `pyproject.toml` into the sdist as `pyproject.toml.orig`, next to its
+normalized copy, and has no setting to leave it out. The build hook repacks the sdist without it.
+uv writes every member and the gzip header with mtime 0, and the repack keeps that, so two builds of
+one tree with one uv version give the same bytes. The uv version matters: the wheel's
+`.dist-info/WHEEL` names the uv that built it (`Generator: uv 0.13.7`), so CI pins uv.
+
+### Verifying a release
+
+A user can check a downloaded asset three ways:
+
+```sh
+gh attestation verify contexto-<v>-py3-none-any.whl --repo VentureForgre/contexto
+shasum -a 256 -c SHA256SUMS --ignore-missing     # or: sha256sum -c SHA256SUMS --ignore-missing
+```
+
+or rebuild it from the tag with the uv version the wheel names:
+
+```sh
+git clone https://github.com/VentureForgre/contexto.git && cd contexto && git checkout v<v>
+NEW_VERSION=<v> bash .github/scripts/release-build.sh   # needs uv, the version in the wheel's WHEEL file
+cat dist/SHA256SUMS
+```
+
+Releases up to v0.5.8 have no `SHA256SUMS` and no attestation, and their sdists hold
+`pyproject.toml.orig`; their wheels rebuild the same way, from `uv version <v> --frozen` and `uv build`.
 
 No VCS-derived version plugin (hatch-vcs, setuptools-scm) is needed.
 
@@ -104,7 +135,7 @@ No VCS-derived version plugin (hatch-vcs, setuptools-scm) is needed.
 | File | Purpose |
 |---|---|
 | `.github/semantic-release.toml` | PSR settings: `v{version}` tags, conventional parser, release types, `main` only, no version files |
-| `.github/scripts/release-build.sh` | PSR `build_command`: stamp, build, and verify artifact versions; skip cleanly without `pyproject.toml` |
+| `.github/scripts/release-build.sh` | PSR `build_command`: stamp, build, drop `pyproject.toml.orig` from the sdist, verify artifact versions, write `SHA256SUMS`; skip cleanly without `pyproject.toml` |
 | `.github/scripts/reattach-verify.sh` | Recovery guard: the tag must be an existing `vX.Y.Z` tag on `main` |
 | `.github/scripts/ensure-gh.sh` | Both release jobs: use `gh` if the runner has it (hosted runners do), else install a pinned, checksum-verified `gh` |
 | `.github/workflows/ci.yml` | Pull request checks; also the required gate for releases (`workflow_call`) |
@@ -120,24 +151,37 @@ self-hosted runner. A self-hosted runner on a public repository would let a fork
 run code on that machine.
 
 Third-party actions are pinned by commit SHA, with the release tag in a comment:
-`actions/checkout` v7.0.1 and `astral-sh/setup-uv` v10.2.0. To update one, resolve the new tag's
-commit (`gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`) and update the SHA and the comment
-together.
+`actions/checkout` v7.0.1, `astral-sh/setup-uv` v10.2.0, and `actions/attest-build-provenance`
+v4.2.2. To update one, resolve the new tag's commit (`gh api repos/<owner>/<repo>/commits/<tag> --jq
+.sha`) and update the SHA and the comment together. uv itself is pinned in every `setup-uv` step
+(`version: "0.13.7"`); keep it inside the `uv_build` range in `pyproject.toml` (`>=0.8,<0.14`) and
+move both together.
+
+The release and reattach jobs have `id-token: write` and `attestations: write` on top of
+`contents: write`, for the attestation only. No other job gets them.
+
+The attestation runs before the upload. If it fails, the release exists with its notes but without
+its files; run the reattach job for that tag to attach and attest them. Reattaching an older tag
+rebuilds it with the pinned uv, so the new wheel differs from the one first published in one line
+of its `WHEEL` file (the uv version that built it), and its checksum changes with it.
 
 ## Dry run
 
 Compute the next version on any checkout without changing anything:
 
 ```sh
-PSR="uvx --from python-semantic-release==10.7.0 semantic-release -c .github/semantic-release.toml"
-$PSR version --print-last-released-tag    # empty when there is no release yet
-$PSR version --print-tag                  # the tag the next release would get
-$PSR --noop version --no-commit --tag --push --vcs-release --no-changelog   # show every step and the notes
+psr() { uvx --from python-semantic-release==10.7.0 semantic-release -c .github/semantic-release.toml "$@"; }
+psr version --print-last-released-tag    # empty when there is no release yet
+psr version --print-tag                  # the tag the next release would get
+psr --noop version --no-commit --tag --push --vcs-release --no-changelog   # show every step and the notes
 ```
+
+The function works in bash and zsh. (A `PSR="uvx ..."` variable does not: zsh does not split
+`$PSR` into words.)
 
 To rehearse a full release without touching GitHub, clone into a scratch directory, make a bare
 clone to act as `origin`, push the commits under test to its `main`, and run
-`$PSR version --no-commit --tag --push --no-vcs-release --no-changelog` there.
+`psr version --no-commit --tag --push --no-vcs-release --no-changelog` there.
 
 ## Recovery
 
@@ -149,7 +193,9 @@ clone to act as `origin`, push the commits under test to its `main`, and run
   anything. If the release is missing, it first checks that the notes can be generated, then creates
   the release and posts that tag's Conventional Commit notes
   (`semantic-release changelog --post-to-release-tag`, which needs a branch checkout, not a detached
-  tag). Finally it checks out the tag, rebuilds at the tag's version, and uploads the sdist and wheel.
+  tag). Finally it checks out the tag, rebuilds at the tag's version, attests the rebuilt sdist and
+  wheel, and uploads them with `SHA256SUMS` (written by the workflow when the tag's build script
+  predates it).
   It never creates a tag or a new version. A plain re-run of the
   release workflow does nothing here, because it sees the tag and treats that version as released.
 - **A release is broken:** fix it with a `fix:` pull request; the merge produces the next patch

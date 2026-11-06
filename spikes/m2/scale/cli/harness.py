@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -19,7 +20,8 @@ import threading
 import time
 from pathlib import Path
 
-CLAUDE_BIN = str(Path.home() / ".local/bin/claude")
+# The Claude Code to run: $CLAUDE, else the claude on PATH, else ~/.local/bin/claude.
+CLAUDE_BIN = os.environ.get("CLAUDE") or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
 FAKE_KEY = "sk-ant-fake-not-a-credential-0000"
 LOOPBACK = ("127.0.0.1", "[::1]", "localhost", "::1")
 MAX_TREE_RSS_KB = int(os.environ.get("SCALE_MAX_RSS_GB", "14")) * 2**20

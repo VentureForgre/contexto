@@ -7,9 +7,11 @@ Report vulnerabilities privately through GitHub: open the repository's **Securit
 advisory visible only to you and the maintainers). Do not open a public issue or pull request for a
 security problem.
 
-Include the Contexto version (`contexto --version`), the operating system and Python version, the
-CLI and its version (Claude Code or Codex), and the steps that show the problem. Leave real session
-data, API keys, and conversation text out of the report; a synthetic reproduction is enough.
+Include the Contexto version (`contexto --version`; for an install from a checkout, which reports
+`0.0.0+checkout`, the commit from `git rev-parse --short HEAD`), the operating system and Python
+version, the CLI and its version (Claude Code or Codex), and the steps that show the problem. Leave
+real session data, API keys, and conversation text out of the report; a synthetic reproduction is
+enough.
 
 Fixes ship as a new release; the advisory names the first fixed version. Only the latest release
 gets fixes.
@@ -46,16 +48,36 @@ files), and Windows, which is not supported.
 
 ## What the session store holds
 
-The store keeps **raw conversation text**. Every turn the proxy pages out is written word for word
-to `sessions/<id>/pages/`, including your prompts, the model's replies, tool calls, tool outputs,
-and any file contents or secrets that passed through the conversation. The ledger (`ledger.jsonl`)
-holds the decisions and obligations the model pinned. For Codex sessions in API-key mode,
-`sessions/<id>/codex-home/` also holds Codex's own rollout transcripts, which are raw conversation
-text too. Codex writes those files itself with its own file modes, not Contexto's 0600; only the
-0700 directories above them keep other users out. Only the session log (`log.jsonl`) holds no
-conversation text: it records sizes, counts, request paths, status codes, error names, hashes, event
-names, and the upstream source.
+The store keeps **raw conversation text**: your prompts, the model's replies, tool calls, tool
+outputs, and any file contents or secrets that passed through the conversation. These files under
+`sessions/<id>/` hold conversation text:
+
+- `pages/`: every turn the proxy paged out, word for word, one file per turn.
+- `retained.json`: the recent turns still in the model's view, word for word, so a restarted proxy
+  can resume.
+- `epoch.json`: the page index (the opening text of each paged-out turn) and the pinned state.
+- `ledger.jsonl`: the decisions, obligations and other records the model pinned.
+- `quarantine/`: copies of damaged pages and ledger files that Contexto moved aside. They hold the
+  same text as the files they came from.
+- `codex-home/` (Codex sessions in API-key mode): Codex's own rollout transcripts. Codex writes
+  them itself with its own file modes, not Contexto's 0600; only the 0700 directories above them
+  keep other users out.
+
+These hold no conversation text:
+
+- `meta.json`: the absolute path of the working directory the session started in, and request
+  counters.
+- `log.jsonl`: the session log. It records sizes, counts, request paths, status codes, error
+  names, hashes, event names, and the upstream source, never prompts, replies or the upstream URL.
+- `page.key`: a random key that page ids are derived from.
+- `live.lock`, `meta.lock`, `ledger.lock`: empty lock files.
+
+`$CONTEXTO_HOME` itself holds `affinity.salt`, a random value that the `X-Session-Affinity` header
+is hashed with, so the header does not reveal the session id.
 
 Treat `$CONTEXTO_HOME` like your shell history or the CLI's own transcripts. File modes protect it
 from other users on the machine, not from processes running as you, backups, or disk images.
-Delete a session's directory to delete its history; Contexto never deletes it for you.
+To delete a session's text, delete the whole session directory, not only `pages/`: `retained.json`,
+`epoch.json` and `ledger.jsonl` hold copies. `contexto sessions prune` deletes whole session
+directories; Contexto deletes nothing else on its own. Deleting `$CONTEXTO_HOME` removes every
+session and the affinity salt.

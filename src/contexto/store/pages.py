@@ -14,7 +14,7 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes
 from contexto.store.recall import DEFAULT_LINES, salient_identifiers
-from contexto.store.render import as_message, is_responses_item
+from contexto.store.render import as_message, is_own_block, is_own_item, is_responses_item, own_call_ids
 from contexto.store.search import Query, SearchEntry, rank, search_text, searchable
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
@@ -72,14 +72,19 @@ def _view(turn: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _texts(turn: list[dict[str, Any]]):
-    """Every human-readable string in a turn: text, tool inputs, and tool results (both dialects)."""
-    for message in _view(turn):
+    """Every human-readable string in a turn: text, tool inputs, and tool results (both dialects), except
+    the inputs and results of Contexto's search, recall, and state calls (``own_call_ids``, D51)."""
+    own = own_call_ids(turn)
+    for item in turn:
+        message = as_message(item)
+        if not isinstance(message, dict) or is_own_item(item, own):
+            continue
         content = message.get("content")
         if isinstance(content, str):
             yield content
             continue
         for block in content if isinstance(content, list) else []:
-            if not isinstance(block, dict):
+            if not isinstance(block, dict) or is_own_block(block, own):
                 continue
             kind = block.get("type")
             if kind == "text":
@@ -190,20 +195,25 @@ def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def current_stub(page: dict[str, Any]) -> dict[str, Any]:
-    """The page with its stub rebuilt if it is a pre-v0.1.3 Codex stub, else the page itself.
+    """The page with its stub rebuilt if it is a pre-v0.1.3 Codex stub or a pre-D51 stub of a page
+    holding a Contexto search, recall, or state call, else the page itself.
 
     v0.1.0 to v0.1.2 stored every Responses (Codex) page with empty user text, tools, and paths: the
-    stub rule read only Messages API blocks (fixed by B23). A page keeps its exact messages, so the
+    stub rule read only Messages API blocks (fixed by B23). Up to v0.5.8 a page's stub also took paths
+    from the results of Contexto's search, recall, and state calls, copies of older pages, so a path
+    search ranked such a page above the page it quoted (D51). A page keeps its exact messages, so the
     stub is rebuilt from them with the current rule, in memory only: the page file, its id, and its
-    content are never changed (pages are immutable). Only that empty shape on a page holding a
-    Responses item is rebuilt; Messages API pages and any stub with a field filled are returned as
-    stored, and so is a rebuild that comes out the same. Idempotent.
+    content are never changed (pages are immutable). Only those two cases are rebuilt: an empty stub
+    on a page holding a Responses item, and any stub of a page with such a call; other stubs are
+    returned as stored, and so is a rebuild that comes out the same. Idempotent.
     """
     stub = page.get("stub")
-    if not isinstance(stub, dict) or stub.get("user_text") or stub.get("tools") or stub.get("paths"):
-        return page
     messages = page.get("messages")
-    if not isinstance(messages, list) or not any(isinstance(m, dict) and is_responses_item(m) for m in messages):
+    if not isinstance(stub, dict) or not isinstance(messages, list):
+        return page
+    codex_v010 = (not (stub.get("user_text") or stub.get("tools") or stub.get("paths"))
+                  and any(isinstance(m, dict) and is_responses_item(m) for m in messages))
+    if not codex_v010 and not own_call_ids(messages):
         return page
     rebuilt = build_stub(messages)
     return page if rebuilt == stub else {**page, "stub": rebuilt}

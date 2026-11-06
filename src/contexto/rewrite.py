@@ -137,8 +137,8 @@ from contexto.canonical import canonical_bytes, canonical_json
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
-from contexto.store.render import render_page
-from contexto.tokens import TokenEstimator
+from contexto.store.render import is_own_block, is_own_item, own_call_ids, render_page
+from contexto.tokens import TEXT_BYTES_PER_TOKEN, TokenEstimator
 from contexto.toolcheck import ToolCheck
 
 MESSAGES = "/v1/messages"
@@ -208,6 +208,7 @@ class EpochState:
     last_turn_start_n: int | None = None  # history length at the previous turn start
     last_turn_count: int = 0  # turn starts in the history at the previous turn start
     head_tokens: int | None = None  # rule 4: measured head (system, tools, initial carried)
+    head_size: int | None = None  # D49: bytes of the head head_fingerprint names, set with it; never recorded
     initial_carried: int | None = None  # carried content at the conversation's first request
     last_window_tokens: int = 0  # estimate of the previous upstream request's non-carried messages
     paged_carried: frozenset[str] = frozenset()  # hashes of carried text messages paged by the fallback
@@ -514,6 +515,10 @@ def head_fingerprint(request: dict) -> str:
     return _dialect().head_fingerprint(request)
 
 
+def head_size(request: dict) -> int:
+    return len(canonical_bytes(_dialect().head_estimate_source(request)))
+
+
 def strip_thinking(item: dict) -> dict | None:
     return _dialect().strip_thinking(item)
 
@@ -573,16 +578,21 @@ UNCLASSIFIED = "unclassified"
 # available via ToolSearch. ...", one name per line, then a blank line) and "# Environment" follows;
 # the main conversation's still starts with "# Environment" (spikes/m2/subagents, zero spend). A
 # listing with no "# Environment" after it (an MCP server connecting mid-session) does not match.
-SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.310"
+# D56: the same on 2.1.314 and 2.1.318, with one change for claude-opus-5-5: it gets no <total_tokens>
+# countdown from 2.1.314 on (the other ids still do), so an effort change on a turn with no other
+# system message arrives as a settings-only message ({"role": "system", "content": [], "output_config":
+# ...}; none in the 2.1.302 matrix, 3 to 12 per opus-5-5 run on 2.1.314 and 2.1.318). It is read as
+# settings, and the latest copy is carried.
+SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.318"
 SESSION_START_SIGNATURE = re.compile(
     r"\s*(?:<system-reminder>\s*)?(?:The following deferred tools are now available[^\n]*\n(?:[^\n]+\n)*\r?\n\s*)?"
     r"# Environment[ \t]*(?:\r?\n|\Z)")
 
 # Documented hook-output signatures (measured on Claude Code 2.1.301 with zero-spend stubs,
-# spikes/m2/carried/README.md findings 7 and 9; the same prefixes on 2.1.310, live_probe.sh): the CLI
-# wraps a hook's additionalContext in a role "system" message whose whole text starts with one of
-# these prefixes.
-HOOK_SIGNATURES_CLAUDE_CODE_VERSION = "2.1.310"
+# spikes/m2/carried/README.md findings 7 and 9; the same prefixes on 2.1.310, 2.1.314 and 2.1.318,
+# live_probe.sh): the CLI wraps a hook's additionalContext in a role "system" message whose whole text
+# starts with one of these prefixes.
+HOOK_SIGNATURES_CLAUDE_CODE_VERSION = "2.1.318"
 HOOK_SIGNATURES = (
     re.compile(r"UserPromptSubmit hook additional context: "),
     re.compile(r"PostToolUse:[^\s]+ hook additional context: "),
@@ -692,7 +702,9 @@ def _anthropic_classify_system(messages: list[dict], i: int) -> str:
 # each kind and may page older ones; blocks of no recognised kind are pageable. D46: 2.1.310 turns tool
 # search on by default, and on 4.x ids messages[0] then holds one more block, the deferred-tool listing
 # (the same on 2.1.302 with ENABLE_TOOL_SEARCH); the other kinds and their placement are unchanged.
-CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.310"
+# D56: the same kinds and placement on 2.1.314 and 2.1.318; 2.1.318's --resume re-sends far fewer old
+# file-changed notes (4 instead of 80 in the last request of each 48-turn resume run).
+CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.318"
 CONTEXT_BLOCK_KINDS = (
     ("token_countdown", re.compile(r"<total_tokens>")),
     ("plan_mode", re.compile(r"Plan mode is active|## Exited Plan Mode")),
@@ -1111,14 +1123,26 @@ def carried_tokens(messages: list[dict], estimator: TokenEstimator, paged: froze
     return estimate_items(estimator, parts) if parts else 0
 
 
+def measured_head(request: dict, state: EpochState, estimator: TokenEstimator) -> int | None:
+    """Rule 4's measured head for this request's ``system`` and ``tools``. Usage measures the head once, so
+    after a head change (D49: an MCP server's tools, a model switch) the change in the head's bytes is
+    estimated and added, or taken off, rounded toward the measured value."""
+    if state.head_tokens is None or state.head_size is None:
+        return state.head_tokens
+    change = head_size(request) - state.head_size
+    ratio = estimator.measured_bytes_per_token or TEXT_BYTES_PER_TOKEN
+    return max(0, state.head_tokens + math.ceil(change / ratio)) if change else state.head_tokens
+
+
 def fixed_overhead(request: dict, messages: list[dict], state: EpochState, store: Store, config: Config,
                    estimator: TokenEstimator) -> int:
     """Rule 4: F = system + tools + carried content + preamble. The head comes from measured usage once
-    available (the conversation's first request), else from the estimator; carried growth since the
-    first request and the current pinned and index text are estimated."""
+    available (the conversation's first request, adjusted for any head change since), else from the
+    estimator; carried growth since the first request and the current pinned and index text are estimated."""
     carried = carried_tokens(messages, estimator, state.paged_carried)
-    if state.head_tokens is not None:
-        head = state.head_tokens + max(0, carried - (state.initial_carried or 0))
+    measured = measured_head(request, state, estimator)
+    if measured is not None:
+        head = measured + max(0, carried - (state.initial_carried or 0))
     else:
         head = estimator.estimate(canonical_json(_dialect().head_estimate_source(request))) + carried
     pre = compose_preamble(config, store.pinned_text(config.pin_budget), store.index_text(config.index_budget))
@@ -1155,6 +1179,7 @@ def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Sto
         turns_paged = state.turns_paged
     new = replace(state, epoch=state.epoch + 1, k=k, pinned_text=store.pinned_text(config.pin_budget),
                   index_text=store.index_text(config.index_budget), head_fingerprint=head_fingerprint(request),
+                  head_tokens=measured_head(request, state, estimator), head_size=head_size(request),
                   strip_upto=strip_upto, turns_paged=turns_paged, head_changed=False, last_input_tokens=None)
     rotation = {"event": "rotation", "epoch": new.epoch, "reason": reason, "k": k,
                 "retained_messages": len(messages) - k, "turns_paged": turns_paged}
@@ -1238,7 +1263,11 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
     ``bound - estimate - headroom_floor``, is below ``min_turn_room``. A rotation for the room sizes its
     window target as ``0.5 * (W - min_turn_room)`` (minimal window as the fallback) and fires only if it
     would restore at least ``min_turn_room``; otherwise there is no rotation for the room and
-    ``turn_room_low`` is logged once per epoch, so a small bound does not rotate on every turn."""
+    ``turn_room_low`` is logged once per epoch, so a small bound does not rotate on every turn.
+
+    Rule 6: a head change always starts a new epoch here, since the cached prefix is lost anyway, sized
+    like a size rotation (D49): the minimal window and ``bound_too_small`` when ``W`` cannot hold the
+    newest complete turn, and the room target when it restores the room."""
     trigger = estimate > config.bound - headroom(state, config)
     room_low = config.bound - estimate - config.headroom_floor < config.min_turn_room
     if state.head_changed or trigger or room_low:
@@ -1263,10 +1292,6 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
             if restores:
                 state = new_epoch(messages, request, state, store, config, estimator, room_k, n, events,
                                   "min_turn_room", sizing=(f, w))
-        elif state.head_changed:  # rule 6: always a new epoch; page only if the budget allows
-            k = choose_k(messages, state, target, estimator) if w > 0 else state.k
-            state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "head_change",
-                              sizing=(f, w))
         elif w <= 0 or window_tokens(messages, estimator, newest_start) > w:
             # Rule 4 window_minimal (contract PR #50, intake 2026-10-16): W cannot hold the newest
             # complete turn plus the new turn, so retain only the new turn; the previous turn is paged
@@ -1277,11 +1302,14 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
                                if newest_start < new_start else 0)
             if new_start > state.k:
                 state = new_epoch(messages, request, state, store, config, estimator, new_start, n, events,
-                                  "window_minimal", sizing=(f, w))
+                                  "head_change" if state.head_changed else "window_minimal", sizing=(f, w))
                 state = replace(state, window_minimal_count=state.window_minimal_count + 1)
                 events.append({"event": "window_minimal", "epoch": state.epoch, "window_budget": w,
                                "new_turn_tokens": new_tokens, "previous_turn_tokens": previous_tokens,
                                "k": new_start, "count": state.window_minimal_count})
+            elif state.head_changed:  # already the minimal window: rule 6's epoch pages nothing
+                state = new_epoch(messages, request, state, store, config, estimator, state.k, n, events,
+                                  "head_change", sizing=(f, w))
             if w <= 0 or new_tokens > w:
                 events.append({"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
                                "new_turn_tokens": new_tokens})
@@ -1291,7 +1319,10 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
                 # Both conditions: the room target keeps the turn's room, so the next turn start does not
                 # rotate again for it (no back-to-back rotations).
                 k = room_k
-            if k == state.k:  # rule 4: nothing to page, so no strip and no rebuild
+            if state.head_changed:  # rule 6: a new epoch even when nothing is paged
+                state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "head_change",
+                                  sizing=(f, w))
+            elif k == state.k:  # rule 4: nothing to page, so no strip and no rebuild
                 events.append({"event": "rotation_noop", **sizing, "k": k})
             else:
                 state = new_epoch(messages, request, state, store, config, estimator, k, n, events, "bound",
@@ -1470,14 +1501,14 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
         state = replace(state, last_carried_text_count=texts, carried_text_streak=streak)
         state = guarded_rotation(request, messages, n, estimate, state, store, config, estimator, events)
     rotated = any(e["event"] == "rotation" for e in events)
-    # Pre-send over-bound is the allowed exception only inside a tool loop (rule 5): the newest turn
-    # already has model output. At a turn start an over-bound request is bound_too_small instead.
-    in_tool_loop = bool(turn_starts(messages)) and not at_turn_start(messages)
-    # Rule 14: a degraded request may exceed the bound at a turn start too; it is logged the same way.
-    over = estimate > config.bound and not rotated and (in_tool_loop or state.degraded)
     # The estimate observe_usage compares with real usage must describe what is actually sent: after a
     # rotation that is the transformed request, not the history that triggered it (A2b review).
     sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
+    # Pre-send over-bound, checked on every request forwarded, rotated or not (D49). Inside a tool loop it
+    # is rule 5's allowed exception and in degraded mode rule 14's; at a turn start it goes with
+    # bound_too_small, or means the rotation's sizing did not hold.
+    in_tool_loop = bool(turn_starts(messages)) and not at_turn_start(messages)
+    over = sent_estimate > config.bound
 
     upstream = {**request, field_name: transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
@@ -1492,11 +1523,12 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     if state.degraded:
         event["degraded"] = True
     if over:
-        # Pre-send over-bound (rule 5: a turn that grows past the bound inside a tool loop): the allowed,
-        # logged exception for acceptance 1, kept distinct from observe_usage's source "real" record.
+        # Pre-send over-bound: with in_tool_loop (rule 5: a turn that grows past the bound inside a tool
+        # loop) the allowed, logged exception for acceptance 1, kept distinct from observe_usage's source
+        # "real" record.
         event["over_bound"] = True
         bound_event = {"event": "over_bound", "source": "estimate", "in_tool_loop": in_tool_loop, "epoch": state.epoch,
-                       "estimate": estimate, "bound": config.bound}
+                       "estimate": sent_estimate, "bound": config.bound}
         if state.degraded:
             bound_event["degraded"] = True
         events.append(bound_event)
@@ -1528,7 +1560,7 @@ def _rewrite(request: dict, state: EpochState | None, store: Store, config: Conf
     events: list[dict] = []
     fingerprint = head_fingerprint(request)
     if state is None:
-        state = EpochState(head_fingerprint=fingerprint)
+        state = EpochState(head_fingerprint=fingerprint, head_size=head_size(request))
     previous_n = len(state.hashes)
 
     # Rule 10: the stored messages must still match.
@@ -1617,17 +1649,21 @@ def retained_entries(messages: list[dict], k: int, dialect: Dialect) -> list[dic
     that message (the newest equals ``turn_id``); ``message_index`` is the position in the CLI's full
     history; ``text`` is the block rendered by ``render_page``, the renderer recall uses, so a line
     found in view reads like the same line in a page. Carried system messages and injected context
-    blocks are not turn text and are left out; thinking and images are never included. The entries
-    hold conversation text: they go to the store only, never to a log or an event."""
+    blocks are not turn text and are left out; thinking and images are never included, nor Contexto's
+    search, recall, and state calls and results, which search does not read in a page either (D51). The
+    entries hold conversation text: they go to the store only, never to a log or an event."""
     turn = bisect.bisect_left(_turn_starts(messages, dialect), k)  # turn starts in M[:k]
+    own = own_call_ids(messages[k:])
     entries = []
     for i in range(k, len(messages)):
         item = messages[i]
         if dialect.is_turn_start(item):
             turn += 1
-        if dialect.is_system_like(item):
+        if dialect.is_system_like(item) or is_own_item(item, own):
             continue
         for role, block in dialect.retained_blocks(item):
+            if is_own_block(block, own):
+                continue
             # The store's roles (lane B PR #128): a tool result is its own role, whoever carried it.
             role = "tool_result" if block.get("type") == "tool_result" else role
             if role not in RETAINED_ROLES:
@@ -1719,6 +1755,12 @@ def anchor_hash(hashes: tuple[str, ...] | list[str]) -> str:
 # ``resumedAgentId``) runs it again, as a new user turn in its own conversation, and that run's notice
 # names the ``SendMessage`` call. ``cliversions.SUBAGENT_SHAPES_TESTED`` names
 # the CLI versions these shapes were measured on; for any other version rooms only expire.
+# D56: since 2.1.312 (measured on 2.1.314 and 2.1.318) a run that used tools is reported with their names
+# first, in a ``<tools-used-before-summary>`` element: indented above a foreground hand-back's frame
+# ("  <tools-used-before-summary>Bash</tools-used-before-summary>\n  \n[Subagent hand-back] ..."), at
+# the start of the ``system`` notice, and, while main is idle, as a ``<system-reminder>`` block of its
+# own ahead of the notice's block. A system message is searched whole; in the other two places the
+# element is skipped, and only there.
 AGENT_TOOLS = frozenset({"Agent", "Task"})
 ASYNC_LAUNCH = "Async agent launched successfully."  # a background launch's result: the agent runs on
 HAND_BACK = "[Subagent hand-back]"  # a foreground agent's result: it has stopped
@@ -1727,6 +1769,8 @@ TASK_NOTIFICATION = re.compile(r"<task-notification>(.*?)</task-notification>", 
 NOTIFIED_CALL = re.compile(r"<tool-use-id>([^<\s]+)</tool-use-id>")
 AGENT_ID = re.compile(r"\bagentId: (\w+)")
 RESUMED_AGENT = re.compile(r'"resumedAgentId"\s*:\s*"(\w+)"')
+TOOLS_USED = re.compile(r"\s*<tools-used-before-summary>[^<]*</tools-used-before-summary>\s*")
+TOOLS_USED_BLOCK = re.compile(r"\s*<system-reminder>" + TOOLS_USED.pattern + r"</system-reminder>\s*")
 
 
 class _SideRoom(NamedTuple):
@@ -1765,8 +1809,9 @@ def first_prompt(messages: list[dict]) -> str | None:
 def _notice_texts(message: dict) -> list[str]:
     """The texts of ``message`` that may carry a CLI notice, in the measured shapes only: a ``system``
     message, or a user message whose content (a string, or its first text block) opens with the
-    ``<system-reminder>`` wrapper or ``[SYSTEM NOTIFICATION - NOT USER INPUT]``. Assistant text and
-    plain user text (a pasted notice) never count."""
+    ``<system-reminder>`` wrapper or ``[SYSTEM NOTIFICATION - NOT USER INPUT]``, or (D56) whose first
+    text block holds only the tools-used element and whose second opens with the wrapper. Assistant
+    text and plain user text (a pasted notice) never count."""
     if message.get("role") == "system":
         return _texts(message)
     if message.get("role") != "user":
@@ -1777,6 +1822,8 @@ def _notice_texts(message: dict) -> list[str]:
     else:
         texts = [b["text"] for b in _blocks(message) if isinstance(b, dict) and b.get("type") == "text"
                  and isinstance(b.get("text"), str)]
+        if len(texts) > 1 and TOOLS_USED_BLOCK.fullmatch(texts[0]):
+            return [texts[1]] if texts[1].lstrip().startswith(NOTICE_OPENINGS[0]) else []
         first = texts[0] if texts else ""
     return [first] if first.lstrip().startswith(NOTICE_OPENINGS) else []
 
@@ -1822,6 +1869,8 @@ def agent_runs(messages: list[dict]) -> tuple[dict[str, list[str | None]], dict[
                     continue
                 if call_id not in calls:
                     continue
+                used = TOOLS_USED.match(text)
+                text = text[used.end():] if used else text  # D56: the tools the agent used, then the result
                 found = AGENT_ID.search(text)
                 if block.get("is_error"):
                     agents.pop(call_id, None)  # no agent was started
@@ -1896,7 +1945,7 @@ def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dia
     if anchor_hash(hashes) != record["anchor"]["hash"]:
         return None, "history_diverged"
     state = EpochState(pinned_text=record["pinned_text"], index_text=record["index_text"],
-                       head_fingerprint=record["head_fingerprint"], hashes=hashes,
+                       head_fingerprint=record["head_fingerprint"], head_size=head_size(request), hashes=hashes,
                        paged_carried=frozenset(record["paged_carried"]),
                        **{name: record[name] for name in RECORD_INT})
     return state, ""
