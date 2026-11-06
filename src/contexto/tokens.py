@@ -6,17 +6,16 @@ M0 measured about 1.8 bytes per token for it, so the seed errs toward overcounti
 reports real usage (``TokenEstimator.observe``), the session's cumulative measured bytes-per-token
 ratio replaces both seeds.
 
-Images and documents (D48) are priced by what the model sees, not by their base64 bytes, which
-overcounted a screenshot 55 to 270 times: an image costs ``width * height / 750`` tokens after the
-API's downscaling to a 2,576-pixel long edge, at most 4,784 (Anthropic's high-resolution tier;
-dimensions read from the PNG, JPEG, GIF, or WebP header), and a PDF ``PDF_PAGE_TOKENS`` per page,
-its pages trusted only when certain (``contexto.pdfpages``). Media whose size cannot be read (a URL, a
-file id, an unknown format, a PDF whose count is not certain) gets the largest cost it can have, 4,784
-tokens for an image and 600 pages for a PDF: every fallback errs high, since the bound depends on it.
-Parsing a PDF is bounded in time and memory and never raises.
+Images (D48) are priced by what the model sees, not by their base64 bytes, which overcounted a
+screenshot 55 to 270 times: an image costs ``width * height / 750`` tokens after the API's downscaling
+to a 2,576-pixel long edge, at most 4,784 (Anthropic's high-resolution tier; dimensions read from the
+PNG, JPEG, GIF, or WebP header). An image whose size cannot be read (a URL, a file id, an unknown
+format) gets the largest cost it can have, 4,784 tokens, since the bound depends on it. Documents (a
+PDF by base64, URL or file id; Codex ``input_file``) are still estimated by their bytes as text, as
+before D48, which errs high; pricing them by page awaits a separate decision.
 Media bytes stay out of every byte count the ratio divides, and the engine takes the media's lowest
-plausible cost (``MediaCost.floor``) off the real usage before it updates the ratio, so a screenshot
-never skews the ratio later text is estimated at.
+plausible cost (``MediaCost.floor``, 0 for a document) off the real usage before it updates the ratio,
+so neither a screenshot nor a PDF skews the ratio later text is estimated at.
 """
 
 from __future__ import annotations
@@ -26,12 +25,9 @@ import binascii
 import math
 import re
 import struct
-import threading
-from collections import OrderedDict
 from typing import Any, NamedTuple
 
 from contexto.canonical import canonical_bytes, utf8
-from contexto.pdfpages import UNCERTAIN, PdfCount, count_pages
 
 TEXT_BYTES_PER_TOKEN = 3.5
 TOOL_RESULT_BYTES_PER_TOKEN = 1.5
@@ -47,33 +43,20 @@ IMAGE_MIN_TOKENS = 64  # a thin or tiny image: patch rounding is not modelled, s
 IMAGE_FLOOR_MAX_EDGE = 1_568  # the older models' downscaling: the lowest cost an image can have
 IMAGE_FLOOR_MAX_TOKENS = 1_568
 IMAGE_FLOOR_SHARE = 0.95  # measured costs ran up to 3% under the formula (2,694 for 2,765)
-# PDFs: each page is sent as its text plus an image of the page. A 3-page PDF measured 4,748 tokens
-# (1,583 a page); Anthropic documents 1,500 to 3,000 text tokens a page, and the page image comes on
-# top, so a page is priced at 3,000 plus an image at the older 1,568-token limit. Typical pages cost
-# far less; a dense page (small-font code or tables) can cost more than 3,000 text tokens.
-PDF_PAGE_TOKENS = 3_000 + IMAGE_FLOOR_MAX_TOKENS
-PDF_FLOOR_PAGE_TOKENS = 1_000
-# A PDF whose page count is not certain (contexto.pdfpages), a document by URL or file id, one too large
-# to decode or damaged, counts as PDF_MAX_PAGES (the API's maximum, the only always-safe value, D48).
-PDF_MAX_BASE64 = 32 << 20  # characters decoded: the API's request limit
 IMAGE_TYPES = frozenset({"image", "input_image"})  # Messages, Responses
 HEAD_CHARS = 64  # base64 characters that hold the PNG, GIF and WebP dimensions
 JPEG_HEAD_CHARS = 262_144  # a JPEG's frame header follows its EXIF and ICC segments: read up to 192 KB
-# PDFs whose counts are kept, least recently used dropped first. An entry is a key and three ints (288
-# bytes measured), so this costs at most about 19 MB, and no request holds enough PDFs to cycle it.
-PDF_CACHE_SIZE = 65_536
 MEDIA_KEYS = ("content", "output", "source")  # where a block or item can hold media
 MEDIA_DEPTH = 10  # messages, message, content, tool_result, content, document, source, content, image
 
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
 _NOT_BASE64 = re.compile(r"[^A-Za-z0-9+/]")
-_PDF_PAGES: OrderedDict[tuple[int, int], PdfCount] = OrderedDict()  # (length, hash) of base64 data -> count
-_PDF_PAGES_LOCK = threading.Lock()  # the proxy primes the cache outside its transform lock (prime_media)
 
 
 class MediaCost(NamedTuple):
-    """Image and document blocks in a value: their canonical JSON bytes, their estimated tokens
-    (errs high, for the bound), and their lowest plausible tokens (errs low, for the ratio)."""
+    """Image and document blocks in a value, for the measured ratio: their canonical JSON bytes, their
+    estimated tokens (errs high), and their lowest plausible tokens (errs low). A document counts its
+    bytes as tokens (it is estimated by its bytes, at most one token a byte) and has no floor."""
 
     bytes: int = 0
     tokens: int = 0
@@ -112,23 +95,25 @@ def _media_kind(node: dict) -> str | None:
     return None
 
 
-def split_media(node: Any, depth: int = 0) -> tuple[Any, list[dict]]:
+def split_media(node: Any, depth: int = 0, *, documents: bool = True) -> tuple[Any, list[dict]]:
     """``node`` (a message or item list, a message or item, or a block) with every image and document
-    block replaced by None, and those blocks. Media is looked for only where the APIs allow it: in
+    block replaced by None, and those blocks; with ``documents`` False, images only (the estimate prices
+    a document by its bytes, D48). Media is looked for only where the APIs allow it: in
     ``content`` and ``output`` lists, and a document's ``source`` (a tool's input is text even when it
     holds an image-shaped object), at most ``MEDIA_DEPTH`` levels down. Only the containers on the way
     to a media block are copied; a value without media is returned as is."""
     if depth > MEDIA_DEPTH:
         return node, []
     if isinstance(node, dict):
-        if _media_kind(node):
+        kind = _media_kind(node)
+        if kind == "image" or (kind and documents):
             return None, [node]
         found: list[dict] = []
         copy: dict | None = None
         for key in MEDIA_KEYS:
             value = node.get(key)
             if isinstance(value, (dict, list)):
-                stripped, media = split_media(value, depth + 1)
+                stripped, media = split_media(value, depth + 1, documents=documents)
                 if media:
                     copy = copy if copy is not None else dict(node)
                     copy[key] = stripped
@@ -139,7 +124,7 @@ def split_media(node: Any, depth: int = 0) -> tuple[Any, list[dict]]:
         items: list | None = None
         for i, value in enumerate(node):
             if isinstance(value, dict):
-                stripped, media = split_media(value, depth + 1)
+                stripped, media = split_media(value, depth + 1, documents=documents)
                 if media:
                     items = items if items is not None else list(node)
                     items[i] = stripped
@@ -248,59 +233,6 @@ def _image_cost(block: dict) -> tuple[int, int]:
     return image_tokens(width, height), math.floor(floor * IMAGE_FLOOR_SHARE)
 
 
-def pdf_pages(data: str) -> int:
-    return pdf_page_count(data).pages
-
-
-def pdf_page_count(data: str) -> PdfCount:
-    """Pages of a base64 PDF (``contexto.pdfpages``): certain, or ``PDF_MAX_PAGES``. Never raises. Cached
-    by content (least recently used dropped), since the engine estimates a history many times per request
-    and the same PDF on every later request."""
-    key = (len(data), hash(data))
-    with _PDF_PAGES_LOCK:
-        result = _PDF_PAGES.get(key)
-        if result is not None:
-            _PDF_PAGES.move_to_end(key)
-            return result
-    try:
-        pdf = _decode(data, len(data)) if len(data) <= PDF_MAX_BASE64 else b""
-        result = count_pages(pdf) if pdf else UNCERTAIN
-    except Exception:  # a hostile or damaged PDF must not break the transform (D48)
-        result = UNCERTAIN
-    with _PDF_PAGES_LOCK:
-        _PDF_PAGES[key] = result
-        while len(_PDF_PAGES) > PDF_CACHE_SIZE:
-            _PDF_PAGES.popitem(last=False)
-    return result
-
-
-def _document_cost(block: dict) -> tuple[int, int]:
-    data = _base64_payload(block)
-    count = pdf_page_count(data) if data is not None else UNCERTAIN  # a URL or file id: not in the request
-    return count.pages * PDF_PAGE_TOKENS, count.floor_pages * PDF_FLOOR_PAGE_TOKENS
-
-
-def uncertain_documents(value: Any) -> int:
-    """How many documents in ``value`` (a message or item list) count as ``PDF_MAX_PAGES`` because their
-    pages are not certain (a PDF the reader could not read fully, or one by URL or file id)."""
-    found = split_media(value)[1]
-    return sum(1 for block in found if _media_kind(block) == "document" and (
-        (data := _base64_payload(block)) is None or not pdf_page_count(data).counted))
-
-
-def prime_media(value: Any) -> None:
-    """Count the pages of every base64 PDF in ``value`` (a request's message or item list) into the
-    cache, so the engine finds them there. The proxy calls this, through ``RewriteEngine.prime``, before
-    it takes its transform lock (D48), so a large or crafted PDF is parsed without holding up other
-    sessions. Never raises."""
-    try:
-        for block in split_media(value)[1]:
-            if _media_kind(block) == "document" and (data := _base64_payload(block)) is not None:
-                pdf_page_count(data)
-    except Exception:  # priming is an optimisation; the engine counts again under the lock if it failed
-        return
-
-
 def media_keys(blocks: list[dict]) -> tuple:
     """A content key per media block (from ``split_media``), in order: two requests with equal keys carry
     the same media (D48). Base64 data is keyed by its length and hash, any other source by its JSON."""
@@ -311,37 +243,27 @@ def media_keys(blocks: list[dict]) -> tuple:
     return tuple(keys)
 
 
-class MediaPart(NamedTuple):
-    """One media block of a request: its content key, whether it is a document, its estimate and floor."""
-
-    key: Any
-    document: bool
-    tokens: int
-    floor: int
-
-
-def media_parts(blocks: list[dict]) -> tuple[MediaPart, ...]:
-    """Each media block's key, kind, estimate and floor."""
-    parts = []
-    for block, key in zip(blocks, media_keys(blocks), strict=True):
-        document = _media_kind(block) != "image"
-        high, low = _document_cost(block) if document else _image_cost(block)
-        parts.append(MediaPart(key, document, high, low))
-    return tuple(parts)
-
-
 def media_cost(blocks: list[dict], *, measure_bytes: bool = False) -> MediaCost:
-    """The cost of media blocks (from ``split_media``); their bytes only when asked, since that
-    serializes them."""
-    parts = media_parts(blocks)
-    size = sum(len(canonical_bytes(block)) for block in blocks) if measure_bytes else 0
-    return MediaCost(size, sum(p.tokens for p in parts), sum(p.floor for p in parts))
+    """The cost of media blocks (from ``split_media``). An image's bytes are counted only when asked, since
+    that serializes it; a document's always, since they are its estimate."""
+    size = tokens = floor = 0
+    for block in blocks:
+        if _media_kind(block) == "image":
+            high, low = _image_cost(block)
+            tokens += high
+            floor += low
+            size += len(canonical_bytes(block)) if measure_bytes else 0
+        else:
+            length = len(canonical_bytes(block))
+            size += length
+            tokens += length
+    return MediaCost(size, tokens, floor)
 
 
 # Messages -------------------------------------------------------------------------------------------
 
 class MessageSizes(NamedTuple):
-    """A message list's text bytes, tool_result bytes (media left out of both), and media tokens."""
+    """A message list's text bytes, tool_result bytes (images left out of both), and image tokens."""
 
     text: int
     tool: int
@@ -356,7 +278,9 @@ def measure_messages(messages: list[dict[str, Any]]) -> MessageSizes:
             text += _size(content)
             continue
         for block in content or []:
-            stripped, found = split_media(block)
+            if block is None:  # an image or document taken out by split_media
+                continue
+            stripped, found = split_media(block, documents=False)
             if found:
                 media += media_cost(found).tokens
                 size = len(canonical_bytes(stripped)) if stripped is not None else 0
@@ -394,8 +318,8 @@ def estimate_message_tokens(messages: list[dict[str, Any]], bytes_per_token: flo
 
 
 def estimate_value_tokens(value: Any, bytes_per_token: float | None = None) -> int:
-    """Any JSON value (a Responses item list) as text, with its media priced as media."""
-    stripped, found = split_media(value)
+    """Any JSON value (a Responses item list) as text, with its images priced as images."""
+    stripped, found = split_media(value, documents=False)
     return (estimate_tokens(canonical_bytes(stripped), bytes_per_token=bytes_per_token)
             + (media_cost(found).tokens if found else 0))
 
@@ -414,7 +338,7 @@ class TokenEstimator:
 
     def observe(self, request_bytes: int, input_tokens: int) -> None:
         """Add a request's byte size and its real input tokens (uncached, cache read, and cache write),
-        both without the request's media (D48)."""
+        both without the request's images and documents (D48)."""
         if request_bytes > 0 and input_tokens > 0:
             self.total_bytes += request_bytes
             self.total_tokens += input_tokens

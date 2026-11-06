@@ -364,12 +364,7 @@ class NoticeLog:
             if inner is event:
                 continue
             budget, overhead = inner.get("window_budget"), inner.get("fixed_overhead")
-            if inner.get("event") == "bound_too_small" and inner.get("media_allowance"):
-                # D48: the turn fits with its PDFs at their least cost; only the generous page allowance falls
-                # short, so the bound is not what is too small.
-                self._once("media_allowance", "a large PDF is estimated generously, so this turn kept only its "
-                           "own messages (the earlier ones are recallable); the bound does not need to change.")
-            elif inner.get("event") == "bound_too_small":
+            if inner.get("event") == "bound_too_small":
                 # Rule 4 window_minimal (contract PR #50): the engine still rotates, to a window of
                 # only the new turn, which can still put the request over the bound.
                 bound = inner.get("bound")

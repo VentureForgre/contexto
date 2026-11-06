@@ -304,39 +304,20 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    Until the first real usage arrives, count `tool_result` content at 1.5 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
    character, and M0 saw log-heavy tool output near 1.8 bytes per token, so 1.5 errs high); after
-   that, use the session's measured bytes-per-token ratio. Image and document blocks (D48: Messages
-   `image` and `document`, Responses `input_image` and `input_file`, top level or inside a
-   `tool_result` or tool output) are not priced by their bytes: an image costs `width * height / 750`
-   tokens after scaling its long edge down to 2,576 pixels, between 64 and 4,784, with the size read
-   from the PNG, JPEG, GIF, or WebP header, and 4,784 when it cannot be read (a URL, a file id,
-   another format); a PDF costs 4,568 tokens a page (3,000 text tokens plus a page image at 1,568),
-   its pages trusted only when the count is certain, otherwise 600 (the API's maximum, the only
-   always-safe value; D48, round 8). Certain means a PDF lexer (PDF whitespace including NUL,
-   comments, `#xx` escapes in names, any spacing) read every object in file order, every stream's
-   body ended at `endstream` where its `/Length` (direct, or indirect and resolved) says, no object
-   header was inside a skipped body, every object stream was inflated (Flate or stored) within the
-   budget below and its objects read, and every indirect `/Type` or `/Count` resolved; the pages are
-   then the object numbers whose `/Type` is `/Page`, each once over every version, or the `/Kids`
-   references that are not page tree nodes, whichever is more, raised by any `/Count`, at most 600.
-   Anything else is 600 pages, and the request that brings such a PDF logs `pdf_pages_uncertain`: an
-   object stream not inflated (another filter, a predictor, damaged data, the budget spent), a token
-   the lexer cannot read, a bound passed, no pages found, base64 that cannot be decoded or is over 32
-   MB, a document by URL or file id. So a large PDF is estimated generously (a typical page costs
-   about 1,583), the turn it is pasted on can page the earlier conversation where an equal-cost text
-   turn would not, and pages an incremental save deleted or a page tree node no catalog reaches count
-   too; a document of plain text or content blocks is text. Parsing a PDF never raises and is
-   bounded: at most 32 MB of base64, 16 MB inflated per PDF and 4 MB per object stream, 1,000,000
-   tokens, 200,000 objects, 50,000 `/Kids` references and nesting 64. Counts are cached by content
-   (65,536 PDFs, least recently used dropped). The proxy calls the engine's `prime` with each request
-   before it takes its transform lock, which counts the request's PDFs into that cache, so the
-   transform finds them counted.
-   The ratio is learned from text only: each observed request's media bytes are left out of its
-   bytes, and its media's cost out of its real tokens. That cost lies at or under the media's
-   estimate and is meant to lie at or over their floor (on Claude 95% of the image formula on the
-   older 1,568-pixel, 1,568-token limit, 0 for an image of unknown size, and 1,000 tokens a PDF page
-   for the pages its page tree draws: numbered page objects a `/Kids` array references, at most the
-   tree's count, at least one; on Codex 0, since OpenAI's tile prices go lower), though the floor can
-   run high. A request that only appends to the last measured one (same epoch, window, degraded state
+   that, use the session's measured bytes-per-token ratio. Images (D48: Messages `image`, Responses
+   `input_image`, top level or inside a `tool_result` or tool output) are not priced by their bytes:
+   an image costs `width * height / 750` tokens after scaling its long edge down to 2,576 pixels,
+   between 64 and 4,784, with the size read from the PNG, JPEG, GIF, or WebP header, and 4,784 when it
+   cannot be read (a URL, a file id, another format). Documents (Messages `document` with a base64
+   PDF, a URL or a file id; Responses `input_file`) are estimated by their bytes as text, as before
+   D48, pending a separate decision on pricing them by page; a document of plain text or content
+   blocks is text.
+   The ratio is learned from text only: each observed request's image and document (media) bytes are
+   left out of its bytes, and their cost out of its real tokens. That cost lies at or under the
+   media's estimate (a document's is its bytes) and is meant to lie at or over their floor (on Claude
+   95% of the image formula on the older 1,568-pixel, 1,568-token limit, 0 for an image of unknown
+   size; 0 for a document; on Codex 0, since OpenAI's tile prices go lower), though the floor can run
+   high. A request that only appends to the last measured one (same epoch, window, degraded state
    and head, and every message of that request unchanged, by rule 10's hashes of the request's
    messages before the transform) and carries the same media teaches the ratio its difference from
    it: the bytes and tokens it added. Otherwise, with a measured ratio, the media are charged the
@@ -357,8 +338,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    bytes, applied to the input minus the request's media floor, and the window's media at their floor.
    With media in the window, the head is never under the text-seed estimate of the request's own
    `system` and `tools`, since a floor can run high, and, when all the request's media are in the
-   window, never over its own bytes at 1.5 bytes a token, since a dense PDF's floor is far under its
-   cost. Without media the measurement is D49's.
+   window, never over its own bytes at 1.5 bytes a token, since a floor can run far under the cost (a
+   document's is 0). Without media the measurement is D49's.
    After a head change (rule 6) the measured head is adjusted by the estimated size of the change in
    `system` and `tools` bytes since the measured request, so a server that adds tools or a model
    switch counts in `F` once (D49). The window budget is `W = bound - headroom - F`, and
@@ -375,11 +356,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    log `window_minimal`; this keeps the request under the bound at the cost of the previous turn's
    verbatim text. Only if `W` is not positive or cannot hold even the new turn, log
    `bound_too_small` and still rotate to the minimal window (the new turn alone), which is
-   smaller than sending unrotated. When the new turn would fit `W` with its PDFs at their floor, the
-   shortfall is only the generous page allowance for its PDFs (D48; images do not count, their estimate
-   is their price): the event says `media_allowance`, and the launcher says the PDF is estimated
-   generously rather than suggesting a larger `--bound`; the launcher warns at start when a typical
-   head (28,000 tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
+   smaller than sending unrotated; the launcher warns at start when a typical head (28,000
+   tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
    seat) leaves less than 25,000 tokens of window budget, says that recall will barely fit or, at a
    budget of 0 or less, that it may not fit at all (a "may": measured heads ran as low as 15,689), and
    suggests a larger `--bound` (D55). Example

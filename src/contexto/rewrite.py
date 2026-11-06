@@ -138,7 +138,6 @@ from typing import Any, ClassVar, NamedTuple, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
-from contexto.pdfpages import PDF_MAX_PAGES
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import is_own_block, is_own_item, own_call_ids, render_page
@@ -149,10 +148,7 @@ from contexto.tokens import (
     estimate_tokens,
     media_cost,
     media_keys,
-    media_parts,
-    prime_media,
     split_media,
-    uncertain_documents,
 )
 from contexto.toolcheck import ToolCheck
 
@@ -170,7 +166,7 @@ RETAINED_ROLES = ("user", "assistant", "tool_result")  # A14: the roles set_reta
 # its media floor is taken off had a floor above the media's real cost; its floor is dropped instead.
 MEDIA_RATIO_CEILING = TEXT_BYTES_PER_TOKEN
 # D48: bytes a token a request with media may teach the ratio; outside it the media's cost was not bounded
-# well enough (a dense PDF far over its floor, or a floor far over its cost), so the request is not learned.
+# well enough (a document far over its floor of 0, or a floor far over its cost), so the request is not learned.
 MEDIA_TEXT_RATIO_RANGE = (1.5, 6.0)
 # D48: before a ratio is measured, a request with media teaches the first one only when its media's cost is
 # known to this share of its usage (estimate minus floor), so the first ratio errs low by at most about this.
@@ -265,10 +261,10 @@ class EpochState:
     head_size: int | None = None  # D49: bytes of the head head_tokens measures; never recorded
     initial_carried: int | None = None  # carried content at the conversation's first request
     # Rule 4, while the head is unmeasured: the previous upstream request's non-carried messages, estimated
-    # and in bytes as the estimator counts them
+    # and in bytes as the estimator counts them, both without their images and documents (D48)
     last_window_tokens: int = 0
     last_window_bytes: int = 0
-    last_window_media: MediaCost = MediaCost()  # D48: that window's media (estimate and floor)
+    last_window_media: MediaCost = MediaCost()  # D48: that window's images and documents
     paged_carried: frozenset[str] = frozenset()  # hashes of carried text messages paged by the fallback
     last_carried_text_count: int | None = None  # carried text messages at the previous turn start
     carried_text_streak: int = 0  # consecutive turn starts at which that count grew
@@ -428,7 +424,7 @@ class Dialect:
     name = "anthropic"
     field = "messages"
     # D48: whether media's floor cost (MediaCost.floor) is at or under what this API charges, so the ratio
-    # can take it off real usage. True for Claude's pixel and page prices.
+    # can take it off real usage. True for Claude's pixel prices.
     media_floor = True
 
     def is_context_block(self, block: Any) -> bool:
@@ -1377,16 +1373,8 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
                 state = new_epoch(messages, request, state, store, config, estimator, state.k, n, events,
                                   "head_change", sizing=(f, w))
             if w <= 0 or new_tokens > w:
-                event = {"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
-                         "new_turn_tokens": new_tokens}
-                documents = [part for part in media_parts(split_media(window_items(messages, new_start))[1])
-                             if part.document]
-                allowance = sum(part.tokens - part.floor for part in documents)
-                if w > 0 and allowance > 0 and new_tokens - allowance <= w:
-                    # D48: the new turn fits with its PDFs at their floor; only the generous page allowance
-                    # falls short (an image's estimate is its price, so images do not count here).
-                    event["media_allowance"] = True
-                events.append(event)
+                events.append({"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
+                               "new_turn_tokens": new_tokens})
         else:
             k = choose_k(messages, state, target, estimator)
             if restores and room_k > k:
@@ -1516,17 +1504,18 @@ def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None
     """The text part of a request's bytes and real tokens, for the measured ratio (D48), or None for the
     tokens when the request should not be learned from. Media bytes are left out. The media's real cost
     lies between its floor and its estimate when the floor is at or under the cost and the estimate at or
-    over it; the floor can still run high (an incremental save that deleted pages, an orphan page-tree
-    node, pages that cost under 1,000). With a measured ratio, the media are charged the cost that keeps
-    the ratio, at most their estimate, so a request can lower the ratio (text denser than measured) but
-    never raise it: when the usage leaves the media less than their floor, the request is skipped, since
-    a floor above the real cost would book the rest as sparse text. Before
+    over it; a floor can still run high (an API that prices an image under it), and a document has no
+    floor (it is estimated by its bytes, far above what it costs). With a measured ratio, the media are
+    charged the cost that keeps the ratio, at most their estimate, so a request can lower the ratio (text
+    denser than measured) but never raise it: when the usage leaves the media less than their floor, the
+    request is skipped, since a floor above the real cost would book the rest as sparse text. Before
     one, the media are charged their floor, so the first ratio errs low (text over-counted); when they
     have a floor (Claude) the request is learned only if that range is within ``MEDIA_FIRST_UNCERTAINTY``
-    of its usage, so a dense PDF cannot set a first ratio far too low (on Codex the floor is 0 and the
-    estimate a deliberate over-estimate, so its range says nothing). A floor that would put the text over
-    ``MEDIA_RATIO_CEILING`` ran high and is not taken off. A request whose text ratio still lands outside
-    ``MEDIA_TEXT_RATIO_RANGE`` is skipped."""
+    of its usage, so a document next to an image cannot set a first ratio far too low (on Codex the floor
+    is 0 and the estimate a deliberate over-estimate, so its range says nothing). A floor that would put
+    the text over ``MEDIA_RATIO_CEILING`` ran high and is not taken off. A request whose text ratio still
+    lands outside ``MEDIA_TEXT_RATIO_RANGE`` is skipped (a large document's cost, booked as text when
+    no ratio is measured yet, puts it under that range)."""
     text_bytes = sent_bytes - media.bytes
     if not media.bytes and not media.tokens:
         return text_bytes, real
@@ -1536,7 +1525,7 @@ def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None
             return text_bytes, None  # the media may have cost less than their floor: never raise the ratio
         charged = min(implied, media.tokens)
     elif media.floor and media.tokens - media.floor > MEDIA_FIRST_UNCERTAINTY * real:
-        return text_bytes, None  # a dense PDF: too uncertain to set the first ratio from
+        return text_bytes, None  # media whose cost is too uncertain to set the first ratio from
     else:
         charged = media.floor if text_bytes <= MEDIA_RATIO_CEILING * (real - media.floor) else 0
     tokens = real - charged
@@ -1549,20 +1538,20 @@ def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None
 def measured_head_tokens(state: EpochState, real: int, request: dict, dialect: Dialect) -> int:
     """Rule 4's head from the first measured request (D49 amended, D48): its input minus its window. The
     window's text counts at its byte share of the request's text tokens, unless the estimate made before
-    the send is lower, and its media at their floor: media bytes are no text, and a screenshot's base64
-    would otherwise take most of the share. The request's text tokens are its input minus its media's
-    floor, so with a floor at or under the media's cost the head errs high. With media in the window two
-    limits hold whatever the floor does: a floor can run high (a PDF of pages cheaper than it), so the head
-    is never under the seed estimate of the request's own system prompt and tools; and a floor far under
-    the cost (a dense PDF) leaves the head that much high, so when all the request's media are in the
+    the send is lower, and its media at their floor: media bytes are no text, and a screenshot's or a
+    PDF's base64 would otherwise take most of the share. The request's text tokens are its input minus its
+    media's floor, so with a floor at or under the media's cost the head errs high. With media in the
+    window two limits hold whatever the floor does: a floor can run high, so the head is never under the
+    seed estimate of the request's own system prompt and tools; and a floor far under the cost (a
+    document's, which is 0) leaves the head that much high, so when all the request's media are in the
     window (none in the head) it is never over its own bytes at the densest text the ratio accepts
     (``MEDIA_TEXT_RATIO_RANGE``, the tool-output seed). Without media the measurement is D49's."""
     window_media, media = state.last_window_media, state.last_sent_media
-    window_text_bytes = state.last_window_bytes - window_media.tokens
+    window_text_bytes = state.last_window_bytes
     sent_text_bytes = state.last_sent_bytes - media.bytes
     text_tokens = max(0, real - media.floor)
     share = window_text_bytes * text_tokens // sent_text_bytes if sent_text_bytes > 0 else text_tokens
-    window = min(state.last_window_tokens - window_media.tokens, share) + window_media.floor
+    window = min(state.last_window_tokens, share) + window_media.floor
     head = real - window
     if window_media.tokens:
         if window_media.tokens == media.tokens:
@@ -1684,8 +1673,9 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     sent_items = upstream[field_name]
     if state.head_tokens is None and state.k == 0:  # rule 4 may measure the head from this request's usage
         window = window_items(sent_items)
-        state = replace(state, last_window_tokens=estimate_items(estimator, window),
-                        last_window_bytes=estimate_items(BYTE_COUNT, window),
+        text = split_media(window)[0]
+        state = replace(state, last_window_tokens=estimate_items(estimator, text),
+                        last_window_bytes=estimate_items(BYTE_COUNT, text),
                         last_window_media=sent_media(window, measure_bytes=False))
     # Within one epoch, window, degraded state and head the transform is a function of the request's own
     # messages, so their rule 10 hashes (computed once per request) stand for what is sent (D48).
@@ -1697,11 +1687,6 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
                     last_sent_appends=appends_to(state.last_measured, scope, hashes), last_sent_scope=scope,
                     last_sent_anchor=(len(hashes), anchor_hash(hashes)),
                     pending_usage=usage_identity(messages))
-    uncertain = uncertain_documents(messages[previous_n:]) if n > previous_n else 0
-    if uncertain:
-        # D48: a PDF whose pages are not certain counts as the API's maximum; say so when it arrives.
-        events.append({"event": "pdf_pages_uncertain", "epoch": state.epoch, "documents": uncertain,
-                       "pages": PDF_MAX_PAGES})
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
     if rotated:
@@ -2674,14 +2659,6 @@ class RewriteEngine:
         runs = len(_turn_starts(messages, dialect))
         self._side_rooms[room_id] = _SideRoom(key, len(messages), anchor_hash(hashes), now, frozenset(call_ids),
                                               prompt, runs)
-
-    def prime(self, request: dict) -> None:
-        """D48: count the request's PDFs into the page-count cache. The proxy calls this before it takes
-        its transform lock, so parsing a large or crafted PDF does not hold up every other session; the
-        engine then finds the counts cached. Reads the request only, and never raises."""
-        if isinstance(request, dict):
-            for field_name in ("messages", "input"):  # Messages, Responses
-                prime_media(request.get(field_name))
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
