@@ -15,6 +15,8 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
 from contexto import mcp
 from contexto.rewrite import ANTHROPIC, CLAUDE_CODE_COMPACTION_SUMMARY, MESSAGES, RewriteEngine, keyed
 from contexto.store.memory import MemoryStore
@@ -22,7 +24,19 @@ from test_codex import CONFIG as CODEX_CONFIG
 from test_codex import history as codex_history
 from test_codex import prompt as codex_prompt
 from test_codex import request as codex_request
-from test_rewrite import CONFIG, FILL, assistant, conversation, ctx_block, history, request, settings_only, user
+from test_rewrite import (
+    CONFIG,
+    FILL,
+    assistant,
+    conversation,
+    ctx_block,
+    history,
+    request,
+    settings_only,
+    tool_result,
+    tool_use,
+    user,
+)
 
 RESPONSES_PATH = "/v1/responses"
 OLD, NEW = "237dedfa-8ca9-43b9-ad3c-4a6ebcb1a084", "916e1695-b1be-43de-abe8-eb4ffa7e0931"
@@ -490,3 +504,29 @@ def test_a_headless_compaction_hands_over():
     send(engine, main_request(conversation("old conversation", 6), OLD), OLD, entrypoint="sdk-cli", tool_calls=True)
     events = send(engine, main_request(compacted("AFTER-COMPACT turn"), OLD), OLD, entrypoint="sdk-cli")
     assert events[-1]["main"] is True and changes(events) == ["compacted"]
+
+
+@pytest.mark.parametrize("order", ["retry_answered_first", "late_end_first", "duplicate"])
+def test_a_late_or_duplicate_response_never_makes_a_headless_main_idle(order):
+    """Reviewer A round 4: the CLI gives up on a stalled request R1 and retries it as R1' (the same
+    body); R1' releases the Bash running a nested `claude -p`. R1's late end, with no client call,
+    must not make the lead idle, in either order, and neither may a duplicate of an answered one."""
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    tool(store, "contexto_pin", {"kind": "fact", "text": "synthetic pinned fact " * 90})  # about 2 KB
+    lead = main_request(conversation("HEADLESS lead prompt", 1), OLD)
+    if order == "duplicate":
+        send(engine, lead, OLD, input_tokens=3_000, entrypoint="sdk-cli", tool_calls=True)
+        engine.observe_usage(MESSAGES, {"input_tokens": 3_000}, lead, tool_calls=False)  # usage_unattributed
+    else:
+        engine(lead, headers(OLD, "sdk-cli"), MESSAGES)  # R1, abandoned
+        engine(lead, headers(OLD, "sdk-cli"), MESSAGES)  # R1'
+        responses = [({"input_tokens": 3_000}, True), ({"input_tokens": 3_000}, False)]  # R1', R1's late end
+        for usage, released in responses if order == "retry_answered_first" else responses[::-1]:
+            engine.observe_usage(MESSAGES, usage, lead, tool_calls=released)
+    nested = send(engine, main_request(conversation("NESTED-P hello", 1), NESTED), NESTED, entrypoint="sdk-cli")
+    assert nested[-1]["main"] is False and changes(nested) == []
+    text, _ = tool(store, "contexto_state", {})
+    loop = main_request([*conversation("HEADLESS lead prompt", 1), tool_use(1), tool_result(1, text)], OLD)
+    events = send(engine, loop, OLD, entrypoint="sdk-cli")
+    assert events[-1]["main"] is True and "over_bound" not in [e["event"] for e in events]

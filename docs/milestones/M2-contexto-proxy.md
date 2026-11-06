@@ -840,8 +840,9 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   main one, subagents, side requests). The first conversation seen is main, and the choice is
   re-evaluated at each turn start of another conversation, which takes over when (D50):
   - its Claude Code session id differs from main's, its User-Agent entrypoint is main's, and, unless
-    both are the interactive CLI's `cli`, main is idle (its latest response released no client tool
-    call and it has sent no request since); and either no
+    both are the interactive CLI's `cli`, main is idle (the response to its newest request released no
+    client tool call, no response of main's that may have released one arrived after it, and main
+    has sent no request since); and either no
     conversation has been main in that session yet (`/clear` starts a new
     id), or it was the first conversation main in its session and that session lost main to another
     session's id and has sent no request of this conversation since (`/resume` sends the resumed
@@ -865,8 +866,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
     topic, and quota side requests have none, and one is often the session's first request);
   - or it has strictly more turn starts than main (a tie keeps the current one).
 
-  Only a conversation seen with a tool list takes over by the first two rules (for Codex, which
-  sends no Claude Code session id, only the third applies). A request whose `metadata.user_id` has
+  Only a conversation seen with a tool list takes over by the first three rules (for Codex, which
+  sends no Claude Code session id, only the fourth applies). A request whose `metadata.user_id` has
   `parent_session_id` (an agent-team teammate, in process or in its own pane, on 2.1.314), and one
   carrying `X-Claude-Code-Agent-Id` (every subagent request on 2.1.302 to 2.1.318, and an in-process
   teammate's), never takes over, by any rule. The engine logs content-free

@@ -68,8 +68,9 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   sequence that both of the request's room publishes carry. A failed write logs ``retained_stale``
   (not degraded mode). Only the main conversation publishes the room and the snapshot: the first one
   seen, replaced at a turn start by a conversation with strictly more turn starts, by the first
-  request with a tool list after a tool-less side request, or by Claude Code's next session after
-  ``/clear`` or ``/resume`` (D50, ``RewriteEngine._takes_over``). Every other
+  request with a tool list after a tool-less side request, by Claude Code's next session after
+  ``/clear`` or ``/resume``, or by its compacted conversation after ``/compact`` (D50,
+  ``RewriteEngine._takes_over``). Every other
   conversation (a subagent, a side request) publishes a side room at each response instead (D40):
   ``set_side_room(room_id, bound - (input + output) - headroom_floor)`` when the response may hold a
   client tool call, ``set_side_room(room_id, None)`` when it holds none, where ``room_id`` is the
@@ -1995,8 +1996,9 @@ class RewriteEngine:
         self._cli_sessions: dict[str, ClaudeCodeSession | None] = {}
         self._judged: set[str] = set()
         self._compacted: set[str] = set()  # the keys whose first message is Claude Code's compaction summary
-        # D50: per conversation key, whether it is idle: its latest response released no client tool call
-        # and it has sent no request since (a headless /clear qualifies; a nested claude -p never does).
+        # D50: per conversation key, whether it is idle: the response to its newest request released no
+        # client tool call, no response since may have, and it has sent no request since (a headless
+        # /clear qualifies; a nested claude -p, run inside one of main's calls, never does).
         self._idle: dict[str, bool] = {}
         self._session_mains: dict[str, str] = {}
         self._displaced: dict[str, bool] = {}
@@ -2276,7 +2278,7 @@ class RewriteEngine:
 
     def _takes_over(self, key: str, main: str, turn_starts: int) -> str | None:
         """D50: why the conversation ``key``, at a turn start, replaces ``main``, or None. The turn-start
-        rule above, plus two cases it got wrong for Claude Code, which keys a conversation by its first
+        rule above, plus the cases it got wrong for Claude Code, which keys a conversation by its first
         prompt. Only a conversation seen with a request the dialect judges (for Claude Code, one with
         a tool list) takes over by them, so its title, topic, and quota side requests never do:
 
@@ -2481,12 +2483,18 @@ class RewriteEngine:
         state = self.states.get(key)
         if state is None:
             return []
-        self._idle[key] = tool_calls is False  # unknown (None) is not idle
         token = _DIALECT.set(dialect)
         try:
             identity = usage_identity(request.get(dialect.field) or [])
         finally:
             _DIALECT.reset(token)
+        # D50: any response that may hold a client call (True, or unknown) leaves the conversation busy,
+        # whichever request it answers; only the newest request's response without one makes it idle.
+        # A late end of a request the CLI gave up on and retried is not the newest request's.
+        if tool_calls is not False:
+            self._idle[key] = False
+        elif identity == state.pending_usage:
+            self._idle[key] = True
         real = usage_tokens(usage, dialect)
         events: list[dict] = []
         estimate = None

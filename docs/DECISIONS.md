@@ -1337,10 +1337,20 @@ the owner's delegation. Open decisions are listed at the end with the options an
     in the binary, so it was not run. A nested
     `claude -p` under a headless lead has the same shape: a new id under the lead's inherited
     `sdk-cli`. What tells them apart is main's state: the nested child runs inside one of main's
-    tool calls (main's latest response released a client call, the Bash running it), and a
+    tool calls (the response to main's newest request released a client call, the Bash running it), and a
     headless `/clear` follows main's final response. So for equal entrypoints other than `cli`, the
-    two session-id rules also need main idle: its latest response released no client tool call
-    (the proxy's `tool_calls` is False, not unknown) and it has sent no request since. Compaction
+    two session-id rules also need main idle: the response to its newest request released no client
+    tool call (the proxy's `tool_calls` is False, not unknown), no response of main's that may have
+    released one (True or unknown, whichever request it answers) arrived after it, and main has
+    sent no request since. A late or duplicate response, such as the end of a request the CLI gave
+    up on and retried, never makes main idle: with "its latest response" (round 3), that late end
+    made a headless lead idle while its Bash ran a nested `claude -p`, the child took main, and the
+    lead's next request was estimated at 4,775 tokens against a 4,000 bound (reviewer A round 4).
+    Updating idle from the newest request's response alone is not enough: when R1's late end comes
+    first it is the attributed one, and the retry's own response, releasing the Bash, is then
+    unattributed. So any response that may hold a client call marks main busy, whichever request
+    it answers, and only the newest request's response without one marks it idle; the test runs
+    both orders and a duplicate response. Compaction
     keeps the session id, which a nested child never shares, so `compacted` needs no idle check. In
     the interactive CLI the idle check is not applied, since after Esc main's latest response can
     still show a call that was cancelled and never runs. The quiet check means two sessions both sending trade main at most once: the one that lost main by
@@ -1392,7 +1402,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     it has more turn starts than the record's (rule 16, unchanged), so that conversation can resume
     only by rotating once. A subagent on a Claude Code that stopped sending `X-Claude-Code-Agent-Id`
     could again take over by the turn-start rule. In a headless session, `/clear` right after an
-    SDK `interrupt()` (main's latest response released a call), or with a proxy that could not tell
+    SDK `interrupt()` (the response to main's newest request released a call), or with a proxy that could not tell
     whether the response held a client call, falls back to the turn-start rule; a nested `claude -p`
     started in the background that sends its first request after the lead ended its turn takes
     main until the lead's next prompt, which takes it back by its id or its turn starts. If a Claude Code version sent a request of the old
