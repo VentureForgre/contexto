@@ -1018,10 +1018,11 @@ upstream before it opens the session or starts the proxy; a launch that fails af
 Codex starts, removes the session directory it created (a resumed session is never removed). In
 API-key mode Codex's provider gets its key from `auth.command` = `/bin/sh -c <helper>`, so the helper
 runs through a shell as Claude Code runs `apiKeyHelper`. Interactive launches (no subcommand,
-`resume`, `fork`) on Codex 0.156.0 or later pass `--no-daemon`, unless the user passed `--no-daemon`
-or `--remote`, so Codex's shared background app-server is not started for the session's CODEX_HOME
-and left running. On exit the kept CODEX_HOME loses `config.toml`, `packages/` and `.tmp/`; its
-rollouts stay. The session line shows the bound, the log records `launch` and `exit` as for Claude,
+`resume`, `fork`, found after the leading options) on Codex 0.156.0 or later pass `--no-daemon`,
+unless the user passed `--no-daemon` or `--remote`, so Codex's shared background app-server is not
+started for the session's CODEX_HOME and left running; when the version cannot be read, the flag is
+passed if `codex --help` lists it, else one warning is printed. On exit the kept CODEX_HOME loses
+`config.toml` and `packages/`; its rollouts and the plugin clone in `.tmp/` stay. The session line shows the bound, the log records `launch` and `exit` as for Claude,
 and the start-time window warning assumes a Codex fixed overhead of 19,000 tokens.
 
 `contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated

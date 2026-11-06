@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -277,18 +278,29 @@ KEY_HELPER_SHELL = "/bin/sh"
 # launches pass --no-daemon instead (D54). The flag is a top-level option since 0.156.0
 # (codex-rs/tui/src/cli.rs: absent at rust-v0.155.0, present at rust-v0.156.0); 0.166.0 accepts it
 # before every subcommand. exec starts no server (measured on 0.166.0), and neither it nor the other
-# subcommands that do not open the TUI get the flag; resume and fork open the TUI and do.
+# subcommands that do not open the TUI get the flag (``agents`` refuses it: it needs the shared
+# server); resume and fork open the TUI and do. When ``codex --version`` cannot be read, ``codex
+# --help`` decides: the flag is passed if it lists it, else the user is warned once.
 NO_DAEMON_FLAG = "--no-daemon"
 NO_DAEMON_SINCE = (0, 156, 0)
+HELP_TIMEOUT_S = 3.0
 INTERACTIVE_SUBCOMMANDS = ("resume", "fork")
+# Top-level options that take a value, so the subcommand is found after them (codex --help, 0.166.0).
+# ``-i``/``--image`` takes every following word up to the next option: ``codex -i a.png exec`` opens the
+# TUI with two images, while ``--image=a.png exec`` runs exec.
+VALUE_OPTIONS = ("-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env", "-m", "--model",
+                 "--local-provider", "-p", "--profile", "-s", "--sandbox", "-C", "--cd", "--add-dir", "-a",
+                 "--ask-for-approval")
+MULTI_VALUE_OPTIONS = ("-i", "--image")
 SUBCOMMANDS = ("agents", "exec", "e", "review", "login", "logout", "mcp", "plugin", "app-server", "remote-control",
                "app", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "resume", "queue",
                "archive", "delete", "migrate-rollouts", "migrate-nfs-db", "unarchive", "fork", "cloud",
                "exec-server", "features", "help")  # codex --help, 0.166.0
-# A kept CODEX_HOME is kept for its rollouts. Codex 0.166.0 also copies its release into packages/
-# (417 MB) and clones the plugin marketplace into .tmp/ (96 MB) in every home; both are rebuilt when
-# needed, so cleanup removes them.
-DISPOSABLE_HOME_DIRS = ("packages", ".tmp")
+# A kept CODEX_HOME is kept for its rollouts. Codex 0.166.0's daemon also copies its release into
+# packages/ (417 MB; a launch with --no-daemon makes none), which cleanup removes. The plugin
+# marketplace clone in .tmp/ (96 MB) stays, so a resumed session does not download it again; plugins
+# are left to the user (README).
+DISPOSABLE_HOME_DIRS = ("packages",)
 # Window budget at start (contract rule 4, launcher.start_warning): Codex's fixed overhead measured
 # 13,322 to 18,403 tokens (docs/research/M2-codex-step1-live.md, M2-codex-acceptance-150k.md) and
 # 15,694 on 0.166.0 (QA, 2026-11-05); the largest, rounded up.
@@ -336,12 +348,16 @@ def claude_api_key_helper(cwd: Path, home: Path, env: dict[str, str] | None = No
 
 
 def _toml(value: object) -> str:
-    """TOML literal for strings, booleans, and lists of strings (JSON escapes are valid TOML)."""
+    """TOML literal for strings, booleans, and lists of strings (JSON escapes are valid TOML). TOML also
+    forbids a raw DEL, which JSON leaves as is, and has no escape for a lone surrogate."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, list):
         return "[" + ", ".join(_toml(v) for v in value) + "]"
-    return json.dumps(str(value), ensure_ascii=False)
+    text = str(value)
+    if any(0xD800 <= ord(c) <= 0xDFFF for c in text):
+        raise CodexLaunchError("a value for Codex's config holds a lone surrogate, which TOML cannot hold")
+    return json.dumps(text, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 # Exec mode runs with approval policy "never", which refuses every MCP call that needs approval, so
@@ -459,20 +475,52 @@ def _anthropic_host(url: str) -> str | None:
     return host if host == ANTHROPIC_DOMAIN or host.endswith("." + ANTHROPIC_DOMAIN) else None
 
 
-def daemon_args(codex_args: list[str], codex_version: str | None) -> list[str]:
-    """``[NO_DAEMON_FLAG]`` for an interactive launch on a Codex that takes it, else ``[]``: not for a
-    non-interactive subcommand, an unknown or older version, or when the user already chose a server
-    (``--no-daemon``, ``--remote``)."""
-    if _may_take_no_daemon(codex_args) and _version_tuple(codex_version) >= NO_DAEMON_SINCE:
-        return [NO_DAEMON_FLAG]
-    return []
+def takes_no_daemon(codex_args: list[str], codex_version: str | None, help_lists_flag: bool = False) -> bool:
+    """Whether to pass ``--no-daemon``: only for an interactive launch where the user chose no server
+    (``--no-daemon``, ``--remote``), on a Codex that takes it: by version when it was read (0.156.0 or
+    later), else when ``codex --help`` lists the flag (``help_lists_flag``)."""
+    if not _may_take_no_daemon(codex_args):
+        return False
+    version = _version_tuple(codex_version)
+    return version >= NO_DAEMON_SINCE if version else help_lists_flag
 
 
 def _may_take_no_daemon(codex_args: list[str]) -> bool:
     if any(a == NO_DAEMON_FLAG or a == "--remote" or a.startswith("--remote=") for a in codex_args):
         return False
-    first = codex_args[0] if codex_args else None
-    return first not in SUBCOMMANDS or first in INTERACTIVE_SUBCOMMANDS
+    subcommand = _subcommand(codex_args)
+    return subcommand is None or subcommand in INTERACTIVE_SUBCOMMANDS
+
+
+def _subcommand(codex_args: list[str]) -> str | None:
+    """The subcommand ``codex`` would run: the first word after the leading options, if it names one."""
+    i = 0
+    while i < len(codex_args):
+        arg = codex_args[i]
+        if arg == "--":  # the rest is the prompt
+            return None
+        if arg in MULTI_VALUE_OPTIONS:
+            i += 1
+            while i < len(codex_args) and not codex_args[i].startswith("-"):
+                i += 1
+        elif arg in VALUE_OPTIONS:
+            i += 2
+        elif arg.startswith("-"):
+            i += 1
+        else:
+            return arg if arg in SUBCOMMANDS else None
+    return None
+
+
+def help_lists_no_daemon(codex: str) -> bool:
+    """Whether ``codex --help`` lists ``--no-daemon`` (bounded by ``HELP_TIMEOUT_S``, in its own process
+    group, stdin closed; False when it cannot be run)."""
+    try:
+        out = subprocess.run([codex, "--help"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, timeout=HELP_TIMEOUT_S, start_new_session=True)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return re.search(rb"(?m)^\s*--no-daemon\b", out.stdout) is not None
 
 
 def _version_tuple(version: str | None) -> tuple[int, ...]:
@@ -485,17 +533,17 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
                codex_bin: str = "codex", env: dict[str, str] | None = None, cwd: Path | None = None,
                home: Path | None = None, claude_upstream: str | None = None,
                codex_home_dir: Path | None = None, contexto_home: Path | None = None,
-               codex_version: str | None = None) -> CodexLaunch:
+               no_daemon: bool = False) -> CodexLaunch:
     """Plan a ``codex`` launch behind the proxy at ``proxy_url`` (no ``/v1``: the upstream carries the
     version path). The caller starts the proxy with ``launch.upstream``, runs ``launch.argv`` with
-    ``launch.env``, and calls ``launch.cleanup()`` on exit. ``codex_version`` (the installed Codex's,
-    when read) decides ``--no-daemon`` (``daemon_args``). Nothing here reads or writes a credential."""
+    ``launch.env``, and calls ``launch.cleanup()`` on exit. ``no_daemon`` (``takes_no_daemon``) puts
+    ``--no-daemon`` first. Nothing here reads or writes a credential."""
     base_env = dict(os.environ if env is None else env)
     contexto_home = Path(contexto_home) if contexto_home is not None else paths.contexto_home(base_env)
     cwd = cwd or Path.cwd()
     home = home or Path.home()
     target = resolve_codex_upstream(auth_mode, upstream, base_env, claude_upstream)
-    flags = daemon_args(codex_args, codex_version)
+    flags = [NO_DAEMON_FLAG] if no_daemon else []
     if auth_mode == CHATGPT_MODE:
         # --no-daemon here too, so the TUI does not attach to a server already running for the user's
         # own CODEX_HOME, started without the proxy's -c overrides (whether it would honor them is not
@@ -576,15 +624,23 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         claude = upstream_module.resolve_upstream(args.upstream)
         target, source = codex_upstream_with_source(args.codex_auth, args.codex_upstream, dict(os.environ),
                                                     claude.url, claude.source)
-        version = None
-        if _may_take_no_daemon(codex_args):  # only the --no-daemon decision needs it
+        no_daemon, version_error = False, None
+        if _may_take_no_daemon(codex_args):  # only the --no-daemon decision needs the version
             try:
-                version = cliversions.installed_version(codex)[0]
+                version, version_error = cliversions.installed_version(codex)
             except KeyboardInterrupt:  # its process group was killed first
                 print("contexto: interrupted", file=stderr, flush=True)
                 return launcher.EXIT_INTERRUPTED
-            except Exception:  # unreadable: no flag, as for an unknown version
-                version = None
+            except Exception as exc:  # unreadable, as when it prints no version
+                version, version_error = None, type(exc).__name__
+            if version_error is None and not _version_tuple(version):
+                version_error = "unparsed"
+            try:
+                listed = help_lists_no_daemon(codex) if version_error else False
+            except KeyboardInterrupt:
+                print("contexto: interrupted", file=stderr, flush=True)
+                return launcher.EXIT_INTERRUPTED
+            no_daemon = takes_no_daemon(codex_args, version, listed)
         home = paths.contexto_home()
         session_id = args.session or uuid.uuid4().hex
         try:
@@ -607,16 +663,22 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         plan = plan_codex(codex_args, proxy.url, session_id, auth_mode=args.codex_auth,
                           key_helper=args.codex_key_helper, upstream=target, codex_bin=codex,
                           codex_home_dir=paths.session_dir(home, session_id) / "codex-home",
-                          contexto_home=home, codex_version=version)
+                          contexto_home=home, no_daemon=no_daemon)
         for note in plan.notes:
             print(f"contexto: {note}", file=stderr)
         store.log({"event": "launch", "cli": "codex", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": source, "codex_auth": args.codex_auth,
                    "observe_thinking": args.observe_thinking, "user_arg_count": len(codex_args),
                    "affinity_header": getattr(proxy, "affinity_header", None) is not None,
-                   "no_daemon": bool(daemon_args(codex_args, version))})
+                   "no_daemon": no_daemon,
+                   **({"codex_version_error": version_error} if version_error else {})})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {source}, codex auth "
               f"{args.codex_auth}, engine {engine_name})", file=stderr, flush=True)
+        if version_error and not no_daemon:
+            # Without the flag Codex may leave its shared server running for this session's CODEX_HOME.
+            print(f"contexto: warning: cannot read the Codex version ({version_error}) and 'codex --help' does not "
+                  f"list {NO_DAEMON_FLAG}, so it is not passed; Codex may leave a background app-server running "
+                  "after it exits.", file=stderr, flush=True)
         if not launcher.check_cli_version("codex", codex, store,
                                           enabled=not getattr(args, "no_version_check", False), stderr=stderr):
             code = launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started

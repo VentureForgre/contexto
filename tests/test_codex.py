@@ -210,6 +210,21 @@ def test_engine_dispatches_responses_paths_with_separate_state():
 PROXY = "http://127.0.0.1:43210"
 
 
+@pytest.fixture(autouse=True)
+def isolated_from_the_checkout(tmp_path, monkeypatch):
+    """No test here may read the developer's Claude settings or upstream: in a linked worktree the
+    upstream resolution reads the main checkout's .claude/settings.local.json, which CI does not have
+    (reviewer A, PR #236)."""
+    work = tmp_path / "work"
+    work.mkdir()
+    (tmp_path / "claude-config").mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("HOME", str(tmp_path / "user-home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    for name in ("ANTHROPIC_BASE_URL", "CONTEXTO_CODEX_UPSTREAM", "CONTEXTO_CODEX_KEY_HELPER", "CODEX_HOME"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def claude_home(tmp_path, helper="/synthetic/bin/key-helper --profile synthetic"):
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True, exist_ok=True)
@@ -383,8 +398,13 @@ def codex_bin(tmp_path, monkeypatch):
     bindir = tmp_path / "codex-bin"
     bindir.mkdir()
     stub = bindir / "codex"
-    stub.write_text('#!/bin/sh\n[ "$1" = --version ] && echo "codex-cli ${STUB_CODEX_VERSION:-0.166.0}"\n'
-                    'exit ${STUB_CODEX_EXIT:-0}\n')
+    stub.write_text('#!/bin/sh\n'
+                    'case "$1" in\n'
+                    '--version) [ -n "$STUB_CODEX_NO_VERSION" ] && exit 1\n'
+                    '  echo "codex-cli ${STUB_CODEX_VERSION:-0.166.0}" ;;\n'
+                    '--help) printf "%s\\n" "${STUB_CODEX_HELP:-Usage: codex [OPTIONS] [PROMPT]}" ;;\n'
+                    'esac\n'
+                    'exit 0\n')
     stub.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
     return str(stub)
@@ -479,7 +499,8 @@ def test_run_codex_checks_the_codex_binary_unless_silenced(tmp_path, monkeypatch
     # D38: after the session line, before Codex starts; --no-version-check turns it off.
     monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
     for enabled in (True, False):
-        args = parse("--codex-key-helper", "/synthetic/helper", "codex", "exec", "hi")
+        args = parse("--upstream", "http://127.0.0.1:9", "--codex-key-helper", "/synthetic/helper", "codex",
+                     "exec", "hi")
         if not enabled:
             args.no_version_check = True
         fake = FakeLauncher()
@@ -487,8 +508,8 @@ def test_run_codex_checks_the_codex_binary_unless_silenced(tmp_path, monkeypatch
         assert fake.calls["version_check"] == ("codex", codex_bin, enabled)
     fake = FakeLauncher()
     fake.interrupted = True  # Ctrl+C during the check: codex never runs, the proxy still stops
-    assert run_codex(parse("--codex-key-helper", "/synthetic/helper", "codex", "exec", "hi"), launcher=fake,
-                     stderr=io.StringIO()) == 130
+    assert run_codex(parse("--upstream", "http://127.0.0.1:9", "--codex-key-helper", "/synthetic/helper", "codex",
+                           "exec", "hi"), launcher=fake, stderr=io.StringIO()) == 130
     assert "argv" not in fake.calls and fake.proxy.stopped and fake.calls["reported_after_stop"]
 
 
@@ -705,6 +726,17 @@ def test_key_helper_strings_round_trip_through_the_config(tmp_path):
     with pytest.raises(CodexLaunchError, match="empty"):
         plan_codex([], PROXY, "S", env={}, cwd=tmp_path, home=tmp_path, key_helper="  \t",
                    upstream="https://u.invalid/v1")
+    # TOML forbids a raw DEL, which JSON leaves raw (reviewer A, L1), and has no lone surrogates.
+    launch = plan_codex([], PROXY, "S", env={}, cwd=tmp_path, home=tmp_path, key_helper="echo a\x7fb\x00c",
+                        upstream="https://u.invalid/v1")
+    try:
+        assert "\x7f" not in (launch.codex_home / "config.toml").read_text()
+        assert auth_of(launch)["args"] == ["-c", "echo a\x7fb\x00c"]
+    finally:
+        launch.cleanup()
+    with pytest.raises(CodexLaunchError, match="surrogate"):
+        plan_codex([], PROXY, "S", env={}, cwd=tmp_path, home=tmp_path, key_helper="echo \ud800",
+                   upstream="https://u.invalid/v1")
 
 
 @pytest.mark.parametrize("url", ["https://api.anthropic.com", "https://API.Anthropic.COM/", "https://anthropic.com.",
@@ -738,33 +770,54 @@ def test_codex_still_derives_a_cliproxyapi_upstream(url):
     ([], "0.155.0", False), ([], None, False), ([], "unparsed", False),
     (["exec", "hi"], "0.166.0", False), (["e", "hi"], "0.166.0", False), (["mcp", "list"], "0.166.0", False),
     (["--no-daemon"], "0.166.0", False), (["--remote", "ws://127.0.0.1:1"], "0.166.0", False),
-    (["--remote=unix://"], "0.166.0", False)])
+    (["--remote=unix://"], "0.166.0", False),
+    # The subcommand is found after leading options (reviewer A, N1): codex refuses --no-daemon with agents.
+    (["-m", "x", "agents"], "0.166.0", False), (["-c", "k=1", "--search", "exec", "hi"], "0.166.0", False),
+    (["--image=a.png", "exec"], "0.166.0", False), (["-ia.png", "exec"], "0.166.0", False),
+    (["-m", "x", "resume", "--last"], "0.166.0", True), (["--", "exec"], "0.166.0", True),
+    (["-i", "a.png", "exec"], "0.166.0", True),  # -i takes "exec" as a second image and opens the TUI
+    (["-i", "a.png", "--search", "exec"], "0.166.0", False)])
 def test_no_daemon_only_for_interactive_launches_that_take_it(codex_args, version, expected):
-    from contexto.codex import daemon_args
+    from contexto.codex import takes_no_daemon
 
-    assert daemon_args(codex_args, version) == (["--no-daemon"] if expected else [])
+    assert takes_no_daemon(codex_args, version) is expected
+
+
+def test_an_unreadable_version_falls_back_to_codex_help(codex_bin):
+    from contexto.codex import help_lists_no_daemon, takes_no_daemon
+
+    assert takes_no_daemon([], None, help_lists_flag=True) and not takes_no_daemon([], None)
+    assert not takes_no_daemon(["exec", "hi"], None, help_lists_flag=True)
+    assert not help_lists_no_daemon(codex_bin)
+    os.environ["STUB_CODEX_HELP"] = "Options:\n      --no-daemon\n          Run without the shared background server"
+    try:
+        assert help_lists_no_daemon(codex_bin)
+    finally:
+        del os.environ["STUB_CODEX_HELP"]
+    assert not help_lists_no_daemon("/nonexistent/codex")
 
 
 def test_plans_put_no_daemon_right_after_codex(tmp_path):
     launch = plan_codex(["resume", "--last"], PROXY, "S", env={}, cwd=tmp_path, home=claude_home(tmp_path),
-                        upstream="https://u.invalid/v1", codex_version="0.166.0")
+                        upstream="https://u.invalid/v1", no_daemon=True)
     try:
         assert launch.argv == ["codex", "--no-daemon", "resume", "--last"]
     finally:
         launch.cleanup()
     chatgpt = plan_codex(["hi"], PROXY, "S", auth_mode=CHATGPT_MODE, env={}, cwd=tmp_path, home=tmp_path,
-                         codex_version="0.166.0")
+                         no_daemon=True)
     assert chatgpt.argv[:3] == ["codex", "--no-daemon", "-c"] and chatgpt.argv[-1] == "hi"
     exec_plan = plan_codex(["exec", "hi"], PROXY, "S", env={}, cwd=tmp_path, home=claude_home(tmp_path),
-                           upstream="https://u.invalid/v1", codex_version="0.166.0")
+                           upstream="https://u.invalid/v1")
     try:
         assert exec_plan.argv == ["codex", "exec", "hi"]
     finally:
         exec_plan.cleanup()
 
 
-def test_cleanup_drops_codexs_release_copy_and_plugin_clone_but_keeps_rollouts(tmp_path):
-    """QA verify-codex-orphans: each kept home held packages/ (417 MB) and .tmp/ (96 MB) after exit."""
+def test_cleanup_drops_codexs_release_copy_but_keeps_rollouts_and_the_plugin_clone(tmp_path):
+    """QA verify-codex-orphans: each kept home held packages/ (417 MB) after exit. The plugin clone in
+    .tmp/ stays, so a resumed session does not download it again (reviewer A, PR #236)."""
     home_dir = tmp_path / "ctx" / "sessions" / "S4" / "codex-home"
     launch = plan_codex([], PROXY, "S4", env={}, cwd=tmp_path, home=claude_home(tmp_path),
                         upstream="https://u.invalid/v1", codex_home_dir=home_dir)
@@ -773,7 +826,8 @@ def test_cleanup_drops_codexs_release_copy_and_plugin_clone_but_keeps_rollouts(t
         (home_dir / name / "f").write_text("x")
     (home_dir / "state_5.sqlite").write_text("x")
     launch.cleanup()
-    assert sorted(p.name for p in home_dir.iterdir()) == ["sessions", "state_5.sqlite"]
+    assert sorted(p.name for p in home_dir.iterdir()) == [".tmp", "sessions", "state_5.sqlite"]
+    assert (home_dir / ".tmp" / "plugins" / ".git" / "f").exists()
     assert (home_dir / "sessions" / "2026" / "11" / "05" / "f").exists()
 
 
@@ -860,4 +914,32 @@ def test_run_codex_logs_launch_and_exit_and_warns_early_like_claude(tmp_path, mo
     err = io.StringIO()
     assert run_codex(args, stderr=err) == 5
     assert seen["argv"] == [codex_bin] and "window budget" not in err.getvalue()
+    assert "background app-server" not in err.getvalue()  # a known version too old for the flag: no warning
     assert next(e for e in log_events(tmp_path / "ctx", "W2") if e["event"] == "launch")["no_daemon"] is False
+
+
+def test_run_codex_without_a_readable_version_asks_codex_help_then_warns(tmp_path, monkeypatch, codex_bin):
+    """Reviewer A, L2: an unreadable ``codex --version`` silently left the daemon running."""
+    from contexto import launcher
+
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    monkeypatch.setenv("STUB_CODEX_NO_VERSION", "1")
+    seen = {}
+    monkeypatch.setattr(launcher, "run_child", lambda argv, env=None, *, stderr=None: seen.update(argv=argv) or 0)
+
+    def launch(session):
+        args = parse("--session", session, "--upstream", "http://127.0.0.1:9", "--codex-key-helper", "echo k",
+                     "codex")
+        args.no_version_check = True
+        err = io.StringIO()
+        assert run_codex(args, stderr=err) == 0
+        event = next(e for e in log_events(tmp_path / "ctx", session) if e["event"] == "launch")
+        return err.getvalue(), event
+
+    err, event = launch("H1")  # help does not list the flag: not passed, one warning
+    assert seen["argv"] == [codex_bin] and err.count("may leave a background app-server") == 1
+    assert event["no_daemon"] is False and event["codex_version_error"] == "exit_1"
+    monkeypatch.setenv("STUB_CODEX_HELP", "Options:\n      --no-daemon\n          Run without the shared server")
+    err, event = launch("H2")  # help lists it: passed, no warning
+    assert seen["argv"] == [codex_bin, "--no-daemon"] and "background app-server" not in err
+    assert event["no_daemon"] is True and event["codex_version_error"] == "exit_1"

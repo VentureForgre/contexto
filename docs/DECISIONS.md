@@ -1283,16 +1283,27 @@ the owner's delegation. Open decisions are listed at the end with the options an
     argument, unless the user passed `--no-daemon` or `--remote`. The same holds in ChatGPT mode, where
     CODEX_HOME is the user's own and a server may already run for it. The flag goes first because 0.166.0
     accepts it before every subcommand and rejects it after `exec`. `exec` and the other
-    non-interactive subcommands start no server (measured: no process, no `packages/`) and get no flag.
-    The flag is gated on the installed version, read with `codex --version` only for launches that
-    could take it. It is passed from 0.156.0 on: the flag is in `codex-rs/tui/src/cli.rs` at
-    rust-v0.156.0 and not at rust-v0.155.0. Only 0.166.0 was run; 0.163.0 is not installed. With the
-    fix, a turn and a `resume --last` turn on the same session (9 input items: the conversation
-    resumed) left 0 processes and a 4.6 to 4.9 MB home.
+    non-interactive subcommands start no server (measured: no process, no `packages/`) and get no flag;
+    `agents` refuses it ("requires a shared server"). The subcommand is the first word after the
+    leading options, with Codex's value-taking options skipped (`-i`/`--image` takes every word up
+    to the next option, so `codex -i a.png exec` opens the TUI; measured on 0.166.0). The flag is gated
+    on the installed version, read with `codex --version` only for launches that could take it. It is
+    passed from 0.156.0 on: the flag is in `codex-rs/tui/src/cli.rs` at rust-v0.156.0 and not at
+    rust-v0.155.0. When the version cannot be read, `codex --help` decides (bounded, 3 s): the flag is
+    passed if it is listed, else one warning line says Codex may leave a background app-server
+    running; the `launch` event records `codex_version_error` (reviewer A, PR #236). Only 0.166.0 was
+    run; 0.163.0 is not installed. With the fix, a turn and a `resume --last` turn on the same session
+    (9 input items: the conversation resumed) left 0 processes.
   - **Cleanup.** A kept CODEX_HOME is kept for its rollouts. On exit Contexto now also removes
-    `packages/` (Codex's copy of its release, 417 MB) and `.tmp/` (the plugin marketplace clone, 96 MB)
-    as well as `config.toml`; Codex rebuilds both when it needs them. A daemon a user starts some other
-    way is not stopped.
+    `packages/` (the daemon's copy of Codex's release, 417 MB; a `--no-daemon` launch makes none) as
+    well as `config.toml`. The plugin marketplace clone in `.tmp/` stays: removing it made every resumed
+    launch clone about 96 MB from github.com again (reviewer A, PR #236), and plugins are left to the
+    user. Measured with the fix: 98 MB after a first session (93 MB of it `.tmp/`, no `packages/`), still
+    98 MB after a `resume --last` on it, with the same `.tmp/plugins` inode (no second clone). A daemon a
+    user starts some other way is not stopped.
+  - **TOML.** A helper is written as a JSON-escaped TOML string, but JSON leaves DEL (U+007F) raw and
+    TOML forbids it, so Codex could not load the config (pre-existing, reviewer A); it is now written as
+    `\u007f`. A lone surrogate, which TOML cannot hold, is refused with exit 2.
   - **Launch checks and messages.** With no `codex` on PATH, `contexto run codex` blamed a missing key
     helper (exit 2), or, given a helper, opened a session and started the proxy before failing (exit
     127). Every failed launch left an empty session that became the "most recent" one. Rule: options,
