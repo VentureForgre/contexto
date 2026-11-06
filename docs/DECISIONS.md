@@ -1387,9 +1387,14 @@ the owner's delegation. Open decisions are listed at the end with the options an
     in user settings, the helper did not run and all 10 requests went to the user's stub; after
     recording the folder as trusted, the project's helper ran and the requests went to the project's
     stub.
+  - **Ignoring recorded trust (review round 2).** While `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is truthy,
+    Claude Code ignores every trust record and shows its dialog in every folder; Contexto then treats
+    every folder as untrusted for Codex (`1`, `true`, `yes` or `on`, any case). Before, it still read
+    the records, the one case where it trusted a folder Claude Code would not.
   - **Left open.** Claude Code may change where or how it records trust. The rule errs toward
-    untrusted where it differs from Claude Code's (a `.git` symlink, a bare repository's worktree):
-    the cost is a warning and a flag.
+    untrusted where it differs from Claude Code's (a `.git` symlink, including a dangling one; a
+    `.git` that is a FIFO or another non-regular file; a bare repository's worktree): the cost is a
+    warning and a flag.
 - **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
   subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
   untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by

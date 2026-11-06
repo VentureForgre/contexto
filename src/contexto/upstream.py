@@ -200,6 +200,12 @@ def claude_global_config_path(home: Path, env: Mapping[str, str] | None = None) 
     return (config_dir or home) / f".claude{suffix}.json"
 
 
+# Claude Code ignores every recorded trust, and shows its dialog in every folder, while this is truthy
+# (reviewer A, PR #237 round 2). The spellings are read broadly: here a false "true" errs toward untrusted.
+IGNORE_TRUST_KEY = "CLAUDE_CODE_IGNORE_PERSISTED_TRUST"
+TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
 def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None, *,
                    layout: GitLayout | None = None) -> bool:
     """Whether Claude Code has recorded ``cwd`` as trusted: ``projects[<path>].hasTrustDialogAccepted``
@@ -208,8 +214,11 @@ def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None, 
     checkout of a genuine linked worktree (accepting the dialog records the main checkout, even
     from a subdirectory); outside git, ``cwd`` or any parent. A folder above the toplevel does not
     count, and neither does a path recorded unresolved (``/tmp`` for ``/private/tmp``) or with a
-    trailing slash. An unreadable config means not trusted. ``layout`` is ``git_layout(cwd)`` when
-    the caller already has it."""
+    trailing slash. An unreadable config means not trusted, and so does any folder while ``env`` sets
+    ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST``. ``layout`` is ``git_layout(cwd)`` when the caller already
+    has it."""
+    if (env or {}).get(IGNORE_TRUST_KEY, "").strip().lower() in TRUTHY:
+        return False
     try:
         data = json.loads(claude_global_config_path(home, env).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):

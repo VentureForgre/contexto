@@ -255,6 +255,20 @@ def test_trust_is_read_from_the_home_directory_without_a_config_dir(tree, home):
     assert folder_trusted(tree / "repo" / "sub", home, {})
 
 
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", " yes ", "on"])
+def test_ignore_persisted_trust_makes_every_folder_untrusted(tree, home, value):
+    # Claude Code shows its trust dialog in every folder while this is set (reviewer A, PR #237 round 2).
+    record_trust(home, tree / "repo")
+    assert folder_trusted(tree / "repo", home, {})
+    assert not folder_trusted(tree / "repo", home, {"CLAUDE_CODE_IGNORE_PERSISTED_TRUST": value})
+
+
+@pytest.mark.parametrize("value", ["", "0", "false"])
+def test_ignore_persisted_trust_off_keeps_recorded_trust(tree, home, value):
+    record_trust(home, tree / "repo")
+    assert folder_trusted(tree / "repo", home, {"CLAUDE_CODE_IGNORE_PERSISTED_TRUST": value})
+
+
 # The gate ------------------------------------------------------------------------------------------
 
 
