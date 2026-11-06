@@ -836,9 +836,10 @@ def test_pre_send_and_real_over_bound_records_are_distinct():
 
 
 
-def test_over_bound_at_a_turn_start_is_never_the_tool_loop_exemption():
+def test_over_bound_at_a_turn_start_is_flagged_but_never_the_tool_loop_exemption():
     # A turn-start request whose estimate is over the bound but which cannot rotate (rotation_noop or
-    # bound_too_small) must not emit the source "estimate" exemption.
+    # bound_too_small) must not emit rule 5's tool-loop exemption. D49: the pre-send check still flags
+    # it, with in_tool_loop false, since every forwarded request is checked.
     from dataclasses import replace
     store = MemoryStore(key=b"k" * 32)
     cfg = Config(bound=100_000, headroom_floor=500)
@@ -847,8 +848,9 @@ def test_over_bound_at_a_turn_start_is_never_the_tool_loop_exemption():
     _, st, _ = rewrite(request(msgs), None, store, cfg, est)
     st = replace(st, last_input_tokens=150_000, head_tokens=1_000, pending_usage=None)  # as if observed
     up, _, ev = rewrite(request(msgs + [assistant("a"), user("next")]), st, store, cfg, est)
-    assert ev[-1]["estimate"] > cfg.bound
-    assert not any(e["event"] == "over_bound" for e in ev) and not ev[-1].get("over_bound")
+    assert ev[-1]["estimate"] > cfg.bound and ev[-1]["over_bound"] is True
+    over = [e for e in ev if e["event"] == "over_bound"]
+    assert len(over) == 1 and over[0]["source"] == "estimate" and over[0]["in_tool_loop"] is False
 
 
 # A2c: window_minimal (contract PR #50) --------------------------------------------------------------
