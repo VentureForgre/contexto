@@ -28,7 +28,8 @@ compaction never fires, and accuracy equals full context.
   agents; details under "QA run and fix round" below.
 - Latest release: v0.5.23 (main 08ec571, 2026-11-06). Releases from v0.5.13 on carry `SHA256SUMS`
   and a build provenance attestation (PR #233).
-- Tests on main: TESTS_LINE
+- Tests on main (08ec571, v0.5.23, with this docs pass): 3162 passed, 1 skipped, 1 xfailed on macOS,
+  Python 3.13 (local run, 2026-11-06, 6 min 6 s).
 - Tested CLI versions (`TESTED_VERSIONS`): Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318;
   codex-cli 0.154.0, 0.163.0 and 0.166.0 (D56). 2.1.318 has the full live acceptance; 2.1.314 and
   0.166.0 the zero-spend routine only.
