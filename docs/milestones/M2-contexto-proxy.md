@@ -551,6 +551,20 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   holds a shared `flock` on `live.lock` in the session directory until it exits; the descriptor is
   not inherited by child processes. A session whose lock another process holds is in use, and
   `contexto sessions prune` never deletes it. Stores never follow a symlinked `live.lock`.
+- **File safety (D58):** a session directory must be a real directory. One that is a symlink is
+  refused by every command that opens it (the proxy, the launcher, the MCP server, `recall`,
+  `state`, `sessions show`), as `sessions list` leaves it out and prune refuses it. Files in a
+  session are never opened through a symlink, and a FIFO, device or directory in a file's place
+  is refused without blocking: `meta.json`, `epoch.json` and `retained.json` read as absent, a page
+  as unreadable (`page_unreadable`), the ledger as damaged, `page.key` as a key file error, and
+  the log is not written. Every write is whole (a short write continues). A temporary file is
+  removed when its write fails (a full disk), and temporary files left by a process that died
+  mid-write are removed when a store opens for writing (`stale_temp_removed`, with the count). A
+  log line cut short by a full disk is never joined to the next event, which starts on a new line.
+- **Lone surrogates (D58):** a lone UTF-16 surrogate in a string (which Claude Code does not send,
+  and the Messages API refuses) is stored, hashed, counted and written to the MCP client as its
+  JSON escape (`\ud83d`), so pages, ledger records and log lines stay valid UTF-8 JSON that reads
+  back to the same string, and nothing raises on it.
 - **Pinned text** starts with fixed instruction lines, then lists open obligations, active
   decisions, then verified facts, newest first, each with its id, capped at `pin_budget` (default
   6,000 tokens). The instruction lines must say that earlier turns are paged out and how to reach
@@ -571,7 +585,16 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 
 ## MCP server
 
-`contexto mcp --session S`, stdio JSON-RPC per the MCP spec, tools:
+`contexto mcp --session S`, stdio JSON-RPC per the MCP spec. Errors (D58): an id that is not a
+string, a number or null is an invalid request (`-32600`, `id: null`); `params` that is present and
+not an object or null, or a tool name that is not a string, is invalid params (`-32602`). A tool
+that fails returns a tool result with `isError: true`, never a JSON-RPC error, and the call is
+logged `mcp_call` with `ok: false` and the error class: on a damaged ledger, `contexto_pin`,
+`contexto_close` and `contexto_state` say the ledger is damaged and name `contexto sessions show
+<session>`; any other unexpected failure says the call failed with its error class. An error
+echoes a value from the request at most 100 characters long, with its length noted, and a tool
+error's text is at most 1,000 characters. A page id that is not `pg_` and exactly 16 lowercase hex
+digits is an unknown page, never read. Tools:
 
 - `contexto_recall(page_id)` returns the page's messages rendered as plain text (thinking omitted),
   exactly, up to a per-call limit with `offset` for more. The limit is the smaller of 32,000
@@ -760,8 +783,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
-- `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
-- `contexto_close(obligation_id, note)` appends a closure.
+- `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record. A
+  `text` of whitespace only is refused. Pinning an `event`, `artifact` or `reference` that is not
+  `verified` says in its reply that the pinned state will not show it (D58).
+- `contexto_close(obligation_id, note)` appends a closure. A `note` of whitespace only is refused.
 - `contexto_state()` returns the full pinned state without the budget cap.
 - `contexto_search(query)`: word search over page stubs and text (D34). The query is split on
   whitespace; a page matches when every word occurs in it, case-insensitively and in any order. A
@@ -846,8 +871,9 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   "in view" refers to the main conversation's window (a documented subagent limitation); the MCP
   server cannot tell which conversation issued a call. Matches in the
   snapshot (a retained entry matches as a page does: every word of the query in its text, and its
-  matching lines chosen by the same rule) are listed first, labeled in view, newest first, as the matching line only, at most 3
-  per reply (the newest 3 across the window, the rest counted in one line), charged,
+  matching lines chosen by the same rule) are listed first, labeled in view with their turn, newest first, as the matching line only, at most 3
+  per reply (the label counts turns as pages do, from 0, so a turn reads the same number paged or in view; the logged span keeps the
+  entry's own `turn`, which counts turn starts from 1; D58) (the newest 3 across the window, the rest counted in one line), charged,
   skipping the current turn's own question: entries with role `user` in the snapshot's newest
   turn are never matched, since that text is what is being asked, not a
   statement about it (B22; inferred from reviewer-2's zero-spend reach re-check on main 8571095: an offline
