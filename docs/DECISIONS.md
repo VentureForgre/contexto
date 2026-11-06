@@ -1256,6 +1256,146 @@ the owner's delegation. Open decisions are listed at the end with the options an
     role `system` text, so a one-reminder queued prompt placed after other text there (for example a
     nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
     (reviewer B, PR #230 round 2).
+- **D48. Images are priced by their pixels, and images and documents are kept out of the ratio.** Claude,
+  2026-11-05, under D0; contract change (rule 3). The QA round of 2026-11-05 (verify-images, scale-engine
+  finding 1) found every image and document block priced by its base64 bytes: a Read-tool screenshot
+  that count_tokens measured at 641 to 3,243 tokens (claude-haiku-5-5, Claude Code 2.1.314, which scales
+  Read images to a 2,000-pixel long edge) was estimated at 124,000 to 429,000 inside a `tool_result` and
+  53,000 to 184,000 pasted; a 3-page PDF measured at 4,748 was estimated at 498,000. One pasted
+  screenshot at the default 150,000 bound paged the whole retained window and logged `window_minimal`,
+  `bound_too_small` and `turn_room_low`, so the launcher told the user to restart with a larger bound.
+  The image bytes also went into the measured bytes-per-token ratio: 2.87 became 39.4 after two
+  screenshots in a live run, and later text was under-estimated (a tool loop estimated at 61,000 was
+  really 81,000 against a 60,000 bound). The Codex estimate had the same flaw for `input_image`.
+  - **Scope (the orchestrator's decision, PR #234 round 9).** This decision prices images only. Nine
+    review rounds each found a new way to count a PDF's pages low or to make the count slow, while the
+    image pricing, the ratio rules and the head limits below held, so page counting moved to a separate
+    branch and decision. Documents (a Claude `document` block with a base64 PDF, a URL or a file id;
+    a Codex `input_file`) are estimated as on v0.5.8, by their bytes as text: 3.5 bytes a token pasted,
+    1.5 inside a `tool_result`, or the measured ratio once there is one. For the ratio they are media
+    with no floor (below), so they can never raise it.
+  - **Images.** `width * height / 750` tokens after scaling the long edge down to 2,576 pixels, between
+    64 and 4,784: Anthropic's documented formula and limits for the high-resolution tier (Opus 4.7 and
+    later, Sonnet 5 and later); the 64-token minimum covers thin and tiny images, whose patch rounding
+    is not modelled. The size comes from the decoded header: PNG IHDR, GIF screen descriptor, WebP VP8,
+    VP8L and VP8X, and the first JPEG start-of-frame segment within the first 192 KB (after EXIF and ICC
+    segments); line breaks in the base64 are dropped first. An image whose size cannot be read (a URL or
+    file-id source, another format, a damaged header) gets 4,784, the largest cost an image can have.
+    The formula gives 640, 1,728, 2,765 and 3,334 for the four measured sizes (measured 641, 1,719,
+    2,694 and 3,243).
+  - **Where media is found.** Message content, `tool_result` content, a document's content source, and
+    Responses message content and tool output lists, at most 10 levels down. An image-shaped object in a
+    tool's input is text the model wrote and is not priced as an image (and is never walked, so a tool
+    input deeper than Python's recursion limit still estimates).
+  - **The ratio.** It is learned from text only: a request's image and document bytes are left out of
+    its bytes, and their cost out of its real tokens. That cost is not measured, only bounded. The
+    estimate is at or over it for an image. The floor is meant to be at or under it: on Claude 95% of the
+    image formula on the older 1,568-pixel, 1,568-token limit (measured costs ran up to 3% under the
+    formula), 0 for an image of unknown size, and 0 for a document; on Codex 0, since OpenAI prices
+    images by tiles (1,105 tokens for 1920x1080 at high detail, 85 at low). The floor can still run
+    high (an API that prices an image under it), so nothing below relies on it being right.
+  - **What the ratio learns from a request with media** (`text_usage`, `appended_usage`; reviewer B
+    round 3, reviewer A round 4), in order:
+    - **The same media as the last measured request.** When a request only appends to the last measured
+      one (same epoch, window, degraded state and head fingerprint, and every message that request sent
+      unchanged, compared as an anchor over rule 10's normalised hashes, so a moved `cache_control` is
+      no change) and carries the same media (equal content keys), the ratio learns from their
+      difference: the bytes and real tokens the request added. The media cancel exactly, so the appended
+      text is measured with no floor or estimate, and real drift toward denser or sparser text is
+      learned as it happens. Round 5 (reviewer A): at 2ef88a4 only that request's last message was
+      compared, so an edit to an earlier message (a `window_changed` resync keeps the epoch and window)
+      or a head change put its own bytes into the difference. Clearing old dense tool output while
+      appending, with a screenshot in view, crossed the bound unflagged in 5 of 5 sessions (ratio
+      2.64 to 2.79 against the media-free control's 2.52 to 2.68); now all 5 are flagged before sending
+      (ratio 2.22 to 2.23). Tests show the chain does not form after an edit, a rotation, a head change,
+      new media, or a request forwarded after a failed transform.
+    - **With a measured ratio, otherwise.** The media are charged the cost that keeps the ratio, at most
+      their estimate (a document's is its bytes): a request can lower the ratio (its text is denser than
+      measured) but never raise it. When the usage leaves the media less than their floor, the request
+      is not learned, since the floor may have run high. Upward moves come only from requests without
+      media and from differences.
+    - **Before a ratio is measured.** The media are charged their floor, so the first ratio errs low.
+      On Claude, when the media have a floor, only if estimate minus floor is within 10% of the
+      request's usage; otherwise the request is not learned and the estimator keeps its seeds until a
+      difference or a request without media gives a ratio. A floor that would put the request's text
+      above 3.5 bytes a token (the text seed; honest requests measured 2.9 to 3.0) ran high and is not
+      taken off. On Codex the estimate is a deliberate over-estimate, so the range says nothing and the
+      first ratio is learned at floor 0: gating it too kept the 3.5 seed and ran 1.9% under.
+    - **Any request** whose learned text ratio lands outside 1.5 to 6 bytes a token is not learned. A
+      document's whole cost counts as text before a ratio exists, so a first request with a PDF of any
+      size lands under 1.5 and waits for the next request's difference.
+
+    Measured (synthetic upstream at 3.0 bytes a text token, PDFs priced by bytes with floor 0; the
+    sessions of `tests/test_image_estimate.py`): the suite's forms of reviewer B's round-3 sessions (a 20-page PDF at 4,568
+    a page read on turn 1, a 10-page one pasted in the first request) hold 3.00 after every turn, the
+    pasted one learned from the second request's difference (d95e5df: 1.95 and 0.82 after the PDF).
+    Reviewer A's round-4 sessions, a PDF read on turn 2 then text turns and a tool loop run until a
+    request crosses the bound at 150,000 (10 pages at 300 or 1,583 a page, 1 page at 1,583, 20 pages at
+    4,568; three Read sizes each): peak ratio 3.00, and 0 of 12 runs cross the bound unflagged
+    (134f939: peaks 4.37 to 5.05, 14 of 60 runs unflagged, with a page floor that ran high). Drift with a 20-page PDF in view and
+    tool output turning to JSON at 2.0 bytes a token, bound 400,000: the ratio ends at 2.39 (the
+    media-free control 2.20, which weighs recent content more because it observes its whole history on
+    every request; 2.78 at 134f939), the worst estimate against real 0.973 (control 0.955), and nothing
+    crosses the bound unflagged. A Codex session opening with a 1920x1080 screenshot learns 2.70 rising
+    to 2.94 (true 3.0), every estimate at or above real. The price of a floor of 0 is that an
+    image-heavy first Codex request learns a low first ratio: 10 screenshots beside 45 KB of text learn
+    1.74 for a true 3.0.
+  - **Media in the conversation's first request** (reviewer B, rounds 4 and 5; D49 amended by #244).
+    Rule 4 measures the head from the first measured request: its input minus its window, the window's
+    text counting at its share of the request's text bytes applied to the input minus the request's
+    media floor (or the estimate before the send when that is lower), and the window's media at their
+    floor (`measured_head_tokens`). With a floor at or under the media's cost this errs high. With media
+    in the window, two limits hold whatever the floor does: the head is never under the text-seed
+    estimate of the request's own `system` and `tools`, since a floor can run high (B, round 5: at
+    2ef88a4 a floor over the cost took the head to 0 and `W` about 38k too large, and one tool loop
+    reached 153,954 on a 150,000 bound); and when all the request's media are in the window it is never
+    over its own bytes at 1.5 bytes a token, the densest text the ratio accepts, since a floor far under
+    the cost (a document's 0) leaves the head that much high (B, round 4: a 100-page PDF in the first
+    request at 800,000 gave `W` 226,625 against the control's 517,858). Without media the measurement
+    is D49's. Measured head (true head 16,715; text at 3.0 bytes a token; `W` beside an equal-cost text
+    control), v0.5.8 then now:
+
+    | first request carries | v0.5.8: head, W | now: head, W | control W |
+    |---|---|---|---|
+    | a 1440x900 screenshot | 1,374, 110,314 | 16,966, 108,034 | 108,026 |
+    | a 10-page PDF, 4,568 a page | 9,854, 115,146 | 33,449, 91,551 | 101,747 |
+    | a 10-page PDF, 1,583 a page | 8,857, 116,143 | 32,557, 92,443 | 106,012 |
+    | 20 pages costing 300 | 14,624, 110,376 | 22,727, 102,273 | 107,416 |
+    | a 100-page PDF, 4,568 a page, bound 800,000 | 11,546, 763,454 | 33,449, 741,551 | 693,016 |
+
+    On v0.5.8 the base64 took most of the byte share, so the head measured low and `W` ran over its
+    true size. Now a PDF's unknown cost lands in the head up to the 1.5-bytes limit, so `W` runs 5 to
+    13% under the control's until the PDF's own pricing (the follow-up decision) gives it a floor. The
+    100-page case's `W` is above its control's because the control's own head errs high by D49's
+    design, and below the true `W` (about 758,000).
+  - **Pages are unchanged.** A page keeps the image as sent, `render_page` shows `[image omitted]`, and
+    search and recall skip it; only the page's `tokens` metadata is now realistic.
+  - **Measured** (synthetic upstream at 3.0 bytes per text token plus `w*h/750` per image, QA-sized
+    images; `tests/test_image_estimate.py`), v0.5.8 then this change:
+
+    | case | v0.5.8 | D48 |
+    |---|---|---|
+    | 800x600 PNG in a `tool_result` / pasted (measured 641) | 124,088 / 53,166 | 678 / 640 |
+    | 1440x900 PNG (measured 1,719) | 416,621 / 178,537 | 1,766 / 1,728 |
+    | 1920x1080 JPEG (measured 2,694) | 406,955 / 174,394 | 2,803 / 2,765 |
+    | 2000x1250 JPEG (measured 3,243) | 429,355 / 183,994 | 3,372 / 3,334 |
+    | 3-page PDF, 1.7 MB base64 (measured 4,748) | 498,397 | 498,397 (unchanged) |
+    | pasted screenshot after 6 turns, bound 150,000 | estimate 261,033; window_minimal, bound_too_small, turn_room_low; 1 of 13 messages sent | estimate 54,466 for a real 54,487; no events; 13 of 13 sent |
+    | ratio after 2 Read screenshots, then after 25 text requests (true 3.0) | 36.44, then 59.15 | 3.00, then 3.00 |
+    | 55 KB Read in the tool loop after them, bound 60,000 | estimate 23,877 for a real 59,618 | 59,601 for 59,618 |
+
+  - **Not covered.** Image prices on models before the high-resolution tier are lower (at most about
+    1,568 tokens), so there the estimate errs high by up to 3 times per large image; the ratio rules
+    above keep the ratio safe. Codex uses the same formula; OpenAI prices images by tiles, lower than
+    this, so a Codex estimate errs high: in reviewer B's Codex run two turns its equal-cost control keeps
+    were paged (`window_minimal`), by design. A screenshot in a paged turn is still not recallable as an
+    image (unchanged). PDFs keep v0.5.8's estimate, which errs high for a PDF over about 4 KB a page
+    pasted (2 KB in a Read result) and low for a more compact one, since the API charges each page its
+    text and a page image whatever the file's size: at an assumed 1,583 tokens a page (the measured
+    3-page PDF), 12 of the 14 producer files the PDF branch tests with, 0.1 to 1.7 KB a page, are
+    estimated at 0.02 to 0.41 of that pasted and 0.05 to 0.96 in a Read result, and the two at 4.6 KB
+    a page or more at 1.2 to 4.0 times. Pricing documents by page is the follow-up decision.
+
 - **D49. A head change is sized like any other rotation, and every forwarded request is checked
   against the bound.** Claude, 2026-11-05, under D0; contract change (rules 3 to 6). QA 2026-11-05
   (live-realworld F1, verify-headchange) found that any byte change to `system` or `tools` (tool

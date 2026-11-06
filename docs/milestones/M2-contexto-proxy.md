@@ -304,14 +304,42 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    Until the first real usage arrives, count `tool_result` content at 1.5 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
    character, and M0 saw log-heavy tool output near 1.8 bytes per token, so 1.5 errs high); after
-   that, use the session's measured bytes-per-token ratio. After every response, compare real
-   usage with the bound and the estimate: log `over_bound` from real usage when it exceeds the
-   bound, and `estimate_error` when real usage exceeds the estimate by more than 10%.
+   that, use the session's measured bytes-per-token ratio. Images (D48: Messages `image`, Responses
+   `input_image`, top level or inside a `tool_result` or tool output) are not priced by their bytes:
+   an image costs `width * height / 750` tokens after scaling its long edge down to 2,576 pixels,
+   between 64 and 4,784, with the size read from the PNG, JPEG, GIF, or WebP header, and 4,784 when it
+   cannot be read (a URL, a file id, another format). Documents (Messages `document` with a base64
+   PDF, a URL or a file id; Responses `input_file`) are estimated by their bytes as text, as before
+   D48, pending a separate decision on pricing them by page; a document of plain text or content
+   blocks is text.
+   The ratio is learned from text only: each observed request's image and document (media) bytes are
+   left out of its bytes, and their cost out of its real tokens. That cost lies at or under the
+   media's estimate (a document's is its bytes) and is meant to lie at or over their floor (on Claude
+   95% of the image formula on the older 1,568-pixel, 1,568-token limit, 0 for an image of unknown
+   size; 0 for a document; on Codex 0, since OpenAI's tile prices go lower), though the floor can run
+   high. A request that only appends to the last measured one (same epoch, window, degraded state
+   and head, and every message of that request unchanged, by rule 10's hashes of the request's
+   messages before the transform) and carries the same media teaches the ratio its difference from
+   it: the bytes and tokens it added. Otherwise, with a measured ratio, the media are charged the
+   cost that keeps the ratio, at most their estimate, so a request with media can lower the ratio but
+   never raise it; when that cost would be under the floor, the request is not learned. Before a
+   ratio is measured, the media are charged their floor, and a request whose media has a floor is
+   learned only when estimate minus floor is within 10% of its usage; a floor that would put the text
+   above 3.5 bytes a token (the text seed) ran high and none is taken off. A request whose learned
+   ratio lands outside 1.5 to 6 bytes a token is not learned. After every response, compare real
+   usage with the bound and the estimate: log `over_bound` from real usage when it exceeds the bound,
+   and `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
    index), in tokens, taken from measured usage once available and from the estimator before that.
    The first measured request's input, minus its non-carried messages, is the head; the messages
    count at that request's own ratio (their share of its bytes), or at the estimate made before the
    send when that is lower, so the head errs high whenever the first usage arrives (D49 as amended).
+   Media are left out of that share (D48): the window's text counts at its share of the request's text
+   bytes, applied to the input minus the request's media floor, and the window's media at their floor.
+   With media in the window, the head is never under the text-seed estimate of the request's own
+   `system` and `tools`, since a floor can run high, and, when all the request's media are in the
+   window, never over its own bytes at 1.5 bytes a token, since a floor can run far under the cost (a
+   document's is 0). Without media the measurement is D49's.
    After a head change (rule 6) the measured head is adjusted by the estimated size of the change in
    `system` and `tools` bytes since the measured request, so a server that adds tools or a model
    switch counts in `F` once (D49). The window budget is `W = bound - headroom - F`, and

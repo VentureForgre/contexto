@@ -10,7 +10,7 @@ deterministic serializer sends byte-identical prefixes within an epoch. The stor
 a turn start's rotation and a paged_changed resync (``page_out``, ``pinned_text``, ``index_text``,
 ``set_window``, ``quarantine_page``) and by ``observe_usage``
 (``log``, ``set_window``); the estimator only through ``estimate``, ``estimate_messages``,
-``observe`` and ``measured_bytes_per_token``.
+``estimate_value``, ``observe`` and ``measured_bytes_per_token``.
 
 Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 
@@ -141,7 +141,15 @@ from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import is_own_block, is_own_item, own_call_ids, render_page
-from contexto.tokens import TEXT_BYTES_PER_TOKEN, TokenEstimator
+from contexto.tokens import (
+    TEXT_BYTES_PER_TOKEN,
+    MediaCost,
+    TokenEstimator,
+    estimate_tokens,
+    media_cost,
+    media_keys,
+    split_media,
+)
 from contexto.toolcheck import ToolCheck
 
 MESSAGES = "/v1/messages"
@@ -154,7 +162,27 @@ STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
 RETAINED_ROLES = ("user", "assistant", "tool_result")  # A14: the roles set_retained accepts (lane B PR #128)
+# D48: before a ratio is measured, a request whose text would measure above this many bytes a token once
+# its media floor is taken off had a floor above the media's real cost; its floor is dropped instead.
+MEDIA_RATIO_CEILING = TEXT_BYTES_PER_TOKEN
+# D48: bytes a token a request with media may teach the ratio; outside it the media's cost was not bounded
+# well enough (a document far over its floor of 0, or a floor far over its cost), so the request is not learned.
+MEDIA_TEXT_RATIO_RANGE = (1.5, 6.0)
+# D48: before a ratio is measured, a request with media teaches the first one only when its media's cost is
+# known to this share of its usage (estimate minus floor), so the first ratio errs low by at most about this.
+MEDIA_FIRST_UNCERTAINTY = 0.1
 RESTORED_RATIO_RANGE = (1.0, 6.0)  # bytes per token a restore accepts; outside it the seed is safer (A2e)
+
+
+class Measured(NamedTuple):
+    """D48: what the ratio needs of the last measured request to learn from the next one's difference."""
+
+    scope: tuple  # (epoch, k, degraded, head fingerprint) it was sent in
+    count: int  # messages sent
+    prefix: str  # anchor_hash of its messages' rule 10 hashes
+    text_bytes: int  # bytes sent, media left out
+    real: int  # its real input tokens
+    keys: tuple  # its media's content keys
 
 
 class _ByteCount(TokenEstimator):
@@ -215,6 +243,16 @@ class EpochState:
     head_changed: bool = False  # a new epoch is due at the next turn start
     hashes: tuple[str, ...] = ()  # normalised hashes of the previous request's messages
     last_sent_bytes: int = 0
+    last_sent_media: MediaCost = MediaCost()  # D48: the images and documents in those bytes
+    last_sent_media_keys: tuple = ()  # D48: their content keys, in order (media_keys)
+    # D48: whether that request only appended to the last measured one (same epoch, window, degraded state
+    # and head, and every message of that request unchanged, by the rule 10 hashes taken before the
+    # transform), so their media cancel in a difference.
+    last_sent_appends: bool = False
+    last_sent_scope: tuple = ()  # D48: (epoch, k, degraded, head fingerprint) the request was sent in
+    # D48: (message count, anchor_hash of the request's message hashes); (0, "") when it may not start a chain
+    last_sent_anchor: tuple[int, str] = (0, "")
+    last_measured: Measured | None = None  # D48: the last request whose usage was measured. Per-request.
     last_input_tokens: int | None = None  # real upstream input of the previous request
     max_turn_growth: int = 0
     last_turn_start_n: int | None = None  # history length at the previous turn start
@@ -223,9 +261,10 @@ class EpochState:
     head_size: int | None = None  # D49: bytes of the head head_tokens measures; never recorded
     initial_carried: int | None = None  # carried content at the conversation's first request
     # Rule 4, while the head is unmeasured: the previous upstream request's non-carried messages, estimated
-    # and in bytes as the estimator counts them
+    # and in bytes as the estimator counts them, both without their images and documents (D48)
     last_window_tokens: int = 0
     last_window_bytes: int = 0
+    last_window_media: MediaCost = MediaCost()  # D48: that window's images and documents
     paged_carried: frozenset[str] = frozenset()  # hashes of carried text messages paged by the fallback
     last_carried_text_count: int | None = None  # carried text messages at the previous turn start
     carried_text_streak: int = 0  # consecutive turn starts at which that count grew
@@ -384,6 +423,9 @@ class Dialect:
 
     name = "anthropic"
     field = "messages"
+    # D48: whether media's floor cost (MediaCost.floor) is at or under what this API charges, so the ratio
+    # can take it off real usage. True for Claude's pixel prices.
+    media_floor = True
 
     def is_context_block(self, block: Any) -> bool:
         return _anthropic_is_context_block(block)
@@ -1125,11 +1167,16 @@ def estimate_upstream(request: dict, messages: list[dict], previous_n: int, stat
     return head + estimate_items(estimator, transform_messages(messages, state))
 
 
-def window_tokens(messages: list[dict], estimator: TokenEstimator, start: int = 0) -> int:
-    """Tokens of the non-carried part of M[start..) (no carried system messages, no context blocks)."""
+def window_items(messages: list[dict], start: int = 0) -> list[dict]:
+    """The non-carried part of M[start..) as estimated (no carried system messages, no context blocks)."""
     kept = strip_carried(messages, start, len(messages))
     d = _dialect()
-    return estimate_items(estimator, [x for x in (strip_thinking(m) for m in kept if d.countable(m)) if x is not None])
+    return [x for x in (strip_thinking(m) for m in kept if d.countable(m)) if x is not None]
+
+
+def window_tokens(messages: list[dict], estimator: TokenEstimator, start: int = 0) -> int:
+    """Tokens of the non-carried part of M[start..)."""
+    return estimate_items(estimator, window_items(messages, start))
 
 
 def carried_tokens(messages: list[dict], estimator: TokenEstimator, paged: frozenset[str] = frozenset()) -> int:
@@ -1453,17 +1500,113 @@ def guarded_rotation(request: dict, messages: list[dict], n: int, estimate: int,
     return replace(new, degraded=False, conflict_page=None)
 
 
+def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None) -> tuple[int, int | None]:
+    """The text part of a request's bytes and real tokens, for the measured ratio (D48), or None for the
+    tokens when the request should not be learned from. Media bytes are left out. The media's real cost
+    lies between its floor and its estimate when the floor is at or under the cost and the estimate at or
+    over it; a floor can still run high (an API that prices an image under it), and a document has no
+    floor (it is estimated by its bytes, far above what it costs). With a measured ratio, the media are
+    charged the cost that keeps the ratio, at most their estimate, so a request can lower the ratio (text
+    denser than measured) but never raise it: when the usage leaves the media less than their floor, the
+    request is skipped, since a floor above the real cost would book the rest as sparse text. Before
+    one, the media are charged their floor, so the first ratio errs low (text over-counted); when they
+    have a floor (Claude) the request is learned only if that range is within ``MEDIA_FIRST_UNCERTAINTY``
+    of its usage, so a document next to an image cannot set a first ratio far too low (on Codex the floor
+    is 0 and the estimate a deliberate over-estimate, so its range says nothing). A floor that would put
+    the text over ``MEDIA_RATIO_CEILING`` ran high and is not taken off. A request whose text ratio still
+    lands outside ``MEDIA_TEXT_RATIO_RANGE`` is skipped (a large document's cost, booked as text when
+    no ratio is measured yet, puts it under that range)."""
+    text_bytes = sent_bytes - media.bytes
+    if not media.bytes and not media.tokens:
+        return text_bytes, real
+    if ratio:
+        implied = real - text_bytes / ratio
+        if implied < media.floor:
+            return text_bytes, None  # the media may have cost less than their floor: never raise the ratio
+        charged = min(implied, media.tokens)
+    elif media.floor and media.tokens - media.floor > MEDIA_FIRST_UNCERTAINTY * real:
+        return text_bytes, None  # media whose cost is too uncertain to set the first ratio from
+    else:
+        charged = media.floor if text_bytes <= MEDIA_RATIO_CEILING * (real - media.floor) else 0
+    tokens = real - charged
+    low, high = MEDIA_TEXT_RATIO_RANGE
+    if tokens <= 0 or text_bytes <= 0 or not low <= text_bytes / tokens <= high:
+        return text_bytes, None
+    return text_bytes, math.ceil(tokens)
+
+
+def measured_head_tokens(state: EpochState, real: int, request: dict, dialect: Dialect) -> int:
+    """Rule 4's head from the first measured request (D49 amended, D48): its input minus its window. The
+    window's text counts at its byte share of the request's text tokens, unless the estimate made before
+    the send is lower, and its media at their floor: media bytes are no text, and a screenshot's or a
+    PDF's base64 would otherwise take most of the share. The request's text tokens are its input minus its
+    media's floor, so with a floor at or under the media's cost the head errs high. With media in the
+    window two limits hold whatever the floor does: a floor can run high, so the head is never under the
+    seed estimate of the request's own system prompt and tools; and a floor far under the cost (a
+    document's, which is 0) leaves the head that much high, so when all the request's media are in the
+    window (none in the head) it is never over its own bytes at the densest text the ratio accepts
+    (``MEDIA_TEXT_RATIO_RANGE``, the tool-output seed). Without media the measurement is D49's."""
+    window_media, media = state.last_window_media, state.last_sent_media
+    window_text_bytes = state.last_window_bytes
+    sent_text_bytes = state.last_sent_bytes - media.bytes
+    text_tokens = max(0, real - media.floor)
+    share = window_text_bytes * text_tokens // sent_text_bytes if sent_text_bytes > 0 else text_tokens
+    window = min(state.last_window_tokens, share) + window_media.floor
+    head = real - window
+    if window_media.tokens:
+        if window_media.tokens == media.tokens:
+            head = min(head, math.ceil(max(0, sent_text_bytes - window_text_bytes) / MEDIA_TEXT_RATIO_RANGE[0]))
+        head = max(head, estimate_tokens(canonical_json(dialect.head_estimate_source(request))))
+    return max(head, 0)
+
+
+def appended_usage(previous: Measured | None, text_bytes: int, real: int, keys: tuple) -> tuple[int, int] | None:
+    """D48: the text bytes and real tokens a request added to the last measured one, for a request that
+    only appended to it (``appends_to``, checked when it was sent) and carries the same media (``keys``):
+    the media cancel exactly, so the appended text is measured with no floor or estimate. None otherwise,
+    or when the difference is not positive or its ratio lands outside ``MEDIA_TEXT_RATIO_RANGE``."""
+    if not keys or previous is None or previous.keys != keys:
+        return None
+    added_bytes, added_tokens = text_bytes - previous.text_bytes, real - previous.real
+    low, high = MEDIA_TEXT_RATIO_RANGE
+    if added_bytes <= 0 or added_tokens <= 0 or not low <= added_bytes / added_tokens <= high:
+        return None
+    return added_bytes, added_tokens
+
+
+def appends_to(previous: Measured | None, scope: tuple, hashes: tuple[str, ...]) -> bool:
+    """Whether a request whose messages have ``hashes`` only appends to the last measured request: the same
+    epoch, window, degraded state and head (``scope``), and every message that request had unchanged
+    (rule 10's normalised hashes, so a moved ``cache_control`` is no change). An edit to an earlier message
+    (a ``window_changed`` resync keeps the epoch and window) or a head change would put its own bytes
+    and tokens into the difference."""
+    if previous is None or previous.scope != scope or not 0 < previous.count <= len(hashes):
+        return False
+    return anchor_hash(hashes[:previous.count]) == previous.prefix
+
+
+def sent_media(items: list, *, measure_bytes: bool = True) -> MediaCost:
+    """The images and documents in ``items``: their bytes, estimate, and least cost (D48). The least cost
+    is 0 on a dialect whose API can charge less than Claude's floor (Codex: OpenAI prices by tiles,
+    85 tokens at low detail), so taking it off real usage never makes the ratio count text low."""
+    media = media_cost(split_media(items)[1], measure_bytes=measure_bytes)
+    return media if _dialect().media_floor else media._replace(floor=0)
+
+
 def forward_original(request: dict, messages: list[dict], state: EpochState, reason: str,
                      events: list[dict]) -> tuple[dict, EpochState, list[dict]]:
     """Rule 14 terminal step: send the CLI's request unchanged and log ``fallback_failed``. The epoch keeps
     its previous hashes, so the next request detects the same mismatch and tries once more."""
     sent = len(canonical_bytes(request))
+    media = sent_media(messages)
     events.append({"event": "fallback_failed", "epoch": state.epoch, "reason": reason, "messages": len(messages)})
     events.append({"event": "request", "epoch": state.epoch, "k": state.k, "messages": len(messages),
                    "upstream_messages": len(messages), "sent_bytes": sent, "degraded": True,
                    "fallback_failed": True})
-    return request, replace(state, degraded=True, last_sent_bytes=sent, last_estimate=None, last_input_tokens=None,
-                            pending_usage=usage_identity(messages)), events
+    return request, replace(state, degraded=True, last_sent_bytes=sent, last_sent_media=media,
+                            last_sent_media_keys=media_keys(split_media(messages)[1]), last_sent_appends=False,
+                            last_sent_anchor=(0, ""),
+                            last_estimate=None, last_input_tokens=None, pending_usage=usage_identity(messages)), events
 
 
 def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str, state: EpochState, store: Store,
@@ -1527,11 +1670,23 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
 
     upstream = {**request, field_name: transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
+    sent_items = upstream[field_name]
     if state.head_tokens is None and state.k == 0:  # rule 4 may measure the head from this request's usage
-        state = replace(state, last_window_tokens=window_tokens(upstream[field_name], estimator),
-                        last_window_bytes=window_tokens(upstream[field_name], BYTE_COUNT))
-    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
-                    last_estimate=sent_estimate, pending_usage=usage_identity(messages))
+        window = window_items(sent_items)
+        text = split_media(window)[0]
+        state = replace(state, last_window_tokens=estimate_items(estimator, text),
+                        last_window_bytes=estimate_items(BYTE_COUNT, text),
+                        last_window_media=sent_media(window, measure_bytes=False))
+    # Within one epoch, window, degraded state and head the transform is a function of the request's own
+    # messages, so their rule 10 hashes (computed once per request) stand for what is sent (D48).
+    scope = (state.epoch, state.k, state.degraded, fingerprint)
+    hashes = tuple(message_hash(m) for m in messages)
+    state = replace(state, hashes=hashes, last_sent_bytes=sent,
+                    last_sent_media=sent_media(sent_items), last_estimate=sent_estimate,
+                    last_sent_media_keys=media_keys(split_media(sent_items)[1]),
+                    last_sent_appends=appends_to(state.last_measured, scope, hashes), last_sent_scope=scope,
+                    last_sent_anchor=(len(hashes), anchor_hash(hashes)),
+                    pending_usage=usage_identity(messages))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
     if rotated:
@@ -2572,8 +2727,23 @@ class RewriteEngine:
             events.append({"event": "usage_unattributed", "epoch": state.epoch, "messages": identity[0],
                            "expected_messages": pending[0] if pending else None})
         else:
-            self.estimator.observe(state.last_sent_bytes, real)  # the session's measured ratio from now on
-            state = replace(state, last_input_tokens=real, pending_usage=None)
+            # The session's measured ratio from now on, of text only (D48): from what a request appended to
+            # the last measured one when both carry the same media, else bounded by the media's floor and
+            # estimate (text_usage).
+            media, keys = state.last_sent_media, state.last_sent_media_keys
+            text_bytes = state.last_sent_bytes - media.bytes
+            appended = (appended_usage(state.last_measured, text_bytes, real, keys)
+                        if state.last_sent_appends else None)
+            if appended is not None:
+                self.estimator.observe(*appended)
+            else:
+                text_bytes, text_tokens = text_usage(state.last_sent_bytes, real, media,
+                                                     self.estimator.measured_bytes_per_token)
+                if text_tokens is not None:
+                    self.estimator.observe(text_bytes, text_tokens)
+            measured = (Measured(state.last_sent_scope, *state.last_sent_anchor, text_bytes, real, keys)
+                        if state.last_sent_anchor[0] else None)
+            state = replace(state, last_input_tokens=real, pending_usage=None, last_measured=measured)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried
                 # messages, which also covers a resumed first request with a long history). The messages
@@ -2582,9 +2752,8 @@ class RewriteEngine:
                 # at the seed's 1.5 bytes per token, and after a long loop ran thousands of tokens over
                 # (D49 amended). The head's size is re-based on this request, so a head change since the
                 # conversation's first request is in the measurement and counted once.
-                share = state.last_window_bytes * real // state.last_sent_bytes if state.last_sent_bytes else real
-                window = min(state.last_window_tokens, share)
-                state = replace(state, head_tokens=max(0, real - window), head_size=size)
+                state = replace(state, head_tokens=measured_head_tokens(state, real, request, dialect),
+                                head_size=size)
             if state.window_budget is None and state.head_tokens is not None:
                 # A8 (c): W from the measured head, so set_window publishes W and the ratio after the first
                 # response rather than only after a rotation decision, and a restarted engine can restore
