@@ -328,6 +328,7 @@ def start_warning(bound: int, headroom_floor: int | None, overhead: int) -> str 
 
 class NoticeLog:
     """Session log wrapper: everything goes to the store; the engine's first bound_too_small event,
+    first ``pdf_allowance`` and ``pdf_pages_uncertain`` (D60),
     first window budget under MIN_WINDOW_BUDGET, first ``mcp_tools_denied`` (D44), and first
     ``mcp_tools_missing`` (from a request, or logged at exit by ``report_missing_tools``) are also shown
     on stderr, once each; an exit-time ``mcp_tools_missing`` that repeats a mid-run one is shown once
@@ -372,7 +373,22 @@ class NoticeLog:
             if inner is event:
                 continue
             budget, overhead = inner.get("window_budget"), inner.get("fixed_overhead")
-            if inner.get("event") == "bound_too_small":
+            if inner.get("event") == "pdf_pages_uncertain":
+                self._once("pdf_pages_uncertain", "a PDF could not be read fully, so it is counted at the "
+                           "maximum, 600 pages; earlier messages may be paged out for it, and stay recallable.")
+            elif inner.get("event") == "pdf_allowance":
+                # D60: the turn fits at a typical page cost; only the PDF's allowance does not. Dense pages
+                # can cost more than typical ones, so this is not a promise that the request fits.
+                self._once("pdf_allowance", "a large PDF is estimated generously (4,568 tokens a page, more than "
+                           "most pages cost), so this turn kept only its own messages; the earlier ones are "
+                           "recallable. With typical pages the turn may fit the bound as it is.")
+            elif inner.get("event") == "bound_too_small" and inner.get("pdf_uncertain"):
+                # D60: an uncertain PDF counts 600 pages; its real size, and so the bound it needs, is unknown.
+                self._once("bound_too_small_pdf", "a PDF in this turn could not be read fully, so it is counted "
+                           "at the maximum, 600 pages, and the turn does not fit the window; the engine keeps "
+                           "only the new turn, and requests may exceed the bound. A larger --bound helps only if "
+                           "the PDF is long.")
+            elif inner.get("event") == "bound_too_small":
                 # Rule 4 window_minimal (contract PR #50): the engine still rotates, to a window of
                 # only the new turn, which can still put the request over the bound.
                 bound = inner.get("bound")

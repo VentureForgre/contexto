@@ -52,7 +52,9 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   cannot hold the newest complete turn and the new turn rotates to the minimal window (only the new
   turn; ``window_minimal``, contract PR #50), and a ``W`` that is not positive or cannot hold even the
   new turn also logs ``bound_too_small`` and still rotates there, so such a request can exceed the
-  bound. ``F`` and ``W`` appear in these events.
+  bound; ``pdf_allowance`` instead when the new turn would fit with its PDFs at a typical page cost and
+  all of them are certain (D60).
+  ``F`` and ``W`` appear in these events.
 - A second rotation condition (packet A12, contract PR #115): at a turn start, when the recall room
   the request-time publish would give the new turn (``bound - estimate - headroom_floor``) is below
   ``min_turn_room`` (default 12,000), the engine rotates with the window target ``0.5 * (W -
@@ -138,6 +140,7 @@ from typing import Any, ClassVar, NamedTuple, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
+from contexto.pdfpages import PDF_MAX_PAGES
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import is_own_block, is_own_item, own_call_ids, render_page
@@ -148,7 +151,10 @@ from contexto.tokens import (
     estimate_tokens,
     media_cost,
     media_keys,
+    pdf_allowance,
+    prime_media,
     split_media,
+    uncertain_documents,
 )
 from contexto.toolcheck import ToolCheck
 
@@ -1373,8 +1379,19 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
                 state = new_epoch(messages, request, state, store, config, estimator, state.k, n, events,
                                   "head_change", sizing=(f, w))
             if w <= 0 or new_tokens > w:
-                events.append({"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
-                               "new_turn_tokens": new_tokens})
+                # D60: when the new turn would fit with its PDFs at a typical page cost, and every PDF in it
+                # is certain, it is the PDFs' generous allowance that falls short, not (necessarily) the
+                # bound. An uncertain PDF's real size is unknown, so that turn is a bound too small, marked.
+                allowance, uncertain = pdf_allowance(messages[new_start:])
+                if w > 0 and allowance and not uncertain and new_tokens - allowance <= w:
+                    events.append({"event": "pdf_allowance", **sizing, "epoch": state.epoch, "bound": config.bound,
+                                   "new_turn_tokens": new_tokens, "pdf_allowance_tokens": allowance})
+                else:
+                    event = {"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
+                             "new_turn_tokens": new_tokens}
+                    if uncertain:
+                        event["pdf_uncertain"] = uncertain
+                    events.append(event)
         else:
             k = choose_k(messages, state, target, estimator)
             if restores and room_k > k:
@@ -1505,7 +1522,7 @@ def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None
     tokens when the request should not be learned from. Media bytes are left out. The media's real cost
     lies between its floor and its estimate when the floor is at or under the cost and the estimate at or
     over it; a floor can still run high (an API that prices an image under it), and a document has no
-    floor (it is estimated by its bytes, far above what it costs). With a measured ratio, the media are
+    floor (a PDF's page can cost far under its allowance, D60). With a measured ratio, the media are
     charged the cost that keeps the ratio, at most their estimate, so a request can lower the ratio (text
     denser than measured) but never raise it: when the usage leaves the media less than their floor, the
     request is skipped, since a floor above the real cost would book the rest as sparse text. Before
@@ -1687,6 +1704,11 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
                     last_sent_appends=appends_to(state.last_measured, scope, hashes), last_sent_scope=scope,
                     last_sent_anchor=(len(hashes), anchor_hash(hashes)),
                     pending_usage=usage_identity(messages))
+    uncertain = uncertain_documents(messages[previous_n:]) if n > previous_n else 0
+    if uncertain:
+        # D60: a PDF whose pages are not certain counts as the API's maximum; say so when it arrives.
+        events.append({"event": "pdf_pages_uncertain", "epoch": state.epoch, "documents": uncertain,
+                       "pages": PDF_MAX_PAGES})
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
     if rotated:
@@ -2688,6 +2710,14 @@ class RewriteEngine:
         runs = len(_turn_starts(messages, dialect))
         self._side_rooms[room_id] = _SideRoom(key, len(messages), anchor_hash(hashes), now, frozenset(call_ids),
                                               prompt, runs)
+
+    def prime(self, request: dict) -> None:
+        """D60: count the request's PDFs into the page-count cache. The proxy calls this before it takes
+        its transform lock, so parsing a large or crafted PDF does not hold up every other session; the
+        engine then finds the counts cached. Reads the request only, and never raises."""
+        if isinstance(request, dict):
+            for field_name in ("messages", "input"):  # Messages, Responses
+                prime_media(request.get(field_name))
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:

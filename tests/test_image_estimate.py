@@ -3,9 +3,8 @@
 Measured with count_tokens on claude-haiku-5-5 (QA, 2026-11-05): a 1440x900 PNG that Claude Code sends as
 624,872 base64 characters costs 1,719 tokens (about w*h/750). On v0.5.8 the engine estimated it at about
 178,000 tokens as a pasted image (3.5 bytes per token) and about 417,000 inside a tool_result (1.5 bytes
-per token, how the Read tool returns screenshots). Documents (PDFs) are still estimated by their bytes, as
-on v0.5.8, which errs high (a 3-page PDF really 4,748 is estimated at about 115,000 or more); pricing them
-by page awaits a separate decision.
+per token, how the Read tool returns screenshots). Documents (PDFs) are priced by their pages (D60,
+tests/test_pdf_pages.py), and are media here too.
 The session tests use a synthetic upstream that charges text at 3.0 bytes per token plus w*h/750 per image.
 """
 
@@ -22,6 +21,7 @@ import pytest
 
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.codex import RESPONSES
+from contexto.pdfpages import PDF_MAX_PAGES
 from contexto.rewrite import Config, RewriteEngine
 from contexto.store import SessionStore
 from contexto.store.memory import MemoryStore
@@ -29,6 +29,7 @@ from contexto.store.render import render_page
 from contexto.tokens import (
     IMAGE_MAX_TOKENS,
     IMAGE_MIN_TOKENS,
+    PDF_PAGE_TOKENS,
     TokenEstimator,
     estimate_message_tokens,
     image_size,
@@ -160,23 +161,23 @@ def pdf_block(data: str) -> dict:
     return {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}}
 
 
-def test_documents_are_estimated_by_their_bytes_as_before():
-    """D48 prices images only; a PDF is estimated as on v0.5.8 (its bytes as text, which errs high), pasted
-    or read by a tool, by base64, URL, or file id, until a separate decision prices it by page."""
+def test_documents_are_estimated_by_their_pages():
+    """D60: a PDF costs 4,568 a page, its pages certain or 600 (a document by URL or file id is never
+    certain), pasted or read by a tool, at the seeds or the measured ratio; its bytes are no text."""
     pasted = [{"role": "user", "content": [{"type": "text", "text": "read this"}, pdf_block(pdf_b64(3))]}]
     read = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
                                           "content": [pdf_block(pdf_b64(3)), image_block()]}]}]
     url = {"type": "document", "source": {"type": "url", "url": "https://example.com/a.pdf"}}
     file = {"type": "document", "source": {"type": "file", "file_id": "file_011"}}
     by_reference = [{"role": "user", "content": [url, file]}]
-    for messages in (pasted, by_reference):
-        assert estimate_message_tokens(messages) == v058_estimate(messages)
-    assert estimate_message_tokens(pasted) > 100_000 > 3 * 4_568  # a 3-page PDF really costs about 4,748
-    # In a Read result next to a screenshot: the PDF by its bytes at the tool-output seed, the image by pixels
-    assert estimate_message_tokens(read) == v058_estimate(split_media(read, documents=False)[0]) + REAL_IMAGE_TOKENS
+    text = [{"role": "user", "content": [{"type": "text", "text": "read this"}]}]
+    read_text = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [None, None]}]}]
+    assert estimate_message_tokens(pasted) == v058_estimate(text) + 3 * PDF_PAGE_TOKENS
+    assert estimate_message_tokens(by_reference) == 2 * PDF_MAX_PAGES * PDF_PAGE_TOKENS
+    assert estimate_message_tokens(read) == v058_estimate(read_text) + 3 * PDF_PAGE_TOKENS + REAL_IMAGE_TOKENS
     measured = TokenEstimator()
     measured.observe(3_000, 1_000)
-    assert measured.estimate_messages(pasted) == math.ceil(sum(message_bytes(pasted)) / 3.0)
+    assert measured.estimate_messages(pasted) == math.ceil(sum(message_bytes(text)) / 3.0) + 3 * PDF_PAGE_TOKENS
 
 
 def test_text_documents_are_measured_as_text():
@@ -194,8 +195,7 @@ def test_split_media_copies_only_the_path_to_media():
     assert mixed["content"][1] is image  # the input is not changed
     document = pdf_block(pdf_b64(1, filler=10))
     both = {"type": "tool_result", "content": [document, image]}
-    assert split_media(both)[1] == [document, image]  # the ratio leaves both out
-    assert split_media(both, documents=False) == ({"type": "tool_result", "content": [document, None]}, [image])
+    assert split_media(both) == ({"type": "tool_result", "content": [None, None]}, [document, image])
 
 
 def test_codex_input_image_is_priced_by_pixels():
@@ -206,7 +206,8 @@ def test_codex_input_image_is_priced_by_pixels():
     assert REAL_IMAGE_TOKENS <= tokens < REAL_IMAGE_TOKENS + 100  # v0.5.8: about 178,000
     pdf = {"type": "input_file", "filename": "a.pdf", "file_data": "data:application/pdf;base64," + pdf_b64(2)}
     items = [{"type": "message", "role": "user", "content": [pdf]}]
-    assert RESPONSES.estimate_items(TokenEstimator(), items) == TokenEstimator().estimate(canonical_json(items))
+    text = TokenEstimator().estimate(canonical_json(split_media(items)[0]))
+    assert RESPONSES.estimate_items(TokenEstimator(), items) == text + 2 * PDF_PAGE_TOKENS  # D60: by its pages
 
 
 # The session -------------------------------------------------------------------------------------
@@ -339,7 +340,8 @@ def test_a_document_has_no_floor_for_the_ratio():
     real usage is taken off for it, so it can never raise the ratio (the image's floor stays)."""
     doc = pdf_block(pdf_b64(3))
     size = len(canonical_bytes(doc))
-    assert media_cost([doc]) == (size, size, 0)
+    assert media_cost([doc], measure_bytes=True) == (size, 3 * PDF_PAGE_TOKENS, 0)
+    assert media_cost([doc]) == (0, 3 * PDF_PAGE_TOKENS, 0)
     image = image_block()
     assert media_cost([doc, image]).floor == media_cost([image]).floor > 0
 
