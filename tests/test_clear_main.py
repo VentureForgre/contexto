@@ -295,3 +295,63 @@ def test_clear_and_resume_can_go_back_and_forth():
         reasons += changes(events)
     assert reasons == ["new_cli_session", "new_cli_session", "resumed_cli_session", "resumed_cli_session",
                        "resumed_cli_session", "resumed_cli_session"]
+
+
+def test_a_claude_p_under_a_headless_lead_never_takes_main():
+    """Reviewer A round 2, captured on 2.1.314: under `contexto run claude -p` the lead's entrypoint is
+    sdk-cli and a `claude -p` run from its Bash tool inherits it, with its own id and no parent."""
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    lead = lambda loop: main_request(conversation("NESTED-RUN run claude -p", 1, mid_loop=loop), OLD)  # noqa: E731
+    send(engine, lead(False), OLD, input_tokens=3_000, entrypoint="sdk-cli")
+    room, record = store.turn_room(), store.epoch_record()
+    events = send(engine, main_request(conversation("NESTED-P hello", 1), NESTED), NESTED, entrypoint="sdk-cli")
+    assert events[-1]["main"] is False and changes(events) == []
+    assert store.turn_room() == room and store.epoch_record() == record
+    assert send(engine, lead(True), OLD, input_tokens=3_000, entrypoint="sdk-cli")[-1]["main"] is True
+
+
+def test_a_headless_session_never_takes_main_by_its_id_from_an_interactive_one():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 3), OLD), OLD, entrypoint="sdk-cli")
+    assert send(engine, main_request(conversation("after clear", 1), NEW), NEW)[-1]["main"] is False
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 3), OLD), OLD)
+    assert send(engine, main_request(conversation("other", 1), NEW), NEW, entrypoint="sdk-cli")[-1]["main"] is False
+
+
+def test_main_never_moves_at_a_response():
+    """Reviewer A round 2: A's turn-start request is in flight when B's /clear session takes main; A's
+    response must not move main back without a main_changed event."""
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 2), OLD), OLD)
+    in_flight = main_request(conversation("old conversation", 3), OLD)
+    engine(in_flight, headers(OLD), MESSAGES)
+    new = main_request(conversation("after clear", 1), NEW)
+    assert changes(send(engine, new, NEW)) == ["new_cli_session"]
+    turn = store.turn_room()[0]
+    engine.observe_usage(MESSAGES, {"input_tokens": 300}, in_flight)
+    assert engine._main == keyed(ANTHROPIC, new) and store.turn_room()[0] == turn
+    assert send(engine, main_request(conversation("after clear", 2), NEW), NEW)[-1]["main"] is True
+
+
+def test_two_sessions_taking_turns_follow_the_one_prompted():
+    """Not a supported setup: two interactive sessions on one proxy, each idle while the other is
+    prompted, pass the quiet check at every switch, and each switch is logged."""
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    reasons: list[str] = []
+    for turns in range(1, 5):
+        for first, session in (("lead", OLD), ("other", OTHER)):
+            events = send(engine, main_request(conversation(first, turns), session), session)
+            assert events[-1]["main"] is True
+            reasons += changes(events)
+    assert reasons == ["new_cli_session"] + ["resumed_cli_session"] * 6
+
+
+def test_a_deeply_nested_user_id_is_no_session_id():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 3), OLD), OLD)
+    deep = request(conversation("after clear", 1), metadata={"user_id": "[" * 100_000 + "]" * 100_000})
+    _, _, events = engine(deep, headers(None), MESSAGES)
+    assert events[-1]["event"] == "request" and events[-1]["main"] is False

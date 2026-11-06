@@ -839,15 +839,19 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   conversation publishes the room, the snapshot, and the window (`set_window`): the engine keeps state per conversation (the
   main one, subagents, side requests). The first conversation seen is main, and the choice is
   re-evaluated at each turn start of another conversation, which takes over when (D50):
-  - its Claude Code session id differs from main's, its User-Agent entrypoint (`cli`, `sdk-cli`, ...)
-    is main's, and either no conversation has been main in that session yet (`/clear` starts a new
+  - its Claude Code session id differs from main's, both its User-Agent entrypoint and main's are
+    `cli` (the interactive CLI, the only mode with `/clear` and `/resume`), and either no
+    conversation has been main in that session yet (`/clear` starts a new
     id), or it was the first conversation main in its session and that session lost main to another
     session's id and has sent no request of this conversation since (`/resume` sends the resumed
     conversation's id again). The id is `X-Claude-Code-Session-Id`, else the `session_id` in
     `metadata.user_id`; subagents and side requests carry the id of the conversation they run for
     (measured on Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318). A `claude -p` or SDK process run
-    from a tool has its own id and another entrypoint (`sdk-cli` on 2.1.314), so it does not qualify;
-    a session that keeps running beside the new main returns only by turn starts;
+    from a tool has its own id and an `sdk-*` entrypoint, its own or, under a headless lead
+    (`contexto run claude -p`), the lead's inherited `sdk-cli`, so it does not qualify; under a
+    headless lead only the turn-start rule applies. A session that keeps sending beside the new main
+    returns only by turn starts; two sessions that take turns, each idle while the other is
+    prompted, follow the one prompted;
   - main has never sent a request with a tool list and this conversation has (Claude Code's title,
     topic, and quota side requests have none, and one is often the session's first request);
   - or it has strictly more turn starts than main (a tie keeps the current one).
@@ -858,7 +862,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   takes over. The engine logs content-free
   `main_changed` with `reason` (`new_cli_session`, `resumed_cli_session`, `after_side_request`, or
   `more_turn_starts`) and the request's `turn_starts` on the request that takes over; never the
-  session id. The choice is made before the request is transformed, so a request that fails after
+  session id. Main moves only at a request, never at a response: a response that arrives after
+  another conversation's request took over publishes a side room. The choice is made before the request is transformed, so a request that fails after
   its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them (they publish side rooms instead, D40, see the per-turn
   recall budget), so their tool calls see the main conversation's snapshot, and for a subagent
   "in view" refers to the main conversation's window (a documented subagent limitation); the MCP

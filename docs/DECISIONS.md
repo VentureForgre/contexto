@@ -1287,9 +1287,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
     entrypoint `sdk-cli` (`claude-cli/<v> (external, <entrypoint>[, ...])`; the lead's is `cli`).
     With the first version of this rule the tmux teammate took main at its first turn start and the
     lead took it back at its next. The nested `claude -p` took main too, and the lead's next request
-    was a side request.
+    was a side request. Under a headless lead (`claude -p` with a Bash call that runs `claude -p`,
+    reviewer A round 2) the lead and the child both send `sdk-cli`: the binary keeps an inherited
+    `CLAUDE_CODE_ENTRYPOINT` and only turns its own `cli` into `sdk-cli` in print mode. The child has
+    its own id and no parent. With the second version of this rule the child took main, and the
+    lead, whose run has one turn start, never took it back.
   - **Rule.** At a turn start, a conversation also takes over main when its session id differs from
-    main's, its entrypoint is main's, and either no conversation has been main in that session yet
+    main's, both its entrypoint and main's are `cli` (the interactive CLI), and either no conversation has been main in that session yet
     (`new_cli_session`, after `/clear`), or it was the first conversation main in its session, and
     that session lost main to another session's id and has sent no request of this conversation
     since (`resumed_cli_session`, after `/resume`). It also takes over when main has never sent a
@@ -1297,22 +1301,33 @@ the owner's delegation. Open decisions are listed at the end with the options an
     seen with a tool list takes over by these, so side requests never do. A subagent carries main's
     id, so it never does either. A background subagent the old conversation launched before `/clear`
     keeps the old id, and the old conversation was that session's main, so it does not take over. A
-    request with `parent_session_id` never takes over by any rule. The entrypoint check keeps out a
-    `claude -p` or SDK process run from a tool, since `/clear` and `/resume` keep the process. The
-    quiet check means two sessions running at once trade main at most once: the one that lost main
-    by id and kept sending returns only by turn starts, and the other one, having lost by turn
-    starts, never returns by id. A session's main is the first conversation main in it, so a
+    request with `parent_session_id` never takes over by any rule. Requiring `cli` on both sides keeps
+    out a `claude -p` or SDK process run from a tool: `/clear` and `/resume` exist only in the
+    interactive CLI, and a child carries an `sdk-*` entrypoint, its own or a headless lead's
+    inherited `sdk-cli`. Under a headless lead only the turn-start rule applies, as before D50. The
+    quiet check means two sessions both sending trade main at most once: the one that lost main by
+    id and kept sending returns only by turn starts, and the other one, having lost by turn starts,
+    never returns by id. Two sessions that take turns, each idle while the other is prompted, pass
+    the quiet check at every switch and follow the one prompted (10 switches in 10 alternations,
+    reviewer A round 2). That is safe because each switch happens at the prompted session's turn
+    start, when the other is idle and has no call in flight, so no tool call is charged against a
+    room it does not belong to, and each switch is logged. Main is decided once per request, before
+    the transform, and never moves at a response: at round 2 a response of a session whose request
+    was in flight when another took over moved main back with no event (reviewer A). A session's main is the first conversation main in it, so a
     subagent that outgrew main does not replace it, and a later `/resume` still returns to the
     user's conversation. The turn-start rule is kept as the last case (`more_turn_starts`), so the
     only handover D50 removes is a child session's. The id is read
     from the header, else from `metadata.user_id`, only for the Messages API; Codex is unchanged.
+    `metadata.user_id` is parsed by `loads_bounded` (D45): a string nested past the limit gives no
+    session id; before, a deep one raised `RecursionError` and every request went upstream
+    untransformed (reviewer A round 2).
     The request that takes over logs content-free `main_changed` with the reason and its turn
     starts (QA found no event saying main was stale).
   - **Result.** Replaying the captures through the engine: before, the user's first turn (3
     requests) and all 4 of the new conversation's requests after `/clear` were not main;
     after, every request of the user's conversation is main (from its first request after `/clear`
-    and after `/resume`), and no subagent or side request is. Over the two team captures no teammate or nested request
-    takes main, and the lead stays main throughout. In the engine test of the live case
+    and after `/resume`), and no subagent or side request is. Over the two team captures and the headless one no teammate
+    or nested request takes main, and the lead stays main throughout. In the engine test of the live case
     (old room spent: bound 4,000, real input 3,600), `contexto_state` returned the budget-spent
     notice before and returns the pin after the new conversation's first request; `contexto_search`
     finds the old conversation's paged turn.
@@ -1332,7 +1347,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     still take over by the turn-start rule. If a Claude Code version sent a request of the old
     conversation after `/clear` (none of the four measured did), a later `/resume` of it would return
     only by turn starts. A second interactive Claude Code pointed at the same proxy with no parent
-    id (not a supported setup) takes main at its first turn start, once.
+    id (not a supported setup) takes main at its first turn start; while both send, once.
 
 ## Open decisions
 

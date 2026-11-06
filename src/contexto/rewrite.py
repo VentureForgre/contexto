@@ -124,7 +124,6 @@ from __future__ import annotations
 
 import bisect
 import hashlib
-import json
 import math
 import os
 import posixpath
@@ -136,7 +135,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, ClassVar, NamedTuple, Protocol
 
-from contexto.canonical import canonical_bytes, canonical_json
+from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
@@ -1670,12 +1669,13 @@ def claude_code_session(request: dict, headers: dict[str, str]) -> ClaudeCodeSes
     and side requests carry the id of the conversation they run for. On 2.1.314 a teammate's
     requests carry ``parent_session_id`` (the lead's id; an in-process teammate keeps the lead's own
     id, a tmux one has its own), and a ``claude -p`` run from the Bash tool has its own id and the
-    entrypoint ``sdk-cli``, where the interactive CLI's is ``cli``."""
+    entrypoint ``sdk-cli``, where the interactive CLI's is ``cli``; under a headless lead (itself
+    ``sdk-cli``) the child inherits the lead's ``sdk-cli``."""
     meta = request.get("metadata")
     user_id = meta.get("user_id") if isinstance(meta, dict) else None
     try:
-        parsed = json.loads(user_id) if isinstance(user_id, str) else None
-    except ValueError:
+        parsed = loads_bounded(user_id) if isinstance(user_id, str) else None
+    except ValueError:  # not JSON, or nested deeper than MAX_JSON_DEPTH (D45): no session id from it
         parsed = None
     fields = parsed if isinstance(parsed, dict) else {}
     found = next((v for k, v in headers.items() if k.lower() == CLAUDE_CODE_SESSION_HEADER), None)
@@ -2018,7 +2018,8 @@ class RewriteEngine:
         # sizes contexto_recall's per-call limit and the next engine's restore. Main is committed before
         # the transform, whose turn-start rotation may publish the window, so a request that fails after
         # that publish (a genuine bug, or degraded mode's forwarded original) still leaves it recorded
-        # as main and the previous main's publish forgotten. publishes() below agrees for this request.
+        # as main and the previous main's publish forgotten. This is the request's one decision: the
+        # request-time publish, the epoch record, and the response-time publish all read self._main.
         if dialect.name == "anthropic":
             self._cli_sessions[key] = claude_code_session(request, headers)
         if dialect.judges_session_start(request):
@@ -2060,7 +2061,7 @@ class RewriteEngine:
         state = self.states[key]
         if state.last_estimate is not None and not state.degraded:
             messages = request.get(dialect.field) or []
-            if self.publishes(key, messages, dialect):
+            if key == self._main:  # decided at this request's publishes() above
                 failures: list[dict] = []
                 # Contract PR #125: the snapshot first, so the store's request sequence stamps it and
                 # both of this request's room publishes alike.
@@ -2176,7 +2177,7 @@ class RewriteEngine:
         token = _DIALECT.set(dialect)
         try:
             due = at_turn_start(messages) or "degraded_leave" in names_of(events)
-            if not (due and self.publishes(key, messages, dialect) and self._may_write(self._turn_starts.get(key, 0))):
+            if not (due and key == self._main and self._may_write(self._turn_starts.get(key, 0))):
                 return
             record = epoch_record(state, request, messages, key, dialect, self.config)
         finally:
@@ -2256,21 +2257,24 @@ class RewriteEngine:
         - ``resumed_cli_session``: its session id differs from main's, it was the first conversation
           main in its session, and that session lost main to another session's id and has sent no
           request of this conversation since: ``/resume`` of a conversation the user had cleared.
-          A session that kept running beside the new main regains main only by the turn-start rule,
-          so two live sessions cannot trade main at each turn start.
+          A session that kept sending beside the new main regains main only by the turn-start rule,
+          so two sessions both sending cannot trade main at each turn start; two that take turns
+          (one idle while the other is prompted) do follow the one prompted.
         - ``after_side_request``: main is a conversation never seen with a tool list, which happens
           when a side request is the session's first request; the user's first prompt ties it at one
           turn start.
 
-        The session rules need the same entrypoint as main's (``/clear`` and ``/resume`` keep the
-        process, so a ``claude -p`` or SDK child run from a tool, with its own id, never qualifies).
+        The session rules apply only when both this conversation and main run in the interactive CLI
+        (User-Agent entrypoint ``cli``), the only mode with ``/clear`` and ``/resume``. A ``claude -p``
+        or SDK child run from a tool has its own id and ``sdk-cli``, ``sdk-ts`` or ``sdk-py``, or, under
+        a headless lead, the lead's inherited ``sdk-cli``, so it never qualifies.
         A child session (``parent_session_id``: an agent-team teammate) never takes over at all.
         Codex requests carry no Claude Code session id, so only the turn-start rule applies to them."""
         session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
         if session and session.parent:
             return None
         if key in self._judged:
-            if (session and current and session.id != current.id and session.entrypoint == current.entrypoint):
+            if session and current and session.id != current.id and session.entrypoint == current.entrypoint == "cli":
                 owner = self._session_mains.get(session.id)
                 if owner is None:
                     return "new_cli_session"
@@ -2481,7 +2485,9 @@ class RewriteEngine:
                 # any held tool_use reaches the CLI.
                 output = usage.get("output_tokens") or 0
                 messages = request.get(dialect.field) or []
-                if self.publishes(key, messages, dialect):
+                # Main moves only at a request (D50): a response arriving after another conversation's
+                # request took over publishes a side room, and main_changed is logged where it moves.
+                if key == self._main:
                     calls.set_turn_room(turn_id(messages, dialect), self.turn_room(real + output))
                     state = publish_window(calls, state, self.estimator, window_model_name(request))
                 elif callable(getattr(self.store, "set_side_room", None)):
