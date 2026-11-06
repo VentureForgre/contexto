@@ -793,13 +793,16 @@ turns before it, usually where such rules are given. Tools:
   stub repeats the prompt and the paths, so they count twice. The inputs and outputs of Contexto's
   own tools are not texts of the turn (D51): a call is one of them when its tool name starts
   `mcp__contexto__` (Claude Code, and Codex calling it directly), or when it is Codex's code-mode
-  `exec` call and every tool its code calls (`tools["..."]` or `tools.<name>`) is one; the output is
+  `exec` call whose code has no comment and in which every mention of `tools` is a literal call of
+  one (`tools["mcp__contexto__..."](` or `tools.mcp__contexto__...(`), so any other way of reaching a
+  tool keeps the call searchable; the output is
   paired with its call by `tool_use_id` or `call_id` within the turn. A search reply holds copies of
   lines from older pages, and as the newest page holding them it outranked the pages it quoted (QA,
   2026-11-05). The page keeps them verbatim and `contexto_recall` returns them; the stub's paths, the
   index line's identifiers, the matching lines a reply shows (matched on the rendered page with
   those lines blanked at the same offsets, and a context line inside them left out), and the
-  retained-window entries leave them out. So a grep or a log that repeats a key
+  retained-window entries leave them out. A page written before this rule that holds an own call has
+  its stub rebuilt from its messages when read, in memory only (the file and id are unchanged). So a grep or a log that repeats a key
   many times counts once, and a turn that runs many greps counts 3. And there is no length term
   (b 0): a long turn that states a value once scores as a short page that states it once. A page
   with the term in 3 or more texts scores 1.57 times a page with it in one. Relevance is multiplied
