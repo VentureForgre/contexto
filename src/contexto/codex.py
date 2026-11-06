@@ -643,6 +643,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             raise launcher.LaunchError(launcher.cli_not_found(CODEX_BIN), launcher.EXIT_NOT_FOUND)
         # `codex --version` both shows that Codex can start at all (an executable file with a missing #!
         # interpreter passes `which`) and gives the version --no-daemon is gated on.
+        # It is read once: the version check below reuses it (D59).
         try:
             version, version_error = cliversions.installed_version(codex)
         except KeyboardInterrupt:  # its process group was killed first
@@ -650,6 +651,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             return launcher.EXIT_INTERRUPTED
         except Exception as exc:  # unreadable, as when it prints no version
             version, version_error = None, type(exc).__name__
+        installed = version, version_error
         if _start_failure(version_error):
             raise launcher.LaunchError(f"'{CODEX_BIN}' at {codex} cannot be run ({version_error}); check its #! "
                                        "line or reinstall Codex", launcher.EXIT_NOT_FOUND)
@@ -720,12 +722,13 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {source}, codex auth "
               f"{args.codex_auth}, engine {engine_name})", file=stderr, flush=True)
         if version_error and not no_daemon and _may_take_no_daemon(codex_args):
-            # Without the flag Codex may leave its shared server running for this session's CODEX_HOME.
+            # Without the flag Codex may leave its shared server running for the CODEX_HOME it used (this
+            # session's in API-key mode, the user's own in ChatGPT mode).
             print(f"contexto: warning: cannot read the Codex version ({version_error}) and 'codex --help' does not "
                   f"list {NO_DAEMON_FLAG}, so it is not passed; Codex may leave a background app-server running "
                   "after it exits.", file=stderr, flush=True)
-        if not launcher.check_cli_version("codex", codex, store,
-                                          enabled=not getattr(args, "no_version_check", False), stderr=stderr):
+        if not launcher.check_cli_version("codex", codex, store, enabled=not getattr(args, "no_version_check", False),
+                                          stderr=stderr, installed=installed):
             code = launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started
             return code
         warning = launcher.start_warning(options.bound, options.headroom_floor, ASSUMED_OVERHEAD)
