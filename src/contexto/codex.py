@@ -28,6 +28,7 @@ Mapping onto the contract's rules (``contexto.rewrite``):
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import os
@@ -618,8 +619,8 @@ def add_arguments(parser) -> None:
 
 def run_codex(args, *, launcher=None, stderr=None) -> int:
     """Run ``codex`` behind a Contexto proxy; returns the exit code (codex's, or a launcher error).
-    What can refuse the launch up front (the options, a missing ``codex``, the upstream) is checked
-    before the session and the proxy exist; a launch that fails after that, before Codex starts,
+    What can refuse the launch up front (the options, a ``codex`` that is missing or cannot run, the
+    upstream) is checked before the session and the proxy exist; a launch that fails after that, before Codex starts,
     removes the session directory it created, so a failed launch leaves no empty session (D54)."""
     import uuid
 
@@ -635,26 +636,31 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         options = launcher.options_from_args(args)
         launcher.check_options(options)
         codex = shutil.which(CODEX_BIN)
-        if codex is None:
-            raise launcher.LaunchError(f"'{CODEX_BIN}' not found on PATH", launcher.EXIT_NOT_FOUND)
+        if codex is None:  # named as `run claude` names it: missing, not executable, a directory, a broken link
+            raise launcher.LaunchError(launcher.cli_not_found(CODEX_BIN), launcher.EXIT_NOT_FOUND)
+        # `codex --version` both shows that Codex can start at all (an executable file with a missing #!
+        # interpreter passes `which`) and gives the version --no-daemon is gated on.
+        try:
+            version, version_error = cliversions.installed_version(codex)
+        except KeyboardInterrupt:  # its process group was killed first
+            print("contexto: interrupted", file=stderr, flush=True)
+            return launcher.EXIT_INTERRUPTED
+        except Exception as exc:  # unreadable, as when it prints no version
+            version, version_error = None, type(exc).__name__
+        if _start_failure(version_error):
+            raise launcher.LaunchError(f"'{CODEX_BIN}' at {codex} cannot be run ({version_error}); check its #! "
+                                       "line or reinstall Codex", launcher.EXIT_NOT_FOUND)
         shared = needs_shared_server(codex_args)
         if shared:
             raise CodexLaunchError(
-                f"'codex {shared}' needs Codex's shared background server, which would keep running for this "
-                f"session's CODEX_HOME after Codex exits (Codex refuses {NO_DAEMON_FLAG} with it), so Contexto "
-                f"does not run it; run 'codex {shared}' without Contexto, or pass --remote.")
+                f"'codex {shared}' needs Codex's shared background server, which would keep running for its "
+                f"CODEX_HOME after Codex exits (Codex refuses {NO_DAEMON_FLAG} with it), so Contexto does not "
+                f"run it; run 'codex {shared}' without Contexto, or pass --remote.")
         claude = upstream_module.resolve_upstream(args.upstream)
         target, source = codex_upstream_with_source(args.codex_auth, args.codex_upstream, dict(os.environ),
                                                     claude.url, claude.source)
-        no_daemon, version_error = False, None
-        if _may_take_no_daemon(codex_args):  # only the --no-daemon decision needs the version
-            try:
-                version, version_error = cliversions.installed_version(codex)
-            except KeyboardInterrupt:  # its process group was killed first
-                print("contexto: interrupted", file=stderr, flush=True)
-                return launcher.EXIT_INTERRUPTED
-            except Exception as exc:  # unreadable, as when it prints no version
-                version, version_error = None, type(exc).__name__
+        no_daemon = False
+        if _may_take_no_daemon(codex_args):
             if version_error is None and not _version_tuple(version):
                 version_error = "unparsed"
             try:
@@ -696,7 +702,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                    **({"codex_version_error": version_error} if version_error else {})})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {source}, codex auth "
               f"{args.codex_auth}, engine {engine_name})", file=stderr, flush=True)
-        if version_error and not no_daemon:
+        if version_error and not no_daemon and _may_take_no_daemon(codex_args):
             # Without the flag Codex may leave its shared server running for this session's CODEX_HOME.
             print(f"contexto: warning: cannot read the Codex version ({version_error}) and 'codex --help' does not "
                   f"list {NO_DAEMON_FLAG}, so it is not passed; Codex may leave a background app-server running "
@@ -724,6 +730,14 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         store.log({"event": "exit", "code": code})
         if not started:
             _remove_session(created)
+
+
+def _start_failure(error: str | None) -> bool:
+    """Whether ``installed_version``'s error means ``codex`` could not be started at all: the name of an
+    ``OSError`` from starting it (FileNotFoundError for a missing #! interpreter, PermissionError,
+    OSError for an exec format error), not a timeout, an exit code, or unparsed output."""
+    cls = getattr(builtins, error or "", None)
+    return isinstance(cls, type) and issubclass(cls, OSError) and not issubclass(cls, TimeoutError)
 
 
 def _remove_session(created: Path | None) -> None:

@@ -27,6 +27,8 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
+          # Pinned like Ruff and pytest. uv is also the build backend, and its version is in the wheel.
+          version: "0.13.7"
           python-version: "3.12"
           # uvx keeps its tools outside the uv cache, so this job may leave nothing to save.
           ignore-nothing-to-cache: true
@@ -55,6 +57,8 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
+          # Pinned like Ruff and pytest. uv is also the build backend, and its version is in the wheel.
+          version: "0.13.7"
           # uv downloads this CPython when the runner lacks it.
           python-version: ${{ matrix.python }}
       # pytest is pinned for the same reason as Ruff.

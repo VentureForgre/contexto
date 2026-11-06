@@ -362,6 +362,10 @@ class FakeLauncher:
     def engine_config(self, options):
         return {"bound": options.bound}
 
+    def cli_not_found(self, name):
+        from contexto.launcher import cli_not_found
+        return cli_not_found(name)
+
     def start_warning(self, bound, headroom_floor, overhead):
         from contexto.launcher import start_warning
         return start_warning(bound, headroom_floor, overhead)
@@ -900,7 +904,8 @@ def test_run_codex_logs_launch_and_exit_and_warns_early_like_claude(tmp_path, mo
     assert run_codex(args, stderr=err) == 5
     assert ("contexto: session W1 (bound 40,000, upstream claude-flag+/v1, codex auth apikey, engine rewrite)"
             in seen["err"])
-    assert "window budget about" in seen["err"] and "Consider --bound" in seen["err"]  # before codex starts
+    # Before codex starts; 40,000 - 25,000 - 19,000 leaves no budget (launcher.start_warning's wording, D55).
+    assert "bound 40,000 leaves no window budget" in seen["err"] and "Use --bound 94,000 or more" in seen["err"]
     assert seen["argv"] == [codex_bin, "--no-daemon"]  # interactive, on the stub's 0.166.0
     events = log_events(tmp_path / "ctx", "W1")
     launch = next(e for e in events if e["event"] == "launch")
@@ -967,3 +972,28 @@ def test_run_codex_agents_exits_2_before_making_a_session(tmp_path, monkeypatch,
     assert run_codex(args, stderr=err) == 2
     assert "'codex agents' needs Codex's shared background server" in err.getvalue()
     assert session_names(tmp_path / "ctx") == []
+
+
+@pytest.mark.parametrize("kind", ["missing interpreter", "not executable"])
+def test_a_codex_that_cannot_run_exits_127_before_making_a_session(tmp_path, monkeypatch, kind):
+    """Reviewer A, PR #236 round 2: a codex on PATH whose #! interpreter is missing passed ``which``, then
+    failed to start after the session existed, leaving it behind as the "most recent" session."""
+    from contexto import launcher
+
+    bindir = tmp_path / "bad-bin"
+    bindir.mkdir()
+    codex = bindir / "codex"
+    codex.write_text("#!/nonexistent/interp\n")
+    codex.chmod(0o755 if kind == "missing interpreter" else 0o644)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.defpath}")
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    monkeypatch.setattr(launcher, "run_child", lambda *a, **k: pytest.fail("codex must not start"))
+    for cli_args in (["hi"], ["exec", "hi"]):
+        err = io.StringIO()
+        args = parse("--codex-upstream", "http://127.0.0.1:9/v1", "--codex-key-helper", "echo k", "codex", *cli_args)
+        assert run_codex(args, stderr=err) == 127
+        if kind == "missing interpreter":
+            assert f"'codex' at {codex} cannot be run (FileNotFoundError)" in err.getvalue()
+        else:
+            assert f"'codex' at {codex} is not executable" in err.getvalue()
+        assert session_names(tmp_path / "ctx") == []
