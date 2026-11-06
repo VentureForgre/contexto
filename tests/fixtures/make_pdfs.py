@@ -34,6 +34,11 @@ EXPECTED = {
     "pdflib-indirect-length-1.pdf": 1,
     "pdflib-indirect-length-7.pdf": 7,
 }
+# Files whose page count runs high on purpose (true pages here): an incremental save that deleted pages
+# leaves the superseded page tree listing them (D48 review round 4).
+OVERCOUNTED = {
+    "pymupdf-incremental-deleted-40-to-10.pdf": 10,
+}
 
 
 def reportlab(pages: int) -> bytes:
@@ -79,6 +84,25 @@ def pymupdf_objstm(pages: int) -> bytes:
         doc.new_page().insert_text((72, 72), f"Synthetic page {page + 1} of {pages}.")
     doc.set_metadata({})
     return doc.tobytes(use_objstms=1, garbage=1, no_new_id=1)
+
+
+def pymupdf_deleted(pages: int, keep: int) -> bytes:
+    """``pages`` text pages saved, then all but the first ``keep`` deleted by an incremental save."""
+    import pymupdf
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "synthetic.pdf"
+        doc = pymupdf.open()
+        for page in range(pages):
+            doc.new_page().insert_text((72, 72), f"Synthetic page {page + 1} of {pages}.")
+        doc.set_metadata({})
+        doc.save(path, no_new_id=1)
+        doc.close()
+        doc = pymupdf.open(path)
+        doc.delete_pages(range(keep, pages))
+        doc.saveIncr()
+        doc.close()
+        return path.read_bytes()
 
 
 def cupsfilter_text() -> bytes:
@@ -194,10 +218,11 @@ def main() -> None:
         "incremental-edited-page-3.pdf": edited_page(),
         "pdflib-indirect-length-1.pdf": pdflib_like(1),
         "pdflib-indirect-length-7.pdf": pdflib_like(7),
+        "pymupdf-incremental-deleted-40-to-10.pdf": pymupdf_deleted(40, 10),
     }
     for name, data in made.items():
         (OUT / name).write_bytes(data)
-        print(f"{name}: {len(data)} bytes, {EXPECTED[name]} pages")
+        print(f"{name}: {len(data)} bytes, {EXPECTED.get(name) or OVERCOUNTED[name]} pages")
 
 
 if __name__ == "__main__":

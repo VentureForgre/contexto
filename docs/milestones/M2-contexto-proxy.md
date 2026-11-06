@@ -266,18 +266,23 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    The proxy calls the engine's `prime` with each request before it takes its transform lock, which
    counts the request's PDFs into that cache, so the transform finds them counted.
    The ratio is learned from text only: each observed request's media bytes are left out of its
-   bytes, and its media's cost is taken off its real tokens. That cost lies between the media's floor,
-   at or under the real cost (on Claude 95% of the image formula on the older 1,568-pixel, 1,568-token
-   limit, 0 for an image of unknown size, and 1,000 tokens a PDF page for the pages its page tree draws:
-   numbered page objects a `/Kids` array references, at most the tree's count, at least one; on Codex
-   0, since OpenAI's tile prices go lower), and the media's estimate. With a measured ratio, the media
-   are charged the cost in that range that keeps the ratio. Before one, they are charged their floor,
-   and a request whose media has a floor is learned only when estimate minus floor is within 10% of its
-   usage; a floor that would put the text above 3.5 bytes a token (the text seed) ran high and none is
-   taken off. A request whose text then measures outside 1.5 to 6 bytes a token is not learned. The head measured on the first request (rule 4) takes its window's
-   media at the same floor, so it errs high. After every response, compare real usage with the bound
-   and the estimate: log `over_bound` from real usage when it exceeds the
-   bound, and `estimate_error` when real usage exceeds the estimate by more than 10%.
+   bytes, and its media's cost out of its real tokens. That cost lies at or under the media's estimate
+   and is meant to lie at or over their floor (on Claude 95% of the image formula on the older
+   1,568-pixel, 1,568-token limit, 0 for an image of unknown size, and 1,000 tokens a PDF page for the
+   pages its page tree draws: numbered page objects a `/Kids` array references, at most the tree's
+   count, at least one; on Codex 0, since OpenAI's tile prices go lower), though the floor can run high.
+   A request that only appends to the last measured one (same epoch, window and degraded state, that
+   request's last message unchanged) and carries the same media teaches the ratio its difference from
+   it: the bytes and tokens it added. Otherwise, with a measured ratio, the media are charged the cost
+   that keeps the ratio, at most their estimate, so a request with media can lower the ratio but never
+   raise it; when that cost would be under the floor, the request is not learned. Before a ratio is
+   measured, the media are charged their floor, and a request whose media has a floor is learned only
+   when estimate minus floor is within 10% of its usage; a floor that would put the text above 3.5 bytes
+   a token (the text seed) ran high and none is taken off. A request whose learned ratio lands outside
+   1.5 to 6 bytes a token is not learned. The head measured on the first request (rule 4) takes its
+   window's media at the floor, so it errs high. After every response, compare real usage with the
+   bound and the estimate: log `over_bound` from real usage when it exceeds the bound, and
+   `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
    index), in tokens, taken from measured usage once available (the first request's input is the
    head) and from the estimator before that. After a head change (rule 6) the measured head is

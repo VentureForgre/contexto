@@ -138,7 +138,15 @@ from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import is_own_block, is_own_item, own_call_ids, render_page
-from contexto.tokens import TEXT_BYTES_PER_TOKEN, MediaCost, TokenEstimator, media_cost, prime_media, split_media
+from contexto.tokens import (
+    TEXT_BYTES_PER_TOKEN,
+    MediaCost,
+    TokenEstimator,
+    media_cost,
+    media_keys,
+    prime_media,
+    split_media,
+)
 from contexto.toolcheck import ToolCheck
 
 MESSAGES = "/v1/messages"
@@ -213,6 +221,14 @@ class EpochState:
     hashes: tuple[str, ...] = ()  # normalised hashes of the previous request's messages
     last_sent_bytes: int = 0
     last_sent_media: MediaCost = MediaCost()  # D48: the images and documents in those bytes
+    last_sent_media_keys: tuple = ()  # D48: their content keys, in order (media_keys)
+    # D48: whether that request only appended to the last measured one (same epoch, window and degraded
+    # state, its last message unchanged at the same index), so their media cancel in a difference.
+    last_sent_appends: bool = False
+    last_sent_anchor: tuple[int, str] = (0, "")  # (message count, last message hash) as sent; (0, "") unchained
+    # D48: (epoch, k, degraded, message count, last message hash, text bytes, real tokens, media keys) of
+    # the last request whose usage was measured. Per-request, never recorded.
+    last_measured: tuple | None = None
     last_input_tokens: int | None = None  # real upstream input of the previous request
     max_turn_growth: int = 0
     last_turn_start_n: int | None = None  # history length at the previous turn start
@@ -1460,9 +1476,12 @@ def guarded_rotation(request: dict, messages: list[dict], n: int, estimate: int,
 def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None) -> tuple[int, int | None]:
     """The text part of a request's bytes and real tokens, for the measured ratio (D48), or None for the
     tokens when the request should not be learned from. Media bytes are left out. The media's real cost
-    lies between its floor (at or under the cost) and its estimate (at or over it). With a measured
-    ratio, the media are charged the cost in that range that keeps the ratio, so a request moves it only
-    as far as its usage proves (a dense PDF far over its floor no longer reads as dense text). Before
+    lies between its floor and its estimate when the floor is at or under the cost and the estimate at or
+    over it; the floor can still run high (an incremental save that deleted pages, an orphan page-tree
+    node, pages that cost under 1,000). With a measured ratio, the media are charged the cost that keeps
+    the ratio, at most their estimate, so a request can lower the ratio (text denser than measured) but
+    never raise it: when the usage leaves the media less than their floor, the request is skipped, since
+    a floor above the real cost would book the rest as sparse text. Before
     one, the media are charged their floor, so the first ratio errs low (text over-counted); when they
     have a floor (Claude) the request is learned only if that range is within ``MEDIA_FIRST_UNCERTAINTY``
     of its usage, so a dense PDF cannot set a first ratio far too low (on Codex the floor is 0 and the
@@ -1473,7 +1492,10 @@ def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None
     if not media.bytes and not media.tokens:
         return text_bytes, real
     if ratio:
-        charged = min(max(real - text_bytes / ratio, media.floor), media.tokens)
+        implied = real - text_bytes / ratio
+        if implied < media.floor:
+            return text_bytes, None  # the media may have cost less than their floor: never raise the ratio
+        charged = min(implied, media.tokens)
     elif media.floor and media.tokens - media.floor > MEDIA_FIRST_UNCERTAINTY * real:
         return text_bytes, None  # a dense PDF: too uncertain to set the first ratio from
     else:
@@ -1483,6 +1505,30 @@ def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None
     if tokens <= 0 or text_bytes <= 0 or not low <= text_bytes / tokens <= high:
         return text_bytes, None
     return text_bytes, math.ceil(tokens)
+
+
+def appended_usage(previous: tuple | None, scope: tuple, text_bytes: int, real: int,
+                   keys: tuple) -> tuple[int, int] | None:
+    """D48: the text bytes and real tokens a request added to the last measured one, when it only
+    appended to it and carries the same media (``keys``): the media cancel exactly, so the appended text
+    is measured with no floor or estimate. None otherwise, or when the difference is not positive or its
+    ratio lands outside ``MEDIA_TEXT_RATIO_RANGE``."""
+    if not keys or previous is None or previous[:3] != scope[:3] or previous[7] != keys:
+        return None
+    added_bytes, added_tokens = text_bytes - previous[5], real - previous[6]
+    low, high = MEDIA_TEXT_RATIO_RANGE
+    if added_bytes <= 0 or added_tokens <= 0 or not low <= added_bytes / added_tokens <= high:
+        return None
+    return added_bytes, added_tokens
+
+
+def appends_to(previous: tuple | None, scope: tuple, messages: list[dict]) -> bool:
+    """Whether ``messages`` (as sent) only append to the last measured request: the same epoch, window and
+    degraded state, and that request's last message unchanged at the same index."""
+    if previous is None or previous[:3] != scope:
+        return False
+    count, last = previous[3], previous[4]
+    return 0 < count <= len(messages) and message_hash(messages[count - 1]) == last
 
 
 def sent_media(items: list, *, measure_bytes: bool = True) -> MediaCost:
@@ -1503,8 +1549,10 @@ def forward_original(request: dict, messages: list[dict], state: EpochState, rea
     events.append({"event": "request", "epoch": state.epoch, "k": state.k, "messages": len(messages),
                    "upstream_messages": len(messages), "sent_bytes": sent, "degraded": True,
                    "fallback_failed": True})
-    return request, replace(state, degraded=True, last_sent_bytes=sent, last_sent_media=media, last_estimate=None,
-                            last_input_tokens=None, pending_usage=usage_identity(messages)), events
+    return request, replace(state, degraded=True, last_sent_bytes=sent, last_sent_media=media,
+                            last_sent_media_keys=media_keys(split_media(messages)[1]), last_sent_appends=False,
+                            last_sent_anchor=(0, ""),
+                            last_estimate=None, last_input_tokens=None, pending_usage=usage_identity(messages)), events
 
 
 def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str, state: EpochState, store: Store,
@@ -1571,8 +1619,13 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     window = window_items(upstream[field_name])
     window_estimate = estimate_items(estimator, window)
     window_media = sent_media(window, measure_bytes=False)
+    sent_items = upstream[field_name]
+    scope = (state.epoch, state.k, state.degraded)
     state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
-                    last_sent_media=sent_media(upstream[field_name]), last_estimate=sent_estimate,
+                    last_sent_media=sent_media(sent_items), last_estimate=sent_estimate,
+                    last_sent_media_keys=media_keys(split_media(sent_items)[1]),
+                    last_sent_appends=appends_to(state.last_measured, scope, sent_items),
+                    last_sent_anchor=usage_identity(sent_items),
                     last_window_tokens=window_estimate,
                     last_window_floor=window_estimate - window_media.tokens + window_media.floor,
                     pending_usage=usage_identity(messages))
@@ -2450,12 +2503,23 @@ class RewriteEngine:
             events.append({"event": "usage_unattributed", "epoch": state.epoch, "messages": identity[0],
                            "expected_messages": pending[0] if pending else None})
         else:
-            # The session's measured ratio from now on, of text only (D48).
-            text_bytes, text_tokens = text_usage(state.last_sent_bytes, real, state.last_sent_media,
-                                                 self.estimator.measured_bytes_per_token)
-            if text_tokens is not None:
-                self.estimator.observe(text_bytes, text_tokens)
-            state = replace(state, last_input_tokens=real, pending_usage=None)
+            # The session's measured ratio from now on, of text only (D48): from what a request appended to
+            # the last measured one when both carry the same media, else bounded by the media's floor and
+            # estimate (text_usage).
+            media, keys = state.last_sent_media, state.last_sent_media_keys
+            text_bytes = state.last_sent_bytes - media.bytes
+            scope = (state.epoch, state.k, state.degraded)
+            appended = (appended_usage(state.last_measured, scope, text_bytes, real, keys)
+                        if state.last_sent_appends else None)
+            if appended is not None:
+                self.estimator.observe(*appended)
+            else:
+                text_bytes, text_tokens = text_usage(state.last_sent_bytes, real, media,
+                                                     self.estimator.measured_bytes_per_token)
+                if text_tokens is not None:
+                    self.estimator.observe(text_bytes, text_tokens)
+            measured = (*scope, *state.last_sent_anchor, text_bytes, real, keys) if state.last_sent_anchor[0] else None
+            state = replace(state, last_input_tokens=real, pending_usage=None, last_measured=measured)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried
                 # messages, which also covers a resumed first request with a long history). Their media

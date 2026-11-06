@@ -71,8 +71,8 @@ PDF_OBJECT_WINDOW = 8_192  # bytes searched back from /Type /Page for its "N G o
 IMAGE_TYPES = frozenset({"image", "input_image"})  # Messages, Responses
 HEAD_CHARS = 64  # base64 characters that hold the PNG, GIF and WebP dimensions
 JPEG_HEAD_CHARS = 262_144  # a JPEG's frame header follows its EXIF and ICC segments: read up to 192 KB
-# PDFs whose counts are kept, least recently used dropped first. An entry is a key and three ints (about
-# 200 bytes), so this costs at most about 13 MB, and no request holds enough PDFs to cycle it.
+# PDFs whose counts are kept, least recently used dropped first. An entry is a key and three ints (288
+# bytes measured), so this costs at most about 19 MB, and no request holds enough PDFs to cycle it.
 PDF_CACHE_SIZE = 65_536
 MEDIA_KEYS = ("content", "output", "source")  # where a block or item can hold media
 MEDIA_DEPTH = 10  # messages, message, content, tool_result, content, document, source, content, image
@@ -378,9 +378,10 @@ class _PageScan:
         return True
 
     def floor_pages(self) -> int:
-        """Pages the floor may count: numbered page objects that a ``/Kids`` array references, the pages
-        a renderer draws, so a file cannot raise its floor with page objects or counts it does not draw
-        (D48); at most the tree's count when there is one, and at least 1."""
+        """Pages the floor may count: numbered page objects that a ``/Kids`` array references, at most the
+        tree's count when there is one, and at least 1 (D48). This can still run high (a superseded tree
+        after an incremental save that deleted pages, a node no catalog reaches); the ratio rules in
+        ``contexto.rewrite.text_usage`` do not rely on it."""
         drawn = sum(1 for page in self.pages if isinstance(page, int) and page in self.kids)
         return max(1, min(drawn, self.tree, PDF_MAX_PAGES) if self.tree else min(drawn, PDF_MAX_PAGES))
 
@@ -493,6 +494,16 @@ def prime_media(value: Any) -> None:
                 pdf_page_count(data)
     except Exception:  # priming is an optimisation; the engine counts again under the lock if it failed
         return
+
+
+def media_keys(blocks: list[dict]) -> tuple:
+    """A content key per media block (from ``split_media``), in order: two requests with equal keys carry
+    the same media (D48). Base64 data is keyed by its length and hash, any other source by its JSON."""
+    keys = []
+    for block in blocks:
+        data = _base64_payload(block)
+        keys.append((len(data), hash(data)) if data is not None else hash(canonical_bytes(block)))
+    return tuple(keys)
 
 
 def media_cost(blocks: list[dict], *, measure_bytes: bool = False) -> MediaCost:

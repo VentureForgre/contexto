@@ -46,7 +46,7 @@ from contexto.tokens import (
     pdf_pages,
     split_media,
 )
-from fixtures.make_pdfs import EXPECTED
+from fixtures.make_pdfs import EXPECTED, OVERCOUNTED
 
 EP = "/v1/messages"
 W, H = 1440, 900
@@ -789,3 +789,122 @@ def test_a_dense_pdf_in_the_first_request_does_not_set_a_low_first_ratio(tmp_pat
     learned 0.82, and 1.65 ten turns later."""
     ratios = _dense_session(tmp_path, paste_first=True, pages=10)
     assert all(r is None or 2.7 <= r <= 3.0 for r in ratios) and ratios[-1] is not None
+
+
+# Reviewer A, PR #234, round 4: a floor that runs high, drift, and a PDF pasted first ------------------------
+
+def _orphan_node_pdf() -> bytes:
+    """One drawn page, plus a page-tree node no catalog reaches that lists 40 pages (pikepdf ignores it)."""
+    pages = b"".join(b"%d 0 obj << /Type /Page /Parent 50 0 R >> endobj " % n for n in range(10, 50))
+    orphan = b"50 0 obj << /Type /Pages /Count 40 /Kids [ %s ] >> endobj " % b" ".join(
+        b"%d 0 R" % n for n in range(10, 50))
+    return (b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj 2 0 obj << /Type /Pages /Count 1 "
+            b"/Kids [ 3 0 R ] >> endobj 3 0 obj << /Type /Page /Parent 2 0 R >> endobj " + orphan + pages)
+
+
+def _pdf_session(tmp_path, raw: bytes, cost: int, *, paste_first: bool = False, dense_after: int | None = None,
+                 turns: int = 7, read_words: int = 3_000, bound: int = 150_000) -> dict:
+    """Text at 3.0 bytes a token (JSON tool output at 2.0 from turn ``dense_after``), the PDF costing ``cost``
+    in all, read on turn 2 or pasted in the first request, then text turns with Reads and a tool loop that
+    runs until a request crosses the bound; with no ``raw``, the same session without the PDF. Returns the
+    ratios after each request and any request whose real usage crossed the bound without a pre-send
+    over_bound."""
+    eng = _engine(tmp_path, bound=bound)
+    doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                          "data": base64.b64encode(raw).decode()}}
+    rng = random.Random(11)
+    msgs: list[dict] = []
+    out: dict = {"ratios": [], "unflagged": [], "estimates": []}
+
+    def usage(upstream: dict) -> int:
+        stripped, found = split_media(upstream["messages"])
+        dense = sum(len(json.dumps(b["content"]).encode()) for m in stripped if isinstance(m.get("content"), list)
+                    for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_result"
+                    and isinstance(b.get("content"), str) and b["content"].startswith("["))
+        text = len(canonical_json({**upstream, "messages": stripped})) - dense
+        return math.ceil(text / 3.0 + dense / 2.0) + cost * len(found)
+
+    def send() -> int:
+        req = {**HEAD, "messages": list(msgs)}
+        upstream, _, events = eng(req, {}, EP)
+        real = usage(upstream)
+        flagged = any(e["event"] == "over_bound" for e in events)
+        if real > bound and not flagged:
+            out["unflagged"].append(real)
+        out["estimates"].append((next(e for e in events if e["event"] == "request")["estimate"], real))
+        eng.observe_usage(EP, {"input_tokens": real, "output_tokens": 10}, req)
+        out["ratios"].append(eng.estimator.measured_bytes_per_token)
+        return real
+
+    def tool_output(turn: int) -> str:
+        if dense_after is not None and turn >= dense_after:
+            return json.dumps([rng.randrange(10**6) for _ in range(read_words // 2)])
+        return " ".join(rng.choices(["def", "x", "=", "(", ")", "return"], k=read_words))
+
+    for turn in range(turns):
+        first = [{"type": "text", "text": f"turn {turn} " + "talk " * 300}]
+        if raw and paste_first and turn == 0:
+            first.append(doc)
+        msgs.append({"role": "user", "content": first})
+        send()
+        rounds = 2 if turn < turns - 1 else 400  # the last turn's tool loop runs until it crosses the bound
+        for r in range(rounds):
+            msgs.append({"role": "assistant", "content": [{"type": "tool_use", "id": f"t{turn}_{r}", "name": "Read",
+                                                           "input": {}}]})
+            content = [doc] if (raw and not paste_first and turn == 2 and r == 0) else tool_output(turn)
+            msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{turn}_{r}",
+                                                      "content": content}]})
+            if send() > bound:
+                break
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
+    return out
+
+
+def _fixture_bytes(name: str) -> bytes:
+    return (FIXTURES / name).read_bytes()
+
+
+@pytest.mark.parametrize(("pdf", "cost"), [
+    ("deleted", 10 * 1_583), ("deleted", 10 * 2_500), ("orphan", 1_583), ("orphan", 2_500), ("cheap", 20 * 300)],
+    ids=["deleted-1583", "deleted-2500", "orphan-1583", "orphan-2500", "cheap-pages"])
+def test_a_floor_that_runs_high_never_raises_the_ratio(tmp_path, pdf, cost):
+    """Round 4: once a ratio was measured, a floor above the PDF's real cost was booked as sparse text: the
+    ratio rose to 3.75-5.06 (true 3.0) and requests crossed the bound unflagged. Files: a PyMuPDF save that
+    deleted 30 of 40 pages incrementally (the superseded tree still lists 40), a crafted orphan page-tree
+    node, and pages cheaper than the 1,000 floor."""
+    raw = {"deleted": _fixture_bytes("pymupdf-incremental-deleted-40-to-10.pdf"), "orphan": _orphan_node_pdf(),
+           "cheap": base64.b64decode(pdf_b64(20, filler=20_000))}[pdf]
+    result = _pdf_session(tmp_path, raw, cost)
+    assert max(r for r in result["ratios"] if r is not None) <= 3.0 * 1.005
+    assert result["unflagged"] == []
+
+
+def test_the_overcounted_fixture_errs_high():
+    for name, pages in OVERCOUNTED.items():
+        count = pdf_page_count(_fixture(name))
+        assert count.pages >= pages and count.counted
+
+
+def test_drift_to_denser_text_is_learned_with_a_pdf_in_view(tmp_path):
+    """Round 4: with a 20-page PDF in the window, the floor-to-estimate slack absorbed the move to JSON tool
+    output at 2.0 bytes a token, so the ratio held at 3.00 while the control fell. What a request appends
+    to the last one, with the same media, is now learned as text."""
+    raw = base64.b64decode(pdf_b64(20, filler=20_000))
+    with_pdf = _pdf_session(tmp_path / "pdf", raw, 20 * 1_583, dense_after=3, turns=6, bound=400_000)
+    control = _pdf_session(tmp_path / "control", b"", 0, dense_after=3, turns=6, bound=400_000)
+    assert with_pdf["unflagged"] == [] and control["unflagged"] == []
+    assert with_pdf["ratios"][-1] <= 2.5  # 134f939: 2.78 (control 2.20; each appended byte is learned once)
+
+    def worst(result: dict) -> float:
+        return min(estimate / real for estimate, real in result["estimates"][1:])
+
+    assert worst(with_pdf) >= worst(control) - 0.01  # estimates stay as close to real as the control's
+
+
+def test_a_pdf_pasted_first_learns_the_ratio_by_the_third_request(tmp_path):
+    """Round 4: the 10% gate left the seeds in use for 9 to 51 requests while a PDF pasted first stayed in
+    view; two requests with the same PDF now give the ratio from their difference."""
+    raw = base64.b64decode(pdf_b64(10, filler=200_000))
+    result = _pdf_session(tmp_path, raw, 10 * 4_568, paste_first=True, turns=3)
+    assert result["ratios"][2] is not None and 2.9 <= result["ratios"][2] <= 3.0 * 1.005
+    assert result["unflagged"] == []
