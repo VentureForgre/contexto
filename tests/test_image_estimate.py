@@ -95,7 +95,8 @@ def pdf_b64(pages: int, *, object_stream: bool = False, filler: int = 300_000) -
         packed = zlib.compress(objs)
         objs = b"9 0 obj << /Type /ObjStm /N %d /Filter /FlateDecode /Length %d >>\nstream\n" % (
             pages, len(packed)) + packed + b"\nendstream endobj\n"
-    body = b"%%PDF-1.5\n2 0 obj << /Type /Pages /Count %d /Kids [] >> endobj\n" % pages + objs
+    kids = b" ".join(b"%d 0 R" % (i + 3) for i in range(pages))
+    body = b"%%PDF-1.5\n2 0 obj << /Type /Pages /Count %d /Kids [ %s ] >> endobj\n" % (pages, kids) + objs
     return base64.b64encode(body + random.Random(5).randbytes(filler)).decode()
 
 
@@ -409,7 +410,7 @@ def test_too_many_object_streams_is_a_guess():
 
 
 def test_line_wrapped_base64_is_counted():
-    clean = pdf_b64(100, filler=300_035)  # a length whose wrapped form failed to decode at 2ae9ff4: (1, False)
+    clean = pdf_b64(100, filler=300_028)  # a length whose wrapped form failed to decode at 2ae9ff4: (1, False)
     wrapped = "\n".join(clean[i:i + 76] for i in range(0, len(clean), 76))
     assert counted(clean) == counted(wrapped) == (100, True)
     assert counted("\r\n".join(clean[i:i + 64] for i in range(0, len(clean), 64))) == (100, True)
@@ -449,7 +450,8 @@ def test_codex_media_has_no_floor_so_the_ratio_never_rises(tmp_path):
     _, found = split_media(upstream["input"])
     text_bytes = len(canonical_json(upstream).encode()) - sum(len(canonical_json(b).encode()) for b in found)
     eng.observe_usage("/v1/responses", {"input_tokens": math.ceil(text_bytes / 3.0) + 1_105 * 10}, req)
-    assert eng.estimator.measured_bytes_per_token <= 3.0  # Claude's floor here: 4.31, text 30% low
+    ratio = eng.estimator.measured_bytes_per_token  # Claude's floor here: 4.31, text 30% low
+    assert ratio is None or ratio <= 3.0  # 10 images' cost is too uncertain to set a first ratio from
 
 
 def test_a_document_in_the_first_request_does_not_zero_the_head(tmp_path):
@@ -500,7 +502,7 @@ def test_a_pdflib_file_does_not_page_the_window(tmp_path):
 
 def test_the_floor_takes_the_lower_of_the_two_counts():
     pages = b"".join(b"%d 0 obj << /Type /Page /Parent 2 0 R >> endobj " % (i + 3) for i in range(20))
-    raw = b"%PDF-1.4\n2 0 obj << /Type /Pages /Count 3 /Kids [] >> endobj " + pages
+    raw = b"%PDF-1.4\n2 0 obj << /Type /Pages /Count 3 /Kids [ 3 0 R 4 0 R 5 0 R 6 0 R ] >> endobj " + pages
     assert pdf_page_count(base64.b64encode(raw).decode()) == (20, True, 3)  # estimate high, floor low
     only_pages = b"%PDF-1.4\n" + pages
     assert pdf_page_count(base64.b64encode(only_pages).decode()) == (20, True, 1)  # one claim: floor one page
@@ -518,7 +520,8 @@ def test_a_crafted_page_count_does_not_raise_the_ratio(tmp_path):
     req = {**HEAD, "messages": list(msgs)}
     upstream, _, _ = eng(req, {}, EP)
     eng.observe_usage(EP, {"input_tokens": _real_usage(upstream) + 1_583, "output_tokens": 10}, req)
-    assert eng.estimator.measured_bytes_per_token <= 3.0
+    ratio = eng.estimator.measured_bytes_per_token
+    assert ratio is None or ratio <= 3.0  # 23c42ea: 10.24
     rng = random.Random(7)
     text = " ".join(rng.choices(["def", "return", "self", "value", "x", "=", "(", ")"], k=30_000))
     msgs += [{"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read",
@@ -575,20 +578,31 @@ class _Upstream(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def test_the_proxy_counts_pdfs_before_it_takes_the_transform_lock():
-    """Round 2: parsing ran under the lock every session waits on; the proxy primes the cache first."""
-    seen: list[tuple[str, bool]] = []
+def test_the_proxy_counts_pdfs_before_it_takes_the_transform_lock(monkeypatch):
+    """Round 3: ``prime`` cached nothing (it passed a list of lists, which ``split_media`` skips), so every PDF
+    was still parsed under the lock every session waits on. Every parse must run with the lock free, and the
+    cache must hold the request's PDFs when the transform starts."""
+    parses: list[bool] = []
+    real = tokens._count_pdf_pages
+
+    def counting(data):
+        parses.append(proxy.transform_lock.locked())
+        return real(data)
+
+    monkeypatch.setattr(tokens, "_count_pdf_pages", counting)
+    seen: list[tuple] = []
     engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config())
 
     class Spy:
         preserves_input = True
 
         def prime(self, request):
-            seen.append(("prime", proxy.transform_lock.locked()))
+            assert not proxy.transform_lock.locked()
             engine.prime(request)
+            seen.append(("primed", len(parses)))
 
         def __call__(self, request, headers, endpoint):
-            seen.append(("transform", proxy.transform_lock.locked()))
+            seen.append(("transform", proxy.transform_lock.locked(), len(parses)))
             return engine(request, headers, endpoint)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
@@ -596,10 +610,14 @@ def test_the_proxy_counts_pdfs_before_it_takes_the_transform_lock():
     proxy = ContextoProxy(f"http://127.0.0.1:{server.server_address[1]}", MemoryStore(key=b"k" * 32), Spy())
     proxy.start()
     try:
-        data = pdf_b64(3, filler=2_024)
         tokens._PDF_PAGES.clear()
-        doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}}
-        body = json.dumps({**HEAD, "stream": False, "messages": [{"role": "user", "content": [doc]}]}).encode()
+        docs = [{"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                                "data": pdf_b64(3, filler=2_024 + i)}} for i in range(2)]
+        pasted = {"role": "user", "content": [docs[0]]}
+        read = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [docs[1]]}]}
+        messages = [pasted, {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read",
+                                                               "input": {}}]}, read]
+        body = json.dumps({**HEAD, "stream": False, "messages": messages}).encode()
         conn = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=10)
         conn.request("POST", EP, body=body, headers={"Content-Type": "application/json", "x-api-key": "synthetic"})
         assert conn.getresponse().status == 200
@@ -608,8 +626,21 @@ def test_the_proxy_counts_pdfs_before_it_takes_the_transform_lock():
         proxy.stop()
         server.shutdown()
         server.server_close()
-    assert seen == [("prime", False), ("transform", True)]
-    assert (len(data), hash(data)) in tokens._PDF_PAGES
+    assert seen == [("primed", 2), ("transform", True, 2)]  # both PDFs counted before the lock, none after
+    assert parses == [False, False]
+
+
+@pytest.mark.parametrize("field", ["messages", "input"])
+def test_prime_fills_the_cache(field):
+    data = pdf_b64(2, filler=3_000)
+    block = ({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}}
+             if field == "messages" else
+             {"type": "input_file", "filename": "a.pdf", "file_data": "data:application/pdf;base64," + data})
+    item = {"role": "user", "content": [block]} if field == "messages" else {"type": "message", "role": "user",
+                                                                             "content": [block]}
+    tokens._PDF_PAGES.clear()
+    RewriteEngine(MemoryStore(key=b"k" * 32), config=Config()).prime({"model": "m", field: [item]})
+    assert (len(data), hash(data)) in tokens._PDF_PAGES  # d95e5df: empty
 
 
 def test_priming_never_raises():
@@ -617,3 +648,144 @@ def test_priming_never_raises():
     for request in (None, [], {"messages": 5}, {"messages": [{"content": [{"type": "document", "source": 3}]}]},
                     {"input": [{"type": "input_file", "file_data": "data:application/pdf;base64,%%%"}]}):
         engine.prime(request)
+
+
+# Reviewer A, PR #234, round 3: per-PDF caps, the cache past 256 PDFs, and a floor a file cannot raise -------
+
+def _streams(bodies: list[bytes]) -> bytes:
+    return b"%PDF-1.7\n" + b"".join(_object_stream(body).replace(b"9 0 obj", b"%d 0 obj" % (10 + i))
+                                    for i, body in enumerate(bodies))
+
+
+def _stored_streams(bodies: list[bytes]) -> bytes:
+    """Object streams stored without a filter, as PyMuPDF writes them."""
+    header = b"%d 0 obj << /Type /ObjStm /N 1 /First 0 /Length %d >>\nstream\n"
+    return b"%PDF-1.7\n" + b"".join(header % (10 + i, len(body)) + body + b"\nendstream endobj\n"
+                                    for i, body in enumerate(bodies))
+
+
+TREE_MARKERS = b"/Type/Pages " * 999 + b"/Count " * 1_300
+PAGE_MARKERS = b"/Type/Page " * 9_999
+
+
+@pytest.mark.parametrize("bodies", [[TREE_MARKERS] * 128, [PAGE_MARKERS] * 128,
+                                    [TREE_MARKERS, PAGE_MARKERS] * 64], ids=["tree", "pages", "mixed"])
+@pytest.mark.parametrize("stored", [False, True], ids=["flate", "stored"])
+def test_caps_hold_per_pdf_across_object_streams(bodies, stored):
+    """Round 3: the caps restarted in every object stream, so 128 streams multiplied them: a 30 KB PDF took
+    1.8 to 2.5 s (d95e5df), and ten of them held another session's text request for 18.6 s."""
+    result, seconds, _ = _timed_count(_stored_streams(bodies) if stored else _streams(bodies))
+    assert seconds < 0.5 and result == (600, False)
+
+
+def test_a_request_with_300_pdfs_parses_each_once(monkeypatch, tmp_path):
+    """Round 3: past 256 distinct PDFs the LRU missed on every access: 910 parses in one engine call."""
+    calls = []
+    real = tokens._count_pdf_pages
+    monkeypatch.setattr(tokens, "_count_pdf_pages", lambda data: calls.append(1) or real(data))
+    tokens._PDF_PAGES.clear()
+    eng = _engine(tmp_path, bound=10_000_000)
+    msgs: list[dict] = []
+    for turn in range(30):
+        docs = [{"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                                "data": pdf_b64(1, filler=500 + 10 * turn + i)}} for i in range(10)]
+        msgs.append({"role": "user", "content": [{"type": "text", "text": f"turn {turn}"}, *docs]})
+        _send(eng, msgs)
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
+    assert len(calls) == 300
+
+
+def _claiming(drawn: int, claimed: int) -> bytes:
+    """A PDF whose page tree draws ``drawn`` pages but that holds ``claimed`` page objects and /Count."""
+    kids = b" ".join(b"%d 0 R" % (i + 3) for i in range(drawn))
+    pages = b"".join(b"%d 0 obj << /Type /Page /Parent 2 0 R >> endobj " % (i + 3) for i in range(claimed))
+    return b"%%PDF-1.4\n2 0 obj << /Type /Pages /Count %d /Kids [ %s ] >> endobj " % (claimed, kids) + pages
+
+
+def test_the_floor_counts_only_pages_the_tree_draws():
+    assert pdf_page_count(base64.b64encode(_claiming(1, 8)).decode()) == (8, True, 1)  # estimate high, floor low
+    assert pdf_page_count(base64.b64encode(_claiming(8, 8)).decode()) == (8, True, 8)
+
+
+def test_a_crafted_claim_in_a_dense_session_is_not_under_counted(tmp_path):
+    """Round 3: text at a true 2.0 bytes a token sits below the 3.5 ceiling, so a 1-page PDF claiming 8 pages
+    lifted the ratio to 2.34 and the next request was estimated 4% low. The floor now counts drawn pages."""
+    eng = _engine(tmp_path)
+    doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                          "data": base64.b64encode(_claiming(1, 8)).decode()}}
+
+    def dense_usage(body: dict) -> int:  # every byte outside media at 2.0 bytes a token, the PDF's 1 page at 1,583
+        stripped, found = split_media(body["messages"])
+        return math.ceil(len(canonical_json({**body, "messages": stripped})) / 2.0) + 1_583 * len(found)
+
+    rng = random.Random(8)
+    msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "read"}, doc]}]
+    for i in range(4):
+        req = {**HEAD, "messages": list(msgs)}
+        upstream, _, events = eng(req, {}, EP)
+        estimate = next(e for e in events if e["event"] == "request")["estimate"]
+        real = dense_usage(upstream)
+        if i:
+            assert estimate >= real * 0.99
+        eng.observe_usage(EP, {"input_tokens": real, "output_tokens": 10}, req)
+        blob = json.dumps([rng.randrange(10**6) for _ in range(3_000)])
+        msgs += [{"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {}}]},
+                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": blob}]}]
+    ratio = eng.estimator.measured_bytes_per_token
+    assert ratio is None or ratio <= 2.0 * 1.01  # d95e5df: 2.35
+
+
+# Reviewer B, PR #234, round 3: a dense PDF must not drag the ratio down ------------------------------------
+
+def _dense_session(tmp_path, *, paste_first: bool, pages: int = 20) -> list[float | None]:
+    """Text at 3.0 bytes a token, a PDF at 4,568 tokens a page (3,000 text plus a page image), read in a tool
+    loop after a text turn or pasted in the first request, then 12 text turns with Reads. The ratio after
+    each turn."""
+    eng = _engine(tmp_path)
+    doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                          "data": pdf_b64(pages, filler=pages * 20_000)}}
+    rng = random.Random(9)
+    msgs: list[dict] = []
+    ratios: list[float | None] = []
+
+    def send() -> None:
+        req = {**HEAD, "messages": list(msgs)}
+        upstream, _, events = eng(req, {}, EP)
+        stripped, found = split_media(upstream["messages"])
+        real = math.ceil(len(canonical_json({**upstream, "messages": stripped})) / 3.0) + pages * 4_568 * len(found)
+        estimate = next(e for e in events if e["event"] == "request")["estimate"]
+        if len(msgs) > 1:  # the first request is estimated by the seeds, as in any session
+            assert estimate >= real * 0.97  # never meaningfully under
+        eng.observe_usage(EP, {"input_tokens": real, "output_tokens": 10}, req)
+
+    for turn in range(14):
+        first = [{"type": "text", "text": f"turn {turn} " + "talk " * 400}]
+        if paste_first and turn == 0:
+            first.append(doc)
+        msgs.append({"role": "user", "content": first})
+        send()
+        for r in range(2):
+            msgs.append({"role": "assistant", "content": [{"type": "tool_use", "id": f"t{turn}_{r}", "name": "Read",
+                                                           "input": {}}]})
+            content = ([doc] if not paste_first and turn == 1 and r == 0
+                       else " ".join(rng.choices(["def", "x", "=", "(", ")", "return"], k=2_500)))
+            msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{turn}_{r}",
+                                                      "content": content}]})
+            send()
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
+        ratios.append(eng.estimator.measured_bytes_per_token)
+    return ratios
+
+
+def test_a_dense_pdf_read_mid_session_keeps_the_ratio(tmp_path):
+    """d95e5df took 1,000 a page off real usage for a PDF that cost 4,568: the ratio fell from 3.0 to 1.95 (20
+    pages) or 0.81 (100 pages) and took about 30 turns to recover, so the session kept less context."""
+    ratios = _dense_session(tmp_path, paste_first=False)
+    assert all(r is not None and 2.85 <= r <= 3.0 for r in ratios)
+
+
+def test_a_dense_pdf_in_the_first_request_does_not_set_a_low_first_ratio(tmp_path):
+    """Before a ratio exists the PDF's cost (1,000 to 4,568 a page) is too uncertain to learn from; d95e5df
+    learned 0.82, and 1.65 ten turns later."""
+    ratios = _dense_session(tmp_path, paste_first=True, pages=10)
+    assert all(r is None or 2.7 <= r <= 3.0 for r in ratios) and ratios[-1] is not None

@@ -64,14 +64,16 @@ PDF_STREAM_INPUT = 1 << 20  # compressed bytes read for one object stream
 PDF_STREAM_OUTPUT = 2 << 20  # inflated bytes per object stream
 PDF_INFLATE_BUDGET = 4 << 20  # inflated bytes per PDF: object streams hold dictionaries, not page content
 PDF_HEADER_WINDOW = 2_048  # bytes searched around /ObjStm for its object start and stream keyword
-PDF_MAX_PAGE_OBJECTS = 10_000  # /Type /Page matches read; more is not a real document
-PDF_MAX_TREE_NODES = 1_000  # /Type /Pages matches read
+PDF_MAX_PAGE_OBJECTS = 10_000  # /Type /Page matches read per PDF, object streams included
+PDF_MAX_TREE_NODES = 1_000  # /Type /Pages matches read per PDF, object streams included
 PDF_TREE_WINDOW = 8_192  # bytes searched on each side of /Type /Pages for its /Count (a 600-page /Kids)
 PDF_OBJECT_WINDOW = 8_192  # bytes searched back from /Type /Page for its "N G obj" header
 IMAGE_TYPES = frozenset({"image", "input_image"})  # Messages, Responses
 HEAD_CHARS = 64  # base64 characters that hold the PNG, GIF and WebP dimensions
 JPEG_HEAD_CHARS = 262_144  # a JPEG's frame header follows its EXIF and ICC segments: read up to 192 KB
-PDF_CACHE_SIZE = 256  # PDFs whose counts are kept, least recently used dropped first
+# PDFs whose counts are kept, least recently used dropped first. An entry is a key and three ints (about
+# 200 bytes), so this costs at most about 13 MB, and no request holds enough PDFs to cycle it.
+PDF_CACHE_SIZE = 65_536
 MEDIA_KEYS = ("content", "output", "source")  # where a block or item can hold media
 MEDIA_DEPTH = 10  # messages, message, content, tool_result, content, document, source, content, image
 
@@ -79,6 +81,7 @@ MEDIA_DEPTH = 10  # messages, message, content, tool_result, content, document, 
 _PAGE_OBJECT = re.compile(rb"/Type\s{0,16}/Page(?![A-Za-z])")
 _PAGE_TREE = re.compile(rb"/Type\s{0,16}/Pages\b")
 _COUNT = re.compile(rb"/Count\s{0,16}(\d{1,9})(?!\d)")
+_REFERENCE = re.compile(rb"(?<!\d)(\d{1,9})\s{1,16}\d{1,5}\s{1,16}R\b")
 _OBJECT_HEADER = re.compile(rb"(?<!\d)(\d{1,9})\s{1,16}\d{1,5}\s{1,16}obj\Z")  # searched up to "obj"
 _OBJECT_TABLE = re.compile(rb"(\d{1,9})\s{1,16}(\d{1,9})(?!\d)")
 _FIRST = re.compile(rb"/First\s{1,16}(\d{1,9})(?!\d)")
@@ -321,11 +324,12 @@ def _count_pdf_pages(data: str) -> PdfCount:
     if not pdf:
         return PdfCount(_guess_pages(len(data) * 3 // 4), False)
     scan = _PageScan()
-    complete = scan.add(pdf) and _object_stream_pages(pdf, scan)
+    streams = _object_stream_pages(pdf, scan)  # first, so the file's own scan can skip stored streams
+    complete = scan.add(pdf, skip=scan.stored) and streams
     found, tree = len(scan.pages), scan.tree
     if scan.capped:  # more page objects or tree nodes than a document has: crafted, so trust neither
         return PdfCount(PDF_MAX_PAGES, False)
-    floor = min(found, tree, PDF_MAX_PAGES) if found and tree else 1
+    floor = scan.floor_pages()
     if not complete:
         return PdfCount(min(PDF_MAX_PAGES, max(found, tree)), True, floor) if tree else PdfCount(PDF_MAX_PAGES, False)
     if found or tree:
@@ -334,28 +338,51 @@ def _count_pdf_pages(data: str) -> PdfCount:
 
 
 class _PageScan:
-    """Page objects (by object number) and the largest page-tree count found in one PDF's buffers."""
+    """Page objects (by object number), the page tree's largest count, and the object numbers its
+    ``/Kids`` arrays reference, over one PDF's buffers. The caps hold for the whole PDF, so object
+    streams cannot multiply them."""
 
     def __init__(self) -> None:
         self.pages: set = set()
+        self.kids: set[int] = set()
         self.tree = 0
         self.capped = False
+        self.page_matches = 0
+        self.tree_matches = 0
+        self.stored: list[tuple[int, int]] = []  # spans of object streams stored without a filter, in order
 
-    def add(self, buffer: bytes, numbers: tuple[list[int], list[int]] | None = None) -> bool:
-        """Scan one buffer: the PDF, or an inflated object stream with its offset table (``numbers``:
-        offsets, object numbers). False, and ``capped``, past ``PDF_MAX_PAGE_OBJECTS`` or
-        ``PDF_MAX_TREE_NODES``, which no real document reaches."""
-        for n, match in enumerate(_PAGE_OBJECT.finditer(buffer)):
-            if n >= PDF_MAX_PAGE_OBJECTS:
+    def add(self, buffer: bytes, numbers: tuple[list[int], list[int]] | None = None,
+            skip: list[tuple[int, int]] = ()) -> bool:
+        """Scan one buffer: the PDF, or an object stream's content with its offset table (``numbers``:
+        offsets, object numbers). Page objects inside a ``skip`` span were counted with their stream.
+        False, and ``capped``, once the PDF passes ``PDF_MAX_PAGE_OBJECTS`` or ``PDF_MAX_TREE_NODES``,
+        which no real document reaches."""
+        starts = [span[0] for span in skip]
+        for match in _PAGE_OBJECT.finditer(buffer):
+            index = bisect.bisect_right(starts, match.start()) - 1
+            if index >= 0 and match.start() < skip[index][1]:
+                continue
+            self.page_matches += 1
+            if self.page_matches > PDF_MAX_PAGE_OBJECTS:
                 self.capped = True
                 return False
             self.pages.add(self._number(buffer, match.start(), numbers))
-        for n, match in enumerate(_PAGE_TREE.finditer(buffer)):
-            if n >= PDF_MAX_TREE_NODES:
+        for match in _PAGE_TREE.finditer(buffer):
+            self.tree_matches += 1
+            if self.tree_matches > PDF_MAX_TREE_NODES:
                 self.capped = True
                 return False
-            self.tree = max(self.tree, _node_count(buffer, match.start(), match.end()))
+            count, kids = _node(buffer, match.start(), match.end())
+            self.tree = max(self.tree, count)
+            self.kids.update(kids)
         return True
+
+    def floor_pages(self) -> int:
+        """Pages the floor may count: numbered page objects that a ``/Kids`` array references, the pages
+        a renderer draws, so a file cannot raise its floor with page objects or counts it does not draw
+        (D48); at most the tree's count when there is one, and at least 1."""
+        drawn = sum(1 for page in self.pages if isinstance(page, int) and page in self.kids)
+        return max(1, min(drawn, self.tree, PDF_MAX_PAGES) if self.tree else min(drawn, PDF_MAX_PAGES))
 
     @staticmethod
     def _number(buffer: bytes, at: int, numbers: tuple[list[int], list[int]] | None) -> Any:
@@ -369,24 +396,37 @@ class _PageScan:
         return int(header.group(1)) if header is not None else (id(buffer), at)
 
 
-def _node_count(buffer: bytes, start: int, end: int) -> int:
-    """The ``/Count`` of the ``/Type /Pages`` dictionary at ``start``: the nearest one after it, else
-    before it, without crossing a ``>`` (a page tree node holds no nested dictionary between the two),
-    within ``PDF_TREE_WINDOW``, so the work per node is bounded."""
+def _node(buffer: bytes, start: int, end: int) -> tuple[int, list[int]]:
+    """The ``/Count`` and the ``/Kids`` references of the ``/Type /Pages`` dictionary at ``start``: each
+    the nearest after it, else before it, without crossing a ``>`` (a page tree node holds no nested
+    dictionary between them), within ``PDF_TREE_WINDOW``, so the work per node is bounded."""
     stop = buffer.find(b">", end, end + PDF_TREE_WINDOW)
-    after = _COUNT.search(buffer, end, stop if stop >= 0 else end + PDF_TREE_WINDOW)
-    if after is not None:
-        return int(after.group(1))
+    after = (end, stop if stop >= 0 else min(len(buffer), end + PDF_TREE_WINDOW))
     gt = buffer.rfind(b">", max(0, start - PDF_TREE_WINDOW), start)
-    at = buffer.rfind(b"/Count", gt + 1 if gt >= 0 else max(0, start - PDF_TREE_WINDOW), start)
-    before = _COUNT.match(buffer, at, start) if at >= 0 else None
-    return int(before.group(1)) if before is not None else 0
+    before = (gt + 1 if gt >= 0 else max(0, start - PDF_TREE_WINDOW), start)
+    count = 0
+    for low, high in (after, before):
+        found = _COUNT.search(buffer, low, high)
+        if found is not None:
+            count = int(found.group(1))
+            break
+    kids: list[int] = []
+    for low, high in (after, before):
+        at = buffer.find(b"/Kids", low, high)
+        opening = buffer.find(b"[", at, min(high, at + 32)) if at >= 0 else -1
+        closing = buffer.find(b"]", opening, high) if opening >= 0 else -1
+        if closing >= 0:
+            kids = [int(m.group(1)) for m in _REFERENCE.finditer(buffer, opening, closing)]
+            break
+    return count, kids
 
 
 def _object_stream_pages(pdf: bytes, scan: _PageScan) -> bool:
     """Scan a PDF's object streams, where PDF 1.5 and later can keep their page objects and page tree.
-    Each stream is inflated, scanned, and dropped in turn, within the ``PDF_*`` bounds. False when one
-    was not read: not plain Flate (another filter, a predictor, encryption), or past a bound."""
+    Each stream is read (Flate inflated, or as stored when it has no filter, as PyMuPDF writes them),
+    scanned with its offset table, and dropped in turn, within the ``PDF_*`` bounds; a stored stream's
+    span is recorded in ``scan.stored`` so the scan of the file itself skips its page objects. False
+    when one was not read: another filter, a predictor, encryption, or past a bound."""
     view = memoryview(pdf)
     budget = PDF_INFLATE_BUDGET
     for n, match in enumerate(_OBJECT_STREAM.finditer(pdf)):
@@ -397,19 +437,26 @@ def _object_stream_pages(pdf: bytes, scan: _PageScan) -> bool:
         if keyword < 0 or begin < 0:
             return False
         header = pdf[begin:keyword]
-        if not _FLATE_ONLY.search(header) or b"/Predictor" in header:
-            return False
         body = keyword + 6
         body += 2 if pdf[body:body + 2] == b"\r\n" else 1 if pdf[body:body + 1] in (b"\n", b"\r") else 0
         length = _DIRECT_LENGTH.search(header)
-        end = body + min(int(length.group(1)) if length else PDF_STREAM_INPUT, PDF_STREAM_INPUT)
-        inflater = zlib.decompressobj()
-        try:
-            out = inflater.decompress(view[body:end], min(PDF_STREAM_OUTPUT, budget))
-        except zlib.error:
-            return False
-        if inflater.unconsumed_tail or not inflater.eof:  # an output bound, or a stream longer than read
-            return False
+        if b"/Filter" not in header:
+            end = body + int(length.group(1)) if length else pdf.find(b"endstream", body, body + PDF_STREAM_INPUT)
+            if end < body or end - body > min(PDF_STREAM_OUTPUT, budget):
+                return False
+            out = pdf[body:end]
+            scan.stored.append((body, end))
+        else:
+            if not _FLATE_ONLY.search(header) or b"/Predictor" in header:
+                return False
+            end = body + min(int(length.group(1)) if length else PDF_STREAM_INPUT, PDF_STREAM_INPUT)
+            inflater = zlib.decompressobj()
+            try:
+                out = inflater.decompress(view[body:end], min(PDF_STREAM_OUTPUT, budget))
+            except zlib.error:
+                return False
+            if inflater.unconsumed_tail or not inflater.eof:  # an output bound, or a stream longer than read
+                return False
         budget -= len(out)
         if not scan.add(out, _object_table(header, out)):
             return False
@@ -436,9 +483,10 @@ def _document_cost(block: dict) -> tuple[int, int]:
 
 
 def prime_media(value: Any) -> None:
-    """Count the pages of every base64 PDF in ``value`` (a request) into the cache, so the engine finds
-    them there. The proxy calls this before it takes its transform lock (D48), so a large or crafted PDF
-    is parsed without holding up other sessions. Never raises."""
+    """Count the pages of every base64 PDF in ``value`` (a request's message or item list) into the
+    cache, so the engine finds them there. The proxy calls this, through ``RewriteEngine.prime``, before
+    it takes its transform lock (D48), so a large or crafted PDF is parsed without holding up other
+    sessions. Never raises."""
     try:
         for block in split_media(value)[1]:
             if _media_kind(block) == "document" and (data := _base64_payload(block)) is not None:

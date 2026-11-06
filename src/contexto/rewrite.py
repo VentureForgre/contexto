@@ -151,9 +151,15 @@ STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
 RETAINED_ROLES = ("user", "assistant", "tool_result")  # A14: the roles set_retained accepts (lane B PR #128)
-# D48: a request whose text would measure above this many bytes a token once its media floor is taken off
-# had a floor above the media's real cost (a page count a file inflated); its floor is dropped instead.
+# D48: before a ratio is measured, a request whose text would measure above this many bytes a token once
+# its media floor is taken off had a floor above the media's real cost; its floor is dropped instead.
 MEDIA_RATIO_CEILING = TEXT_BYTES_PER_TOKEN
+# D48: bytes a token a request with media may teach the ratio; outside it the media's cost was not bounded
+# well enough (a dense PDF far over its floor, or a floor far over its cost), so the request is not learned.
+MEDIA_TEXT_RATIO_RANGE = (1.5, 6.0)
+# D48: before a ratio is measured, a request with media teaches the first one only when its media's cost is
+# known to this share of its usage (estimate minus floor), so the first ratio errs low by at most about this.
+MEDIA_FIRST_UNCERTAINTY = 0.1
 RESTORED_RATIO_RANGE = (1.0, 6.0)  # bytes per token a restore accepts; outside it the seed is safer (A2e)
 
 
@@ -1451,6 +1457,34 @@ def guarded_rotation(request: dict, messages: list[dict], n: int, estimate: int,
     return replace(new, degraded=False, conflict_page=None)
 
 
+def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None) -> tuple[int, int | None]:
+    """The text part of a request's bytes and real tokens, for the measured ratio (D48), or None for the
+    tokens when the request should not be learned from. Media bytes are left out. The media's real cost
+    lies between its floor (at or under the cost) and its estimate (at or over it). With a measured
+    ratio, the media are charged the cost in that range that keeps the ratio, so a request moves it only
+    as far as its usage proves (a dense PDF far over its floor no longer reads as dense text). Before
+    one, the media are charged their floor, so the first ratio errs low (text over-counted); when they
+    have a floor (Claude) the request is learned only if that range is within ``MEDIA_FIRST_UNCERTAINTY``
+    of its usage, so a dense PDF cannot set a first ratio far too low (on Codex the floor is 0 and the
+    estimate a deliberate over-estimate, so its range says nothing). A floor that would put the text over
+    ``MEDIA_RATIO_CEILING`` ran high and is not taken off. A request whose text ratio still lands outside
+    ``MEDIA_TEXT_RATIO_RANGE`` is skipped."""
+    text_bytes = sent_bytes - media.bytes
+    if not media.bytes and not media.tokens:
+        return text_bytes, real
+    if ratio:
+        charged = min(max(real - text_bytes / ratio, media.floor), media.tokens)
+    elif media.floor and media.tokens - media.floor > MEDIA_FIRST_UNCERTAINTY * real:
+        return text_bytes, None  # a dense PDF: too uncertain to set the first ratio from
+    else:
+        charged = media.floor if text_bytes <= MEDIA_RATIO_CEILING * (real - media.floor) else 0
+    tokens = real - charged
+    low, high = MEDIA_TEXT_RATIO_RANGE
+    if tokens <= 0 or text_bytes <= 0 or not low <= text_bytes / tokens <= high:
+        return text_bytes, None
+    return text_bytes, math.ceil(tokens)
+
+
 def sent_media(items: list, *, measure_bytes: bool = True) -> MediaCost:
     """The images and documents in ``items``: their bytes, estimate, and least cost (D48). The least cost
     is 0 on a dialect whose API can charge less than Claude's floor (Codex: OpenAI prices by tiles,
@@ -2360,7 +2394,8 @@ class RewriteEngine:
         its transform lock, so parsing a large or crafted PDF does not hold up every other session; the
         engine then finds the counts cached. Reads the request only, and never raises."""
         if isinstance(request, dict):
-            prime_media([request.get("messages"), request.get("input")])
+            for field_name in ("messages", "input"):  # Messages, Responses
+                prime_media(request.get(field_name))
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
@@ -2415,14 +2450,11 @@ class RewriteEngine:
             events.append({"event": "usage_unattributed", "epoch": state.epoch, "messages": identity[0],
                            "expected_messages": pending[0] if pending else None})
         else:
-            # The session's measured ratio from now on, of text only (D48): the request's media bytes and
-            # the least its media can have cost are taken out, so a screenshot cannot inflate the ratio.
-            # A floor that would put the text above the ceiling ran high, so it is not taken off.
-            media = state.last_sent_media
-            text_bytes, floor = state.last_sent_bytes - media.bytes, media.floor
-            if floor and text_bytes > MEDIA_RATIO_CEILING * (real - floor):
-                floor = 0
-            self.estimator.observe(text_bytes, real - floor)
+            # The session's measured ratio from now on, of text only (D48).
+            text_bytes, text_tokens = text_usage(state.last_sent_bytes, real, state.last_sent_media,
+                                                 self.estimator.measured_bytes_per_token)
+            if text_tokens is not None:
+                self.estimator.observe(text_bytes, text_tokens)
             state = replace(state, last_input_tokens=real, pending_usage=None)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried

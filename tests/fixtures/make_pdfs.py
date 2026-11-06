@@ -2,7 +2,7 @@
 
 Run from a checkout on macOS (cupsfilter and sips are the system's; the rest come from PyPI):
 
-    uv run --no-project --with reportlab --with fpdf2 --with pikepdf python tests/fixtures/make_pdfs.py
+    uv run --no-project --with reportlab --with fpdf2 --with pikepdf --with pymupdf python tests/fixtures/make_pdfs.py
 
 Every file holds only synthetic text. ``EXPECTED`` is each file's true page count, which
 tests/test_image_estimate.py asserts; the PDFlib-shaped and incremental-update files are written by
@@ -26,6 +26,7 @@ EXPECTED = {
     "fpdf2-5.pdf": 5,
     "pikepdf-objstm-12.pdf": 12,
     "pikepdf-objstm-linearized-12.pdf": 12,
+    "pymupdf-objstm-stored-9.pdf": 9,
     "cupsfilter-text.pdf": 2,
     "sips-image-1.pdf": 1,
     "incremental-added-page-4.pdf": 4,
@@ -67,6 +68,17 @@ def pikepdf_objstm(pages: int, *, linearize: bool) -> bytes:
     pdf.save(buffer, object_stream_mode=pikepdf.ObjectStreamMode.generate, linearize=linearize,
              deterministic_id=True)
     return buffer.getvalue()
+
+
+def pymupdf_objstm(pages: int) -> bytes:
+    """PyMuPDF stores its object streams without a filter (D48 review round 3)."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    for page in range(pages):
+        doc.new_page().insert_text((72, 72), f"Synthetic page {page + 1} of {pages}.")
+    doc.set_metadata({})
+    return doc.tobytes(use_objstms=1, garbage=1, no_new_id=1)
 
 
 def cupsfilter_text() -> bytes:
@@ -175,6 +187,7 @@ def main() -> None:
         "fpdf2-5.pdf": fpdf2(5),
         "pikepdf-objstm-12.pdf": pikepdf_objstm(12, linearize=False),
         "pikepdf-objstm-linearized-12.pdf": pikepdf_objstm(12, linearize=True),
+        "pymupdf-objstm-stored-9.pdf": pymupdf_objstm(9),
         "cupsfilter-text.pdf": cupsfilter_text(),
         "sips-image-1.pdf": sips_image(),
         "incremental-added-page-4.pdf": added_page(),

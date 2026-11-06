@@ -1088,7 +1088,10 @@ class _Handler(BaseHTTPRequestHandler):
                 return body, headers, None
         prime = getattr(owner.transform, "prime", None)
         if callable(prime):
-            prime(request)  # D48: count the request's PDFs before taking the lock that every session waits on
+            try:
+                prime(request)  # D48: count the request's PDFs before taking the lock that every session waits on
+            except Exception:  # an optimisation only: the transform counts them under the lock instead
+                pass
         try:
             with owner.transform_lock:
                 new_request, new_headers, events = owner.transform(request, dict(headers), endpoint)
