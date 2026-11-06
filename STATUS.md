@@ -1,7 +1,8 @@
 # Contexto status
 
-Updated 2026-10-25 by claude (v0.5.8: PRs #218 to #230, D43 to D47). Decisions taken and still
-open, with reasons: `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
+Updated 2026-11-06 by claude (v0.5.23: the 2026-11-05 QA run and the fix round, PRs #232 to #248,
+D48 to D60, and live acceptance run #4). Decisions taken and still open, with reasons:
+`docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
 
@@ -12,43 +13,146 @@ compaction never fires, and accuracy equals full context.
 - M0 study: complete. Recommendation `docs/research/M0-recommendation.md`.
 - M2 build: complete on main. Runs end to end through `contexto run claude ...` and
   `contexto run codex ...`. Contract: `docs/milestones/M2-contexto-proxy.md`.
-- Acceptance: **all four live criteria passed in one run on Claude Code** (live run #3, main
-  fbb1303, claude-haiku-5-5), and again on claude-opus-5-5 (main 9d2949a, PR #221, with two
-  departures from the contract, below), and **Codex passed criteria 1 to 3** at bound 64,000 (D30)
-  and at the default 150,000 (main 9d2949a, codex-cli 0.163.0;
+- Acceptance: **all five criteria passed on Claude Code 2.1.318** (live run #4, v0.5.20,
+  claude-haiku-5-5, bound 150,000, Claude Code's defaults with tool search on): Contexto answered 52
+  of 54 probes against 47 for the full-context baseline, with zero compaction, every request under
+  the bound (largest 110,465) and 38 of 38 cache reads. Earlier: live run #3 (2.1.301, 51 against
+  48), claude-opus-5-5 (2.1.302, 53 against 54, two departures from the contract), and **Codex
+  passed criteria 1 to 3** at bound 64,000 (D30) and at the default 150,000 (codex-cli 0.163.0;
   `docs/research/M2-codex-acceptance-150k.md`).
-  On claude-haiku-5-5, Contexto answered 51 of 54 probes against 48 for the full-context baseline;
-  on claude-opus-5-5, 53 against 54. Both runs had zero compaction and every request under the
-  bound.
-- Latest release: v0.5.8 (main 52a96b5, 2026-10-25). See "Open follow-ups" and "What is left"
-  below for the remaining work and the items that need the owner.
-- Tests on main (52a96b5, v0.5.8): 2284 passed, 1 skipped, 1 xfailed on macOS, Python 3.12 (local
-  run, 2026-10-25).
+- QA run, 2026-11-05 (v0.5.8): 22 tester agents found that three common actions broke the promise in
+  normal use (a pasted screenshot, a head change from tool search or a model switch, `/clear`), that
+  standing rules were lost once paged, and two security holes (a project's `apiKeyHelper` run by
+  `contexto run codex` with no trust check, and no Host or Origin check on the proxy). The fix round
+  (PRs #232 to #248, D48 to D60, v0.5.9 to v0.5.23) fixed all of them, each PR with two reviewer
+  agents; details under "QA run and fix round" below.
+- Latest release: v0.5.23 (main 08ec571, 2026-11-06). Releases from v0.5.13 on carry `SHA256SUMS`
+  and a build provenance attestation (PR #233).
+- Tests on main (08ec571, v0.5.23, with this docs pass): 3162 passed, 1 skipped, 1 xfailed on macOS,
+  Python 3.13 (local run, 2026-11-06, 6 min 6 s).
+- Tested CLI versions (`TESTED_VERSIONS`): Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318;
+  codex-cli 0.154.0, 0.163.0 and 0.166.0 (D56). 2.1.318 has the full live acceptance; 2.1.314 and
+  0.166.0 the zero-spend routine only.
 - The repository is public (D42) and MIT licensed (D43). GitHub Releases stay the only distribution;
   there is no package registry release. Tracked files were scrubbed at `HEAD` of the owner's proxy
   hostname, another private repository's name, statements about the owner's own accounts and plans,
-  and the self-hosted runner's machine name; history was not rewritten.
+  and the self-hosted runner's machine name; history was not rewritten. On 2026-11-06, with the
+  owner's approval, 197 old branches were deleted (QA had found the hostname on 197 of 232 public
+  branches), with no force push. Old history still holds the hostname, including the v0.1.0 to
+  v0.4.0 source archives.
 - CI and releases run on GitHub-hosted runners (PR #213): Python 3.12 to 3.15 on Ubuntu, 3.12 and
-  3.15 on macOS, and Ruff lint. `ci` is a required check in the main ruleset, and workflow runs on
-  fork pull requests need approval for all external contributors (D42). GitHub private
-  vulnerability reporting, which `SECURITY.md` points to, is on.
-- Two "flaky" tests (launcher Ctrl+C, proxy command) failed whenever pytest ran as a background
-  job, which starts with SIGINT ignored; fixed in the tests (PR #213), not a timing problem.
-- The proxy no longer makes a reverse hostname lookup at start; on a GitHub macOS runner it took
-  35 seconds per launch (PR #213, fix). Quarantined pages are named from one clock reading (PR
-  #213, fix).
-- Ruff lint is enforced in CI (`uvx ruff@0.17.2 check .`); `ruff format` is not.
-- CLIProxyAPI compatibility (D35, PR #210): the stream hold passes terminated `: keep-alive`
-  comments like ping; the user settings file follows `CLAUDE_CONFIG_DIR`; the Codex session line
-  names its upstream source. Live through the owner's proxy: `contexto run claude -p` on
-  claude-haiku-5-5 and `contexto run codex exec -m gpt-5.6-luna` both exit 0 with 200 upstream.
-  Guide: `docs/cliproxyapi.md`.
-- Upstream affinity (D36, PR #212) is deployed on the owner's proxy and verified for cache reuse;
-  the dropped-thinking check ran on 2026-10-25 UTC: no drop reported in a claude-opus-5-5 session,
-  which by cache evidence stayed on one credential (see "O6" below).
-- Claude Code 2.1.310 is tested (D46, PR #227), next to 2.1.302. It turns tool search on by
-  default. The zero-spend routine and a 305,223-token live recall check ran on it; the full live
-  acceptance has not (see "Needs the owner").
+  3.15 on macOS, and Ruff lint (`uvx ruff@0.17.2 check .`; `ruff format` is not enforced). `ci` is a
+  required check in the main ruleset, and workflow runs on fork pull requests need approval for all
+  external contributors (D42). GitHub private vulnerability reporting, which `SECURITY.md` points
+  to, is on.
+- CLIProxyAPI compatibility (D35, PR #210) and upstream affinity (D36, PR #212, deployed on the
+  owner's proxy and verified for cache reuse). Guide: `docs/cliproxyapi.md`.
+
+## QA run and fix round (2026-11-05 to 2026-11-06, v0.5.9 to v0.5.23)
+
+The QA run (main 4e2c4cd, v0.5.8) had 22 tester agents in three waves and spent about 4.94M live
+tokens on claude-haiku-5-5 and gpt-6-astra low. What held: installs on Python 3.12 to 3.15 by pip,
+pipx and uv; 2,284 tests passed on every Python, 0 failures in 18 runs; the bound held in every live
+session; about 3,800 synthetic requests passed an API-rule validator with byte-exact storage; the
+proxy took 2,400 requests at 100 concurrent with no crash or leak, and keys were never logged. The
+fix round then ran one builder per area, two reviewer agents per PR, and re-checks after each merge.
+
+What each decision changed, with the key numbers (full text in `docs/DECISIONS.md`):
+
+- **D48 (PR #234, v0.5.21): images priced by their pixels.** Images and PDFs were priced
+  by base64 size: a screenshot measured at 641 to 3,243 tokens was estimated at 124,000 to 429,000,
+  so one pasted screenshot paged the whole window and logged `bound_too_small` with advice to restart.
+  Now `width * height / 750` after scaling to a 2,576-pixel long edge, 64 to 4,784 (estimates 640 to
+  3,334 for the four measured sizes). Images and documents are kept out of the bytes-per-token
+  ratio, which two screenshots had pushed from 2.87 to 39.4; after the fix it stays 3.00.
+- **D49 (PR #232, v0.5.9; amended by PR #244, v0.5.18): a head change is sized like any rotation.**
+  Tool search loading a tool, an MCP server connecting, or a model switch took a branch that skipped
+  the minimal window, `bound_too_small` and the room rotation. Live at bound 60,000 a turn started
+  with recall room -4,243 and every search came back empty. Now sized like any rotation, and every
+  forwarded request is checked against the bound before it is sent (at bound 60,000 with the live
+  shape: sent 51,050 to 51,406 before, 20,681 to 21,037 after). The amendment measures the head from
+  the first usage that has an input count, at that request's own ratio (a late first usage had left
+  the head 0 and turn starts over the bound: 32,047 real at bound 30,000, now about 20,700).
+- **D50 (PR #238, v0.5.15): main follows Claude Code's session id.** After `/clear` the new
+  conversation stayed a side conversation until it outgrew the old one, so recall drew on a spent
+  room and returned nothing. Main now follows `X-Claude-Code-Session-Id` across `/clear` and
+  `/resume`, and the compaction summary across `/compact`, interactive and headless, measured on 2.1.302 to 2.1.318; subagents, teammates and
+  nested `claude -p` never take it. Logged as `main_changed`.
+- **D51 (PR #242, v0.5.11): standing rules pinned when stated.** The model had pinned 1 of 16
+  standing rules. The MCP instructions and the preamble now tell it to pin a rule as an obligation
+  when stated and keep it open: live, 4 of 4 and 4 of 4 rules pinned and applied, against 0 of 4 with
+  the shipped wording (865,443 tokens). Contexto's own search, recall and state calls are no longer
+  searched, so an old search reply no longer outranks the page it quoted.
+- **D52 (PR #237, v0.5.14): settings as Claude Code reads them, and project settings for Codex only
+  from a trusted folder.** Contexto read different project files than Claude Code in 8 of 27
+  layouts; it now matches all 27. A project's `apiKeyHelper` and base URL count for Codex only when
+  Claude Code has recorded the folder as trusted; `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` turns project
+  files off for every CLI, as `claude -p` does.
+- **D53 (PR #239, v0.5.16): the proxy serves only the local CLI.** A page on localhost could scan
+  every ephemeral port in about a second, write pages and take main. Now a request with an `Origin`
+  header, or whose `Host` is not `127.0.0.1` or `localhost`, gets 403. Esc during a held tool call
+  let upstream generate for 38 s more; now the proxy shuts upstream within 0.21 to 0.23 s. An early
+  413 is forwarded instead of becoming retried 502s.
+- **D54 (PR #236, v0.5.20): `contexto run codex` launch.** The key helper runs through `/bin/sh -c`
+  (`$VAR`, `~` and pipes failed before); a derived upstream on Anthropic's API is refused instead of
+  sending the OpenAI key there; interactive launches pass `--no-daemon` (Codex 0.166.0 had left 2
+  processes and about 517 MB per session); a missing `codex` exits 127 before anything starts.
+- **D55 (PR #240, v0.5.12; follow-ups PR #245, v0.5.13): `contexto run claude` resumes through
+  Contexto.** `--resume <id>` and `--continue` had opened a new, empty Contexto session; they now
+  reuse the one that served the conversation, and the exit prints the resume command. Signals: a
+  watchdog ends Claude Code and removes the temporary files when the launcher is killed with SIGKILL
+  (Claude Code gone within 2 s). Mid-run notices are printed after Claude Code exits. The automatic
+  session choice is serialized by `choose.lock` (four racers shared a store in 3 of 4 tries without
+  it, never with it).
+- **D56 (PR #243, v0.5.10): Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 tested** at zero
+  spend; Contexto reads the new subagent stop reports (`<tools-used-before-summary>`), so side rooms
+  close early on those versions too. Most spikes run a CLI by path with a temp `HOME`, and all
+  set `DISABLE_AUTOUPDATER=1`. Numbers: `docs/research/M2-claude-code-2.1.318.md`.
+- **D57 (PR #241, v0.5.17): user-facing commands.** `contexto sessions show` lists page ids,
+  `contexto search` finds them, `contexto state` prints the pinned records readably (`--raw` for
+  the model's text), session ids take unique prefixes for read-only commands, failed launches leave
+  no empty session, and exit codes are consistent (42 new or extended tests fail on v0.5.8).
+- **D58 (PR #235, v0.5.19): the store and the MCP server stay up.** Lone surrogates no longer stop
+  paging or kill the MCP server; any tool exception is that call's tool error; a FIFO, directory or
+  symlink in place of a session file is damage, never waited on; a full disk leaves no temporary
+  file; error echoes are capped at 100 characters.
+- **D59 (PR #246, v0.5.22): review follow-ups.** The Host check accepts any port (SSH forwards, port
+  80); a close after the last event is not an abort; the `choose.lock` wait says so and Ctrl+C exits
+  130; Claude Code's full value-option list (36 were missing); one `codex --version` read (6.02 s to
+  3.51 s with a hanging one); damaged lock files are named; and Claude Code's compaction summary is
+  recognised in all its forms (7 of 8 captures had been missed).
+- **D60 (PR #248, v0.5.23): a PDF is never estimated low.** Priced by bytes, 25 of 28 real-producer
+  fixtures were estimated at 0.02 to 0.59 of their cost, and one read near the bound went out over
+  it unflagged. A PDF now costs 4,568 tokens a page with its pages counted only when certain, else
+  600 pages (`pdf_pages_uncertain`). The page lexer is a single pass with a 400,000-step budget:
+  hostile inputs take at most 0.27 s, and the exponential regex of the earlier parser (branch `claude/pdf-pages`, found in review round 9)
+  is gone.
+- **Docs and packaging (PR #233):** README sections for first-time users (what is stored, how to
+  tell it works, uninstall), SECURITY.md's full store list, release checksums and provenance.
+- **Harness (PR #247):** the baseline replay turns `tool_reference` blocks for tools it removes
+  into a text note, which run #4's baseline needed.
+
+## Acceptance, live run #4 (v0.5.20, Claude Code 2.1.318, claude-haiku-5-5, bound 150,000, owner's proxy)
+
+Numbers-only record: `docs/research/M2-acceptance-run4.md`. D27 protocol, seed 20261016 (run #3's
+content), Claude Code's default settings (tool search on, no `--allow-contexto-tools`). No departures
+from the contract. The owner approved the run on 2026-11-06.
+
+| Criterion | Result |
+|---|---|
+| 1. Long run | PASS: 45 Messages requests, all 200, 0 compaction, max upstream input 110,465 of 150,000, 0 real over-bound, 0 model 4xx, 0 local 5xx, 0 failure events, usage on 45 of 45; 6 rotations (4 `bound`, 2 `head_change`, inferred from the request shapes to be tool search loading Contexto's tools); CLI exit 0 |
+| 2. Fidelity | PASS: Contexto 52 of 54, baseline 47; chain 28 / 26, obligations 6 / 3, distractor, multihop and paged-only level |
+| 3. Recall | PASS: paged-only 4 of 4 correct and credited, each through one `contexto_search` call that returned the plant's paged span before the answer |
+| 4. Cache | PASS: 38 of 38 eligible requests (1.0) |
+| 5. Tests | PASS: 2880 passed, 1 skipped, 1 xfailed at 2388752; CI and Release green |
+
+The baseline's first attempt stopped at request 1's `count_tokens` (400, no tokens spent): the
+replay kept a `tool_reference` to a Contexto tool it removes. That was the harness, not the
+product; with PR #247 the baseline re-ran from the same transcript, 6 of 6 requests 200. Tokens:
+6,001,818 in all (H1 3,422,988, baseline 2,578,830) of a 9,865,000 approval. Against run #3: one
+more probe right for Contexto, one fewer for the baseline, and 380,631 fewer tokens. Product, client
+and model behaviour changed together between the runs, so the record does not attribute the
+difference to any one of them.
 
 ## Fixed and added on 2026-10-25 (v0.5.2 to v0.5.8)
 
@@ -271,6 +375,11 @@ modeled). Users who keep one proxy for the whole session do not hit these restar
   (10,097,561 in all, PR #221). Codex at 150,000: 4,988,562 of 14,014,001 (PR #219). O6
   dropped-thinking check: 1,159,358 (PR #220). Messages API depth check: 3,840 (PR #225). Claude
   Code 2.1.310 live recall check: 305,223 over two attempts (PR #227).
+- 2026-11-05 QA run: about 4.94M (live-claude 509k, live-codex 316k, live-fidelity 1.41M,
+  verify-images 103k, verify-obligations 1.13M, live-realworld 1.47M).
+- 2026-11-05 fix round: D51's live standing-rules check 865,443 of a 1,200,000 budget (PR #242).
+- 2026-11-06: live acceptance run #4 6,001,818 of a 9,865,000 line (H1 3,422,988, baseline
+  2,578,830; the baseline's first attempt spent 0).
 
 ## Scale to 30M tokens of history (zero-spend measurement, measured 2026-10-17, recorded 2026-10-18)
 
@@ -396,43 +505,76 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   nothing and is not read by the missing-tools check (it still goes to the model unchanged); files
   nested memory imports with `@path` are carried within the cap; the cap counts each block as its
   page; a queued prompt in a role `system` text is not read by the missing-tools check.
+- D48: images are priced by their pixels (`width * height / 750`, 64 to 4,784), and images and
+  documents are kept out of the bytes-per-token ratio, so a screenshot no longer pages the window.
+- D49: a head change is sized like any rotation, and every forwarded request is checked against the
+  bound; amended (PR #244) to measure the head from the first usage that has an input count.
+- D50: main follows Claude Code's session id across `/clear` and `/resume`, and its compaction
+  summary across `/compact`; a side request that arrives first stays main only until the first
+  prompt.
+- D51: the model is told to pin standing rules when stated and keep them open; Contexto's own
+  search, recall and state calls are not searched or indexed.
+- D52: settings files are read in Claude Code's order; project settings count for Codex only in a
+  folder Claude Code recorded as trusted; `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` turns them off for
+  every CLI.
+- D53: the proxy answers only requests with a loopback `Host` and no `Origin`, shuts upstream when
+  the client leaves, and forwards an early upstream answer instead of retrying.
+- D54: `contexto run codex` runs the key helper through `/bin/sh -c`, refuses an Anthropic upstream
+  for Codex, passes `--no-daemon`, and checks the launch before opening a session.
+- D55: `contexto run claude` resumes through the Contexto session that served the conversation,
+  survives signals (a watchdog for SIGKILL), and prints its notices after Claude Code exits.
+- D56: Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; the new subagent stop
+  reports are read.
+- D57: page ids are findable (`sessions show`, `contexto search`), `state` is readable, read-only
+  commands take id prefixes, failed launches leave no session, exit codes are consistent.
+- D58: the store and the MCP server survive lone surrogates, non-regular files and full disks, and
+  report damage by name.
+- D59: the review follow-ups of the fix round (Host check by name, abort after the last event, the
+  `choose.lock` wait, Claude Code's option list, one `codex --version`, damaged locks, compaction
+  shapes).
+- D60: a PDF is never estimated low: 4,568 tokens a page when its pages are counted for certain,
+  else 600 pages.
 
 ## Open follow-ups
 
-Each would be its own pull request.
+PR #250 (D61, under review) fixes the first six items below, the low findings the fix round's
+reviews left; until it merges, these are open:
 
-- Nested memory and the missing-tools check after D46: fixed by D47 (PR #230, v0.5.8). What it
-  leaves open is under "Known limitations".
+- Bound risk on Codex (#244 review B, pre-existing): when Codex responses carry no input count
+  until request 30, turn starts reached 36,011 real tokens at bound 30,000 with nothing logged. Count
+  `function_call_output` at the 1.5 tool-output seed.
+- Epoch records written by v0.5.8 keep their low measured head when a session resumes after the
+  upgrade (#244 review A).
+- Images (#234 reviews): crafted JPEG fill and marker runs price about 30 times slower (100 images
+  held the lock 2.77 s first, about 1 s later); the pixel formula can be up to 88 tokens under
+  `ceil(w/28) * ceil(h/28) + 3` for thin images; high-resolution screenshots in a conversation's first
+  request make the head run high (log-only `turn_room_low` and `window_minimal` at bound 60,000);
+  Codex pages show no `[image omitted]` marker for a screenshot (as on v0.5.8).
+- The start-up warning quotes an overhead floor of 15,700; measured on 2.1.314 it is 13,842 (#245).
+- The uncertain-PDF notice says "a larger --bound helps only if the PDF is long" even when the text
+  alone is over the window (#248 re-check).
 - Not started: a byte budget per search on the pages `contexto_search` reads (D41 follow-up): it
   reads and renders up to 53 pages per search with no cap on their size (18.5 MB of page JSON for
-  one multi-word query at 3,000 pages sized like real turns; at most 53 times the largest page). For
-  example, read the 50 listed rows' offsets from the held search text instead of parsing whole
-  pages, or list fewer rows once the budget is spent.
+  one multi-word query at 3,000 pages sized like real turns).
+- Open from D49: a head too large for `min_turn_room` (bound 60,000, a 28,000-token head) leaves the
+  minimum-room rotation (A12) nothing to restore, so later turn starts keep their window (about 34,200 real, room 806,
+  `turn_room_low` logged once); PR #232 review B's finding 1.
 
-## What is left (as of 2026-10-25)
+## What is left (as of 2026-11-06)
 
 Definition of done for this project: M2 acceptance passed on both CLIs (done), every release
 published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
 
-The 30M plan the owner approved on 2026-10-18 is done, each step with two reviewers: carried
-growth stopped (D32, D33, #203, v0.4.0), search ranked by BM25 with a recency prior and page reads
-cached (D34, #204, v0.4.0; the `index_text` manifest was rejected there), each message hashed once
-in the proxy (#205, v0.2.9), and the missing-tools warning (#202, v0.3.0). That plan ran with no
-live model runs.
+Earlier work, all merged and released: the 30M plan (D32 to D34, #202 to #205, by v0.4.0), the
+2026-10-24 work (D35 to D41, v0.5.0 and v0.5.1), and the 2026-10-25 work (D43 to D47, v0.5.2 to
+v0.5.8); see "Releases".
 
-The 2026-10-24 work is merged and released: CLIProxyAPI support (D35, #210), upstream affinity
-(D36, #212, deployed on the owner's proxy), sessions prune (D37, #208), the CLI version check (D38,
-#211), the MCP search-text budget (D39, #215), subagent recall rooms (D40, #209), hosted CI (#213),
-the public repository (D42, #206, #207), all in v0.5.0, and the search ranking fix (D41, #216) in
-v0.5.1.
-
-The 2026-10-25 work is merged and released: the MIT license (D43, #218), Codex acceptance at
-150,000 (#219), the O6 dropped-thinking check (#220), acceptance on claude-opus-5-5 (#221), the
-`input_transformations` merge (#222), the harness's 2.1.302 fixes (#223), all in v0.5.2; the
-launcher allowing Contexto's tools (D44, #224) in v0.5.3; a prompt right after `claude` and the
-`--settings` guard (#226) in v0.5.4; the JSON nesting limit (D45, #225) in v0.5.5; damaged page
-files (#228) in v0.5.6; Claude Code 2.1.310 (D46, #227) in v0.5.7; the D46 follow-ups (D47,
-#230) in v0.5.8.
+The 2026-11-05 QA run's fix round is merged and released: D49 (#232, v0.5.9; amended #244,
+v0.5.18), D56 (#243, v0.5.10), D51 (#242, v0.5.11), D55 (#240, v0.5.12; #245, v0.5.13), the docs for
+first-time users and release checksums (#233, v0.5.13), D52 (#237, v0.5.14), D50 (#238, v0.5.15),
+D53 (#239, v0.5.16), D57 (#241, v0.5.17), D58 (#235, v0.5.19), D54 (#236, v0.5.20), D48 (#234) and
+the replay fix (#247) in v0.5.21, D59 (#246, v0.5.22), D60 (#248, v0.5.23). Live acceptance run #4
+passed on v0.5.20. Left: the code follow-ups above (PR #250, D61).
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
@@ -441,27 +583,27 @@ Measured candidates deliberately not pursued (each would need a live run or new 
 - A search "follow" option for multihop chains (B26): the hops come from synthetic probes.
 - A live check of 150,000 on an OpenRig seat (D31 says revisit only if a seat shows a recall
   cost).
+- Answering Claude Code's `HEAD /api/hello` locally while the upstream comes from an untrusted
+  project file (D52): for now the README says to pin `--upstream` in such a repository.
 
 Needs the owner:
+- Live checks the fix round could not run at zero spend: D51's "keep it open until the user
+  withdraws it" wording (added after the live run, not measured live), standing-rule pinning on
+  claude-opus-5-5 and on Codex, and the full acceptance on Claude Code 2.1.314 (run #4 covered
+  2.1.318). Step 9 of `docs/cli-updates.md` costs millions of tokens and needs the owner's approval.
 - Nested memory on Claude 4.x model ids (D46): a nested `CLAUDE.md`, `CLAUDE.local.md` or
-  `.claude/rules/*.md` arrives inside the Read tool result there, on 2.1.302 and 2.1.310 alike, so
-  it is paged with its turn. On claude-opus-5-5 (2.1.310) Claude Code was measured to send a nested
-  CLAUDE.md once per session; on 4.x ids that rests on D46's "attached once per session". On 5.x ids
-  it is now carried. Whether to carry it on 4.x ids too is the owner's call.
+  `.claude/rules/*.md` arrives inside the Read tool result there, so it is paged with its turn. On
+  5.x ids it is carried. Whether to carry it on 4.x ids too is the owner's call.
 - Search ranking (D41): search ships with text cap 1, page cap 3. Text cap 3, page cap 3 restores
-  main's two D34 scenarios (a reply that discusses a key in one text outranks newer passing
-  mentions; the newest of equal one-reply statements is shown first) at 41 more stale-only
-  results, all in the quiet dump set (162 against 121), with no other measured change. The owner
-  asked to discuss it; the default stands until the owner chooses.
-- A full live acceptance run on Claude Code 2.1.310, which has tool search on by default, so
-  Contexto's tools are deferred. Only a stand-in ran: one planted fact recalled through the
-  deferred `contexto_search` (305,223 tokens over two attempts, claude-haiku-5-5). Step 9 of
-  `docs/cli-updates.md` costs millions of tokens and needs the owner's approval.
+  main's two D34 scenarios at 41 more stale-only results, all in the quiet dump set (162 against
+  121), with no other measured change. The owner asked to discuss it; the default stands until the
+  owner chooses.
 - The Responses API's nesting depth limit is unmeasured (D45). The Messages API refuses more than
   127 levels; if the Responses API accepts a request past Contexto's 512, that request goes
-  upstream untransformed, which is why `request_too_deep` fails acceptance 1. The Messages API
-  check (`spikes/m2/deepjson/live_check.py`) spent 3,840 tokens; a Responses check needs a live
-  call.
+  upstream untransformed, which is why `request_too_deep` fails acceptance 1. A Responses check
+  needs a live call.
+- Old history, including the v0.1.0 to v0.4.0 source archives, still holds the owner's proxy
+  hostname. Removing it would mean rewriting history and re-cutting those releases.
 
 ## Open decisions (details in DECISIONS.md)
 
@@ -505,152 +647,179 @@ Needs the owner:
   claude-opus-5-5 they were not reported here; the one Opus series on 2026-10-15 also reported none,
   with crossing unknown. 1,159,358 tokens.
 
-## Known limitations (v0.5.8)
+## Known limitations (v0.5.23)
 
-- Claude acceptance ran on two models, claude-haiku-5-5 (Claude Code 2.1.301) and claude-opus-5-5
-  (2.1.302, with a `mcp__contexto` allow rule before D44), at one bound (150,000) and through the
-  owner's proxy. It has not run on Claude Code 2.1.310, where tool search is on by default and
-  Contexto's tools are deferred; only a one-fact live recall check ran there (D46). Codex
-  acceptance ran on gpt-6-astra at bounds 64,000 (D30) and 150,000, through the owner's proxy.
+- Claude acceptance ran on two models, claude-haiku-5-5 (Claude Code 2.1.301 and 2.1.318) and
+  claude-opus-5-5 (2.1.302, with a `mcp__contexto` allow rule before D44), at one bound (150,000)
+  and through the owner's proxy. Run #4 on 2.1.318 used Claude Code's defaults, tool search on, so
+  Contexto's tools were deferred. 2.1.310 had only a one-fact live recall check (D46), and 2.1.314
+  the zero-spend routine only. Codex acceptance ran on gpt-6-astra at bounds 64,000 (D30) and
+  150,000 on codex-cli 0.163.0, through the owner's proxy; 0.166.0 had the zero-spend routine only.
+- Images (D48) cost `width * height / 750` tokens, 64 to 4,784, the high-resolution tier's formula.
+  On models before that tier images cost less (at most about 1,568), so the estimate errs high by up
+  to 3 times per large image. Codex uses the same formula and OpenAI prices images by tiles, lower,
+  so a Codex estimate errs high: two turns an equal-cost text control keeps were paged in reviewer
+  B's run. A screenshot in a paged turn is not recallable as an image: recall shows
+  `[image omitted]`, and the model sees only the turn's text.
+- PDFs (D60) are never estimated low, and pay for it: 4,568 tokens a page, about 2.9 times a typical
+  1,583-token page, so a large PDF pasted at a turn start can page the earlier conversation (30
+  PyMuPDF pages at bound 60,000 kept 1 message where an equal-cost text control kept 41); the
+  launcher says it is the PDF's allowance that fell short (`pdf_allowance`). A PDF whose pages cannot
+  be counted for certain counts as 600 pages (2.74 million tokens) and logs `pdf_pages_uncertain`:
+  encrypted object streams, object streams under another filter or a predictor, pages that show PDF
+  source as text, a PDF that needs more than 400,000 lexer steps (about 300 or more pages with 60 or
+  more links a page), and every PDF by URL or file id, which is then over any bound. Pages an
+  incremental save deleted still count. A dense page (small-font code, tables) can cost more than
+  4,568. PDFs are parsed one at a time, the smallest waiting first; one that has waited 1 s goes
+  next. 20 PDFs that spend the step budget take about 5 s together.
+- Rule 4's measured head (D49 as amended) errs high except when the window has more bytes per token
+  than the head (prose in the window, a JSON-dense head): then it is low by that difference, up to
+  1,816 tokens (7.3%) in PR #244's reviews, with the bound held. If no usage ever carries an input
+  count, the head is never measured and the estimator stands in for the whole session; the
+  pre-send check is then the only bound check.
+- Standing rules (D51): the model is told to pin a rule as an obligation when it is stated and keep
+  it open. Measured on one model (claude-haiku-5-5) with 8 rules stated in their own turn; the
+  "keep it open" words were added after that run and are unmeasured. A rule the model does not pin
+  leaves view once its turn is paged; the index carries only its turn's first 200 characters, and
+  its words stay searchable. A rule turn costs a second request for the pin (a mean of 45,000
+  tokens against 21,426 at bound 60,000).
+- Search does not read Contexto's own search, recall and state calls (D51). For Codex's code-mode
+  `exec` this is a text check: a call is left out only when every mention of the word `tools` is a
+  literal call of one of those tools and the code holds no `//` or `/*`. Code that reaches a tool
+  without the word `tools` (`eval`, `globalThis[...]`, Codex's `load()`) beside such a call is not
+  seen, so a shell call made that way is hidden from search (recall keeps it); strings holding `//`,
+  `/*` or `tools` leave the echo searchable.
+- Main conversation (D50, D59): main follows Claude Code's session id, measured on 2.1.302 to
+  2.1.318. Without a session id (another client) only the turn-start rule applies. A headless
+  `/clear` right after an SDK `interrupt()`, or after a late end of an older request that may hold a
+  call, falls back to the turn-start rule. A compaction inside a tool loop takes main at its first
+  request only when the summary request was answered with no client call; otherwise at the next
+  prompt. A first prompt that reproduces Claude Code's compaction sentence and the blank line after
+  it, in main's own session, is read as a compaction. Two interactive Claude Codes on one proxy are
+  not a supported setup. After `/rewind` of the first prompt the new key stays side until it
+  outgrows the old one (inferred).
+- Resume (D55): `contexto run claude --resume` without an id opens Claude Code's picker, which
+  Contexto cannot follow, so that launch gets a new session. A `--fork-session` fork shares the
+  original's session (pages, pins, recall room); switching between branches re-rotates and search
+  can return the other branch's turns. Pass `--session NEW` for a separate store. Codex resumes only
+  with `contexto run --session <id> codex resume --last`. Two launches that wait more than 5 s for
+  `choose.lock` choose without it and may pick the same session (the launcher says so).
+- Signals (D55): SIGKILL of the launcher leaves no `exit` event; a watchdog ends Claude Code and
+  removes the temporary files, and if the watchdog is killed too, the temporary directory (no
+  secrets) stays.
+- Untrusted repositories (D52): `contexto run claude` uses project settings as Claude Code does, so
+  in `-p` mode, which has no trust check, a repository's own `ANTHROPIC_BASE_URL` wins; pin it with
+  `--upstream`. Interactively, while Claude Code shows its trust dialog, its keyless `HEAD /api/hello`
+  goes to that repository's upstream even if the user declines. For Codex, project settings count
+  only in a folder Claude Code recorded as trusted; Claude Code may change where it records trust,
+  and the rule errs toward untrusted (a dangling `.git` symlink, a `.git` FIFO, a bare repository's
+  worktree).
+- The proxy (D53, D59) refuses a request whose `Host` is not `127.0.0.1` or `localhost`, so a CLI in a
+  container that names `host.docker.internal` gets 403; use a port forward to `localhost`. A client
+  that half-closes its sending side counts as gone and gets no response. An early upstream answer
+  (a 413) over TLS is read the same way, but a TLS upstream was not tested.
 - Deeply nested JSON (D45): the Messages API refuses a request nested more than 127 levels
   (400 `invalid_request_error`), so once a message that deep is in what goes upstream, the session
   cannot continue, with or without Contexto. Past 512 levels Contexto forwards the request
   untransformed (`request_too_deep`). The Responses API's limit is unmeasured.
 - Codex pages written by v0.1.0 to v0.1.2 were stored with empty index stubs. Since v0.2.3
-  the store rebuilds such a stub from the page's messages each time it reads the page, so
-  their index lines show user text, tools, and paths. The page file is not rewritten and its id is
-  unchanged; anything reading page files directly still sees the empty stub.
+  the store rebuilds such a stub from the page's messages each time it reads the page; the page
+  file is not rewritten and its id is unchanged.
 - Codex: HTTP is forced through a custom provider (no WebSocket). Contexto's tools sit behind Codex
   tool search and need `default_tools_approval_mode = approve`, which `contexto run codex` sets.
-  Only API-key mode is live-tested; ChatGPT login mode is tested with synthetic credentials. On
-  its terms, D35 answers O4: people who run Contexto themselves use a vendor API key or a
-  CLIProxyAPI instance, subscription logins live in CLIProxyAPI or the vendor's own CLI, never in
-  Contexto, and users follow their providers' terms.
-  In ChatGPT login mode some Codex calls (rate limits, usage, a remote MCP connection) go to
-  chatgpt.com directly and bypass the proxy by design. By default Codex also connects to
-  chatgpt.com (analytics) and github.com (plugin sync) outside the proxy;
+  Interactive launches pass `--no-daemon` from Codex 0.156.0 on, so `codex agents`, which needs the
+  shared server, is refused unless `--remote` sends it elsewhere; `app-server` and `remote-control`
+  were not measured and are not refused. Only API-key mode is live-tested; ChatGPT login mode is
+  tested with synthetic credentials. In ChatGPT login mode some Codex calls (rate limits, usage, a
+  remote MCP connection) go to chatgpt.com directly and bypass the proxy by design. By default Codex
+  also connects to chatgpt.com (analytics) and github.com (plugin sync) outside the proxy;
   `-c analytics.enabled=false` and `-c features.plugins=false` stop them in network samples, and
   `contexto run codex` leaves both to the user. `preamble_first` is on but unmeasured there.
 - One turn that needs more evidence than its recall room holds cannot get it all (D27); the room
   per turn is the bound minus the request's usage (input plus output) minus a 25,000-token
   headroom floor; the engine rotates at a turn start when that would leave less than 12,000
-  (`min_turn_room`).
+  (`min_turn_room`). A head change (tool search, an MCP server connecting, a model switch) is sized
+  like any other rotation (D49), so it no longer leaves a turn without recall room.
 - Subagents and side requests have their own recall room while in a tool loop (D40): a tool call
   gets the smallest live room and is charged against every live room, because the MCP server
   cannot tell which conversation made it. A side room expires 15 minutes after its last publish,
-  or earlier when main's history shows its agent stopped (a task notification or a foreground
-  hand-back). That early close works only on the Claude Code versions whose subagent shapes were
-  measured (`SUBAGENT_SHAPES_TESTED`, 2.1.302 and 2.1.310); on any other version side rooms only
-  expire. A
-  subagent that stopped without one can hold main's recall down until the expiry
-  (`limited_by: side` with `limiting_age_s` in the log). Main's room is the only bound for a
-  subagent's calls when the stream hold is skipped, its transform failed, it went degraded before
-  its first publish, or its call starts more than 15 minutes after its response (for example after
-  a permission prompt). Search's "in view" for a subagent still means the main conversation's
-  window.
+  or earlier when main's history shows its agent stopped. That early close works only on the Claude
+  Code versions whose subagent shapes were measured (`SUBAGENT_SHAPES_TESTED`: 2.1.302, 2.1.310,
+  2.1.314 and 2.1.318, which report the tools a subagent used before its hand-back, D56); on any
+  other version side rooms only expire. A subagent that stopped without one can hold main's recall
+  down until the expiry (`limited_by: side` with `limiting_age_s` in the log). Search's "in view"
+  for a subagent still means the main conversation's window.
 - Usage refines the estimate only for the request it measured (rule 3): with two requests of one
   conversation in flight, only the newer one's usage counts (`usage_unattributed` for the other),
-  and after a request without usage the next estimate is a full one (`usage_missing`).
-- After a restart, a side request that arrives before main and finds no epoch record (or main's
-  resume fails) is main until main's next turn start, so its window and model stay in the store
-  until then.
+  and after a request without usage (including usage whose input counts are absent or 0) the next
+  estimate is a full one (`usage_missing`).
 - Small bounds with large fixed heads leave little window: the launcher warns when the window
-  budget is under 25,000; at 42,000 with a 16,000 head nearly every turn rotates. Use a larger
-  bound for OpenRig seat-sized heads (O3).
-- Very large single turns can still exceed the bound inside a tool loop (logged `over_bound`).
-- Search (D34, D39) holds page text in the MCP server up to `CONTEXTO_SEARCH_CACHE_MB` (default
-  64 MB; the newest pages uncompressed, older ones compressed). A store whose compressed text does
-  not fit reads every page outside it at each search, and the first search of each MCP process
-  reads every page once and compresses what it keeps (1.6 s at 6,000 synthetic pages, which all fit
-  compressed: 0.26 to 0.41 s per search against 0.10 to 0.25 s with every page uncompressed; peak
-  RSS 134 MB instead of 290). The 3.2 compression ratio is from synthetic text. Single common
-  words can still bury a fact at 6,000 pages (5 of 86 probe queries, measured under D34).
-  Search (D41) counts a term once per text, at most 3, with no length term. A reply or file that
-  discusses a key at length in one text weighs as one passing mention, so a newer passing mention
-  outranks it. An old turn that names a key in 2 or more texts (a prompt that names it counts twice)
-  usually outranks a newer one-line reply that states its value (3 texts outrank it even from the
-  oldest position), and once a passing mention follows that reply, the reply leaves the 3 detailed
-  pages more often than under D34 (38 of 122 against 64 in a repo-text simulation); many separate
-  greps cost most. The pages one search shows are read in full with no cap (18.5 MB of page JSON for
-  one multi-word query at 3,000 pages sized like real turns); a per-search budget is under
-  "Open follow-ups".
-- Carried content after D32 and D33 (#203, measured on Claude Code 2.1.302's captured bodies in
-  `spikes/m2/scale/reminders/`, Contexto's estimator): at turn 48 the content the fallback cannot
-  page is 3,557 to 3,794 tokens on sonnet-4-6 (was 5,452 to 22,953) and 4,897 to 5,643 on
-  claude-opus-5-5 busy sessions (was 9,804 to 12,169). On 4.x ids, and on 5.x ids in one process, it stops growing
-  from turn 12 (on 4.x up to about 5,250 while plan mode is on); on claude-opus-5-5 and claude-haiku-5-5
-  with a resume every turn it still grows about 21 tokens per turn, because the latest
-  effort-change message itself grows as the CLI re-sends unread file notes on it. On
-  claude-sonnet-5 and claude-fable-5 the environment message (2,630 to 2,764 tokens) is now always
-  carried.
-  In the 30M proxy run with later-turn reminders, `bound_too_small` and `over_bound` fell from 871
-  and 692 to 0, the largest request from 288,309 to 134,203 tokens, and F at 30M from 259,155 to
-  74,240; the store holds 1,616 pages at 30M instead of 1,138. Session-start recognition depends on
-  Claude Code's own `# Environment` text, and the kinds of context block on 2.1.302's first lines:
-  re-run the routine in `docs/cli-updates.md` when the CLI changes. Resuming an epoch record
-  written before v0.4.0 can carry one message the old code had paged (logged as
-  `carried_reclassified`).
-- Nested memory (D46, D47): on 4.x ids it is paged with its turn (see "Needs the owner"). D47
-  (PR #230, v0.5.8) fixed the three gaps #227's round-3 review measured: `@path` imports are
-  carried, the cap counts whole blocks, and a message with the synthetic missing result (where a
-  queue-then-Esc prompt landed with no interrupt marker in 2 of 24 runs on 2.1.302) carries
-  nothing. Still open: a round where a completed Read's nested memory sits next to another call's
-  synthetic result is unmeasured, and such a block would be paged with its turn; `@~/x.md` imports
-  sent nothing in the `-p` capture, so their form is unknown (`~/` is expanded anyway).
-- Missing-tools check (D46, D47): D47 fixed two misreads from #227's round-3 review. On 5.x ids a
-  prompt queued during a tool run arrives as a role `system` text starting "The user sent a new
-  message while you were working:", which the check read whole (a fake listing read as offered,
-  a fake disconnect gave a false warning, 4 of 4 runs on 2.1.302 and 2.1.310); that span is now
-  skipped. On claude-sonnet-4-6 on 2.1.302, a fake listing pasted in the queue-then-Esc case was
-  read as offered (1 of the 2 no-marker runs, out of 24; 0 of 24 on 2.1.310); the synthetic-result
-  rule now covers it. Still readable (D47): an exact notice typed as an earlier block of a
-  several-block prompt; a queued prompt if Claude Code changes its two sentences; messages under
-  Claude Code's other mid-turn openers (not measured, not skipped); and, not captured, a 2.1.302
-  queued prompt that follows other text in a shared role `system` text. The check only logs and
-  warns; it does not change what is paged.
-- CLI versions (D38): Contexto is tested with Claude Code 2.1.302 and 2.1.310 and codex-cli 0.154.0
-  and 0.163.0 (`TESTED_VERSIONS`, `src/contexto/cliversions.py`). 2.1.310 was tested at zero spend
-  plus one live recall check (D46), not a full live acceptance. `contexto run` warns once on stderr
-  for any other version and still launches (`contexto run --no-version-check <cli>` or
-  `CONTEXTO_NO_VERSION_CHECK=1` silences it). The proxy logs each distinct CLI version once
-  (`cli_version`, at most 8) and `session_start_unrecognised` when the main conversation's first
-  request carries the CLI's context but no session start it recognises. A CLI that changes its text
-  without changing its version, or changes text only on later turns, is not caught. Re-test routine:
-  `docs/cli-updates.md`.
+  budget is under 25,000, assuming a fixed overhead of 28,000 for Claude Code (measured 18,641 to
+  27,925 on 2.1.314 with tool search on) and 19,000 for Codex. Use a larger bound for OpenRig
+  seat-sized heads (O3).
+- Very large single turns can still exceed the bound inside a tool loop. Every forwarded request is
+  checked before it is sent (D49): `over_bound` with `in_tool_loop: true` is that expected overrun;
+  at a turn start it goes with `bound_too_small` or means the sizing did not hold.
+- Search (D34, D39, D41) holds page text in the MCP server up to `CONTEXTO_SEARCH_CACHE_MB` (default
+  64 MB). The first search of each MCP process reads every page once (1.6 s at 6,000 synthetic
+  pages). Single common words can still bury a fact at 6,000 pages (5 of 86 probe queries). A reply
+  or file that discusses a key at length in one text weighs as one passing mention, and an old turn
+  that names a key in 2 or more texts usually outranks a newer one-line reply that states its value.
+  The pages one search shows are read in full with no cap (18.5 MB of page JSON for one multi-word
+  query at 3,000 pages sized like real turns); a per-search budget is under "Open follow-ups".
+- Turn numbers in search replies (D58) match the page numbering only while every page is a whole
+  turn; carried-text pages from the bounded fallback and a resync make in-view numbers run behind
+  recent pages and can repeat one. No tool takes a turn number.
+- Carried content after D32 and D33 (#203, measured on Claude Code 2.1.302's captured bodies,
+  Contexto's estimator): at turn 48 the content the fallback cannot page is 3,557 to 3,794 tokens on
+  sonnet-4-6 and 4,897 to 5,643 on claude-opus-5-5 busy sessions; on 4.x ids, and on 5.x ids in one
+  process, it stops growing from turn 12; on claude-opus-5-5 and claude-haiku-5-5 with a resume every
+  turn it still grows about 21 tokens per turn. Session-start recognition depends on Claude Code's
+  own `# Environment` text: re-run the routine in `docs/cli-updates.md` when the CLI changes.
+- Nested memory (D46, D47): on 4.x ids it is paged with its turn (see "Needs the owner"). A round
+  where a completed Read's nested memory sits next to another call's synthetic result is
+  unmeasured, and `@~/x.md` imports sent nothing in the `-p` capture, so their form is unknown.
+- Missing-tools check (D46, D47): still readable are an exact notice typed as an earlier block of a
+  several-block prompt, a queued prompt if Claude Code changes its two sentences, and messages under
+  Claude Code's other mid-turn openers. The check only logs and warns; it does not change what is
+  paged.
+- CLI versions (D38, D56): Contexto is tested with Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318
+  and codex-cli 0.154.0, 0.163.0 and 0.166.0 (`TESTED_VERSIONS`, `src/contexto/cliversions.py`).
+  `contexto run` warns once on stderr for any other version and still launches
+  (`--no-version-check` or `CONTEXTO_NO_VERSION_CHECK=1` silences it). A CLI that changes its text
+  without changing its version, or changes text only on later turns, is not caught.
 - Session folders are never removed on their own. `contexto sessions prune` (D37) deletes whole
-  sessions only, skips any session in use or active in the last 10 minutes (a retry after a partly
-  failed delete waits out the same 10 minutes), and cannot remove pages inside a live session.
-- Windows is not supported: the store locks files with `fcntl` (`store/__init__.py`,
-  `store/ledger.py`), the launcher forwards `SIGHUP` (`launcher.py`), and the store relies on
-  POSIX file modes (0700 and 0600), so neither imports there. CI tests Python 3.12 to 3.15 on
-  Linux and 3.12 and 3.15 on macOS; live runs used Python 3.12.
-- Cache efficiency depends on the upstream route: 29 of 31 and 36 of 37 in the live runs, before
-  D36; 54 of 55 in the Opus run after it, the miss a cold first write. A proxy with several upstream
-  credentials has to pin each session to one (D36); on the owner's proxy, since 2026-10-24, a
-  byte-identical series read the cache 9 of 9 times after one write. Subagents and side requests
-  share the session's key and CLIProxyAPI sends Claude Code subagents to their root session's
-  credential, so parallel subagents load one credential's rate limit, and a 429 there moves the
-  whole session to the next credential, with one cache miss and dropped thinking at each move. A
-  fresh launch or `--fork-session` gets a new Claude Code session id and can miss the cache once.
+  sessions only, by full id with `--session`, skips any session in use or active in the last 10
+  minutes, and cannot remove pages inside a live session. A launch that fails before the CLI starts
+  removes the session it created (D52, D54, D57); a session whose CLI never sent a request is kept.
+- Damaged files (D58, D59): a FIFO, directory or symlink in place of a session file is damage, read
+  as such and never waited on. A damaged `meta.lock` or `live.lock` stops `contexto run` from opening
+  the session until the file is deleted; with a damaged `meta.lock` recall, search and state are
+  refused (pins and closes work), and with a damaged `live.lock` every tool is. A symlinked session
+  directory is refused by every command.
+- Windows is not supported: the store locks files with `fcntl`, the launcher forwards POSIX signals,
+  and the store relies on POSIX file modes (0700 and 0600), so neither imports there. CI tests
+  Python 3.12 to 3.15 on Linux and 3.12 and 3.15 on macOS; the live runs did not record their Python version.
+- Cache efficiency depends on the upstream route: 38 of 38 in run #4 and 54 of 55 in the Opus run
+  after D36. A proxy with several upstream credentials has to pin each session to one (D36).
+  Subagents and side requests share the session's key, so parallel subagents load one credential's
+  rate limit, and a 429 there moves the whole session to the next credential, with one cache miss
+  and dropped thinking at each move. A fresh launch or `--fork-session` gets a new Claude Code
+  session id and can miss the cache once.
 - Organization-managed Claude Code settings outrank the launcher's `--settings`, and were not
   tested with the D44 allow rules. A user-supplied `--settings` is refused (exit 2) anywhere in the
-  claude arguments, after `--` too, so a prompt that is exactly `--settings` or starts with
-  `--settings=` is refused as well. A user `--mcp-config` is allowed; a prompt right after the
-  user's own `--mcp-config <file>` is read as another config file (`--mcp-config=<file>` avoids
-  it), and after any other list-taking flag such as `--allowedTools` it is read as one of its
-  values.
-- The proxy never reuses upstream connections, and retries once, on a new connection, only for connect, TLS, or send failures (rule 8).
-  A failure after the body is sent and before the response head returns 502 and relies on the
-  CLI's own retry; a failure after the response started ends the stream without its terminator
-  (logged as `relay: <class>`).
+  claude arguments, after `--` too. A prompt right after the user's own `--mcp-config <file>` is read
+  as another config file (`--mcp-config=<file>` avoids it), and after any other list-taking flag
+  such as `--allowedTools` it is read as one of its values.
+- The proxy never reuses upstream connections, and retries once, on a new connection, only for
+  connect, TLS, or send failures (rule 8). A failure after the body is sent and before the response
+  head returns 502 and relies on the CLI's own retry; a failure after the response started ends the
+  stream without its terminator (logged as `relay: <class>`).
 - Compressed request bodies: gzip and deflate are decoded (zstd only on Python 3.14+); other
-  encodings get 415 (rule 15). `count_tokens` errors from upstream pass through unchanged (the
-  owner's proxy returns 403; Claude Code calls it only around compaction).
-- On restart, sizing restores the measured token ratio at the first request on the recorded model
-  (so a side request on another model that arrives first does not cancel it), unless the ratio is
-  outside 1.0 to 6.0 bytes per token (then the seed ratios apply). Only the main conversation
-  publishes the ratio and its model label, but the ratio is measured over every request, so
-  mixed-model sessions still blend it.
+  encodings get 415 (rule 15). `count_tokens` errors from upstream pass through unchanged.
+- On restart, sizing restores the measured token ratio at the first request on the recorded model,
+  unless the ratio is outside 1.0 to 6.0 bytes per token (then the seed ratios apply). Mixed-model
+  sessions still blend it.
 
 ## Releases
 
@@ -684,6 +853,21 @@ Needs the owner:
 | v0.5.6 | 302f7d2 | #228: hand-damaged page files are handled the same way everywhere (rule 18): search and the index skip them, recall returns an error; re-paging onto one is a `page_conflict`; a failed read is retried on the next call |
 | v0.5.7 | 3a48fcc | #227 (D46): Claude Code 2.1.310 tested; the missing-tools check reads 4.x tool-search listings, a subagent environment message led by the listing is session start, and 5.x nested memory next to a tool result is carried up to 4,000 tokens; D44 refusals paired across the request |
 | v0.5.8 | 52a96b5 | #230 (D47): a tool-result message with Claude Code's synthetic missing result carries nothing and is not read by the missing-tools check (it still goes to the model unchanged); nested memory's `@path` imports are carried within the cap; the cap counts each block as its page; a queued prompt in a role `system` text is not read by the missing-tools check; recall tells a failed read from a damaged file. Docs: #229 (STATUS, README, contract and decisions accurate to v0.5.7) |
+| v0.5.9 | 0ed37b5 | #232 (D49): a head change is sized like any rotation; every forwarded request is checked against the bound before it is sent |
+| v0.5.10 | 1d5f0d1 | #243 (D56): Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 tested; the new subagent stop reports are read; spikes use a temp `HOME` and `DISABLE_AUTOUPDATER=1` |
+| v0.5.11 | 0339038 | #242 (D51): the model is told to pin standing rules when stated; Contexto's own search, recall and state calls are not searched |
+| v0.5.12 | e2ae0c3 | #240 (D55): `contexto run claude` resumes through the session that served the conversation, survives signals with a watchdog, and prints its notices after Claude Code exits |
+| v0.5.13 | 8557d6d | #245 (D55 follow-ups): the automatic session choice is serialized by `choose.lock`; Claude Code's short-option clusters are read; a fork keeps the original's session. Docs: #233 (README, SECURITY and CONTRIBUTING for first-time users; release checksums and provenance), so this is the first release with `SHA256SUMS` and an attestation |
+| v0.5.14 | 844df06 | #237 (D52): settings files in Claude Code's order; project settings count for Codex only in a trusted folder |
+| v0.5.15 | 26bacd3 | #238 (D50): main follows Claude Code's session id across `/clear`, `/resume` and `/compact` |
+| v0.5.16 | 3950a21 | #239 (D53): Host and Origin check; upstream shut when the client leaves; an early 413 forwarded |
+| v0.5.17 | 9865f5d | #241 (D57): `sessions show` lists pages, `contexto search`, readable `state`, id prefixes, no junk sessions, consistent exit codes |
+| v0.5.18 | ded5b67 | #244 (D49 amended): the head is measured from the first usage with an input count, at that request's own ratio |
+| v0.5.19 | c702657 | #235 (D58): lone surrogates, non-regular files and full disks no longer stop the store or the MCP server |
+| v0.5.20 | 2388752 | #236 (D54): the Codex key helper through `/bin/sh -c`, no Anthropic default upstream for Codex, `--no-daemon`, launch checks first. Live acceptance run #4 ran on this release |
+| v0.5.21 | cbc9683 | #234 (D48): images priced by their pixels; images and documents kept out of the ratio. Harness: #247 (replay turns `tool_reference` blocks for removed tools into text) |
+| v0.5.22 | 33b54e6 | #246 (D59): the fix round's review follow-ups |
+| v0.5.23 | 08ec571 | #248 (D60): a PDF is never estimated low: 4,568 tokens a page when counted for certain, else 600 pages |
 
 Each is a tag and a GitHub Release on this repository with the wheel and sdist attached; there is
 no package registry release.
@@ -711,3 +895,10 @@ no package registry release.
   requires the `ci` check.
 - 2026-10-24: CI and releases moved back to GitHub-hosted runners (PR #213), and the repository
   went public (D42).
+- 2026-11-05: a 22-agent QA run on v0.5.8 (reports kept outside the repository), then a fix round
+  with one builder per area in its own worktree, two reviewer agents per PR, and a re-check after
+  each merge. During the QA run Claude Code's auto-updater installed 2.1.318 and deleted the 2.1.310
+  binary, so 2.1.310 can no longer be run side by side; every spike and run now sets
+  `DISABLE_AUTOUPDATER=1` (D56).
+- 2026-11-06: the owner approved the branch cleanup and live acceptance run #4 ("just do it"),
+  keeping the two-reviewer gate.

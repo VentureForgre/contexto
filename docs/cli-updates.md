@@ -13,7 +13,7 @@ The single list is `TESTED_VERSIONS` in `src/contexto/cliversions.py`, oldest to
 |---|---|---|
 | Claude Code | 2.1.302 | session-start signature (D33), context-block kinds (D32), missing-tools notices, the permission refusal of Contexto's tools in `-p` mode (D44), live acceptance on Claude Opus 5.5 (PR #221, [M2-acceptance-opus.md](research/M2-acceptance-opus.md); live run #3 ran on 2.1.301) |
 | Claude Code | 2.1.310 | steps 1 to 6 below at zero spend, and the D44 permission check ([M2-claude-code-2.1.310.md](research/M2-claude-code-2.1.310.md)); tool search is on by default, and three of its shapes are read differently since D46; a live recall check with Contexto's tools deferred (credited at 145,080 tokens; 305,223 with the first attempt), not the full live acceptance |
-| Claude Code | 2.1.314, 2.1.318 | steps 1 to 7 below at zero spend, with the reminders matrix run with tool search on and off, and the D44 permission check ([M2-claude-code-2.1.318.md](research/M2-claude-code-2.1.318.md)); the request shapes are 2.1.310's, and the subagent stop reports put the tools the agent used first, which the engine reads since D56; no live check (step 9 is the owner's) |
+| Claude Code | 2.1.314, 2.1.318 | steps 1 to 7 below at zero spend, with the reminders matrix run with tool search on and off, and the D44 permission check ([M2-claude-code-2.1.318.md](research/M2-claude-code-2.1.318.md)); the request shapes are 2.1.310's, and the subagent stop reports put the tools the agent used first, which the engine reads since D56; 2.1.318 passed the full live acceptance (run #4, [M2-acceptance-run4.md](research/M2-acceptance-run4.md)); no live check on 2.1.314 |
 | Codex | 0.154.0 | Responses shapes and context sections, Codex acceptance (D30) |
 | Codex | 0.163.0 | MCP server launch and missing-tools check (v0.2.8); context sections and request shapes rechecked for D38 (Codex steps 1 to 4 below) |
 | Codex | 0.166.0 | Codex steps 1 to 4 below at zero spend for D56: the same context sections and request shapes, and the MCP launch; no live check |
@@ -83,8 +83,9 @@ python3.12 -m venv .venv
 export PATH="$PWD/.venv/bin:$PATH"
 ```
 
-Every spike runs the `claude` and `codex` first on `PATH`, falling back to `~/.local/bin`, unless you
-name a binary. To test a version that is not your default, run it by path and leave your own install
+Every spike except `argv/argstub.py` and `permissions/permstub.py` runs the `claude` and `codex`
+first on `PATH` unless you name a binary; all but those two and `subagents/run.sh` and
+`subagents/drive.py` then fall back to `~/.local/bin`. To test a version that is not your default, run it by path and leave your own install
 alone (Claude Code keeps each version under `~/.local/share/claude/versions/<version>`):
 
 - `check.sh [claude] [codex]`, `carried/live_probe.sh [claude]`, `carried/probe.sh [claude]` and
@@ -94,8 +95,10 @@ alone (Claude Code keeps each version under `~/.local/share/claude/versions/<ver
 - `argv/argstub.py` and `permissions/permstub.py` take `--claude-version` and run
   `~/.local/share/claude/versions/<version>`.
 
-They use temp homes and config dirs, fake keys, and loopback stubs, so they read no credential, write
-nothing in your home, and reach no model. Each run of Claude Code must have `DISABLE_AUTOUPDATER=1`:
+They use fake keys and loopback stubs, so they read no credential and reach no model. All but two
+also run the CLI with a temp `HOME`, so they write nothing in your home. `argv/argstub.py` and
+`permissions/permstub.py` set a temp `CLAUDE_CONFIG_DIR` and `CONTEXTO_HOME` but keep your real
+`HOME`, so Claude Code may write files under it (your own settings are not read). Each run of Claude Code must have `DISABLE_AUTOUPDATER=1`:
 otherwise the CLI may update itself during the run, repoint `~/.local/bin/claude` and delete older
 versions (a QA run lost 2.1.310 this way). The spikes set it; set it yourself for any other run,
 interactive ones included. The shell may print `Alarm clock` lines: the spikes stop a CLI that keeps
@@ -173,7 +176,7 @@ Everything here is zero spend unless marked.
    Contexto's tools are offered raises (2.1.310: a planted fact, paged out, asked for, through
    deferred tools; D46). The stand-in spends tokens too (305,223 for 2.1.310's two attempts) and needs
    the owner's approval of its token cap. Say in the version's decision which of the two ran, or that
-   neither did (2.1.314 and 2.1.318: neither yet, D56).
+   neither did (2.1.314: neither yet, D56; 2.1.318: the full acceptance, run #4).
 
 ## Routine for a new Codex version
 

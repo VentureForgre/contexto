@@ -21,16 +21,21 @@ gets fixes.
 In scope:
 
 - **The local proxy.** It listens on `127.0.0.1` only, on a free port by default (`contexto proxy
-  --port N` lets the user pick the port). It forwards the CLI's auth headers upstream unchanged
+  --port N` lets the user pick the port). It answers only requests whose `Host` names `127.0.0.1`
+  or `localhost` and that carry no `Origin` header, so a web page cannot use it; others get 403. It forwards the CLI's auth headers upstream unchanged
   and must never store or log them. Reports of the proxy binding to another interface, leaking
   auth headers or conversation text into its logs, or sending requests anywhere other than the
   configured upstream are in scope.
 - **The session store** under `$CONTEXTO_HOME` (default `~/.contexto`). Every directory Contexto
-  creates there is mode 0700 and every file 0600, whatever the umask. The temporary `--settings`
-  and `--mcp-config` files `contexto run claude` writes are 0600 and deleted on exit.
-  In API-key mode (the default), `contexto run codex` sets `CODEX_HOME` to
-  `sessions/<id>/codex-home` (0700) and writes its `config.toml` there (0600); on exit only
-  `config.toml` is deleted and the directory is kept, so Codex can resume. ChatGPT login mode uses
+  creates there is mode 0700 and every file 0600, whatever the umask; an existing
+  `$CONTEXTO_HOME` keeps its own mode, and `sessions/` is narrowed to 0700. The temporary
+  `--settings` and `--mcp-config` files `contexto run claude` writes are 0600 and deleted on exit,
+  on every signal the launcher can catch, and, if the launcher is killed with SIGKILL, by a
+  watchdog process that also ends Claude Code. In API-key mode (the default), `contexto run codex`
+  sets `CODEX_HOME` to `sessions/<id>/codex-home` (0700) and writes its `config.toml` there (0600);
+  on exit `config.toml` and `packages/` are deleted and the rest is kept, so Codex can resume.
+  `$CONTEXTO_HOME` may be a symlink. A session directory may not: every command refuses a
+  symlinked `sessions/<id>`, and files inside a session are never opened through a symlink. ChatGPT login mode uses
   your own `CODEX_HOME` with `-c` overrides, and Contexto writes nothing there. Any path that
   creates store data with wider modes, follows a link out of the store, or lets a page id from
   outside read a file that is not a page is in scope.
@@ -65,15 +70,17 @@ outputs, and any file contents or secrets that passed through the conversation. 
 
 These hold no conversation text:
 
-- `meta.json`: the absolute path of the working directory the session started in, and request
-  counters.
+- `meta.json`: the absolute path of the working directory the session started in, request
+  counters, and the Claude Code session ids the session served (`cli_sessions`). Those ids name
+  Claude Code's own transcript files, so they link a Contexto store to those transcripts.
 - `log.jsonl`: the session log. It records sizes, counts, request paths, status codes, error
   names, hashes, event names, and the upstream source, never prompts, replies or the upstream URL.
 - `page.key`: a random key that page ids are derived from.
 - `live.lock`, `meta.lock`, `ledger.lock`: empty lock files.
 
 `$CONTEXTO_HOME` itself holds `affinity.salt`, a random value that the `X-Session-Affinity` header
-is hashed with, so the header does not reveal the session id.
+is hashed with, so the header does not reveal the session id, and `choose.lock`, an empty lock file
+that lets one launch at a time pick a session automatically.
 
 Treat `$CONTEXTO_HOME` like your shell history or the CLI's own transcripts. File modes protect it
 from other users on the machine, not from processes running as you, backups, or disk images.

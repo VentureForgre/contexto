@@ -1,5 +1,6 @@
 name: New Claude Code or Codex version
 description: Contexto warns that your CLI version was not tested, or a new CLI version broke something.
+labels: [enhancement]
 body:
   - type: markdown
     attributes:

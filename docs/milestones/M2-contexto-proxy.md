@@ -295,8 +295,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    the previous request sent in this conversation got its usage; when it did not (a 4xx or 5xx, a
    dropped stream, a response without usage, or a request still in flight), the whole request is
    estimated instead, logged content-free as `usage_missing` (epoch only) when that replaces a real
-   input. Usage with no input count (`output_tokens` alone) is a response without usage (D49 as
-   amended). Usage is paired only with the request it measured, identified by its message count and
+   input. Usage with no input count (`output_tokens` alone), or whose input, cache-read and
+   cache-write counts add up to 0, is a response without usage (D49 as amended). Usage is paired only with the request it measured, identified by its message count and
    its last message's hash (rule 10): usage for any other request (the CLI's original, forwarded
    after `transform_error`, or an older request still in flight) never feeds the ratio, the last
    real input, the measured head, or `estimate_error`, and logs `usage_unattributed` (the epoch,
@@ -365,7 +365,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    index), in tokens, taken from measured usage once available and from the estimator before that.
    The first measured request's input, minus its non-carried messages, is the head; the messages
    count at that request's own ratio (their share of its bytes), or at the estimate made before the
-   send when that is lower, so the head errs high whenever the first usage arrives (D49 as amended).
+   send when that is lower, so the head errs high whenever the first usage arrives (D49 as amended),
+   with one exception: byte share assumes the head and the window tokenize alike, so a window with
+   more bytes per token than the head (prose in the window, a JSON-dense head) puts the head low by
+   that difference, unless the estimate before the send is lower. PR #244's reviews measured it up to
+   1,816 tokens (7.3%) low, with the bound held, and A12's `turn_room_low` then unlogged in 21 of 240
+   runs.
    Media are left out of that share (D48): the window's text counts at its share of the request's text
    bytes, applied to the input minus the request's media floor, and the window's media at their floor.
    With media in the window, the head is never under the text-seed estimate of the request's own
@@ -436,7 +441,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    shuts the upstream connection, so upstream stops generating. The entry is logged with
    `client_aborted: true` and no `error`: with the status and any usage read when the response had
    started (the usage still reaches the engine), and with `upstream_phase` and no status when it
-   had not. A client that closes once it has the stream's last event (`message_stop`, or a
+   had not. A client that half-closes its sending side while it still reads counts as gone the same
+   way and gets no response (neither CLI does that; nginx treats it the same, D53). A client that
+   closes once it has the stream's last event (`message_stop`, or a
    Responses `response.completed`, `response.incomplete` or `response.failed`), before the chunk
    terminator, has the whole response, so upstream is still shut but the entry is not
    `client_aborted` (D59). A second Ctrl+C during the 2 s stop drain ends the wait without a traceback, and the
@@ -982,8 +989,13 @@ unknown page, never read. Tools:
   directly), or when it is Codex's code-mode `exec` call whose code (a custom tool's input, or the
   string fields of a function call's JSON arguments) has no comment and in which every mention of
   `tools` is a literal call of one of them (`tools["mcp__contexto__contexto_search"](` or
-  `tools.mcp__contexto__contexto_search(`), so any other way of reaching a tool keeps the call
-  searchable; the output is paired with its call by `tool_use_id` or `call_id` within the turn.
+  `tools.mcp__contexto__contexto_search(`). The check is on the text: the code must hold no `//` or
+  `/*` anywhere (in a string too), and the word `tools` is counted wherever it appears. So a call
+  that names `tools` any other way (destructuring, an alias, `tools[n]`, `tools?.x`, a reference not
+  called at once, another tool), or whose strings hold `//`, `/*` or the word `tools`, stays
+  searchable, echo included. Code that reaches a tool without the word `tools` (`eval`,
+  `globalThis[...]`, Codex's `load()`) beside a Contexto call is not seen, so a shell call made that
+  way in such an `exec` is left out of search (recall still returns it). The output is paired with its call by `tool_use_id` or `call_id` within the turn.
   Their replies hold copies of older pages or of the pinned state, and as the newest page holding
   them a search reply outranked the pages it quoted (QA, 2026-11-05). `contexto_pin` and
   `contexto_close` calls are the model's own words and stay searchable. The page keeps the calls
@@ -1082,18 +1094,22 @@ unknown page, never read. Tools:
     `<system-reminder>` text blocks, starts "This session is being continued from a previous
     conversation that ran out of context. The summary below covers the earlier portion of the
     conversation." and a blank line (D59). `/compact` and auto-compaction keep the session id but
-    start a new first message. Measured on 2.1.314 and 2.1.318, interactive and headless: with Claude
-    Code's default attribution reminder the content is a list, that reminder block, then the summary
-    block (after `/compact` the command's blocks and the new prompt follow in the same message), then a
-    role `system` message; with the attribution set empty, a list that starts with the summary
-    (`/compact`) or a plain string (auto-compaction). A prompt that starts with the sentence and goes on
-    in the same paragraph does not match. It becomes that session's main, so a later `/resume` of the
-    session returns to it. This rule alone also applies at the compacted conversation's first request
-    when it has no turn start, once main's newest request (Claude Code's summary request) was answered
-    with no client tool call (D59): a compaction that kept a pending `tool_use` and its result after
-    the summary takes over there instead of at the next prompt (in the captures an auto-compaction
-    between a tool call and its result puts the result in the summary request, so the compacted
-    conversation starts at a turn start);
+    start a new first message. Measured on 2.1.314 and 2.1.318, interactive and headless, the first
+    message takes one of three forms, by what Claude Code kept after the summary: a plain string when
+    it kept tail messages (after `/compact` the previous assistant message, after auto-compaction a
+    pending `tool_use` and its result; the attribution reminder then moves to the next user message);
+    a list of `<system-reminder>` blocks then the summary block, which the command's blocks and the
+    new prompt may follow in the same message; or a list that starts with the summary, with or without
+    a reminder block after it. A role `system` message follows. A prompt that starts with the sentence
+    and goes on in the same paragraph does not match; a first prompt that reproduces the whole first
+    line and the blank line, in main's own session and entrypoint, does. It becomes that session's
+    main, so a later `/resume` of the session returns to it. This rule alone also applies at the
+    compacted conversation's first request when it has no turn start, once main's newest request
+    (Claude Code's summary request) was answered with no client tool call (D59): a compaction that
+    kept a pending `tool_use` and its result after the summary takes over there instead of at the next
+    prompt. Auto-compaction at Claude Code's threshold produces that form on both versions (PR #246
+    review: 32 compactions in 14 runs through `contexto run`, every one `main_changed: compacted`);
+    only the forced-usage captures put the pending result into the summary request;
   - main has never sent a request with a tool list and this conversation has (Claude Code's title,
     topic, and quota side requests have none, and one is often the session's first request);
   - or it has strictly more turn starts than main (a tie keeps the current one).
