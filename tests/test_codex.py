@@ -904,8 +904,8 @@ def test_run_codex_logs_launch_and_exit_and_warns_early_like_claude(tmp_path, mo
     assert run_codex(args, stderr=err) == 5
     assert ("contexto: session W1 (bound 40,000, upstream claude-flag+/v1, codex auth apikey, engine rewrite)"
             in seen["err"])
-    # Before codex starts; 40,000 - 25,000 - 19,000 leaves no budget (launcher.start_warning's wording, D55).
-    assert "bound 40,000 leaves no window budget" in seen["err"] and "Use --bound 94,000 or more" in seen["err"]
+    # Before codex starts; 40,000 - 25,000 - 19,000 leaves no budget (launcher.start_warning's wording, D55 and its #245 follow-up).
+    assert "bound 40,000 may leave no window budget" in seen["err"] and "Use --bound 94,000 or more" in seen["err"]
     assert seen["argv"] == [codex_bin, "--no-daemon"]  # interactive, on the stub's 0.166.0
     events = log_events(tmp_path / "ctx", "W1")
     launch = next(e for e in events if e["event"] == "launch")
