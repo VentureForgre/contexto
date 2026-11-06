@@ -285,6 +285,12 @@ NO_DAEMON_FLAG = "--no-daemon"
 NO_DAEMON_SINCE = (0, 156, 0)
 HELP_TIMEOUT_S = 3.0
 INTERACTIVE_SUBCOMMANDS = ("resume", "fork")
+# ``codex agents`` browses the shared server's sessions and refuses --no-daemon ("requires a shared
+# server"). Measured on 0.166.0 under Contexto: it installs and starts the server pair in the session's
+# CODEX_HOME and leaves both running; ``codex app-server daemon stop`` then stops the server but not its
+# pid-update-loop. The server's work would also outlive the proxy it is configured to use. So it is
+# refused, unless ``--remote`` points it at a server elsewhere.
+SHARED_SERVER_SUBCOMMANDS = ("agents",)
 # Top-level options that take a value, so the subcommand is found after them (codex --help, 0.166.0).
 # ``-i``/``--image`` takes every following word up to the next option: ``codex -i a.png exec`` opens the
 # TUI with two images, while ``--image=a.png exec`` runs exec.
@@ -512,6 +518,15 @@ def _subcommand(codex_args: list[str]) -> str | None:
     return None
 
 
+def needs_shared_server(codex_args: list[str]) -> str | None:
+    """The subcommand when it runs only with Codex's local shared server (``SHARED_SERVER_SUBCOMMANDS``)
+    and ``--remote`` does not send it elsewhere, else None."""
+    if any(a == "--remote" or a.startswith("--remote=") for a in codex_args):
+        return None
+    subcommand = _subcommand(codex_args)
+    return subcommand if subcommand in SHARED_SERVER_SUBCOMMANDS else None
+
+
 def help_lists_no_daemon(codex: str) -> bool:
     """Whether ``codex --help`` lists ``--no-daemon`` (bounded by ``HELP_TIMEOUT_S``, in its own process
     group, stdin closed; False when it cannot be run)."""
@@ -621,6 +636,12 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         codex = shutil.which(CODEX_BIN)
         if codex is None:
             raise launcher.LaunchError(f"'{CODEX_BIN}' not found on PATH", launcher.EXIT_NOT_FOUND)
+        shared = needs_shared_server(codex_args)
+        if shared:
+            raise CodexLaunchError(
+                f"'codex {shared}' needs Codex's shared background server, which would keep running for this "
+                f"session's CODEX_HOME after Codex exits (Codex refuses {NO_DAEMON_FLAG} with it), so Contexto "
+                f"does not run it; run 'codex {shared}' without Contexto, or pass --remote.")
         claude = upstream_module.resolve_upstream(args.upstream)
         target, source = codex_upstream_with_source(args.codex_auth, args.codex_upstream, dict(os.environ),
                                                     claude.url, claude.source)

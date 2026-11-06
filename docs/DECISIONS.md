@@ -1283,8 +1283,14 @@ the owner's delegation. Open decisions are listed at the end with the options an
     argument, unless the user passed `--no-daemon` or `--remote`. The same holds in ChatGPT mode, where
     CODEX_HOME is the user's own and a server may already run for it. The flag goes first because 0.166.0
     accepts it before every subcommand and rejects it after `exec`. `exec` and the other
-    non-interactive subcommands start no server (measured: no process, no `packages/`) and get no flag;
-    `agents` refuses it ("requires a shared server"). The subcommand is the first word after the
+    non-interactive subcommands start no server (measured: no process, no `packages/`) and get no flag.
+    `codex agents` is refused instead (exit 2, before the session exists) unless `--remote` sends it
+    elsewhere (reviewer B, PR #236). Measured on 0.166.0 under Contexto: it installed and started the
+    server pair in the session's CODEX_HOME and left both running (PPID 1); Codex refuses `--no-daemon`
+    with it ("requires a shared server"); `codex app-server daemon stop` stopped the server but not its
+    `pid-update-loop`; and the server's work would outlive the proxy it is configured to use. Other
+    subcommands that manage the server (`app-server`, `remote-control`) were not measured and are not
+    refused. The subcommand is the first word after the
     leading options, with Codex's value-taking options skipped (`-i`/`--image` takes every word up
     to the next option, so `codex -i a.png exec` opens the TUI; measured on 0.166.0). The flag is gated
     on the installed version, read with `codex --version` only for launches that could take it. It is

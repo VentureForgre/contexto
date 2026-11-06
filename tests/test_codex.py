@@ -943,3 +943,27 @@ def test_run_codex_without_a_readable_version_asks_codex_help_then_warns(tmp_pat
     err, event = launch("H2")  # help lists it: passed, no warning
     assert seen["argv"] == [codex_bin, "--no-daemon"] and "background app-server" not in err
     assert event["no_daemon"] is True and event["codex_version_error"] == "exit_1"
+
+
+@pytest.mark.parametrize("codex_args,refused", [
+    (["agents"], True), (["-m", "x", "agents"], True), (["agents", "--remote", "ws://127.0.0.1:1"], False),
+    (["--remote=unix://", "agents"], False), (["agents is a word in my prompt"], False), (["--", "agents"], False),
+    (["exec", "agents"], False), ([], False)])
+def test_codex_agents_is_refused_because_it_needs_the_shared_server(codex_args, refused):
+    """Reviewer B, PR #236: ``codex agents`` (0.166.0) starts the shared server pair in the session's
+    CODEX_HOME, leaves it running, and refuses --no-daemon."""
+    from contexto.codex import needs_shared_server
+
+    assert needs_shared_server(codex_args) == ("agents" if refused else None)
+
+
+def test_run_codex_agents_exits_2_before_making_a_session(tmp_path, monkeypatch, codex_bin):
+    from contexto import launcher
+
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    monkeypatch.setattr(launcher, "run_child", lambda *a, **k: pytest.fail("codex must not start"))
+    err = io.StringIO()
+    args = parse("--upstream", "http://127.0.0.1:9", "--codex-key-helper", "echo k", "codex", "-m", "x", "agents")
+    assert run_codex(args, stderr=err) == 2
+    assert "'codex agents' needs Codex's shared background server" in err.getvalue()
+    assert session_names(tmp_path / "ctx") == []

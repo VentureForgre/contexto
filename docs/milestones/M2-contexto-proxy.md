@@ -1021,7 +1021,8 @@ runs through a shell as Claude Code runs `apiKeyHelper`. Interactive launches (n
 `resume`, `fork`, found after the leading options) on Codex 0.156.0 or later pass `--no-daemon`,
 unless the user passed `--no-daemon` or `--remote`, so Codex's shared background app-server is not
 started for the session's CODEX_HOME and left running; when the version cannot be read, the flag is
-passed if `codex --help` lists it, else one warning is printed. On exit the kept CODEX_HOME loses
+passed if `codex --help` lists it, else one warning is printed. `codex agents`, which needs that
+server and refuses `--no-daemon`, is refused (exit 2) unless `--remote` is given. On exit the kept CODEX_HOME loses
 `config.toml` and `packages/`; its rollouts and the plugin clone in `.tmp/` stay. The session line shows the bound, the log records `launch` and `exit` as for Claude,
 and the start-time window warning assumes a Codex fixed overhead of 19,000 tokens.
 
