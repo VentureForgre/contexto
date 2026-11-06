@@ -51,8 +51,9 @@ TOOL_RESULT_BYTES_PER_TOKEN = 1.5
 # 641, 1,719, 2,694 and 3,243 for 800x600, 1440x900, 1920x1080 and 2000x1250 (formula: 640 to 3,334).
 # Those four are exactly ceil(w / 28) * ceil(h / 28) + 3, 28-pixel patches and 3 more tokens (PR #234
 # review A), which the pixel formula undercounts for a thin image (100 for 2576x29, against 187) and for
-# about 1 size in 4 above 500 pixels an edge, by up to 31 tokens; an image is priced at the higher of the
-# two (D61). The 4,784-token maximum is 92 x 52 patches at the 2,576-pixel edge, so 4,787 with the 3.
+# some larger sizes (6.6% to 27.7% of sizes above 500 pixels an edge, by up to 34 to 91 tokens, depending
+# on the sample; PR #250 review A); an image is priced at the higher of the two (D61). The 4,784-token
+# maximum is 92 x 52 patches at the 2,576-pixel edge, so 4,787 with the 3.
 PIXELS_PER_TOKEN = 750
 PATCH_PIXELS = 28
 PATCH_EXTRA_TOKENS = 3
