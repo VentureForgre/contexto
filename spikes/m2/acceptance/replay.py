@@ -12,7 +12,9 @@ The replay sends H1's probe-turn request as Claude Code built it, decoded from i
 (the session-start system message, per-turn reminders, and every turn), straight to the upstream
 (the owner's proxy), bypassing Contexto. Thinking blocks are stripped, so it is a no-replayed-thinking
 baseline. Contexto's tools are removed and ``tool_choice`` is ``none``, so the model answers from the
-context alone. ``context_management`` is dropped so nothing edits the context away.
+context alone; a history block that names a tool the baseline does not send (tool search's
+``tool_reference``) becomes a text note naming it (``_unsent_tool_notes``). ``context_management`` is
+dropped so nothing edits the context away.
 
 The key comes from the seat's apiKeyHelper at call time, held in memory and sent only in the request
 header; it is never written, logged, or printed. The first 401 or 403 stops the replay.
@@ -185,10 +187,86 @@ def _has_text(message: dict[str, Any], text: str) -> bool:
     return any(isinstance(b, dict) and b.get("text") == text for b in content or [])
 
 
+def _reference_name(block: Any) -> str | None:
+    """The tool a ``tool_reference`` names: ``tool_name`` in a tool result, ``name`` in Claude Code's
+    ``tool_addition`` and ``tool_removal`` blocks (2.1.318 writes both spellings)."""
+    if not isinstance(block, dict) or block.get("type") != "tool_reference":
+        return None
+    name = block.get("tool_name", block.get("name"))
+    return name if isinstance(name, str) else None
+
+
+def _added_name(block: dict[str, Any]) -> str | None:
+    """The tool a ``tool_addition`` or ``tool_removal`` block names, by reference or by definition."""
+    tool = block.get("tool")
+    if isinstance(tool, dict) and tool.get("type") == "tool_definition" and isinstance(tool.get("definition"), dict):
+        name = tool["definition"].get("name")
+        return name if isinstance(name, str) else None
+    return _reference_name(tool)
+
+
+def _unsent_tool_notes(messages: list[dict[str, Any]], sent: set[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    """The messages with every block that names a tool outside ``sent`` turned into a text note.
+
+    With tool search on (Claude Code 2.1.318's default), a ``ToolSearch`` result holds
+    ``tool_reference`` blocks, and the API refuses a request whose history references a tool missing
+    from ``tools``: live run #4's replay got 400 "Tool reference ... not found in available tools" for
+    ``contexto_pin``, loaded in a content turn. The baseline must not get Contexto's tools, so the
+    reference becomes "Tool <name> loaded.", which keeps the history's account of what happened
+    (count_tokens accepted it: 426,266 input tokens on that run's request 1). Claude Code's own
+    fallback for a model without tool search inlines the tool's definition instead; that would hand
+    the baseline Contexto's tool text. The same holds for 2.1.318's inline-tools form, a ``system``
+    message of ``tool_addition`` and ``tool_removal`` blocks (used when tool search is off): an
+    addition of a Contexto tool, by definition or by reference, and an addition or removal by
+    reference of any tool outside ``sent`` become notes; another tool's inline definition is kept,
+    and references to it stay. A ``tool_use`` naming a removed tool is left as sent: the API accepts
+    it with ``tool_choice`` ``none`` (the same request 1 held content turn 5's ``contexto_pin`` call).
+    Returns the new messages and the noted names, in order."""
+    available = set(sent)
+    for m in messages:
+        for b in m.get("content") if isinstance(m.get("content"), list) else []:
+            if isinstance(b, dict) and b.get("type") == "tool_addition" and \
+                    isinstance(b.get("tool"), dict) and b["tool"].get("type") == "tool_definition":
+                name = _added_name(b)
+                if name is not None and not name.startswith(CONTEXTO_TOOL_PREFIX):
+                    available.add(name)
+    noted: list[str] = []
+
+    def note(name: str, verb: str = "loaded") -> dict[str, Any]:
+        noted.append(name)
+        return {"type": "text", "text": f"Tool {name} {verb}."}
+
+    def block(b: Any) -> Any:
+        if not isinstance(b, dict):
+            return b
+        kind = b.get("type")
+        name = _reference_name(b)
+        if name is not None:
+            return b if name in available else note(name)
+        if kind == "tool_result" and isinstance(b.get("content"), list):
+            inner = [block(x) for x in b["content"]]
+            return {**b, "content": inner} if inner != b["content"] else b
+        if kind in ("tool_addition", "tool_removal"):
+            name = _added_name(b)
+            if name is not None and name not in available:
+                return note(name, "loaded" if kind == "tool_addition" else "removed")
+        return b
+
+    out = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):
+            new = [block(b) for b in content]
+            m = {**m, "content": new} if new != content else m
+        out.append(m)
+    return out, noted
+
+
 def build_request(cc_records: list[dict[str, Any]], probe_text: str, max_tokens: int) -> dict[str, Any]:
     """The replay request: H1's probe-turn request as Claude Code sent it (system and tools from its
     shape, params, and every message, including system messages and per-turn reminders), with
-    thinking stripped from assistant messages. Raises ReplayError when the JSONL lacks a part."""
+    thinking stripped from assistant messages and references to tools it does not send turned into
+    text notes (``_unsent_tool_notes``). Raises ReplayError when the JSONL lacks a part."""
     shapes = {r.get("shapeHash"): r["shape"] for r in cc_records
               if r.get("type") == "api-request-shape" and isinstance(r.get("shape"), dict)}
     requests = [r for r in cc_records if r.get("type") == "api-request" and isinstance(r.get("params"), dict)]
@@ -216,6 +294,7 @@ def build_request(cc_records: list[dict[str, Any]], probe_text: str, max_tokens:
         messages.append(m)
     p = probe["params"]
     tools = [t for t in shape.get("tools") or [] if not str(t.get("name", "")).startswith(CONTEXTO_TOOL_PREFIX)]
+    messages, noted = _unsent_tool_notes(messages, {str(t.get("name")) for t in tools})
     request: dict[str, Any] = {"model": p.get("model", driver.MODEL), "max_tokens": max_tokens,
                                "system": shape.get("system") or [], "messages": messages, "stream": True}
     if tools:
@@ -232,6 +311,8 @@ def build_request(cc_records: list[dict[str, Any]], probe_text: str, max_tokens:
     if isinstance(thinking, dict) and thinking.get("display") not in (None, "summarized", "omitted"):
         changes["thinking.display"] = [thinking["display"], "omitted"]
         request["thinking"] = {**thinking, "display": "omitted"}
+    if noted:
+        changes["unsent_tool_notes"] = {"blocks": len(noted), "tools": sorted(set(noted))}
     request["_changes"] = changes
     request["_betas"] = harness_betas(p.get("betas"))
     return request
