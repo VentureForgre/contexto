@@ -19,7 +19,7 @@ def fail(message: str) -> int:
 def add_session_option(parser) -> None:
     parser.add_argument("--session", metavar="ID",
                         help=f"{SESSION_HELP} (default: $CONTEXTO_SESSION, else the most recently active "
-                             "session with pages or pins)")
+                             "session with pages or pins, or one in use)")
 
 
 def say_session(session_id: str, how: str) -> None:

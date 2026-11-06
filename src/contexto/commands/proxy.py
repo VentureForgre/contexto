@@ -32,7 +32,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                                    description="Run the Contexto proxy alone, without the rewrite engine or a "
                                                "CLI, mainly for tests. Prints the port, session, and upstream "
                                                "source once listening, then serves until interrupted.")
-    parser.add_argument("--session", default=None, help="session id (default: a new one)")
+    parser.add_argument("--session", default=None, help="full session id to resume or create (default: a new one)")
     parser.add_argument("--port", type=_port, default=0, help="port on 127.0.0.1 (default 0: a free port)")
     parser.add_argument("--upstream", default=None,
                         help="upstream base URL (default: what Claude Code would use from this directory)")
@@ -43,10 +43,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    from contexto.launcher import session_affinity_key
+    from contexto.launcher import LaunchError, open_session, session_affinity_key
     from contexto.paths import contexto_home, session_dir
     from contexto.proxy import ContextoProxy
-    from contexto.store import SessionStore
     from contexto.store.prune import discard_new_session
     from contexto.upstream import resolve_upstream
 
@@ -55,10 +54,15 @@ def run(args: argparse.Namespace) -> int:
     store = None
     try:
         created = not session_dir(contexto_home(), session_id).exists()
-        store = SessionStore(contexto_home(), session_id)
+        # Through the launcher's check (D57): an id that only starts existing sessions is refused, so a new
+        # session under it does not hide the one meant from the readers.
+        store = open_session(contexto_home(), session_id, Path.cwd())
         proxy = ContextoProxy(upstream.url, store, observe_thinking=args.observe_thinking,
                               upstream_source=upstream.source, affinity_key=session_affinity_key(store, upstream.url))
         port = proxy.start(args.port)
+    except LaunchError as exc:
+        print(f"contexto proxy: {exc}", file=sys.stderr)
+        return exc.code
     except (OSError, ValueError) as exc:
         print(f"contexto proxy: cannot start: {exc}", file=sys.stderr)
         if store is not None and created:

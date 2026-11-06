@@ -123,6 +123,8 @@ def run_prune(args: argparse.Namespace) -> int:
     now = time.time()
     try:
         check_home(home)
+        if args.session is not None:
+            session_dir(home, args.session)  # an invalid id (empty, a path, over 255 bytes) is refused first
         if args.session is not None and starting_with(home, args.session) and not _is_session(home, args.session):
             # Prune is irreversible: a mistyped or already deleted id must not delete another session (D57).
             message = (f"--session {args.session!r} is not a session but the start of "

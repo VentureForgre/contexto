@@ -31,7 +31,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--headroom-floor", type=int, default=None,
                         help="minimum headroom below the bound that triggers a rotation (default 25,000; "
                              "must be below the bound)")
-    parser.add_argument("--session", default=None, help="session id (default: a new one, printed at start)")
+    parser.add_argument("--session", default=None,
+                        help="full session id to resume or create (default: a new one, printed at start)")
     parser.add_argument("--upstream", default=None,
                         help="upstream base URL (default: what Claude Code would use from this directory)")
     parser.add_argument("--observe-thinking", action="store_true",

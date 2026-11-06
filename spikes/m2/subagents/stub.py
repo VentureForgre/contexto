@@ -97,4 +97,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 server = ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler)
+print("listening", flush=True)  # run.sh and drive.py wait for this line: the port is ours
 server.serve_forever()

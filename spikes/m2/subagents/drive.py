@@ -1,4 +1,5 @@
-"""Drive interactive Claude Code 2.1.302 in a pty against the stub (isolated config dir).
+"""Drive interactive Claude Code in a pty against the stub (scrubbed env, isolated config dir and HOME,
+auto-updater off; CLAUDE=<binary> picks the Claude Code to run, default claude on PATH).
 
 usage: drive.py <name> <mode>
 mode esc:    type MAIN-RUN; when the subagent's first request has been answered (its 30 s Bash runs),
@@ -10,9 +11,10 @@ mode bgidle: type MAIN-RUN; once main ended its turn, type HUMAN-NEXT while the 
 import json
 import os
 import pty
-import random
 import select
+import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -35,21 +37,30 @@ key = "sk-ant-test-stub-0000000000"
     "bypassPermissionsModeAccepted": True,
     "projects": {str(work.resolve()): {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}},
 }))
-port = 18900 + random.randrange(90)
-env = dict(os.environ, SCEN_MODE=mode, PYTHONPATH=str(here))
+home = root / f"home-{name}"
+home.mkdir(parents=True, exist_ok=True)
+claude = os.environ.get("CLAUDE") or shutil.which("claude") or "claude"
+with socket.socket() as probe:
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+stub_log = root / f"stub-{name}.log"
 stub = subprocess.Popen([sys.executable, str(here / "stub.py"), str(port), str(cap),
-                         str(here / "esc_scenario.py")], env=env,
-                        stdout=open(root / f"stub-{name}.log", "w"), stderr=subprocess.STDOUT)
-time.sleep(1)
-for var in ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"):
-    env.pop(var, None)
-env.update(CLAUDE_CONFIG_DIR=str(cfg), ANTHROPIC_BASE_URL=f"http://127.0.0.1:{port}", ANTHROPIC_API_KEY=key,
-           DISABLE_TELEMETRY="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1",
-           TERM="xterm-256color")
+                         str(here / "esc_scenario.py")], env=dict(os.environ, SCEN_MODE=mode, PYTHONPATH=str(here)),
+                        stdout=open(stub_log, "w"), stderr=subprocess.STDOUT)
+for _ in range(50):  # the stub prints "listening" once it holds the port; a bind error ends it
+    if stub_log.read_text().splitlines()[:1] == ["listening"] or stub.poll() is not None:
+        break
+    time.sleep(0.1)
+if stub.poll() is not None or stub_log.read_text().splitlines()[:1] != ["listening"]:
+    stub.kill()
+    sys.exit(f"stub not listening on port {port} (see {stub_log})")
+env = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TERM": "xterm-256color",
+       "CLAUDE_CONFIG_DIR": str(cfg), "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}", "ANTHROPIC_API_KEY": key,
+       "DISABLE_TELEMETRY": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1"}
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(work)
-    os.execvpe("claude", ["claude", "--dangerously-skip-permissions", "--model", "claude-haiku-5-5"], env)
+    os.execve(claude, [claude, "--dangerously-skip-permissions", "--model", "claude-haiku-5-5"], env)
 screen = open(root / f"screen-{name}.log", "wb")
 
 
