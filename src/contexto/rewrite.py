@@ -10,7 +10,7 @@ deterministic serializer sends byte-identical prefixes within an epoch. The stor
 a turn start's rotation and a paged_changed resync (``page_out``, ``pinned_text``, ``index_text``,
 ``set_window``, ``quarantine_page``) and by ``observe_usage``
 (``log``, ``set_window``); the estimator only through ``estimate``, ``estimate_messages``,
-``observe`` and ``measured_bytes_per_token``.
+``estimate_value``, ``observe`` and ``measured_bytes_per_token``.
 
 Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 
@@ -138,7 +138,7 @@ from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import render_page
-from contexto.tokens import TokenEstimator
+from contexto.tokens import MediaCost, TokenEstimator, media_cost, split_media
 from contexto.toolcheck import ToolCheck
 
 MESSAGES = "/v1/messages"
@@ -203,6 +203,7 @@ class EpochState:
     head_changed: bool = False  # a new epoch is due at the next turn start
     hashes: tuple[str, ...] = ()  # normalised hashes of the previous request's messages
     last_sent_bytes: int = 0
+    last_sent_media: MediaCost = MediaCost()  # D48: the images and documents in those bytes
     last_input_tokens: int | None = None  # real upstream input of the previous request
     max_turn_growth: int = 0
     last_turn_start_n: int | None = None  # history length at the previous turn start
@@ -1407,17 +1408,23 @@ def guarded_rotation(request: dict, messages: list[dict], n: int, estimate: int,
     return replace(new, degraded=False, conflict_page=None)
 
 
+def sent_media(messages: list) -> MediaCost:
+    """The images and documents of a request as sent: their bytes and their least cost (D48)."""
+    return media_cost(split_media(messages)[1], measure_bytes=True)
+
+
 def forward_original(request: dict, messages: list[dict], state: EpochState, reason: str,
                      events: list[dict]) -> tuple[dict, EpochState, list[dict]]:
     """Rule 14 terminal step: send the CLI's request unchanged and log ``fallback_failed``. The epoch keeps
     its previous hashes, so the next request detects the same mismatch and tries once more."""
     sent = len(canonical_bytes(request))
+    media = sent_media(messages)
     events.append({"event": "fallback_failed", "epoch": state.epoch, "reason": reason, "messages": len(messages)})
     events.append({"event": "request", "epoch": state.epoch, "k": state.k, "messages": len(messages),
                    "upstream_messages": len(messages), "sent_bytes": sent, "degraded": True,
                    "fallback_failed": True})
-    return request, replace(state, degraded=True, last_sent_bytes=sent, last_estimate=None, last_input_tokens=None,
-                            pending_usage=usage_identity(messages)), events
+    return request, replace(state, degraded=True, last_sent_bytes=sent, last_sent_media=media, last_estimate=None,
+                            last_input_tokens=None, pending_usage=usage_identity(messages)), events
 
 
 def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str, state: EpochState, store: Store,
@@ -1482,7 +1489,7 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     upstream = {**request, field_name: transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
     state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
-                    last_estimate=sent_estimate,
+                    last_sent_media=sent_media(upstream[field_name]), last_estimate=sent_estimate,
                     last_window_tokens=window_tokens(upstream[field_name], estimator),
                     pending_usage=usage_identity(messages))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
@@ -2333,7 +2340,10 @@ class RewriteEngine:
             events.append({"event": "usage_unattributed", "epoch": state.epoch, "messages": identity[0],
                            "expected_messages": pending[0] if pending else None})
         else:
-            self.estimator.observe(state.last_sent_bytes, real)  # the session's measured ratio from now on
+            # The session's measured ratio from now on, of text only (D48): the request's media bytes and
+            # the least its media can have cost are taken out, so a screenshot cannot inflate the ratio.
+            media = state.last_sent_media
+            self.estimator.observe(state.last_sent_bytes - media.bytes, real - media.floor)
             state = replace(state, last_input_tokens=real, pending_usage=None)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried

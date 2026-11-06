@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from contexto import paths
-from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
+from contexto.canonical import canonical_bytes, loads_bounded
 from contexto.rewrite import CARRIED_TEXT, SESSION_START, UNCLASSIFIED, Dialect
 from contexto.tokens import TokenEstimator
 from contexto.upstream import claude_settings_order
@@ -200,7 +200,7 @@ class ResponsesDialect(Dialect):
         return True
 
     def estimate_items(self, estimator: TokenEstimator, items: list[dict]) -> int:
-        return estimator.estimate(canonical_json(items)) if items else 0
+        return estimator.estimate_value(items) if items else 0
 
     def lead_count(self, items: list[dict]) -> int:
         for i, item in enumerate(items):
