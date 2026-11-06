@@ -1029,7 +1029,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **History is not rewritten** (owner decision). Old commits, pull request diffs and pull request
     comments keep the proxy hostname, one home-directory path, the owner's commit email, the
     runner's machine name and notes on plans. A rewrite would need force pushes, which the ruleset
-    forbids, and would still leave the pull request comments.
+    forbids, and would still leave the pull request comments. The release source archives that held
+    the hostname were removed by D62.
   - **CI on fork pull requests.** Since #213, CI and Release run on GitHub-hosted runners, and
     workflow runs on fork pull requests need approval for all external contributors.
 - **D43. Contexto is MIT licensed.** Owner, 2026-10-25. The owner asked for the most permissive
@@ -2694,6 +2695,15 @@ the owner's delegation. Open decisions are listed at the end with the options an
     on Codex as on Claude, so tool-loop requests can go over unflagged when no response carries an input
     count (the 12 sessions above). Images in history are still priced once per request each; caching
     their cost was not needed once the walk was bounded.
+- **D62. The v0.1.0 to v0.4.0 releases and tags are deleted.** Owner, 2026-11-06. The 2026-11-05 QA
+  run found the owner's proxy hostname in `docs/DECISIONS.md` at all 19 tags from v0.1.0 to v0.4.0,
+  so GitHub's automatic source archives on those release pages held it; no tag from v0.5.0 on does.
+  The 19 releases and their tags were deleted with `gh release delete --cleanup-tag`. Nothing was
+  force pushed: the tagged commits are all on `main` and stay there, and their wheels and sdists,
+  which did not hold the hostname, are no longer published. Versions still come from the latest tag,
+  so the next release follows v0.5.24. A backup of each release's notes, assets and tags is kept
+  outside the repository. Old commits, pull request diffs and pull request comments still hold the
+  hostname (D42).
 
 ## Open decisions
 

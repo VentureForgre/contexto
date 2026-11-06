@@ -20,7 +20,8 @@ Otherwise it exits successfully without doing anything.
 ## Releases are on (since v0.1.0)
 
 `RELEASES_ENABLED` was set to `true` on 2026-10-16 under D29, and v0.1.0 was released from
-f990703. Every push to `main` with a releasable commit (`feat`, `fix`, `perf`, or a breaking
+f990703. The v0.1.0 to v0.4.0 releases and tags were deleted on 2026-11-06 (D62); v0.5.0 is the
+oldest release and tag, so re-attaching it generates notes with no earlier tag to start from. Every push to `main` with a releasable commit (`feat`, `fix`, `perf`, or a breaking
 change) now cuts a release; `docs`, `test`, `chore`, `ci`, and similar prefixes do not. The rest of
 this section describes the gate itself.
 
@@ -187,7 +188,7 @@ clone to act as `origin`, push the commits under test to its `main`, and run
 
 - **The tag exists but the release is missing or has no assets** (for example, release creation or
   the upload failed after the tag was pushed): run the Release workflow manually from the Actions tab
-  with the existing tag, such as `v0.2.0`. The `reattach` job checks out `main` with full history.
+  with the existing tag, such as `v0.5.24`. The `reattach` job checks out `main` with full history.
   It refuses anything except an existing `vX.Y.Z` tag whose commit is on `main`
   (`.github/scripts/reattach-verify.sh`, `git merge-base --is-ancestor`), failing before it creates
   anything. If the release is missing, it first checks that the notes can be generated, then creates

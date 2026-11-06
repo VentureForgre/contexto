@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag whose sdist and wheel should be rebuilt and re-attached (for example v0.2.0)"
+        description: "Existing release tag whose sdist and wheel should be rebuilt and re-attached (for example v0.5.24)"
         required: true
         type: string
 
