@@ -83,8 +83,8 @@ python3.12 -m venv .venv
 export PATH="$PWD/.venv/bin:$PATH"
 ```
 
-Every spike runs the `claude` and `codex` first on `PATH`, falling back to `~/.local/bin`, unless you
-name a binary. To test a version that is not your default, run it by path and leave your own install
+Every spike runs the `claude` and `codex` first on `PATH` unless you name a binary; all but
+`subagents/run.sh` and `subagents/drive.py` then fall back to `~/.local/bin`. To test a version that is not your default, run it by path and leave your own install
 alone (Claude Code keeps each version under `~/.local/share/claude/versions/<version>`):
 
 - `check.sh [claude] [codex]`, `carried/live_probe.sh [claude]`, `carried/probe.sh [claude]` and
@@ -94,8 +94,10 @@ alone (Claude Code keeps each version under `~/.local/share/claude/versions/<ver
 - `argv/argstub.py` and `permissions/permstub.py` take `--claude-version` and run
   `~/.local/share/claude/versions/<version>`.
 
-They use temp homes and config dirs, fake keys, and loopback stubs, so they read no credential, write
-nothing in your home, and reach no model. Each run of Claude Code must have `DISABLE_AUTOUPDATER=1`:
+They use fake keys and loopback stubs, so they read no credential and reach no model. All but two
+also run the CLI with a temp `HOME`, so they write nothing in your home. `argv/argstub.py` and
+`permissions/permstub.py` set a temp `CLAUDE_CONFIG_DIR` and `CONTEXTO_HOME` but keep your real
+`HOME`, so Claude Code may write files under it (your own settings are not read). Each run of Claude Code must have `DISABLE_AUTOUPDATER=1`:
 otherwise the CLI may update itself during the run, repoint `~/.local/bin/claude` and delete older
 versions (a QA run lost 2.1.310 this way). The spikes set it; set it yourself for any other run,
 interactive ones included. The shell may print `Alarm clock` lines: the spikes stop a CLI that keeps
