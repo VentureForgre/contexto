@@ -1256,6 +1256,66 @@ the owner's delegation. Open decisions are listed at the end with the options an
     role `system` text, so a one-reminder queued prompt placed after other text there (for example a
     nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
     (reviewer B, PR #230 round 2).
+- **D52. Settings files as Claude Code reads them, and project settings for Codex only from a
+  trusted folder.** Claude, 2026-11-05, under D0; contract change. QA run 2026-11-05 (verify-security
+  B and C, security finding 2, launcher-ux finding 1). All measurements with real Claude Code 2.1.314
+  and codex-cli 0.166.0 against local stub upstreams, with a scratch `CLAUDE_CONFIG_DIR` and `HOME`;
+  zero spend.
+  - **Which files.** In 27 layouts (`claude -p`, one stub port per settings file and one for the
+    process environment), Claude Code read, highest first: the main checkout's
+    `.claude/settings.local.json` (the parent of the git common dir, so the repository root also from
+    a subdirectory, and the main checkout from a linked worktree, as M0 finding 1a measured; for a
+    submodule, whose common dir is under the superproject's `.git/modules`, the submodule's own
+    root), then the working directory's own `settings.local.json` and `settings.json`, then the user
+    file. From a subdirectory it did not read the repository root's `settings.json` (nor a linked
+    worktree root's files from the worktree's subdirectory), and outside git it read no parent's
+    files. A committed `settings.local.json` is read like an untracked one (2 layouts). Contexto read
+    the git toplevel's two files instead of the working directory's and got 8 of the 27 wrong; it now
+    matches all 27 (`tests/test_upstream.py` has one test for each of the 25 that differ in which file
+    wins). A project file that is also the
+    user file (the working directory is the home directory) is listed once, as the user's.
+  - **The hole.** `contexto run codex` took the `apiKeyHelper` and the base URL from the same files,
+    project first, and wrote the helper as Codex's `auth.command`, which Codex runs without asking.
+    QA's proof of concept: a repository whose `.claude/settings.json` names a helper that appends to a
+    marker file and prints `sk-evil`, and a base URL on a stub; `contexto run codex exec` in it ran the
+    helper twice and the stub got `Authorization: Bearer sk-evil`; with only the base URL in the
+    project, the user's own helper's key went to the project's host. Plain Codex ignores `.claude/`
+    (and an untrusted `.codex/config.toml`); interactive Claude Code asks "Quick safety check: Is this
+    a project you created or one you trust?" (default "No, exit") before using them.
+  - **Rule.** For Codex, a project file's `apiKeyHelper` and `env.ANTHROPIC_BASE_URL` count only when
+    Claude Code has recorded the folder as trusted; otherwise the file is skipped, the next one wins
+    (the user's, the process environment, the default), and stderr names the ignored file and the way
+    on (`--codex-key-helper` or `--codex-upstream`, or run `claude` there once and accept the
+    dialog). With no helper left, the launch stops with exit 2 before Codex starts. The flag and
+    environment helpers, `--upstream`, `--codex-upstream`, and the user file are never gated. A
+    trust lookup happens only when a project file sets the key.
+  - **How Claude Code records trust** (read from the 2.1.314 binary, then measured in a pty: the
+    dialog shown or not, 20 cases). Accepting the dialog in `repo/sub` writes
+    `projects["<real path of repo>"].hasTrustDialogAccepted: true` to `$CLAUDE_CONFIG_DIR/.claude.json`
+    (`~/.claude.json` without `CLAUDE_CONFIG_DIR`, measured with a scratch `HOME`; a non-empty legacy
+    `.config.json` in the config directory is read instead, measured; `.claude-custom-oauth.json` with
+    `CLAUDE_CODE_CUSTOM_OAUTH_URL`, read, not measured). A folder counts as trusted when the key is
+    exactly `true` for the working directory or a parent up to the git toplevel (a key on `repo/sub`
+    trusts `repo/sub/deeper`, not `repo`), or for the main checkout (a linked worktree and its
+    subdirectories are trusted when the main checkout is); outside git, for the working directory or
+    any parent. A folder above the git toplevel does not count, nor does a key recorded unresolved
+    (`/tmp/...` for `/private/tmp/...`) or with a trailing slash. Not copied: Claude Code's own
+    session-only trust (a home directory accepted in one session) and its sandbox flag; both only
+    make Contexto ignore a file Claude Code would use, and the message says how to proceed.
+  - **Why not gate `contexto run claude`.** Claude Code itself reads those files: in `-p` mode with no
+    trust check (QA measured the project helper running and the key going to the project's base
+    URL with plain `claude -p`), interactively after its dialog, which still appears behind
+    Contexto because the launcher's `--settings` does not mark the folder trusted. The proxy's
+    upstream must be the one Claude Code would use, or accepting the dialog would send requests
+    somewhere else than plain `claude`. So `contexto run claude` (and `contexto proxy`) keep parity,
+    exposed exactly as plain `claude -p` is; pass `--upstream` to pin it.
+  - **End to end** (real `contexto run codex exec`, codex-cli 0.166.0, QA's repository): untrusted, it
+    printed both notes, exited 2, and the helper never ran; with the user's own helper and base URL
+    in user settings, the helper did not run and all 10 requests went to the user's stub; after
+    recording the folder as trusted, the project's helper ran and the requests went to the project's
+    stub.
+  - **Left open.** Claude Code may change where or how it records trust; a mismatch makes Contexto
+    ignore a trusted project's file (never use an untrusted one) and says so.
 
 ## Open decisions
 

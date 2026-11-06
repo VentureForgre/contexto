@@ -44,7 +44,7 @@ from contexto import paths
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
 from contexto.rewrite import CARRIED_TEXT, SESSION_START, UNCLASSIFIED, Dialect
 from contexto.tokens import TokenEstimator
-from contexto.upstream import claude_settings_order
+from contexto.upstream import claude_key_helper, untrusted_note
 
 MODEL_OUTPUT_TYPES = frozenset({"reasoning", "function_call", "custom_tool_call", "local_shell_call",
                                 "web_search_call", "image_generation_call", "tool_search_call"})
@@ -288,17 +288,9 @@ class CodexLaunch:
 
 def claude_api_key_helper(cwd: Path, home: Path, env: dict[str, str] | None = None) -> str | None:
     """The ``apiKeyHelper`` Claude Code would use, from the same settings files and order as the
-    upstream resolution (the main checkout's local settings first in a linked worktree, and
-    ``$CLAUDE_CONFIG_DIR/settings.json`` for the user's when ``env`` sets it)."""
-    for _kind, path in claude_settings_order(cwd, home, env):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):  # unreadable or not JSON: skipped, as if absent
-            continue
-        value = data.get("apiKeyHelper") if isinstance(data, dict) else None
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+    upstream resolution (``$CLAUDE_CONFIG_DIR/settings.json`` for the user's when ``env`` sets it),
+    a project file's only when Claude Code has recorded the folder as trusted (D52)."""
+    return claude_key_helper(cwd, home, env).value
 
 
 def _toml(value: object) -> str:
@@ -422,9 +414,17 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     if auth_mode == CHATGPT_MODE:
         argv = [codex_bin, *chatgpt_overrides(proxy_url, session_id, contexto_home, base_env), *codex_args]
         return CodexLaunch(argv=argv, env=base_env, upstream=target, notes=[CHATGPT_MODE_HELP])
-    helper = key_helper or base_env.get(KEY_HELPER_ENV) or claude_api_key_helper(cwd, home, base_env)
+    helper = key_helper or base_env.get(KEY_HELPER_ENV)
+    notes: list[str] = []
     if not helper:
-        raise CodexLaunchError(f"no key helper: pass --codex-key-helper, set {KEY_HELPER_ENV}, "
+        # A project's apiKeyHelper only from a folder Claude Code trusts: Codex runs it unasked (D52).
+        found = claude_key_helper(cwd, home, base_env)
+        helper = found.value
+        if found.ignored:
+            notes.append(untrusted_note("apiKeyHelper", found.ignored, "Pass --codex-key-helper"))
+    if not helper:
+        raise CodexLaunchError(f"no key helper: {notes[0]}" if notes else
+                               f"no key helper: pass --codex-key-helper, set {KEY_HELPER_ENV}, "
                                "or configure apiKeyHelper in Claude Code settings")
     if codex_home_dir is not None:
         # Kept under the Contexto session directory so Codex's rollouts stay resumable; only the
@@ -450,7 +450,7 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
             shutil.rmtree(codex_home, ignore_errors=True)
         raise
     return CodexLaunch(argv=[codex_bin, *codex_args], env={**base_env, "CODEX_HOME": str(codex_home)},
-                       upstream=target, codex_home=codex_home, keep_home=keep)
+                       upstream=target, codex_home=codex_home, notes=notes, keep_home=keep)
 
 
 # The run command's codex branch (agreed with builder-1: commands/run.py calls add_arguments and
@@ -482,9 +482,13 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
     try:
         options = launcher.options_from_args(args)
         launcher.check_options(options)
-        claude = upstream_module.resolve_upstream(args.upstream)
+        # Codex ignores .claude/, so a project's base URL only from a folder Claude Code trusts (D52).
+        claude = upstream_module.resolve_upstream(args.upstream, trusted_only=True)
         target, source = codex_upstream_with_source(args.codex_auth, args.codex_upstream, dict(os.environ),
                                                     claude.url, claude.source)
+        if claude.ignored and source.startswith("claude-"):
+            print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', claude.ignored, 'Pass --codex-upstream')}",
+                  file=stderr)
         session_id = args.session or uuid.uuid4().hex
         try:
             store = launcher.open_session(paths.contexto_home(), session_id, Path.cwd())

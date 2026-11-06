@@ -62,13 +62,34 @@ proxy (Anthropic Messages API)        mcp server (stdio, JSON-RPC)
 Upstream resolution: the launcher computes the base URL Claude Code would otherwise use, in this
 order (measured in M0, PR #16 findings 1 and 1a: a settings-file `env.ANTHROPIC_BASE_URL`
 overrides the process environment, and in a git worktree the main checkout's
-`settings.local.json` wins): explicit `--upstream`; else the first settings file that sets
-`env.ANTHROPIC_BASE_URL`, in Claude Code's precedence (in a worktree the main checkout's
-`.claude/settings.local.json` first, then the local, project, and user settings files, the user's
-being `$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35); else
-`ANTHROPIC_BASE_URL` in the process environment; else `https://api.anthropic.com`. The launcher's
-own flag-level `--settings` outranks all of these, which is what makes the proxy attachment work.
-Organization-managed settings still outrank `--settings`; document that limit.
+`settings.local.json` wins; the file list re-measured for D52): explicit `--upstream`; else the
+first settings file that sets `env.ANTHROPIC_BASE_URL`, in Claude Code's precedence: the main
+checkout's `.claude/settings.local.json` (the parent of the git common dir: the repository root,
+also from a subdirectory, or the main checkout from a linked worktree; a submodule's own root),
+then the working directory's own `.claude/settings.local.json` and `.claude/settings.json`, then
+the user settings file (`$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35).
+From a subdirectory the repository root's `settings.json` is not read, and outside git no parent
+directory's files are (D52, 27 layouts with Claude Code 2.1.314). Else `ANTHROPIC_BASE_URL` in the
+process environment; else `https://api.anthropic.com`. The launcher's own flag-level `--settings`
+outranks all of these, which is what makes the proxy attachment work. Organization-managed
+settings still outrank `--settings`; document that limit.
+
+Project settings trust (D52): every settings file above except the user's comes with the
+repository. `contexto run claude` and `contexto proxy` use them as Claude Code does: Claude Code
+uses a project's base URL and `apiKeyHelper` in `-p` mode with no trust check, and interactively
+only after its "do you trust this folder" dialog, which it still shows behind Contexto, so a
+proxy upstream taken from an untrusted project matches what Claude Code would use once the user
+accepts. `contexto run codex` does not: Codex runs the `apiKeyHelper` it is given without asking
+and plain Codex ignores `.claude/`, so for Codex a project file's `apiKeyHelper` and base URL
+count only when Claude Code has recorded the folder as trusted, that is
+`projects[<real path>].hasTrustDialogAccepted` is `true` in Claude Code's global config
+(`$CLAUDE_CONFIG_DIR/.claude.json` or `~/.claude.json`, or a non-empty legacy `.config.json` in the
+config directory) for the working directory or a parent up to the git toplevel, or for the main
+checkout; outside git, for the working directory or any parent. Otherwise the file is skipped and
+Contexto says which file it ignored and how to proceed (`--codex-key-helper`, `--codex-upstream`,
+or running `claude` there once and accepting the dialog). `--codex-key-helper`,
+`CONTEXTO_CODEX_KEY_HELPER`, `--upstream`, `--codex-upstream`, and the user settings file are never
+gated.
 
 Tool permissions (D44): the same `--settings` file sets `permissions.allow` to one rule per Contexto
 MCP tool, by its exact name: `mcp__contexto__contexto_recall`, `_pin`, `_close`, `_state`, and
