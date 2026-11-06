@@ -32,13 +32,13 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from contexto import paths
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
@@ -240,15 +240,15 @@ RESPONSES = ResponsesDialect()
 
 # Launch planning (intake decision D22) -----------------------------------------------------------
 #
-# API-key mode, the default and the only mode run live: a temporary CODEX_HOME (directory 0700,
-# config 0600, removed on exit) whose custom provider points at the proxy and gets its bearer token
-# from ``auth.command`` running the existing key helper. The config names the helper command only,
-# never a key. ChatGPT mode (``--codex-auth chatgpt``): the user's own CODEX_HOME with ``-c`` overrides
-# only and ``requires_openai_auth``: Codex keeps its own login and the proxy passes it through. Under
-# D35 logins belong in CLIProxyAPI (reached in API-key mode) or the vendor's own CLI, never in
-# Contexto, and users follow their providers' terms. Both keep Codex on
-# HTTP (custom providers have no WebSocket transport) and turn request compression off, because the
-# proxy cannot transform compressed bodies. Some Codex calls (rate limits, usage, a remote MCP
+# API-key mode, the default and the only mode run live: a private CODEX_HOME (directory 0700, config
+# 0600, removed on exit) whose custom provider points at the proxy and gets its bearer token from
+# ``auth.command`` running the existing key helper through ``/bin/sh -c``. The config names the helper
+# command only, never a key. ChatGPT mode (``--codex-auth chatgpt``): the user's own CODEX_HOME with
+# ``-c`` overrides only and ``requires_openai_auth``: Codex keeps its own login and the proxy passes it
+# through. Under D35 logins belong in CLIProxyAPI (reached in API-key mode) or the vendor's own CLI,
+# never in Contexto, and users follow their providers' terms. Both keep Codex on HTTP (custom
+# providers have no WebSocket transport) and turn request compression off, because the proxy cannot
+# transform compressed bodies. Some Codex calls (rate limits, usage, a remote MCP
 # connection) go to chatgpt.com directly and bypass the proxy by design.
 
 API_KEY_MODE = "apikey"
@@ -256,11 +256,43 @@ CHATGPT_MODE = "chatgpt"
 KEY_HELPER_ENV = "CONTEXTO_CODEX_KEY_HELPER"
 UPSTREAM_ENV = "CONTEXTO_CODEX_UPSTREAM"
 CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
+ANTHROPIC_DOMAIN = "anthropic.com"
 PROVIDER_ID = "contexto"
 CHATGPT_MODE_HELP = ("ChatGPT login: route the user's own Codex ChatGPT credentials through the local proxy, "
                      "tested only with synthetic credentials. Logins belong in CLIProxyAPI or the vendor's own "
-                     "CLI, never in Contexto, and you must follow your provider's terms (D35, "
-                     "https://github.com/VentureForgre/contexto/blob/main/docs/cliproxyapi.md).")
+                     "CLI, never in Contexto, and you must follow your provider's terms "
+                     "(https://github.com/VentureForgre/contexto/blob/main/docs/cliproxyapi.md).")
+
+
+CODEX_BIN = "codex"
+# Codex runs ``auth.command`` itself, with ``args``, without a shell (codex-rs ModelProviderAuthInfo,
+# 0.166.0). Claude Code runs ``apiKeyHelper`` through a shell, and Contexto reuses that helper, so the
+# helper string goes to /bin/sh -c as one argument: ``~``, ``$VAR``, pipes and quoting work as they do
+# for Claude Code (D54).
+KEY_HELPER_SHELL = "/bin/sh"
+# Codex's interactive TUI starts a shared background app-server for each CODEX_HOME and leaves it
+# running after the TUI exits, with an updater that downloads new Codex releases into the home
+# (measured on 0.166.0: two processes and 517 MB per home, 936 MB after one self-update).
+# Each Contexto session has its own CODEX_HOME, so each session would leave a pair behind; interactive
+# launches pass --no-daemon instead (D54). The flag is a top-level option since 0.156.0
+# (codex-rs/tui/src/cli.rs: absent at rust-v0.155.0, present at rust-v0.156.0); 0.166.0 accepts it
+# before every subcommand. exec starts no server (measured on 0.166.0), and neither it nor the other
+# subcommands that do not open the TUI get the flag; resume and fork open the TUI and do.
+NO_DAEMON_FLAG = "--no-daemon"
+NO_DAEMON_SINCE = (0, 156, 0)
+INTERACTIVE_SUBCOMMANDS = ("resume", "fork")
+SUBCOMMANDS = ("agents", "exec", "e", "review", "login", "logout", "mcp", "plugin", "app-server", "remote-control",
+               "app", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "resume", "queue",
+               "archive", "delete", "migrate-rollouts", "migrate-nfs-db", "unarchive", "fork", "cloud",
+               "exec-server", "features", "help")  # codex --help, 0.166.0
+# A kept CODEX_HOME is kept for its rollouts. Codex 0.166.0 also copies its release into packages/
+# (417 MB) and clones the plugin marketplace into .tmp/ (96 MB) in every home; both are rebuilt when
+# needed, so cleanup removes them.
+DISPOSABLE_HOME_DIRS = ("packages", ".tmp")
+# Window budget at start (contract rule 4, launcher.start_warning): Codex's fixed overhead measured
+# 13,322 to 18,403 tokens (docs/research/M2-codex-step1-live.md, M2-codex-acceptance-150k.md) and
+# 15,694 on 0.166.0 (QA, 2026-11-05); the largest, rounded up.
+ASSUMED_OVERHEAD = 19_000
 
 
 class CodexLaunchError(RuntimeError):
@@ -281,6 +313,8 @@ class CodexLaunch:
             return
         if self.keep_home:
             (self.codex_home / "config.toml").unlink(missing_ok=True)
+            for name in DISPOSABLE_HOME_DIRS:
+                shutil.rmtree(self.codex_home / name, ignore_errors=True)
         else:
             shutil.rmtree(self.codex_home, ignore_errors=True)
         self.codex_home = None
@@ -331,9 +365,8 @@ def _mcp_server(session_id: str) -> tuple[str, list[str]]:
 
 def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: Path,
                    env: dict[str, str] | None = None) -> str:
-    parts = shlex.split(helper)
     mcp_command, mcp_args = _mcp_server(session_id)
-    if not parts:
+    if not helper.strip():
         raise CodexLaunchError("the key helper command is empty")
     lines = [
         f"model_provider = {_toml(PROVIDER_ID)}",
@@ -345,8 +378,8 @@ def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: 
         f"supports_websockets = {_toml(False)}",
         "",
         f"[model_providers.{PROVIDER_ID}.auth]",
-        f"command = {_toml(parts[0])}",
-        f"args = {_toml(parts[1:])}",
+        f"command = {_toml(KEY_HELPER_SHELL)}",
+        f"args = {_toml(['-c', helper])}",
         "",
         "[features]",
         f"enable_request_compression = {_toml(False)}",
@@ -402,25 +435,73 @@ def codex_upstream_with_source(auth_mode: str, explicit: str | None, env: dict[s
     if auth_mode == CHATGPT_MODE:
         return CHATGPT_UPSTREAM, "chatgpt-default"
     if claude_upstream:
-        return claude_upstream.rstrip("/") + "/v1", f"claude-{claude_source or 'upstream'}+/v1"
+        label = f"claude-{claude_source or 'upstream'}+/v1"
+        host = _anthropic_host(claude_upstream)
+        if host:
+            # Claude Code's own API (its default, or a base URL set to it) does not serve the Responses
+            # API: Codex's /responses would 404 there, after sending the user's key to the wrong vendor.
+            raise CodexLaunchError(
+                f"no upstream for Codex: Claude Code's upstream ({claude_source or 'upstream'}) is {host}, "
+                f"which does not serve Codex. With an OpenAI API key pass --codex-upstream "
+                f"https://api.openai.com/v1; with CLIProxyAPI pass its URL plus /v1 (or set {UPSTREAM_ENV}).")
+        return claude_upstream.rstrip("/") + "/v1", label
     raise CodexLaunchError(f"no upstream for Codex: pass --codex-upstream or set {UPSTREAM_ENV}")
+
+
+def _anthropic_host(url: str) -> str | None:
+    """The host name of ``url`` when it is Anthropic's (``anthropic.com`` or a subdomain, compared after
+    IDNA normalization as ``proxy.is_vendor_host`` does), else None."""
+    try:
+        host = urlsplit(url).hostname
+        host = host.encode("idna").decode("ascii").lower().rstrip(".") if host else ""
+    except (ValueError, UnicodeError):  # not a URL the proxy accepts either; it reports that
+        return None
+    return host if host == ANTHROPIC_DOMAIN or host.endswith("." + ANTHROPIC_DOMAIN) else None
+
+
+def daemon_args(codex_args: list[str], codex_version: str | None) -> list[str]:
+    """``[NO_DAEMON_FLAG]`` for an interactive launch on a Codex that takes it, else ``[]``: not for a
+    non-interactive subcommand, an unknown or older version, or when the user already chose a server
+    (``--no-daemon``, ``--remote``)."""
+    if _may_take_no_daemon(codex_args) and _version_tuple(codex_version) >= NO_DAEMON_SINCE:
+        return [NO_DAEMON_FLAG]
+    return []
+
+
+def _may_take_no_daemon(codex_args: list[str]) -> bool:
+    if any(a == NO_DAEMON_FLAG or a == "--remote" or a.startswith("--remote=") for a in codex_args):
+        return False
+    first = codex_args[0] if codex_args else None
+    return first not in SUBCOMMANDS or first in INTERACTIVE_SUBCOMMANDS
+
+
+def _version_tuple(version: str | None) -> tuple[int, ...]:
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", version or "")
+    return tuple(int(p) for p in match.groups()) if match else ()
 
 
 def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_mode: str = API_KEY_MODE,
                key_helper: str | None = None, upstream: str | None = None,
                codex_bin: str = "codex", env: dict[str, str] | None = None, cwd: Path | None = None,
                home: Path | None = None, claude_upstream: str | None = None,
-               codex_home_dir: Path | None = None, contexto_home: Path | None = None) -> CodexLaunch:
+               codex_home_dir: Path | None = None, contexto_home: Path | None = None,
+               codex_version: str | None = None) -> CodexLaunch:
     """Plan a ``codex`` launch behind the proxy at ``proxy_url`` (no ``/v1``: the upstream carries the
     version path). The caller starts the proxy with ``launch.upstream``, runs ``launch.argv`` with
-    ``launch.env``, and calls ``launch.cleanup()`` on exit. Nothing here reads or writes a credential."""
+    ``launch.env``, and calls ``launch.cleanup()`` on exit. ``codex_version`` (the installed Codex's,
+    when read) decides ``--no-daemon`` (``daemon_args``). Nothing here reads or writes a credential."""
     base_env = dict(os.environ if env is None else env)
     contexto_home = Path(contexto_home) if contexto_home is not None else paths.contexto_home(base_env)
     cwd = cwd or Path.cwd()
     home = home or Path.home()
     target = resolve_codex_upstream(auth_mode, upstream, base_env, claude_upstream)
+    flags = daemon_args(codex_args, codex_version)
     if auth_mode == CHATGPT_MODE:
-        argv = [codex_bin, *chatgpt_overrides(proxy_url, session_id, contexto_home, base_env), *codex_args]
+        # --no-daemon here too, so the TUI does not attach to a server already running for the user's
+        # own CODEX_HOME, started without the proxy's -c overrides (whether it would honor them is not
+        # measured).
+        argv = [codex_bin, *flags, *chatgpt_overrides(proxy_url, session_id, contexto_home, base_env),
+                *codex_args]
         return CodexLaunch(argv=argv, env=base_env, upstream=target, notes=[CHATGPT_MODE_HELP])
     helper = key_helper or base_env.get(KEY_HELPER_ENV) or claude_api_key_helper(cwd, home, base_env)
     if not helper:
@@ -449,7 +530,7 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
         else:
             shutil.rmtree(codex_home, ignore_errors=True)
         raise
-    return CodexLaunch(argv=[codex_bin, *codex_args], env={**base_env, "CODEX_HOME": str(codex_home)},
+    return CodexLaunch(argv=[codex_bin, *flags, *codex_args], env={**base_env, "CODEX_HOME": str(codex_home)},
                        upstream=target, codex_home=codex_home, keep_home=keep)
 
 
@@ -460,63 +541,107 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
 def add_arguments(parser) -> None:
     group = parser.add_argument_group("codex")
     group.add_argument("--codex-auth", choices=[API_KEY_MODE, CHATGPT_MODE], default=API_KEY_MODE,
-                       help=f"how Codex authenticates (default {API_KEY_MODE}: a temporary CODEX_HOME whose provider "
-                            f"runs the key helper). {CHATGPT_MODE}: {CHATGPT_MODE_HELP}")
+                       help=f"how Codex authenticates (default {API_KEY_MODE}: a private CODEX_HOME in the session "
+                            f"directory whose provider runs the key helper). {CHATGPT_MODE}: {CHATGPT_MODE_HELP}")
     group.add_argument("--codex-key-helper", default=None,
-                       help=f"command that prints the API key (default ${KEY_HELPER_ENV}, "
-                            "else Claude Code's apiKeyHelper)")
+                       help=f"command that prints the API key, run with {KEY_HELPER_SHELL} -c as Claude Code runs "
+                            f"apiKeyHelper (default ${KEY_HELPER_ENV}, else Claude Code's apiKeyHelper)")
     group.add_argument("--codex-upstream", default=None,
-                       help=f"upstream for Codex requests, with its version path (default ${UPSTREAM_ENV}, else "
-                            "the ChatGPT backend in chatgpt mode, else Claude Code's upstream plus /v1)")
+                       help=f"upstream for Codex requests, with its version path, such as https://api.openai.com/v1 "
+                            f"(default ${UPSTREAM_ENV}, else the ChatGPT backend in chatgpt mode, else Claude Code's "
+                            "upstream plus /v1 unless that is Anthropic's API)")
 
 
 def run_codex(args, *, launcher=None, stderr=None) -> int:
-    """Run ``codex`` behind a Contexto proxy; returns the exit code (codex's, or a launcher error)."""
+    """Run ``codex`` behind a Contexto proxy; returns the exit code (codex's, or a launcher error).
+    What can refuse the launch up front (the options, a missing ``codex``, the upstream) is checked
+    before the session and the proxy exist; a launch that fails after that, before Codex starts,
+    removes the session directory it created, so a failed launch leaves no empty session (D54)."""
     import uuid
 
+    from contexto import cliversions
     from contexto import upstream as upstream_module
 
     if launcher is None:
         from contexto import launcher  # builder-1's module; imported lazily
     stderr = stderr or sys.stderr
+    codex_args = list(args.cli_args)
+    created: Path | None = None  # the session directory this launch made
     try:
         options = launcher.options_from_args(args)
         launcher.check_options(options)
+        codex = shutil.which(CODEX_BIN)
+        if codex is None:
+            raise launcher.LaunchError(f"'{CODEX_BIN}' not found on PATH", launcher.EXIT_NOT_FOUND)
         claude = upstream_module.resolve_upstream(args.upstream)
         target, source = codex_upstream_with_source(args.codex_auth, args.codex_upstream, dict(os.environ),
                                                     claude.url, claude.source)
+        version = None
+        if _may_take_no_daemon(codex_args):  # only the --no-daemon decision needs it
+            try:
+                version = cliversions.installed_version(codex)[0]
+            except KeyboardInterrupt:  # its process group was killed first
+                print("contexto: interrupted", file=stderr, flush=True)
+                return launcher.EXIT_INTERRUPTED
+            except Exception:  # unreadable: no flag, as for an unknown version
+                version = None
+        home = paths.contexto_home()
         session_id = args.session or uuid.uuid4().hex
         try:
-            store = launcher.open_session(paths.contexto_home(), session_id, Path.cwd())
+            existed = os.path.lexists(paths.session_dir(home, session_id))
+            store = launcher.open_session(home, session_id, Path.cwd())
         except (OSError, ValueError) as exc:  # as `contexto run claude` reports it
             raise launcher.LaunchError(f"cannot open session {session_id!r}: {exc}", 2) from exc
-        proxy, engine_name = launcher.start_proxy(store, target, source, launcher.engine_config(options),
-                                                  args.observe_thinking, stderr=stderr)
-    except CodexLaunchError as exc:
+        created = None if existed else paths.session_dir(home, session_id)
+        config = launcher.engine_config(options)
+        proxy, engine_name = launcher.start_proxy(store, target, source, config, args.observe_thinking,
+                                                  stderr=stderr)
+    except (CodexLaunchError, launcher.LaunchError) as exc:
         print(f"contexto: {exc}", file=stderr)
-        return 2
-    except launcher.LaunchError as exc:
-        print(f"contexto: {exc}", file=stderr)
-        return exc.code
+        _remove_session(created)
+        return getattr(exc, "code", 2)
     plan = None
+    started = False
+    code = launcher.EXIT_PROXY
     try:
-        plan = plan_codex(list(args.cli_args), proxy.url, session_id, auth_mode=args.codex_auth,
-                          key_helper=args.codex_key_helper, upstream=target,
-                          codex_home_dir=paths.session_dir(paths.contexto_home(), session_id) / "codex-home",
-                          contexto_home=paths.contexto_home())
+        plan = plan_codex(codex_args, proxy.url, session_id, auth_mode=args.codex_auth,
+                          key_helper=args.codex_key_helper, upstream=target, codex_bin=codex,
+                          codex_home_dir=paths.session_dir(home, session_id) / "codex-home",
+                          contexto_home=home, codex_version=version)
         for note in plan.notes:
             print(f"contexto: {note}", file=stderr)
-        print(f"contexto: session {session_id}, engine {engine_name}, codex auth {args.codex_auth}, "
-              f"upstream {source}", file=stderr)
-        if not launcher.check_cli_version("codex", plan.argv[0], store,
+        store.log({"event": "launch", "cli": "codex", "session": session_id, "config": config,
+                   "engine": engine_name, "upstream_source": source, "codex_auth": args.codex_auth,
+                   "observe_thinking": args.observe_thinking, "user_arg_count": len(codex_args),
+                   "affinity_header": getattr(proxy, "affinity_header", None) is not None,
+                   "no_daemon": bool(daemon_args(codex_args, version))})
+        print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {source}, codex auth "
+              f"{args.codex_auth}, engine {engine_name})", file=stderr, flush=True)
+        if not launcher.check_cli_version("codex", codex, store,
                                           enabled=not getattr(args, "no_version_check", False), stderr=stderr):
-            return launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started
-        return launcher.run_child(plan.argv, plan.env, stderr=stderr)
+            code = launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started
+            return code
+        warning = launcher.start_warning(options.bound, options.headroom_floor, ASSUMED_OVERHEAD)
+        if warning:
+            print(f"contexto: {warning}", file=stderr, flush=True)
+            store.log({"event": "window_budget_warning", "bound": options.bound, "assumed_overhead": ASSUMED_OVERHEAD})
+        started = True
+        code = launcher.run_child(plan.argv, plan.env, stderr=stderr)
+        return code
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)
-        return 2
+        code = 2
+        return code
     finally:
         if plan is not None:
             plan.cleanup()
         proxy.stop()
         launcher.report_missing_tools(proxy)  # Codex reports no MCP server that fails to start
+        store.log({"event": "exit", "code": code})
+        if not started:
+            _remove_session(created)
+
+
+def _remove_session(created: Path | None) -> None:
+    if created is not None:
+        shutil.rmtree(created, ignore_errors=True)

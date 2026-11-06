@@ -647,7 +647,7 @@ def test_proxy_and_mcp_report_an_unopenable_session_without_a_traceback(home, tm
     assert err.startswith("contexto mcp: cannot start: ") and "symlink to a missing target" in err
 
 
-def test_codex_reports_an_unopenable_session(home, tmp_path):
+def test_codex_reports_an_unopenable_session(home, tmp_path, monkeypatch):
     import argparse
     import io
 
@@ -655,6 +655,11 @@ def test_codex_reports_an_unopenable_session(home, tmp_path):
     from contexto.codex import add_arguments, run_codex
 
     dangling(home, tmp_path)
+    bindir = tmp_path / "codex-bin"  # run codex checks that codex is on PATH first (D54); CI has none
+    bindir.mkdir()
+    (bindir / "codex").write_text("#!/bin/sh\nexit 0\n")
+    (bindir / "codex").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
     parser = argparse.ArgumentParser()
     for name, kw in (("--bound", {"type": int, "default": 150_000}), ("--allow-large-bound", {"action": "store_true"}),
                      ("--window-fraction", {"type": float, "default": None}),
