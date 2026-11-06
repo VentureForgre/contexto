@@ -14,11 +14,19 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 
 import pytest
 
 from contexto import mcp
-from contexto.rewrite import ANTHROPIC, CLAUDE_CODE_COMPACTION_SUMMARY, MESSAGES, RewriteEngine, keyed
+from contexto.rewrite import (
+    ANTHROPIC,
+    CLAUDE_CODE_COMPACTION_SUMMARY,
+    MESSAGES,
+    RewriteEngine,
+    compaction_summary,
+    keyed,
+)
 from contexto.store.memory import MemoryStore
 from test_codex import CONFIG as CODEX_CONFIG
 from test_codex import history as codex_history
@@ -382,9 +390,10 @@ SUMMARY = (CLAUDE_CODE_COMPACTION_SUMMARY
 
 
 def compacted(prompt: str, manual: bool = True, kept: str = "synthetic last reply") -> list[dict]:
-    """The compacted conversation as Claude Code 2.1.314 and 2.1.318 sent it: the summary (a plain
-    string), a role system message, the last message from before compaction kept verbatim, then the
-    new prompt, which after /compact also holds the command's blocks."""
+    """A compacted conversation in the form D50 recorded (2.1.314 and 2.1.318 with the attribution reminder
+    off): the summary (a plain string), a role system message, the last message from before compaction
+    kept verbatim, then the new prompt, which after /compact also holds the command's blocks. The forms
+    the CLI sends by default are in the capture fixture below (D59)."""
     if manual:
         command = [{"type": "text", "text": "<local-command-caveat>synthetic caveat</local-command-caveat>\n"},
                    {"type": "text", "text": "<command-name>/compact</command-name>\n"},
@@ -605,3 +614,72 @@ def test_only_main_s_own_compaction_takes_over_inside_a_tool_loop():
     assert send(engine, subagent, OLD, agent=True)[-1]["main"] is False
     assert send(engine, main_request(compacted_loop(), NEW), NEW)[-1]["main"] is False  # another session
     assert send(engine, main_request(compacted_loop(), OLD), OLD, entrypoint="sdk-cli")[-1]["main"] is False
+
+
+def test_a_late_request_of_an_older_compaction_does_not_retake_main():
+    """Reviewer A, PR #246: the mid-loop handover held for any compaction of main's session, so a late
+    request of an older one took main back and pointed a later /resume at it."""
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    first = [{"role": "user", "content": SUMMARY}, assistant("ok"), user("prompt one " + FILL)]
+    send(engine, main_request(first, OLD), OLD, input_tokens=900, tool_calls=False)
+    second = [{"role": "user", "content": SUMMARY + " second compaction"}, assistant("ok"), user("prompt two")]
+    assert changes(send(engine, main_request(second, OLD), OLD, tool_calls=False)) == ["compacted"]
+    late = main_request([*first, tool_use(3), tool_result(3, "x")], OLD)
+    events = send(engine, late, OLD, tool_calls=False)
+    assert events[-1]["main"] is False and changes(events) == []
+
+
+# Claude Code's real compaction requests (review of #246, D59) ------------------------------------------
+# Captured from 2.1.314 and 2.1.318 against a loopback stub (tests/fixtures/make_compaction_shapes.py):
+# headless /compact, headless auto-compaction and interactive /compact with the default attribution
+# reminder on, and with it off headless /compact (2.1.318) and auto-compaction (2.1.314).
+
+SHAPES = json.loads((Path(__file__).parent / "fixtures" / "compaction_shapes_2_1_31x.json").read_text())
+SESSION_IDS = {1: OLD, 2: NEW}
+
+
+def replay(captured: list[dict]) -> list[tuple[bool, list[str], bool]]:
+    """Each captured request through one engine, in order: (main, main_changed reasons, compacted shape).
+    The response usage is what the stub reported; only the auto-compaction's first response held a call."""
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32))
+    out = []
+    for captured_request in captured:
+        req = {"model": "claude-sonnet-5-5", "max_tokens": 32_000, "messages": captured_request["messages"],
+               "metadata": metadata(SESSION_IDS[captured_request["session"]])}
+        if captured_request["tools"]:
+            req["tools"] = SUBAGENT_TOOLS
+        session = SESSION_IDS[captured_request["session"]]
+        found = {"User-Agent": captured_request["user_agent"], "X-Claude-Code-Session-Id": session}
+        _, _, events = engine(req, found, MESSAGES)
+        engine.observe_usage(MESSAGES, {"input_tokens": 1_200}, req, tool_calls=False)
+        out.append((events[-1]["main"], changes(events), compaction_summary(req["messages"])))
+    return out
+
+
+@pytest.mark.parametrize("version, scenario", [(v, s) for v in sorted(SHAPES) for s in sorted(SHAPES[v])])
+def test_claude_codes_real_compaction_hands_main_over(version, scenario):
+    """On 2.1.314 and 2.1.318 the compacted conversation's first user message starts with Claude Code's
+    attribution <system-reminder> block, then the summary block: D50's plain-string test never matched
+    it, so the compacted conversation stayed a side conversation (reviewer B, PR #246)."""
+    captured = SHAPES[version][scenario]
+    rows = replay(captured)
+    assert [row[2] for row in rows] == [False] * (len(rows) - 1) + [True], rows  # only the last is compacted
+    assert rows[-1][:2] == (True, ["compacted"]), rows
+    # Before it, main's own requests (the prompt and the summary request) were main; the interactive
+    # CLI's title requests carry no tool list and are side.
+    assert all(row[0] for row, req in zip(rows[:-1], captured) if req["tools"]), rows
+
+
+@pytest.mark.parametrize("content, matches", [
+    (CLAUDE_CODE_COMPACTION_SUMMARY + "\nSummary:\nx", True),  # attribution off, auto-compaction
+    ([{"type": "text", "text": CLAUDE_CODE_COMPACTION_SUMMARY + "\nSummary:\nx"}], True),  # off, /compact
+    ([ctx_block("attribution"), ctx_block(), {"type": "text", "text": CLAUDE_CODE_COMPACTION_SUMMARY + "\nx"}], True),
+    ([ctx_block(), {"type": "text", "text": CLAUDE_CODE_COMPACTION_SUMMARY + "typed by the user"}], False),
+    (CLAUDE_CODE_COMPACTION_SUMMARY + "typed by the user", False),  # a prompt that quotes the sentence
+    ([{"type": "text", "text": "a prompt"}, {"type": "text", "text": CLAUDE_CODE_COMPACTION_SUMMARY + "\nx"}], False),
+    ([{"type": "image", "source": {}}, {"type": "text", "text": CLAUDE_CODE_COMPACTION_SUMMARY + "\nx"}], False),
+    ([ctx_block()], False), ([], False), (None, False),
+])
+def test_the_compaction_summary_is_found_after_leading_reminder_blocks(content, matches):
+    assert compaction_summary([{"role": "user", "content": content}, settings_only()]) is matches
+    assert compaction_summary([{"role": "assistant", "content": content}]) is False
