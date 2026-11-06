@@ -8,6 +8,7 @@ the CLI render a page identically. ``recall_chunk`` is the offset and limit rule
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from contexto.store.search import Query, matching_lines
@@ -35,7 +36,72 @@ def recall_limit(window_tokens: int | None, bytes_per_token: float | None) -> tu
     return limit, f"chunks are {limit:,} characters, about a quarter of this session's window budget"
 
 
-def render_page(page: dict[str, Any]) -> str:
+# Contexto's own MCP tools as the CLIs name them (D51): Claude Code, and Codex calling one directly, prefix
+# the server's name; Codex's code mode calls them from the JavaScript of its exec tool, as
+# tools["mcp__contexto__contexto_search"](...) or tools.mcp__contexto__contexto_search(...).
+OWN_TOOL_PREFIX = "mcp__contexto__"
+CODE_MODE_TOOL = "exec"
+_CODE_MODE_CALL = re.compile(r"""\btools\s*(?:\[\s*["'`]([^"'`]+)["'`]\s*\]|\.([A-Za-z_$][\w$]*))""")
+_CALL_TYPES = ("function_call", "custom_tool_call")
+_OUTPUT_TYPES = ("function_call_output", "custom_tool_call_output")
+
+
+def _own_call(name: Any, arguments: Any) -> bool:
+    """A call of one of Contexto's own tools. An exec call counts when every tool its code calls is one
+    (it calls at least one); one that also runs another tool is that tool's output too, so it stays."""
+    if isinstance(name, str) and name.startswith(OWN_TOOL_PREFIX):
+        return True
+    if name != CODE_MODE_TOOL or not isinstance(arguments, str):
+        return False
+    called = [a or b for a, b in _CODE_MODE_CALL.findall(arguments)]
+    return bool(called) and all(tool.startswith(OWN_TOOL_PREFIX) for tool in called)
+
+
+def own_call_ids(messages: Any) -> set[str]:
+    """The ids of a turn's calls of Contexto's own tools: ``tool_use`` ids (Messages API) and ``call_id``
+    of calls (Responses API). Their inputs and results are kept verbatim in the page, for recall, but
+    search, the stub, and the index do not read them: a search result is a copy of older pages, and as
+    the newest page holding it, it outranked the pages it quoted (D51)."""
+    ids: set[str] = set()
+    for message in messages if isinstance(messages, list) else []:
+        if not isinstance(message, dict):
+            continue
+        if is_responses_item(message):
+            call_id = message.get("call_id")
+            kind = message.get("type")
+            if kind in _CALL_TYPES and isinstance(call_id, str) and _own_call(
+                    message.get("name"), message.get("arguments" if kind == "function_call" else "input")):
+                ids.add(call_id)
+            continue
+        content = message.get("content") if message.get("role") == "assistant" else None
+        for block in content if isinstance(content, list) else []:
+            if (isinstance(block, dict) and block.get("type") == "tool_use" and isinstance(block.get("id"), str)
+                    and _own_call(block.get("name"), block.get("input"))):
+                ids.add(block["id"])
+    return ids
+
+
+def is_own_item(item: Any, own: set[str]) -> bool:
+    """A Responses item that is one of ``own``'s calls or its output."""
+    call_id = item.get("call_id") if isinstance(item, dict) else None
+    return (bool(own) and isinstance(call_id, str) and call_id in own
+            and item.get("type") in (*_CALL_TYPES, *_OUTPUT_TYPES))
+
+
+def is_own_block(block: Any, own: set[str]) -> bool:
+    """A Messages API ``tool_use`` or ``tool_result`` block of one of ``own``'s calls."""
+    if not own or not isinstance(block, dict):
+        return False
+    key = block.get("id") if block.get("type") == "tool_use" else (
+        block.get("tool_use_id") if block.get("type") == "tool_result" else None)
+    return isinstance(key, str) and key in own
+
+
+def _blank(lines: list[str]) -> list[str]:
+    return [re.sub(r"[^\n]", " ", line) for line in lines]
+
+
+def render_page(page: dict[str, Any], searchable: bool = False) -> str:
     """Render a page's messages as plain text, thinking omitted. Deterministic for a given page.
 
     Any value inside ``messages`` may be damaged in a page file a person edited: a message, content,
@@ -44,16 +110,22 @@ def render_page(page: dict[str, Any]) -> str:
     partly damaged output does not read as complete.
 
     A page from a Codex session holds Responses API items (M2 B20); each is rendered by
-    ``_responses_lines``, the same way the engine's retained-window snapshot renders it (A14)."""
+    ``_responses_lines``, the same way the engine's retained-window snapshot renders it (A14).
+
+    With ``searchable``, the lines of Contexto's own tool calls and results (``own_call_ids``) are
+    blanked to spaces, so search matches no line in them while every offset stays the offset of the
+    same line in the verbatim text that recall reads (D51)."""
     lines: list[str] = []
     turn = page.get("turn")
     messages = page.get("messages")
+    own = own_call_ids(messages) if searchable else set()
     for message in messages if isinstance(messages, list) else []:
         if not isinstance(message, dict):
             lines.append("[malformed message omitted]")
             continue
         if is_responses_item(message):
-            lines.extend(_responses_lines(turn, message))
+            item_lines = _responses_lines(turn, message)
+            lines.extend(_blank(item_lines) if is_own_item(message, own) else item_lines)
             continue
         role = message.get("role", "unknown")
         lines.append(f"[turn {turn}] {role}:")
@@ -69,6 +141,7 @@ def render_page(page: dict[str, Any]) -> str:
                 lines.append("[malformed block omitted]")
                 continue
             kind = block.get("type")
+            mark = len(lines)
             if kind == "text":
                 lines.append(_text(block))
             elif kind in ("thinking", "redacted_thinking"):
@@ -97,6 +170,8 @@ def render_page(page: dict[str, Any]) -> str:
                     lines.append("[malformed content omitted]")
             else:
                 lines.append(f"[{kind} omitted]")
+            if is_own_block(block, own):
+                lines[mark:] = _blank(lines[mark:])
     return "\n".join(lines)
 
 

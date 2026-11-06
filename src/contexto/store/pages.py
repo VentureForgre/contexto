@@ -14,7 +14,7 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes
 from contexto.store.recall import DEFAULT_LINES, salient_identifiers
-from contexto.store.render import as_message, is_responses_item
+from contexto.store.render import as_message, is_own_block, is_own_item, is_responses_item, own_call_ids
 from contexto.store.search import Query, SearchEntry, rank, search_text, searchable
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
@@ -72,14 +72,19 @@ def _view(turn: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _texts(turn: list[dict[str, Any]]):
-    """Every human-readable string in a turn: text, tool inputs, and tool results (both dialects)."""
-    for message in _view(turn):
+    """Every human-readable string in a turn: text, tool inputs, and tool results (both dialects), except
+    the inputs and results of Contexto's own tools (``own_call_ids``, D51)."""
+    own = own_call_ids(turn)
+    for item in turn:
+        message = as_message(item)
+        if not isinstance(message, dict) or is_own_item(item, own):
+            continue
         content = message.get("content")
         if isinstance(content, str):
             yield content
             continue
         for block in content if isinstance(content, list) else []:
-            if not isinstance(block, dict):
+            if not isinstance(block, dict) or is_own_block(block, own):
                 continue
             kind = block.get("type")
             if kind == "text":

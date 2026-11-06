@@ -696,12 +696,13 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     matched in its JSON-escaped form too, as ``render_page`` prints it (B18).
     """
     rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
-    text = render_page(page) if page.get("messages") is not None else ""
+    # Contexto's own calls are blanked at their offsets, so no line of an earlier reply is shown (D51).
+    text = render_page(page, searchable=True) if page.get("messages") is not None else ""
     q = Query.parse(query)
     on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only
     shown, total = match_lines(text, q, last=True) if on_page else ([], 0)  # the LAST matching lines (B21)
-    rows += [(f"{'>' if is_match else ' '} {start}: {text}", (page_id, start, end))
-             for start, end, is_match, text in shown]
+    rows += [(f"{'>' if is_match else ' '} {start}: {line}", (page_id, start, end))
+             for start, end, is_match, line in shown if is_match or not _blanked(text, start, end)]
     if not shown:  # the match is in the stub only: show the stub line as the matching line
         rows.append((f"> stub: {_stub_line(page.get('stub'))}", None))
     elif total > MATCHES_PER_PAGE:  # earlier statements stay reachable from the first match's offset
@@ -711,10 +712,15 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     return rows
 
 
+def _blanked(text: str, start: int, end: int) -> bool:
+    """A context line of a blanked call (``render_page(..., searchable=True)``): spaces only, not empty."""
+    return end > start and not text[start:end].strip()
+
+
 def _more_row(page_id: str, page: dict[str, Any], query: str) -> Row:
     """A further matching page, compactly: page id, turn, and where its first and last matching lines
     start (``@first..last``, one offset when they coincide; B21, contract PR #134)."""
-    text = render_page(page) if page.get("messages") is not None else ""
+    text = render_page(page, searchable=True) if page.get("messages") is not None else ""
     q = Query.parse(query)
     starts = matching_line_starts(text, q) if q is not None and text_matches(text, q) else []
     if not starts:

@@ -137,7 +137,7 @@ from contexto.canonical import canonical_bytes, canonical_json
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
-from contexto.store.render import render_page
+from contexto.store.render import is_own_block, is_own_item, own_call_ids, render_page
 from contexto.tokens import TokenEstimator
 from contexto.toolcheck import ToolCheck
 
@@ -1617,17 +1617,21 @@ def retained_entries(messages: list[dict], k: int, dialect: Dialect) -> list[dic
     that message (the newest equals ``turn_id``); ``message_index`` is the position in the CLI's full
     history; ``text`` is the block rendered by ``render_page``, the renderer recall uses, so a line
     found in view reads like the same line in a page. Carried system messages and injected context
-    blocks are not turn text and are left out; thinking and images are never included. The entries
+    blocks are not turn text and are left out; thinking and images are never included, nor the calls
+    and results of Contexto's own tools, which search does not read in a page either (D51). The entries
     hold conversation text: they go to the store only, never to a log or an event."""
     turn = bisect.bisect_left(_turn_starts(messages, dialect), k)  # turn starts in M[:k]
+    own = own_call_ids(messages[k:])
     entries = []
     for i in range(k, len(messages)):
         item = messages[i]
         if dialect.is_turn_start(item):
             turn += 1
-        if dialect.is_system_like(item):
+        if dialect.is_system_like(item) or is_own_item(item, own):
             continue
         for role, block in dialect.retained_blocks(item):
+            if is_own_block(block, own):
+                continue
             # The store's roles (lane B PR #128): a tool result is its own role, whoever carried it.
             role = "tool_result" if block.get("type") == "tool_result" else role
             if role not in RETAINED_ROLES:
