@@ -12,6 +12,7 @@ import errno
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -386,7 +387,12 @@ def test_a_meta_lock_that_is_not_a_file_is_reported_as_damage_naming_it(home, ca
         assert result["isError"] is True, result
         assert text_of(result).startswith(f"{name} failed: this session's meta.lock is damaged (it is ")
         assert "Try once more" not in text_of(result) and "will not help" in text_of(result)
+        assert "recall, search and state, which charge the recall room, are refused (pins and closes still work)" \
+            in text_of(result)
     assert tool(server, "contexto_pin", {"kind": "decision", "text": "x"})["isError"] is False  # no meta write
+    pinned = text_of(tool(server, "contexto_pin", {"kind": "obligation", "text": "ship the fix"}))
+    obligation = re.search(r"rec_[0-9a-f]{24}", pinned).group(0)
+    assert tool(server, "contexto_close", {"obligation_id": obligation, "note": "done"})["isError"] is False
     assert [e.get("file") for e in events(store, "mcp_call") if not e["ok"]] == ["meta.lock", "meta.lock"]
     with pytest.raises(launcher.LaunchError, match=r"meta\.lock is damaged \(it is .*delete it"):
         launcher.pick_session(launcher.LaunchOptions(claude_args=[], session_id="s1"), home, home, io.StringIO())
@@ -399,8 +405,22 @@ def test_a_live_lock_that_is_not_a_file_is_reported_as_damage_naming_it(home, ca
     pid = planted(home, "live.lock", kind)
     with pytest.raises(OSError, match=r"live\.lock is damaged \(it is .*delete it, and Contexto makes a new one"):
         finishes(lambda: SessionStore(home, "s1"))
-    assert finishes(lambda: cli.main(["mcp", "--session", "s1"])) == 1
-    assert "live.lock is damaged" in capsys.readouterr().err
+    # Review of #246: the MCP server failed to start, so the CLI showed a dead server; it now starts and
+    # every tool call says which file is damaged.
+    requested = (("contexto_state", {}), ("contexto_pin", {"kind": "decision", "text": "x"}))
+    lines = [json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": name, "arguments": a}})
+             for i, (name, a) in enumerate(requested)]
+    lines.insert(0, json.dumps({"jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": {}}))
+    proc = subprocess.run([sys.executable, "-m", "contexto", "mcp", "--session", "s1"], input="\n".join(lines) + "\n",
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0 and "live.lock is damaged" in proc.stderr and "Traceback" not in proc.stderr
+    listed, *calls = [json.loads(line) for line in proc.stdout.splitlines()]
+    assert len(listed["result"]["tools"]) >= 5
+    for reply, name in zip(calls, ("contexto_state", "contexto_pin"), strict=True):
+        text = reply["result"]["content"][0]["text"]
+        assert reply["result"]["isError"] is True and text.startswith(f"{name} failed: this session's live.lock is "
+                                                                       "damaged (it is ")
+        assert "every tool is refused" in text and "will not help" in text
     for argv in (["state", "--session", "s1"], ["recall", pid, "--session", "s1"], ["sessions", "show", "s1"],
                  ["sessions", "list"]):
         finishes(lambda argv=argv: cli.main(argv))
