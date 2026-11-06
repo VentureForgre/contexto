@@ -136,7 +136,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, ClassVar, NamedTuple, Protocol
 
-from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
+from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
@@ -1975,7 +1975,7 @@ def agent_runs(messages: list[dict]) -> tuple[dict[str, list[str | None]], dict[
 
 
 def preamble_sha256(config: Config, pinned_text: str, index_text: str) -> str:
-    return hashlib.sha256(compose_preamble(config, pinned_text, index_text).encode("utf-8")).hexdigest()
+    return hashlib.sha256(utf8(compose_preamble(config, pinned_text, index_text))).hexdigest()
 
 
 def epoch_record(state: EpochState, request: dict, messages: list[dict], key: str, dialect: Dialect,

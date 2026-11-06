@@ -59,8 +59,8 @@ def test_in_view_lines_come_first_newest_first_and_labelled(store):
     snapshot(store, [entry(16, 0, "intro\nthe cohort=b now\nmore"), entry(17, 2, "cohort=c latest", "tool_result")])
     body, coverage = search(store, "cohort=")
     lines = body.split("\n")
-    assert lines[:3] == ["[in view, newest first:]", "> in view (turn 17): cohort=c latest",
-                         "> in view (turn 16): the cohort=b now"]  # the matching line only, no context, no offset
+    assert lines[:3] == ["[in view, newest first:]", "> in view (turn 16): cohort=c latest",
+                         "> in view (turn 15): the cohort=b now"]  # the matching line only, no context, no offset
     assert lines[3] == mcp.SEARCH_BEST_HEADER and lines[4].startswith("pg_")  # then the paged hits
     assert coverage == mcp.SEARCH_COVERAGE  # in view was checked
     event = last_event(store)
@@ -70,7 +70,7 @@ def test_in_view_lines_come_first_newest_first_and_labelled(store):
 def test_in_view_lines_are_charged_with_the_reply(store):
     snapshot(store, [entry(16, 0, "cfg cache.ttl=short")])
     body, _ = search(store, "cache.ttl")
-    assert body == "[in view, newest first:]\n> in view (turn 16): cfg cache.ttl=short"  # in view only: no paged hit
+    assert body == "[in view, newest first:]\n> in view (turn 15): cfg cache.ttl=short"  # in view only: no paged hit
     assert store.turn_room()[2] == math.ceil(len(body) / RATIO)
 
 
@@ -125,15 +125,15 @@ def test_more_in_view_matches_than_shown_are_counted(store):
     snapshot(store, [entry(10 + i, 0, f"NEEDLE {i}") for i in range(5)])
     body, _ = search(store, "NEEDLE")
     lines = body.split("\n")
-    assert lines[1:4] == ["> in view (turn 14): NEEDLE 4", "> in view (turn 13): NEEDLE 3",
-                          "> in view (turn 12): NEEDLE 2"]
+    assert lines[1:4] == ["> in view (turn 13): NEEDLE 4", "> in view (turn 12): NEEDLE 3",
+                          "> in view (turn 11): NEEDLE 2"]
     assert lines[4] == "  [2 more matching lines in view]" and mcp.IN_VIEW_LIMIT == 3
 
 
 def test_a_tool_input_in_view_matches_through_its_escaped_form(store):
     snapshot(store, [entry(16, 1, 'tool_use run {"note": "say \\"hi\\" twice"}', "assistant")])
     body, _ = search(store, 'say "hi" twice')
-    assert body.split("\n")[1].startswith("> in view (turn 16): tool_use run")
+    assert body.split("\n")[1].startswith("> in view (turn 15): tool_use run")
 
 
 
@@ -145,8 +145,8 @@ def test_the_newest_in_view_matches_win_within_one_message(store):
     snapshot(store, [entry(16, 0, text)])
     body, _ = search(store, "deploy.target")
     lines = body.split("\n")
-    assert lines[1:4] == ["> in view (turn 16): deploy.target=v6", "> in view (turn 16): deploy.target=v5",
-                          "> in view (turn 16): deploy.target=v4"]
+    assert lines[1:4] == ["> in view (turn 15): deploy.target=v6", "> in view (turn 15): deploy.target=v5",
+                          "> in view (turn 15): deploy.target=v4"]
     assert lines[4] == "  [3 more matching lines in view]"
     event = last_event(store)
     assert event["in_view_hits"] == 3 and event["in_view_more"] == 3  # shown hits only; the rest counted apart
@@ -158,8 +158,8 @@ def test_the_newest_in_view_matches_win_across_messages(store):
     snapshot(store, [entry(16, 0, "deploy.target=a1\ndeploy.target=a2\ndeploy.target=a3\ndeploy.target=a4"),
                      entry(17, 1, "deploy.target=b1\ndeploy.target=b2", "tool_result")])
     body, _ = search(store, "deploy.target")
-    assert body.split("\n")[1:5] == ["> in view (turn 17): deploy.target=b2", "> in view (turn 17): deploy.target=b1",
-                                      "> in view (turn 16): deploy.target=a4", "  [3 more matching lines in view]"]
+    assert body.split("\n")[1:5] == ["> in view (turn 16): deploy.target=b2", "> in view (turn 16): deploy.target=b1",
+                                      "> in view (turn 15): deploy.target=a4", "  [3 more matching lines in view]"]
     assert last_event(store)["in_view_hits"] == 3
 
 
@@ -174,9 +174,9 @@ def test_the_current_question_is_not_returned_in_view_but_earlier_turns_and_tool
                      entry(17, 0, "the user said deploy.target=red")], question=None)
     body, _ = search(store, "deploy.target")
     lines = body.split("\n")
-    assert lines[1:4] == ["> in view (turn 18): tool_result deploy.target=green",
-                          "> in view (turn 17): the user said deploy.target=red",
-                          "> in view (turn 16): earlier: deploy.target=blue"]
+    assert lines[1:4] == ["> in view (turn 17): tool_result deploy.target=green",
+                          "> in view (turn 16): the user said deploy.target=red",
+                          "> in view (turn 15): earlier: deploy.target=blue"]
     assert "What is deploy.target now?" not in body
     assert last_event(store)["in_view_hits"] == 3
 

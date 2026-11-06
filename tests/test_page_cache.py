@@ -3,11 +3,10 @@
 import errno
 import json
 import os
-from pathlib import Path
 
 import pytest
 
-from contexto.store import PageConflictError, SessionStore
+from contexto.store import PageConflictError, SessionStore, catalog
 from contexto.store.pages import render_index
 
 FILLER = "\n".join(f"step {i}: ran the build and checked the output, nothing unusual" for i in range(40))
@@ -19,18 +18,18 @@ def page(text, prompt="continue"):
 
 
 class Reads:
-    """Counts reads of page files."""
+    """Counts reads of page files (the catalog reads them with ``read_regular_text``, D58)."""
 
     def __init__(self, monkeypatch):
         self.paths: list[str] = []
-        original = Path.read_text
+        original = catalog.read_regular_text
 
-        def read_text(path, *args, **kwargs):
+        def read_text(path):
             if path.name.startswith("pg_"):
                 self.paths.append(path.name)
-            return original(path, *args, **kwargs)
+            return original(path)
 
-        monkeypatch.setattr(Path, "read_text", read_text)
+        monkeypatch.setattr(catalog, "read_regular_text", read_text)
 
     def take(self):
         out, self.paths[:] = list(self.paths), []
@@ -129,15 +128,15 @@ def test_one_read_that_fails_with_too_many_open_files_is_retried_on_the_next_cal
     store = SessionStore(tmp_path, "s1")
     [a] = store.page_out([page("needle")], 1)
     fresh = SessionStore(tmp_path, "s1")
-    read_text = Path.read_text
+    read_text = catalog.read_regular_text
     failures = [OSError(errno.EMFILE, "Too many open files")]
 
-    def flaky(self, *args, **kwargs):
-        if self.name == f"{a}.json" and failures:
+    def flaky(path):
+        if path.name == f"{a}.json" and failures:
             raise failures.pop()
-        return read_text(self, *args, **kwargs)
+        return read_text(path)
 
-    monkeypatch.setattr(Path, "read_text", flaky)
+    monkeypatch.setattr(catalog, "read_regular_text", flaky)
     first = fresh.search("needle") if call == "search" else fresh.index_text(400)
     assert not failures and a not in first
     assert fresh.search("needle") == [a] and a in fresh.index_text(400)

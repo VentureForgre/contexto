@@ -1998,6 +1998,104 @@ the owner's delegation. Open decisions are listed at the end with the options an
     opens. D52's removal of a session a refused Codex launch created is kept as the one mechanism for
     `run codex`; `run claude` and `proxy` keep `discard_new_session`, so no launch removes a session twice.
 
+- **D58. The store and the MCP server stay up and say what is wrong.** Claude, 2026-11-05, under D0;
+  contract change. From the 2026-11-05 QA run on main 4e2c4cd (store-mcp, verify-surrogate,
+  scale-engine finding 2, verify-obligations finding 3), all reproduced at zero spend first.
+  - **Lone surrogates.** One `\ud83d` with no low half raised `UnicodeEncodeError` at every strict
+    `encode("utf-8")` (canonical JSON, the token estimate, the preamble hash, page ids, ledger lines,
+    the session log), so the engine logged `transform_error` and forwarded untransformed from then
+    on, and a page could never hold the turn. In the MCP server the reply write was outside its try:
+    a page id, tool name, method or request id holding one ended the process (rc 1), and the call
+    failed with "Connection closed" until Claude Code respawned it. verify-surrogate showed Claude
+    Code 2.1.302 to 2.1.318 replaces lone surrogates with U+FFFD in every API request, and the API
+    answers 400 to a body holding one, so this was downgraded to low; MCP tool inputs reach the
+    server unsanitized, so that half was reachable. Rule: such a character is encoded as its JSON
+    escape (`backslashreplace`, as `proxy.serialize_request` already did), which in JSON text is the
+    same string again: pages, ledger lines and log lines stay valid UTF-8 JSON that reads back
+    exactly, and the client reads the same string it sent. Strings without one encode byte for byte
+    as before, so no existing page id, record id or hash changes. QA's test (8 cases, 7 failing on
+    main) passes: the 40-turn conversation with the surrogate in turn 0, 3 or 39 is paged and
+    bounded, and the server answers the ping after each of the 4 poisoned lines. Re-encoding a
+    32,000-character reply costs about 23 microseconds.
+  - **Tool errors.** The tools caught only `ValueError`, so a damaged ledger (`LedgerCorruptError`)
+    made pin, close and state a JSON-RPC `-32603 Internal error`, with no `mcp_call` logged. Now any
+    exception inside a tool is that call's tool result (`isError: true`), logged with its error
+    class: a damaged ledger says pins and closes are refused until the user repairs it and names
+    `contexto sessions show <session>`; anything else says the call failed with its class and to
+    try once more. A non-string tool name was `-32603` and is now `-32602`; ids that are objects,
+    arrays or booleans, which JSON-RPC does not allow, are `-32600` with `id: null`; `params` of
+    `[]` or `0`, which read as `{}`, are `-32602`, and `arguments` of `[]`, `0` or `false` are the
+    tool error "arguments must be an object", as `"x"` already was (reviewer B, PR #235). Errors echoed whole arguments: a 10 MB page id or
+    obligation id, or 100,000 rejected `supersedes` ids, came back in full, outside any recall room.
+    An echoed value is now at most 100 characters and a tool error at most 1,000. A pin or close note
+    of whitespace only, which passed `minLength: 1`, is refused. A pin of an `event`, `artifact` or
+    `reference` that is not `verified` returned "Recorded ..." although the pinned state shows those
+    kinds only when verified; its reply now says so and suggests a decision or an obligation (the
+    tool description is D51's).
+  - **Unknown page ids.** `get_page` took `pg_` and any number of hex digits, so a 300-digit id
+    failed in the read with `ENAMETOOLONG` and was reported "cannot be read" and logged
+    `page_unreadable`, as damage. Only `pg_` and exactly 16 lowercase hex digits name a page now;
+    anything else is "Unknown page id" and is never read.
+  - **Files that are not files.** A FIFO in place of `meta.json`, `ledger.jsonl`, `log.jsonl`,
+    `retained.json`, `epoch.json` or a page hung the MCP server, `recall`, `state`, `sessions show`
+    and the proxy; a directory in place of the ledger or the log gave tracebacks; a damaged
+    `page.key` gave the proxy a traceback (`KeyFileError` was not a `ValueError`). Every session file
+    is now opened `O_NONBLOCK | O_NOFOLLOW` and checked to be a regular file before it is read or
+    written (`contexto.private.open_regular`, `open_private`), as `affinity.salt` already was; each
+    reads as the damage it is (absent metadata, an unreadable page, a damaged ledger, a key file
+    error), and `KeyFileError` is a `ValueError` too. A symlink in a file's place is refused the
+    same way (`NotRegularFileError`): with the first head, a symlinked `ledger.jsonl` raised a plain
+    `ELOOP` that gave tracebacks in `sessions list`, `show` and `state` and stopped `contexto mcp`
+    and the proxy, where a FIFO or directory degraded (reviewer B, PR #235). `ledger.lock` the same:
+    a symlink, FIFO or directory there gave tracebacks in `sessions list` (for every session),
+    `show` and `state` and stopped `contexto mcp`; it now reads as a damaged ledger (reviewer A, PR
+    #235 round 2; the FIFO and directory cases crashed on main too). In the 21 FIFO, directory and
+    symlink cases every MCP tool and CLI reader returns within the test's 10-second limit; on main 8 fail (each FIFO blocks the MCP server on its first call, and a directory as the
+    ledger or the log raises).
+  - **Symlinked session directories: one rule.** A session directory that was a symlink was used by
+    `mcp`, the proxy, `state` and `sessions show`, which chmodded the link's target to 0700, but was
+    left out of `sessions list` and refused by prune. Rule: a session directory must be a real
+    directory, and every command refuses one that is a symlink (the error says so; a dangling link
+    keeps its "symlink to a missing target" message). Following them everywhere was rejected: prune
+    must not delete through a link, so it could never be one rule. A symlinked `log.jsonl` was
+    appended to and chmodded; files in a session are no longer opened through a symlink.
+  - **A full disk.** `write_new` removed its temporary file only after a successful write, so
+    `ENOSPC` left `.pg_<id>.json.<pid>.<rand>.tmp` in `pages/` (2 after one QA full-disk run), and
+    `_modify_meta` did the same for `meta.json`. Writes were a single `os.write`, so a short write
+    could rename a truncated `meta.json` into place, or leave a log line without its newline that
+    the next event (`proxy_start`) was appended to, losing both. Now every write continues after a
+    short write, a failed write removes its temporary file, a log event after a cut line starts on a
+    new line (the cut line stays unreadable and readers skip it), and opening a store for writing
+    removes temporary files whose process no longer runs (1 in 25 of QA's kill -9 runs left one
+    between the link and the unlink), logging `stale_temp_removed`. A file must also be more than 10
+    minutes old: a live writer whose pid this process cannot see (a container sharing the home in
+    another pid namespace, another machine) looks gone, and a live temporary file exists for
+    milliseconds (reviewer A, PR #235).
+  - **`open_existing`** did not set `clock`, so `side_rooms()`, `set_side_room()` and
+    `charge_turn_room()` raised `AttributeError` on a store opened for reading. No shipped command
+    reached it; it is set now.
+  - **Turn numbers.** Pages number paged turns from 0 (`page_out(turns, turns_paged)`) and the
+    in-view search lines showed the retained entry's count of turn starts, from 1: in one QA reply
+    the 33rd turn was "pg_... (turn 32)" and the 34th "in view (turn 34)". Rotation pages whole
+    turns (`k` is always a turn start), so the in-view label now shows that count less one: a test
+    pages 40 turns through the engine and finds each turn's unique key under its own index, paged
+    or in view. Page turn numbers are hashed into page ids and fix every page offset, so they stay;
+    the logged in-view span keeps the entry's `turn`. This holds only while every page is a whole
+    turn: carried-text pages from the bounded fallback take page turn numbers too, and a resync
+    (local compaction) restarts the CLI's count while `turns_paged` goes on, so in-view numbers then
+    run behind recent pages and can repeat one (reviewer B, PR #235: in a 40-turn store with 4
+    carried pages, CLI turn 38 was "turn 43" paged and "turn 39" named both CLI turn 39 in view and
+    CLI turn 36 paged). Labelling from the page numbering would need the turn starts before `k` and
+    `turns_paged` with each snapshot, and the epoch record that holds `turns_paged` is written only
+    at turn starts, so a label built from it would still lag a mid-turn carried page. No tool takes
+    a turn number (`contexto_recall` takes a page id and offset), so the contract says when the
+    numbers match instead.
+  - **CLI output.** The first head stored lone surrogates, but `contexto state` and `contexto
+    recall` wrote to a strict UTF-8 stdout and raised `UnicodeEncodeError`; the ledger is
+    append-only, so one such pin broke `state` for that session (reviewer B, PR #235). `cli.main`
+    now sets stdout and stderr to write an unencodable character as its backslash escape, as the
+    MCP server does; text that encodes is unchanged.
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.

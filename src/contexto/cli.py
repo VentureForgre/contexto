@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import pkgutil
+import sys
 from collections.abc import Sequence
 
 from contexto import __version__, commands
@@ -27,7 +28,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _escape_unencodable_output() -> None:
+    """Write a character stdout or stderr cannot encode as its backslash escape instead of raising (D58):
+    the store keeps a lone UTF-16 surrogate a page or pin holds, and ``contexto state`` or ``recall`` must
+    still print it, as the MCP server does. Text that encodes is written unchanged."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):  # a closed or detached stream: nothing to configure
+                pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _escape_unencodable_output()
     parser = build_parser()
     args = parser.parse_args(argv)
     func = getattr(args, "func", None)

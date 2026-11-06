@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from contexto.paths import session_dir
+from contexto.private import read_regular
 from contexto.store import SessionNotFoundError, SessionStore
 from contexto.store.ledger import LedgerError
 
@@ -155,6 +156,9 @@ def resolve_session(home: Path, given: str, how: str | None = None) -> str:
         path = session_dir(home, given)
     except ValueError as e:
         raise SessionNotFoundError(str(e)) from e
+    if path.is_symlink():  # one rule for every command (D58): list leaves it out, prune and the stores refuse it
+        raise SessionNotFoundError(f"session {given!r} under {Path(home) / 'sessions'} is a symlink, not a session "
+                                   "directory" + (f" (from {how})" if how else ""))
     if path.is_dir():
         return given
     matches = starting_with(home, given)
@@ -211,8 +215,8 @@ def select_session(home: Path, explicit: str | None) -> tuple[str, str]:
 def _log_events(path: Path) -> list[dict[str, Any]]:
     events = []
     try:
-        lines = (path / "log.jsonl").read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
+        lines = read_regular(path / "log.jsonl").decode("utf-8", "replace").splitlines()
+    except OSError:  # missing, unreadable, or not a regular file (D58): no events to count
         return events
     for line in lines:
         try:

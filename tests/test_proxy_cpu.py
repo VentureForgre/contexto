@@ -90,12 +90,12 @@ def test_hash_is_rule_10s_normalised_hash_on_every_path(message):
         rw._DIALECT.reset(token)
 
 
-def test_a_lone_surrogate_fails_to_hash_on_both_paths_alike():
+def test_a_lone_surrogate_hashes_on_both_paths_alike():
+    # D58: a lone surrogate is hashed as its JSON escape instead of raising, on both paths.
     message = {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "lone \ud800"}]}
-    with pytest.raises(UnicodeEncodeError):
-        reference_hash(message, ANTHROPIC)
-    with pytest.raises(UnicodeEncodeError):
-        message_hash(message)
+    assert message_hash(message) == reference_hash(message, ANTHROPIC)
+    with request_scope([message]):
+        assert message_hash(message) == reference_hash(message, ANTHROPIC)
 
 
 def test_a_lone_surrogate_only_inside_cache_control_hashes_like_the_reference():

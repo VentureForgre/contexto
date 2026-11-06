@@ -619,7 +619,7 @@ def test_in_view_lines_match_like_pages(store):
                               {"turn": 10, "message_index": 0, "role": "user", "text": "when is the nightly backup?"}])
     store.set_turn_room("r", 10_000)
     lines = search(store, "backup nightly").split("\n")
-    assert lines[:2] == ["[in view, newest first:]", "> in view (turn 9): Nightly backups now run at 03:00"]
+    assert lines[:2] == ["[in view, newest first:]", "> in view (turn 8): Nightly backups now run at 03:00"]
     assert lines[2] == mcp.SEARCH_BEST_HEADER and lines[3].endswith("(turn 1)")
 
 
@@ -633,5 +633,5 @@ def test_a_word_on_every_line_of_a_large_in_view_message_is_still_fast(store):
     started = time.perf_counter()
     lines = search(store, "self").split("\n")
     assert time.perf_counter() - started < 0.5  # 0.03 s; about 4 s before ffb635f
-    assert lines[1] == "> in view (turn 9):     self.value_19999 = self.compute(19999)"
+    assert lines[1] == "> in view (turn 8):     self.value_19999 = self.compute(19999)"
     assert lines[4] == "  [19997 more matching lines in view]"

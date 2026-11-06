@@ -18,11 +18,17 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
   ``SIDE_ROOM_TTL_S``), and ``cli_sessions`` (D55: the CLI conversations the session served, recorded
   by the launcher with ``record_cli_session``, so a resume finds the session). Writers
   serialize on ``meta.lock``; the file is replaced atomically, so readers never see a partial file.
-- ``log.jsonl``: the session log, one canonical JSON event per line.
+- ``log.jsonl``: the session log, one canonical JSON event per line. A line cut short (a full disk)
+  is never joined to the next event: that event starts on a new line (D58).
 - ``live.lock``: every writable ``SessionStore`` (the proxy, the launcher, the MCP server) holds a
   shared ``flock`` on it for as long as the store object lives, so ``contexto sessions prune`` can
   tell a session in use from an idle one (D37). The lock file is never opened through a symlink, the
   descriptor is not inherited by child processes, and the kernel drops the lock when the process exits.
+
+The session directory must be a real directory: one that is a symlink is refused when a store opens
+it, as ``sessions list`` and prune refuse it (D58). Files in it are never opened through a symlink, a
+FIFO or directory in a file's place is refused without blocking, and temporary files left by a process
+that died mid-write are removed when a writable store opens (``contexto.private``).
 
 Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``) come from
 ``contexto.store.records.LedgerOps``; see that module for the API the MCP server uses.
@@ -48,7 +54,17 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
-from contexto.private import open_private, private_dir, write_new
+from contexto.private import (
+    NotRegularFileError,
+    open_private,
+    private_dir,
+    read_regular,
+    read_regular_text,
+    remove_stale_temps,
+    write_all,
+    write_atomic,
+    write_new,
+)
 from contexto.store.catalog import PageCatalog, load_page
 from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, render_index, same_content
@@ -73,6 +89,19 @@ KEY_BYTES = 32
 LIVE_LOCK = "live.lock"
 CLI_SESSIONS_KEPT = 64  # record_cli_session: CLI conversation ids kept per CLI (a /clear or a fork adds one)
 LIVE_ATTEMPTS = 8  # hold_live: tries before giving up on a session that keeps being deleted
+
+
+def refuse_symlinked_session(session_path: Path) -> None:
+    """Raise when the session entry is a symlink (D58): the one rule for every command, as ``sessions
+    list`` leaves one out and prune refuses it. FileNotFoundError when the link's target is missing,
+    else NotADirectoryError; both are OSErrors, which the commands report as a session they cannot open."""
+    path = Path(session_path)
+    if not path.is_symlink():
+        return
+    if not path.exists():
+        raise FileNotFoundError(errno.ENOENT, "session directory is a symlink to a missing target", str(path))
+    raise NotADirectoryError(errno.ENOTDIR, "session directory is a symlink; Contexto uses only real directories "
+                             "under sessions/", str(path))
 
 
 def hold_live(session_path: Path) -> tuple[int, bool]:
@@ -433,8 +462,9 @@ class PageUnreadableError(ValueError):
         self.damaged = damaged
 
 
-class KeyFileError(RuntimeError):
-    """The store's page key file is empty, short, or not hex; page ids cannot be trusted."""
+class KeyFileError(RuntimeError, ValueError):
+    """The store's page key file is empty, short, not hex, or not a regular file; page ids cannot be
+    trusted. A ValueError too, so a command that reports a session it cannot open reports this (D58)."""
 
 
 def redact(event: Any) -> Any:
@@ -465,14 +495,18 @@ class SessionStore(LedgerOps):
         # under it is Contexto's own and is narrowed even when it exists.
         private_dir(Path(home), narrow=False)
         private_dir(Path(home) / "sessions")
+        refuse_symlinked_session(self.dir)
         # Creates the session directory and locks it before anything else is created in it, so prune
         # cannot remove it under us.
         live, pruned = hold_live(self.dir)
         self.release = weakref.finalize(self, os.close, live)  # release(): drop the lock before collection
         private_dir(self.pages_dir)
+        removed = remove_stale_temps(self.dir) + remove_stale_temps(self.pages_dir)
         self._key_cache = self._load_key()
         self.ledger = Ledger(self.dir)
         self._repair_ledger()
+        if removed:
+            self.log({"event": "stale_temp_removed", "files": removed})
         if pruned:
             # A resume (--session ID) raced `contexto sessions prune` and lost: the old contents are gone.
             self.log({"event": "pruned_while_opening"})
@@ -632,7 +666,7 @@ class SessionStore(LedgerOps):
         """The saved epoch record, or None when there is none or it is unreadable, malformed, or of
         an unknown version."""
         try:
-            data = json.loads((self.dir / "epoch.json").read_text(encoding="utf-8"))
+            data = json.loads(read_regular_text(self.dir / "epoch.json"))
         except (OSError, ValueError):
             return None
         return read_epoch(data)
@@ -650,7 +684,7 @@ class SessionStore(LedgerOps):
     def retained(self) -> tuple[int, int, int, list[dict[str, Any]]] | None:
         """(epoch, k, stamp, entries) of the retained snapshot, or None when there is none or it is malformed."""
         try:
-            data = json.loads((self.dir / "retained.json").read_text(encoding="utf-8"))
+            data = json.loads(read_regular_text(self.dir / "retained.json"))
         except (OSError, ValueError):
             return None
         return read_retained(data)
@@ -701,19 +735,8 @@ class SessionStore(LedgerOps):
                 pass
 
     def _write_atomic(self, path: Path, data: bytes) -> None:
-        """Write ``path`` privately and atomically: a fsynced temp file renamed into place."""
-        tmp = self.dir / f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-        fd = open_private(tmp, os.O_WRONLY | os.O_EXCL)
-        try:
-            try:
-                os.write(fd, data)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.replace(tmp, path)
-        except OSError:
-            tmp.unlink(missing_ok=True)  # leave no partial temp file behind
-            raise
+        """Write ``path`` privately and atomically: a fsynced temp file renamed into place, removed on failure."""
+        write_atomic(path, data)
 
     def _update_meta(self, updates: dict[str, Any]) -> None:
         """Merge ``updates`` into meta.json: writers serialize on meta.lock; readers never block."""
@@ -733,20 +756,13 @@ class SessionStore(LedgerOps):
             if updates is None:
                 return
             meta.update(updates)
-            tmp = self.dir / f".meta.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-            fd = open_private(tmp, os.O_WRONLY | os.O_EXCL)
-            try:
-                os.write(fd, canonical_bytes(meta))
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.replace(tmp, self.dir / "meta.json")
+            write_atomic(self.dir / "meta.json", canonical_bytes(meta))
         finally:
             os.close(lock)  # releases the flock
 
     def _meta(self) -> dict[str, Any]:
         try:
-            meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
+            meta = json.loads(read_regular_text(self.dir / "meta.json"))
         except (OSError, ValueError):  # missing, unreadable, not UTF-8, or not JSON: treat as unrecorded
             return {}
         return meta if isinstance(meta, dict) else {}
@@ -808,11 +824,15 @@ class SessionStore(LedgerOps):
         Writing pages through a store opened this way loads (or creates) the page key on first use.
         """
         path = session_dir(home, session_id)
+        if path.is_symlink():
+            raise SessionNotFoundError(f"session {session_id!r} under {Path(home) / 'sessions'} is a symlink, "
+                                       "not a session directory")
         if not path.is_dir():
             raise SessionNotFoundError(f"no session {session_id!r} under {Path(home) / 'sessions'}")
         store = cls.__new__(cls)
         store.session_id = session_id
         store.home = Path(home)
+        store.clock = time.time  # as __init__ sets it: side_rooms and charge_turn_room read it
         store.dir = path
         store.pages_dir = path / "pages"
         store._key_cache = None
@@ -834,7 +854,9 @@ class SessionStore(LedgerOps):
             # A losing racer's write_new returns False and reads the winner's complete key below.
             write_new(path, secrets.token_bytes(KEY_BYTES).hex().encode("ascii"))
         try:
-            key = bytes.fromhex(path.read_text(encoding="ascii").strip())
+            key = bytes.fromhex(read_regular(path).decode("ascii").strip())
+        except NotRegularFileError as e:
+            raise KeyFileError(str(e)) from e
         except (ValueError, UnicodeDecodeError) as e:
             raise KeyFileError(f"{path} is not a hex key: {e}") from e
         if len(key) != KEY_BYTES:
@@ -856,7 +878,7 @@ class SessionStore(LedgerOps):
             data = canonical_bytes(page)
             if not write_new(path, data):
                 try:
-                    stored = load_page(path.read_text(encoding="utf-8"), page["id"])
+                    stored = load_page(read_regular_text(path), page["id"])
                 except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
                     # Not a page record, or another id (rule 18): a conflict, which quarantines the
                     # file and pages the turn afresh (rule 14), rather than a page the index skips forever.
@@ -923,11 +945,11 @@ class SessionStore(LedgerOps):
         """The page record for ``page_id``, or None if this store has no such page. Raises
         ``PageUnreadableError``, after logging ``page_unreadable``, when the file cannot be read or is not
         a page record (rule 18)."""
-        if not page_id.startswith("pg_") or not all(c in "0123456789abcdef" for c in page_id[3:]):
+        if not isinstance(page_id, str) or not _PAGE_ID.fullmatch(page_id):  # any other id names no page (D58)
             return None
         path = self.pages_dir / f"{page_id}.json"
         try:
-            return load_page(path.read_text(encoding="utf-8"), page_id)
+            return load_page(read_regular_text(path), page_id)
         except FileNotFoundError:
             return None
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
@@ -975,12 +997,18 @@ class SessionStore(LedgerOps):
             pass  # recording is a convenience; an unwritable meta.json must not break rendering
 
     def log(self, event: dict) -> None:
-        """Append ``event`` (credentials redacted, ``ts`` added if absent) to ``log.jsonl``."""
+        """Append ``event`` (credentials redacted, ``ts`` added if absent) to ``log.jsonl`` as one line.
+
+        A line an earlier write left without its newline (cut short by a full disk) is ended first, so
+        this event is never joined to it (D58); the cut line stays unreadable and readers skip it."""
         record = redact(dict(event))
         record.setdefault("ts", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-        line = (canonical_json(record) + "\n").encode("utf-8")
-        fd = open_private(self.dir / "log.jsonl", os.O_WRONLY | os.O_APPEND)
+        line = canonical_bytes(record) + b"\n"
+        fd = open_private(self.dir / "log.jsonl", os.O_RDWR | os.O_APPEND)
         try:
-            os.write(fd, line)
+            size = os.fstat(fd).st_size
+            if size and os.pread(fd, 1, size - 1) != b"\n":
+                line = b"\n" + line
+            write_all(fd, line)
         finally:
             os.close(fd)

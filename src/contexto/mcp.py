@@ -27,9 +27,11 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
-from contexto.canonical import loads_bounded
+from contexto.canonical import loads_bounded, utf8
 from contexto.store import PageUnreadableError
+from contexto.store.ledger import LedgerCorruptError
 from contexto.store.pages import is_context_page
+from contexto.store.pinned import FACT_KINDS
 from contexto.store.render import (
     MATCH_CONTEXT,
     MATCHES_PER_PAGE,
@@ -89,6 +91,10 @@ CACHE_FIELDS = {"ttlMs": 0, "cacheScope": "private"}
 _CACHEABLE = frozenset({"server/discover", "tools/list"})
 RECORD_KINDS = ("event", "decision", "obligation", "artifact", "reference")
 EPISTEMICS = ("verified", "reported", "summary", "hypothesis")
+# The pinned state lists FACT_KINDS only when verified (contexto.store.pinned), so a pin of one that is
+# not says so, rather than letting the model believe it will stay in view (D58).
+UNPINNED_NOTE = (" It is in the ledger but not in the pinned state, which shows a {kind} only when it is verified "
+                 "(epistemic verified, with provenance); to keep it in view, pin it as a decision or an obligation.")
 
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -96,6 +102,17 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 UNSUPPORTED_VERSION = -32022
+# D58: a value from the request is echoed in an error at most this long, and a tool error's text is
+# held to ERROR_TEXT_LIMIT, so a 10 MB argument is not sent back to the model whole.
+ECHO_CHARS = 100
+ERROR_TEXT_LIMIT = 1_000
+# D58: a damaged ledger is left for a human (contract), so the model is told what still works and where
+# the user looks, not a bare JSON-RPC Internal error.
+LEDGER_DAMAGED = ("{what}: this session's ledger is damaged, so pins and closes are refused and the pinned state may "
+                  "be unreadable until the user repairs it (`contexto sessions show {session}` names the damaged "
+                  "line). Keep decisions and obligations in your replies meanwhile.")
+TOOL_FAILED = ("{tool} failed: an internal error in Contexto ({error}). Try once more; if it fails again, go on "
+               "without it.")
 
 INSTRUCTIONS = (
     "Contexto keeps this session's older turns in a local store. Use contexto_recall with a page id "
@@ -253,7 +270,9 @@ class Server:
                 except (ValueError, TypeError, RecursionError) as exc:  # never let one reply kill the server
                     self._diag(f"unserializable response: {type(exc).__name__}")
                     text = json.dumps(_error(None, INTERNAL_ERROR, "Internal error"), separators=(",", ":"))
-                self.stdout.write(text + "\n")
+                # A lone UTF-16 surrogate echoed from the request has no UTF-8 form: it is written as its
+                # JSON escape, the same string to the client, rather than failing the write (D58).
+                self.stdout.write(utf8(text).decode("utf-8") + "\n")
                 self.stdout.flush()
         return 0  # end of input is the shutdown signal
 
@@ -266,12 +285,15 @@ class Server:
                 or not isinstance(message.get("method"), str)):
             if isinstance(message, dict) and "method" not in message and ("result" in message or "error" in message):
                 return None  # a response from the client: nothing to answer
-            return _error(message.get("id") if isinstance(message, dict) else None, INVALID_REQUEST, "Invalid request")
+            return _error(message.get("id") if isinstance(message, dict) and _valid_id(message.get("id")) else None,
+                          INVALID_REQUEST, "Invalid request")
+        if not _valid_id(message.get("id")):  # JSON-RPC ids are strings, numbers or null (D58)
+            return _error(None, INVALID_REQUEST, "Invalid request: id must be a string, a number or null")
         is_notification = "id" not in message
         try:
             response = self._dispatch(message)
         except Exception as exc:  # never let one bad request kill the server
-            self._diag(f"internal error in {message['method']}: {type(exc).__name__}")
+            self._diag(f"internal error in {_clip(message['method'])}: {type(exc).__name__}")
             response = _error(message.get("id"), INTERNAL_ERROR, "Internal error")
         return None if is_notification else response
 
@@ -280,7 +302,8 @@ class Server:
     def _dispatch(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message["method"]
         msg_id = message.get("id")
-        params = message.get("params") or {}
+        params = message.get("params")
+        params = {} if params is None else params
         if not isinstance(params, dict):
             return _error(msg_id, INVALID_PARAMS, "params must be an object")
         if method.startswith("notifications/"):
@@ -293,9 +316,11 @@ class Server:
                           {"supported": list(MODERN_VERSIONS) + list(LEGACY_VERSIONS), "requested": requested})
         handler = self.handlers.get(method)
         if handler is None:
-            return _error(msg_id, METHOD_NOT_FOUND, f"Method not found: {method}")
-        if method == "tools/call" and params.get("name") not in _TOOL_NAMES:
-            return _error(msg_id, INVALID_PARAMS, f"Unknown tool: {params.get('name')}")
+            return _error(msg_id, METHOD_NOT_FOUND, f"Method not found: {_clip(method)}")
+        if method == "tools/call" and not isinstance(params.get("name"), str):
+            return _error(msg_id, INVALID_PARAMS, "Tool name must be a string")
+        if method == "tools/call" and params["name"] not in _TOOL_NAMES:
+            return _error(msg_id, INVALID_PARAMS, f"Unknown tool: {_clip(params['name'])}")
         result = handler(params)
         if modern and method != "initialize":
             result = {"resultType": "complete", **result}
@@ -340,7 +365,8 @@ class Server:
 
     def _tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
         name = params["name"]
-        args = params.get("arguments") or {}
+        args = params.get("arguments")
+        args = {} if args is None else args  # [], 0 or false is not an object (D58)
         event: dict[str, Any] = {"event": "mcp_call", "tool": name}
         try:
             if not isinstance(args, dict):
@@ -352,7 +378,17 @@ class Server:
                 result["structuredContent"] = structured
         except ToolError as exc:
             event.update(ok=False, error=type(exc).__name__)
-            result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+            result = _tool_error(str(exc))
+        except LedgerCorruptError as exc:
+            event.update(ok=False, error=type(exc).__name__)
+            self._diag(f"{name}: the session ledger is damaged; see contexto sessions show")
+            what = {"contexto_pin": "Not recorded", "contexto_close": "Not closed"}.get(name, "The pinned state "
+                                                                                       "cannot be read")
+            result = _tool_error(LEDGER_DAMAGED.format(what=what, session=getattr(self.store, "session_id", "ID")))
+        except Exception as exc:  # an unexpected failure fails this call only, as a result the model can read
+            event.update(ok=False, error=type(exc).__name__)
+            self._diag(f"internal error in {name}: {type(exc).__name__}")
+            result = _tool_error(TOOL_FAILED.format(tool=name, error=type(exc).__name__))
         try:
             self.store.log(event)
         except Exception as exc:  # logging must never break a call
@@ -374,7 +410,7 @@ class Server:
             cause = "its stored file is damaged" if exc.damaged else "reading its stored file failed"
             raise ToolError(f"Page {page_id} cannot be read: {cause}.") from None
         if page is None:
-            raise ToolError(f"Unknown page id: {page_id}. Page ids appear in the paged-history index.")
+            raise ToolError(f"Unknown page id: {_clip(page_id)}. Page ids appear in the paged-history index.")
         limit, note = recall_limit(*self._window())
         try:
             part = recall_chunk(page, offset, limit)
@@ -412,6 +448,8 @@ class Server:
         if kind not in RECORD_KINDS:
             raise ToolError(f"kind must be one of {', '.join(RECORD_KINDS)}")
         text = _require_str(args, "text")
+        if not text.strip():
+            raise ToolError("text must not be blank")
         epistemic = args.get("epistemic", "reported")
         if epistemic not in EPISTEMICS:
             raise ToolError(f"epistemic must be one of {', '.join(EPISTEMICS)}")
@@ -429,13 +467,18 @@ class Server:
                                        provenance=tuple(provenance or ()))
         except ValueError as exc:
             raise ToolError(f"Not recorded: {exc}") from None
-        return ([{"type": "text", "text": f"Recorded {kind} {record_id}."}], {"record_id": record_id},
+        reply = f"Recorded {kind} {record_id}."
+        if kind in FACT_KINDS and epistemic != "verified":
+            reply += UNPINNED_NOTE.format(kind=kind)
+        return ([{"type": "text", "text": reply}], {"record_id": record_id},
                 {"kind": kind, "record_id": record_id, "chars": len(text), "supersedes": len(supersedes or [])})
 
     def _tool_close(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         _reject_extra(args, {"obligation_id", "note"})
         obligation_id = _require_str(args, "obligation_id")
         note = _require_str(args, "note")
+        if not note.strip():
+            raise ToolError("note must not be blank")
         try:
             record_id = self.store.close(obligation_id, note)
         except ValueError as exc:
@@ -586,7 +629,10 @@ class Server:
         if not found:
             return []
         rows: list[Row] = [("[in view, newest first:]", None)]
-        rows += [(f"> in view (turn {turn}): {text}", ("in_view", turn, index, start, end))
+        # A retained entry's turn counts turn starts from 1; pages count paged turns from 0, and rotation
+        # pages whole turns, so the page that follows a turn shows its count less one. The line shows the
+        # page numbering, so a turn reads the same paged or in view (D58); the logged span keeps the entry's.
+        rows += [(f"> in view (turn {max(0, turn - 1)}): {text}", ("in_view", turn, index, start, end))
                  for turn, index, start, end, text in found[:IN_VIEW_LIMIT]]
         if len(found) > IN_VIEW_LIMIT:
             rows.append((f"  [{len(found) - IN_VIEW_LIMIT} more matching lines in view]", None))
@@ -653,8 +699,11 @@ class Server:
         return out["texts"], out["budget"]
 
     def _diag(self, message: str) -> None:
-        self.stderr.write(f"contexto mcp: {message}\n")
-        self.stderr.flush()
+        try:
+            self.stderr.write(utf8(f"contexto mcp: {message}\n").decode("utf-8"))
+            self.stderr.flush()
+        except (OSError, ValueError):  # a closed or broken stderr: diagnostics are best effort
+            pass
 
 
 def _state_trailer(rest: int) -> str:
@@ -767,6 +816,22 @@ def _spans(rows: list[Row]) -> list[dict[str, Any]]:
         else:
             spans.append({"source": "paged", "page_id": page_id, "start": start, "end": end})
     return spans
+
+
+def _clip(value: str, limit: int = ECHO_CHARS) -> str:
+    """``value`` as an error echoes it: whole up to ``limit`` characters, else cut to ``limit``, length noted."""
+    if len(value) <= limit:
+        return value
+    note = f"... ({len(value)} characters)"
+    return value[:max(0, limit - len(note))] + note
+
+
+def _tool_error(text: str) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": _clip(text, ERROR_TEXT_LIMIT)}], "isError": True}
+
+
+def _valid_id(msg_id: Any) -> bool:
+    return msg_id is None or isinstance(msg_id, (str, int, float)) and not isinstance(msg_id, bool)
 
 
 def _require_str(args: dict[str, Any], key: str) -> str:

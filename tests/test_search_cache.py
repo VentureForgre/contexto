@@ -5,14 +5,13 @@ import math
 import os
 import random
 import tomllib
-from pathlib import Path
 
 import pytest
 
 from contexto import cli
 from contexto.codex import plan_codex
 from contexto.launcher import mcp_payload
-from contexto.store import SessionStore
+from contexto.store import SessionStore, catalog
 from contexto.store.catalog import DEFAULT_TEXT_BUDGET_MB, MB, text_budget_bytes
 from contexto.store.pages import search_entry
 from contexto.store.search import (
@@ -223,18 +222,18 @@ def test_search_keeps_no_stub_and_the_index_still_reads_one(tmp_path):
 
 
 class Reads:
-    """Counts reads of page files (the catalog reads them with ``Path.read_text``)."""
+    """Counts reads of page files (the catalog reads them with ``read_regular_text``, D58)."""
 
     def __init__(self, monkeypatch):
         self.names: list[str] = []
-        original = Path.read_text
+        original = catalog.read_regular_text
 
-        def read_text(path, *args, **kwargs):
+        def read_text(path):
             if path.name.startswith("pg_"):
                 self.names.append(path.name)
-            return original(path, *args, **kwargs)
+            return original(path)
 
-        monkeypatch.setattr(Path, "read_text", read_text)
+        monkeypatch.setattr(catalog, "read_regular_text", read_text)
 
     def take(self):
         out, self.names[:] = list(self.names), []
