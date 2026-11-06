@@ -37,8 +37,17 @@ def mcp_env(home: Path, env: Mapping[str, str] | None = None) -> dict[str, str]:
     return out
 
 
+SESSION_ID_MAX_BYTES = 255  # NAME_MAX: a longer directory name fails in the filesystem, not here
+
+
 def session_dir(home: Path, session_id: str) -> Path:
-    """``home/sessions/<session_id>``; the id must be a single safe path segment."""
+    """``home/sessions/<session_id>``; the id must be a single safe path segment the filesystem can name."""
     if (not session_id or session_id in (".", "..") or any(c in session_id for c in "/\\\0")):
         raise ValueError(f"invalid session id: {session_id!r}")
+    try:
+        size = len(os.fsencode(session_id))
+    except UnicodeEncodeError:  # a lone surrogate no file name can hold
+        raise ValueError(f"invalid session id: {session_id[:40]!r}") from None
+    if size > SESSION_ID_MAX_BYTES:
+        raise ValueError(f"invalid session id {session_id[:40]!r}...: longer than {SESSION_ID_MAX_BYTES} bytes")
     return Path(home) / "sessions" / session_id

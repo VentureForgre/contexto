@@ -468,7 +468,7 @@ class SessionStore(LedgerOps):
         # Creates the session directory and locks it before anything else is created in it, so prune
         # cannot remove it under us.
         live, pruned = hold_live(self.dir)
-        weakref.finalize(self, os.close, live)
+        self.release = weakref.finalize(self, os.close, live)  # release(): drop the lock before collection
         private_dir(self.pages_dir)
         self._key_cache = self._load_key()
         self.ledger = Ledger(self.dir)
@@ -937,6 +937,12 @@ class SessionStore(LedgerOps):
     def page_ids(self) -> list[str]:
         """Every page id in this store, newest turn first."""
         return [e.id for e in sorted(self._catalog.entries(), key=lambda e: (e.turn, e.id), reverse=True)]
+
+    def page_list(self) -> list[dict[str, Any]]:
+        """``{id, turn, line}`` for every page, newest turn first; ``line`` is its index line without the
+        identifiers (``contexto sessions show``, D57)."""
+        entries = sorted(self._catalog.entries(), key=lambda e: (e.turn, e.id), reverse=True)
+        return [{"id": e.id, "turn": e.turn, "line": self._catalog.line(e, False)} for e in entries]
 
     def search(self, query: str) -> list[str]:
         """Ids of pages holding every word of ``query`` (case-insensitive, any order), best first (D34)."""

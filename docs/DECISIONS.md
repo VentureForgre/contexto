@@ -1847,6 +1847,92 @@ the owner's delegation. Open decisions are listed at the end with the options an
     only by turn starts. A second interactive Claude Code pointed at the same proxy with no parent
     id (not a supported setup) takes main at its first turn start; while both send, once.
 
+- **D57. User-facing command fixes from the 2026-11-05 QA run.** Claude, 2026-11-05, under D0; contract
+  change. The install, docs-audit, live-claude, store-mcp and launcher-ux reports, reproduced at zero
+  spend on v0.5.8 with stub CLIs and synthetic stores; 42 new or extended tests fail on v0.5.8 and pass
+  after.
+  - **Finding a page id.** No command printed one: `sessions show` gave counts only, and `state` gave the
+    model's instructions ending "The page index below lists the paged turns" with no index below. Now
+    `sessions show` lists the pages, newest first (the 20 newest; all with `--all`; `page_list` in
+    `--json`), and `contexto search WORDS` runs the store search the MCP tool uses and prints each hit's
+    index line and matching lines with their offsets. `recall` takes the page id and offset both print,
+    and refuses a malformed id before building a path: a 300-character `pg_` id was read as a file name,
+    failed with ENAMETOOLONG, and was logged `page_unreadable`. The search prints its own lines rather
+    than the tool's reply, which is shaped by the turn's recall room and phrased for the model.
+  - **A readable `state`.** The default view is the pinned records, or "No pinned records.", then how
+    many turns are paged out. On a session with no pages, the model text opened with "Earlier turns of
+    this conversation are paged out of your context" (live-claude finding 3). `--raw` keeps the model text
+    for diagnosis. The MCP tool's text is unchanged here.
+  - **4xx counted once.** The proxy logs each upstream 4xx as its `request` entry and as `upstream_4xx`,
+    and `sessions show` counted both: 12 for 6 `HEAD /api/hello` 401s (live-claude finding 2). `request`
+    entries are no longer counted, and `upstream_4xx_model` separates the model paths, since Claude Code
+    sends that keyless probe at every launch.
+  - **Id prefixes.** The README writes `7f3a`; `sessions show 87df` said "no session". A unique prefix now
+    names a session for the read-only commands (`recall`, `search`, `state`, `sessions show`); an exact id
+    wins, and an ambiguous prefix names up to 5 matches and exits 1. `sessions prune --session` takes the
+    full id only: with prefixes, `prune --session w --yes` deleted the one session starting with `w`, so
+    a mistyped or already deleted id removed a session nobody named, and a cleanup run twice deleted
+    `test-2` the second time (reviewer A, PR #241). A prune id that only starts existing ids exits 2 and
+    names them; an unknown id still exits 1. `mcp` and `run` keep exact ids: one is written by the
+    launcher, and the other creates the session when it is absent, so a prefix there would open the
+    wrong store or a new one.
+    `run --session 5238` made a new empty session `5238`, which the readers then preferred (exact id
+    first) to `52385048...` (reviewer B, PR #241); `run` now refuses an id that is not a session but
+    the start of existing ids, exit 2, naming them, for claude and codex (in `launcher.open_session`).
+    A new full id still creates its session.
+  - **The live session.** Inside a fresh `contexto run claude` that had not paged yet, `contexto state`
+    and `contexto search` answered from an older session with content: the default skipped the live
+    empty session, and nothing told the CLI its session (reviewer A, PR #241). `run` now sets
+    `CONTEXTO_SESSION=<id>` for claude and codex, and the default never skips a session another process
+    holds open (its `live.lock`, probed as prune probes it).
+  - **`--session` edges.** `--session ''` was taken as "not given" and quietly used another session; it is
+    now an invalid id, for the readers, `proxy`, and `run` with either CLI. An id over 255 bytes crashed
+    `recall`, `state` and `sessions show` with a traceback (Errno 63); `paths.session_dir` now refuses it,
+    so every command reports it in one line.
+  - **No junk sessions.** On a fresh home, `proxy --upstream not-a-url`, `proxy --port 1`, `run --upstream
+    ftp://x claude`, `run claude --version` and `mcp --session typo-id` each left a session directory, and
+    the docs-audit run had 7 empty rows in `sessions list`. A failed launch's empty session then became the
+    default for `state` and `recall`. Now `mcp` serves only an existing session; `proxy` and `run claude`
+    remove a session they created when the proxy cannot start, through prune's lock check (the store
+    releases its own lock first, `SessionStore.release`); `run claude` with only `--version`, `-v`,
+    `--help` or `-h` runs claude without a session or proxy; and the default skips sessions with no pages
+    and no ledger records unless another process holds them open. Not changed here: a failed `run codex`
+    still leaves its session (codex.py,
+    whose launch order the codex-launch area changes), and a session whose CLI never sent a request is
+    kept, since its log records the launch and the exit code.
+  - **Validation and exit codes.** `--bound 10` started with a warning of "-79,990 tokens" while `--bound 10
+    --headroom-floor 25000`, the default spelled out, was refused. The default floor is now checked like a
+    given one: a bound not above 25,000 without `--headroom-floor` is a usage error (the engine's headroom
+    is never below the floor, rule 17). `proxy --port -1` or `70000` printed an `OverflowError` traceback;
+    it is now a usage error, exit 2. `run` exited 2 when the store could not open (`CONTEXTO_HOME` a file,
+    or read-only); 2 stays the usage error, including an invalid session id, and a store that cannot open
+    is 1, like a proxy that cannot start, for claude and codex. (After D55 merged, `run` refuses a home
+    that is a file up front as a usage error, exit 2, unchanged; the stricter check is kept, and 1 is for a
+    home that exists but cannot be written.) `sessions list` on a home that is a file
+    said "No sessions" and exited 0, `state` and `search` said "no sessions under <file>/sessions", and
+    `prune` printed a raw `[Errno 20]`; every reader now says "<home> is not a directory (check
+    $CONTEXTO_HOME)" and exits 1. `sessions show --json` marks a cut list with `page_list_truncated`.
+    A pages directory that cannot be read gave `sessions show` and `search` a `PermissionError` traceback
+    with this change (reviewer A); `show` and `state` now print the summary or the pins and one error line,
+    `search` one line, all exit 1.
+  - **Help text.** `run` and the top-level help name Codex; `mcp` says the CLI spawns it; `proxy --help`
+    no longer shows "``contexto proxy``: ... (M2 contract, CLI)"; `recall`'s `PAGE_ID` and `sessions
+    show`'s `ID` have help. The `--codex-auth` help still cites D35 (codex.py, the codex-launch area).
+  - **Review round 2 (reviewers A and B).** `contexto proxy --session` goes through the same check as
+    `run`: an id that only starts existing sessions is refused with exit 2, so it cannot create a session
+    that hides the one meant. `sessions prune --session ''` is an invalid id (exit 1) again, checked
+    before the prefix rule, which had reported it as the start of every session. `run --help` and
+    `proxy --help` say `--session` takes the full id; the readers' default names "or one in use".
+  - **Round 4 (re-check after D55 and its follow-ups merged).** `run codex` with a `CONTEXTO_HOME` that
+    is a file exited 1, while `run claude` refuses it up front with 2 (D55): `launcher.open_session`, which
+    both CLIs use, now checks the home, so codex exits 2 too. Whether the launch created its session is now
+    recorded in `pick_session`, where the D55 follow-ups open the store; a test makes the proxy's bind fail in
+    `run claude` and checks that a session the launch created is removed and an existing one is kept.
+  - **Merge re-check after D52.** `contexto proxy --session ''` exited 1 while `run` exits 2; an invalid
+    `proxy --session` id (empty, or over 255 bytes) is now a usage error, exit 2, checked before the store
+    opens. D52's removal of a session a refused Codex launch created is kept as the one mechanism for
+    `run codex`; `run claude` and `proxy` keep `discard_new_session`, so no launch removes a session twice.
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.
