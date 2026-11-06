@@ -1,8 +1,9 @@
 name: Release
 
 # A release creates a v{version} tag on the merged commit and a GitHub Release with the
-# sdist and wheel attached. It never pushes a commit: main is protected by a ruleset with
-# no bypass actors, and semantic-release runs with --no-commit. See RELEASING.md.
+# sdist, wheel and SHA256SUMS attached, plus a GitHub build provenance attestation for the sdist
+# and wheel. It never pushes a commit: main is protected by a ruleset with no bypass actors, and
+# semantic-release runs with --no-commit. See RELEASING.md.
 #
 # Releases are off until the repository variable RELEASES_ENABLED is set to "true"
 # (Settings > Secrets and variables > Actions > Variables). Unset or any other value:
@@ -46,12 +47,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # actions/attest-build-provenance: sign the provenance with the job's OIDC token and store it.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
+          # Pinned like Ruff and pytest. uv is also the build backend, and its version is in the wheel.
+          version: "0.13.7"
           python-version: "3.12"
           # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
           ignore-nothing-to-cache: true
@@ -95,11 +101,17 @@ jobs:
           test -n "$remote"
           echo "$TAG points at $GITHUB_SHA; HEAD unchanged; no commit was made."
 
+      - name: Attest the build provenance of the sdist and wheel
+        if: steps.plan.outputs.released == 'true' && hashFiles('dist/SHA256SUMS') != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
       - name: Check that gh is available (hosted runners ship it; the script installs it only if missing)
         if: steps.plan.outputs.released == 'true'
         run: bash .github/scripts/ensure-gh.sh
 
-      - name: Attach the sdist and wheel
+      - name: Attach the sdist, wheel and checksums
         if: steps.plan.outputs.released == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -111,13 +123,16 @@ jobs:
             echo "No distributions were built (no pyproject.toml on this commit)."
             exit 0
           fi
-          gh release upload "$TAG" "${files[@]}" --clobber
+          gh release upload "$TAG" "${files[@]}" dist/SHA256SUMS --clobber
 
   reattach:
     if: github.event_name == 'workflow_dispatch' && vars.RELEASES_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # actions/attest-build-provenance: sign the provenance with the job's OIDC token and store it.
+      id-token: write
+      attestations: write
     env:
       TAG: ${{ inputs.tag }}
     steps:
@@ -128,6 +143,8 @@ jobs:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
+          # Pinned like Ruff and pytest. uv is also the build backend, and its version is in the wheel.
+          version: "0.13.7"
           python-version: "3.12"
           # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
           ignore-nothing-to-cache: true
@@ -148,19 +165,32 @@ jobs:
           gh release create "$TAG" --verify-tag --title "$TAG" --notes "Release notes are being generated."
           # Replace the placeholder with the Conventional Commit notes for this tag.
           $PSR changelog --post-to-release-tag "$TAG"
-      - name: Rebuild at the tagged version and re-attach
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Rebuild at the tagged version
         run: |
           git checkout --quiet --detach "refs/tags/$TAG"
           # Drop files main's checkout left behind (semantic-release writes CHANGELOG.md), so the
           # sdist holds exactly the tagged tree.
           git clean -ffdx
           NEW_VERSION="${TAG#v}" bash .github/scripts/release-build.sh
+          # A tag older than the checksum asset runs a release-build.sh that does not write it.
+          shopt -s nullglob
+          files=(dist/*.tar.gz dist/*.whl)
+          if [ "${#files[@]}" -gt 0 ] && [ ! -f dist/SHA256SUMS ]; then
+            (cd dist && sha256sum -- "${files[@]#dist/}" > SHA256SUMS)
+          fi
+      - name: Attest the build provenance of the rebuilt sdist and wheel
+        if: hashFiles('dist/SHA256SUMS') != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Re-attach the sdist, wheel and checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           shopt -s nullglob
           files=(dist/*.tar.gz dist/*.whl)
           if [ "${#files[@]}" -eq 0 ]; then
             echo "Nothing to attach: $TAG has no pyproject.toml."
             exit 0
           fi
-          gh release upload "$TAG" "${files[@]}" --clobber
+          gh release upload "$TAG" "${files[@]}" dist/SHA256SUMS --clobber
