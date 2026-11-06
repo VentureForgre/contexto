@@ -630,6 +630,13 @@ It goes straight to the owner's proxy, bypassing Contexto.
   baseline.
 - **No tool loop.** Contexto's tools are removed and `tool_choice` is `none`, so the model answers
   from the context alone. The probe turn's own tool calls in H1 are not part of the baseline.
+- **Notes for tools it does not send.** With tool search on (Claude Code 2.1.318's default), a
+  `ToolSearch` result holds `tool_reference` blocks, and the API refuses a history that references a
+  tool missing from `tools` (live run #4: 400 for `contexto_pin`). Each block naming a tool the baseline
+  does not send (a `tool_reference`, or a `tool_addition`/`tool_removal` of an unsent tool) becomes the
+  text `Tool <name> loaded.` (or `removed.`), keeping its `cache_control`; the tool's definition is not
+  sent, and the conversation's content (the tool call and its result) is unchanged. The replay output
+  lists the converted names as `unsent_tool_notes`.
 - **Nothing edits the context.** `context_management` is dropped.
 - **Intake's check, no silent trimming.** `count_tokens` on the exact request must fit
   `claude-haiku-5-5`'s 1,000,000-token context window with `max_tokens` (32,000, the guard's
