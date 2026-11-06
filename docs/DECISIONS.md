@@ -1257,6 +1257,59 @@ the owner's delegation. Open decisions are listed at the end with the options an
     nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
     (reviewer B, PR #230 round 2).
 
+- **D50. Main follows Claude Code's session id across `/clear` and `/resume`, and a side request
+  that arrives first stays main only until the first prompt.** Claude, 2026-11-05, under D0; contract
+  change. The engine keys a conversation by its first prompt and handed main over only at a turn
+  start with strictly more turn starts than main (contract PR #125). QA's verify-clear and
+  live-realworld F2 (v0.5.8): after `/clear` the new conversation has one turn start, so it stayed a
+  side conversation until it outgrew the old one. No room, snapshot or window came from the
+  conversation the user was in. Every tool call was charged against the old conversation's last
+  room, which was never republished; once that was spent, `contexto_state` and `contexto_search`
+  returned nothing, pins included. The live answer for a pinned codename was "I don't know ... my
+  contexto recall budget for this turn is used up". The same report saw the user's first turn of a
+  fresh session not be main, because Claude Code's tool-less side request arrives first and a tie
+  keeps it.
+  - **Measured** (zero spend; Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318 in a pty against a
+    loopback stub that kept every request's headers and body, isolated config dirs, fake key; 15
+    Messages requests per version). The steps: two turns, the first launching a subagent; `/clear`;
+    the same again; `/resume` of the first conversation; one turn. On every request
+    `X-Claude-Code-Session-Id` equals the `session_id` in `metadata.user_id`. `/clear` starts a new
+    id; `/resume` sends the resumed conversation's old id again; the subagents and the one-message,
+    tool-less side request Claude Code sends before each prompt carry the id of the conversation
+    they run for. The first request of the session, and the first after `/clear`, is that side request.
+  - **Rule.** At a turn start, a conversation also takes over main when its session id differs from
+    main's and no other conversation has been main in that session (`new_cli_session` after
+    `/clear`, `resumed_cli_session` after `/resume`), or when main has never sent a request with a
+    tool list and this conversation has (`after_side_request`). Only a conversation seen with a tool
+    list takes over by these two, so side requests never do, and a subagent never does since it
+    carries main's id. A background subagent the old conversation launched before `/clear` keeps the
+    old id, whose main was the old conversation, so it does not take over either. The turn-start
+    rule is kept as the third case (`more_turn_starts`), so D50 only adds handovers. The id is read
+    from the header, else from `metadata.user_id`, only for the Messages API; Codex is unchanged.
+    The request that takes over logs content-free `main_changed` with the reason and its turn
+    starts (QA found no event saying main was stale).
+  - **Result.** Replaying the captures through the engine: before, the user's first turn (3
+    requests) and all 4 of the new conversation's requests after `/clear` were not main;
+    after, every request of the user's conversation is main (from its first request after `/clear`
+    and after `/resume`), and no subagent or side request is. In the engine test of the live case
+    (old room spent: bound 4,000, real input 3,600), `contexto_state` returned the budget-spent
+    notice before and returns the pin after the new conversation's first request; `contexto_search`
+    finds the old conversation's paged turn.
+  - **Options considered.** Stop charging a stale main once another conversation has started a turn
+    (QA's fallback). Rejected: a subagent's first request is a turn start inside main's tool loop,
+    so main's own calls would then be bounded by the side room alone and could overfill main's
+    window. A head match (same system and tools as main at a new conversation's turn start).
+    Rejected: deferred tools and settings change the head inside one conversation, and the session id
+    is on every request of every measured version.
+  - **Not covered.** Without a session id (another client, or a Claude Code that drops both) the
+    turn-start rule alone applies, as before. Editing the first prompt with `/rewind` would give a
+    new key in the same session, which stays side until it outgrows the old one (inferred, not
+    measured). After a
+    restart whose epoch record holds another conversation, the new main still writes no record until
+    it has more turn starts than the record's (rule 16, unchanged), so that conversation can resume
+    only by rotating once. A subagent resumed by `SendMessage` more often than main has turns can
+    still take over by the turn-start rule.
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.

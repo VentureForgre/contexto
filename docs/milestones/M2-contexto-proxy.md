@@ -837,10 +837,22 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   snapshot write only marks the snapshot stale (search then says "in view not checked") and logs
   `retained_stale`, not `store_error`; it does not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Only the main
   conversation publishes the room, the snapshot, and the window (`set_window`): the engine keeps state per conversation (the
-  main one, subagents, side requests), and the main conversation is the one with the most turn
-  starts, re-evaluated at each turn start: it changes only when another conversation has strictly
-  more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
-  stay main. The choice is made before the request is transformed, so a request that fails after
+  main one, subagents, side requests). The first conversation seen is main, and the choice is
+  re-evaluated at each turn start of another conversation, which takes over when (D50):
+  - its Claude Code session id differs from main's and no other conversation has been main in that
+    session: `/clear` starts a new session id, `/resume` sends the resumed conversation's id again.
+    The id is `X-Claude-Code-Session-Id`, else the `session_id` in `metadata.user_id`; subagents and
+    side requests carry the id of the conversation they run for (measured on Claude Code 2.1.302,
+    2.1.310, 2.1.314 and 2.1.318);
+  - main has never sent a request with a tool list and this conversation has (Claude Code's title,
+    topic, and quota side requests have none, and one is often the session's first request);
+  - or it has strictly more turn starts than main (a tie keeps the current one).
+
+  Only a conversation seen with a tool list takes over by the first two rules (for Codex, which
+  sends no Claude Code session id, only the third applies). The engine logs content-free
+  `main_changed` with `reason` (`new_cli_session`, `resumed_cli_session`, `after_side_request`, or
+  `more_turn_starts`) and the request's `turn_starts` on the request that takes over; never the
+  session id. The choice is made before the request is transformed, so a request that fails after
   its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them (they publish side rooms instead, D40, see the per-turn
   recall budget), so their tool calls see the main conversation's snapshot, and for a subagent
   "in view" refers to the main conversation's window (a documented subagent limitation); the MCP
