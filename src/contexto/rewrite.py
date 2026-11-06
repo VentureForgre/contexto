@@ -578,16 +578,21 @@ UNCLASSIFIED = "unclassified"
 # available via ToolSearch. ...", one name per line, then a blank line) and "# Environment" follows;
 # the main conversation's still starts with "# Environment" (spikes/m2/subagents, zero spend). A
 # listing with no "# Environment" after it (an MCP server connecting mid-session) does not match.
-SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.310"
+# D56: the same on 2.1.314 and 2.1.318, with one change for claude-opus-5-5: it gets no <total_tokens>
+# countdown from 2.1.314 on (the other ids still do), so an effort change on a turn with no other
+# system message arrives as a settings-only message ({"role": "system", "content": [], "output_config":
+# ...}; none in the 2.1.302 matrix, 3 to 12 per opus-5-5 run on 2.1.314 and 2.1.318). It is read as
+# settings, and the latest copy is carried.
+SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.318"
 SESSION_START_SIGNATURE = re.compile(
     r"\s*(?:<system-reminder>\s*)?(?:The following deferred tools are now available[^\n]*\n(?:[^\n]+\n)*\r?\n\s*)?"
     r"# Environment[ \t]*(?:\r?\n|\Z)")
 
 # Documented hook-output signatures (measured on Claude Code 2.1.301 with zero-spend stubs,
-# spikes/m2/carried/README.md findings 7 and 9; the same prefixes on 2.1.310, live_probe.sh): the CLI
-# wraps a hook's additionalContext in a role "system" message whose whole text starts with one of
-# these prefixes.
-HOOK_SIGNATURES_CLAUDE_CODE_VERSION = "2.1.310"
+# spikes/m2/carried/README.md findings 7 and 9; the same prefixes on 2.1.310, 2.1.314 and 2.1.318,
+# live_probe.sh): the CLI wraps a hook's additionalContext in a role "system" message whose whole text
+# starts with one of these prefixes.
+HOOK_SIGNATURES_CLAUDE_CODE_VERSION = "2.1.318"
 HOOK_SIGNATURES = (
     re.compile(r"UserPromptSubmit hook additional context: "),
     re.compile(r"PostToolUse:[^\s]+ hook additional context: "),
@@ -697,7 +702,9 @@ def _anthropic_classify_system(messages: list[dict], i: int) -> str:
 # each kind and may page older ones; blocks of no recognised kind are pageable. D46: 2.1.310 turns tool
 # search on by default, and on 4.x ids messages[0] then holds one more block, the deferred-tool listing
 # (the same on 2.1.302 with ENABLE_TOOL_SEARCH); the other kinds and their placement are unchanged.
-CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.310"
+# D56: the same kinds and placement on 2.1.314 and 2.1.318; 2.1.318's --resume re-sends far fewer old
+# file-changed notes (4 instead of 80 in the last request of each 48-turn resume run).
+CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.318"
 CONTEXT_BLOCK_KINDS = (
     ("token_countdown", re.compile(r"<total_tokens>")),
     ("plan_mode", re.compile(r"Plan mode is active|## Exited Plan Mode")),
@@ -1744,6 +1751,12 @@ def anchor_hash(hashes: tuple[str, ...] | list[str]) -> str:
 # ``resumedAgentId``) runs it again, as a new user turn in its own conversation, and that run's notice
 # names the ``SendMessage`` call. ``cliversions.SUBAGENT_SHAPES_TESTED`` names
 # the CLI versions these shapes were measured on; for any other version rooms only expire.
+# D56: since 2.1.312 (measured on 2.1.314 and 2.1.318) a run that used tools is reported with their names
+# first, in a ``<tools-used-before-summary>`` element: indented above a foreground hand-back's frame
+# ("  <tools-used-before-summary>Bash</tools-used-before-summary>\n  \n[Subagent hand-back] ..."), at
+# the start of the ``system`` notice, and, while main is idle, as a ``<system-reminder>`` block of its
+# own ahead of the notice's block. A system message is searched whole; in the other two places the
+# element is skipped, and only there.
 AGENT_TOOLS = frozenset({"Agent", "Task"})
 ASYNC_LAUNCH = "Async agent launched successfully."  # a background launch's result: the agent runs on
 HAND_BACK = "[Subagent hand-back]"  # a foreground agent's result: it has stopped
@@ -1752,6 +1765,8 @@ TASK_NOTIFICATION = re.compile(r"<task-notification>(.*?)</task-notification>", 
 NOTIFIED_CALL = re.compile(r"<tool-use-id>([^<\s]+)</tool-use-id>")
 AGENT_ID = re.compile(r"\bagentId: (\w+)")
 RESUMED_AGENT = re.compile(r'"resumedAgentId"\s*:\s*"(\w+)"')
+TOOLS_USED = re.compile(r"\s*<tools-used-before-summary>[^<]*</tools-used-before-summary>\s*")
+TOOLS_USED_BLOCK = re.compile(r"\s*<system-reminder>" + TOOLS_USED.pattern + r"</system-reminder>\s*")
 
 
 class _SideRoom(NamedTuple):
@@ -1790,8 +1805,9 @@ def first_prompt(messages: list[dict]) -> str | None:
 def _notice_texts(message: dict) -> list[str]:
     """The texts of ``message`` that may carry a CLI notice, in the measured shapes only: a ``system``
     message, or a user message whose content (a string, or its first text block) opens with the
-    ``<system-reminder>`` wrapper or ``[SYSTEM NOTIFICATION - NOT USER INPUT]``. Assistant text and
-    plain user text (a pasted notice) never count."""
+    ``<system-reminder>`` wrapper or ``[SYSTEM NOTIFICATION - NOT USER INPUT]``, or (D56) whose first
+    text block holds only the tools-used element and whose second opens with the wrapper. Assistant
+    text and plain user text (a pasted notice) never count."""
     if message.get("role") == "system":
         return _texts(message)
     if message.get("role") != "user":
@@ -1802,6 +1818,8 @@ def _notice_texts(message: dict) -> list[str]:
     else:
         texts = [b["text"] for b in _blocks(message) if isinstance(b, dict) and b.get("type") == "text"
                  and isinstance(b.get("text"), str)]
+        if len(texts) > 1 and TOOLS_USED_BLOCK.fullmatch(texts[0]):
+            return [texts[1]] if texts[1].lstrip().startswith(NOTICE_OPENINGS[0]) else []
         first = texts[0] if texts else ""
     return [first] if first.lstrip().startswith(NOTICE_OPENINGS) else []
 
@@ -1847,6 +1865,8 @@ def agent_runs(messages: list[dict]) -> tuple[dict[str, list[str | None]], dict[
                     continue
                 if call_id not in calls:
                     continue
+                used = TOOLS_USED.match(text)
+                text = text[used.end():] if used else text  # D56: the tools the agent used, then the result
                 found = AGENT_ID.search(text)
                 if block.get("is_error"):
                     agents.pop(call_id, None)  # no agent was started

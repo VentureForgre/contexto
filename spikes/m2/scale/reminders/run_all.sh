@@ -1,18 +1,23 @@
 #!/bin/bash
 # Zero-spend matrix: resume and stream sessions of 48 turns on three models, then the analysis.
 # Raw bodies stay under $ROOT (a temp dir, deleted by nothing: inspect, then remove by hand).
-# Usage: spikes/m2/scale/reminders/run_all.sh [turns]   (from the repo root, after the venv setup)
+# Usage: spikes/m2/scale/reminders/run_all.sh [turns] [run_session.py args...]   (from the repo root,
+# after the venv setup). Extra args go to every run, e.g. `48 --env ENABLE_TOOL_SEARCH=false`.
+# CLAUDE=<binary> picks the Claude Code to run (default: claude on PATH, then ~/.local/bin).
 # Wall time about 1 minute for 48 turns on an M-series Mac.
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$S/../../../.." && pwd)"
 TURNS="${1:-48}"
+shift $(($# > 0 ? 1 : 0))
+EXTRA=("$@")
 ROOT="$(cd "$(mktemp -d /tmp/rem-runs.XXXXXX)" && pwd -P)"
 mkdir -p "$S/results"
 echo "runs under $ROOT"
 run() {  # run <label> <mode> <model> [--env K=V ...]
   local label=$1 mode=$2 model=$3; shift 3
   python3 "$S/run_session.py" --mode "$mode" --turns "$TURNS" --model "$model" --root "$ROOT/$label" "$@" \
+    ${EXTRA[@]+"${EXTRA[@]}"} \
     > "$ROOT/$label.log" 2>&1
   echo "$label exit $? ($(grep -c '^turn ' "$ROOT/$label.log") turns, non-loopback lines: $(grep -c 'bad=[1-9]' "$ROOT/$label.log"))"
 }

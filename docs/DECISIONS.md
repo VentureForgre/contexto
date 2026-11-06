@@ -1295,6 +1295,62 @@ the owner's delegation. Open decisions are listed at the end with the options an
     request with the new head, the change is counted twice at the next head-change turn start
     (higher `F`, so more paging, never an overrun). The pre-send check uses the estimator; real
     usage over the bound is still logged after the response, as before.
+- **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
+  subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
+  untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by
+  Claude Code's auto-updater, which deleted 2.1.310, and Codex at 0.166.0. The D38 routine
+  (`docs/cli-updates.md`, Claude steps 1 to 7, Codex steps 1 to 4) ran on each with zero spend,
+  binaries run by path and `DISABLE_AUTOUPDATER=1`; the numbers are in
+  `docs/research/M2-claude-code-2.1.318.md`. 2.1.310 could not be run side by side.
+  - **What did not change.** Session start, every context block's kind, the hook prefixes, the
+    missing-tools verdicts (True, False, True in 6 of 6 sets), the D44 refusal (5 / 0, 0 / 5, 4 / 1)
+    and argstub's 8 of 8 are the same on both versions. In the four reminders matrices (52 runs),
+    Contexto's code never missed a session start and found no context block without a kind (705 bodies
+    with tools per matrix with tool search on, 782 with it off). Codex 0.166.0 sends the 0.163.0
+    section tags and request shapes; only its built-in provider, which Contexto does not use, adds a
+    role-less `configuration_update` item. The CLI changes that do not change a classification:
+    claude-opus-5-5 gets no `<total_tokens>` countdown from 2.1.314 on, so an effort change on a turn
+    with no other system message comes as a settings-only message (3 to 12 per opus-5-5 run; none on
+    2.1.302), read as settings (contract rule 2a). And 2.1.318's `--resume` re-sends 4 old
+    file-changed notes where 2.1.314 sent 80.
+  - **What changed: subagent stop reports.** Since 2.1.312 a subagent run that used tools is reported
+    with their names first, in `<tools-used-before-summary>Bash</tools-used-before-summary>`. It comes
+    in three places. (1) It is indented above a foreground hand-back's `[Subagent hand-back]` frame,
+    so the result no longer started with the frame and the call was an unknown shape. (2) While main
+    is idle, it is a `<system-reminder>` text block of its own ahead of the notice's block, and only a
+    user message's first text block was read, so the stop was missed. (3) It opens the `system` notice
+    during main's tool loop, which was still read, since a system message is searched whole. Captured
+    on 2.1.314 and 2.1.318 (the same apart from agent ids), on the fg, stop, resume, bgidle and esc
+    scenarios, `agent_runs` gave 1 stop for none of fg, stop, bgidle and esc; resume gave 3.
+    Unchanged: the subagent's first prompt, the launch receipt, `resumedAgentId`, and the resumed
+    run's `SendMessage`-named notice.
+  - **Rule.** The element and the whitespace around it are skipped at the start of an `Agent` call's
+    result. A user message whose first text block is a `<system-reminder>` holding only the element
+    is read at its second text block, and only when that block opens with `<system-reminder>`. A
+    notice block that is not wrapped after it (`[SYSTEM NOTIFICATION ...` alone, which counts as a
+    first block) does not count there, and other text before a hand-back's frame still leaves the
+    call unknown. The 2.1.302 shapes are read as before. With the rule, the captures give 1 stop for
+    fg, stop, bgidle and esc and 3 for resume on both versions. The engine tests run on those
+    captures, scrubbed (`tests/fixtures/subagent_shapes_2_1_31x.json`).
+  - **Lists.** `TESTED_VERSIONS` gains 2.1.314, 2.1.318 and 0.166.0, and `SUBAGENT_SHAPES_TESTED`
+    gains 2.1.314 and 2.1.318. The session-start, context-block and hook measured-on constants become
+    2.1.318, and the Codex section constant 0.166.0. 2.1.312 was only partly measured (by QA) and
+    stays out.
+  - **The spikes.** `carried/live_probe.sh` and `carried/probe.sh` drove `~/.local/bin/claude` with
+    the real `HOME`, and `codex/probe.sh` and `codex/smoke.sh` ran Codex with the real `HOME`. Claude
+    Code's auto-updater was left on in the carried scripts and `cliversion/check.sh`. Now every one
+    takes a binary (an argument, or `CLAUDE=` / `CODEX=`) and defaults to the one on `PATH`, uses a
+    temp `HOME`, and sets `DISABLE_AUTOUPDATER=1` for Claude Code. The reminders harness reads
+    `CLAUDE=`, and `run_all.sh` passes extra arguments to every run, so the tool-search-off matrix
+    needs no script edit. `subagents/run.sh` printed `rc=0` with an empty capture when its stub could
+    not bind (the port is drawn from 200, and another run held it). `run.sh` and `drive.py` now take a
+    free port, wait for the stub's `listening` line, fail when it does not come, and run Claude Code
+    under a scrubbed environment and a temp `HOME`. `docs/cli-updates.md` says every run must set
+    `DISABLE_AUTOUPDATER=1`.
+  - **Not done.** No live check ran on 2.1.314, 2.1.318 or 0.166.0 (routine step 9 needs the owner's
+    approval and a token cap). The early close was measured against the scripted stub only. In esc a
+    side request asks for a background agent's progress ("Describe your most recent action in 3-5
+    words ..."). Its first prompt matches no `Agent` call, so it opens no room that could close early.
 - **D55. `contexto run claude` resumes through Contexto, survives signals, and keeps out of the TUI.**
   Claude, 2026-11-05, under D0; contract change. From the QA run of 2026-11-05 (reports launcher-ux 2,
   4 to 8; live-claude 1; live-realworld F3 to F5; live-fidelity 6; security 3, 4 and 7). Measured at zero

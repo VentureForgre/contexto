@@ -6,7 +6,8 @@
 # here) and A6_UPSTREAM (the owner's proxy base URL). Codex runs with env -i in a non-git scratch
 # directory, so no OpenRig or Claude Code session variables reach it. A watchdog reads the session
 # log and kills the run on the stop rules (A6 plan, manager-1 2026-10-16 02:47Z). Output stays in
-# <repo>/.contexto/spikes/M2-A6/ (ignored by Git).
+# <repo>/.contexto/spikes/M2-A6/ (ignored by Git). HOME is a temp directory, so Codex writes nothing in
+# the user's home; CODEX=<binary> picks the Codex to run (default: codex on PATH, then ~/.local/bin).
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$S/../../.." && pwd)"
@@ -17,6 +18,10 @@ FLOOR=6000
 PER_REQUEST_KILL=46000   # planned per-request maximum 37,000 plus 25%
 CUMULATIVE_KILL=225000
 mkdir -p "$OUT" "$SCRATCH"
+CODEX="${CODEX:-$(command -v codex || echo "$HOME/.local/bin/codex")}"
+RUN_HOME="$(cd "$(mktemp -d /tmp/m2-a6-home.XXXXXX)" && pwd -P)"
+mkdir -p "$RUN_HOME/bin" && ln -s "$CODEX" "$RUN_HOME/bin/codex"  # contexto run finds codex on PATH
+trap 'rm -rf "$RUN_HOME"' EXIT
 [ -d "$SCRATCH/.git" ] && { echo "scratch must not be a Git repository"; exit 2; }
 # One large synthetic tool output per turn: about 40 KB of plain text lines, no numbers to speak of.
 cat > "$SCRATCH/gen.py" <<'PY'
@@ -41,7 +46,7 @@ case "$mode" in
     : > "$OUT/preflight-stub.jsonl"
     python3 "$S/responses_stub.py" "$PORT" "$OUT/preflight-stub.jsonl" > /dev/null 2>&1 &
     STUB=$!
-    trap 'kill $STUB 2>/dev/null; wait $STUB 2>/dev/null' EXIT
+    trap 'kill $STUB 2>/dev/null; wait $STUB 2>/dev/null; rm -rf "$RUN_HOME"' EXIT
     sleep 1
     printf '#!/bin/sh\necho dummy-not-a-credential\n' > "$OUT/dummy-helper.sh"
     chmod 700 "$OUT/dummy-helper.sh"
@@ -73,7 +78,7 @@ case "$mode" in
 esac
 
 LOG="$HOME_DIR/sessions/$SID/log.jsonl"
-(cd "$SCRATCH" && exec env -i HOME="$HOME" PATH="$REPO/.venv/bin:$HOME/.local/bin:/usr/bin:/bin" TERM=dumb \
+(cd "$SCRATCH" && exec env -i HOME="$RUN_HOME" PATH="$REPO/.venv/bin:$RUN_HOME/bin:/usr/bin:/bin" TERM=dumb \
   CONTEXTO_HOME="$HOME_DIR" perl -e "alarm $LIMIT; exec @ARGV" "$REPO/.venv/bin/contexto" run \
   --bound "$BOUND" --headroom-floor "$FLOOR" --session "$SID" --upstream "$UP" \
   --codex-key-helper "$HELPER" ${EXTRA[@]+"${EXTRA[@]}"} codex "${CODEX_ARGS[@]}" \
