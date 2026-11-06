@@ -11,9 +11,11 @@ overcounted a screenshot 55 to 270 times: an image costs ``width * height / 750`
 API's downscaling to a 2,576-pixel long edge, at most 4,784 (Anthropic's high-resolution tier;
 dimensions read from the PNG, JPEG, GIF, or WebP header), and a PDF ``PDF_PAGE_TOKENS`` per page.
 Media whose size cannot be read (a URL, a file id, an unknown format) gets the largest cost one can
-have. Their bytes stay out of every byte count the ratio divides, and the engine takes their
-lowest plausible cost (``MediaCost.floor``) off the real usage before it updates the ratio, so a
-screenshot never skews the ratio later text is estimated at.
+have, and a PDF whose pages cannot all be counted a guess of one page per 3 KB: every fallback errs
+high, since the bound depends on it. Parsing a PDF is bounded in time and memory and never raises.
+Media bytes stay out of every byte count the ratio divides, and the engine takes the media's lowest
+plausible cost (``MediaCost.floor``) off the real usage before it updates the ratio, so a screenshot
+never skews the ratio later text is estimated at.
 """
 
 from __future__ import annotations
@@ -38,15 +40,27 @@ TOOL_RESULT_BYTES_PER_TOKEN = 1.5
 PIXELS_PER_TOKEN = 750
 IMAGE_MAX_EDGE = 2_576
 IMAGE_MAX_TOKENS = 4_784
+IMAGE_MIN_TOKENS = 64  # a thin or tiny image: patch rounding is not modelled, so never price it near 0
 IMAGE_FLOOR_MAX_EDGE = 1_568  # the older models' downscaling: the lowest cost an image can have
 IMAGE_FLOOR_MAX_TOKENS = 1_568
+IMAGE_FLOOR_SHARE = 0.95  # measured costs ran up to 3% under the formula (2,694 for 2,765)
 # PDFs: each page is sent as its text plus an image of the page. A 3-page PDF measured 4,748 tokens
-# (1,583 a page); Anthropic documents 1,500 to 3,000 text tokens a page before the page image.
-PDF_PAGE_TOKENS = 3_000
+# (1,583 a page); Anthropic documents 1,500 to 3,000 text tokens a page, and the page image comes on
+# top, so a page is priced at 3,000 plus an image at the older 1,568-token limit. Typical pages cost
+# far less; a dense page (small-font code or tables) can cost more than 3,000 text tokens.
+PDF_PAGE_TOKENS = 3_000 + IMAGE_FLOOR_MAX_TOKENS
 PDF_FLOOR_PAGE_TOKENS = 1_000
-PDF_BYTES_PER_PAGE = 50_000  # page count of a PDF whose page tree cannot be read: one page per 50 KB
-PDF_MAX_PAGES = 600  # the API's limit; also the cap on the byte-based count
+PDF_GUESS_BYTES_PER_PAGE = 3_000  # a page count that cannot be read: the most compact text pages, so it errs high
+PDF_MAX_PAGES = 600  # the API's limit; also the cap on every count and guess
 DOCUMENT_UNKNOWN_PAGES = 10  # a document by URL or file id: its size is not in the request
+# Bounds on the work for one PDF (the engine runs under the proxy's one transform lock, and a PDF can
+# come from an untrusted file): beyond any of them the page count is a guess, which errs high.
+PDF_MAX_BASE64 = 32 << 20  # characters decoded: the API's request limit
+PDF_MAX_OBJECT_STREAMS = 128  # object streams inflated
+PDF_STREAM_INPUT = 1 << 20  # compressed bytes read for an object stream without a direct /Length
+PDF_STREAM_OUTPUT = 4 << 20  # inflated bytes per object stream
+PDF_INFLATE_BUDGET = 16 << 20  # inflated bytes per PDF
+PDF_HEADER_WINDOW = 2_048  # bytes searched around /ObjStm for its object start and stream keyword
 IMAGE_TYPES = frozenset({"image", "input_image"})  # Messages, Responses
 HEAD_CHARS = 64  # base64 characters that hold the PNG, GIF and WebP dimensions
 JPEG_HEAD_CHARS = 262_144  # a JPEG's frame header follows its EXIF and ICC segments: read up to 192 KB
@@ -54,9 +68,15 @@ PDF_CACHE_SIZE = 64
 MEDIA_KEYS = ("content", "output", "source")  # where a block or item can hold media
 MEDIA_DEPTH = 10  # messages, message, content, tool_result, content, document, source, content, image
 
-_PAGE_OBJECT = re.compile(rb"/Type\s*/Page(?![A-Za-z])")
-_PAGE_COUNT = re.compile(rb"/Type\s*/Pages\b[^>]*?/Count\s+(\d+)|/Count\s+(\d+)[^>]*?/Type\s*/Pages\b")
-_STREAM = re.compile(rb"stream\r?\n")
+# Every repetition is bounded, so each scan is linear in the PDF's size; numbers have at most 9 digits.
+_PAGE_OBJECT = re.compile(rb"/Type\s{0,16}/Page(?![A-Za-z])")
+_PAGE_TREE = re.compile(rb"/Type\s{0,16}/Pages\b[^>]{0,256}?/Count\s{0,16}(\d{1,9})(?!\d)"
+                        rb"|/Count\s{0,16}(\d{1,9})(?!\d)[^>]{0,256}?/Type\s{0,16}/Pages\b")
+_OBJECT_STREAM = re.compile(rb"/Type\s{0,16}/ObjStm\b")
+_FLATE_ONLY = re.compile(rb"/Filter\s{0,16}(?:/FlateDecode\b|\[\s{0,16}/FlateDecode\s{0,16}\])")
+_DIRECT_LENGTH = re.compile(rb"/Length\s{1,16}(\d{1,9})(?!\s{1,16}\d{1,9}\s{1,16}R)")
+_BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
+_NOT_BASE64 = re.compile(r"[^A-Za-z0-9+/]")
 _PDF_PAGES: dict[tuple[int, int], tuple[int, bool]] = {}  # (length, hash) of base64 data -> pdf_page_count
 
 
@@ -152,7 +172,11 @@ def _base64_payload(block: dict) -> str | None:
 
 
 def _decode(data: str, chars: int) -> bytes:
+    """The first ``chars`` characters of base64 data, decoded; line breaks and other stray characters
+    are dropped first, so wrapped (MIME) base64 decodes too."""
     head = data[:chars]
+    if not _BASE64.fullmatch(head):
+        head = _NOT_BASE64.sub("", head)
     head = head[: len(head) - len(head) % 4]
     try:
         return base64.b64decode(head)
@@ -207,26 +231,30 @@ def _jpeg_size(head: bytes) -> tuple[int, int] | None:
     return None
 
 
-def image_tokens(width: int, height: int, *, max_edge: int = IMAGE_MAX_EDGE,
-                 max_tokens: int = IMAGE_MAX_TOKENS) -> int:
-    """``width * height / 750`` after scaling the long edge down to ``max_edge``, at most ``max_tokens``."""
+def image_tokens(width: int, height: int, *, max_edge: int = IMAGE_MAX_EDGE, max_tokens: int = IMAGE_MAX_TOKENS,
+                 min_tokens: int = IMAGE_MIN_TOKENS) -> int:
+    """``width * height / 750`` after scaling the long edge down to ``max_edge``, between ``min_tokens``
+    and ``max_tokens``."""
     scale = min(1.0, max_edge / max(width, height))
-    return min(max_tokens, max(1, math.ceil(width * scale * height * scale / PIXELS_PER_TOKEN)))
+    return min(max_tokens, max(min_tokens, math.ceil(width * scale * height * scale / PIXELS_PER_TOKEN)))
 
 
 def _image_cost(block: dict) -> tuple[int, int]:
     data = _base64_payload(block)
     size = None
     if data is not None:
-        head = _decode(data, HEAD_CHARS)
-        if head[:2] == b"\xff\xd8":
-            head = _decode(data, JPEG_HEAD_CHARS)
-        size = image_size(head)
+        try:
+            head = _decode(data, HEAD_CHARS)
+            if head[:2] == b"\xff\xd8":
+                head = _decode(data, JPEG_HEAD_CHARS)
+            size = image_size(head)
+        except Exception:  # a damaged header must not break the transform: priced as unknown
+            size = None
     if not size or min(size) <= 0:
         return IMAGE_MAX_TOKENS, 0  # a URL, a file id, or a header that cannot be read
     width, height = size
-    return (image_tokens(width, height),
-            image_tokens(width, height, max_edge=IMAGE_FLOOR_MAX_EDGE, max_tokens=IMAGE_FLOOR_MAX_TOKENS))
+    floor = image_tokens(width, height, max_edge=IMAGE_FLOOR_MAX_EDGE, max_tokens=IMAGE_FLOOR_MAX_TOKENS, min_tokens=0)
+    return image_tokens(width, height), math.floor(floor * IMAGE_FLOOR_SHARE)
 
 
 def pdf_pages(data: str) -> int:
@@ -234,40 +262,86 @@ def pdf_pages(data: str) -> int:
 
 
 def pdf_page_count(data: str) -> tuple[int, bool]:
-    """Pages of a base64 PDF, and whether they were counted: its page objects (in object streams
-    too), else its page tree's count, else a guess of one page per ``PDF_BYTES_PER_PAGE``; between 1
-    and ``PDF_MAX_PAGES``. Cached by content, since the engine estimates a history many times per request."""
+    """Pages of a base64 PDF, and whether they were counted rather than guessed; between 1 and
+    ``PDF_MAX_PAGES``. Never raises: any failure is a guess. Cached by content, since the engine
+    estimates a history many times per request."""
     key = (len(data), hash(data))
     result = _PDF_PAGES.get(key)
     if result is None:
-        pdf = _decode(data, len(data))
-        pages = len(_PAGE_OBJECT.findall(pdf)) + sum(len(_PAGE_OBJECT.findall(s)) for s in _object_streams(pdf))
-        if not pages:
-            pages = max((int(a or b) for a, b in _PAGE_COUNT.findall(pdf)), default=0)
-        counted = pages > 0
-        if not counted:
-            pages = math.ceil(len(pdf) / PDF_BYTES_PER_PAGE)
-        result = min(PDF_MAX_PAGES, max(1, pages)), counted
+        try:
+            result = _count_pdf_pages(data)
+        except Exception:  # a hostile or damaged PDF must not break the transform (D48)
+            result = _guess_pages(len(data) * 3 // 4), False
         if len(_PDF_PAGES) >= PDF_CACHE_SIZE:
             _PDF_PAGES.pop(next(iter(_PDF_PAGES)))
         _PDF_PAGES[key] = result
     return result
 
 
-def _object_streams(pdf: bytes) -> list[bytes]:
-    """The inflated content of a PDF's Flate-compressed object streams, where PDF 1.5 and later can
-    keep their page objects. Each is capped at 4 MB."""
-    streams = []
-    for match in _STREAM.finditer(pdf):
-        header = pdf[max(0, match.start() - 400):match.start()]
-        header = header[header.rfind(b"<<"):]
-        if b"/ObjStm" not in header or b"/FlateDecode" not in header:
-            continue
+def _guess_pages(size: int) -> int:
+    return min(PDF_MAX_PAGES, max(1, math.ceil(size / PDF_GUESS_BYTES_PER_PAGE)))
+
+
+def _count_pdf_pages(data: str) -> tuple[int, bool]:
+    """The larger of the page objects (in object streams too) and the page tree's count. When an
+    object stream was not read (a bound, another filter, encryption), pages may hide in it: only the
+    page tree's count, the document's own total, is trusted then, else the API's maximum. A PDF with
+    neither pages nor a tree, or that cannot be decoded, is a guess of one page per 3 KB."""
+    if len(data) > PDF_MAX_BASE64:
+        return PDF_MAX_PAGES, False
+    pdf = _decode(data, len(data))
+    if not pdf:
+        return _guess_pages(len(data) * 3 // 4), False
+    pages, tree = _scan_pages(pdf)
+    more, more_tree, complete = _object_stream_pages(pdf)
+    pages, tree = pages + more, max(tree, more_tree)
+    if not complete:
+        return (min(PDF_MAX_PAGES, max(pages, tree)), True) if tree else (PDF_MAX_PAGES, False)
+    if pages or tree:
+        return min(PDF_MAX_PAGES, max(pages, tree)), True
+    return _guess_pages(len(pdf)), False
+
+
+def _scan_pages(buffer: bytes) -> tuple[int, int]:
+    """(page objects, largest page-tree count) in uncompressed PDF bytes."""
+    pages = sum(1 for _ in _PAGE_OBJECT.finditer(buffer))
+    tree = max((int(m.group(1) or m.group(2)) for m in _PAGE_TREE.finditer(buffer)), default=0)
+    return pages, tree
+
+
+def _object_stream_pages(pdf: bytes) -> tuple[int, int, bool]:
+    """(page objects, largest page-tree count, every object stream read) over a PDF's object streams,
+    where PDF 1.5 and later can keep their page objects. Each stream is inflated, scanned, and dropped
+    in turn, within the ``PDF_*`` bounds; a stream that is not plain Flate (another filter, a predictor,
+    encryption) or that passes a bound stops the walk as not read."""
+    view = memoryview(pdf)
+    budget = PDF_INFLATE_BUDGET
+    pages = tree = 0
+    for n, match in enumerate(_OBJECT_STREAM.finditer(pdf)):
+        if n >= PDF_MAX_OBJECT_STREAMS or budget <= 0:
+            return pages, tree, False
+        keyword = pdf.find(b"stream", match.end(), match.end() + PDF_HEADER_WINDOW)
+        begin = pdf.rfind(b"obj", max(0, match.start() - PDF_HEADER_WINDOW), match.start())
+        if keyword < 0 or begin < 0:
+            return pages, tree, False
+        header = pdf[begin:keyword]
+        if not _FLATE_ONLY.search(header) or b"/Predictor" in header:
+            return pages, tree, False
+        body = keyword + 6
+        body += 2 if pdf[body:body + 2] == b"\r\n" else 1 if pdf[body:body + 1] in (b"\n", b"\r") else 0
+        length = _DIRECT_LENGTH.search(header)
+        end = body + (int(length.group(1)) if length else PDF_STREAM_INPUT)
+        inflater = zlib.decompressobj()
         try:
-            streams.append(zlib.decompressobj().decompress(pdf[match.end():match.end() + 4_000_000], 4_000_000))
+            out = inflater.decompress(view[body:end], min(PDF_STREAM_OUTPUT, budget))
         except zlib.error:
-            continue
-    return streams
+            return pages, tree, False
+        if inflater.unconsumed_tail or not inflater.eof:  # an output bound, or a stream longer than read
+            return pages, tree, False
+        budget -= len(out)
+        found, found_tree = _scan_pages(out)
+        pages, tree = pages + found, max(tree, found_tree)
+    return pages, tree, True
 
 
 def _document_cost(block: dict) -> tuple[int, int]:

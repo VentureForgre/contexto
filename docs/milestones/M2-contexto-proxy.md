@@ -248,14 +248,21 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    that, use the session's measured bytes-per-token ratio. Image and document blocks (D48: Messages
    `image` and `document`, Responses `input_image` and `input_file`, top level or inside a
    `tool_result` or tool output) are not priced by their bytes: an image costs `width * height / 750`
-   tokens after scaling its long edge down to 2,576 pixels, at most 4,784, with the size read from the
-   PNG, JPEG, GIF, or WebP header, and 4,784 when it cannot be read (a URL, a file id, another
-   format); a PDF costs 3,000 tokens a page, its pages counted from its page objects (in object
-   streams too), else its page tree, else one per 50 KB, and a document by URL or file id 10 pages;
-   a document of plain text or content blocks is text. The ratio is learned from text only: each
-   observed request's media bytes are left out of its bytes, and the lowest cost its media can have
-   (images scaled to 1,568 pixels and at most 1,568 tokens, 1,000 tokens a counted PDF page and one
-   page when the count is a guess or unknown, 0 for an image of unknown size) is taken off its real tokens. After every response, compare real
+   tokens after scaling its long edge down to 2,576 pixels, between 64 and 4,784, with the size read
+   from the PNG, JPEG, GIF, or WebP header, and 4,784 when it cannot be read (a URL, a file id,
+   another format); a PDF costs 4,568 tokens a page (3,000 text tokens plus a page image at 1,568),
+   its pages the larger of its page objects (in object streams too) and its page tree's count. Every
+   fallback errs high: a PDF with neither, or that cannot be decoded, is one page per 3 KB; a PDF with
+   an object stream that cannot be read (another filter, a predictor, encryption, or a bound below)
+   is its page tree's count, else 600 pages (the API's limit); a document by URL or file id is 10
+   pages; a document of plain text or content blocks is text. Parsing a PDF never raises and is
+   bounded: at most 32 MB of base64, 128 object streams, 4 MB inflated per stream and 16 MB per PDF.
+   The ratio is learned from text only: each observed request's media bytes are left out of its
+   bytes, and the lowest cost its media can have is taken off its real tokens (on Claude 95% of the
+   image formula on the older 1,568-pixel, 1,568-token limit, 1,000 tokens a counted PDF page and
+   one page when the count is a guess, 0 for an image of unknown size; on Codex 0, since OpenAI's
+   tile prices go lower). The head measured on the first request (rule 4) takes its window's media
+   at the same floor, so it errs high. After every response, compare real
    usage with the bound and the estimate: log `over_bound` from real usage when it exceeds the
    bound, and `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and

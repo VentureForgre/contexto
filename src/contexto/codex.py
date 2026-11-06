@@ -103,6 +103,7 @@ def is_context_part(part: Any) -> bool:
 class ResponsesDialect(Dialect):
     name = "responses"
     field = "input"
+    media_floor = False  # D48: OpenAI prices images by tiles (85 tokens at low detail), under Claude's floor
 
     def is_context_block(self, block: Any) -> bool:
         return False  # Codex sends context as separate messages, not inside the prompt message

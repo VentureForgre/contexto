@@ -13,6 +13,8 @@ import base64
 import math
 import random
 import struct
+import time
+import tracemalloc
 import zlib
 
 import pytest
@@ -21,9 +23,11 @@ from contexto.canonical import canonical_json
 from contexto.codex import RESPONSES
 from contexto.rewrite import Config, RewriteEngine
 from contexto.store import SessionStore
+from contexto.store.memory import MemoryStore
 from contexto.store.render import render_page
 from contexto.tokens import (
     IMAGE_MAX_TOKENS,
+    IMAGE_MIN_TOKENS,
     PDF_FLOOR_PAGE_TOKENS,
     PDF_PAGE_TOKENS,
     TokenEstimator,
@@ -133,7 +137,7 @@ def test_jpeg_frame_after_a_large_exif_segment_is_found():
 def test_large_images_follow_the_api_downscaling_and_cap():
     assert image_tokens(2576, 1449) == IMAGE_MAX_TOKENS  # 3.73 MP: capped at the documented maximum
     assert image_tokens(8000, 2000) == math.ceil(2576 * 644 / 750)  # long edge scaled to 2,576
-    assert image_tokens(10, 10) == 1
+    assert image_tokens(10, 10) == image_tokens(1, 2576) == IMAGE_MIN_TOKENS  # patch rounding is not modelled
 
 
 @pytest.mark.parametrize("block", [
@@ -148,11 +152,14 @@ def test_images_without_a_readable_size_get_the_largest_cost(block):
 
 
 def test_document_block_is_not_priced_by_base64_bytes():
-    pdf = base64.b64encode(b"%PDF-1.4\n" + random.Random(3).randbytes(300_000)).decode()
+    # A 300 KB, 3-page PDF costs a few thousand tokens a page, not the 115,000 of v0.5.8.
     messages = [{"role": "user", "content": [{"type": "document", "source": {
-        "type": "base64", "media_type": "application/pdf", "data": pdf}}]}]
-    # A 300 KB PDF whose page tree cannot be read counts one page per 50 KB: 7 pages, not 115,000 tokens.
-    assert estimate_message_tokens(messages) == 7 * PDF_PAGE_TOKENS < 40_000
+        "type": "base64", "media_type": "application/pdf", "data": pdf_b64(3, filler=300_000)}}]}]
+    assert estimate_message_tokens(messages) == 3 * PDF_PAGE_TOKENS < 40_000
+    # The QA stand-in (random bytes after the header) has no readable pages: its count is a guess of one
+    # page per 3 KB, which errs high, since the bound depends on it (reviewer A, PR #234).
+    unreadable = base64.b64encode(b"%PDF-1.4\n" + random.Random(3).randbytes(300_000)).decode()
+    assert pdf_page_count(unreadable) == (101, False)
 
 
 def test_pdf_pages_are_counted_from_page_objects_and_object_streams():
@@ -319,8 +326,127 @@ def test_codex_function_call_output_image_is_media():
 
 def test_a_guessed_page_count_does_not_raise_the_ratio_floor():
     guessed = base64.b64encode(b"%PDF-1.4\n" + random.Random(3).randbytes(300_000)).decode()
-    assert pdf_page_count(guessed) == (7, False) and pdf_page_count(pdf_b64(3)) == (3, True)
+    assert pdf_page_count(guessed) == (101, False) and pdf_page_count(pdf_b64(3)) == (3, True)
     doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": guessed}}
-    assert media_cost([doc]) == (0, 7 * PDF_PAGE_TOKENS, PDF_FLOOR_PAGE_TOKENS)
+    assert media_cost([doc]) == (0, 101 * PDF_PAGE_TOKENS, PDF_FLOOR_PAGE_TOKENS)
     counted = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64(3)}}
     assert media_cost([counted]).floor == 3 * PDF_FLOOR_PAGE_TOKENS
+
+
+# Reviewer A, PR #234: hostile and unusual PDFs ----------------------------------------------------
+
+def _doc(raw: bytes) -> dict:
+    return {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                           "data": base64.b64encode(raw).decode()}}
+
+
+def _timed_count(raw: bytes) -> tuple[tuple[int, bool], float, int]:
+    """pdf_page_count of ``raw``: its result, seconds, and peak traced memory in bytes."""
+    data = base64.b64encode(raw).decode()
+    tracemalloc.start()
+    started = time.perf_counter()
+    try:
+        result = pdf_page_count(data)
+        return result, time.perf_counter() - started, tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def _object_stream(body: bytes, extra: bytes = b"") -> bytes:
+    packed = zlib.compress(body)
+    return (b"9 0 obj << /Type /ObjStm /N 1 /Filter /FlateDecode " + extra + b" /Length %d >>\nstream\n"
+            % len(packed) + packed + b"\nendstream endobj\n")
+
+
+def test_a_count_with_thousands_of_digits_does_not_raise(tmp_path):
+    raw = b"%PDF-1.7\n<</Type/Pages/Count " + b"9" * 5000 + b">>"
+    assert pdf_page_count(base64.b64encode(raw).decode()) == (2, False)  # no count read: one page per 3 KB
+    eng = _engine(tmp_path)
+    req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "read this"}, _doc(raw)]}]}
+    upstream, _, events = eng(req, {}, EP)  # v0.5.8 head: ValueError, so the proxy sent every request unwindowed
+    assert upstream["messages"] == req["messages"] and any(e["event"] == "request" for e in events)
+
+
+def test_media_costs_never_raise():
+    odd = [{"type": "image", "source": {"type": "base64", "data": "/9j/" + "A" * 10}},  # a JPEG cut short
+           {"type": "image", "source": {"type": "base64", "data": 7}},
+           {"type": "image", "source": "x"}, {"type": "input_image", "image_url": {"url": 5}},
+           {"type": "document", "source": {"type": "base64", "data": "%%%"}}, {"type": "input_file"}]
+    assert media_cost(odd).tokens > 0
+
+
+def test_a_quadratic_count_pattern_is_linear():
+    result, seconds, _ = _timed_count(b"%PDF-1.7\n" + b"/Count 1 " * 80_000)  # 720 KB: 130 s on the head
+    assert seconds < 2 and result == (241, False)  # no page objects or tree: a guess of one page per 3 KB
+
+
+def test_zlib_bombs_are_bounded_in_memory_and_time():
+    bomb = _object_stream(bytes(4 << 20))  # 4 MB of zeros in about 4 KB
+    result, seconds, peak = _timed_count(b"%PDF-1.7\n" + bomb * 50)  # 204 MB peak on the head
+    assert seconds < 2 and peak < 64 << 20
+    assert result == (600, False)  # the inflate budget ran out and no page tree was read: the API's maximum
+
+
+def test_too_many_object_streams_is_a_guess():
+    page = b"3 0 obj << /Type /Page >> endobj "
+    raw = b"%PDF-1.7\n" + _object_stream(page) * 200
+    assert pdf_page_count(base64.b64encode(raw).decode()) == (600, False)  # 128 read, the rest unknown
+    with_tree = raw + b"2 0 obj << /Type /Pages /Count 200 >> endobj"
+    assert pdf_page_count(base64.b64encode(with_tree).decode()) == (200, True)  # the tree's own total
+
+
+def test_line_wrapped_base64_is_counted():
+    clean = pdf_b64(100, filler=300_049)  # a length whose wrapped form failed to decode on the head: (1, False)
+    wrapped = "\n".join(clean[i:i + 76] for i in range(0, len(clean), 76))
+    assert pdf_page_count(clean) == pdf_page_count(wrapped) == (100, True)
+    assert pdf_page_count("\r\n".join(clean[i:i + 64] for i in range(0, len(clean), 64))) == (100, True)
+    image = "\n".join(png_b64(payload=200)[i:i + 76] for i in range(0, 300, 76))
+    assert estimate_message_tokens([{"role": "user", "content": [image_block(data=image)]}]) == REAL_IMAGE_TOKENS
+
+
+def test_object_stream_with_a_nested_dictionary_is_read():
+    pages = b"".join(b"%d 0 obj << /Type /Page /Parent 2 0 R >> endobj " % (i + 3) for i in range(100))
+    tree = b"2 0 obj << /Type /Pages /Count 100 /Kids [] >> endobj "
+    raw = b"%PDF-1.5\n" + _object_stream(tree + pages, b"/DecodeParms << /Columns 4 >>")
+    assert pdf_page_count(base64.b64encode(raw).decode()) == (100, True)  # the head: (1, False)
+
+
+@pytest.mark.parametrize("extra", [b"/DecodeParms << /Predictor 12 /Columns 4 >>", b"/Filter2 /LZWDecode"])
+def test_an_unreadable_object_stream_errs_high(extra):
+    pages = b"".join(b"%d 0 obj << /Type /Page >> endobj " % (i + 3) for i in range(100))
+    raw = b"%PDF-1.5\n" + _object_stream(pages, extra)
+    if b"LZW" in extra:
+        raw = raw.replace(b"/Filter /FlateDecode", b"/Filter /LZWDecode")
+    assert pdf_page_count(base64.b64encode(raw).decode()) == (600, False)
+
+
+# Reviewer A, PR #234: the Codex floor and the measured head -------------------------------------
+
+def test_codex_media_has_no_floor_so_the_ratio_never_rises(tmp_path):
+    """OpenAI's tile price (1,105 tokens for 1920x1080 at high detail, 85 at low) is under Claude's floor,
+    so Codex requests take no media cost off real usage: the ratio can only err toward over-counting."""
+    eng = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config())
+    shot = "data:image/png;base64," + png_b64(1920, 1080, payload=1_000)
+    items = [{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "d" * 2_000}]},
+             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x" * 45_000}]}]
+    image = {"type": "input_image", "image_url": shot}
+    items += [{"type": "function_call_output", "call_id": f"c{i}", "output": [image]} for i in range(10)]
+    req = {"model": "gpt-6-astra", "stream": True, "input": items}
+    upstream, _, _ = eng(req, {}, "/v1/responses")
+    _, found = split_media(upstream["input"])
+    text_bytes = len(canonical_json(upstream).encode()) - sum(len(canonical_json(b).encode()) for b in found)
+    eng.observe_usage("/v1/responses", {"input_tokens": math.ceil(text_bytes / 3.0) + 1_105 * 10}, req)
+    assert eng.estimator.measured_bytes_per_token <= 3.0  # Claude's floor here: 4.31, text 30% low
+
+
+def test_a_document_in_the_first_request_does_not_zero_the_head(tmp_path):
+    """The head is the first request's usage minus its window, with the window's media at their floor."""
+    eng = _engine(tmp_path)
+    req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "summarise"},
+                                                             _doc(base64.b64decode(pdf_b64(20)))]}]}
+    upstream, _, _ = eng(req, {}, EP)
+    stripped, _ = split_media(upstream)
+    true_head = math.ceil(len(canonical_json({**stripped, "messages": []})) / 3.0)
+    eng.observe_usage(EP, {"input_tokens": _real_usage(upstream) + 20 * 1_583, "output_tokens": 10}, req)
+    state = next(iter(eng.states.values()))
+    assert true_head <= state.head_tokens <= true_head + 20 * 1_583  # the head: 0

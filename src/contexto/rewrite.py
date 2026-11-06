@@ -211,6 +211,7 @@ class EpochState:
     head_tokens: int | None = None  # rule 4: measured head (system, tools, initial carried)
     initial_carried: int | None = None  # carried content at the conversation's first request
     last_window_tokens: int = 0  # estimate of the previous upstream request's non-carried messages
+    last_window_floor: int = 0  # the same with its media at their floor cost (D48), for the measured head
     paged_carried: frozenset[str] = frozenset()  # hashes of carried text messages paged by the fallback
     last_carried_text_count: int | None = None  # carried text messages at the previous turn start
     carried_text_streak: int = 0  # consecutive turn starts at which that count grew
@@ -369,6 +370,9 @@ class Dialect:
 
     name = "anthropic"
     field = "messages"
+    # D48: whether media's floor cost (MediaCost.floor) is at or under what this API charges, so the ratio
+    # can take it off real usage. True for Claude's pixel and page prices.
+    media_floor = True
 
     def is_context_block(self, block: Any) -> bool:
         return _anthropic_is_context_block(block)
@@ -1099,11 +1103,16 @@ def estimate_upstream(request: dict, messages: list[dict], previous_n: int, stat
     return head + estimate_items(estimator, transform_messages(messages, state))
 
 
-def window_tokens(messages: list[dict], estimator: TokenEstimator, start: int = 0) -> int:
-    """Tokens of the non-carried part of M[start..) (no carried system messages, no context blocks)."""
+def window_items(messages: list[dict], start: int = 0) -> list[dict]:
+    """The non-carried part of M[start..) as estimated (no carried system messages, no context blocks)."""
     kept = strip_carried(messages, start, len(messages))
     d = _dialect()
-    return estimate_items(estimator, [x for x in (strip_thinking(m) for m in kept if d.countable(m)) if x is not None])
+    return [x for x in (strip_thinking(m) for m in kept if d.countable(m)) if x is not None]
+
+
+def window_tokens(messages: list[dict], estimator: TokenEstimator, start: int = 0) -> int:
+    """Tokens of the non-carried part of M[start..)."""
+    return estimate_items(estimator, window_items(messages, start))
 
 
 def carried_tokens(messages: list[dict], estimator: TokenEstimator, paged: frozenset[str] = frozenset()) -> int:
@@ -1408,9 +1417,12 @@ def guarded_rotation(request: dict, messages: list[dict], n: int, estimate: int,
     return replace(new, degraded=False, conflict_page=None)
 
 
-def sent_media(messages: list) -> MediaCost:
-    """The images and documents of a request as sent: their bytes and their least cost (D48)."""
-    return media_cost(split_media(messages)[1], measure_bytes=True)
+def sent_media(items: list, *, measure_bytes: bool = True) -> MediaCost:
+    """The images and documents in ``items``: their bytes, estimate, and least cost (D48). The least cost
+    is 0 on a dialect whose API can charge less than Claude's floor (Codex: OpenAI prices by tiles,
+    85 tokens at low detail), so taking it off real usage never makes the ratio count text low."""
+    media = media_cost(split_media(items)[1], measure_bytes=measure_bytes)
+    return media if _dialect().media_floor else media._replace(floor=0)
 
 
 def forward_original(request: dict, messages: list[dict], state: EpochState, reason: str,
@@ -1488,9 +1500,13 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
 
     upstream = {**request, field_name: transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
+    window = window_items(upstream[field_name])
+    window_estimate = estimate_items(estimator, window)
+    window_media = sent_media(window, measure_bytes=False)
     state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
                     last_sent_media=sent_media(upstream[field_name]), last_estimate=sent_estimate,
-                    last_window_tokens=window_tokens(upstream[field_name], estimator),
+                    last_window_tokens=window_estimate,
+                    last_window_floor=window_estimate - window_media.tokens + window_media.floor,
                     pending_usage=usage_identity(messages))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
@@ -2347,8 +2363,9 @@ class RewriteEngine:
             state = replace(state, last_input_tokens=real, pending_usage=None)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried
-                # messages, which also covers a resumed first request with a long history).
-                state = replace(state, head_tokens=max(0, real - state.last_window_tokens))
+                # messages, which also covers a resumed first request with a long history). Their media
+                # count at the floor (D48), so a document priced high cannot zero the head: it errs high.
+                state = replace(state, head_tokens=max(0, real - state.last_window_floor))
             if state.window_budget is None and state.head_tokens is not None:
                 # A8 (c): W from the measured head, so set_window publishes W and the ratio after the first
                 # response rather than only after a rotation decision, and a restarted engine can restore
