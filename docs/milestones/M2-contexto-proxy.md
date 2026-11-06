@@ -929,10 +929,44 @@ turns before it, usually where such rules are given. Tools:
   snapshot write only marks the snapshot stale (search then says "in view not checked") and logs
   `retained_stale`, not `store_error`; it does not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Only the main
   conversation publishes the room, the snapshot, and the window (`set_window`): the engine keeps state per conversation (the
-  main one, subagents, side requests), and the main conversation is the one with the most turn
-  starts, re-evaluated at each turn start: it changes only when another conversation has strictly
-  more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
-  stay main. The choice is made before the request is transformed, so a request that fails after
+  main one, subagents, side requests). The first conversation seen is main, and the choice is
+  re-evaluated at each turn start of another conversation, which takes over when (D50):
+  - its Claude Code session id differs from main's, its User-Agent entrypoint is main's, and, unless
+    both are the interactive CLI's `cli`, main is idle (the response to its newest request released no
+    client tool call, no response of main's that may have released one arrived after it, and main
+    has sent no request since); and either no
+    conversation has been main in that session yet (`/clear` starts a new
+    id), or it was the first conversation main in its session and that session lost main to another
+    session's id and has sent no request of this conversation since (`/resume` sends the resumed
+    conversation's id again). The id is `X-Claude-Code-Session-Id`, else the `session_id` in
+    `metadata.user_id`; subagents and side requests carry the id of the conversation they run for
+    (measured on Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318). Headless sessions run `/clear`
+    and `/compact` too (`claude -p --input-format stream-json`, the Agent SDK; `/clear` starts a new
+    id under `sdk-cli`, measured on 2.1.314 and 2.1.318). A `claude -p` or SDK process run from a
+    tool has its own id and an `sdk-*` entrypoint: its own under an interactive lead, so it does not
+    qualify, or, under a headless lead, the lead's inherited `sdk-cli`, and then it runs inside one
+    of main's tool calls, so main is not idle and it does not qualify either. A session that keeps
+    sending beside the new main returns only by turn starts; two sessions that take turns, each idle
+    while the other is prompted, follow the one prompted;
+  - its session id and entrypoint are main's, and its first message is
+    Claude Code's compaction summary: a user message whose content is a string starting "This
+    session is being continued from a previous conversation that ran out of context. The summary
+    below covers the earlier portion of the conversation." and a newline (`/compact` and
+    auto-compaction keep the session id but start a new first message, measured on 2.1.314 and
+    2.1.318, interactive and headless). It becomes that session's main, so a later `/resume` of the session returns to it;
+  - main has never sent a request with a tool list and this conversation has (Claude Code's title,
+    topic, and quota side requests have none, and one is often the session's first request);
+  - or it has strictly more turn starts than main (a tie keeps the current one).
+
+  Only a conversation seen with a tool list takes over by the first three rules (for Codex, which
+  sends no Claude Code session id, only the fourth applies). A request whose `metadata.user_id` has
+  `parent_session_id` (an agent-team teammate, in process or in its own pane, on 2.1.314), and one
+  carrying `X-Claude-Code-Agent-Id` (every subagent request on 2.1.302 to 2.1.318, and an in-process
+  teammate's), never takes over, by any rule. The engine logs content-free
+  `main_changed` with `reason` (`new_cli_session`, `resumed_cli_session`, `compacted`,
+  `after_side_request`, or `more_turn_starts`) and the request's `turn_starts` on the request that takes over; never the
+  session id. Main moves only at a request, never at a response: a response that arrives after
+  another conversation's request took over publishes a side room. The choice is made before the request is transformed, so a request that fails after
   its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them (they publish side rooms instead, D40, see the per-turn
   recall budget), so their tool calls see the main conversation's snapshot, and for a subagent
   "in view" refers to the main conversation's window (a documented subagent limitation); the MCP

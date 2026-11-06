@@ -472,9 +472,9 @@ def subagent_request(*, resumed: bool = False) -> dict:
 @pytest.mark.parametrize("main_heading,expected", [(None, []), (RENAMED, ["main"])])
 def test_engine_judges_the_main_conversation_when_a_tool_less_side_request_comes_first(main_heading, expected):
     """Reviewer A's ordering: Claude Code's quota and title requests (no tools) arrive first, so the
-    engine takes them as main through the real conversation's first turn; then main's turn 1, a subagent,
-    and the subagent resumed (2 turn starts, so it takes over as the engine's main). The session start
-    is judged on main's turn 1 only: a subagent without # Environment is never warned about."""
+    engine takes the first as main; then main's turn 1 (main from its first request since D50), a
+    subagent, and the subagent resumed (2 turn starts, so it takes over as the engine's main). The
+    session start is judged on main's turn 1 only: a subagent without # Environment is never warned about."""
     engine = RewriteEngine(MemoryStore(), config=Config(bound=150_000))
     main = claude_request([prompt("fix the bug", ATTRIBUTION),
                            environment(main_heading) if main_heading else environment()])
@@ -487,7 +487,7 @@ def test_engine_judges_the_main_conversation_when_a_tool_less_side_request_comes
         if "session_start_unrecognised" in names(events):
             warned.append(label)
     assert warned == expected
-    assert engine_main["main"] is False  # the engine's own main was the quota request: not what judges
+    assert engine_main["quota"] is True and engine_main["title"] is False and engine_main["main"] is True
 
 
 def test_engine_check_that_raises_keeps_the_rewrite_and_logs_only_its_type():
