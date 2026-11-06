@@ -46,7 +46,7 @@ from contexto.tokens import (
     pdf_pages,
     split_media,
 )
-from fixtures.make_pdfs import EXPECTED
+from fixtures.make_pdfs import COUNTED_HIGH, EXPECTED
 
 EP = "/v1/messages"
 W, H = 1440, 900
@@ -975,21 +975,29 @@ def test_the_chain_does_not_form_unless_the_request_only_appends(tmp_path, monke
     assert all(result is None for result in _chain_session(tmp_path, change, monkeypatch))
 
 
-def test_pages_count_as_the_catalog_tree_draws_them():
-    """Round 5 (reviewer B): the deleted-pages file counted 40 pages for 10, so pasting it logged
-    window_minimal and bound_too_small and the launcher told the user to raise --bound. Each node counts
-    by its latest definition, from the latest catalog's root, so deleted pages and orphan nodes do not."""
-    assert pdf_page_count(_fixture("pymupdf-incremental-deleted-40-to-10.pdf")) == (10, True, 10)
-    assert pdf_page_count(base64.b64encode(_orphan_node_pdf()).decode()) == (1, True, 1)
+@pytest.mark.parametrize("name", sorted(COUNTED_HIGH))
+def test_files_counted_high_are_never_counted_low(name):
+    """Round 7 (orchestrator's decision): a PDF is never counted low, so its pages are the largest count it
+    offers. Pages an incremental save deleted, and page objects shown as text in a content stream, count
+    too. The qdf listing counted 2 pages for 20 at 5971e84 (its stream skip ended at an endstream in text)."""
+    count = pdf_page_count(_fixture(name))
+    assert count.counted and count.pages >= COUNTED_HIGH[name]
 
 
-def test_the_deleted_pages_file_pasted_first_does_not_advise_a_larger_bound(tmp_path):
+def test_deleted_and_orphaned_pages_count_high_not_low():
+    assert pdf_page_count(_fixture("pymupdf-incremental-deleted-40-to-10.pdf")).pages >= 10  # 40: deleted count
+    assert pdf_page_count(base64.b64encode(_orphan_node_pdf()).decode()).pages >= 1  # 41: the orphan counts
+
+
+def test_the_deleted_pages_file_pasted_first_is_not_advised_as_a_small_bound(tmp_path):
+    """Its 40 counted pages (10 true) do not fit the window at the allowance; the shortfall is the PDF's
+    allowance, so no larger --bound is advised (round 5, reviewer B)."""
     eng = _engine(tmp_path)
     doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
                                           "data": _fixture("pymupdf-incremental-deleted-40-to-10.pdf")}}
     req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "read this"}, doc]}]}
     _, _, events = eng(req, {}, EP)
-    assert not {"window_minimal", "bound_too_small", "turn_room_low"} & {e["event"] for e in events}
+    assert all(e.get("media_allowance") for e in events if e["event"] == "bound_too_small")
 
 
 # Rule 4's head with media in the conversation's first request (D49 amended with D48, round 5) ----------------
@@ -1062,21 +1070,17 @@ def _listing_pdf(pages: int, *, length_marked: bool = True) -> bytes:
     return b"%PDF-1.4\n" + b"".join(objs) + b"trailer << /Size %d /Root 1 0 R >>\n%%%%EOF\n" % (4 + 2 * pages)
 
 
+@pytest.mark.parametrize("length_marked", [True, False], ids=["direct-length", "indirect-length"])
 @pytest.mark.parametrize("pages", [20, 100])
-def test_objects_shown_inside_content_streams_are_not_read(pages):
-    """Round 6: the walk took the latest /Type /Catalog and /Type /Pages by position, including text in a
-    page's content stream, so a tutorial PDF counted 1 page; a 100-page one was estimated at 40,187 for a real
-    193,939 on a 150k bound, unflagged. Stream bodies are skipped, to their direct /Length."""
-    assert pdf_page_count(base64.b64encode(_listing_pdf(pages)).decode()) == (pages, True, pages)
+def test_objects_shown_inside_content_streams_never_lower_the_count(pages, length_marked):
+    """Rounds 6 and 7: a page-tree walk read catalogs and nodes shown as text in content streams, so a
+    tutorial PDF counted 1 page (3ac7984) and its indirect-/Length form 2 (5971e84); a 100-page one was
+    estimated at 40,187 for a real 193,939 on a 150k bound, unflagged. The count is the largest the file
+    offers, so text can only raise it."""
+    assert pdf_page_count(base64.b64encode(_listing_pdf(pages, length_marked=length_marked)).decode()).pages >= pages
 
 
-def test_a_stream_without_a_direct_length_ends_at_its_endstream():
-    # Text saying "endstream" can end such a stream early; the rest of that page's text is then read, but
-    # the trailer's catalog still names the real tree.
-    assert pdf_page_count(base64.b64encode(_listing_pdf(20, length_marked=False)).decode()).pages == 20
-
-
-def test_the_catalog_is_the_one_the_trailer_names():
+def test_a_decoy_catalog_does_not_lower_the_count():
     pages = 300
     kids = b" ".join(b"%d 0 R" % (i + 3) for i in range(pages))
     body = [b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
@@ -1085,7 +1089,7 @@ def test_the_catalog_is_the_one_the_trailer_names():
     body += [b"900 0 obj << /Type /Catalog /Pages 901 0 R >> endobj\n",  # appended, unreferenced
              b"901 0 obj << /Type /Pages /Count 1 /Kids [ 3 0 R ] >> endobj\n"]
     raw = b"%PDF-1.4\n" + b"".join(body) + b"trailer << /Size 902 /Root 1 0 R >>\n%%EOF\n"
-    assert pdf_page_count(base64.b64encode(raw).decode()) == (300, True, 300)  # 3ac7984: (1, True, 1)
+    assert pdf_page_count(base64.b64encode(raw).decode()).pages >= 300  # 3ac7984: (1, True, 1)
 
 
 def test_a_crafted_wide_tree_is_bounded_in_memory_and_time():
@@ -1099,47 +1103,81 @@ def test_a_crafted_wide_tree_is_bounded_in_memory_and_time():
     assert result[0] == 600 and seconds < 0.5 and peak < 25 << 20
 
 
-# Round 6: a PDF's real cost, learned from its first response, and the launcher's advice (reviewer B) --------
+# Round 6 and 7: a PDF is priced at its allowance on every request, and the launcher's advice ---------------
 
-def test_a_pdfs_real_cost_is_learned_from_its_first_response(tmp_path):
-    """Round 6: a PDF of 20 typical pages (1,583 each) was estimated at 4,568 a page on every request. The
-    first measured request that carries it gives its real cost, kept between its floor and estimate."""
+def test_a_pdf_is_never_estimated_under_its_real_cost(tmp_path):
+    """Round 7 (reviewer A): a learned per-PDF cost could come out far under the real cost (a cheap PDF
+    learned at its floor was subtracted from the next one), and a re-Read near the bound went out
+    unflagged: 146,786 estimated for 158,466 on 150k. Learning is removed; every request carrying the PDF
+    is estimated at or above real, and every request over the bound is flagged before the send."""
     eng = _engine(tmp_path)
-    pages, cost = 20, 20 * 1_583
-    doc = _pdf_block(base64.b64decode(pdf_b64(pages, filler=pages * 800)))
-    msgs: list[dict] = []
-    for turn in range(5):
-        msgs.append({"role": "user", "content": [{"type": "text", "text": f"turn {turn} " + "talk " * 400},
-                                                 *([doc] if turn == 2 else [])]})
+    slides = _pdf_block(base64.b64decode(pdf_b64(20, filler=6_000)))  # 20 pages costing 300 each
+    paper = _pdf_block(base64.b64decode(pdf_b64(20, filler=16_000)))  # 20 pages costing 1,583 each
+    costs = {slides["source"]["data"]: 20 * 300, paper["source"]["data"]: 20 * 1_583}
+    rng = random.Random(12)
+    msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "read the slides, then the paper"}]}]
+    crossed = 0
+    for step in range(200):
         req = {**HEAD, "messages": list(msgs)}
         upstream, _, events = eng(req, {}, EP)
         stripped, found = split_media(upstream["messages"])
-        real = math.ceil(len(canonical_json({**upstream, "messages": stripped})) / 3.0) + cost * len(found)
+        real = math.ceil(len(canonical_json({**upstream, "messages": stripped})) / 3.0) + sum(
+            costs[b["source"]["data"]] for b in found)
         estimate = next(e for e in events if e["event"] == "request")["estimate"]
-        if turn > 2:
-            assert real * 0.99 <= estimate <= real * 1.01  # 3ac7984: 110,000 for 50,000 on every request
+        if found:  # within text rounding once the PDF's request was measured (the estimate builds on it)
+            assert estimate >= real * 0.995
+        if real > 150_000:
+            assert any(e["event"] == "over_bound" for e in events)
+            crossed += 1
+            if crossed > 2:
+                break
         eng.observe_usage(EP, {"input_tokens": real, "output_tokens": 10}, req)
-        msgs.append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
-    (learned,) = eng.estimator.document_tokens.values()
-    assert pages * 1_000 <= learned <= pages * PDF_PAGE_TOKENS and abs(learned - cost) <= cost * 0.02
+        content = ([slides] if step == 0 else [paper] if step in (1, 30) else
+                   " ".join(rng.choices(["def", "x", "=", "return"], k=2_500)))
+        use = {"type": "tool_use", "id": f"t{step}", "name": "Read", "input": {}}
+        msgs += [{"role": "assistant", "content": [use]},
+                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{step}", "content": content}]}]
+    assert crossed
 
 
-def test_two_new_pdfs_in_one_request_are_not_learned(tmp_path):
+def _hostile(pages: int, mode: str) -> bytes:
+    """Reviewer A, round 7: a correct xref table, with the first content stream before the page objects and
+    either a /Length that lies long, covering them, or no endstream at all."""
+    content = b"BT /F1 10 Tf 72 700 Td (hi) Tj ET"
+    first = 3 + pages
+    tail = b"\nendstream" if mode == "long-length" else b""
+    length = b"/Length 99999" if mode == "long-length" else b"/Length 99 0 R"
+    objs = [b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
+            b"%d 0 obj << %s >>\nstream\n%s%s\nendobj\n" % (first, length, content, tail),
+            b"2 0 obj << /Type /Pages /Kids [ %s ] /Count %d >> endobj\n" % (
+                b" ".join(b"%d 0 R" % (3 + i) for i in range(pages)), pages)]
+    objs += [b"%d 0 obj << /Type /Page /Parent 2 0 R /Contents %d 0 R >> endobj\n" % (3 + i, first)
+             for i in range(pages)]
+    objs.append(b"99 0 obj %d endobj\n" % len(content))
+    return b"%PDF-1.7\n" + b"".join(objs) + b"trailer << /Root 1 0 R >>\n%%EOF\n"
+
+
+@pytest.mark.parametrize("mode", ["long-length", "missing-endstream"])
+@pytest.mark.parametrize("pages", [20, 300])
+def test_crafted_stream_lengths_never_lower_the_count(pages, mode):
+    """Round 7 (reviewer A, low): a /Length that lies long, or a stream with no endstream, counted 1 to 12
+    pages for 20 or 300. The whole file is scanned, so nothing hides the page objects."""
+    assert pdf_page_count(base64.b64encode(_hostile(pages, mode)).decode()).pages >= min(pages, 600)
+
+
+def test_the_qdf_listing_read_near_the_bound_is_flagged(tmp_path):
+    """Round 7 (reviewer A): a qpdf --qdf file (every /Length indirect) counted 2 pages for 100, and reading
+    it was estimated at 44,755 for a real 193,939 on 150k, unflagged."""
     eng = _engine(tmp_path)
-    docs = [_pdf_block(base64.b64decode(pdf_b64(5, filler=4_000 + i))) for i in range(2)]
-    req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "read both"}, *docs]}]}
-    upstream, _, _ = eng(req, {}, EP)
-    eng.observe_usage(EP, {"input_tokens": _real_usage(upstream) + 2 * 5 * 1_583, "output_tokens": 10}, req)
-    assert eng.estimator.document_tokens == {}  # the split between them is not known
-
-
-def test_codex_documents_keep_their_estimate():
-    eng = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config())
-    pdf = {"type": "input_file", "filename": "a.pdf", "file_data": "data:application/pdf;base64," + pdf_b64(5)}
-    req = {"model": "gpt-6-astra", "input": [{"type": "message", "role": "user", "content": [pdf]}]}
-    eng(req, {}, "/v1/responses")
-    eng.observe_usage("/v1/responses", {"input_tokens": 20_000}, req)
-    assert eng.estimator.document_tokens == {}  # OpenAI's document price is not bounded by Claude's floors
+    doc = _pdf_block((FIXTURES / "qdf-listing-20.pdf").read_bytes())
+    msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "read the tutorial"}]},
+                        {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read",
+                                                           "input": {}}]},
+                        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [doc]}]}]
+    upstream, _, events = eng({**HEAD, "messages": msgs}, {}, EP)
+    stripped, _ = split_media(upstream["messages"])
+    real = math.ceil(len(canonical_json({**upstream, "messages": stripped})) / 3.0) + 20 * 1_583
+    assert next(e for e in events if e["event"] == "request")["estimate"] >= real
 
 
 def _midpaste(tmp_path, pages: int, *, bound: int = 150_000, text_only: bool = False) -> list[dict]:
@@ -1181,6 +1219,17 @@ def test_a_large_pdf_pasted_at_a_turn_start_is_not_advised_as_a_small_bound(tmp_
     assert real_small and not real_small[0].get("media_allowance")
 
 
+def test_images_do_not_count_as_a_media_allowance(tmp_path):
+    """Round 7 (reviewer A, low): an image's estimate is its price, not an allowance a response lowers, so a
+    turn too large because of screenshots is a bound that is too small."""
+    eng = _engine(tmp_path, bound=30_000, headroom_floor=5_000)
+    shots = [image_block(data=png_b64(2560, 1600, payload=1_000, seed=i)) for i in range(4)]
+    req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "compare these"}, *shots]}]}
+    _, _, events = eng(req, {}, EP)
+    small = [e for e in events if e["event"] == "bound_too_small"]
+    assert small and not any(e.get("media_allowance") for e in small)
+
+
 def test_the_launcher_explains_a_media_allowance_and_still_warns_of_a_small_bound():
     import io
 
@@ -1194,6 +1243,7 @@ def test_the_launcher_explains_a_media_allowance_and_still_warns_of_a_small_boun
     notices = NoticeLog(Store(), err)
     sizing = {"event": "bound_too_small", "bound": 150_000, "fixed_overhead": 45_242, "window_budget": 79_758}
     notices.log({"event": "request", "transform_events": [{**sizing, "media_allowance": True}]})
-    assert "estimated generously" in err.getvalue() and "larger --bound" not in err.getvalue()
+    assert "PDF is estimated generously" in err.getvalue() and "larger --bound" not in err.getvalue()
+    assert "first response" not in err.getvalue()
     notices.log({"event": "request", "transform_events": [sizing]})  # a later, genuine one still shows
     assert "Restart with a larger --bound" in err.getvalue()

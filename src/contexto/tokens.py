@@ -9,10 +9,11 @@ ratio replaces both seeds.
 Images and documents (D48) are priced by what the model sees, not by their base64 bytes, which
 overcounted a screenshot 55 to 270 times: an image costs ``width * height / 750`` tokens after the
 API's downscaling to a 2,576-pixel long edge, at most 4,784 (Anthropic's high-resolution tier;
-dimensions read from the PNG, JPEG, GIF, or WebP header), and a PDF ``PDF_PAGE_TOKENS`` per page.
-Media whose size cannot be read (a URL, a file id, an unknown format) gets the largest cost one can
-have, and a PDF whose pages cannot all be counted a guess of one page per 3 KB: every fallback errs
-high, since the bound depends on it. Parsing a PDF is bounded in time and memory and never raises.
+dimensions read from the PNG, JPEG, GIF, or WebP header), and a PDF ``PDF_PAGE_TOKENS`` per page,
+its pages never counted low: the largest count the file offers (round 7). Media whose size cannot be
+read (a URL, a file id, an unknown format) gets the largest cost one can have, and a PDF whose pages
+cannot be counted a guess of one page per 3 KB: every fallback errs high, since the bound depends on
+it. Parsing a PDF is bounded in time and memory and never raises.
 Media bytes stay out of every byte count the ratio divides, and the engine takes the media's lowest
 plausible cost (``MediaCost.floor``) off the real usage before it updates the ratio, so a screenshot
 never skews the ratio later text is estimated at.
@@ -68,9 +69,7 @@ PDF_MAX_PAGE_OBJECTS = 10_000  # /Type /Page matches read per PDF, object stream
 PDF_MAX_TREE_NODES = 1_000  # /Type /Pages matches read per PDF, object streams included
 PDF_TREE_WINDOW = 8_192  # bytes searched on each side of /Type /Pages for its /Count (a 600-page /Kids)
 PDF_OBJECT_WINDOW = 8_192  # bytes searched back from /Type /Page for its "N G obj" header
-PDF_MAX_STREAMS = 20_000  # streams per PDF whose bodies the file-level scan skips; more is not a real document
-PDF_MAX_KID_REFS = 20_000  # /Kids references kept per PDF for the page-tree walk; past it the walk is not used
-PDF_MAX_ROOTS = 10_000  # trailer /Root entries read per PDF
+PDF_MAX_KID_REFS = 20_000  # /Kids references read per PDF for the floor; past it the floor counts fewer pages
 IMAGE_TYPES = frozenset({"image", "input_image"})  # Messages, Responses
 HEAD_CHARS = 64  # base64 characters that hold the PNG, GIF and WebP dimensions
 JPEG_HEAD_CHARS = 262_144  # a JPEG's frame header follows its EXIF and ICC segments: read up to 192 KB
@@ -84,10 +83,6 @@ MEDIA_DEPTH = 10  # messages, message, content, tool_result, content, document, 
 _PAGE_OBJECT = re.compile(rb"/Type\s{0,16}/Page(?![A-Za-z])")
 _PAGE_TREE = re.compile(rb"/Type\s{0,16}/Pages\b")
 _COUNT = re.compile(rb"/Count\s{0,16}(\d{1,9})(?!\d)")
-_CATALOG = re.compile(rb"/Type\s{0,16}/Catalog\b")
-_TRAILER_ROOT = re.compile(rb"/Root\s{1,16}(\d{1,9})\s{1,16}\d{1,5}\s{1,16}R\b")
-_STREAM_KEYWORD = re.compile(rb"(?<![A-Za-z])stream(?:\r\n|\n|\r)")
-_ROOT_REFERENCE = re.compile(rb"/Pages\s{1,16}(\d{1,9})\s{1,16}\d{1,5}\s{1,16}R\b")
 _REFERENCE = re.compile(rb"(?<!\d)(\d{1,9})\s{1,16}\d{1,5}\s{1,16}R\b")
 _OBJECT_HEADER = re.compile(rb"(?<!\d)(\d{1,9})\s{1,16}\d{1,5}\s{1,16}obj\Z")  # searched up to "obj"
 _OBJECT_TABLE = re.compile(rb"(\d{1,9})\s{1,16}(\d{1,9})(?!\d)")
@@ -318,41 +313,26 @@ def _guess_pages(size: int) -> int:
 
 
 def _count_pdf_pages(data: str) -> PdfCount:
-    """The estimate is the larger of the page objects (each object number once, so an incremental update
-    that rewrites a page does not count it twice; in object streams too) and the page tree's largest
-    count. When an object stream was not read (a bound, another filter, encryption), pages may hide in
-    it: only the page tree's count, the document's own total, is trusted then, else the API's maximum.
-    A PDF with neither pages nor a tree, or that cannot be decoded, is a guess of one page per 3 KB.
-    The floor is the smaller of the two counts when both were read, else one page: both are the file's
-    own claims, and a floor above the real cost would raise the ratio."""
+    """A PDF is never counted low (D48, round 7): its pages are the larger of its page objects, wherever
+    they are (content streams and object streams too, every version, each object number once) and the
+    largest ``/Count`` of any page tree node, at most ``PDF_MAX_PAGES``. Pages an incremental save deleted,
+    or a node no catalog reaches, count too. When an object stream was not read (a bound, another filter,
+    encryption), pages may hide in it: the page tree's count stands then, else the API's maximum. A PDF
+    with neither pages nor a tree, or that cannot be decoded, is a guess of one page per 3 KB. The floor
+    is the numbered page objects a ``/Kids`` array lists, at most the largest count, at least one."""
     if len(data) > PDF_MAX_BASE64:
         return PdfCount(PDF_MAX_PAGES, False)
     pdf = _decode(data, len(data))
     if not pdf:
         return PdfCount(_guess_pages(len(data) * 3 // 4), False)
     scan = _PageScan()
-    spans = _stream_spans(pdf)
-    if spans is None:  # more streams than a document has: crafted
-        return PdfCount(PDF_MAX_PAGES, False)
     streams = _object_stream_pages(pdf, scan)
-    if scan.capped:
-        return PdfCount(PDF_MAX_PAGES, False)
-    # Stream bodies hold no real objects (object streams are read on their own), but a page's content can
-    # show PDF syntax as text: the file-level scan skips them all.
-    complete = scan.add(pdf, skip=spans) and streams
+    # The file is scanned whole, stream bodies included, but for object streams stored without a filter,
+    # whose objects the pass above counted by number.
+    complete = not scan.capped and scan.add(pdf, skip=scan.stored) and streams
     found, tree = len(scan.pages), scan.tree
     if scan.capped:  # more page objects or tree nodes than a document has: crafted, so trust neither
         return PdfCount(PDF_MAX_PAGES, False)
-    drawn = scan.drawn(_trailer_root(pdf, spans))
-    if drawn is not None:
-        # The catalog's page tree, as a renderer walks it: its root's count and the pages it reaches, each
-        # node by its latest definition, so pages an incremental save deleted and nodes no catalog reaches
-        # do not count. As a safety net, a page object that no node lists at all (in any definition,
-        # reachable or not), or whose number was not found, cannot be explained by the walk, so it counts.
-        root_count, reached = drawn
-        unexplained = sum(1 for page in scan.pages if not isinstance(page, int) or page not in scan.kids)
-        pages = min(PDF_MAX_PAGES, max(root_count, reached + unexplained))
-        return PdfCount(pages, True, max(1, min(root_count, reached, PDF_MAX_PAGES)))
     floor = scan.floor_pages()
     if not complete:
         return PdfCount(min(PDF_MAX_PAGES, max(found, tree)), True, floor) if tree else PdfCount(PDF_MAX_PAGES, False)
@@ -373,18 +353,15 @@ class _PageScan:
         self.capped = False
         self.page_matches = 0
         self.tree_matches = 0
-        self.nodes: dict[int, tuple[tuple[int, int], int, list[int]]] = {}  # number -> (position, count, kids)
-        self.catalogs: dict[int, tuple[tuple[int, int], int]] = {}  # number -> (position, root node number)
-        self.root: tuple[tuple[int, int], int] | None = None  # the latest catalog's (position, root node number)
-        self.kid_refs = 0  # /Kids references kept in ``nodes``
-        self.walkable = True  # False once PDF_MAX_KID_REFS is passed
+        self.kid_refs = 0  # /Kids references read, at most PDF_MAX_KID_REFS
+        self.stored: list[tuple[int, int]] = []  # spans of object streams stored without a filter, in order
 
     def add(self, buffer: bytes, numbers: tuple[list[int], list[int]] | None = None,
-            skip: list[tuple[int, int]] = (), base: int | None = None) -> bool:
-        """Scan one buffer: the PDF, or an object stream's content (starting at ``base`` in the file) with
-        its offset table (``numbers``: offsets, object numbers). Objects inside a ``skip`` span were read
-        with their stream. False, and ``capped``, once the PDF passes ``PDF_MAX_PAGE_OBJECTS`` or
-        ``PDF_MAX_TREE_NODES`` (catalogs included), which no real document reaches."""
+            skip: list[tuple[int, int]] = ()) -> bool:
+        """Scan one buffer: the PDF, or an object stream's content with its offset table (``numbers``:
+        offsets, object numbers). Objects inside a ``skip`` span were counted with their stream. False,
+        and ``capped``, once the PDF passes ``PDF_MAX_PAGE_OBJECTS`` or ``PDF_MAX_TREE_NODES``, which no
+        real document reaches."""
         # Only the gaps between skipped spans are searched, so skipped bytes cost nothing.
         gaps, at = [], 0
         for start, end in skip:
@@ -392,9 +369,6 @@ class _PageScan:
                 gaps.append((at, start))
             at = max(at, end)
         gaps.append((at, len(buffer)))
-
-        def position(at: int) -> tuple[int, int]:  # file order, so a later definition supersedes
-            return (at, 0) if base is None else (base, at)
 
         def matches(pattern: re.Pattern) -> Any:
             for low, high in gaps:
@@ -406,68 +380,22 @@ class _PageScan:
                 self.capped = True
                 return False
             self.pages.add(self._number(buffer, match.start(), numbers))
-        for pattern in (_PAGE_TREE, _CATALOG):
-            for match in matches(pattern):
-                self.tree_matches += 1
-                if self.tree_matches > PDF_MAX_TREE_NODES:
-                    self.capped = True
-                    return False
-                number = self._number(buffer, match.start(), numbers)
-                at = position(match.start())
-                if pattern is _CATALOG:
-                    root = _root_reference(buffer, match.start(), match.end())
-                    if root is not None and (self.root is None or at > self.root[0]):
-                        self.root = (at, root)
-                    if root is not None and isinstance(number, int) and (
-                            number not in self.catalogs or at > self.catalogs[number][0]):
-                        self.catalogs[number] = (at, root)
-                    continue
-                count, kids = _node(buffer, match.start(), match.end(), kids=self.walkable)
-                self.tree = max(self.tree, count)
-                self.kid_refs += len(kids)
-                if self.kid_refs > PDF_MAX_KID_REFS:  # a crafted wide tree: no walk, the high counts stand
-                    self.walkable = False
-                    self.nodes.clear()
-                    continue
+        for match in matches(_PAGE_TREE):
+            self.tree_matches += 1
+            if self.tree_matches > PDF_MAX_TREE_NODES:
+                self.capped = True
+                return False
+            count, kids = _node(buffer, match.start(), match.end(), kids=self.kid_refs <= PDF_MAX_KID_REFS)
+            self.tree = max(self.tree, count)
+            self.kid_refs += len(kids)
+            if self.kid_refs <= PDF_MAX_KID_REFS:  # past it, the floor counts fewer pages, which is safe
                 self.kids.update(kids)
-                if isinstance(number, int) and (number not in self.nodes or at > self.nodes[number][0]):
-                    self.nodes[number] = (at, count, kids)
         return True
-
-    def drawn(self, trailer_root: int | None) -> tuple[int, int] | None:
-        """(the root node's count, the page objects it reaches through ``/Kids``) for the document catalog's
-        page tree, each node by its latest definition; None when the root or its count was not read. The
-        catalog is the one the last trailer (or cross-reference stream) names in ``/Root``, else the latest
-        by position."""
-        if not self.walkable:
-            return None
-        if trailer_root is not None and trailer_root in self.catalogs:
-            root = self.catalogs[trailer_root][1]
-        elif self.root is not None:
-            root = self.root[1]
-        else:
-            return None
-        if root not in self.nodes or not self.nodes[root][1]:
-            return None
-        seen: set[int] = set()
-        stack, reached = [root], set()
-        while stack:
-            number = stack.pop()
-            if number in seen:
-                continue
-            seen.add(number)
-            for kid in self.nodes[number][2]:
-                if kid in self.nodes:
-                    stack.append(kid)
-                elif kid in self.pages:
-                    reached.add(kid)
-        return self.nodes[root][1], len(reached)
 
     def floor_pages(self) -> int:
         """Pages the floor may count: numbered page objects that a ``/Kids`` array references, at most the
-        tree's count when there is one, and at least 1 (D48). This can still run high (a superseded tree
-        after an incremental save that deleted pages, a node no catalog reaches); the ratio rules in
-        ``contexto.rewrite.text_usage`` do not rely on it."""
+        tree's count when there is one, and at least 1 (D48). This can still run high (deleted or orphaned
+        pages); the ratio rules in ``contexto.rewrite.text_usage`` do not rely on it."""
         drawn = sum(1 for page in self.pages if isinstance(page, int) and page in self.kids)
         return max(1, min(drawn, self.tree, PDF_MAX_PAGES) if self.tree else min(drawn, PDF_MAX_PAGES))
 
@@ -509,61 +437,12 @@ def _node(buffer: bytes, start: int, end: int, *, kids: bool = True) -> tuple[in
     return count, references
 
 
-def _stream_spans(pdf: bytes) -> list[tuple[int, int]] | None:
-    """The body of every stream in the file, in order, so the file-level scan can skip them: from the
-    ``stream`` keyword to its direct ``/Length``, when ``endstream`` follows it there, else to the next
-    ``endstream`` (so text that says "endstream" inside a stream of known length cannot end it early).
-    One pass; None past ``PDF_MAX_STREAMS``."""
-    spans: list[tuple[int, int]] = []
-    at = 0
-    while (match := _STREAM_KEYWORD.search(pdf, at)) is not None:
-        body = match.end()
-        end = -1
-        mark = pdf.rfind(b"/Length", max(0, match.start() - PDF_HEADER_WINDOW), match.start())
-        length = _DIRECT_LENGTH.match(pdf, mark) if mark >= 0 else None
-        if length is not None:
-            end = pdf.find(b"endstream", body + int(length.group(1)), body + int(length.group(1)) + 32)
-        if end < 0:
-            end = pdf.find(b"endstream", body)
-        end = end if end >= 0 else len(pdf)
-        spans.append((body, end))
-        if len(spans) > PDF_MAX_STREAMS:
-            return None
-        at = end + 9
-    return spans
-
-
-def _trailer_root(pdf: bytes, spans: list[tuple[int, int]]) -> int | None:
-    """The object number the last trailer or cross-reference stream names in ``/Root`` (outside stream
-    bodies), or None; at most ``PDF_MAX_ROOTS`` entries are read."""
-    starts = [span[0] for span in spans]
-    root = None
-    for n, match in enumerate(_TRAILER_ROOT.finditer(pdf)):
-        if n >= PDF_MAX_ROOTS:
-            return None
-        index = bisect.bisect_right(starts, match.start()) - 1
-        if index < 0 or match.start() >= spans[index][1]:
-            root = int(match.group(1))
-    return root
-
-
-def _root_reference(buffer: bytes, start: int, end: int) -> int | None:
-    """The page tree root a ``/Type /Catalog`` dictionary at ``start`` names (``/Pages N G R``): the nearest
-    after it, else before it, without crossing a ``>``, within ``PDF_TREE_WINDOW``."""
-    stop = buffer.find(b">", end, end + PDF_TREE_WINDOW)
-    after = _ROOT_REFERENCE.search(buffer, end, stop if stop >= 0 else min(len(buffer), end + PDF_TREE_WINDOW))
-    if after is not None:
-        return int(after.group(1))
-    gt = buffer.rfind(b">", max(0, start - PDF_TREE_WINDOW), start)
-    before = _ROOT_REFERENCE.search(buffer, gt + 1 if gt >= 0 else max(0, start - PDF_TREE_WINDOW), start)
-    return int(before.group(1)) if before is not None else None
-
-
 def _object_stream_pages(pdf: bytes, scan: _PageScan) -> bool:
     """Scan a PDF's object streams, where PDF 1.5 and later can keep their page objects and page tree.
     Each stream is read (Flate inflated, or as stored when it has no filter, as PyMuPDF writes them),
-    scanned with its offset table, and dropped in turn, within the ``PDF_*`` bounds; the scan of the file
-    itself skips every stream body (``_stream_spans``). False
+    scanned with its offset table, and dropped in turn, within the ``PDF_*`` bounds; a stored stream's span
+    is recorded in ``scan.stored`` so the scan of the file itself does not count its page objects twice.
+    False
     when one was not read: another filter, a predictor, encryption, or past a bound."""
     view = memoryview(pdf)
     budget = PDF_INFLATE_BUDGET
@@ -583,6 +462,7 @@ def _object_stream_pages(pdf: bytes, scan: _PageScan) -> bool:
             if end < body or end - body > min(PDF_STREAM_OUTPUT, budget):
                 return False
             out = pdf[body:end]
+            scan.stored.append((body, end))
         else:
             if not _FLATE_ONLY.search(header) or b"/Predictor" in header:
                 return False
@@ -595,7 +475,7 @@ def _object_stream_pages(pdf: bytes, scan: _PageScan) -> bool:
             if inflater.unconsumed_tail or not inflater.eof:  # an output bound, or a stream longer than read
                 return False
         budget -= len(out)
-        if not scan.add(out, _object_table(header, out), base=body):
+        if not scan.add(out, _object_table(header, out)):
             return False
     return True
 
@@ -651,48 +531,22 @@ class MediaPart(NamedTuple):
     floor: int
 
 
-def media_parts(blocks: list[dict], learned: dict | None = None) -> tuple[MediaPart, ...]:
-    """Each media block's key, kind, estimate and floor; a document whose real cost was learned
-    (``learned``, see ``learn_document_cost``) is estimated at that cost."""
+def media_parts(blocks: list[dict]) -> tuple[MediaPart, ...]:
+    """Each media block's key, kind, estimate and floor."""
     parts = []
     for block, key in zip(blocks, media_keys(blocks), strict=True):
-        if _media_kind(block) == "image":
-            high, low = _image_cost(block)
-            parts.append(MediaPart(key, False, high, low))
-            continue
-        high, low = _document_cost(block)
-        if learned is not None and key in learned:
-            high = learned[key]
-            low = min(low, high)
-        parts.append(MediaPart(key, True, high, low))
+        document = _media_kind(block) != "image"
+        high, low = _document_cost(block) if document else _image_cost(block)
+        parts.append(MediaPart(key, document, high, low))
     return tuple(parts)
 
 
-def media_cost(blocks: list[dict], *, measure_bytes: bool = False, learned: dict | None = None) -> MediaCost:
+def media_cost(blocks: list[dict], *, measure_bytes: bool = False) -> MediaCost:
     """The cost of media blocks (from ``split_media``); their bytes only when asked, since that
     serializes them."""
-    parts = media_parts(blocks, learned)
+    parts = media_parts(blocks)
     size = sum(len(canonical_bytes(block)) for block in blocks) if measure_bytes else 0
     return MediaCost(size, sum(p.tokens for p in parts), sum(p.floor for p in parts))
-
-
-def learn_document_cost(learned: dict, parts: tuple[MediaPart, ...], text_bytes: int, real: int,
-                        ratio: float | None) -> Any:
-    """Learn a PDF's real cost from a measured request (D48): its usage less its text (at ``ratio``, else the
-    3.5 text seed, which counts text low, so the PDF errs high) and its other media, kept between the PDF's
-    floor and its estimate. Only when exactly one document in the request is not learned yet (copies of it
-    share the rest): documents learned earlier count at their learned cost, images at their floor, which
-    again errs the PDF high. Returns the key learned, or None."""
-    unknown = {p.key for p in parts if p.document and p.key not in learned}
-    if len(unknown) != 1 or len(learned) >= PDF_CACHE_SIZE:
-        return None
-    key = unknown.pop()
-    copies = [p for p in parts if p.key == key]
-    others = sum(p.tokens if p.document else p.floor for p in parts if p.key != key)
-    text = text_bytes / (ratio or TEXT_BYTES_PER_TOKEN)
-    each = (real - text - others) / len(copies)
-    learned[key] = int(min(max(each, copies[0].floor), copies[0].tokens))
-    return key
 
 
 # Messages -------------------------------------------------------------------------------------------
@@ -705,7 +559,7 @@ class MessageSizes(NamedTuple):
     media_tokens: int
 
 
-def measure_messages(messages: list[dict[str, Any]], learned: dict | None = None) -> MessageSizes:
+def measure_messages(messages: list[dict[str, Any]]) -> MessageSizes:
     text = tool = media = 0
     for message in messages:
         content = message.get("content")
@@ -715,7 +569,7 @@ def measure_messages(messages: list[dict[str, Any]], learned: dict | None = None
         for block in content or []:
             stripped, found = split_media(block)
             if found:
-                media += media_cost(found, learned=learned).tokens
+                media += media_cost(found).tokens
                 size = len(canonical_bytes(stripped)) if stripped is not None else 0
             else:
                 size = len(canonical_bytes(block))
@@ -743,29 +597,26 @@ def message_bytes(messages: list[dict[str, Any]]) -> tuple[int, int]:
     return text, tool
 
 
-def estimate_message_tokens(messages: list[dict[str, Any]], bytes_per_token: float | None = None,
-                            learned: dict | None = None) -> int:
-    text, tool, media = measure_messages(messages, learned)
+def estimate_message_tokens(messages: list[dict[str, Any]], bytes_per_token: float | None = None) -> int:
+    text, tool, media = measure_messages(messages)
     if bytes_per_token:
         return _tokens(text + tool, bytes_per_token) + media
     return _tokens(text, TEXT_BYTES_PER_TOKEN) + _tokens(tool, TOOL_RESULT_BYTES_PER_TOKEN) + media
 
 
-def estimate_value_tokens(value: Any, bytes_per_token: float | None = None, learned: dict | None = None) -> int:
+def estimate_value_tokens(value: Any, bytes_per_token: float | None = None) -> int:
     """Any JSON value (a Responses item list) as text, with its media priced as media."""
     stripped, found = split_media(value)
     return (estimate_tokens(canonical_bytes(stripped), bytes_per_token=bytes_per_token)
-            + (media_cost(found, learned=learned).tokens if found else 0))
+            + (media_cost(found).tokens if found else 0))
 
 
 class TokenEstimator:
-    """Per-session estimator: the defaults until real usage arrives, then the measured ratio. Also each
-    PDF's real cost once a measured request has given it (``document_tokens``, D48)."""
+    """Per-session estimator: the defaults until real usage arrives, then the measured ratio."""
 
     def __init__(self) -> None:
         self.total_bytes = 0
         self.total_tokens = 0
-        self.document_tokens: dict = {}  # media key -> learned tokens (learn_document_cost)
 
     @property
     def measured_bytes_per_token(self) -> float | None:
@@ -783,7 +634,7 @@ class TokenEstimator:
         return estimate_tokens(data, tool_result=tool_result, bytes_per_token=self.measured_bytes_per_token)
 
     def estimate_messages(self, messages: list[dict[str, Any]]) -> int:
-        return estimate_message_tokens(messages, self.measured_bytes_per_token, self.document_tokens)
+        return estimate_message_tokens(messages, self.measured_bytes_per_token)
 
     def estimate_value(self, value: Any) -> int:
-        return estimate_value_tokens(value, self.measured_bytes_per_token, self.document_tokens)
+        return estimate_value_tokens(value, self.measured_bytes_per_token)

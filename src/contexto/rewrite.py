@@ -146,7 +146,6 @@ from contexto.tokens import (
     MediaCost,
     TokenEstimator,
     estimate_tokens,
-    learn_document_cost,
     media_cost,
     media_keys,
     media_parts,
@@ -194,6 +193,7 @@ class _ByteCount(TokenEstimator):
     measured_bytes_per_token = 1.0
 
 
+BYTE_COUNT = _ByteCount()
 
 
 class Store(Protocol):
@@ -247,7 +247,6 @@ class EpochState:
     last_sent_bytes: int = 0
     last_sent_media: MediaCost = MediaCost()  # D48: the images and documents in those bytes
     last_sent_media_keys: tuple = ()  # D48: their content keys, in order (media_keys)
-    last_sent_parts: tuple = ()  # D48: each of them (media_parts), to learn a PDF's real cost from the usage
     # D48: whether that request only appended to the last measured one (same epoch, window, degraded state
     # and head, and every message of that request unchanged, by the rule 10 hashes taken before the
     # transform), so their media cancel in a difference.
@@ -1378,11 +1377,12 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
             if w <= 0 or new_tokens > w:
                 event = {"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
                          "new_turn_tokens": new_tokens}
-                media = sent_media(window_items(messages, new_start), measure_bytes=False,
-                                   learned=estimator.document_tokens)
-                if w > 0 and media.tokens > media.floor and new_tokens - media.tokens + media.floor <= w:
-                    # D48: the new turn fits with its media at their floor; only the generous allowance for
-                    # a PDF or image not measured yet falls short, which its first response corrects.
+                documents = [part for part in media_parts(split_media(window_items(messages, new_start))[1])
+                             if part.document]
+                allowance = sum(part.tokens - part.floor for part in documents)
+                if w > 0 and allowance > 0 and new_tokens - allowance <= w:
+                    # D48: the new turn fits with its PDFs at their floor; only the generous page allowance
+                    # falls short (an image's estimate is its price, so images do not count here).
                     event["media_allowance"] = True
                 events.append(event)
         else:
@@ -1594,12 +1594,11 @@ def appends_to(previous: Measured | None, scope: tuple, hashes: tuple[str, ...])
     return anchor_hash(hashes[:previous.count]) == previous.prefix
 
 
-def sent_media(items: list, *, measure_bytes: bool = True, learned: dict | None = None) -> MediaCost:
-    """The images and documents in ``items``: their bytes, estimate, and least cost (D48), documents at
-    their learned cost when one was learned (``learned``). The least cost is 0 on a dialect whose API can
-    charge less than Claude's floor (Codex: OpenAI prices by tiles, 85 tokens at low detail), so taking it
-    off real usage never makes the ratio count text low."""
-    media = media_cost(split_media(items)[1], measure_bytes=measure_bytes, learned=learned)
+def sent_media(items: list, *, measure_bytes: bool = True) -> MediaCost:
+    """The images and documents in ``items``: their bytes, estimate, and least cost (D48). The least cost
+    is 0 on a dialect whose API can charge less than Claude's floor (Codex: OpenAI prices by tiles,
+    85 tokens at low detail), so taking it off real usage never makes the ratio count text low."""
+    media = media_cost(split_media(items)[1], measure_bytes=measure_bytes)
     return media if _dialect().media_floor else media._replace(floor=0)
 
 
@@ -1681,22 +1680,18 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     upstream = {**request, field_name: transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
     sent_items = upstream[field_name]
-    learned = estimator.document_tokens
     if state.head_tokens is None and state.k == 0:  # rule 4 may measure the head from this request's usage
         window = window_items(sent_items)
-        byte_count = _ByteCount()
-        byte_count.document_tokens = learned  # media priced alike in both counts, so they cancel
         state = replace(state, last_window_tokens=estimate_items(estimator, window),
-                        last_window_bytes=estimate_items(byte_count, window),
-                        last_window_media=sent_media(window, measure_bytes=False, learned=learned))
+                        last_window_bytes=estimate_items(BYTE_COUNT, window),
+                        last_window_media=sent_media(window, measure_bytes=False))
     # Within one epoch, window, degraded state and head the transform is a function of the request's own
     # messages, so their rule 10 hashes (computed once per request) stand for what is sent (D48).
     scope = (state.epoch, state.k, state.degraded, fingerprint)
     hashes = tuple(message_hash(m) for m in messages)
-    parts = media_parts(split_media(sent_items)[1], learned)
     state = replace(state, hashes=hashes, last_sent_bytes=sent,
-                    last_sent_media=sent_media(sent_items, learned=learned), last_estimate=sent_estimate,
-                    last_sent_media_keys=tuple(part.key for part in parts), last_sent_parts=parts,
+                    last_sent_media=sent_media(sent_items), last_estimate=sent_estimate,
+                    last_sent_media_keys=media_keys(split_media(sent_items)[1]),
                     last_sent_appends=appends_to(state.last_measured, scope, hashes), last_sent_scope=scope,
                     last_sent_anchor=(len(hashes), anchor_hash(hashes)),
                     pending_usage=usage_identity(messages))
@@ -2775,11 +2770,6 @@ class RewriteEngine:
                 # conversation's first request is in the measurement and counted once.
                 state = replace(state, head_tokens=measured_head_tokens(state, real, request, dialect),
                                 head_size=size)
-            if dialect.media_floor:
-                # D48: a PDF's real cost, from the first measured request that carries it, prices it from
-                # now on in place of the generous page allowance (Claude only: the floors bound the cost).
-                learn_document_cost(self.estimator.document_tokens, state.last_sent_parts, text_bytes, real,
-                                    self.estimator.measured_bytes_per_token)
             if state.window_budget is None and state.head_tokens is not None:
                 # A8 (c): W from the measured head, so set_window publishes W and the ratio after the first
                 # response rather than only after a rotation decision, and a restarted engine can restore

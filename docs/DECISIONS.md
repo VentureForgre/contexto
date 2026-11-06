@@ -1280,27 +1280,15 @@ the owner's delegation. Open decisions are listed at the end with the options an
     tokens a page plus the page image at the older 1,568-token limit, since the image comes on top
     (reviewer A, PR #234). The measured 3-page PDF cost 1,583 a page, so typical pages are far under
     it; a page of small-font code or tables can still cost more than 3,000 text tokens, so this is a
-    generous allowance, not a hard maximum. Pages count as a renderer draws them: the catalog the last
-    trailer (or cross-reference stream) names in `/Root`, else the latest catalog, names the root of the
-    page tree, each tree node counts by its latest definition (an incremental update appends newer ones),
-    and the pages are the root's `/Count` or the page objects the root reaches through `/Kids`, whichever
-    is larger (at most 600, the API's limit). So the pages an incremental save deleted, which the
-    superseded tree still lists, and a page-tree node no catalog reaches do not count (round 5: a PyMuPDF
-    file with 30 of 40 pages deleted counted 40 pages and, pasted, logged `bound_too_small` and the
-    launcher's advice to raise `--bound`; now 10, and reviewer A's orphan-node file 1 rather than 41).
-    The file-level scan skips every stream body, to its direct `/Length` when `endstream` follows it
-    there (round 6, reviewer A: a page can show PDF syntax as text, and a reportlab file saved with
-    `pageCompression=0` whose pages show a minimal PDF's objects counted 1 page for 20 or 100; reading
-    the 100-page one at 1,583 a page was estimated at 21,993 for a real 175,746 on a 150,000 bound and
-    went out unflagged; now 100 pages, flagged at 474,225, and estimated within 21 tokens of real from
-    the next request). As a safety net, a page object that no tree node lists in any definition
-    (latest or superseded, reachable or not), or whose number cannot be read, counts too: the walk
-    cannot explain it. Deleted and orphaned pages are still listed by their old or unreachable node,
-    so they stay out. The walk keeps at most 20,000 `/Kids` references per PDF; past that the old count
-    stands (a crafted 990-node tree peaked at 43.8 MB and 1.7 s, now 17.6 MB and 0.13 s). When the
-    catalog's tree cannot be read, pages are the
-    larger of the `/Type /Page` objects (in object streams too, Flate or stored without a filter as
-    PyMuPDF writes them) and the page tree's largest `/Count`. Page objects count once per object
+    generous allowance, not a hard maximum. A PDF is never counted low (round 7, the orchestrator's
+    decision, below): its pages are the larger of its `/Type /Page` objects, wherever they are (in
+    content streams and object streams too, Flate or stored without a filter as PyMuPDF writes them,
+    every version) and the largest `/Count` of any page tree node, at most 600 (the API's limit). Pages
+    an incremental save deleted, which the superseded tree still lists, count (a PyMuPDF file with 30 of
+    40 pages deleted counts 40), as do a page-tree node no catalog reaches (reviewer A's orphan-node
+    file counts 41 for 1) and page objects shown as text in a content stream (a reportlab file with
+    `pageCompression=0` whose pages show a minimal PDF counts 21 for 20).
+    Page objects count once per object
     number, read from the `N G obj` header or an object stream's offset table. Counts are cached by
     content, least recently used dropped,
     up to 65,536 PDFs (288 bytes each measured, 18.8 MB at most), so no request holds enough PDFs to cycle
@@ -1318,10 +1306,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     fpdf2, pikepdf (libqpdf) object streams with and without linearization, PyMuPDF's unfiltered object
     streams, macOS Quartz through `cupsfilter` and `sips`, incremental updates that add or rewrite a
     page, and the object stream PDFlib+PDI 9 writes, with an indirect `/Length 15 0 R` (written by hand;
-    PDFlib is commercial), PyMuPDF's incremental save that deleted 30 of 40 pages, and reportlab pages
-    that show a minimal PDF's objects in uncompressed content streams. All 13 count
-    exactly, pages and floor, as do the same deletion at 20→2, 100→5, the middle 10 of 40 and the first
-    30 of 40 (outside the suite). Larger files from reportlab platypus
+    PDFlib is commercial): all 11 count exactly, pages and floor. Three more count high on purpose,
+    never low: PyMuPDF's incremental save that deleted 30 of 40 pages (40), reportlab pages that show a
+    minimal PDF's objects in uncompressed content streams (21 for 20), and the same listing re-saved by
+    `qpdf --qdf`, every `/Length` indirect (21 for 20). Larger files from reportlab platypus
     (46 pages), fpdf2 (77), PyMuPDF (120 to 600 pages, with links and object streams) and a pikepdf
     merge of three producers (99), each also re-saved through qpdf with object streams, plain and
     linearized, count exactly too (18 files, outside the suite); reviewer A compared 55 more. Round 2
@@ -1369,9 +1357,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     objects a `/Kids` array references, at most the tree's count, at least one); on Codex 0, since
     OpenAI prices images by tiles (1,105 tokens for 1920x1080 at high detail, 85 at low). The floor can
     still run high, so nothing below relies on it being right: blank or image-only pages can cost under
-    1,000, and a PDF whose catalog tree cannot be read falls back to its page objects and largest count
-    (before round 5, an incremental save that deleted pages and an orphan page-tree node ran it high
-    too). Round 2's crafted 20- and 40-page claims took the ratio to
+    1,000, and an incremental save that deleted pages or an orphan page-tree node leaves `/Kids` arrays
+    listing pages that are not drawn. Round 2's crafted 20- and 40-page claims took the ratio to
     4.54 and 10.24 at 23c42ea, and round 3's 8-page claim in a dense session to 2.35 at d95e5df.
   - **What the ratio learns from a request with media** (`text_usage`, `appended_usage`; reviewer B
     round 3, reviewer A round 4), in order:
@@ -1476,8 +1463,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     |---|---|---|
     | a 1440x900 screenshot | 20,082, 104,918 (104,910) | 20,082, 104,918 |
     | a dense 10-page PDF (4,568 a page) | 55,523, 69,477 (98,631) | 39,681, 85,319 |
-    | the deleted-pages fixture (10 × 1,583) | 0, 107,643 (102,896) | 25,673, 99,327 |
-    | the orphan-node file (1 × 1,583) | 0, 107,643 (104,931) | 20,426, 104,574 |
+    | the deleted-pages fixture (10 × 1,583) | 0, 107,643 (102,896) | 16,977, 107,643 (the lower limit; 25,673 with round 5's walk) |
+    | the orphan-node file (1 × 1,583) | 0, 107,643 (104,931) | 16,977, 107,643 (the lower limit; 20,426 with the walk) |
     | 20 pages costing 300 (floor runs high) | 5,843, 119,157 (104,300) | 16,977, 108,023 |
     | a dense 100-page PDF, bound 800,000 | 376,643, 398,357 (689,900) | 39,681, 735,319 |
 
@@ -1486,36 +1473,49 @@ the owner's delegation. Open decisions are listed at the end with the options an
     against 84,737), where the head errs high inside the 1.5-bytes cap. The 100-page case's `W` is above
     its control's because the control's own
     head errs high by D49's design, and below the true `W` (about 755,000).
-  - **A PDF's real cost, and the launcher's advice** (reviewer B, round 6). At a typical page cost (1,583,
-    a third of the 4,568 allowance), a PDF of 20 or more pages pasted at a turn start was sized at the
-    allowance on every request, and from 25 pages the rotation logged `bound_too_small` and the
-    launcher told the user to restart with a larger `--bound`, for requests of 56k to 84k on a 150k
-    bound. The first estimate stays on the safe side. Then: on Claude, the first measured request that
-    carries a PDF gives its real cost, when it is the only PDF of that request not learned yet: the
-    usage less the text (at the measured ratio, else the 3.5 seed, which counts text low) and the other
-    media (learned PDFs at their cost, images at their floor), kept between the PDF's floor and its
-    estimate, per session (`learn_document_cost`). It prices that PDF from then on: 20 pages at 1,583
-    learned 31,661 for a true 31,660, and every later request was estimated within 1% (at 2ef88a4,
-    110,000 for 50,000 on every request). Codex keeps the estimate, since OpenAI's document prices are
-    not bounded by Claude's floors. And when a rotation's `bound_too_small` comes only from the media
-    allowance (the new turn fits `W` with its media at their floor), the event says
-    `media_allowance` and the launcher says the PDF or image is estimated generously until its first
-    response, not that the bound is too small; a later genuine `bound_too_small` is still reported.
-    Measured, bound 150,000, the default 17k head, pages at 1,583 (`midpaste`):
+  - **Round 7: a PDF is never estimated low (the orchestrator's decision).** Three rounds in a row, a
+    precision feature in PDF counting opened an undercount, and undercounting is the one failure that
+    breaks the bound. Round 5's page-tree walk (the catalog's tree, each node by its latest definition)
+    took catalogs and nodes shown as text in content streams, so a tutorial PDF counted 1 page (round
+    6); round 6's stream skip ended a stream with an indirect `/Length` at an `endstream` in its text,
+    so a `qpdf --qdf` tutorial counted 2 pages for 100 and reading it was estimated at 26,561 for a real
+    175,746 on a 150,000 bound, unflagged (round 7, reviewer A); and round 6's learned per-PDF cost (the
+    first measured request's usage less its text and other media, kept between floor and estimate) came
+    out far under the real cost when a cheap PDF learned at its floor was subtracted from the next one,
+    or a dense session ratio over-counted the text, and a later re-Read near the bound went out
+    unflagged (146,786 estimated for 158,466 on 150,000, reviewer A). So the walk and the stream skip
+    are gone (the walk could only lower the larger of the page objects and the counts, which now
+    stands), and so is the learned cost: a PDF is priced at its page allowance on every request.
+    The cost, plainly: a large PDF is estimated generously, at 4,568 tokens a counted page where a
+    typical page costs about 1,583, so the turn it is pasted on can page the earlier conversation
+    (recallable) where an equal-cost text turn would not, and an incremental save that deleted pages, or
+    a node no catalog reaches, counts those pages too. When a rotation's `bound_too_small` comes only
+    from that allowance (the new turn fits `W` with its PDFs at their floor), the event says
+    `media_allowance` and the launcher says the PDF is estimated generously and the bound does not need
+    to change; images do not count toward it, since an image's estimate is its price, not an allowance
+    (reviewer A, round 7). A later genuine `bound_too_small` is still reported. The one-page-per-3 KB
+    size guess stays a fallback for a PDF with no page objects and no page tree: in the max it would
+    price any PDF carrying images or fonts at hundreds of pages (QA's 3-page, 1.7 MB PDF at about 433),
+    and adds no safety, since every page the API renders is a page object the scan finds or sits in an
+    object stream that was not read, which already counts the tree's total or 600. Measured, bound
+    150,000, the default 17k head, pages at 1,583 (reviewer B's `midpaste`; the same at 5971e84, with
+    the learned cost, and now):
 
     | PDF pasted | estimate, real at the paste | messages sent (control) | events at the paste |
     |---|---|---|---|
     | 15 pages after 24k | 102,517, 57,764 | 13 of 13 (13) | none |
-    | 20 pages after 24k | 125,357, 49,691 | 1 of 13 (13) | `window_minimal` |
-    | 25 pages after 24k | 148,197, 57,606 | 1 of 13 (13) | `window_minimal`, `turn_room_low`, `bound_too_small` now with `media_allowance` |
-    | 25 / 30 pages in the first request | 129,081 / 151,921, 56,971 / 64,886 | 1 of 1 | `turn_room_low`, `bound_too_small` now with `media_allowance` |
+    | 20 pages after 24k / 43k | 125,357 / 142,053, 49,691 / 49,869 | 1 of 13 / 1 of 25 (all) | `window_minimal` |
+    | 25 pages after 24k | 148,197, 57,606 | 1 of 13 (13) | `window_minimal`, `turn_room_low`, `bound_too_small` with `media_allowance` |
+    | 25 / 30 pages in the first request | 129,081 / 151,921, 56,971 / 64,886 | 1 of 1 | `turn_room_low`, `bound_too_small` with `media_allowance` |
     | 20 pages first, 50k head | 134,813, 82,389 | 1 of 1 | the same |
 
-    The paste turn itself still pages the earlier turns when the allowance does not fit: from 20 pages
-    after 24k of history the window keeps only the new turn (recallable), where the control keeps all;
-    the turns after it are then sized at the learned cost. Reviewer B's alternative, to size a turn
-    start with its new media at their floor while the whole request fits the bound at the estimate, was
-    not taken, to keep the first estimate on the safe side.
+    The learned cost changed nothing measurable there: the turns after the paste are estimated from the
+    last real usage either way (context kept 76,616 against the control's 84,953 for 20 pages after 24k,
+    before and after). Reviewer A's undercounts, before and after: the `qpdf --qdf` 100-page tutorial
+    read at 150,000, 26,561 estimated for 175,746 and unflagged, now 478,793 and flagged; the re-Read
+    near the bound (A's `learn7.py --reread 40000`), one crossing unflagged at 6.5% over the estimate,
+    now no crossing; crafted streams with a `/Length` that lies long or no `endstream`, counted 1 to 12
+    pages for 20 or 300, now at least the true count.
   - **Also not covered.** A PDF crafted to claim more pages than it has raises its estimate. An
     encrypted PDF with object streams counts 600 pages (reviewer B); Anthropic asks for PDFs without
     encryption. A PDF whose `/Kids` the windows cannot read (a nested dictionary in a page tree node, or

@@ -310,29 +310,23 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    tokens after scaling its long edge down to 2,576 pixels, between 64 and 4,784, with the size read
    from the PNG, JPEG, GIF, or WebP header, and 4,784 when it cannot be read (a URL, a file id,
    another format); a PDF costs 4,568 tokens a page (3,000 text tokens plus a page image at 1,568),
-   its pages counted as a renderer draws them: from the page tree of the catalog the last trailer (or
-   cross-reference stream) names in `/Root`, else the latest catalog, each node by its latest
-   definition (an incremental update appends newer ones), the root's count or the page objects it
-   reaches through `/Kids`, whichever is larger, so pages an incremental save deleted and nodes no
-   catalog reaches do not count. Stream bodies are skipped, to their direct `/Length` (a page can
-   show PDF syntax as text), and a page object that no tree node lists in any definition, or whose
-   number cannot be read, counts as well. When the catalog's tree cannot be read (or past 20,000
-   `/Kids` references), the larger of the page objects (in object streams too, Flate or stored
-   without a filter, each object number once) and the largest page-tree count. Every fallback errs
-   high: a PDF with neither, or that cannot be decoded, is one page per 3 KB; a PDF with an object
-   stream that cannot be read (another filter, a predictor, encryption, or a bound below) is its page
-   tree's count, else 600 pages (the API's limit); a PDF with more page objects, tree nodes or
-   streams than a document has is 600; a document by URL or file id is 10 pages; a document of plain
-   text or content blocks is text. Parsing a PDF never raises and is bounded: at most 32 MB of
-   base64, 128 object streams, 2 MB read per stream and 4 MB per PDF, and, over the whole PDF with
-   its object streams, 10,000 page objects, 1,000 tree nodes and 20,000 streams, each read through a
-   bounded window. Counts are cached by content (65,536 PDFs, least recently used dropped). The proxy
-   calls the engine's `prime` with each request before it takes its transform lock, which counts the
-   request's PDFs into that cache, so the transform finds them counted. On Claude, a PDF's real cost
-   is learned from the first measured request that carries it, when it is the only PDF of that
-   request not learned yet: the usage less the text (at the measured ratio, else the 3.5 seed) and
-   the other media (learned PDFs at their cost, images at their floor), kept between its floor and
-   its estimate; it prices that PDF for the rest of the session.
+   its pages never counted low (D48, round 7): the larger of its page objects, wherever they are
+   (content streams and object streams too, Flate or stored without a filter, every version, each
+   object number once) and the largest `/Count` of any page tree node, at most 600 (the API's limit).
+   So a large PDF is estimated generously (a typical page costs about 1,583), and the turn it is
+   pasted on can page the earlier conversation where an equal-cost text turn would not; pages an
+   incremental save deleted, a page tree node no catalog reaches, and page objects shown as text in a
+   content stream count too. Every fallback errs high: a PDF with neither page objects nor a tree, or
+   that cannot be decoded, is one page per 3 KB; a PDF with an object stream that cannot be read
+   (another filter, a predictor, encryption, or a bound below) is its page tree's count, else 600
+   pages; a PDF with more page objects or tree nodes than a document has is 600; a document by URL or
+   file id is 10 pages; a document of plain text or content blocks is text. Parsing a PDF never
+   raises and is bounded: at most 32 MB of base64, 128 object streams, 2 MB read per stream and 4 MB
+   per PDF, and, over the whole PDF with its object streams, 10,000 page objects, 1,000 tree nodes
+   and 20,000 `/Kids` references, each read through a bounded window. Counts are cached by content
+   (65,536 PDFs, least recently used dropped). The proxy calls the engine's `prime` with each request
+   before it takes its transform lock, which counts the request's PDFs into that cache, so the
+   transform finds them counted.
    The ratio is learned from text only: each observed request's media bytes are left out of its
    bytes, and its media's cost out of its real tokens. That cost lies at or under the media's
    estimate and is meant to lie at or over their floor (on Claude 95% of the image formula on the
@@ -378,10 +372,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    log `window_minimal`; this keeps the request under the bound at the cost of the previous turn's
    verbatim text. Only if `W` is not positive or cannot hold even the new turn, log
    `bound_too_small` and still rotate to the minimal window (the new turn alone), which is
-   smaller than sending unrotated. When the new turn would fit `W` with its media at their floor, the
-   shortfall is only the generous allowance for a PDF or image not measured yet (D48): the event says
-   `media_allowance`, and the launcher says the media are estimated generously until their first
-   response rather than suggesting a larger `--bound`; the launcher warns at start when a typical
+   smaller than sending unrotated. When the new turn would fit `W` with its PDFs at their floor, the
+   shortfall is only the generous page allowance for its PDFs (D48; images do not count, their estimate
+   is their price): the event says `media_allowance`, and the launcher says the PDF is estimated
+   generously rather than suggesting a larger `--bound`; the launcher warns at start when a typical
    head (28,000 tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
    seat) leaves less than 25,000 tokens of window budget, says that recall will barely fit or, at a
    budget of 0 or less, that it may not fit at all (a "may": measured heads ran as low as 15,689), and

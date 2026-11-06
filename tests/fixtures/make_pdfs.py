@@ -34,9 +34,18 @@ EXPECTED = {
     "pdflib-indirect-length-1.pdf": 1,
     "pdflib-indirect-length-7.pdf": 7,
     # an incremental save that deleted 30 of 40 pages: the superseded page tree still lists them (D48 round 4)
+}
+# Files counted high on purpose (true pages here; D48 round 7: a PDF is never counted low). The count is the
+# largest the file offers, so pages an incremental save deleted, and page objects shown as text in a content
+# stream, count too.
+COUNTED_HIGH = {
+    # an incremental save that deleted 30 of 40 pages: the superseded page tree still lists them
     "pymupdf-incremental-deleted-40-to-10.pdf": 10,
-    # uncompressed pages that show a minimal PDF's objects as text (D48 round 6: the walk read them)
+    # uncompressed pages that show a minimal PDF's objects as text (D48 round 6)
     "reportlab-uncompressed-listing-20.pdf": 20,
+    # a listing with endstream before its catalog, re-saved by qpdf in QDF mode, every /Length indirect
+    # (D48 round 7: the stream skip ended a stream at the endstream in its text)
+    "qdf-listing-20.pdf": 20,
 }
 
 
@@ -75,6 +84,37 @@ def reportlab_listing(pages: int) -> bytes:
         pdf.showPage()
     pdf.save()
     return buffer.getvalue()
+
+
+QDF_LISTING = [
+    "%PDF-1.7", "4 0 obj", "<< /Length 44 >>", "stream", "BT /F1 24 Tf 72 700 Td (Hello) Tj ET", "endstream",
+    "endobj", "1 0 obj", "<< /Type /Catalog /Pages 2 0 R >>", "endobj", "2 0 obj",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>", "endobj", "3 0 obj",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>", "endobj",
+    "3 0 obj", "<< /Type /Pages /Kids [4 0 R 7 0 R] /Count 2 >>", "endobj",
+]
+
+
+def qdf_listing(pages: int) -> bytes:
+    """Pages showing ``QDF_LISTING`` (which re-lists object 3, the root page tree in qpdf's numbering, as
+    text), re-saved by qpdf in QDF mode, which writes every /Length indirect."""
+    import pikepdf
+    from reportlab.pdfgen import canvas
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, invariant=1, pageCompression=0)
+    for page in range(pages):
+        pdf.setFont("Courier", 10)
+        pdf.drawString(72, 760, f"Synthetic chapter {page + 1}: the smallest valid PDF")
+        for line, text in enumerate(QDF_LISTING):
+            pdf.drawString(72, 740 - 14 * line, text)
+        pdf.showPage()
+    pdf.save()
+    out = io.BytesIO()
+    with pikepdf.open(io.BytesIO(buffer.getvalue())) as source:
+        source.save(out, compress_streams=False, stream_decode_level=pikepdf.StreamDecodeLevel.generalized,
+                    object_stream_mode=pikepdf.ObjectStreamMode.disable, qdf=True, deterministic_id=True)
+    return out.getvalue()
 
 
 def fpdf2(pages: int) -> bytes:
@@ -244,10 +284,11 @@ def main() -> None:
         "pdflib-indirect-length-7.pdf": pdflib_like(7),
         "pymupdf-incremental-deleted-40-to-10.pdf": pymupdf_deleted(40, 10),
         "reportlab-uncompressed-listing-20.pdf": reportlab_listing(20),
+        "qdf-listing-20.pdf": qdf_listing(20),
     }
     for name, data in made.items():
         (OUT / name).write_bytes(data)
-        print(f"{name}: {len(data)} bytes, {EXPECTED[name]} pages")
+        print(f"{name}: {len(data)} bytes, {EXPECTED.get(name) or COUNTED_HIGH[name]} pages")
 
 
 if __name__ == "__main__":
