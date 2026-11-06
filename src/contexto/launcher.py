@@ -83,6 +83,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -92,7 +93,7 @@ from contexto.cliversions import launch_check
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
 from contexto.mcp import TOOLS as MCP_TOOLS
 from contexto.paths import contexto_home, mcp_env, session_dir
-from contexto.private import affinity_salt
+from contexto.private import affinity_salt, open_private, private_dir
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import LIVE_LOCK, SessionStore
 from contexto.toolcheck import denied_tools_message, missing_tools_message
@@ -116,19 +117,34 @@ TERMINATING_SIGNALS = (signal.SIGUSR1, signal.SIGUSR2, signal.SIGALRM)
 WATCHDOG_DONE = b"done\n"
 WATCHDOG_EXITED = b"exited\n"  # the child was reaped: its pid may be reused
 # Contexto's own ``contexto run`` options, and whether each takes a value (D55: a hint when one is put
-# after the CLI's name). The codex options are added by contexto.codex.
+# after the CLI's name). The codex options are not listed: they only apply before 'codex'.
 RUN_OPTIONS = {"--bound": True, "--allow-large-bound": False, "--window-fraction": True, "--headroom-floor": True,
                "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False}
-# Claude Code 2.1.314's options whose value is the next argument even when it starts with "-" (``<value>``
-# in ``claude --help``; variadic ones take at least that one). ``claude_options`` skips it.
+# Claude Code's long options whose value is the next argument even when it starts with "-": every
+# ``<value>`` option in 2.1.314's and 2.1.318's ``claude --help`` (variadic ones take at least that one),
+# and the hidden main-command ones that take a prompt or a count. ``claude_options`` skips that value.
 CLAUDE_VALUE_OPTIONS = frozenset({
     "--add-dir", "--agent", "--agents", "--allowedTools", "--allowed-tools", "--append-system-prompt",
     "--append-system-prompt-file", "--autocompact", "--betas", "--debug-file", "--disallowedTools",
     "--disallowed-tools", "--effort", "--environment", "--fallback-model", "--file", "--input-format",
-    "--json-schema", "--max-budget-usd", "--mcp-config", "--model", "-n", "--name", "--output-format",
+    "--json-schema", "--max-budget-usd", "--mcp-config", "--model", "--name", "--output-format",
     "--permission-mode", "--permission-prompts", "--plugin-dir", "--plugin-url",
     "--remote-control-session-name-prefix", "--session-id", "--setting-sources", "--settings",
-    "--system-prompt", "--system-prompt-file", "--system-prompt-snapshot", "--tools"})
+    "--system-prompt", "--system-prompt-file", "--system-prompt-snapshot", "--tools",
+    # Hidden (in the 2.1.314 and 2.1.318 binaries, not in --help):
+    "--append-subagent-system-prompt", "--append-subagent-system-prompt-file", "--max-thinking-tokens",
+    "--max-turns", "--parent-session-id", "--permission-prompt-tool", "--plan-mode-instructions", "--prefill",
+    "--resume-session-at"})
+# Claude Code's short options (2.1.314 and 2.1.318, the same): True for a flag, False when it takes a value.
+# Commander reads a cluster such as ``-pc`` or ``-rabc123`` one letter at a time: a flag is consumed and the
+# rest is read again (``-pc`` is ``-p -c``); an option that takes a value, required (``-n``) or optional
+# (``-r``, ``-d``, ``-w``), takes the rest of the argument as its value (``-rabc123`` is ``--resume abc123``,
+# and ``-rc`` resumes "c"). Measured on 2.1.318: ``claude -prabc123`` and ``claude -rc`` both fail on the
+# resume value ("abc123", "c").
+CLAUDE_SHORT_OPTIONS = {"c": True, "h": True, "p": True, "v": True, "d": False, "n": False, "r": False, "w": False}
+CLAUDE_SHORT_REQUIRED = frozenset({"n"})  # the short option whose value is the next argument even with a "-"
+CHOOSE_LOCK = "choose.lock"  # under $CONTEXTO_HOME: one launch at a time picks a session automatically
+CHOOSE_LOCK_WAIT_S = 5.0
 CLAUDE_SESSION_HEADER = "x-claude-code-session-id"
 CLI_SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}")  # Claude Code sends a UUID
 LEGACY_USER_ID_SESSION = re.compile(r"_session_([0-9A-Fa-f-]{36})")  # user_<hash>_account_<uuid>_session_<uuid>
@@ -288,9 +304,11 @@ def start_warning(bound: int, headroom_floor: int | None, overhead: int) -> str 
     suggested = headroom + overhead + 2 * MIN_WINDOW_BUDGET
     sizing = f"bound {bound:,} - headroom {headroom:,} - typical fixed overhead {overhead:,}"
     if budget <= 0:
-        return (f"bound {bound:,} leaves no window budget ({sizing} = {budget:,} tokens): the engine keeps only "
-                f"the new turn, requests may exceed the bound, and recall will not fit. "
-                f"Use --bound {suggested:,} or more.")
+        # The overhead is the top of the measured range, and measured heads ran as low as 15,689 (QA,
+        # bound 30,000 against a stub: budgets 7,411 to 9,311), so this is a "may", not a "will".
+        return (f"bound {bound:,} may leave no window budget ({sizing} = {budget:,} tokens; measured overheads "
+                f"run from about 15,700 to 28,000): the engine may keep only the new turn, requests may exceed "
+                f"the bound, and recall may not fit at all. Use --bound {suggested:,} or more.")
     return (f"window budget about {budget:,} tokens ({sizing}) is below {MIN_WINDOW_BUDGET:,}: turns page out "
             f"almost at once and recalled pages will barely fit, if at all. Consider --bound {suggested:,} or more.")
 
@@ -436,40 +454,61 @@ class SessionRecorder:
         return getattr(transform, name)
 
 
-def claude_options(cli_args: list[str]) -> Iterator[tuple[int, str]]:
-    """(index, argument) of each argument Claude Code reads as an option, up to ``--``. The value of an
-    option in ``CLAUDE_VALUE_OPTIONS`` is skipped even when it starts with ``-`` (``--append-system-prompt
-    --continue`` is a prompt, not a continue)."""
+def claude_options(cli_args: list[str]) -> Iterator[tuple[int, str, str | None]]:
+    """(index, option, attached value) of each option Claude Code reads, up to ``--``, as its Commander
+    parser reads them. A long option's attached value is what follows ``=``; the value of one in
+    ``CLAUDE_VALUE_OPTIONS`` given as the next argument is skipped even when it starts with ``-``
+    (``--append-system-prompt --continue`` is a prompt, not a continue). A short-option cluster is split
+    per ``CLAUDE_SHORT_OPTIONS`` (``-pc`` yields ``-p`` and ``-c``; ``-rabc`` yields ``-r`` with ``abc``
+    attached); an unknown letter ends it, as Claude Code then stops with an error."""
     i = 0
     while i < len(cli_args):
         arg = cli_args[i]
         if arg == "--":
             return
-        if arg.startswith("-"):
-            yield i, arg
-            if arg in CLAUDE_VALUE_OPTIONS:
+        if arg.startswith("--"):
+            name, eq, value = arg.partition("=")
+            yield i, name, value if eq else None
+            if not eq and name in CLAUDE_VALUE_OPTIONS:
                 i += 1
+        elif arg.startswith("-") and len(arg) > 1:
+            letters = arg[1:]
+            while letters:
+                letter, rest = letters[0], letters[1:]
+                flag = CLAUDE_SHORT_OPTIONS.get(letter)
+                if flag is None:
+                    yield i, f"-{letters}", None
+                    break
+                if flag:
+                    yield i, f"-{letter}", None
+                    letters = rest
+                    continue
+                yield i, f"-{letter}", rest or None
+                if not rest and letter in CLAUDE_SHORT_REQUIRED:
+                    i += 1
+                break
         i += 1
 
 
 def resume_request(cli_args: list[str]) -> tuple[str, str | None] | None:
-    """What Claude Code will resume: ``("continue", None)`` for ``-c``/``--continue``, ``("resume", id)``
-    for ``-r``/``--resume <id>`` or ``--resume=<id>``, ``("resume", None)`` for ``--resume`` without a
-    value (Claude Code's picker), else None. Only arguments ``claude_options`` names are read."""
-    for i, arg in claude_options(cli_args):
-        if arg in ("-c", "--continue"):
+    """What Claude Code will resume: ``("continue", None)`` for ``-c``/``--continue`` (also in a cluster
+    such as ``-pc``), ``("resume", id)`` for ``-r``/``--resume <id>``, ``--resume=<id>`` or ``-r<id>``,
+    ``("resume", None)`` for ``--resume`` without a value (Claude Code's picker), else None. Only options
+    ``claude_options`` names are read."""
+    for i, name, attached in claude_options(cli_args):
+        if name in ("-c", "--continue"):
             return "continue", None
-        if arg in ("-r", "--resume"):
+        if name in ("-r", "--resume"):
+            if attached is not None:
+                return "resume", attached or None
             value = cli_args[i + 1] if i + 1 < len(cli_args) else None
             return "resume", value if value and not value.startswith("-") else None
-        if arg.startswith("--resume="):
-            return "resume", arg.split("=", 1)[1] or None
     return None
 
 
 def forks(cli_args: list[str]) -> bool:
     """``--fork-session``: Claude Code gives the resumed or continued conversation a new id."""
-    return any(arg == "--fork-session" for _, arg in claude_options(cli_args))
+    return any(name == "--fork-session" for _, name, _ in claude_options(cli_args))
 
 
 def served_sessions(home: Path) -> list[tuple[float, str, str, Path | None]]:
@@ -562,7 +601,56 @@ def choose_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> Ses
     others = sorted({s[1] for s in matches if s[1] != session}) if kind == "resume" else []
     also = f" (newest; also served by {', '.join(others)}: pass --session ID to use one of those)" if others else ""
     say(f"{found}{session}{also}; {'resuming' if kind == 'resume' else 'continuing'} it")
+    if forks(options.claude_args):
+        # Kept on purpose: the fork's history up to the fork point is that session's, and so are the pins.
+        say(f"with --fork-session the fork shares Contexto session {session} with the conversation it forks "
+            f"(pages, pins and recall room; switching between the two re-rotates). Pass --session NEW before "
+            f"'claude' to give the fork its own store.")
     return SessionChoice(session, {s[2] for s in served if s[1] == session} if kind == "continue" else None)
+
+
+@contextmanager
+def choosing(home: Path) -> Iterator[None]:
+    """One launch at a time picks a session automatically (reviewer A, PR #240 round 2): an exclusive
+    ``flock`` on ``$CONTEXTO_HOME/choose.lock`` is held from the busy-session probe until the chosen
+    session is open, with its shared ``live.lock`` taken. Two ``contexto run claude -c`` started at the
+    same moment otherwise both probed the session before either held it, and shared it in 6 of 10 tries.
+    The wait is bounded (``CHOOSE_LOCK_WAIT_S``); a lock that cannot be opened or taken in time only
+    costs the serialization, never the launch."""
+    fd = None
+    try:
+        private_dir(home, narrow=False)
+        fd = open_private(home / CHOOSE_LOCK, os.O_RDWR | os.O_NOFOLLOW)
+        deadline = time.monotonic() + CHOOSE_LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)  # releases the lock
+
+
+def pick_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> tuple[SessionChoice, Any]:
+    """Choose the session (``choose_session``) and open it. A choice made automatically (a resume
+    without ``--session``) is made under ``choosing``, so a concurrent launch sees this one's live lock."""
+    automatic = not options.session_id and resume_request(options.claude_args) is not None
+    with choosing(home) if automatic else nullcontext():
+        choice = choose_session(options, home, cwd, stderr)
+        check_mcp_values(choice.session_id, home, sys.executable)
+        try:
+            store = open_session(home, choice.session_id, cwd)
+        except (OSError, ValueError) as exc:
+            raise LaunchError(f"cannot open session {choice.session_id!r}: {exc}", EXIT_USAGE) from exc
+    return choice, store
 
 
 def resume_command(options: LaunchOptions, session_id: str, cli_session: str) -> str:
@@ -888,7 +976,8 @@ def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None
     signal N, 127 if it cannot be started). Ctrl+C reaches it through the terminal while the
     launcher ignores SIGINT; SIGTERM, SIGHUP and SIGQUIT are forwarded, and SIGUSR1, SIGUSR2 and
     SIGALRM end it with SIGTERM. The handlers are installed before the spawn, so a signal that arrives
-    while the child starts is held and forwarded once it exists, not lost or raised mid-spawn.
+    while the child starts is held and forwarded once it exists, not lost or raised mid-spawn; if the
+    spawn fails, such a signal decides the exit code (128 + N) over the 127.
     ``watchdog`` is told the child's pid when it starts and told to forget it once it is reaped, so a
     later death of the launcher never signals a reused pid. Shared by claude and codex."""
     forwarding = _ChildSignals()
@@ -899,14 +988,14 @@ def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None
             child = subprocess.Popen(argv, env=env)
         except (FileNotFoundError, PermissionError) as exc:
             print(f"contexto: cannot start {argv[0]!r}: {exc.strerror}", file=stderr or sys.stderr)
-            return EXIT_NOT_FOUND
+            return EXIT_NOT_FOUND if forwarding.received is None else 128 + forwarding.received
         if watchdog is not None:
             watchdog.watch(child.pid)
         forwarding.attach(child)
         return exit_code(child.wait())
     finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
+        # First the child: reaped, then forgotten by the watchdog at once (its pid may be reused), then
+        # the handlers restored.
         if child is not None:
             if child.poll() is None:
                 child.terminate()
@@ -917,6 +1006,8 @@ def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None
                     child.wait()
             if watchdog is not None:
                 watchdog.forget()
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
@@ -930,13 +1021,8 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     check_upstream(upstream)
     home = contexto_home()
     check_home(home)
-    choice = choose_session(options, home, Path.cwd(), stderr)
+    choice, store = pick_session(options, home, Path.cwd(), stderr)
     session_id = choice.session_id
-    check_mcp_values(session_id, home, sys.executable)
-    try:
-        store = open_session(home, session_id, Path.cwd())
-    except (OSError, ValueError) as exc:
-        raise LaunchError(f"cannot open session {session_id!r}: {exc}", EXIT_USAGE) from exc
     config = engine_config(options)
     proxy, engine_name = start_proxy(store, upstream.url, upstream.source, config, options.observe_thinking,
                                      stderr=stderr, cli="claude")
@@ -975,10 +1061,10 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         report_missing_tools(proxy)
         recorder.flush()
         notices.release()
+        if tmp is not None:  # before "done": a SIGKILL in between still leaves the watchdog to remove it
+            shutil.rmtree(tmp, ignore_errors=True)
         if watchdog is not None:
             watchdog.done()
-        if tmp is not None:
-            shutil.rmtree(tmp, ignore_errors=True)
         store.log({"event": "exit", "code": code})
         after_exit(options, home, session_id, recorder, choice, stderr)
 
@@ -1003,8 +1089,8 @@ def after_exit(options: LaunchOptions, home: Path, session_id: str, recorder: Se
         others = sorted({s[1] for s in served_sessions(home) if s[2] == last and s[1] != session_id})
         if others:
             print(f"contexto: Claude Code session {last} was also served by Contexto session "
-                  f"{', '.join(others)}; its earlier pages and pins are there, and a later resume picks this "
-                  f"session (the newest) unless you pass --session ID.", file=stderr, flush=True)
+                  f"{', '.join(others)}; its earlier pages and pins are there, and a later resume picks whichever "
+                  f"session served it last unless you pass --session ID.", file=stderr, flush=True)
     print(f"contexto: resume this conversation through Contexto with: "
           f"{resume_command(options, session_id, last)}", file=stderr, flush=True)
 
@@ -1017,7 +1103,8 @@ class _ChildSignals:
 
     def __init__(self) -> None:
         self.child: subprocess.Popen | None = None
-        self.pending: int | None = None
+        self.pending: int | None = None  # the signal to send once the child exists
+        self.received: int | None = None  # the signal the launcher got before the child existed
 
     def install(self) -> dict[int, Any]:
         previous: dict[int, Any] = {signal.SIGINT: signal.signal(signal.SIGINT, self._ignore)}
@@ -1033,9 +1120,10 @@ class _ChildSignals:
     def _ignore(self, signum: int, frame: Any) -> None:
         pass
 
-    def _forward(self, signum: int, frame: Any) -> None:
-        signum = signum if signum in FORWARDED_SIGNALS else signal.SIGTERM
+    def _forward(self, received: int, frame: Any) -> None:
+        signum = received if received in FORWARDED_SIGNALS else signal.SIGTERM
         if self.child is None:
+            self.received = self.received or received
             self.pending = signum
         else:
             self._send(signum)
