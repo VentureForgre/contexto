@@ -2300,7 +2300,7 @@ class RewriteEngine:
         choice is re-evaluated (``_takes_over``): it becomes main with strictly more turn starts than
         the current main (a tie keeps the current one), so a subagent or side request, with about one
         turn start, never takes over, or by D50's Claude Code rules; main never changes inside a tool
-        loop. The window (``set_window``) follows
+        loop, except to Claude Code's compaction of main itself (D59). The window (``set_window``) follows
         the same choice, committed before the transform; when main moves away from a conversation, its
         last publish is forgotten, since the new main replaces the store's window, so it publishes again
         if it becomes main again."""
@@ -2336,7 +2336,22 @@ class RewriteEngine:
             reason = self._takes_over(key, main, len(starts))
             if reason:
                 main, self._main_reason = key, reason
+        elif key != main and self._compacts(key, main) and self._idle.get(main, False):
+            # D59: a compaction inside a tool loop sends the loop's next request under the new key (the
+            # summary, then the pending tool_use and its result), with no turn start. It continues main's
+            # own loop, and main's newest request (the summary request) was answered with no client tool
+            # call, so no call of the old conversation is outstanding to be charged to the new room.
+            main, self._main_reason = key, "compacted"
         return main, len(starts)
+
+    def _compacts(self, key: str, main: str) -> bool:
+        """D50: ``key`` is Claude Code's compaction of ``main``: seen with a request the dialect judges,
+        its first message the compaction summary, in main's own session id and entrypoint, and neither a
+        child session nor a subagent."""
+        session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
+        return bool(key in self._judged and key in self._compacted and session and current
+                    and not session.parent and not session.agent and session.entrypoint
+                    and session.entrypoint == current.entrypoint and session.id == current.id)
 
     def _takes_over(self, key: str, main: str, turn_starts: int) -> str | None:
         """D50: why the conversation ``key``, at a turn start, replaces ``main``, or None. The turn-start
@@ -2358,6 +2373,7 @@ class RewriteEngine:
           Claude Code's compaction summary (``compaction_summary``): ``/compact`` and auto-compaction
           keep the session id but start a new first message, so a new key with two turn starts. It
           becomes its session's main, since ``/resume`` of that session loads the compacted transcript.
+          An auto-compaction inside a tool loop hands over without a turn start (``_main_after``, D59).
         - ``after_side_request``: main is a conversation never seen with a tool list, which happens
           when a side request is the session's first request; the user's first prompt ties it at one
           turn start.
@@ -2386,7 +2402,7 @@ class RewriteEngine:
                     return "new_cli_session"
                 if owner == key and self._displaced.get(session.id):
                     return "resumed_cli_session"
-            if key in self._compacted and same_mode and session.id == current.id:
+            if self._compacts(key, main):
                 return "compacted"
             if main not in self._judged:
                 return "after_side_request"
@@ -2556,8 +2572,9 @@ class RewriteEngine:
             _DIALECT.reset(token)
         # D50: any response that may hold a client call (True, or unknown) leaves the conversation busy,
         # whichever request it answers; only the newest request's response without one makes it idle.
-        # A late end of a request the CLI gave up on and retried is not the newest request's. This runs
-        # before the input-count check below, so a response without usage still marks a pending call.
+        # A late end of a request the CLI gave up on and retried, if it arrives first, counts as the newest
+        # request's response; the retry's own response, if it may hold a call, makes main busy again. This
+        # runs before the input-count check below, so a response without usage still marks a pending call.
         if tool_calls is not False:
             self._idle[key] = False
         elif identity == state.pending_usage:
