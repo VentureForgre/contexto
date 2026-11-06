@@ -102,7 +102,7 @@ from contexto.store import LIVE_LOCK, SessionStore
 from contexto.store.prune import discard_new_session
 from contexto.store.sessions import named, starting_with
 from contexto.toolcheck import denied_tools_message, missing_tools_message
-from contexto.upstream import Upstream, resolve_upstream
+from contexto.upstream import Upstream, resolve_upstream, untrusted_note
 
 DEFAULT_BOUND = 150_000
 REPORT_LOCK_TIMEOUT_S = 2.0  # report_missing_tools: how long the exit waits for a request still in the engine
@@ -1051,6 +1051,9 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         return run_child([claude, *options.claude_args], stderr=stderr)
     upstream = resolve_upstream(options.upstream, cwd=Path.cwd())
     check_upstream(upstream)
+    if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: as Claude Code -p, no project base URL (D52)
+        print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', upstream.ignored, 'Pass --upstream', os.environ)}",
+              file=stderr)
     home = contexto_home()
     check_home(home)
     choice, store = pick_session(options, home, Path.cwd(), stderr)

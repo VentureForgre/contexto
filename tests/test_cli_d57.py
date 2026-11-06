@@ -229,7 +229,7 @@ def test_an_empty_session_option_is_refused_not_ignored(home, capsys, argv):
 def test_an_overlong_session_id_is_a_clean_error(home, capsys, argv):
     make(home, "s1", 1_000_000)
     code, out, err = run(capsys, *argv)
-    assert code == 1 and out == "" and "Traceback" not in err
+    assert code == (2 if argv[0] == "proxy" else 1) and out == "" and "Traceback" not in err  # proxy: as `run`
     assert "invalid session id" in err and "longer than 255 bytes" in err
     assert len(err) < 400  # the id is not echoed in full
 
@@ -517,3 +517,18 @@ def test_run_claude_removes_the_session_it_created_when_the_proxy_cannot_start(h
     assert code == 1 and "cannot start the proxy" in err and "Traceback" not in err, err
     assert sessions(home) == ["kept"]
     assert len(list((home / "sessions" / "kept" / "pages").iterdir())) == 1
+
+
+# merge re-check after D52 (PR #241)
+
+
+def test_proxy_refuses_an_empty_session_id_like_run(home):
+    import subprocess
+
+    make(home, "s1", 1_000_000)
+    # In a child with a timeout: a proxy that wrongly starts serves until killed, so the test fails, not hangs.
+    proc = subprocess.run([sys.executable, "-m", "contexto", "proxy", "--session", "", "--upstream",
+                           "http://127.0.0.1:9"], capture_output=True, text=True, timeout=30,
+                          env={**os.environ, "CONTEXTO_HOME": str(home)})
+    assert proc.returncode == 2 and proc.stdout == "" and "invalid session id: ''" in proc.stderr, proc.stderr
+    assert sessions(home) == ["s1"]

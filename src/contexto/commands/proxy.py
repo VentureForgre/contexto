@@ -10,6 +10,7 @@ cannot start (D57).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -47,13 +48,20 @@ def run(args: argparse.Namespace) -> int:
     from contexto.paths import contexto_home, session_dir
     from contexto.proxy import ContextoProxy
     from contexto.store.prune import discard_new_session
-    from contexto.upstream import resolve_upstream
+    from contexto.upstream import resolve_upstream, untrusted_note
 
     session_id = args.session if args.session is not None else uuid.uuid4().hex
     upstream = resolve_upstream(args.upstream, cwd=Path.cwd())
-    store = None
+    if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: no project base URL (D52)
+        note = untrusted_note("env.ANTHROPIC_BASE_URL", upstream.ignored, "Pass --upstream", os.environ)
+        print(f"contexto proxy: {note}", file=sys.stderr)
     try:
         created = not session_dir(contexto_home(), session_id).exists()
+    except ValueError as exc:  # an id no session can have ('' included): a usage error, as in `run` (D57)
+        print(f"contexto proxy: {exc}", file=sys.stderr)
+        return 2
+    store = None
+    try:
         # Through the launcher's check (D57): an id that only starts existing sessions is refused, so a new
         # session under it does not hide the one meant from the readers.
         store = open_session(contexto_home(), session_id, Path.cwd())
