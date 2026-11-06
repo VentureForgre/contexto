@@ -557,8 +557,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   them (`contexto_search` with an exact key, name, or identifier, then `contexto_recall` with a page
   id); that the model does this before relying on a detail from an earlier turn and before
   answering that something is unknown; that it records decisions and obligations with
-  `contexto_pin` and closes finished ones with `contexto_close`; and one worked example of a
-  search followed by a recall. The preamble is placed before any carried context in the first
+  `contexto_pin` and closes finished ones with `contexto_close`; that it pins a standing rule,
+  preference, or obligation the user states (whenever, from now on, always, never) as an obligation
+  as soon as it is stated, even when its reply is one word, because an unpinned one leaves view when
+  its turn is paged (D51); and one worked example of a search followed by a recall. The preamble is placed before any carried context in the first
   retained turn-start message. Measured (PR #70 experiment, 415,413 tokens): with the earlier
   mechanism-only line the model made 0 tool calls in the H1 run; with this text it searched for
   all four paged-only keys in its first response. Over budget: list the newest, then a
@@ -571,7 +573,12 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 
 ## MCP server
 
-`contexto mcp --session S`, stdio JSON-RPC per the MCP spec, tools:
+`contexto mcp --session S`, stdio JSON-RPC per the MCP spec. Its `instructions` (sent at
+`initialize` and `server/discover`) name the tools and say when to use each, and tell the model to
+pin a standing rule, preference, or obligation the user states as an obligation at once, with the
+pin arguments (`{"kind": "obligation", "text": ...}`), even when its reply is one word (D51): the
+preamble is sent only from the first rotation, and the instructions are what the model sees in the
+turns before it, usually where such rules are given. Tools:
 
 - `contexto_recall(page_id)` returns the page's messages rendered as plain text (thinking omitted),
   exactly, up to a per-call limit with `offset` for more. The limit is the smaller of 32,000
@@ -760,7 +767,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   - Scope: this bounds what Contexto's own tools add. Results of other tools (file reads, shell
     output) are outside Contexto's control; a turn they push over the bound is logged
     `over_bound` as before.
-- `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record.
+- `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` appends a ledger record. Its
+  description names only the kinds it accepts (`event`, `decision`, `obligation`, `artifact`,
+  `reference`) and says what the pinned state shows: open obligations and active decisions, and an
+  event, artifact, or reference only when verified (`epistemic: verified`, with a provenance source;
+  D51).
 - `contexto_close(obligation_id, note)` appends a closure.
 - `contexto_state()` returns the full pinned state without the budget cap.
 - `contexto_search(query)`: word search over page stubs and text (D34). The query is split on
@@ -779,7 +790,16 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   changes (D41). A term's frequency on a page is the number of the page's texts that hold it, at
   most 3. A text is one stub field (the prompt's first 200 characters, each tool name, each path) or
   one text of the turn: each text block, each string field of a tool input, each tool output; the
-  stub repeats the prompt and the paths, so they count twice. So a grep or a log that repeats a key
+  stub repeats the prompt and the paths, so they count twice. The inputs and outputs of Contexto's
+  own tools are not texts of the turn (D51): a call is one of them when its tool name starts
+  `mcp__contexto__` (Claude Code, and Codex calling it directly), or when it is Codex's code-mode
+  `exec` call and every tool its code calls (`tools["..."]` or `tools.<name>`) is one; the output is
+  paired with its call by `tool_use_id` or `call_id` within the turn. A search reply holds copies of
+  lines from older pages, and as the newest page holding them it outranked the pages it quoted (QA,
+  2026-11-05). The page keeps them verbatim and `contexto_recall` returns them; the stub's paths, the
+  index line's identifiers, the matching lines a reply shows (matched on the rendered page with
+  those lines blanked at the same offsets, and a context line inside them left out), and the
+  retained-window entries leave them out. So a grep or a log that repeats a key
   many times counts once, and a turn that runs many greps counts 3. And there is no length term
   (b 0): a long turn that states a value once scores as a short page that states it once. A page
   with the term in 3 or more texts scores 1.57 times a page with it in one. Relevance is multiplied
