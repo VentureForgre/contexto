@@ -1532,7 +1532,6 @@ the owner's delegation. Open decisions are listed at the end with the options an
     (headroom 5,000) where the 28,000 assumption gave -3,000. Also: a signal received during a spawn
     that fails exits 128 + N instead of 127; the watchdog forgets claude's pid before the handlers are
     restored, and the temporary directory is removed before the watchdog's `done`.
-    the same few milliseconds can still both take it.
 - **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
   subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
   untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by
