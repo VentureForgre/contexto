@@ -147,6 +147,9 @@ def main(argv: list[str] | None = None) -> int:
         relay_log = tmp / "relay.jsonl"
         relay = tmp / "relay.py"
         relay.write_text(RELAY)
+        from contexto.store import SessionStore
+
+        SessionStore(tmp / "home", "timing")  # `contexto mcp` serves an existing session only (D57)
         mcp = tmp / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": {"contexto": {"command": sys.executable, "args": [
             str(relay), str(relay_log), sys.executable, "-m", "contexto", "mcp", "--session", "timing",

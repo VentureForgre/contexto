@@ -495,12 +495,14 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         if claude.ignored and source.startswith("claude-"):
             print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', claude.ignored, 'Pass --codex-upstream',
                                               os.environ)}", file=stderr)
-        session_id = args.session or uuid.uuid4().hex
+        session_id = args.session if args.session is not None else uuid.uuid4().hex  # '' is invalid (D57)
         try:
             existed = os.path.lexists(paths.session_dir(paths.contexto_home(), session_id))
             store = launcher.open_session(paths.contexto_home(), session_id, Path.cwd())
-        except (OSError, ValueError) as exc:  # as `contexto run claude` reports it
-            raise launcher.LaunchError(f"cannot open session {session_id!r}: {exc}", 2) from exc
+        except (OSError, ValueError) as exc:  # as `contexto run claude` reports it: 2 for the id, 1 for the store
+            raise launcher.LaunchError(f"cannot open session {session_id[:40]!r}: {exc}",
+                                       launcher.EXIT_USAGE if isinstance(exc, ValueError) else launcher.EXIT_PROXY
+                                       ) from exc
         created = None if existed else paths.session_dir(paths.contexto_home(), session_id)
         proxy, engine_name = launcher.start_proxy(store, target, source, launcher.engine_config(options),
                                                   args.observe_thinking, stderr=stderr)
@@ -527,7 +529,8 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                                           enabled=not getattr(args, "no_version_check", False), stderr=stderr):
             return launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started
         started = True
-        return launcher.run_child(plan.argv, plan.env, stderr=stderr)
+        # Codex's shell commands (`contexto state`, `contexto search`) then name this session (D57).
+        return launcher.run_child(plan.argv, {**plan.env, "CONTEXTO_SESSION": session_id}, stderr=stderr)
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)
         return 2

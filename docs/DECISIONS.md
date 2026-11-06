@@ -1256,6 +1256,232 @@ the owner's delegation. Open decisions are listed at the end with the options an
     role `system` text, so a one-reminder queued prompt placed after other text there (for example a
     nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
     (reviewer B, PR #230 round 2).
+- **D48. Images and documents are priced by pixels and pages, and kept out of the ratio.** Claude,
+  2026-11-05, under D0; contract change (rule 3). The QA round of 2026-11-05 (verify-images, scale-engine
+  finding 1) found every image and document block priced by its base64 bytes: a Read-tool screenshot
+  that count_tokens measured at 641 to 3,243 tokens (claude-haiku-5-5, Claude Code 2.1.314, which scales
+  Read images to a 2,000-pixel long edge) was estimated at 124,000 to 429,000 inside a `tool_result` and
+  53,000 to 184,000 pasted; a 3-page PDF measured at 4,748 was estimated at 498,000. One pasted
+  screenshot at the default 150,000 bound paged the whole retained window and logged `window_minimal`,
+  `bound_too_small` and `turn_room_low`, so the launcher told the user to restart with a larger bound.
+  The image bytes also went into the measured bytes-per-token ratio: 2.87 became 39.4 after two
+  screenshots in a live run, and later text was under-estimated (a tool loop estimated at 61,000 was
+  really 81,000 against a 60,000 bound). The Codex estimate had the same flaw for `input_image`.
+  - **Images.** `width * height / 750` tokens after scaling the long edge down to 2,576 pixels, between
+    64 and 4,784: Anthropic's documented formula and limits for the high-resolution tier (Opus 4.7 and
+    later, Sonnet 5 and later); the 64-token minimum covers thin and tiny images, whose patch rounding
+    is not modelled. The size comes from the decoded header: PNG IHDR, GIF screen descriptor, WebP VP8,
+    VP8L and VP8X, and the first JPEG start-of-frame segment within the first 192 KB (after EXIF and ICC
+    segments); line breaks in the base64 are dropped first. An image whose size cannot be read (a URL or
+    file-id source, another format, a damaged header) gets 4,784, the largest cost an image can have.
+    The formula gives 640, 1,728, 2,765 and 3,334 for the four measured sizes (measured 641, 1,719,
+    2,694 and 3,243).
+  - **Documents.** A PDF is 4,568 tokens a page: the top of Anthropic's documented 1,500 to 3,000 text
+    tokens a page plus the page image at the older 1,568-token limit, since the image comes on top
+    (reviewer A, PR #234). The measured 3-page PDF cost 1,583 a page, so typical pages are far under
+    it; a page of small-font code or tables can still cost more than 3,000 text tokens, so this is a
+    generous allowance, not a hard maximum. Pages count as a renderer draws them: the latest catalog
+    names the root of the page tree, each tree node counts by its latest definition (an incremental
+    update appends newer ones), and the pages are the root's `/Count` or the page objects the root
+    reaches through `/Kids`, whichever is larger (at most 600, the API's limit). So the pages an
+    incremental save deleted, which the superseded tree still lists, and a page-tree node no catalog
+    reaches do not count (round 5: a PyMuPDF file with 30 of 40 pages deleted counted 40 pages and,
+    pasted, logged `bound_too_small` and the launcher's advice to raise `--bound`; now 10, and reviewer
+    A's orphan-node file 1 rather than 41). When the catalog's tree cannot be read, pages are the
+    larger of the `/Type /Page` objects (in object streams too, Flate or stored without a filter as
+    PyMuPDF writes them) and the page tree's largest `/Count`. Page objects count once per object
+    number, read from the `N G obj` header or an object stream's offset table. Counts are cached by
+    content, least recently used dropped,
+    up to 65,536 PDFs (288 bytes each measured, 18.8 MB at most), so no request holds enough PDFs to cycle
+    the cache: round 2 measured 70 PDFs parsed 280 times in 4 estimates with a 64-entry FIFO, and round
+    3 a session at 300 PDFs parsing 910 times inside one engine call with a 256-entry LRU (4,500 over
+    the session); now each PDF is parsed once (300, none inside the last call). Every fallback errs high,
+    since the bound depends on it: a PDF with neither pages nor a tree, or whose base64 cannot be
+    decoded, is one page per 3 KB (the most compact text pages); a PDF with an object stream that was
+    not read is its page tree's count (the document's own total), else 600; a PDF with more page
+    objects (10,000) or page-tree nodes (1,000) than a document has, counted over the whole PDF with
+    its object streams, is 600. A document by URL or file
+    id is 10 pages; a document of plain text or content blocks, and a Responses `input_file` of text,
+    is text.
+  - **Real producers** (`tests/fixtures/pdf/`, made by `tests/fixtures/make_pdfs.py`): reportlab,
+    fpdf2, pikepdf (libqpdf) object streams with and without linearization, PyMuPDF's unfiltered object
+    streams, macOS Quartz through `cupsfilter` and `sips`, incremental updates that add or rewrite a
+    page, and the object stream PDFlib+PDI 9 writes, with an indirect `/Length 15 0 R` (written by hand;
+    PDFlib is commercial), and PyMuPDF's incremental save that deleted 30 of 40 pages. All 12 count
+    exactly, pages and floor, as do the same deletion at 20→2, 100→5, the middle 10 of 40 and the first
+    30 of 40 (outside the suite). Larger files from reportlab platypus
+    (46 pages), fpdf2 (77), PyMuPDF (120 to 600 pages, with links and object streams) and a pikepdf
+    merge of three producers (99), each also re-saved through qpdf with object streams, plain and
+    linearized, count exactly too (18 files, outside the suite); reviewer A compared 55 more. Round 2
+    found the indirect `/Length` read as 1 byte (the regex backtracked
+    to the first digit), so a 1-page PDFlib file counted 600 pages and logged `bound_too_small`
+    (estimate 2,760,637 for a real 18,916; now 24,405 for 21,442); an indirect length now reads the
+    stream up to 1 MB and stops at its end, and the rewritten page counted twice (4 for 3).
+  - **Hostile PDFs** (reviewer A, PR #234). A PDF can come from any file the agent reads, and the engine
+    runs under the proxy's one transform lock, so parsing is bounded and never raises: numbers are read
+    to at most 9 digits (a 5,000-digit `/Count` raised `ValueError`, and the proxy then sent every
+    request unwindowed); every regex repetition is bounded, so scans are linear (720 KB of `/Count`
+    took 130 s, 180 KB 7.4 s, now 0.03 s); object streams are found from `/Type /ObjStm`, their header
+    read from the object's start (a nested `/DecodeParms` dictionary hid them), and inflated one at a
+    time with `max_length`, at most 128 streams, 2 MB each and 4 MB a PDF, scanned and dropped (50
+    zlib bombs in 197 KB peaked at 195 MB, now 4 MB, and count as 600 pages); a stream with another
+    filter, a predictor, or encryption is not read; any other failure is a guess. Round 2 found the
+    scans linear but slow (the page-tree regex scanned every `/Count` in up to 40 MB, about 170 ns a
+    byte): the tree is now read only at `/Type /Pages`, through an 8 KB window on each side, and at
+    most 10,000 page objects and 1,000 tree nodes are read per PDF. Round 3 found those caps applied
+    per buffer, so 128 object streams multiplied them (a 30 KB PDF took 1.8 to 2.5 s); they now hold
+    for the whole PDF, object streams included. Worst cases, one PDF: 50 KB that inflates to 5 streams
+    of `/Count` 2.22 s → 0.001 s; `/Count` to the 32 MB cap 3.56 s → 0.07 s; 4 such streams plus
+    `/Count` to the cap 5.81 s → 0.06 s; round 3's 128-stream shapes (tree markers, page markers,
+    mixed; Flate or stored) under 0.12 s; the slowest case found (`/Type /Pagex` to the cap) 0.15 s;
+    peak 56 MB traced, the decoded file.
+  - **Counting before the lock.** The proxy calls `RewriteEngine.prime(request)` before it takes the
+    transform lock every session waits on; `prime` counts the PDFs in the request's `messages` or
+    `input` into the cache (only that, and never raises; the proxy also guards the call), and the
+    engine then finds them cached. Round 3 found `prime` inert at d95e5df (it passed a list of lists,
+    which the media walk skips), so every PDF was still parsed under the lock; round 2's proxy timings
+    came from the faster parse alone. Through the real proxy, 10 sessions each pasting round 3's 30 KB
+    PDF, with a text-only session probing 1 s in: d95e5df 18.7 s wall, the probe waiting 17.7 s, 10 of
+    10 parses inside the transform; now 1.1 s, 0.0 s, 0 of 10 (main 1.0 s, 0.0 s). Round 2's 20
+    sessions with 50 KB PDFs: 44.6 s and 43.5 s at 23c42ea, 1.0 s and 0.0 s now; with 32 MB PDFs 8.1 s
+    and 0.0 s (main 8.2 s, 0.0 s; reviewer A measured 124 s at 23c42ea).
+  - **Where media is found.** Message content, `tool_result` content, a document's content source, and
+    Responses message content and tool output lists, at most 10 levels down. An image-shaped object in a
+    tool's input is text the model wrote and is not priced as an image (and is never walked, so a tool
+    input deeper than Python's recursion limit still estimates).
+  - **The ratio.** It is learned from text only: a request's media bytes are left out of its bytes, and
+    its media's cost out of its real tokens. That cost is not measured, only bounded. The estimate is at
+    or over it. The floor is meant to be at or under it: on Claude 95% of the image formula on the older
+    1,568-pixel, 1,568-token limit (measured costs ran up to 3% under the formula), 0 for an image of
+    unknown size, and for a PDF 1,000 tokens a page for the pages its page tree draws (numbered page
+    objects a `/Kids` array references, at most the tree's count, at least one); on Codex 0, since
+    OpenAI prices images by tiles (1,105 tokens for 1920x1080 at high detail, 85 at low). The floor can
+    still run high, so nothing below relies on it being right: blank or image-only pages can cost under
+    1,000, and a PDF whose catalog tree cannot be read falls back to its page objects and largest count
+    (before round 5, an incremental save that deleted pages and an orphan page-tree node ran it high
+    too). Round 2's crafted 20- and 40-page claims took the ratio to
+    4.54 and 10.24 at 23c42ea, and round 3's 8-page claim in a dense session to 2.35 at d95e5df.
+  - **What the ratio learns from a request with media** (`text_usage`, `appended_usage`; reviewer B
+    round 3, reviewer A round 4), in order:
+    - **The same media as the last measured request.** When a request only appends to the last measured
+      one (same epoch, window, degraded state and head fingerprint, and every message that request sent
+      unchanged, compared as an anchor over rule 10's normalised hashes, so a moved `cache_control` is
+      no change) and carries the same media (equal content keys), the ratio learns from their
+      difference: the bytes and real tokens the request added. The media cancel exactly, so the appended
+      text is measured with no floor or estimate, and real drift toward denser or sparser text is
+      learned as it happens. Round 5 (reviewer A): at 2ef88a4 only that request's last message was
+      compared, so an edit to an earlier message (a `window_changed` resync keeps the epoch and window)
+      or a head change put its own bytes into the difference. Clearing old dense tool output while
+      appending, with a screenshot in view, crossed the bound unflagged in 5 of 5 sessions (ratio
+      2.64 to 2.79 against the media-free control's 2.52 to 2.68); now all 5 are flagged before sending
+      (ratio 2.22 to 2.23). Tests show the chain does not form after an edit, a rotation, a head change,
+      new media, or a request forwarded after a failed transform.
+    - **With a measured ratio, otherwise.** The media are charged the cost that keeps the ratio, at most
+      their estimate: a request can lower the ratio (its text is denser than measured) but never raise
+      it. When the usage leaves the media less than their floor, the request is not learned, since the
+      floor may have run high. Upward moves come only from requests without media and from differences.
+    - **Before a ratio is measured.** The media are charged their floor, so the first ratio errs low.
+      On Claude, only if estimate minus floor is within 10% of the request's usage; otherwise the
+      request is not learned and the estimator keeps its seeds until a difference or a request without
+      media gives a ratio. A floor that would put the request's text above 3.5 bytes a token (the text
+      seed; honest requests measured 2.9 to 3.0) ran high and is not taken off. On Codex the estimate is
+      a deliberate over-estimate, so the range says nothing and the first ratio is learned at floor 0:
+      gating it too kept the 3.5 seed and ran 1.9% under.
+    - **Any request** whose learned text ratio lands outside 1.5 to 6 bytes a token is not learned.
+
+    Reviewer B, round 3 (text at 3.0 bytes a token, PDFs at 4,568 a page: 3,000 text tokens plus a page
+    image; a 1,000 floor booked 3,568 a page as text), ratio after the PDF and after 10, 20 and 30 text
+    turns, each session beside an equal-cost text control (3.00 throughout):
+
+    | session | d95e5df | now |
+    |---|---|---|
+    | 20-page PDF read on turn 4, bound 150,000 | 1.95, 2.74, 2.90, 2.94 | 3.00 throughout |
+    | 100-page PDF read on turn 4, bound 800,000 | 0.81, 0.47, 0.63, 0.77 | 3.00 throughout |
+    | 10-page PDF read on turn 1, bound 150,000 | 0.99, 1.65, 2.31, 2.55; context kept 82,162 (control 90,371) | 3.00; 90,463 (control 90,463) |
+    | 10-page PDF pasted in the first request, bound 150,000 | 0.82, 1.65, 2.23, 2.50; 70,455 (control 90,642) | learned at request 2, then 3.00; 82,284 (control 90,734) |
+
+    Reviewer A, round 4 (text at 3.0, the PDF read on turn 2, then text turns and a tool loop that runs
+    until a request crosses the bound at 150,000, over 12 Read sizes):
+
+    | PDF (true cost) | 134f939: peak ratio, runs crossing the bound unflagged | now |
+    |---|---|---|
+    | PyMuPDF, 40 pages saved, 30 deleted incrementally (10 × 1,583) | 4.75; 2 of 12 | 3.00; 0 of 12 |
+    | the same at 10 × 2,500 | 4.37; 1 of 12 | 3.00; 0 of 12 |
+    | 1 drawn page plus an orphan 40-page tree node (1,583) | 5.05; 5 of 12 | 3.00; 0 of 12 |
+    | the same at 2,500 | 5.05; 3 of 12 | 3.00; 0 of 12 |
+    | 20 pages costing 300 each | 4.37; 3 of 12 | 3.00; 0 of 12 |
+
+    Drift with a 20-page PDF in view (1,583 a page) and tool output turning to JSON at 2.0 bytes a token,
+    bound 400,000: the ratio ends at 2.78 at 134f939 and 2.39 now (the media-free control 2.20, which
+    weighs recent content more because it observes its whole history on every request); the worst
+    estimate against real is 0.973 (control 0.955), and nothing crosses the bound unflagged. A 10-page
+    PDF pasted in the first request learned no ratio in 31 requests at 134f939; now at request 2. A
+    1-page PDF claiming 8 pages in a dense session (true 2.0) learns 2.00 (2.35 at d95e5df). A Codex
+    session opening with a 1920x1080 screenshot learns 2.70 rising to 2.94 (true 3.0), every estimate at
+    or above real. The price of a floor of 0 is that an image-heavy first Codex request learns a low
+    first ratio: 10 screenshots beside 45 KB of text learn 1.74 for a true 3.0.
+  - **The measured head.** Rule 4 takes the head from the first request's usage minus its window; the
+    window's media now count at the floor there too, so a document priced high cannot zero the head (a
+    20-page PDF made it 0 for a true 16,703, W 125,000 at bound 150,000; now 28,376, W 96,624).
+  - **Pages are unchanged.** A page keeps the image as sent, `render_page` shows `[image omitted]`, and
+    search and recall skip it; only the page's `tokens` metadata is now realistic.
+  - **Measured** (synthetic upstream at 3.0 bytes per text token plus `w*h/750` per image, QA-sized
+    images; `tests/test_image_estimate.py`), v0.5.8 then this change:
+
+    | case | v0.5.8 | D48 |
+    |---|---|---|
+    | 800x600 PNG in a `tool_result` / pasted (measured 641) | 124,088 / 53,166 | 678 / 640 |
+    | 1440x900 PNG (measured 1,719) | 416,621 / 178,537 | 1,766 / 1,728 |
+    | 1920x1080 JPEG (measured 2,694) | 406,955 / 174,394 | 2,803 / 2,765 |
+    | 2000x1250 JPEG (measured 3,243) | 429,355 / 183,994 | 3,372 / 3,334 |
+    | 3-page PDF, 1.7 MB base64 (measured 4,748) | 498,397 | 13,704 |
+    | pasted screenshot after 6 turns, bound 150,000 | estimate 261,033; window_minimal, bound_too_small, turn_room_low; 1 of 13 messages sent | estimate 54,466 for a real 54,487; no events; 13 of 13 sent |
+    | ratio after 2 Read screenshots, then after 25 text requests (true 3.0) | 36.44, then 59.15 | 3.00, then 3.00 |
+    | 55 KB Read in the tool loop after them, bound 60,000 | estimate 23,877 for a real 59,618 | 59,601 for 59,618 |
+
+  - **Not covered.** Image prices on models before the high-resolution tier are lower (at most about
+    1,568 tokens), so there the estimate errs high by up to 3 times per large image; the ratio rules
+    above keep the ratio safe. Codex uses the same formula; OpenAI prices images by tiles, lower than
+    this, so a Codex estimate errs high: in reviewer B's Codex run two turns its equal-cost control keeps
+    were paged (`window_minimal`), by design. The 1,000-token PDF page floor is not measured for blank or
+    image-only pages, and can run high (above); the ratio no longer depends on it being right.
+  - **Media in the conversation's first request** (reviewer B, rounds 4 and 5; D49 amended by #244).
+    Rule 4 measures the head from the first measured request: its input minus its window, the window's
+    text counting at its share of the request's text bytes applied to the input minus the request's
+    media floor (or the estimate before the send when that is lower), and the window's media at their
+    floor (`measured_head_tokens`). With a floor at or under the media's cost this errs high. With media
+    in the window, two limits hold whatever the floor does: the head is never under the text-seed
+    estimate of the request's own `system` and `tools`, since a floor can run high (B, round 5: at
+    2ef88a4 the deleted-pages file and the orphan node, floor 40 pages, took the head to 0 and `W` about
+    38k too large, and one tool loop reached 153,954 on a 150,000 bound); and when all the request's
+    media are in the window it is never over its own bytes at 1.5 bytes a token, the densest text the
+    ratio accepts, since a dense PDF's floor is far under its cost (B, round 4: a 100-page PDF in the
+    first request at 800,000 gave `W` 226,625 against the control's 517,858 and three extra
+    `window_minimal`). Without media the measurement is D49's. Measured head (true head 19,831; text at
+    3.0 bytes a token; W against an equal-cost text control):
+
+    | first request carries | 2ef88a4: head, W (control W) | now |
+    |---|---|---|
+    | a 1440x900 screenshot | 20,082, 104,918 (104,910) | 20,082, 104,918 |
+    | a dense 10-page PDF (4,568 a page) | 55,523, 69,477 (98,631) | 39,681, 85,319 |
+    | the deleted-pages fixture (10 × 1,583) | 0, 107,643 (102,896) | 25,673, 99,327 |
+    | the orphan-node file (1 × 1,583) | 0, 107,643 (104,931) | 20,426, 104,574 |
+    | 20 pages costing 300 (floor runs high) | 5,843, 119,157 (104,300) | 16,977, 108,023 |
+    | a dense 100-page PDF, bound 800,000 | 376,643, 398,357 (689,900) | 39,681, 735,319 |
+
+    Over a session, the dense 10-page PDF pasted first now keeps its control's context (90,734 against
+    90,734; 82,284 at 2ef88a4). The 100-page case's `W` is above its control's because the control's own
+    head errs high by D49's design, and below the true `W` (about 755,000).
+  - **Also not covered.** A PDF crafted to claim more pages than it has raises its estimate. An
+    encrypted PDF with object streams counts 600 pages (reviewer B); Anthropic asks for PDFs without
+    encryption. A PDF whose `/Kids` the windows cannot read (a nested dictionary in a page tree node, or
+    an object stream past a bound) floors at fewer pages (a 600-page qpdf re-save that uses up the
+    inflate budget floors at 305), which only makes its first ratio more uncertain. Twenty crafted PDFs
+    posted at once still slow other
+    sessions by about 0.3 s (regex work contends for the GIL; reviewer B measured 338 to 358 ms against
+    31 to 46 ms on main, and 18.6 s at d95e5df). A screenshot in a paged turn is still not recallable as
+    an image (unchanged).
+
 - **D49. A head change is sized like any other rotation, and every forwarded request is checked
   against the bound.** Claude, 2026-11-05, under D0; contract change (rules 3 to 6). QA 2026-11-05
   (live-realworld F1, verify-headchange) found that any byte change to `system` or `tools` (tool
@@ -1274,9 +1500,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     pages exactly as before. The rotation keeps `reason: "head_change"`; `window_minimal` and
     `bound_too_small` are logged as for any rotation.
   - **Measured head.** Usage measures the head once, at the conversation's first request, so `F` kept
-    the old head after a change. The engine now keeps the byte size of the head its fingerprint names
-    and, at a head-change turn start, adds the change in bytes at the measured ratio (rounded toward
-    the measured value) to the measured head. In a measured engine run where a server adds about 7,600
+    the old head after a change. The engine now keeps the byte size of the head it measured and, at a
+    head-change turn start, adds the change in bytes at the measured ratio (rounded up) to the
+    measured head. In a measured engine run where a server adds about 7,600
     tokens of tools at bound 30,000, `F` went from 480 to 8,920. Not recorded in the epoch record: a
     resumed engine takes it from the request, whose head the record's fingerprint must match.
   - **Pre-send check.** Every forwarded request, rotated or not, is checked against the estimate of
@@ -1291,10 +1517,75 @@ the owner's delegation. Open decisions are listed at the end with the options an
     22-read turn (the live shape): sent 51,050 to 51,406 → 20,681 to 21,037, room -16,406 → 13,963 or
     more. Each for tools added, system changed and model switched; the same runs with no head change
     are unchanged. 15 of the 23 new tests fail on main.
-  - **Limits.** If the head changes before the first usage is measured and that usage comes from a
-    request with the new head, the change is counted twice at the next head-change turn start
-    (higher `F`, so more paging, never an overrun). The pre-send check uses the estimator; real
-    usage over the bound is still logged after the response, as before.
+  - **Limits.** The pre-send check uses the estimator; real usage over the bound is still logged after
+    the response, as before.
+  - **Rule 4's first measurement, amended** (PR #244, from the reviews of PRs #232 and #244). The head
+    was the first measured request's input minus the estimate of its non-carried messages made before
+    the send. For a conversation's first request that estimate is close; when the first usage arrives
+    later or the first request already carries a long history, it is made before the session's ratio is
+    known, counts tool output at the seed's 1.5 bytes per token, and runs thousands of tokens high, so
+    the head came out low, often 0, for the rest of the session, with or without a head change. `W`
+    came out too large, `choose_k` kept the window, `turn_room_low` went unlogged, and turn starts went
+    over the bound. The first usage arrives late when earlier responses carry usage Contexto cannot
+    read (a 200 without usage, a stream cut before it, Esc), or after `usage_unattributed`; the first
+    request carries a long history when a conversation starts with no epoch record it can resume (a
+    restarted proxy, `--resume` after a CLI upgrade or a settings change). A 429 or 529 is not a
+    case: the client retries the same body, and the retry is measured. D49's own Limits bullet (the
+    change counted twice when the head changes before the first usage) was also real; its first
+    version said the double count covers the low head, which holds only when the change is larger
+    than the head lost.
+    - **Rule.** The non-carried messages count at the measured request's own ratio, their share of its
+      bytes (as the estimator counts them), or at the estimate made before the send when that is lower,
+      so the head errs high. The head's byte size is re-based on the measured request, so a head change
+      before the first usage is in the measurement and counted once. Both window sizes are kept only
+      while the head is unmeasured.
+    - **Usage with no input count** (`output_tokens` alone) is a response without usage. It was read
+      as a real input of 0: the head 0 for the session, the next request estimated as 0 plus its new
+      messages, and a recall room published from the output alone. Now nothing is measured or
+      published, and the next request logs `usage_missing` and is estimated whole (rule 3), as after a
+      200 with no usage. If no usage ever has an input count, the head is never measured and the
+      estimator stands in at its seeds for the whole session (every request estimated whole, tool
+      output at 1.5 bytes per token); real usage over the bound cannot be logged, so the pre-send check
+      is the only bound check, and the recall room stays as last published, or unpublished.
+    - **Measured, engine (zero spend, real usage at the sent bytes over a fixed ratio, before →
+      after).** PR #244's repro (bound 30,000, a 20,000-token system prompt, real head 20,095, first
+      usage at read 26 of a loop): head 490 → 20,694; turn starts 2 and 3 skipped paging
+      (`rotation_noop`) and 4 and 5 went out at 32,047 and 32,031 real tokens, `over_bound` → every
+      turn start pages to 20,657 to 20,710, as with usage from the first request. Bound 60,000, the
+      same system prompt, an MCP server's 30 tools connecting at read 6 (real head 28,535), first usage
+      at the last read: `F` 28,299, 22,226 and 19,189 for 12, 20 and 24 reads → 29,183 to 29,399; with
+      no server (real head 20,095), 11,419 to 2,309 → 20,743 to 20,959. Bound 30,000 with the server on
+      a 49-token head (real head 8,489), first usage at read 0, 1, 4, 7, 8, 12: `F` 8,920, 8,741,
+      8,741, 12,048, 11,290, 8,741 → 8,921 to 9,137 (the change counted once). A first request with 18
+      reads of history at bound 60,000: head 6,563 → 20,550 against 20,095, `W` 28,437 → 14,450, later
+      turn starts 25,732 to 25,806 real → 20,742 to 20,816. Codex at bound 60,000, first usage after 26
+      calls: at 4.5 bytes per token the head 18,896 → 22,401 against 22,238; at 3.5 unchanged (28,800
+      against 28,591); at 2.5 unchanged and high (46,628 against 40,028), where the estimate before the
+      send is the lower window. A33's seat replay (`spikes/m2/acceptance`, 92k head, 4 bytes per token):
+      the lowest `W` 18,838 → 18,594 (with D51's pin sentence), the head no longer 244 low; rotations
+      and cost unchanged.
+    - **Measured, proxy** (the real `ContextoProxy` and engine over HTTP, a stub upstream counting 3.2
+      bytes per token, first usage at request 1, 8 or 12, before → after). A 13,100-token head with the
+      server at bound 30,000 (real 23,617): usage without an input count, head 9,266 to 9,276, turn
+      starts up to 28,416 real, room -416 → head 23,838 to 24,112, turn starts at most 24,283, room
+      3,717 with `turn_room_low` logged, the same as the 529 control. A 20,000-token head with the server
+      at 60,000 (real 31,211): without an input count, head 9,258 → 31,426 to 31,716, room -1,064 →
+      3,035 as the control; without usage, head 30,925 to 35,375 → 31,426 to 31,716. A 20,000-token head
+      at 30,000 (real 21,979): without an input count, head 0 and turn starts at 32,975 real, over the
+      bound → head 22,168 to 22,428, turn starts at most 22,645; without usage at request 12, head
+      14,034, turn starts 26,779 → 22,428 and 22,645. A first request with 10, 18 or 40 reads of history
+      and a 28,000-token head (real 27,979): head 21,555, 16,001 and 732 → 28,407, 28,590 and 29,072.
+      Over the head, rule 4 counts the request's JSON around its messages and the carried text, 130 to
+      1,100 tokens in these runs. On main, 38 of the 46 new engine tests and 17 of the 30 proxy tests
+      fail (the 529 controls and some runs without usage pass).
+    - **Limits.** Byte share assumes the head and the window tokenize alike. Tool output usually has
+      fewer bytes per token than the head's prose and JSON, which puts the head high; a window with more
+      bytes per token than the head would put it low by that difference, unless the estimate before the
+      send is lower. As before, a conversation whose first request already rotates (`k > 0`) never
+      measures its head; the estimator stands in. With the head measured right, a head too large for
+      `min_turn_room` (bound 60,000, a 28,000-token head) leaves A12 nothing to restore, so later turn
+      starts keep their window (about 34,200 real, room 806, `turn_room_low` logged once) where the low
+      head used to page; PR #232 review B's finding 1, still open.
 - **D51. Standing rules are pinned when stated; Contexto's search, recall and state calls are not indexed.** Claude,
   2026-11-05, under D0; contract change. The QA run of 2026-11-05 (reports verify-obligations and
   live-fidelity) found three things.
@@ -1495,6 +1786,59 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **Left open.** Claude Code may change where or how it records trust. The rule errs toward
     untrusted where it differs from Claude Code's (a dangling `.git` symlink; a `.git` that is a FIFO
     or another non-regular file; a bare repository's worktree): the cost is a warning and a flag.
+- **D53. The proxy serves only the local CLI, and stops upstream when the CLI goes away.** Claude,
+  2026-11-05, under D0; contract change (Stack, rule 8, the stream hold). From the QA run of 2026-11-05 on
+  main 4e2c4cd (reports security 1, verify-security A, proxy-robustness 2, 3 and 7, verify-proxy 1,
+  2, 4 and 5, suite F1). All measurements at zero spend, against loopback stubs.
+  - **Host and Origin.** The proxy took any request on its port. A page served from localhost, or
+    from anywhere in a browser without Chrome's Local Network Access, could scan the ephemeral
+    ports (all 16,361 in 1,042 ms), POST `text/plain` with no preflight, and have the engine treat
+    it as a conversation: in the QA proof of concept the store went from 25 to 79 pages, all five
+    top results of `search("prod password")` were the attacker's, and the victim's next request
+    logged `main: false`. The proxy also forwarded CORS preflights and relayed upstream's CORS
+    headers. Rule: a request with an `Origin` header, or without exactly one `Host` naming
+    `127.0.0.1:<port>` or `localhost:<port>`, gets a local 403 and `request_refused`. Claude Code
+    2.1.314 and Codex 0.166.0 send neither (QA header survey); both still answered through
+    `contexto run` against a stub with no refusal. `localhost` is accepted because a user may point a
+    CLI at it; IPv6 is not, since the proxy does not listen there. The body of a refused request is
+    read before the 403, because closing on unread bytes sends a reset that can discard the answer.
+    A per-launch secret in the base URL path would be stronger, but needs launcher and Codex config
+    changes, and the header check already stops every browser path. `Sec-Fetch-*` is not checked:
+    it would only add no-cors GETs, which are never transformed and whose answers a page cannot read.
+  - **Client gone.** The proxy noticed a client had left only when a write failed, and while it
+    waits for the response head or holds a tool call it writes nothing. Esc during a held tool
+    input therefore let upstream generate, and bill, to the end. Measured with the real CLIs
+    interrupted 3 s into a 40 s held stream (160 deltas 0.25 s apart) through `contexto proxy`:
+    on main, upstream kept its socket 38.05 s after the interrupt and sent all 164 events, for both
+    `claude -p` and `codex exec`. With this change, 0.21 s and 0.23 s and 15 events, close to the
+    0.13 s and 0.16 s the QA run measured with the CLIs talking to upstream directly. Rule: each
+    forwarded request has a watch thread that polls the client socket every 0.05 s (`poll` and a
+    one-byte `MSG_PEEK`, so nothing is consumed) from the upstream connect to the end of the relay.
+    When it sees a close or a reset, it shuts the upstream socket, so the blocked read returns at
+    once, and the entry is logged `client_aborted: true`. A byte from the client (a pipelined
+    request) ends the watch. A client that half-closes its sending side while it still reads now
+    counts as gone; neither CLI does that, and nginx treats it the same way. A request cut off
+    before the response head now gets its `request` entry, with `upstream_phase`, its transform
+    events and its epoch; before, it got only `proxy_error`, and the upstream socket was left to the
+    garbage collector. The response head is written inside the relay's `try`, and the watch closes
+    the upstream connection on every path, so a failed head write or an internal error after
+    upstream answered no longer leaks that socket.
+  - **Early answer.** An upstream that answers 413 after the head and closes without reading a body
+    over about 1 MB made the send fail with `BrokenPipeError`. Rule 8 then resent the whole body
+    and answered a local 502, and Claude Code retried that 502. On main, with real `claude -p`, a
+    2 MB prompt and such a stub, the 60 s cap stopped a run that had drawn 14 upstream 413s and
+    forwarded none; the QA run had measured 11 client requests, 44 MB and 173 s ending in "API
+    Error: 502". Rule: after a `BrokenPipeError` or `ConnectionResetError` in `send`, the proxy reads
+    the answer upstream already sent (waiting at most 1 s, so a timeout or a silent close still
+    goes to the retry) and forwards it, logging `upstream_answered_early`. With this change, in 4
+    runs, Claude Code got the 413 in 0.2 to 0.3 s from one upstream request and printed its own
+    "Request too large" advice. In 3 of those runs the send failed and the early path answered; in
+    1 the body was written before the stub closed. Over TLS the answer is read the same way, but a
+    TLS upstream was not tested.
+  - **Small fixes.** The listen backlog goes from socketserver's 5 to 128: at 5, a burst of 200
+    connects lost 13 to 21% to ETIMEDOUT, and at 128 none (QA measurement). A second Ctrl+C during
+    `stop()`'s 2 s drain printed a `KeyboardInterrupt` traceback; it now ends the wait, and the
+    requests still in flight are logged as `proxy_stop_incomplete`.
 - **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
   subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
   untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by
@@ -1794,198 +2138,91 @@ the owner's delegation. Open decisions are listed at the end with the options an
     only by turn starts. A second interactive Claude Code pointed at the same proxy with no parent
     id (not a supported setup) takes main at its first turn start; while both send, once.
 
-- **D48. Images and documents are priced by pixels and pages, and kept out of the ratio.** Claude,
-  2026-11-05, under D0; contract change (rule 3). The QA round of 2026-11-05 (verify-images, scale-engine
-  finding 1) found every image and document block priced by its base64 bytes: a Read-tool screenshot
-  that count_tokens measured at 641 to 3,243 tokens (claude-haiku-5-5, Claude Code 2.1.314, which scales
-  Read images to a 2,000-pixel long edge) was estimated at 124,000 to 429,000 inside a `tool_result` and
-  53,000 to 184,000 pasted; a 3-page PDF measured at 4,748 was estimated at 498,000. One pasted
-  screenshot at the default 150,000 bound paged the whole retained window and logged `window_minimal`,
-  `bound_too_small` and `turn_room_low`, so the launcher told the user to restart with a larger bound.
-  The image bytes also went into the measured bytes-per-token ratio: 2.87 became 39.4 after two
-  screenshots in a live run, and later text was under-estimated (a tool loop estimated at 61,000 was
-  really 81,000 against a 60,000 bound). The Codex estimate had the same flaw for `input_image`.
-  - **Images.** `width * height / 750` tokens after scaling the long edge down to 2,576 pixels, between
-    64 and 4,784: Anthropic's documented formula and limits for the high-resolution tier (Opus 4.7 and
-    later, Sonnet 5 and later); the 64-token minimum covers thin and tiny images, whose patch rounding
-    is not modelled. The size comes from the decoded header: PNG IHDR, GIF screen descriptor, WebP VP8,
-    VP8L and VP8X, and the first JPEG start-of-frame segment within the first 192 KB (after EXIF and ICC
-    segments); line breaks in the base64 are dropped first. An image whose size cannot be read (a URL or
-    file-id source, another format, a damaged header) gets 4,784, the largest cost an image can have.
-    The formula gives 640, 1,728, 2,765 and 3,334 for the four measured sizes (measured 641, 1,719,
-    2,694 and 3,243).
-  - **Documents.** A PDF is 4,568 tokens a page: the top of Anthropic's documented 1,500 to 3,000 text
-    tokens a page plus the page image at the older 1,568-token limit, since the image comes on top
-    (reviewer A, PR #234). The measured 3-page PDF cost 1,583 a page, so typical pages are far under
-    it; a page of small-font code or tables can still cost more than 3,000 text tokens, so this is a
-    generous allowance, not a hard maximum. Pages are the larger of the `/Type /Page` objects (in
-    object streams too, Flate or stored without a filter as PyMuPDF writes them) and the page tree's
-    largest `/Count`, at most 600 (the API's limit). Page objects count once per object number, read
-    from the `N G obj` header or an object stream's offset table, so an incremental update that
-    rewrites a page does not count it twice. Counts are cached by content, least recently used dropped,
-    up to 65,536 PDFs (288 bytes each measured, 18.8 MB at most), so no request holds enough PDFs to cycle
-    the cache: round 2 measured 70 PDFs parsed 280 times in 4 estimates with a 64-entry FIFO, and round
-    3 a session at 300 PDFs parsing 910 times inside one engine call with a 256-entry LRU (4,500 over
-    the session); now each PDF is parsed once (300, none inside the last call). Every fallback errs high,
-    since the bound depends on it: a PDF with neither pages nor a tree, or whose base64 cannot be
-    decoded, is one page per 3 KB (the most compact text pages); a PDF with an object stream that was
-    not read is its page tree's count (the document's own total), else 600; a PDF with more page
-    objects (10,000) or page-tree nodes (1,000) than a document has, counted over the whole PDF with
-    its object streams, is 600. A document by URL or file
-    id is 10 pages; a document of plain text or content blocks, and a Responses `input_file` of text,
-    is text.
-  - **Real producers** (`tests/fixtures/pdf/`, made by `tests/fixtures/make_pdfs.py`): reportlab,
-    fpdf2, pikepdf (libqpdf) object streams with and without linearization, PyMuPDF's unfiltered object
-    streams, macOS Quartz through `cupsfilter` and `sips`, incremental updates that add or rewrite a
-    page, and the object stream PDFlib+PDI 9 writes, with an indirect `/Length 15 0 R` (written by hand;
-    PDFlib is commercial). All 11 count exactly, pages and floor. Larger files from reportlab platypus
-    (46 pages), fpdf2 (77), PyMuPDF (120 to 600 pages, with links and object streams) and a pikepdf
-    merge of three producers (99), each also re-saved through qpdf with object streams, plain and
-    linearized, count exactly too (18 files, outside the suite); reviewer A compared 55 more. Round 2 found the indirect `/Length` read as 1 byte (the regex backtracked
-    to the first digit), so a 1-page PDFlib file counted 600 pages and logged `bound_too_small`
-    (estimate 2,760,637 for a real 18,916; now 24,405 for 21,442); an indirect length now reads the
-    stream up to 1 MB and stops at its end, and the rewritten page counted twice (4 for 3).
-  - **Hostile PDFs** (reviewer A, PR #234). A PDF can come from any file the agent reads, and the engine
-    runs under the proxy's one transform lock, so parsing is bounded and never raises: numbers are read
-    to at most 9 digits (a 5,000-digit `/Count` raised `ValueError`, and the proxy then sent every
-    request unwindowed); every regex repetition is bounded, so scans are linear (720 KB of `/Count`
-    took 130 s, 180 KB 7.4 s, now 0.03 s); object streams are found from `/Type /ObjStm`, their header
-    read from the object's start (a nested `/DecodeParms` dictionary hid them), and inflated one at a
-    time with `max_length`, at most 128 streams, 2 MB each and 4 MB a PDF, scanned and dropped (50
-    zlib bombs in 197 KB peaked at 195 MB, now 4 MB, and count as 600 pages); a stream with another
-    filter, a predictor, or encryption is not read; any other failure is a guess. Round 2 found the
-    scans linear but slow (the page-tree regex scanned every `/Count` in up to 40 MB, about 170 ns a
-    byte): the tree is now read only at `/Type /Pages`, through an 8 KB window on each side, and at
-    most 10,000 page objects and 1,000 tree nodes are read per PDF. Round 3 found those caps applied
-    per buffer, so 128 object streams multiplied them (a 30 KB PDF took 1.8 to 2.5 s); they now hold
-    for the whole PDF, object streams included. Worst cases, one PDF: 50 KB that inflates to 5 streams
-    of `/Count` 2.22 s → 0.001 s; `/Count` to the 32 MB cap 3.56 s → 0.07 s; 4 such streams plus
-    `/Count` to the cap 5.81 s → 0.06 s; round 3's 128-stream shapes (tree markers, page markers,
-    mixed; Flate or stored) under 0.12 s; the slowest case found (`/Type /Pagex` to the cap) 0.15 s;
-    peak 56 MB traced, the decoded file.
-  - **Counting before the lock.** The proxy calls `RewriteEngine.prime(request)` before it takes the
-    transform lock every session waits on; `prime` counts the PDFs in the request's `messages` or
-    `input` into the cache (only that, and never raises; the proxy also guards the call), and the
-    engine then finds them cached. Round 3 found `prime` inert at d95e5df (it passed a list of lists,
-    which the media walk skips), so every PDF was still parsed under the lock; round 2's proxy timings
-    came from the faster parse alone. Through the real proxy, 10 sessions each pasting round 3's 30 KB
-    PDF, with a text-only session probing 1 s in: d95e5df 18.7 s wall, the probe waiting 17.7 s, 10 of
-    10 parses inside the transform; now 1.1 s, 0.0 s, 0 of 10 (main 1.0 s, 0.0 s). Round 2's 20
-    sessions with 50 KB PDFs: 44.6 s and 43.5 s at 23c42ea, 1.0 s and 0.0 s now; with 32 MB PDFs 8.1 s
-    and 0.0 s (main 8.2 s, 0.0 s; reviewer A measured 124 s at 23c42ea).
-  - **Where media is found.** Message content, `tool_result` content, a document's content source, and
-    Responses message content and tool output lists, at most 10 levels down. An image-shaped object in a
-    tool's input is text the model wrote and is not priced as an image (and is never walked, so a tool
-    input deeper than Python's recursion limit still estimates).
-  - **The ratio.** It is learned from text only: a request's media bytes are left out of its bytes, and
-    its media's cost out of its real tokens. That cost is not measured, only bounded. The estimate is at
-    or over it. The floor is meant to be at or under it: on Claude 95% of the image formula on the older
-    1,568-pixel, 1,568-token limit (measured costs ran up to 3% under the formula), 0 for an image of
-    unknown size, and for a PDF 1,000 tokens a page for the pages its page tree draws (numbered page
-    objects a `/Kids` array references, at most the tree's count, at least one); on Codex 0, since
-    OpenAI prices images by tiles (1,105 tokens for 1920x1080 at high detail, 85 at low). The floor can
-    still run high, so nothing below relies on it being right: an incremental save that deleted pages
-    leaves the superseded tree listing them (a real PyMuPDF file with 30 of 40 pages deleted counts 40
-    pages, floor 40, for 10), a page-tree node no catalog reaches is still read, and blank or
-    image-only pages can cost under 1,000. Round 2's crafted 20- and 40-page claims took the ratio to
-    4.54 and 10.24 at 23c42ea, and round 3's 8-page claim in a dense session to 2.35 at d95e5df.
-  - **What the ratio learns from a request with media** (`text_usage`, `appended_usage`; reviewer B
-    round 3, reviewer A round 4), in order:
-    - **The same media as the last measured request.** When a request only appends to the last measured
-      one (same epoch, window and degraded state, that request's last message unchanged at its index)
-      and carries the same media (equal content keys), the ratio learns from their difference: the bytes
-      and real tokens the request added. The media cancel exactly, so the appended text is measured with
-      no floor or estimate, and real drift toward denser or sparser text is learned as it happens.
-    - **With a measured ratio, otherwise.** The media are charged the cost that keeps the ratio, at most
-      their estimate: a request can lower the ratio (its text is denser than measured) but never raise
-      it. When the usage leaves the media less than their floor, the request is not learned, since the
-      floor may have run high. Upward moves come only from requests without media and from differences.
-    - **Before a ratio is measured.** The media are charged their floor, so the first ratio errs low.
-      On Claude, only if estimate minus floor is within 10% of the request's usage; otherwise the
-      request is not learned and the estimator keeps its seeds until a difference or a request without
-      media gives a ratio. A floor that would put the request's text above 3.5 bytes a token (the text
-      seed; honest requests measured 2.9 to 3.0) ran high and is not taken off. On Codex the estimate is
-      a deliberate over-estimate, so the range says nothing and the first ratio is learned at floor 0:
-      gating it too kept the 3.5 seed and ran 1.9% under.
-    - **Any request** whose learned text ratio lands outside 1.5 to 6 bytes a token is not learned.
-
-    Reviewer B, round 3 (text at 3.0 bytes a token, PDFs at 4,568 a page: 3,000 text tokens plus a page
-    image; a 1,000 floor booked 3,568 a page as text), ratio after the PDF and after 10, 20 and 30 text
-    turns, each session beside an equal-cost text control (3.00 throughout):
-
-    | session | d95e5df | now |
-    |---|---|---|
-    | 20-page PDF read on turn 4, bound 150,000 | 1.95, 2.74, 2.90, 2.94 | 3.00 throughout |
-    | 100-page PDF read on turn 4, bound 800,000 | 0.81, 0.47, 0.63, 0.77 | 3.00 throughout |
-    | 10-page PDF read on turn 1, bound 150,000 | 0.99, 1.65, 2.31, 2.55; context kept 82,162 (control 90,371) | 3.00; 90,463 (control 90,463) |
-    | 10-page PDF pasted in the first request, bound 150,000 | 0.82, 1.65, 2.23, 2.50; 70,455 (control 90,642) | learned at request 2, then 3.00; 82,284 (control 90,734) |
-
-    Reviewer A, round 4 (text at 3.0, the PDF read on turn 2, then text turns and a tool loop that runs
-    until a request crosses the bound at 150,000, over 12 Read sizes):
-
-    | PDF (true cost) | 134f939: peak ratio, runs crossing the bound unflagged | now |
-    |---|---|---|
-    | PyMuPDF, 40 pages saved, 30 deleted incrementally (10 × 1,583) | 4.75; 2 of 12 | 3.00; 0 of 12 |
-    | the same at 10 × 2,500 | 4.37; 1 of 12 | 3.00; 0 of 12 |
-    | 1 drawn page plus an orphan 40-page tree node (1,583) | 5.05; 5 of 12 | 3.00; 0 of 12 |
-    | the same at 2,500 | 5.05; 3 of 12 | 3.00; 0 of 12 |
-    | 20 pages costing 300 each | 4.37; 3 of 12 | 3.00; 0 of 12 |
-
-    Drift with a 20-page PDF in view (1,583 a page) and tool output turning to JSON at 2.0 bytes a token,
-    bound 400,000: the ratio ends at 2.78 at 134f939 and 2.39 now (the media-free control 2.20, which
-    weighs recent content more because it observes its whole history on every request); the worst
-    estimate against real is 0.973 (control 0.955), and nothing crosses the bound unflagged. A 10-page
-    PDF pasted in the first request learned no ratio in 31 requests at 134f939; now at request 2. A
-    1-page PDF claiming 8 pages in a dense session (true 2.0) learns 2.00 (2.35 at d95e5df). A Codex
-    session opening with a 1920x1080 screenshot learns 2.70 rising to 2.94 (true 3.0), every estimate at
-    or above real. The price of a floor of 0 is that an image-heavy first Codex request learns a low
-    first ratio: 10 screenshots beside 45 KB of text learn 1.74 for a true 3.0.
-  - **The measured head.** Rule 4 takes the head from the first request's usage minus its window; the
-    window's media now count at the floor there too, so a document priced high cannot zero the head (a
-    20-page PDF made it 0 for a true 16,703, W 125,000 at bound 150,000; now 28,376, W 96,624).
-  - **Pages are unchanged.** A page keeps the image as sent, `render_page` shows `[image omitted]`, and
-    search and recall skip it; only the page's `tokens` metadata is now realistic.
-  - **Measured** (synthetic upstream at 3.0 bytes per text token plus `w*h/750` per image, QA-sized
-    images; `tests/test_image_estimate.py`), v0.5.8 then this change:
-
-    | case | v0.5.8 | D48 |
-    |---|---|---|
-    | 800x600 PNG in a `tool_result` / pasted (measured 641) | 124,088 / 53,166 | 678 / 640 |
-    | 1440x900 PNG (measured 1,719) | 416,621 / 178,537 | 1,766 / 1,728 |
-    | 1920x1080 JPEG (measured 2,694) | 406,955 / 174,394 | 2,803 / 2,765 |
-    | 2000x1250 JPEG (measured 3,243) | 429,355 / 183,994 | 3,372 / 3,334 |
-    | 3-page PDF, 1.7 MB base64 (measured 4,748) | 498,397 | 13,704 |
-    | pasted screenshot after 6 turns, bound 150,000 | estimate 261,033; window_minimal, bound_too_small, turn_room_low; 1 of 13 messages sent | estimate 54,466 for a real 54,487; no events; 13 of 13 sent |
-    | ratio after 2 Read screenshots, then after 25 text requests (true 3.0) | 36.44, then 59.15 | 3.00, then 3.00 |
-    | 55 KB Read in the tool loop after them, bound 60,000 | estimate 23,877 for a real 59,618 | 59,601 for 59,618 |
-
-  - **Not covered.** Image prices on models before the high-resolution tier are lower (at most about
-    1,568 tokens), so there the estimate errs high by up to 3 times per large image; the ratio rules
-    above keep the ratio safe. Codex uses the same formula; OpenAI prices images by tiles, lower than
-    this, so a Codex estimate errs high: in reviewer B's Codex run two turns its equal-cost control keeps
-    were paged (`window_minimal`), by design. The 1,000-token PDF page floor is not measured for blank or
-    image-only pages, and can run high (above); the ratio no longer depends on it being right.
-  - **A PDF in the conversation's first request** (reviewer B, round 4). The head measured on the first
-    request takes the window's media at their floor, so a dense PDF there makes the head, and so `F`,
-    err high by the PDF's cost over its floor, and `W` too small. Besides keeping less context (the
-    10-page PDF pasted first above keeps 82,284 against its control's 90,734), a large one logs events
-    the control does not: a 100-page PDF in the first request at bound 800,000 (floor 100,000, real
-    456,800) gives a fixed overhead of 373,375 against the control's 82,142 and `W` 226,625 against
-    517,858, and all three of that session's rotations are `window_minimal` where the control's rotate
-    for the bound; at 150,000, cupsfilter-text.pdf pasted first costs one extra `turn_room_low`. It errs
-    toward safety: nothing went over the bound. PR #244 measures the head by the window's byte share;
-    whichever of the two merges second must take that share from text bytes only and add media back at
-    their floor, and #244's acceptance should include this 100-page case with `W` back near the
-    control's.
-  - **Also not covered.** A PDF crafted to claim more pages than it has raises its estimate. An
-    encrypted PDF with object streams counts 600 pages (reviewer B); Anthropic asks for PDFs without
-    encryption. A PDF whose `/Kids` the windows cannot read (a nested dictionary in a page tree node, or
-    an object stream past a bound) floors at fewer pages (a 600-page qpdf re-save that uses up the
-    inflate budget floors at 305), which only makes its first ratio more uncertain. A page deleted by an
-    incremental update still counts in the estimate. Twenty crafted PDFs posted at once still slow other
-    sessions by about 0.3 s (regex work contends for the GIL; reviewer B measured 338 to 358 ms against
-    31 to 46 ms on main, and 18.6 s at d95e5df). A screenshot in a paged turn is still not recallable as
-    an image (unchanged).
+- **D57. User-facing command fixes from the 2026-11-05 QA run.** Claude, 2026-11-05, under D0; contract
+  change. The install, docs-audit, live-claude, store-mcp and launcher-ux reports, reproduced at zero
+  spend on v0.5.8 with stub CLIs and synthetic stores; 42 new or extended tests fail on v0.5.8 and pass
+  after.
+  - **Finding a page id.** No command printed one: `sessions show` gave counts only, and `state` gave the
+    model's instructions ending "The page index below lists the paged turns" with no index below. Now
+    `sessions show` lists the pages, newest first (the 20 newest; all with `--all`; `page_list` in
+    `--json`), and `contexto search WORDS` runs the store search the MCP tool uses and prints each hit's
+    index line and matching lines with their offsets. `recall` takes the page id and offset both print,
+    and refuses a malformed id before building a path: a 300-character `pg_` id was read as a file name,
+    failed with ENAMETOOLONG, and was logged `page_unreadable`. The search prints its own lines rather
+    than the tool's reply, which is shaped by the turn's recall room and phrased for the model.
+  - **A readable `state`.** The default view is the pinned records, or "No pinned records.", then how
+    many turns are paged out. On a session with no pages, the model text opened with "Earlier turns of
+    this conversation are paged out of your context" (live-claude finding 3). `--raw` keeps the model text
+    for diagnosis. The MCP tool's text is unchanged here.
+  - **4xx counted once.** The proxy logs each upstream 4xx as its `request` entry and as `upstream_4xx`,
+    and `sessions show` counted both: 12 for 6 `HEAD /api/hello` 401s (live-claude finding 2). `request`
+    entries are no longer counted, and `upstream_4xx_model` separates the model paths, since Claude Code
+    sends that keyless probe at every launch.
+  - **Id prefixes.** The README writes `7f3a`; `sessions show 87df` said "no session". A unique prefix now
+    names a session for the read-only commands (`recall`, `search`, `state`, `sessions show`); an exact id
+    wins, and an ambiguous prefix names up to 5 matches and exits 1. `sessions prune --session` takes the
+    full id only: with prefixes, `prune --session w --yes` deleted the one session starting with `w`, so
+    a mistyped or already deleted id removed a session nobody named, and a cleanup run twice deleted
+    `test-2` the second time (reviewer A, PR #241). A prune id that only starts existing ids exits 2 and
+    names them; an unknown id still exits 1. `mcp` and `run` keep exact ids: one is written by the
+    launcher, and the other creates the session when it is absent, so a prefix there would open the
+    wrong store or a new one.
+    `run --session 5238` made a new empty session `5238`, which the readers then preferred (exact id
+    first) to `52385048...` (reviewer B, PR #241); `run` now refuses an id that is not a session but
+    the start of existing ids, exit 2, naming them, for claude and codex (in `launcher.open_session`).
+    A new full id still creates its session.
+  - **The live session.** Inside a fresh `contexto run claude` that had not paged yet, `contexto state`
+    and `contexto search` answered from an older session with content: the default skipped the live
+    empty session, and nothing told the CLI its session (reviewer A, PR #241). `run` now sets
+    `CONTEXTO_SESSION=<id>` for claude and codex, and the default never skips a session another process
+    holds open (its `live.lock`, probed as prune probes it).
+  - **`--session` edges.** `--session ''` was taken as "not given" and quietly used another session; it is
+    now an invalid id, for the readers, `proxy`, and `run` with either CLI. An id over 255 bytes crashed
+    `recall`, `state` and `sessions show` with a traceback (Errno 63); `paths.session_dir` now refuses it,
+    so every command reports it in one line.
+  - **No junk sessions.** On a fresh home, `proxy --upstream not-a-url`, `proxy --port 1`, `run --upstream
+    ftp://x claude`, `run claude --version` and `mcp --session typo-id` each left a session directory, and
+    the docs-audit run had 7 empty rows in `sessions list`. A failed launch's empty session then became the
+    default for `state` and `recall`. Now `mcp` serves only an existing session; `proxy` and `run claude`
+    remove a session they created when the proxy cannot start, through prune's lock check (the store
+    releases its own lock first, `SessionStore.release`); `run claude` with only `--version`, `-v`,
+    `--help` or `-h` runs claude without a session or proxy; and the default skips sessions with no pages
+    and no ledger records unless another process holds them open. Not changed here: a failed `run codex`
+    still leaves its session (codex.py,
+    whose launch order the codex-launch area changes), and a session whose CLI never sent a request is
+    kept, since its log records the launch and the exit code.
+  - **Validation and exit codes.** `--bound 10` started with a warning of "-79,990 tokens" while `--bound 10
+    --headroom-floor 25000`, the default spelled out, was refused. The default floor is now checked like a
+    given one: a bound not above 25,000 without `--headroom-floor` is a usage error (the engine's headroom
+    is never below the floor, rule 17). `proxy --port -1` or `70000` printed an `OverflowError` traceback;
+    it is now a usage error, exit 2. `run` exited 2 when the store could not open (`CONTEXTO_HOME` a file,
+    or read-only); 2 stays the usage error, including an invalid session id, and a store that cannot open
+    is 1, like a proxy that cannot start, for claude and codex. (After D55 merged, `run` refuses a home
+    that is a file up front as a usage error, exit 2, unchanged; the stricter check is kept, and 1 is for a
+    home that exists but cannot be written.) `sessions list` on a home that is a file
+    said "No sessions" and exited 0, `state` and `search` said "no sessions under <file>/sessions", and
+    `prune` printed a raw `[Errno 20]`; every reader now says "<home> is not a directory (check
+    $CONTEXTO_HOME)" and exits 1. `sessions show --json` marks a cut list with `page_list_truncated`.
+    A pages directory that cannot be read gave `sessions show` and `search` a `PermissionError` traceback
+    with this change (reviewer A); `show` and `state` now print the summary or the pins and one error line,
+    `search` one line, all exit 1.
+  - **Help text.** `run` and the top-level help name Codex; `mcp` says the CLI spawns it; `proxy --help`
+    no longer shows "``contexto proxy``: ... (M2 contract, CLI)"; `recall`'s `PAGE_ID` and `sessions
+    show`'s `ID` have help. The `--codex-auth` help still cites D35 (codex.py, the codex-launch area).
+  - **Review round 2 (reviewers A and B).** `contexto proxy --session` goes through the same check as
+    `run`: an id that only starts existing sessions is refused with exit 2, so it cannot create a session
+    that hides the one meant. `sessions prune --session ''` is an invalid id (exit 1) again, checked
+    before the prefix rule, which had reported it as the start of every session. `run --help` and
+    `proxy --help` say `--session` takes the full id; the readers' default names "or one in use".
+  - **Round 4 (re-check after D55 and its follow-ups merged).** `run codex` with a `CONTEXTO_HOME` that
+    is a file exited 1, while `run claude` refuses it up front with 2 (D55): `launcher.open_session`, which
+    both CLIs use, now checks the home, so codex exits 2 too. Whether the launch created its session is now
+    recorded in `pick_session`, where the D55 follow-ups open the store; a test makes the proxy's bind fail in
+    `run claude` and checks that a session the launch created is removed and an existing one is kept.
+  - **Merge re-check after D52.** `contexto proxy --session ''` exited 1 while `run` exits 2; an invalid
+    `proxy --session` id (empty, or over 255 bytes) is now a usage error, exit 2, checked before the store
+    opens. D52's removal of a session a refused Codex launch created is kept as the one mechanism for
+    `run codex`; `run claude` and `proxy` keep `discard_new_session`, so no launch removes a session twice.
 
 ## Open decisions
 

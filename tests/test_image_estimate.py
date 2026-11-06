@@ -990,3 +990,54 @@ def test_the_deleted_pages_file_pasted_first_does_not_advise_a_larger_bound(tmp_
     req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "read this"}, doc]}]}
     _, _, events = eng(req, {}, EP)
     assert not {"window_minimal", "bound_too_small", "turn_room_low"} & {e["event"] for e in events}
+
+
+# Rule 4's head with media in the conversation's first request (D49 amended with D48, round 5) ----------------
+
+def _first_request(tmp_path, block: dict | None, cost: int, bound: int) -> tuple[int, int, int]:
+    """One request carrying ``block`` (or, as the control, text of the same real cost), usage at 3.0 bytes a
+    token plus the media's true cost. Returns (measured head, true head, W)."""
+    eng = _engine(tmp_path, bound=bound)
+    media = block if block is not None else {"type": "text", "text": "w" * (cost * 3)}
+    req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "look at this"}, media]}]}
+    upstream, _, _ = eng(req, {}, EP)
+    stripped, found = split_media(upstream["messages"])
+    real = math.ceil(len(canonical_json({**upstream, "messages": stripped})) / 3.0) + cost * len(found)
+    eng.observe_usage(EP, {"input_tokens": real, "output_tokens": 10}, req)
+    state = next(iter(eng.states.values()))
+    return state.head_tokens, math.ceil(len(canonical_json({**upstream, "messages": []})) / 3.0), state.window_budget
+
+
+def _pdf_block(raw: bytes) -> dict:
+    return {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                           "data": base64.b64encode(raw).decode()}}
+
+
+@pytest.mark.parametrize("case", ["screenshot", "dense-pdf", "deleted-pages", "orphan-node", "floor-runs-high"])
+def test_media_in_the_first_request_measure_the_head(tmp_path, case):
+    """Round 5 (reviewer B): rule 4 took the window's media at their floor, so a floor above the cost (the
+    deleted-pages file and the orphan node counted 40 pages) took the head to 0 and W ran about 38k too
+    large. The head now counts the window's text by its byte share of the request's text and its media at
+    their floor, is never under the seed estimate of the request's own system prompt and tools, and with
+    media never over its own bytes at 1.5 bytes a token (a dense PDF's floor is far under its cost)."""
+    block, cost = {
+        "screenshot": (image_block(), REAL_IMAGE_TOKENS),
+        "dense-pdf": (_pdf_block(base64.b64decode(pdf_b64(10, filler=200_000))), 10 * 4_568),
+        "deleted-pages": (_pdf_block(_fixture_bytes("pymupdf-incremental-deleted-40-to-10.pdf")), 10 * 1_583),
+        "orphan-node": (_pdf_block(_orphan_node_pdf()), 1_583),
+        "floor-runs-high": (_pdf_block(base64.b64decode(pdf_b64(20, filler=20_000))), 20 * 300),
+    }[case]
+    head, true_head, w = _first_request(tmp_path / "media", block, cost, 150_000)
+    _, _, control_w = _first_request(tmp_path / "control", None, cost, 150_000)
+    assert 0.85 * true_head <= head <= 2.05 * true_head  # 2ef88a4: 0 for deleted-pages and orphan-node
+    assert w >= 0.85 * control_w
+
+
+def test_a_100_page_pdf_in_the_first_request_at_800k(tmp_path):
+    """Reviewer B, round 4: the floor (100,000) is far under the real cost (456,800), so the head took most of
+    the PDF: W 226,625 against the control's 517,858, and three extra window_minimal."""
+    block = _pdf_block(base64.b64decode(pdf_b64(100, filler=1_000_000)))
+    head, true_head, w = _first_request(tmp_path / "media", block, 456_800, 800_000)
+    _, _, control_w = _first_request(tmp_path / "control", None, 456_800, 800_000)
+    assert true_head <= head <= 2.05 * true_head  # 2ef88a4: 376,643 for a true head of about 16,700
+    assert w >= 0.95 * control_w and w <= 800_000 - 25_000 - true_head  # at least the control's, never over

@@ -145,6 +145,7 @@ from contexto.tokens import (
     TEXT_BYTES_PER_TOKEN,
     MediaCost,
     TokenEstimator,
+    estimate_tokens,
     media_cost,
     media_keys,
     prime_media,
@@ -179,10 +180,19 @@ class Measured(NamedTuple):
 
     scope: tuple  # (epoch, k, degraded, head fingerprint) it was sent in
     count: int  # messages sent
-    prefix: str  # anchor_hash of every message sent
+    prefix: str  # anchor_hash of its messages' rule 10 hashes
     text_bytes: int  # bytes sent, media left out
     real: int  # its real input tokens
     keys: tuple  # its media's content keys
+
+
+class _ByteCount(TokenEstimator):
+    """Bytes as the estimator counts them (one byte per token), for rule 4's byte share of the window."""
+
+    measured_bytes_per_token = 1.0
+
+
+BYTE_COUNT = _ByteCount()
 
 
 class Store(Protocol):
@@ -240,7 +250,7 @@ class EpochState:
     # state, its last message unchanged at the same index), so their media cancel in a difference.
     last_sent_appends: bool = False
     last_sent_scope: tuple = ()  # D48: (epoch, k, degraded, head fingerprint) the request was sent in
-    # D48: (message count, anchor_hash of every message as sent); (0, "") when it may not start a chain
+    # D48: (message count, anchor_hash of the request's message hashes); (0, "") when it may not start a chain
     last_sent_anchor: tuple[int, str] = (0, "")
     last_measured: Measured | None = None  # D48: the last request whose usage was measured. Per-request.
     last_input_tokens: int | None = None  # real upstream input of the previous request
@@ -248,10 +258,13 @@ class EpochState:
     last_turn_start_n: int | None = None  # history length at the previous turn start
     last_turn_count: int = 0  # turn starts in the history at the previous turn start
     head_tokens: int | None = None  # rule 4: measured head (system, tools, initial carried)
-    head_size: int | None = None  # D49: bytes of the head head_fingerprint names, set with it; never recorded
+    head_size: int | None = None  # D49: bytes of the head head_tokens measures; never recorded
     initial_carried: int | None = None  # carried content at the conversation's first request
-    last_window_tokens: int = 0  # estimate of the previous upstream request's non-carried messages
-    last_window_floor: int = 0  # the same with its media at their floor cost (D48), for the measured head
+    # Rule 4, while the head is unmeasured: the previous upstream request's non-carried messages, estimated
+    # and in bytes as the estimator counts them
+    last_window_tokens: int = 0
+    last_window_bytes: int = 0
+    last_window_media: MediaCost = MediaCost()  # D48: that window's media (estimate and floor)
     paged_carried: frozenset[str] = frozenset()  # hashes of carried text messages paged by the fallback
     last_carried_text_count: int | None = None  # carried text messages at the previous turn start
     carried_text_streak: int = 0  # consecutive turn starts at which that count grew
@@ -1175,7 +1188,7 @@ def carried_tokens(messages: list[dict], estimator: TokenEstimator, paged: froze
 def measured_head(request: dict, state: EpochState, estimator: TokenEstimator) -> int | None:
     """Rule 4's measured head for this request's ``system`` and ``tools``. Usage measures the head once, so
     after a head change (D49: an MCP server's tools, a model switch) the change in the head's bytes is
-    estimated and added, or taken off, rounded toward the measured value."""
+    estimated and added, or taken off, rounded up."""
     if state.head_tokens is None or state.head_size is None:
         return state.head_tokens
     change = head_size(request) - state.head_size
@@ -1521,6 +1534,31 @@ def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None
     return text_bytes, math.ceil(tokens)
 
 
+def measured_head_tokens(state: EpochState, real: int, request: dict, dialect: Dialect) -> int:
+    """Rule 4's head from the first measured request (D49 amended, D48): its input minus its window. The
+    window's text counts at its byte share of the request's text tokens, unless the estimate made before
+    the send is lower, and its media at their floor: media bytes are no text, and a screenshot's base64
+    would otherwise take most of the share. The request's text tokens are its input minus its media's
+    floor, so with a floor at or under the media's cost the head errs high. With media in the window two
+    limits hold whatever the floor does: a floor can run high (a PDF of pages cheaper than it), so the head
+    is never under the seed estimate of the request's own system prompt and tools; and a floor far under
+    the cost (a dense PDF) leaves the head that much high, so when all the request's media are in the
+    window (none in the head) it is never over its own bytes at the densest text the ratio accepts
+    (``MEDIA_TEXT_RATIO_RANGE``, the tool-output seed). Without media the measurement is D49's."""
+    window_media, media = state.last_window_media, state.last_sent_media
+    window_text_bytes = state.last_window_bytes - window_media.tokens
+    sent_text_bytes = state.last_sent_bytes - media.bytes
+    text_tokens = max(0, real - media.floor)
+    share = window_text_bytes * text_tokens // sent_text_bytes if sent_text_bytes > 0 else text_tokens
+    window = min(state.last_window_tokens - window_media.tokens, share) + window_media.floor
+    head = real - window
+    if window_media.tokens:
+        if window_media.tokens == media.tokens:
+            head = min(head, math.ceil(max(0, sent_text_bytes - window_text_bytes) / MEDIA_TEXT_RATIO_RANGE[0]))
+        head = max(head, estimate_tokens(canonical_json(dialect.head_estimate_source(request))))
+    return max(head, 0)
+
+
 def appended_usage(previous: Measured | None, text_bytes: int, real: int, keys: tuple) -> tuple[int, int] | None:
     """D48: the text bytes and real tokens a request added to the last measured one, for a request that
     only appended to it (``appends_to``, checked when it was sent) and carries the same media (``keys``):
@@ -1536,8 +1574,8 @@ def appended_usage(previous: Measured | None, text_bytes: int, real: int, keys: 
 
 
 def appends_to(previous: Measured | None, scope: tuple, hashes: tuple[str, ...]) -> bool:
-    """Whether a request whose sent messages have ``hashes`` only appends to the last measured request: the
-    same epoch, window, degraded state and head (``scope``), and every message that request sent unchanged
+    """Whether a request whose messages have ``hashes`` only appends to the last measured request: the same
+    epoch, window, degraded state and head (``scope``), and every message that request had unchanged
     (rule 10's normalised hashes, so a moved ``cache_control`` is no change). An edit to an earlier message
     (a ``window_changed`` resync keeps the epoch and window) or a head change would put its own bytes
     and tokens into the difference."""
@@ -1631,19 +1669,21 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
 
     upstream = {**request, field_name: transform_messages(messages, state)}
     sent = len(canonical_bytes(upstream))
-    window = window_items(upstream[field_name])
-    window_estimate = estimate_items(estimator, window)
-    window_media = sent_media(window, measure_bytes=False)
     sent_items = upstream[field_name]
+    if state.head_tokens is None and state.k == 0:  # rule 4 may measure the head from this request's usage
+        window = window_items(sent_items)
+        state = replace(state, last_window_tokens=estimate_items(estimator, window),
+                        last_window_bytes=estimate_items(BYTE_COUNT, window),
+                        last_window_media=sent_media(window, measure_bytes=False))
+    # Within one epoch, window, degraded state and head the transform is a function of the request's own
+    # messages, so their rule 10 hashes (computed once per request) stand for what is sent (D48).
     scope = (state.epoch, state.k, state.degraded, fingerprint)
-    sent_hashes = tuple(message_hash(m) for m in sent_items)
-    state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
+    hashes = tuple(message_hash(m) for m in messages)
+    state = replace(state, hashes=hashes, last_sent_bytes=sent,
                     last_sent_media=sent_media(sent_items), last_estimate=sent_estimate,
                     last_sent_media_keys=media_keys(split_media(sent_items)[1]),
-                    last_sent_appends=appends_to(state.last_measured, scope, sent_hashes), last_sent_scope=scope,
-                    last_sent_anchor=(len(sent_hashes), anchor_hash(sent_hashes)),
-                    last_window_tokens=window_estimate,
-                    last_window_floor=window_estimate - window_media.tokens + window_media.floor,
+                    last_sent_appends=appends_to(state.last_measured, scope, hashes), last_sent_scope=scope,
+                    last_sent_anchor=(len(hashes), anchor_hash(hashes)),
                     pending_usage=usage_identity(messages))
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
@@ -2651,6 +2691,9 @@ class RewriteEngine:
           last real input, and the estimate checks are left alone. ``over_bound`` and the room still
           use it, since they describe what the model received.
 
+        Usage with no input count (``output_tokens`` alone) is a response without usage (D49 amended):
+        nothing is measured or published, and the next request logs ``usage_missing`` as rule 3 says.
+
         ``tool_calls`` (D40) says whether the response holds a tool call the client runs: True or
         False from the proxy's stream hold when there is one, else from the response's stop reason
         or output list, None when unknown (treated as True). The main conversation publishes its room
@@ -2669,16 +2712,20 @@ class RewriteEngine:
         token = _DIALECT.set(dialect)
         try:
             identity = usage_identity(request.get(dialect.field) or [])
+            size = head_size(request)
         finally:
             _DIALECT.reset(token)
         # D50: any response that may hold a client call (True, or unknown) leaves the conversation busy,
         # whichever request it answers; only the newest request's response without one makes it idle.
-        # A late end of a request the CLI gave up on and retried is not the newest request's.
+        # A late end of a request the CLI gave up on and retried is not the newest request's. This runs
+        # before the input-count check below, so a response without usage still marks a pending call.
         if tool_calls is not False:
             self._idle[key] = False
         elif identity == state.pending_usage:
             self._idle[key] = True
         real = usage_tokens(usage, dialect)
+        if real <= 0:  # no input count: read as an input of 0, it measured the head as 0 (D49 amended)
+            return []
         events: list[dict] = []
         estimate = None
         if identity != state.pending_usage:
@@ -2705,9 +2752,14 @@ class RewriteEngine:
             state = replace(state, last_input_tokens=real, pending_usage=None, last_measured=measured)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried
-                # messages, which also covers a resumed first request with a long history). Their media
-                # count at the floor (D48), so a document priced high cannot zero the head: it errs high.
-                state = replace(state, head_tokens=max(0, real - state.last_window_floor))
+                # messages, which also covers a resumed first request with a long history). The messages
+                # count at this request's own ratio, their byte share of the input, unless the estimate
+                # made before the send is lower, so the head errs high: that estimate counts tool output
+                # at the seed's 1.5 bytes per token, and after a long loop ran thousands of tokens over
+                # (D49 amended). The head's size is re-based on this request, so a head change since the
+                # conversation's first request is in the measurement and counted once.
+                state = replace(state, head_tokens=measured_head_tokens(state, real, request, dialect),
+                                head_size=size)
             if state.window_budget is None and state.head_tokens is not None:
                 # A8 (c): W from the measured head, so set_window publishes W and the ratio after the first
                 # response rather than only after a rotation decision, and a restarted engine can restore

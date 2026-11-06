@@ -62,10 +62,13 @@ claude exits. So is a CLI version Contexto was not tested with (``contexto.clive
 ``<cli> --version`` at start; ``contexto run --no-version-check <cli>`` or
 ``CONTEXTO_NO_VERSION_CHECK=1`` skips it), before claude starts. stderr stays quiet otherwise.
 
+``claude --version`` and ``--help`` (alone) run claude directly, with no session or proxy.
+
 Exit codes: claude's own code; 128 + N if claude died from signal N, or if the launcher got signal N
-before claude started; 2 for a usage error such as a bound above the guard; 1 if the proxy cannot
-start; 127 if ``claude`` is not on PATH or cannot be run; 130 for a Ctrl+C during the version check,
-before claude starts.
+before claude started; 2 for a usage error such as a bound above the guard, an invalid session id, or
+a ``CONTEXTO_HOME`` that is not a directory; 1 if the proxy or the session store cannot start (for
+example ``CONTEXTO_HOME`` is not writable); 127 if ``claude`` is not on PATH or cannot be run; 130 for
+a Ctrl+C during the version check, before claude starts.
 """
 
 from __future__ import annotations
@@ -96,6 +99,8 @@ from contexto.paths import contexto_home, mcp_env, session_dir
 from contexto.private import affinity_salt, open_private, private_dir
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import LIVE_LOCK, SessionStore
+from contexto.store.prune import discard_new_session
+from contexto.store.sessions import named, starting_with
 from contexto.toolcheck import denied_tools_message, missing_tools_message
 from contexto.upstream import Upstream, resolve_upstream, untrusted_note
 
@@ -554,6 +559,7 @@ class SessionChoice:
     session_id: str
     continued: set[str] | None = None  # --continue: the Claude Code sessions the chosen session had served
     unmatched: bool = False  # a resume was asked for, and this launch got a new session
+    created: bool = False  # this launch created the session (removed again if the proxy cannot start, D57)
 
 
 def choose_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> SessionChoice:
@@ -563,7 +569,7 @@ def choose_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> Ses
     another launch: two launches on one store share its epoch record and its recall room, which the
     contract leaves out of scope, so a new session opens instead. Every other resume gets a new session
     with a line on stderr saying why."""
-    if options.session_id:
+    if options.session_id is not None:  # '' too: it is refused as an invalid id when opened (D57)
         return SessionChoice(options.session_id)
     request = resume_request(options.claude_args)
     new = uuid.uuid4().hex
@@ -642,14 +648,17 @@ def choosing(home: Path) -> Iterator[None]:
 def pick_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> tuple[SessionChoice, Any]:
     """Choose the session (``choose_session``) and open it. A choice made automatically (a resume
     without ``--session``) is made under ``choosing``, so a concurrent launch sees this one's live lock."""
-    automatic = not options.session_id and resume_request(options.claude_args) is not None
+    automatic = options.session_id is None and resume_request(options.claude_args) is not None
     with choosing(home) if automatic else nullcontext():
         choice = choose_session(options, home, cwd, stderr)
         check_mcp_values(choice.session_id, home, sys.executable)
         try:
+            choice.created = not session_dir(home, choice.session_id).exists()
             store = open_session(home, choice.session_id, cwd)
-        except (OSError, ValueError) as exc:
-            raise LaunchError(f"cannot open session {choice.session_id!r}: {exc}", EXIT_USAGE) from exc
+        except ValueError as exc:  # an id no session can have: a usage error
+            raise LaunchError(f"cannot open session {choice.session_id[:40]!r}: {exc}", EXIT_USAGE) from exc
+        except OSError as exc:  # the store's filesystem: Contexto cannot start (D57)
+            raise LaunchError(f"cannot open session {choice.session_id!r}: {exc}", EXIT_PROXY) from exc
     return choice, store
 
 
@@ -676,7 +685,14 @@ def resume_command(options: LaunchOptions, session_id: str, cli_session: str) ->
 
 def open_session(home: Path, session_id: str, workdir: Path) -> Any:
     """Create the session and record the directory claude runs in, before claude starts (lane B
-    checks file sources against it for staleness)."""
+    checks file sources against it for staleness). An id that is not a session but starts existing ones
+    is refused (D57): the readers take a prefix, so a new session under it would hide the one meant. A
+    ``CONTEXTO_HOME`` that is not a directory is refused here too, so ``run codex`` exits 2 like claude."""
+    check_home(home)
+    starts = [] if session_dir(home, session_id).exists() else starting_with(home, session_id)
+    if starts:
+        raise LaunchError(f"--session {session_id!r} is not a session but the start of {named(starts)}; give the "
+                          "full id to resume one, or a different id for a new session", EXIT_USAGE)
     store = SessionStore(home, session_id)
     store.set_workdir(workdir)
     return store
@@ -733,6 +749,11 @@ def claude_argv(claude: str, settings: Path, mcp: Path, claude_args: list[str]) 
     reads the next argument as a config file, and ``contexto run claude "prompt"`` failed with "MCP
     config file not found". The ``=`` form ends the option at its own token."""
     return [claude, f"--settings={settings}", f"--mcp-config={mcp}", *claude_args]
+
+
+def session_env(session_id: str, env: dict[str, str] | None = None) -> dict[str, str]:
+    """``env`` (default the process environment) with ``CONTEXTO_SESSION`` set to the launched session."""
+    return {**(os.environ if env is None else env), "CONTEXTO_SESSION": session_id}
 
 
 def exit_code(returncode: int) -> int:
@@ -865,9 +886,15 @@ def check_options(options: LaunchOptions) -> None:
     check_bound(options.bound, options.allow_large_bound)
     if options.window_fraction is not None and not 0 < options.window_fraction < 1:
         raise LaunchError(f"--window-fraction must be between 0 and 1, got {options.window_fraction}", EXIT_USAGE)
-    if options.headroom_floor is not None and not 0 < options.headroom_floor < options.bound:
-        raise LaunchError(f"--headroom-floor must be between 0 and the bound, got {options.headroom_floor}",
-                          EXIT_USAGE)
+    # The default floor is checked like an explicit one (D57): the engine's headroom is never below it.
+    if options.headroom_floor is None:
+        if options.bound <= DEFAULT_HEADROOM_FLOOR:
+            raise LaunchError(
+                f"--bound {options.bound:,} is not above the headroom floor ({DEFAULT_HEADROOM_FLOOR:,}, the "
+                f"default), so no turn fits: use a larger --bound, or a smaller --headroom-floor", EXIT_USAGE)
+    elif not 0 < options.headroom_floor < options.bound:
+        raise LaunchError(f"--headroom-floor must be above 0 and below the bound ({options.bound:,}), "
+                          f"got {options.headroom_floor:,}", EXIT_USAGE)
 
 
 def session_affinity_key(store: Any, upstream_url: str) -> str | None:
@@ -1010,6 +1037,9 @@ def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None
             signal.signal(signum, handler)
 
 
+INFO_ARGS = (["--version"], ["-v"], ["--help"], ["-h"])  # claude prints and exits: no model request
+
+
 def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     check_misplaced_options("claude", options.claude_args)
     check_user_args(options.claude_args)
@@ -1017,6 +1047,8 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     claude = shutil.which(options.claude_bin)
     if claude is None:
         raise LaunchError(cli_not_found(options.claude_bin), EXIT_NOT_FOUND)
+    if options.claude_args in INFO_ARGS:  # nothing to bound, so no session or proxy (D57)
+        return run_child([claude, *options.claude_args], stderr=stderr)
     upstream = resolve_upstream(options.upstream, cwd=Path.cwd())
     check_upstream(upstream)
     if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: as Claude Code -p, no project base URL (D52)
@@ -1027,8 +1059,13 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     choice, store = pick_session(options, home, Path.cwd(), stderr)
     session_id = choice.session_id
     config = engine_config(options)
-    proxy, engine_name = start_proxy(store, upstream.url, upstream.source, config, options.observe_thinking,
-                                     stderr=stderr, cli="claude")
+    try:
+        proxy, engine_name = start_proxy(store, upstream.url, upstream.source, config, options.observe_thinking,
+                                         stderr=stderr, cli="claude")
+    except LaunchError:
+        if choice.created:  # a launch that never started leaves no empty session (D57)
+            discard_new_session(store)
+        raise
     notices, recorder = proxy.session_log, proxy.transform
     tmp: Path | None = None
     watchdog: Watchdog | None = None
@@ -1053,7 +1090,9 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
             store.log({"event": "window_budget_warning", "bound": options.bound,
                        "assumed_overhead": assumed_overhead()})
         notices.hold()  # claude owns the terminal until it exits (D55)
-        code = run_child(claude_argv(claude, settings, mcp, options.claude_args), stderr=stderr, watchdog=watchdog)
+        # The CLI's shell commands (`contexto state`, `contexto search`) then name this session (D57).
+        code = run_child(claude_argv(claude, settings, mcp, options.claude_args), session_env(session_id),
+                         stderr=stderr, watchdog=watchdog)
         return code
     except Terminated as exc:
         code = 128 + exc.signum

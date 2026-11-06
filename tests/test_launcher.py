@@ -50,7 +50,8 @@ if args == ["--version"]:  # contexto run's version check (D38)
         time.sleep(30)
     print(os.environ.get("FAKE_VERSION", "2.1.302 (Claude Code)"))
     sys.exit(0)
-record = {"argv": args, "pid": os.getpid(), "env_base_url": os.environ.get("ANTHROPIC_BASE_URL")}
+record = {"argv": args, "pid": os.getpid(), "env_base_url": os.environ.get("ANTHROPIC_BASE_URL"),
+          "env_session": os.environ.get("CONTEXTO_SESSION")}
 for flag, key in (("--settings=", "settings"), ("--mcp-config=", "mcp")):
     path = next(a for a in args if a.startswith(flag))[len(flag):]  # the launcher's one-token form
     record[key + "_path"] = path
@@ -347,12 +348,79 @@ def test_ctrl_c_reaches_claude_and_does_not_kill_the_launcher(env, upstream, tmp
     (["--bound", "0"], EXIT_USAGE, "positive"),
     (["--window-fraction", "1.5"], EXIT_USAGE, "--window-fraction"),
     (["--bound", "100000", "--headroom-floor", "100000"], EXIT_USAGE, "--headroom-floor"),
+    # D57: the default headroom floor is checked against the bound like an explicit one
+    (["--bound", "10"], EXIT_USAGE, "--bound 10 is not above the headroom floor (25,000, the default)"),
+    (["--bound", "25000"], EXIT_USAGE, "--bound 25,000 is not above the headroom floor (25,000, the default)"),
+    (["--bound", "10", "--headroom-floor", "25000"], EXIT_USAGE,
+     "--headroom-floor must be above 0 and below the bound (10), got 25,000"),
 ])
 def test_usage_errors_exit_2_without_running_claude(env, upstream, tmp_path, args, code, message):
     proc = launch(env, "--upstream", upstream, *args, "claude", cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == code and message in err
+    assert "window budget" not in err  # refused before any warning about it
     assert not Path(env["FAKE_RECORD"]).exists()
+    assert not (Path(env["CONTEXTO_HOME"]) / "sessions").exists()
+
+
+def test_a_small_bound_above_the_floor_is_accepted_with_the_warning(env, upstream, tmp_path):
+    proc = launch(env, "--upstream", upstream, "--bound", "25001", "--session", "small", "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0 and "window budget" in err
+
+
+def test_a_session_id_that_only_starts_existing_ones_is_refused(env, upstream, tmp_path):
+    """D57, reviewer B on PR #241: `--session 5238` made a new empty session that the readers then preferred
+    (an exact id wins over a prefix) to the session 52385048... the user meant."""
+    sessions = Path(env["CONTEXTO_HOME"]) / "sessions"
+    for sid in ("52385048ed0d", "5238ffff"):
+        open_session(Path(env["CONTEXTO_HOME"]), sid, tmp_path)
+    proc = launch(env, "--upstream", upstream, "--session", "5238", "claude", "-p", "hi", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE and "Traceback" not in err
+    assert "--session '5238' is not a session but the start of 2 sessions: 52385048ed0d, 5238ffff" in err
+    assert sorted(p.name for p in sessions.iterdir()) == ["52385048ed0d", "5238ffff"]
+    assert not Path(env["FAKE_RECORD"]).exists()
+    # A full id is resumed, and a new id that no session starts with is created; claude is told which.
+    for sid in ("52385048ed0d", "52385048ed0d-2"):
+        proc = launch(env, "--upstream", upstream, "--session", sid, "claude", "-p", "hi", cwd=tmp_path)
+        proc.communicate(timeout=30)
+        assert proc.returncode == 0
+        assert json.loads(Path(env["FAKE_RECORD"]).read_text())["env_session"] == sid
+    assert sorted(p.name for p in sessions.iterdir()) == ["52385048ed0d", "52385048ed0d-2", "5238ffff"]
+
+
+def test_claude_version_runs_without_a_session_or_proxy(env, tmp_path):
+    """D57: `contexto run claude --version` opened a session and a proxy just to print the version."""
+    proc = launch(env, "claude", "--version", cwd=tmp_path)
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0 and "2.1.302 (Claude Code)" in out and err == ""
+    assert not (Path(env["CONTEXTO_HOME"]) / "sessions").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only directory")
+def test_an_unwritable_contexto_home_exits_1_not_2(env, upstream, tmp_path):
+    """D57: 2 is a usage error; a store that cannot be opened is Contexto failing to start (1). A home that
+    is a file is refused up front as a usage error (D55, test_a_contexto_home_that_is_a_file_is_refused_unchanged)."""
+    home = Path(env["CONTEXTO_HOME"])
+    home.mkdir()
+    home.chmod(0o500)  # kept as the user made it (D55), so sessions/ cannot be created
+    try:
+        proc = launch(env, "--upstream", upstream, "claude", cwd=tmp_path)
+        _, err = proc.communicate(timeout=30)
+    finally:
+        home.chmod(0o700)
+    assert proc.returncode == 1 and "cannot open session" in err and "Traceback" not in err, err
+    assert not Path(env["FAKE_RECORD"]).exists()
+
+
+def test_an_invalid_upstream_leaves_no_session(env, tmp_path):
+    """D57: the session was opened before the proxy refused the upstream, and stayed behind."""
+    proc = launch(env, "--upstream", "ftp://x", "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE and "invalid upstream" in err
+    sessions = Path(env["CONTEXTO_HOME"]) / "sessions"  # refused before any session opens (D55)
+    assert not sessions.exists() or list(sessions.iterdir()) == []
 
 
 def test_large_bound_is_allowed_with_the_flag(env, upstream, tmp_path):
@@ -1143,6 +1211,14 @@ def test_run_child_tells_the_watchdog_the_child_was_reaped():
 
     assert launcher.run_child([sys.executable, "-c", "raise SystemExit(4)"], watchdog=Watch()) == 4
     assert [m[0] for m in sent] == ["pid", "exited"]
+
+
+def test_an_empty_session_option_is_an_invalid_id(env, upstream, tmp_path):
+    """D57: `--session ''` is refused, not taken as "not given" (with #240's resume choice in between)."""
+    proc = launch(env, "--upstream", upstream, "--session", "", "claude", "-p", "hi", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE and "invalid session id: ''" in err and "Traceback" not in err, err
+    assert not Path(env["FAKE_RECORD"]).exists()
 
 
 # PR #240 round-2 follow-ups

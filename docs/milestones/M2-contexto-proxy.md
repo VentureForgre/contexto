@@ -24,7 +24,16 @@ same design after Claude Code works.
   page key are written to a temporary file and renamed, never left empty by a race). Never edit the user's Claude or Codex
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
-  stores or logs them.
+  stores or logs them. It serves only the local CLI (D53): a request that carries an `Origin`
+  header, or whose `Host` is not exactly one header naming `127.0.0.1:<port>` or
+  `localhost:<port>` (case-insensitive, the proxy's own port), is answered locally with 403
+  (`permission_error`), never reaches the engine, the store, or upstream, and is logged as
+  `request_refused` with its method, path and `reason` (`origin` or `host`). Claude Code 2.1.314
+  and Codex 0.166.0 send their base URL's `Host` and no `Origin`; a browser sends `Origin` on every
+  POST and CORS preflight (a no-cors `text/plain` POST included) and a DNS-rebound page sends its
+  own name as `Host`, so no web page can write to the store or move `main`. A no-cors GET carries
+  neither and is still forwarded; its response is opaque to the page and no GET is transformed.
+  The listen backlog is 128.
 - Upstream affinity (D36). The CLI's session signals reach upstream unchanged: Claude Code's
   `X-Claude-Code-Session-Id` header and `metadata.user_id`, Codex's `session-id` header and
   `prompt_cache_key`. When the upstream host name, IDNA-normalized, is not `anthropic.com`,
@@ -282,7 +291,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    the previous request sent in this conversation got its usage; when it did not (a 4xx or 5xx, a
    dropped stream, a response without usage, or a request still in flight), the whole request is
    estimated instead, logged content-free as `usage_missing` (epoch only) when that replaces a real
-   input. Usage is paired only with the request it measured, identified by its message count and
+   input. Usage with no input count (`output_tokens` alone) is a response without usage (D49 as
+   amended). Usage is paired only with the request it measured, identified by its message count and
    its last message's hash (rule 10): usage for any other request (the CLI's original, forwarded
    after `transform_error`, or an older request still in flight) never feeds the ratio, the last
    real input, the measured head, or `estimate_error`, and logs `usage_unattributed` (the epoch,
@@ -297,9 +307,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    tokens after scaling its long edge down to 2,576 pixels, between 64 and 4,784, with the size read
    from the PNG, JPEG, GIF, or WebP header, and 4,784 when it cannot be read (a URL, a file id,
    another format); a PDF costs 4,568 tokens a page (3,000 text tokens plus a page image at 1,568),
-   its pages the larger of its page objects (in object streams too, Flate or stored without a filter,
-   each object number once, so an incremental update that rewrites a page counts it once) and its page
-   tree's largest count. Every fallback errs high: a PDF with neither, or that cannot be decoded, is one
+   its pages counted as a renderer draws them: from the latest catalog's page tree, each node by its
+   latest definition (an incremental update appends newer ones), the root's count or the page objects
+   it reaches through `/Kids`, whichever is larger, so pages an incremental save deleted and nodes no
+   catalog reaches do not count. When the catalog's tree cannot be read, the larger of the page objects
+   (in object streams too, Flate or stored without a filter, each object number once) and the largest
+   page-tree count. Every fallback errs high: a PDF with neither, or that cannot be decoded, is one
    page per 3 KB; a PDF with an object stream that cannot be read (another filter, a predictor,
    encryption, or a bound below) is its page tree's count, else 600 pages (the API's limit); a PDF with
    more page objects or tree nodes than a document has is 600; a document by URL or file id is 10
@@ -315,23 +328,31 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    1,568-pixel, 1,568-token limit, 0 for an image of unknown size, and 1,000 tokens a PDF page for the
    pages its page tree draws: numbered page objects a `/Kids` array references, at most the tree's
    count, at least one; on Codex 0, since OpenAI's tile prices go lower), though the floor can run high.
-   A request that only appends to the last measured one (same epoch, window and degraded state, that
-   request's last message unchanged) and carries the same media teaches the ratio its difference from
-   it: the bytes and tokens it added. Otherwise, with a measured ratio, the media are charged the cost
+   A request that only appends to the last measured one (same epoch, window, degraded state and head,
+   and every message that request sent unchanged, by rule 10's hashes) and carries the same media
+   teaches the ratio its difference from it: the bytes and tokens it added. Otherwise, with a measured ratio, the media are charged the cost
    that keeps the ratio, at most their estimate, so a request with media can lower the ratio but never
    raise it; when that cost would be under the floor, the request is not learned. Before a ratio is
    measured, the media are charged their floor, and a request whose media has a floor is learned only
    when estimate minus floor is within 10% of its usage; a floor that would put the text above 3.5 bytes
    a token (the text seed) ran high and none is taken off. A request whose learned ratio lands outside
-   1.5 to 6 bytes a token is not learned. The head measured on the first request (rule 4) takes its
-   window's media at the floor, so it errs high. After every response, compare real usage with the
+   1.5 to 6 bytes a token is not learned. After every response, compare real usage with the
    bound and the estimate: log `over_bound` from real usage when it exceeds the bound, and
    `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
-   index), in tokens, taken from measured usage once available (the first request's input is the
-   head) and from the estimator before that. After a head change (rule 6) the measured head is
-   adjusted by the estimated size of the change in `system` and `tools` bytes, so a server that adds
-   tools or a model switch counts in `F` (D49). The window budget is `W = bound - headroom - F`, and
+   index), in tokens, taken from measured usage once available and from the estimator before that.
+   The first measured request's input, minus its non-carried messages, is the head; the messages
+   count at that request's own ratio (their share of its bytes), or at the estimate made before the
+   send when that is lower, so the head errs high whenever the first usage arrives (D49 as amended).
+   Media are left out of that share (D48): the window's text counts at its share of the request's text
+   bytes, applied to the input minus the request's media floor, and the window's media at their floor.
+   With media in the window, the head is never under the text-seed estimate of the request's own
+   `system` and `tools`, since a floor can run high, and, when all the request's media are in the
+   window, never over its own bytes at 1.5 bytes a token, since a dense PDF's floor is far under its
+   cost. Without media the measurement is D49's.
+   After a head change (rule 6) the measured head is adjusted by the estimated size of the change in
+   `system` and `tools` bytes since the measured request, so a server that adds tools or a model
+   switch counts in `F` once (D49). The window budget is `W = bound - headroom - F`, and
    the retained window after rotation targets `window_fraction * W` (default 0.5), so the window
    can grow before the next trigger. Choose the smallest `k` (retain as many recent turns as fit)
    within that target, retaining the newest complete turn and the new turn (except under the
@@ -383,6 +404,18 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    `error: "relay: <class>"` with the status and any usage already read, which still reaches the
    engine; the client sees the stream end without its terminator (or the body end short). A proxy failure after the
    response started logs `proxy_error` with `fallback: "none"`, because no local 502 can be sent.
+   Two cases from D53. An upstream that answers before reading the whole body (a body limit's 413,
+   as nginx or Go send it, then a close) makes the send fail with `BrokenPipeError` or
+   `ConnectionResetError`; the proxy then reads the answer already sent (waiting at most 1 s) and
+   forwards it unchanged, not retried, with `upstream_answered_early: "<class>"` on the entry; only
+   when there is none is the failure retried as above. A client that closes its connection while
+   its request is in flight (Esc) is seen within 0.05 s, from the connection waiting for the
+   response head through the end of the relay, the stream hold included, and the proxy then
+   shuts the upstream connection, so upstream stops generating. The entry is logged with
+   `client_aborted: true` and no `error`: with the status and any usage read when the response had
+   started (the usage still reaches the engine), and with `upstream_phase` and no status when it
+   had not. A second Ctrl+C during the 2 s stop drain ends the wait without a traceback, and the
+   requests still in flight are logged as `proxy_stop_incomplete`.
 9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
    per-turn recall budget; the proxy reads `message_start` and `message_delta` usage. The hold's
    event splitter and the usage reader share one SSE grammar (WHATWG: a line ends at CRLF, LF, or
@@ -704,7 +737,8 @@ turns before it, usually where such rules are given. Tools:
     `message` or `reasoning` item; Codex 0.154.0 emits `custom_tool_call`, measured in the A6 smoke)
     until `response.completed`, `response.incomplete`, or `response.failed` (whose usage, when
     present, sets the room), an error event, or end of stream. A hold that ends at an error event
-    or end of stream, including an upstream failure mid-stream (rule 8), first observes the usage
+    or end of stream, including an upstream failure mid-stream and a client that left, which shuts
+    upstream at once (rule 8, D53), first observes the usage
     already read (`message_start`'s, for Messages), so that publish also comes before any held
     event; the held events are still released, because rule 8 forwards what upstream sent and the
     CLI decides what a stream without its terminator means. A tool call
@@ -1168,8 +1202,54 @@ checked. The routine for testing a new version is `docs/cli-updates.md`.
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run
 the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
-`contexto sessions prune`, `contexto recall <page id>`, `contexto state`. Exit codes and `--help`
-documented in README.
+`contexto sessions prune`, `contexto recall <page id>`, `contexto search <words>`, `contexto state`.
+Exit codes and `--help` documented in README.
+
+Store-reading commands (D57). A session is named by its id or a unique prefix of it (an exact id
+wins; a prefix of several ids is an error naming them, exit 1) in `--session` and `CONTEXTO_SESSION`
+for `recall`, `search`, and `state`, and in `sessions show ID`. `sessions prune --session`,
+`contexto mcp --session`, `contexto proxy --session`, and `contexto run --session` take exact ids only.
+`prune`, `proxy`, and `run` refuse, with exit 2 and the matching ids named, an id that is not a session
+but the start of existing ids: prune is irreversible, and a new session under a prefix would hide the
+one meant from the readers (an exact id wins). A new full id still creates its session in `proxy` and
+`run`. An empty `--session` is an
+invalid id, never "not given", in every command. An id longer than 255 bytes is invalid everywhere
+(`paths.session_dir`). A `CONTEXTO_HOME` that exists but is not a directory is one error for every
+reader: "<home> is not a directory (check $CONTEXTO_HOME)", exit 1. `contexto run` sets
+`CONTEXTO_SESSION=<id>` in the environment of the CLI it runs, claude or codex, so the CLI's shell
+commands name its session. With no `--session` or `CONTEXTO_SESSION`, `recall`, `search`, and
+`state` use the most recently active session that has pages or ledger records or that another
+process holds open (its `live.lock`, probed as prune probes it, without the idle grace), else the
+most recent session; stderr names the choice (`most recent`, `most recent with pages or pins, or in
+use`, `--session`, `CONTEXTO_SESSION`).
+- `sessions show` lists the pages after the summary, newest first, one index line each without the
+  identifiers (`pg_<id> turn N: <opening user text> [tools] [files]`): the 20 newest, all with
+  `--all`; `--json` adds `page_list` (`id`, `turn`, `line`) under the same limit,
+  `page_list_truncated`, and `upstream_4xx_model`. A pages directory that cannot be read leaves the
+  summary printed (`page_list` null in `--json`) and a one-line error, exit 1; `search` reports it in
+  one line and `state` after the pins, exit 1. `upstream_4xx` counts each upstream 4xx once (the proxy's `request` entries
+  are not counted, only the separate events), and `upstream_4xx_model` those on the transformed
+  model paths, apart from Claude Code's keyless `HEAD /api/hello` probe.
+- `search WORDS... [--session ID] [--limit N]` (default 10) runs the store search `contexto_search`
+  uses (pages holding every word, best first, D34) and prints each hit's index line, then its last
+  three matching lines with context, each with the offset `recall PAGE_ID --offset N` reads from.
+  Paged-out turns only. No hit: a line on stderr, exit 0.
+- `recall` refuses an argument that is not a page id (`pg_` and 16 hex digits) before any path is
+  built, exit 1.
+- `state` prints the pinned records by group, or "No pinned records.", then how many turns are
+  paged out and the commands that list and search them. `state --raw` prints the `contexto_state`
+  text the model gets, uncapped.
+- `contexto mcp` serves an existing session only, and creates none: an unknown id exits 1. A
+  session that `contexto proxy` or `contexto run claude` created is removed again when the proxy
+  cannot start (the removal goes through prune's lock check, so a session another process opened is
+  kept). `contexto run claude --version`, `-v`, `--help`, or `-h` alone runs claude directly, with no
+  session or proxy.
+- `contexto proxy --port` outside 0 to 65535, and an invalid `--session` id (`''` included), are
+  usage errors (exit 2), as in `contexto run`. `contexto run` exits 2 for
+  a usage error (including an invalid session id and a `--bound` not above the headroom floor,
+  whether the floor is given or the 25,000 default) and 1 when the proxy or the session store
+  cannot start (for example `CONTEXTO_HOME` is read-only; a `CONTEXTO_HOME` that is a file is refused
+  first, exit 2, D55).
 
 `contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated
 blocks under the session directory, symlinks counted as links) and a total. `contexto sessions
