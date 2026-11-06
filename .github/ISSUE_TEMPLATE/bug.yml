@@ -1,0 +1,96 @@
+name: Bug report
+description: Contexto did something wrong or failed to start.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Do not paste conversation text, page files, API keys or tokens here.
+        Session files under `~/.contexto` hold your conversation word for word; the commands below
+        print only counts, event names and versions. For a security problem, use
+        [private vulnerability reporting](https://github.com/VentureForgre/contexto/security/advisories/new)
+        instead of an issue.
+  - type: input
+    id: contexto-version
+    attributes:
+      label: Contexto version
+      description: Output of `contexto --version`. If it says `0.0.0+checkout`, add the commit (`git rev-parse --short HEAD`).
+      placeholder: contexto 0.5.8
+    validations:
+      required: true
+  - type: dropdown
+    id: cli
+    attributes:
+      label: CLI
+      options:
+        - Claude Code
+        - Codex (API-key mode)
+        - Codex (ChatGPT login mode)
+        - None (contexto sessions, recall, state, proxy or mcp on its own)
+    validations:
+      required: true
+  - type: input
+    id: cli-version
+    attributes:
+      label: CLI version
+      description: Output of `claude --version` or `codex --version`.
+      placeholder: 2.1.310 (Claude Code)
+    validations:
+      required: true
+  - type: dropdown
+    id: upstream
+    attributes:
+      label: Upstream
+      description: Where the requests go. Do not give the URL.
+      options:
+        - The vendor's API with my own key
+        - CLIProxyAPI
+        - Another proxy
+        - Not sure
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and Python version
+      placeholder: macOS 26, Python 3.13
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: The full `contexto ...` command line, with any secrets removed.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: session-lines
+    attributes:
+      label: Contexto's lines on stderr
+      description: |
+        The session line printed at start (`contexto: session <id> (bound ..., upstream ...)`) and every
+        line that starts with `contexto:` or `warning:`. Leave empty if the command printed none.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: session-show
+    attributes:
+      label: Session summary
+      description: |
+        Output of `contexto sessions show <id> --json` for the session in question. It holds counts and
+        event names only, no conversation text.
+      render: json
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: |
+        For example the event lines around the problem from `~/.contexto/sessions/<id>/log.jsonl`. That
+        file holds event names, sizes and counts, not prompts or replies. Leave out `pages/`,
+        `retained.json`, `epoch.json` and `ledger.jsonl`: they hold conversation text.

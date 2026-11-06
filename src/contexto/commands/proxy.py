@@ -9,6 +9,7 @@ forwards with the identity transform.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -32,10 +33,13 @@ def run(args: argparse.Namespace) -> int:
     from contexto.paths import contexto_home
     from contexto.proxy import ContextoProxy
     from contexto.store import SessionStore
-    from contexto.upstream import resolve_upstream
+    from contexto.upstream import resolve_upstream, untrusted_note
 
     session_id = args.session or uuid.uuid4().hex
     upstream = resolve_upstream(args.upstream, cwd=Path.cwd())
+    if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: no project base URL (D52)
+        note = untrusted_note("env.ANTHROPIC_BASE_URL", upstream.ignored, "Pass --upstream", os.environ)
+        print(f"contexto proxy: {note}", file=sys.stderr)
     try:
         store = SessionStore(contexto_home(), session_id)
         proxy = ContextoProxy(upstream.url, store, observe_thinking=args.observe_thinking,

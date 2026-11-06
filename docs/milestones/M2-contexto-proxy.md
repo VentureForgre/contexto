@@ -18,7 +18,9 @@ same design after Claude Code works.
   them (`.github/workflows/ci.yml`).
 - Data lives under `$CONTEXTO_HOME` (default `~/.contexto`), one directory per session:
   `sessions/<session id>/`. Nothing in it is committed. Everything under `$CONTEXTO_HOME` is
-  private to the user: directories `0700`, files `0600`, created atomically (secrets such as the
+  private to the user: directories `0700`, files `0600`, created atomically. A home Contexto creates
+  is `0700`; an existing one keeps the mode its user gave it, and one that is not a directory is
+  refused before any mode is changed (D55) (secrets such as the
   page key are written to a temporary file and renamed, never left empty by a race). Never edit the user's Claude or Codex
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
@@ -62,13 +64,57 @@ proxy (Anthropic Messages API)        mcp server (stdio, JSON-RPC)
 Upstream resolution: the launcher computes the base URL Claude Code would otherwise use, in this
 order (measured in M0, PR #16 findings 1 and 1a: a settings-file `env.ANTHROPIC_BASE_URL`
 overrides the process environment, and in a git worktree the main checkout's
-`settings.local.json` wins): explicit `--upstream`; else the first settings file that sets
-`env.ANTHROPIC_BASE_URL`, in Claude Code's precedence (in a worktree the main checkout's
-`.claude/settings.local.json` first, then the local, project, and user settings files, the user's
-being `$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35); else
-`ANTHROPIC_BASE_URL` in the process environment; else `https://api.anthropic.com`. The launcher's
-own flag-level `--settings` outranks all of these, which is what makes the proxy attachment work.
-Organization-managed settings still outrank `--settings`; document that limit.
+`settings.local.json` wins; the file list re-measured for D52): explicit `--upstream`; else the
+first settings file that sets `env.ANTHROPIC_BASE_URL`, in Claude Code's precedence: the main
+checkout's `.claude/settings.local.json` (the parent of the git common dir: the repository root,
+also from a subdirectory, or the main checkout from a linked worktree; a submodule's own root),
+then the working directory's own `.claude/settings.local.json` and `.claude/settings.json`, then
+the user settings file (`$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35).
+From a subdirectory the repository root's `settings.json` is not read, and outside git no parent
+directory's files are (D52, 27 layouts with Claude Code 2.1.314). Else `ANTHROPIC_BASE_URL` in the
+process environment; else `https://api.anthropic.com`. The launcher's own flag-level `--settings`
+outranks all of these, which is what makes the proxy attachment work. Organization-managed
+settings still outrank `--settings`; document that limit.
+
+Project settings trust (D52): every settings file above except the user's comes with the
+repository. `contexto run claude` and `contexto proxy` use them as Claude Code does: Claude Code
+uses a project's base URL and `apiKeyHelper` in `-p` mode with no trust check (unless
+`CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set, below), and interactively only after its "do you trust
+this folder" dialog, which it still shows behind Contexto, so a
+proxy upstream taken from an untrusted project matches what Claude Code would use once the user
+accepts. One difference remains before the dialog is answered: Claude Code sends `HEAD /api/hello`
+(no credential, no content) while the dialog is shown, and through Contexto that request reaches
+the untrusted project's base URL even if the user declines, where plain `claude` sends it to the
+user's own upstream (reviewer B, PR #237; measured with Claude Code 2.1.314; neither sends it with
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`). The project's host learns the user's address, the
+Claude Code version and the time. `--upstream` pins the upstream in a repository the user does not
+trust. `contexto run codex` does not: Codex runs the `apiKeyHelper` it is given without asking
+and plain Codex ignores `.claude/`, so for Codex a project file's `apiKeyHelper` and base URL
+count only when Claude Code has recorded the folder as trusted, that is
+`projects[<real path>].hasTrustDialogAccepted` is `true` in Claude Code's global config
+(`$CLAUDE_CONFIG_DIR/.claude.json` or `~/.claude.json`, or a non-empty legacy `.config.json` in the
+config directory) for the working directory or a parent up to the nearest directory with a `.git`
+entry (of any kind, valid or not), or for the main checkout of a genuine linked worktree
+(its `.git` file names `<M>/.git/worktrees/<name>`, whose `commondir` names `<M>/.git` and whose
+`gitdir` points back at that `.git` file); outside git, for the working directory or any parent.
+The layout is read from the file system, never from `git`: a folder unpacked from an archive
+writes its own `.git`, so git's answer is the folder's (reviewer A, PR #237). The same genuine
+worktree test decides whose `settings.local.json` is the main checkout's. While
+`CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is truthy no folder counts as trusted, as for Claude Code, which
+then shows its dialog everywhere. The variable is read from the environment Contexto starts with
+(a settings file's `env` cannot set it), as Claude Code reads it: `1`, `true`, `yes` or `on` in
+any case, after JavaScript's `trim()`, which also strips U+FEFF. While it is truthy no project file
+counts for `contexto run claude` and `contexto proxy` either: Claude Code in `-p` mode then drops a
+project file's `env` (but a short list of safe variables) and its `apiKeyHelper`, so plain
+`claude -p` goes to the user's upstream (reviewer A, PR #237 round 3; measured on 2.1.314 and
+2.1.318). Interactively Claude Code shows its dialog and, once it is accepted, uses the project's
+base URL (measured); Contexto skips the project files there too, the stricter side, and
+`--upstream` pins any upstream. When a project file is skipped for that reason the note names the
+variable and offers only the flags or unsetting it. Otherwise the file is skipped and
+Contexto says which file it ignored and how to proceed (`--codex-key-helper`, `--codex-upstream`,
+or running `claude` there once and accepting the dialog). `--codex-key-helper`,
+`CONTEXTO_CODEX_KEY_HELPER`, `--upstream`, `--codex-upstream`, and the user settings file are never
+gated.
 
 Tool permissions (D44): the same `--settings` file sets `permissions.allow` to one rule per Contexto
 MCP tool, by its exact name: `mcp__contexto__contexto_recall`, `_pin`, `_close`, `_state`, and
@@ -270,8 +316,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    log `window_minimal`; this keeps the request under the bound at the cost of the previous turn's
    verbatim text. Only if `W` is not positive or cannot hold even the new turn, log
    `bound_too_small` and still rotate to the minimal window (the new turn alone), which is
-   smaller than sending unrotated; the launcher warns at start when the measured
-   head leaves less than 25,000 tokens of window budget and suggests a larger `--bound`. Example
+   smaller than sending unrotated; the launcher warns at start when a typical head (28,000
+   tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
+   seat) leaves less than 25,000 tokens of window budget, says that recall will barely fit or, at a
+   budget of 0 or less, that it may not fit at all (a "may": measured heads ran as low as 15,689), and
+   suggests a larger `--bound` (D55). Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
    OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
    thinking strips will be frequent at 150k for large heads (see O3).
@@ -884,10 +933,44 @@ turns before it, usually where such rules are given. Tools:
   snapshot write only marks the snapshot stale (search then says "in view not checked") and logs
   `retained_stale`, not `store_error`; it does not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Only the main
   conversation publishes the room, the snapshot, and the window (`set_window`): the engine keeps state per conversation (the
-  main one, subagents, side requests), and the main conversation is the one with the most turn
-  starts, re-evaluated at each turn start: it changes only when another conversation has strictly
-  more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
-  stay main. The choice is made before the request is transformed, so a request that fails after
+  main one, subagents, side requests). The first conversation seen is main, and the choice is
+  re-evaluated at each turn start of another conversation, which takes over when (D50):
+  - its Claude Code session id differs from main's, its User-Agent entrypoint is main's, and, unless
+    both are the interactive CLI's `cli`, main is idle (the response to its newest request released no
+    client tool call, no response of main's that may have released one arrived after it, and main
+    has sent no request since); and either no
+    conversation has been main in that session yet (`/clear` starts a new
+    id), or it was the first conversation main in its session and that session lost main to another
+    session's id and has sent no request of this conversation since (`/resume` sends the resumed
+    conversation's id again). The id is `X-Claude-Code-Session-Id`, else the `session_id` in
+    `metadata.user_id`; subagents and side requests carry the id of the conversation they run for
+    (measured on Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318). Headless sessions run `/clear`
+    and `/compact` too (`claude -p --input-format stream-json`, the Agent SDK; `/clear` starts a new
+    id under `sdk-cli`, measured on 2.1.314 and 2.1.318). A `claude -p` or SDK process run from a
+    tool has its own id and an `sdk-*` entrypoint: its own under an interactive lead, so it does not
+    qualify, or, under a headless lead, the lead's inherited `sdk-cli`, and then it runs inside one
+    of main's tool calls, so main is not idle and it does not qualify either. A session that keeps
+    sending beside the new main returns only by turn starts; two sessions that take turns, each idle
+    while the other is prompted, follow the one prompted;
+  - its session id and entrypoint are main's, and its first message is
+    Claude Code's compaction summary: a user message whose content is a string starting "This
+    session is being continued from a previous conversation that ran out of context. The summary
+    below covers the earlier portion of the conversation." and a newline (`/compact` and
+    auto-compaction keep the session id but start a new first message, measured on 2.1.314 and
+    2.1.318, interactive and headless). It becomes that session's main, so a later `/resume` of the session returns to it;
+  - main has never sent a request with a tool list and this conversation has (Claude Code's title,
+    topic, and quota side requests have none, and one is often the session's first request);
+  - or it has strictly more turn starts than main (a tie keeps the current one).
+
+  Only a conversation seen with a tool list takes over by the first three rules (for Codex, which
+  sends no Claude Code session id, only the fourth applies). A request whose `metadata.user_id` has
+  `parent_session_id` (an agent-team teammate, in process or in its own pane, on 2.1.314), and one
+  carrying `X-Claude-Code-Agent-Id` (every subagent request on 2.1.302 to 2.1.318, and an in-process
+  teammate's), never takes over, by any rule. The engine logs content-free
+  `main_changed` with `reason` (`new_cli_session`, `resumed_cli_session`, `compacted`,
+  `after_side_request`, or `more_turn_starts`) and the request's `turn_starts` on the request that takes over; never the
+  session id. Main moves only at a request, never at a response: a response that arrives after
+  another conversation's request took over publishes a side room. The choice is made before the request is transformed, so a request that fails after
   its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them (they publish side rooms instead, D40, see the per-turn
   recall budget), so their tool calls see the main conversation's snapshot, and for a subagent
   "in view" refers to the main conversation's window (a documented subagent limitation); the MCP
@@ -1004,7 +1087,9 @@ request's `transform_events`, before the engine's request event. The exit event 
 after `proxy_stop`, written under the transform lock (skipped if a stuck request holds the lock for 2
 seconds). The launcher prints the warning on stderr, naming the likely cause and the fix, once when
 it is first reported and once more after the CLI exits for a repeated exit event, because a TUI can
-draw over a line printed mid-run. If the check itself raises, the engine logs `toolcheck_error` with
+draw over a line printed mid-run. `contexto run claude` holds every such line while Claude Code runs
+and prints it after Claude Code exits (D55); an exit-time repeat of a line still held is not printed
+twice. If the check itself raises, the engine logs `toolcheck_error` with
 the exception's type name only and keeps the request's rewrite.
 
 Refused tools (D44): offered tools can still be refused. On every Messages API request, main or not,
@@ -1072,6 +1157,59 @@ checked against the selected entry), so a symlink swapped in at any moment canno
 or create anything outside the checked directory. Failures are per session; the exit code is 1 if
 any failed or if the session named by `--session` was skipped, with `contexto: error:` on stderr.
 A store resumed while prune deletes its session waits, starts empty, and prints a warning.
+
+**`contexto run claude` lifecycle (D55).**
+- Resume. Every request's Claude Code session id (the `X-Claude-Code-Session-Id` header, else the
+  `session_id` in `metadata.user_id`) is recorded in the session's `meta.json` as
+  `cli_sessions.claude.<id>` = last seen (wall-clock seconds; written at its first request in a launch
+  and again at exit; the newest 64 kept). The id never enters the session log. Claude Code keeps the id
+  across `--resume` and `--continue` and names its transcript after it (new only with
+  `--fork-session`; measured on 2.1.314). Without `--session`, `claude --resume <id>` (or `-r <id>`,
+  `--resume=<id>`) reuses the session that served `<id>`, and `claude --continue` (`-c`) the session
+  that last served Claude Code with this working directory; the launcher prints which, and for
+  `--resume` names any other session that served the id too. With no match, `--resume` without an id
+  (Claude Code's picker, which Contexto cannot follow), or a picked session whose `live.lock` another
+  process holds (another launch has it open: two launches on one store would share its epoch record
+  and recall room, rule 16), it prints why on stderr and opens a new session; at exit it then names
+  any other session that served the conversation, since the conversation is split across two stores.
+  An automatic choice is serialized across launches: an exclusive `flock` on
+  `$CONTEXTO_HOME/choose.lock` is held from the busy-session probe until the chosen session is open
+  with its `live.lock` taken (waiting at most 5 seconds), so launches started at the same moment see
+  each other. Options are read as Claude Code's Commander parser reads them (2.1.314 and 2.1.318 alike):
+  arguments after `--` are not, nor the value of a long option that takes one (`<value>` in `--help`,
+  and the hidden prompt-like ones), so `--append-system-prompt --continue` is a prompt; a short-option
+  cluster is split letter by letter, a flag (`c`, `h`, `p`, `v`) consumed and the rest read again, and
+  an option that takes a value (`d`, `n`, `r`, `w`) takes the rest of the argument, so `-pc` continues
+  and `-rabc123` resumes `abc123`. `--session` always wins and is never questioned.
+  If a `--continue` lands in a conversation the chosen session never served (one run without
+  Contexto), a warning says so at exit; not with `--fork-session`, whose new id continues the same
+  history. A fork keeps the session that served the conversation it forks, on purpose: the history up
+  to the fork point and the pins are that session's. Both branches then share its pages, pins and
+  recall room, a search in one can return turns written only in the other, and switching between them
+  re-rotates (the engine logs `head_changed` or `history_diverged`). The launcher says so when it
+  reuses a session for a fork; `--session NEW` gives the fork its own store. After Claude Code exits, when a request named a Claude Code session, the
+  launcher prints `contexto run --session S [the launch's Contexto options] claude --resume <id>` with
+  the last id seen, because Claude Code's own exit hint (`claude --resume <id>`) bypasses Contexto.
+- Signals. SIGTERM, SIGHUP and SIGQUIT are forwarded to Claude Code while it runs; SIGUSR1, SIGUSR2
+  and SIGALRM end it with SIGTERM; SIGINT is ignored by the launcher (the terminal delivers it). Before
+  Claude Code starts (the version check) and after it exits, those six signals run the launcher's
+  cleanup (proxy stop, temporary files, `exit` event) and exit 128 + N; the version check's process
+  group is killed on the way. The forwarding handlers are installed before Claude Code is spawned, and
+  a signal that arrives during the spawn is sent once it exists. SIGKILL cannot be caught: a watchdog
+  process in its own session reads a pipe from the launcher (`pid <n>` at the spawn, `exited` once
+  Claude Code is reaped, `done` from the cleanup) and, when the pipe closes without `done`, sends
+  Claude Code SIGTERM unless it has exited (a reaped pid may be reused) and deletes the temporary
+  directory. The session log then has no `exit` event; if the
+  watchdog is killed too, the temporary directory (proxy URL, tool names, session id, home path; no
+  secrets) stays in `$TMPDIR`.
+- Checks before any session is opened, each a usage error (exit 2) unless noted: Contexto's own
+  `contexto run` options right after `claude` (the message shows the command with them moved before
+  `claude`); a malformed upstream URL, named with its source; a `$CONTEXTO_HOME` that is not a
+  directory; and `${` in the home, the session id or the interpreter path, which Claude Code would
+  expand in the MCP config (2.1.314 expands `${VAR}` and `${VAR:-x}` in `command`, `args` and `env`,
+  keeps `$VAR`, and has no escape). A `claude` on PATH that is not executable, a broken symlink or a
+  directory is named with what is wrong (exit 127). The MCP server gets `--session=<id>` as one
+  argument, so an id starting with `-` stays a value.
 
 ## Lanes
 

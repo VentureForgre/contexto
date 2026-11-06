@@ -32,13 +32,24 @@ def test_session_dirs_0700_and_files_0600_under_a_permissive_umask(tmp_path, per
         assert mode(f) == 0o600, f
 
 
-def test_existing_wide_home_and_sessions_dirs_are_narrowed_on_first_use(tmp_path):
+def test_an_existing_home_keeps_its_mode_and_sessions_dir_is_narrowed(tmp_path):
+    # D55: CONTEXTO_HOME is the user's choice (it may be $HOME or a shared directory), so an existing one
+    # is not chmodded; sessions/ and everything under it is Contexto's own.
     home = tmp_path / "home"
     (home / "sessions").mkdir(parents=True)
     os.chmod(home, 0o755)
     os.chmod(home / "sessions", 0o777)
     SessionStore(home, "s1")
-    assert mode(home) == 0o700 and mode(home / "sessions") == 0o700
+    assert mode(home) == 0o755 and mode(home / "sessions") == 0o700
+
+
+def test_a_home_that_is_a_file_is_refused_before_any_chmod(tmp_path):
+    home = tmp_path / "home"
+    home.write_text("x")
+    os.chmod(home, 0o644)
+    with pytest.raises(NotADirectoryError):
+        SessionStore(home, "s1")
+    assert mode(home) == 0o644
 
 
 def test_existing_wide_session_dirs_are_narrowed(tmp_path):
