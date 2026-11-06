@@ -194,7 +194,7 @@ def test_session_selection_order(home, capsys, monkeypatch):
 
 def test_state_prints_the_full_uncapped_state(home, capsys):
     store, _ = make(home, "s1", 1_000_000, pins=300)
-    code, out, err = run(capsys, "state")
+    code, out, err = run(capsys, "state", "--raw")  # the model's text (D57: the default view is for people)
     assert code == 0 and err.strip() == "session s1 (most recent)"
     assert out.rstrip("\n") == store.state_text()
     assert out.count("obligation, owner assistant") == 300
@@ -266,8 +266,9 @@ def test_mcp_resolves_contexto_home_like_the_other_subcommands(tmp_path, monkeyp
         monkeypatch.setenv("CONTEXTO_HOME", value)
     seen = {}
     monkeypatch.setattr(contexto.mcp, "serve_stdio", lambda store: seen.setdefault("dir", store.dir) and 0)
-    assert cli.main(["mcp", "--session", "s1"]) == 0
     expected = {"~/x": tmp_path / "home" / "x", "rel": tmp_path / "rel", None: tmp_path / "home" / ".contexto"}[value]
+    SessionStore(expected, "s1")  # the server serves an existing session only (D57)
+    assert cli.main(["mcp", "--session", "s1"]) == 0
     assert seen["dir"] == expected / "sessions" / "s1"
     assert seen["dir"].is_absolute() and paths.contexto_home() == expected  # what `contexto sessions` reads
     assert not (tmp_path / "~").exists()  # no literal ./~ directory
@@ -283,7 +284,8 @@ def test_mcp_home_option_is_expanded_and_absolute(tmp_path, monkeypatch, value):
     monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ignored"))  # --home wins
     seen = {}
     monkeypatch.setattr(contexto.mcp, "serve_stdio", lambda store: seen.setdefault("dir", store.dir) and 0)
-    assert cli.main(["mcp", "--session", "s1", f"--home={value}"]) == 0
     expected = {"~/y": tmp_path / "home" / "y", "rel-home": tmp_path / "rel-home"}[value]
+    SessionStore(expected, "s1")  # the server serves an existing session only (D57)
+    assert cli.main(["mcp", "--session", "s1", f"--home={value}"]) == 0
     assert seen["dir"] == expected / "sessions" / "s1" and seen["dir"].is_absolute()
     assert not (tmp_path / "~").exists() and not (tmp_path / "ignored").exists()

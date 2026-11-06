@@ -672,7 +672,7 @@ def test_codex_reports_an_unopenable_session(home, tmp_path, monkeypatch):
     args = parser.parse_args(["--session", "dang", "--upstream", "https://u.invalid", "--codex-auth", "chatgpt",
                               "codex", "exec", "hi"])
     err = io.StringIO()
-    assert run_codex(args, launcher=launcher, stderr=err) == 2
+    assert run_codex(args, launcher=launcher, stderr=err) == 1  # the store cannot open: not a usage error (D57)
     assert "contexto: cannot open session 'dang':" in err.getvalue()
     assert "symlink to a missing target" in err.getvalue()
 

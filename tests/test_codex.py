@@ -345,6 +345,7 @@ class FakeLauncher:
     LaunchError = FakeLaunchError
     EXIT_NOT_FOUND = 127
     EXIT_PROXY = 1
+    EXIT_USAGE = 2
 
     def __init__(self, bound_error=None, child_code=0):
         self.bound_error, self.child_code = bound_error, child_code

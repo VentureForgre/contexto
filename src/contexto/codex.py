@@ -685,12 +685,14 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                 return launcher.EXIT_INTERRUPTED
             no_daemon = takes_no_daemon(codex_args, version, listed)
         home = paths.contexto_home()
-        session_id = args.session or uuid.uuid4().hex
+        session_id = args.session if args.session is not None else uuid.uuid4().hex  # '' is invalid (D57)
         try:
             existed = os.path.lexists(paths.session_dir(home, session_id))
             store = launcher.open_session(home, session_id, Path.cwd())
-        except (OSError, ValueError) as exc:  # as `contexto run claude` reports it
-            raise launcher.LaunchError(f"cannot open session {session_id!r}: {exc}", 2) from exc
+        except (OSError, ValueError) as exc:  # as `contexto run claude` reports it: 2 for the id, 1 for the store
+            raise launcher.LaunchError(f"cannot open session {session_id[:40]!r}: {exc}",
+                                       launcher.EXIT_USAGE if isinstance(exc, ValueError) else launcher.EXIT_PROXY
+                                       ) from exc
         created = None if existed else paths.session_dir(home, session_id)
         config = launcher.engine_config(options)
         proxy, engine_name = launcher.start_proxy(store, target, source, config, args.observe_thinking,
@@ -731,7 +733,8 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             print(f"contexto: {warning}", file=stderr, flush=True)
             store.log({"event": "window_budget_warning", "bound": options.bound, "assumed_overhead": ASSUMED_OVERHEAD})
         started = True
-        code = launcher.run_child(plan.argv, plan.env, stderr=stderr)
+        # Codex's shell commands (`contexto state`, `contexto search`) then name this session (D57).
+        code = launcher.run_child(plan.argv, {**plan.env, "CONTEXTO_SESSION": session_id}, stderr=stderr)
         return code
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)
