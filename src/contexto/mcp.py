@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
 from contexto.canonical import loads_bounded, utf8
-from contexto.store import PageUnreadableError
+from contexto.store import LockFileDamagedError, PageUnreadableError
 from contexto.store.ledger import LedgerCorruptError
 from contexto.store.pages import is_context_page
 from contexto.store.pinned import FACT_KINDS
@@ -111,6 +111,15 @@ ERROR_TEXT_LIMIT = 1_000
 LEDGER_DAMAGED = ("{what}: this session's ledger is damaged, so pins and closes are refused and the pinned state may "
                   "be unreadable until the user repairs it (`contexto sessions show {session}` names the damaged "
                   "line). Keep decisions and obligations in your replies meanwhile.")
+# D59: a lock file that is not a file fails every call that needs it until the user deletes it, so a retry
+# is the wrong advice. What still works depends on the file: meta.lock serializes the recall room's
+# charges, and without live.lock the session is not opened at all.
+LOCK_DAMAGED = ("{tool} failed: this session's {file} is damaged ({reason}), so {effect} until the user deletes "
+                "that file in the session directory; Contexto then makes a new one. Trying again will not help: "
+                "go on without this tool meanwhile.")
+LOCK_EFFECTS = {"meta.lock": "recall, search and state, which charge the recall room, are refused (pins and closes "
+                             "still work)",
+                "live.lock": "Contexto could not open the session and every tool is refused"}
 TOOL_FAILED = ("{tool} failed: an internal error in Contexto ({error}). Try once more; if it fails again, go on "
                "without it.")
 
@@ -385,6 +394,11 @@ class Server:
             what = {"contexto_pin": "Not recorded", "contexto_close": "Not closed"}.get(name, "The pinned state "
                                                                                        "cannot be read")
             result = _tool_error(LEDGER_DAMAGED.format(what=what, session=getattr(self.store, "session_id", "ID")))
+        except LockFileDamagedError as exc:
+            event.update(ok=False, error=type(exc).__name__, file=exc.file)
+            self._diag(f"{name}: {exc.file} is damaged ({exc.reason})")
+            result = _tool_error(LOCK_DAMAGED.format(tool=name, file=exc.file, reason=exc.reason,
+                                                     effect=LOCK_EFFECTS.get(exc.file, "Contexto cannot use it")))
         except Exception as exc:  # an unexpected failure fails this call only, as a result the model can read
             event.update(ok=False, error=type(exc).__name__)
             self._diag(f"internal error in {name}: {type(exc).__name__}")
@@ -852,6 +866,26 @@ def _error(msg_id: Any, code: int, message: str, data: Any = None) -> dict[str, 
     if data is not None:
         error["data"] = data
     return {"jsonrpc": "2.0", "id": msg_id, "error": error}
+
+
+class UnopenedStore:
+    """D59: the stand-in for a session that cannot be opened because its ``live.lock`` is damaged
+    (``LockFileDamagedError``). The server still starts, so the CLI shows each tool call's reply naming
+    the file rather than a server that failed to start; every store call raises that error, and
+    nothing is logged, since the session's log is not opened."""
+
+    def __init__(self, session_id: str, error: LockFileDamagedError) -> None:
+        self.session_id = session_id
+        self.error = error
+
+    def log(self, event: dict[str, Any]) -> None:
+        pass
+
+    def __getattr__(self, name: str) -> Any:
+        def refused(*args: Any, **kwargs: Any) -> Any:
+            raise self.error
+
+        return refused
 
 
 def serve_stdio(store: Store) -> int:

@@ -185,12 +185,15 @@ def _kill_group(child: subprocess.Popen) -> None:
 
 
 def launch_check(cli: str, binary: str, *, enabled: bool = True, env: Mapping[str, str] | None = None,
-                 timeout: float = VERSION_TIMEOUT_S) -> tuple[dict[str, Any], str | None]:
-    """The launcher's check: ``(cli_version_check event, warning line or None)``. Never raises."""
+                 timeout: float = VERSION_TIMEOUT_S,
+                 installed: tuple[str | None, str | None] | None = None) -> tuple[dict[str, Any], str | None]:
+    """The launcher's check: ``(cli_version_check event, warning line or None)``. Never raises.
+    ``installed`` is an ``installed_version`` result the caller already has, so ``--version`` is not run
+    again (D59: a hanging one cost a Codex launch its timeout twice)."""
     if not enabled or check_disabled(env):
         return {"event": "cli_version_check", "cli": cli, "skipped": True}, None
     try:
-        version, error = installed_version(binary, timeout=timeout, env=env)
+        version, error = installed if installed is not None else installed_version(binary, timeout=timeout, env=env)
     except Exception as exc:  # a diagnostic; never stop a launch for it
         version, error = None, type(exc).__name__
     event: dict[str, Any] = {"event": "cli_version_check", "cli": cli, "version": version,

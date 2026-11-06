@@ -25,8 +25,9 @@ same design after Claude Code works.
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
   stores or logs them. It serves only the local CLI (D53): a request that carries an `Origin`
-  header, or whose `Host` is not exactly one header naming `127.0.0.1:<port>` or
-  `localhost:<port>` (case-insensitive, the proxy's own port), is answered locally with 403
+  header, or whose `Host` is not exactly one header naming `127.0.0.1` or `localhost`
+  (case-insensitive, with any port or none, D59: an SSH or container forward sends its own port, and
+  a browser cannot name another port on a connection to this socket), is answered locally with 403
   (`permission_error`), never reaches the engine, the store, or upstream, and is logged as
   `request_refused` with its method, path and `reason` (`origin` or `host`). Claude Code 2.1.314
   and Codex 0.166.0 send their base URL's `Host` and no `Origin`; a browser sends `Origin` on every
@@ -423,7 +424,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    shuts the upstream connection, so upstream stops generating. The entry is logged with
    `client_aborted: true` and no `error`: with the status and any usage read when the response had
    started (the usage still reaches the engine), and with `upstream_phase` and no status when it
-   had not. A second Ctrl+C during the 2 s stop drain ends the wait without a traceback, and the
+   had not. A client that closes once it has the stream's last event (`message_stop`, or a
+   Responses `response.completed`, `response.incomplete` or `response.failed`), before the chunk
+   terminator, has the whole response, so upstream is still shut but the entry is not
+   `client_aborted` (D59). A second Ctrl+C during the 2 s stop drain ends the wait without a traceback, and the
    requests still in flight are logged as `proxy_stop_incomplete`.
 9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
    per-turn recall budget; the proxy reads `message_start` and `message_delta` usage. The hold's
@@ -691,7 +695,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   session are never opened through a symlink, and a symlink, FIFO, device or directory in a file's
   place is refused without blocking: `meta.json`, `epoch.json` and `retained.json` read as absent, a page
   as unreadable (`page_unreadable`), the ledger (`ledger.jsonl` or `ledger.lock`) as damaged,
-  `page.key` as a key file error, and
+  `page.key` as a key file error, `meta.lock` and `live.lock` as damage that names the file and says
+  to delete it, after which the next open makes a new one (D59: every room charge and metadata write
+  takes `meta.lock`, so recall, search and state fail, pins and closes still work, and a launch
+  cannot open the session; a store cannot open without `live.lock`, which tells prune the session is
+  in use, so the MCP server then starts without the session and every tool call says so), and
   the log is not written. Every write is whole (a short write continues). A temporary file is
   removed when its write fails (a full disk), and temporary files left by a process that died
   mid-write are removed when a store opens for writing, once they are more than 10 minutes old
@@ -738,7 +746,11 @@ object or null, or a tool name that is not a string, is invalid params (`-32602`
 returns a tool result with `isError: true`, never a JSON-RPC error, and the call is logged
 `mcp_call` with `ok: false` and the error class: on a damaged ledger, `contexto_pin`,
 `contexto_close` and `contexto_state` say the ledger is damaged and name `contexto sessions show
-<session>`; any other unexpected failure says the call failed with its error class. An error echoes
+<session>`; on a damaged `meta.lock` or `live.lock`, a call that needs it says which file is damaged,
+what is refused (recall, search and state for `meta.lock`, every tool for `live.lock`), that the user
+deletes the file, and that trying again will not help; for `meta.lock` the log entry names the file,
+and for `live.lock`, whose session is not opened, nothing is logged (D59);
+any other unexpected failure says the call failed with its error class. An error echoes
 a value from the request at most 100 characters long, with its length noted, and a tool error's text
 is at most 1,000 characters. A page id that is not `pg_` and exactly 16 lowercase hex digits is an
 unknown page, never read. Tools:
@@ -1054,11 +1066,22 @@ unknown page, never read. Tools:
     sending beside the new main returns only by turn starts; two sessions that take turns, each idle
     while the other is prompted, follow the one prompted;
   - its session id and entrypoint are main's, and its first message is
-    Claude Code's compaction summary: a user message whose content is a string starting "This
-    session is being continued from a previous conversation that ran out of context. The summary
-    below covers the earlier portion of the conversation." and a newline (`/compact` and
-    auto-compaction keep the session id but start a new first message, measured on 2.1.314 and
-    2.1.318, interactive and headless). It becomes that session's main, so a later `/resume` of the session returns to it;
+    Claude Code's compaction summary: a user message whose first text, after any leading
+    `<system-reminder>` text blocks, starts "This session is being continued from a previous
+    conversation that ran out of context. The summary below covers the earlier portion of the
+    conversation." and a blank line (D59). `/compact` and auto-compaction keep the session id but
+    start a new first message. Measured on 2.1.314 and 2.1.318, interactive and headless: with Claude
+    Code's default attribution reminder the content is a list, that reminder block, then the summary
+    block (after `/compact` the command's blocks and the new prompt follow in the same message), then a
+    role `system` message; with the attribution set empty, a list that starts with the summary
+    (`/compact`) or a plain string (auto-compaction). A prompt that starts with the sentence and goes on
+    in the same paragraph does not match. It becomes that session's main, so a later `/resume` of the
+    session returns to it. This rule alone also applies at the compacted conversation's first request
+    when it has no turn start, once main's newest request (Claude Code's summary request) was answered
+    with no client tool call (D59): a compaction that kept a pending `tool_use` and its result after
+    the summary takes over there instead of at the next prompt (in the captures an auto-compaction
+    between a tool call and its result puts the result in the summary request, so the compacted
+    conversation starts at a turn start);
   - main has never sent a request with a tool list and this conversation has (Claude Code's title,
     topic, and quota side requests have none, and one is often the session's first request);
   - or it has strictly more turn starts than main (a tie keeps the current one).
@@ -1213,7 +1236,8 @@ has other text and does not count.
 `src/contexto/cliversions.py`; the measured-on constants of the session-start signature, the
 context-block kinds, and the Codex context sections equal the newest tested version of their CLI.
 `contexto run` runs `<cli> --version` after the session line, in its own process group with stdin
-closed. It reads at most 4,096 bytes of output, until a line with a version, end of file, or 3
+closed (`contexto run codex` reuses the version it read before the session opened, so `--version`
+runs once per launch, D59). It reads at most 4,096 bytes of output, until a line with a version, end of file, or 3
 seconds, and then kills the group. For a version not in the list it prints one stderr line naming
 it, the tested versions, what may break, where to report it, and `contexto run --no-version-check
 <cli>`, and the launch goes on. A CLI that does not answer is logged, not warned about.
@@ -1338,13 +1362,20 @@ A store resumed while prune deletes its session waits, starts empty, and prints 
   any other session that served the conversation, since the conversation is split across two stores.
   An automatic choice is serialized across launches: an exclusive `flock` on
   `$CONTEXTO_HOME/choose.lock` is held from the busy-session probe until the chosen session is open
-  with its `live.lock` taken (waiting at most 5 seconds), so launches started at the same moment see
-  each other. Options are read as Claude Code's Commander parser reads them (2.1.314 and 2.1.318 alike):
-  arguments after `--` are not, nor the value of a long option that takes one (`<value>` in `--help`,
-  and the hidden prompt-like ones), so `--append-system-prompt --continue` is a prompt; a short-option
-  cluster is split letter by letter, a flag (`c`, `h`, `p`, `v`) consumed and the rest read again, and
-  an option that takes a value (`d`, `n`, `r`, `w`) takes the rest of the argument, so `-pc` continues
-  and `-rabc123` resumes `abc123`. `--session` always wins and is never questioned.
+  with its `live.lock` taken (waiting at most 5 seconds, then it chooses without the lock), so
+  launches started at the same moment see each other. A wait past 1 second is said on stderr, and so
+  is a timeout, which may let two launches pick the same session; Ctrl+C during the wait prints
+  `contexto: interrupted` and exits 130 without a traceback, before any session opens (D59). Options
+  are read as Claude Code's Commander parser reads them (2.1.314 and 2.1.318 alike): arguments after
+  `--` are not, nor the value of a main-command option declared with a required value, shown in
+  `--help` or hidden (`--thinking`, `--task-budget` and others, read from both binaries, D59), so
+  `--append-system-prompt --continue` is a prompt; a short-option cluster is split letter by letter, a
+  flag (`c`, `p`, `v`) consumed and the rest read again, and an option that takes a value (`d`, `n`,
+  `r`, `w`) takes the rest of the argument, so `-pc` continues and `-rabc123` resumes `abc123`. `-h`
+  is Commander's help option, which a cluster does not look up, so an `h` ends the cluster (`-hc` is
+  Claude Code's unknown-option error, not a continue). An optional value that starts with `-` is not
+  taken unless it is `-` alone, so `-r -` resumes the session named `-`. `--session` always wins and
+  is never questioned.
   If a `--continue` lands in a conversation the chosen session never served (one run without
   Contexto), a warning says so at exit; not with `--fork-session`, whose new id continues the same
   history. A fork keeps the session that served the conversation it forks, on purpose: the history up

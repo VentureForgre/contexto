@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import signal
@@ -851,6 +852,12 @@ def test_continue_that_lands_in_another_conversation_is_reported_at_exit(env, up
     ([f"-r{CLAUDE_A}", "-p"], ("resume", CLAUDE_A)), ([f"-pr{CLAUDE_A}"], ("resume", CLAUDE_A)),
     (["-pr", CLAUDE_A], ("resume", CLAUDE_A)), (["-rc"], ("resume", "c")), (["-pdx", "-c"], ("continue", None)),
     (["-n", "-c"], None), (["-nmine", "-c"], ("continue", None)), (["-pz", "-c"], ("continue", None)),
+    # D59 (review of #245): -h is Commander's help option, which a cluster does not look up; a lone "-" is a
+    # session name; hidden options that take a value, read from the 2.1.314 and 2.1.318 binaries.
+    (["-hc"], None), (["-ch"], ("continue", None)), (["-r", "-"], ("resume", "-")),
+    (["--resume", "-"], ("resume", "-")),
+    (["--thinking", "--continue"], None), (["--task-budget", "-c"], None), (["--workload", "-r", "x"], None),
+    (["--session-began-as-copy", "-c"], None),
 ])
 def test_resume_request(args, expected):
     assert launcher.resume_request(args) == expected
@@ -1261,6 +1268,53 @@ def test_launches_started_together_never_share_an_automatically_picked_session(t
             for racer in racers:
                 racer.communicate(timeout=30)
         assert chosen.count("served") == 1 and len(set(chosen)) == 4, chosen
+
+
+def _hold_choose_lock(home: Path) -> int:
+    home.mkdir(parents=True, exist_ok=True)
+    fd = os.open(home / launcher.CHOOSE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def test_a_long_choose_lock_wait_and_its_timeout_are_said(tmp_path, monkeypatch, capsys):
+    """Review of #245: a launch waited up to 5 s for choose.lock, then chose without it, saying nothing."""
+    monkeypatch.setattr(launcher, "CHOOSE_LOCK_WAIT_S", 0.4)
+    monkeypatch.setattr(launcher, "CHOOSE_LOCK_NOTICE_S", 0.1)
+    home = tmp_path / "home"
+    held = _hold_choose_lock(home)
+    try:
+        with launcher.choosing(home, sys.stderr):
+            pass
+    finally:
+        os.close(held)
+    err = capsys.readouterr().err
+    assert "waiting for another contexto launch to choose its session" in err
+    assert "choose.lock for 0.4 s; choosing without it, so two launches may pick the same session" in err
+    with launcher.choosing(home, sys.stderr):  # a free lock: no wait, nothing said
+        pass
+    assert capsys.readouterr().err == ""
+
+
+def test_ctrl_c_during_the_choose_lock_wait_exits_130_without_a_traceback(env, upstream, tmp_path):
+    """Review of #245: Ctrl+C while another launch held choose.lock printed a raw traceback."""
+    held = _hold_choose_lock(Path(env["CONTEXTO_HOME"]))
+    try:
+        proc = launch(env, "--upstream", upstream, "claude", "-c", cwd=tmp_path)
+        lines = []
+        while not any("waiting for another contexto launch" in line for line in lines):
+            line = proc.stderr.readline()
+            assert line, lines  # the launch must say it waits before it times out
+            lines.append(line)
+        proc.send_signal(signal.SIGINT)
+        _, rest = proc.communicate(timeout=30)
+    finally:
+        os.close(held)
+    err = "".join(lines) + rest
+    assert proc.returncode == launcher.EXIT_INTERRUPTED, err
+    assert "contexto: interrupted" in err and "Traceback" not in err
+    assert not (Path(env["CONTEXTO_HOME"]) / "sessions").exists() or not any(
+        (Path(env["CONTEXTO_HOME"]) / "sessions").iterdir())  # nothing was opened
 
 
 def test_a_fork_says_it_shares_the_original_session(env, upstream, tmp_path):
