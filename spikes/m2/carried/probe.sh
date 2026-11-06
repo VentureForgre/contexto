@@ -1,17 +1,19 @@
 #!/bin/bash
 # Zero-token probe of where Claude Code 2.1.301 places carried content: the blocks of
 # messages[0] and every role "system" message. Runs throwaway Claude Code processes against
-# shape_stub.py (loopback, 401, structure only) with an isolated config dir, a dummy key that is
-# not a credential, a scrubbed environment, and a pinned model.
+# shape_stub.py (loopback, 401, structure only) with an isolated config dir and HOME, a dummy key
+# that is not a credential, a scrubbed environment, the auto-updater off, and a pinned model.
 # Scenarios: fresh turn; resumed synthetic history of two text turns; resumed synthetic history
 # with a tool loop. Output: <repo>/.contexto/spikes/M2-A2/shapes.jsonl
+# Usage: spikes/m2/carried/probe.sh [claude-binary]   (default: claude on PATH, then ~/.local/bin)
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$S/../../.." && pwd)"
+CLAUDE="${1:-$(command -v claude || echo "$HOME/.local/bin/claude")}"
 OUT="$REPO/.contexto/spikes/M2-A2"
 TMP="$(cd "$(mktemp -d /tmp/m2-carried.XXXXXX)" && pwd -P)"
 PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])")
-mkdir -p "$OUT" "$TMP/cwd" "$TMP/config"
+mkdir -p "$OUT" "$TMP/cwd" "$TMP/config" "$TMP/home"
 : > "$OUT/shapes.jsonl"
 python3 "$S/shape_stub.py" "$PORT" "$OUT/shapes.jsonl" > /dev/null 2>&1 &
 STUB=$!
@@ -20,9 +22,9 @@ sleep 1
 
 claude_run() {  # claude_run <label> <args...>
   echo "{\"scenario\": \"$1\"}" >> "$OUT/shapes.jsonl"; shift
-  (cd "$TMP/cwd" && env -i HOME="$HOME" PATH="$PATH" TERM=dumb CLAUDE_CONFIG_DIR="$TMP/config" \
-    ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_API_KEY="dummy-not-a-credential" \
-    CLAUDE_CODE_MAX_RETRIES=0 perl -e 'alarm 60; exec @ARGV' "$HOME/.local/bin/claude" -p \
+  (cd "$TMP/cwd" && env -i HOME="$TMP/home" PATH="$PATH" TERM=dumb CLAUDE_CONFIG_DIR="$TMP/config" \
+    ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_API_KEY="dummy-not-a-credential" DISABLE_AUTOUPDATER=1 \
+    CLAUDE_CODE_MAX_RETRIES=0 perl -e 'alarm 60; exec @ARGV' "$CLAUDE" -p \
     --model claude-haiku-5-5 --strict-mcp-config "$@" < /dev/null > /dev/null 2>&1)
 }
 
