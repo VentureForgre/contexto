@@ -291,7 +291,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    the previous request sent in this conversation got its usage; when it did not (a 4xx or 5xx, a
    dropped stream, a response without usage, or a request still in flight), the whole request is
    estimated instead, logged content-free as `usage_missing` (epoch only) when that replaces a real
-   input. Usage is paired only with the request it measured, identified by its message count and
+   input. Usage with no input count (`output_tokens` alone) is a response without usage (D49 as
+   amended). Usage is paired only with the request it measured, identified by its message count and
    its last message's hash (rule 10): usage for any other request (the CLI's original, forwarded
    after `transform_error`, or an older request still in flight) never feeds the ratio, the last
    real input, the measured head, or `estimate_error`, and logs `usage_unattributed` (the epoch,
@@ -304,10 +305,13 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    usage with the bound and the estimate: log `over_bound` from real usage when it exceeds the
    bound, and `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
-   index), in tokens, taken from measured usage once available (the first request's input is the
-   head) and from the estimator before that. After a head change (rule 6) the measured head is
-   adjusted by the estimated size of the change in `system` and `tools` bytes, so a server that adds
-   tools or a model switch counts in `F` (D49). The window budget is `W = bound - headroom - F`, and
+   index), in tokens, taken from measured usage once available and from the estimator before that.
+   The first measured request's input, minus its non-carried messages, is the head; the messages
+   count at that request's own ratio (their share of its bytes), or at the estimate made before the
+   send when that is lower, so the head errs high whenever the first usage arrives (D49 as amended).
+   After a head change (rule 6) the measured head is adjusted by the estimated size of the change in
+   `system` and `tools` bytes since the measured request, so a server that adds tools or a model
+   switch counts in `F` once (D49). The window budget is `W = bound - headroom - F`, and
    the retained window after rotation targets `window_fraction * W` (default 0.5), so the window
    can grow before the next trigger. Choose the smallest `k` (retain as many recent turns as fit)
    within that target, retaining the newest complete turn and the new turn (except under the
