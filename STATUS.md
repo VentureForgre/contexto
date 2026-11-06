@@ -28,8 +28,9 @@ compaction never fires, and accuracy equals full context.
   agents; details under "QA run and fix round" below.
 - Latest release: v0.5.24 (main d38e87d, 2026-11-06). Releases from v0.5.13 on carry `SHA256SUMS`
   and a build provenance attestation (PR #233).
-- Tests on main (d38e87d, v0.5.24): 3185 passed, 1 skipped, 1 xfailed on macOS, Python 3.13 (PR #250's
-  head before its review fixes, 2026-11-06); CI green on Linux and macOS, Python 3.12 to 3.15.
+- Tests: 3185 passed, 1 skipped, 1 xfailed on macOS, Python 3.13 (local run on PR #250's head before
+  its review fixes, 2026-11-06; main d38e87d collects the same 3,187 tests). PR #250's final head
+  passed CI on Linux and macOS, Python 3.12 to 3.15.
 - Tested CLI versions (`TESTED_VERSIONS`): Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318;
   codex-cli 0.154.0, 0.163.0 and 0.166.0 (D56). 2.1.318 has the full live acceptance; 2.1.314 and
   0.166.0 the zero-spend routine only.
@@ -48,7 +49,7 @@ compaction never fires, and accuracy equals full context.
 - CLIProxyAPI compatibility (D35, PR #210) and upstream affinity (D36, PR #212, deployed on the
   owner's proxy and verified for cache reuse). Guide: `docs/cliproxyapi.md`.
 
-## QA run and fix round (2026-11-05 to 2026-11-06, v0.5.9 to v0.5.23)
+## QA run and fix round (2026-11-05 to 2026-11-06, v0.5.9 to v0.5.24)
 
 The QA run (main 4e2c4cd, v0.5.8) had 22 tester agents in three waves and spent about 4.94M live
 tokens on claude-haiku-5-5 and gpt-6-astra low. What held: installs on Python 3.12 to 3.15 by pip,
@@ -128,6 +129,13 @@ What each decision changed, with the key numbers (full text in `docs/DECISIONS.m
   600 pages (`pdf_pages_uncertain`). The page lexer is a single pass with a 400,000-step budget:
   hostile inputs take at most 0.27 s, and the exponential regex of the earlier parser (branch `claude/pdf-pages`, found in review round 9)
   is gone.
+- **D61 (PR #250, v0.5.24): the fix round's remaining review lows.** Codex tool output counts at
+  the 1.5 tool-output seed until usage arrives (unflagged over-bound requests in reviewer A's harness
+  6,451 to 445, turn starts 89 to 0); records from every release through v0.5.23 resume with their
+  head measured again; the JPEG walk is bounded (0.75 to 0.97 s for 100 crafted images, now 0.032 to
+  0.037 s) and an image costs the higher of its pixels and its 28-pixel patches, at most 4,787; the
+  start warning quotes each CLI's own measured overheads; `pdf_uncertain` only when the PDF is why
+  the turn does not fit.
 - **Docs and packaging (PR #233):** README sections for first-time users (what is stored, how to
   tell it works, uninstall), SECURITY.md's full store list, release checksums and provenance.
 - **Harness (PR #247):** the baseline replay turns `tool_reference` blocks for tools it removes
@@ -656,7 +664,7 @@ Needs the owner:
   claude-opus-5-5 they were not reported here; the one Opus series on 2026-10-15 also reported none,
   with crossing unknown. 1,159,358 tokens.
 
-## Known limitations (v0.5.23)
+## Known limitations (v0.5.24)
 
 - Claude acceptance ran on two models, claude-haiku-5-5 (Claude Code 2.1.301 and 2.1.318) and
   claude-opus-5-5 (2.1.302, with a `mcp__contexto` allow rule before D44), at one bound (150,000)
@@ -687,7 +695,9 @@ Needs the owner:
   than the head (prose in the window, a JSON-dense head): then it is low by that difference, up to
   1,816 tokens (7.3%) in PR #244's reviews, with the bound held. If no usage ever carries an input
   count, the head is never measured and the estimator stands in for the whole session; the
-  pre-send check is then the only bound check.
+  pre-send check is then the only bound check, and a head denser than the 3.5 text seed is estimated
+  low, so tool-loop requests can go over the bound unflagged (D61: 12 of 32 synthetic Codex sessions;
+  445 requests in reviewer A's 1,440).
 - Standing rules (D51): the model is told to pin a rule as an obligation when it is stated and keep
   it open. Measured on one model (claude-haiku-5-5) with 8 rules stated in their own turn; the
   "keep it open" words were added after that run and are unmeasured. A rule the model does not pin

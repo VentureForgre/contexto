@@ -733,6 +733,10 @@ counts, and event names but no prompt or response text. See [What is stored and 
 - **Search cost.** The first search of each MCP process reads every page once (1.6 s at 6,000
   synthetic pages). Each query word scans the search text once, so a long query with matches costs
   more, and the up to 53 pages one search shows are read in full with no size cap.
+- **Before the first token count.** Until the API reports a request's real input count, Contexto
+  estimates it, and a very dense start of the conversation (JSON, code, non-English text) is
+  estimated low. If the upstream never reports counts, tool-loop requests can go over the bound
+  without a log entry.
 - **Codex ChatGPT login mode** is tested only with synthetic credentials.
 - **Windows** is not supported.
 
