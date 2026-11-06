@@ -347,6 +347,96 @@ def test_a_display_count_tokens_rejects_becomes_omitted_and_is_labeled():
     assert replay.build_request(_records(), PROBE, 32_000)["_changes"] == {}  # nothing to change
 
 
+PIN = "mcp__contexto__contexto_pin"
+
+
+def _tool_search_records() -> list[dict[str, Any]]:
+    """Claude Code 2.1.318's shape with tool search on (live run #4, content turn 5): a ToolSearch call
+    whose result references Contexto's pin tool and a tool the baseline keeps, then the pin call and
+    its result, all before the probe turn. Contexto's tools are in the recorded shape."""
+    H = replay.message_hash
+    u1 = {"role": "user", "content": [{"type": "text", "text": "turn 1"}]}
+    a1 = {"role": "assistant", "content": [{"type": "tool_use", "id": "s1", "name": "ToolSearch", "input": {},
+                                            "caller": {"type": "direct"}}]}
+    found = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "s1", "content": [
+        {"type": "text", "text": "found"}, {"type": "tool_reference", "tool_name": PIN},
+        {"type": "tool_reference", "tool_name": "Read"}]}]}
+    a2 = {"role": "assistant", "content": [{"type": "tool_use", "id": "p1", "name": PIN, "input": {},
+                                            "caller": {"type": "direct"}}]}
+    pinned = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p1",
+                                           "content": [{"type": "text", "text": "pinned"}]}]}
+    a3 = {"role": "assistant", "content": [{"type": "text", "text": "OK"}]}
+    u4 = {"role": "user", "content": [{"type": "text", "text": PROBE}]}
+    shape = {"system": [], "tools": [{"name": "Read", "input_schema": {}}, {"name": "ToolSearch", "input_schema": {}},
+                                     {"name": PIN, "input_schema": {}, "defer_loading": True}]}
+    params = {"model": "claude-haiku-5-5", "max_tokens": 10, "betas": []}
+    return [
+        {"type": "api-request-shape", "shapeHash": "sh", "shape": shape},
+        {"type": "user", "message": u1},
+        {"type": "api-request", "id": "r1", "shapeHash": "sh", "params": params, "keep": 0, "tail": [H(u1)]},
+        {"type": "assistant", "message": {"id": "m1", **a1}},
+        {"type": "user", "message": found},
+        {"type": "assistant", "message": {"id": "m2", **a2}},
+        {"type": "user", "message": pinned},
+        {"type": "assistant", "message": {"id": "m3", **a3}},
+        {"type": "user", "message": u4},
+        {"type": "api-request", "id": "r2", "shapeHash": "sh", "params": params, "base": "r1", "keep": 1,
+         "tail": [H(a1), H(found), H(a2), H(pinned), H(a3), H(u4)]},
+    ]
+
+
+def _references(request: dict[str, Any]) -> list[str]:
+    return [x.get("tool_name", x.get("name")) for m in request["messages"] for b in m["content"]
+            for x in ([b] + (b.get("content") if isinstance(b.get("content"), list) else []))
+            if isinstance(x, dict) and x.get("type") == "tool_reference"]
+
+
+def test_a_tool_reference_to_a_removed_tool_becomes_a_text_note():
+    # Live run #4: count_tokens answered 400 "Tool reference 'mcp__contexto__contexto_pin' not found in
+    # available tools" because the replay removes Contexto's tools; the note was accepted (200).
+    req = replay.build_request(_tool_search_records(), PROBE, 32_000)
+    assert [t["name"] for t in req["tools"]] == ["Read", "ToolSearch"] and req["tool_choice"] == {"type": "none"}
+    assert req["messages"][2]["content"][0]["content"] == [
+        {"type": "text", "text": "found"}, {"type": "text", "text": f"Tool {PIN} loaded."},
+        {"type": "tool_reference", "tool_name": "Read"}]  # a tool the baseline sends stays a reference
+    assert _references(req) == ["Read"]  # every reference left names a tool in tools
+    assert req["messages"][3]["content"][0]["name"] == PIN  # the call stays as sent: the API accepts it
+    assert req["_changes"] == {"unsent_tool_notes": {"blocks": 1, "tools": [PIN]}}
+    parts = replay.turn_requests(_tool_search_records(), [PROBE], 32_000)
+    assert _references({"messages": parts["history"] + parts["tail"]}) == ["Read"]  # every baseline request
+
+
+def test_the_note_leaves_the_recorded_messages_and_other_histories_untouched():
+    records = _tool_search_records()
+    before = json.dumps(records, sort_keys=True)
+    replay.build_request(records, PROBE, 32_000)
+    assert json.dumps(records, sort_keys=True) == before  # nothing mutated in place
+    req = replay.build_request(_records(), PROBE, 32_000)
+    assert req["_changes"] == {} and req["messages"] == replay.build_request(_records(), PROBE, 32_000)["messages"]
+
+
+def test_inline_tool_additions_and_removals_of_unsent_tools_become_notes():
+    # 2.1.318 with tool search off declares late tools in a system message of tool_addition and
+    # tool_removal blocks, by reference ("name") or by definition.
+    other = {"name": "mcp__other__lookup", "input_schema": {}}
+    inline = [{"type": "text", "text": "tools changed"},
+              {"type": "tool_addition", "tool": {"type": "tool_definition",
+                                                 "definition": {"name": PIN, "input_schema": {}}}},
+              {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "mcp__contexto__contexto_search"}},
+              {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "mcp__contexto__contexto_recall"}},
+              {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": other}},
+              {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "Read"}}]
+    later = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": [
+        {"type": "tool_reference", "tool_name": "mcp__other__lookup"}]}]}
+    messages, noted = replay._unsent_tool_notes([{"role": "system", "content": inline}, later], {"Read"})
+    assert messages[0]["content"] == [
+        {"type": "text", "text": "tools changed"}, {"type": "text", "text": f"Tool {PIN} loaded."},
+        {"type": "text", "text": "Tool mcp__contexto__contexto_search loaded."},
+        {"type": "text", "text": "Tool mcp__contexto__contexto_recall removed."}, inline[4], inline[5]]
+    assert messages[1] is later  # declared inline in the history, so its reference stands
+    assert noted == [PIN, "mcp__contexto__contexto_search", "mcp__contexto__contexto_recall"]
+
+
 def test_baseline_request_k_carries_only_the_baselines_own_earlier_answers():
     # Intake D27 (05:42Z): request k = history + probe turns 1..k-1 with the BASELINE's answers + turn k.
     probes = [PROBE, "second probe turn", "third probe turn"]
@@ -391,3 +481,15 @@ def test_the_replay_approval_is_the_combined_approval_minus_the_recorded_h1_spen
     bad.write_text("{}")
     assert run.main(["replay", "--cc-jsonl", str(jsonl), "--out", str(tmp_path / "o2"), "--approved", "1",
                      "--h1-record", str(bad), "--seat-settings", str(seat), "--upstream", stub]) == 2
+
+
+def test_a_note_keeps_the_converted_blocks_cache_control_and_reads_name_when_tool_name_is_null():
+    from acceptance.replay import _unsent_tool_notes
+    messages = [{"role": "system", "content": [
+        {"type": "tool_addition", "tool": {"type": "tool_reference", "tool_name": None,
+                                           "name": "mcp__contexto__contexto_pin"},
+         "cache_control": {"type": "ephemeral"}}]}]
+    out, noted = _unsent_tool_notes(messages, sent={"Bash"})
+    assert noted == ["mcp__contexto__contexto_pin"]
+    assert out[0]["content"] == [{"type": "text", "text": "Tool mcp__contexto__contexto_pin loaded.",
+                                  "cache_control": {"type": "ephemeral"}}]
