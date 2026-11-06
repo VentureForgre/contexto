@@ -43,7 +43,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from contexto import paths
-from contexto.canonical import canonical_bytes, canonical_json, loads_bounded
+from contexto.canonical import canonical_bytes, loads_bounded
 from contexto.rewrite import CARRIED_TEXT, SESSION_START, UNCLASSIFIED, Dialect
 from contexto.tokens import TokenEstimator
 from contexto.upstream import claude_key_helper, untrusted_note
@@ -106,6 +106,7 @@ def is_context_part(part: Any) -> bool:
 class ResponsesDialect(Dialect):
     name = "responses"
     field = "input"
+    media_floor = False  # D48: OpenAI prices images by tiles (85 tokens at low detail), under Claude's floor
 
     def is_context_block(self, block: Any) -> bool:
         return False  # Codex sends context as separate messages, not inside the prompt message
@@ -203,7 +204,7 @@ class ResponsesDialect(Dialect):
         return True
 
     def estimate_items(self, estimator: TokenEstimator, items: list[dict]) -> int:
-        return estimator.estimate(canonical_json(items)) if items else 0
+        return estimator.estimate_value(items) if items else 0
 
     def lead_count(self, items: list[dict]) -> int:
         for i, item in enumerate(items):
