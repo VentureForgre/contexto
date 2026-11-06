@@ -6,6 +6,7 @@ import errno
 import gzip
 import http.client
 import json
+import select
 import socket
 import struct
 import threading
@@ -242,6 +243,11 @@ def call(proxy: ContextoProxy, method: str, path: str, body: bytes = b"", header
     data = response.read()
     conn.close()
     return response, data
+
+
+def request_head(proxy: ContextoProxy, target: str = "/v1/messages") -> bytes:
+    """A raw request line and the Host header the CLIs send (D53: any other Host is refused)."""
+    return b"POST %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n" % (target.encode(), proxy.port)
 
 
 AUTH = {"Content-Type": "application/json", "x-api-key": SECRET, "Authorization": f"Bearer {SECRET}",
@@ -626,7 +632,7 @@ def test_upstream_dropping_mid_stream_still_logs_the_entry_and_feeds_usage(make_
     url, _ = scripted_upstream(_stream_then(ending))
     proxy, log = make_proxy(upstream=url, transform=engine, observe_usage=engine.observe_usage)
     with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
-        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+        sock.sendall(request_head(proxy) + b"Content-Type: application/json\r\n"
                      b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
         reply = read_until_closed(sock)  # the proxy closes the connection after a failed relay
     assert reply.startswith(b"HTTP/1.1 200") and sse(STREAM[0]) in reply
@@ -693,7 +699,7 @@ def test_a_hold_ended_without_message_delta_publishes_before_releasing(make_prox
     proxy, log = make_proxy(upstream=url, transform=StubEngine(), observe_usage=observe)
     tool_at, reply = None, b""
     with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
-        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+        sock.sendall(request_head(proxy) + b"Content-Type: application/json\r\n"
                      b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
         while chunk := sock.recv(65536):
             reply += chunk
@@ -756,7 +762,7 @@ def test_message_delta_usage_reaches_the_engine_once_before_the_hold_is_released
     proxy, log = make_proxy(upstream=url, transform=StubEngine(), observe_usage=observe)
     tool_at, reply = None, b""
     with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
-        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+        sock.sendall(request_head(proxy) + b"Content-Type: application/json\r\n"
                      b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
         while not reply.endswith(b"0\r\n\r\n") and (chunk := sock.recv(65536)):
             reply += chunk
@@ -790,7 +796,7 @@ def test_a_content_length_body_cut_short_is_a_relay_error(make_proxy, scripted_u
     url, _ = scripted_upstream(script)
     proxy, log = make_proxy(upstream=url, transform=engine, observe_usage=engine.observe_usage)
     with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
-        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+        sock.sendall(request_head(proxy) + b"Content-Type: application/json\r\n"
                      b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
         reply = b""
         while not reply.endswith(body) and (chunk := sock.recv(65536)):
@@ -868,7 +874,7 @@ def test_usage_from_a_truncated_stream_is_paired_with_its_request(make_proxy, sc
     url, _ = scripted_upstream(_stream_then("partial_chunk"))
     proxy, log = make_proxy(upstream=url, transform=engine, observe_usage=engine.observe_usage)
     with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
-        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+        sock.sendall(request_head(proxy) + b"Content-Type: application/json\r\n"
                      b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
         read_until_closed(sock)
     entry = log.requests()[0]
@@ -1042,7 +1048,7 @@ def test_a_nested_model_value_is_summarized_in_the_log(make_proxy):
 def test_malformed_framing_gets_a_400_not_a_dropped_connection(make_proxy):
     proxy, log = make_proxy()
     with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
-        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n")
+        sock.sendall(request_head(proxy) + b"Transfer-Encoding: chunked\r\n\r\nzz\r\n")
         reply = b""
         while chunk := sock.recv(65536):  # the proxy closes the connection after the error
             reply += chunk
@@ -1059,7 +1065,7 @@ def test_a_negative_body_length_gets_a_prompt_400(make_proxy, framing):
     # regression times out instead of answering.
     proxy, log = make_proxy()
     with socket.create_connection(("127.0.0.1", proxy.port), timeout=3) as sock:
-        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\n" + framing)
+        sock.sendall(request_head(proxy) + b"" + framing)
         reply = read_until_closed(sock)
     assert reply.startswith(b"HTTP/1.1 400") and b"malformed request framing" in reply
     assert Upstream.received == []
@@ -1105,7 +1111,7 @@ def test_internal_error_after_the_response_started_logs_no_local_502(make_proxy,
     monkeypatch.setattr(proxy_module.UsageReader, "finish", broken)
     proxy, log = make_proxy()
     with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
-        sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+        sock.sendall(request_head(proxy) + b"Content-Type: application/json\r\n"
                      b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
         reply = read_until_closed(sock)
     assert reply.startswith(b"HTTP/1.1 200") and b"502" not in reply
@@ -1811,3 +1817,279 @@ def test_logged_transformations_carry_the_truncated_flag_when_cut(make_proxy, mo
     call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
     entry = log.requests()[0]
     assert same(entry["input_transformations"], items[:32]) and entry["input_transformations_truncated"] is True
+
+
+# Hardening (D53): only the local CLI drives the proxy, a client that goes away stops upstream,
+# and an upstream that answers before reading the body is heard.
+
+
+@pytest.mark.parametrize("extra, reason", [
+    ({"Host": "rebind.evil.example:{port}"}, "host"),  # a DNS-rebound page names its own host
+    ({"Host": "127.0.0.1:1"}, "host"),
+    ({"Host": "127.0.0.1"}, "host"),
+    ({"Host": "localhost.evil.example:{port}"}, "host"),
+    ({"Origin": "https://evil.example"}, "origin"),  # a browser sends Origin on every POST, no-cors too
+    ({"Origin": "null"}, "origin"),
+    ({"Origin": "http://127.0.0.1:{port}"}, "origin"),  # a page on a local dev server is still a page
+], ids=["rebound_host", "other_port", "no_port", "lookalike_host", "origin", "null_origin", "loopback_origin"])
+def test_a_request_not_from_the_local_cli_is_refused_and_never_reaches_the_engine(make_proxy, extra, reason):
+    engine = StubEngine("drop-first")
+    proxy, log = make_proxy(transform=engine, observe_usage=engine.observe_usage)
+    headers = {"Content-Type": "text/plain", **{k: v.format(port=proxy.port) for k, v in extra.items()}}
+    response, data = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, headers)
+    assert response.status == 403 and json.loads(data)["error"]["type"] == "permission_error"
+    assert not any(name.lower().startswith("access-control-") for name, _ in response.getheaders())
+    assert Upstream.received == [] and engine.calls == [] and engine.usage == []
+    refused = [e for e in log.events if e["event"] == "request_refused"]
+    assert [(e["method"], e["path"], e["reason"]) for e in refused] == [("POST", "/v1/messages", reason)]
+    assert [e for e in log.events if e["event"] == "request"] == []
+
+
+def test_a_cors_preflight_is_refused_locally_and_never_forwarded(make_proxy):
+    proxy, log = make_proxy()
+    response, _ = call(proxy, "OPTIONS", "/v1/messages", headers={
+        "Origin": "https://evil.example", "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type,x-api-key"})
+    assert response.status == 403 and Upstream.received == []
+    assert not any(name.lower().startswith("access-control-") for name, _ in response.getheaders())
+    assert [e["reason"] for e in log.events if e["event"] == "request_refused"] == ["origin"]
+
+
+@pytest.mark.parametrize("head", [
+    b"POST /v1/messages HTTP/1.0\r\n",  # no Host at all
+    b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nHost: evil.example\r\n",
+], ids=["missing", "repeated"])
+def test_a_missing_or_repeated_host_is_refused(make_proxy, head):
+    proxy, log = make_proxy()
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(head.replace(b"{port}", str(proxy.port).encode()) + b"Content-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
+        reply = read_until_closed(sock)
+    assert reply.startswith(b"HTTP/1.1 403") and Upstream.received == []
+    assert [e["reason"] for e in log.events if e["event"] == "request_refused"] == ["host"]
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1:{port}", "localhost:{port}", "LocalHost:{port}"])
+def test_the_hosts_the_cli_sends_are_served_unchanged(make_proxy, host):
+    proxy, log = make_proxy()
+    response, data = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, {**AUTH, "Host": host.format(port=proxy.port)})
+    assert response.status == 200 and data == sse(*STREAM)
+    assert len(Upstream.received) == 1 and Upstream.received[0][3] == REQUEST_BYTES
+    assert Upstream.received[0][2]["Host"] == proxy.upstream_netloc  # the proxy still sends upstream's own
+    assert [e for e in log.events if e["event"] == "request_refused"] == []
+
+
+def wait_for(record: dict[str, Any], key: str, timeout: float = 3.0) -> None:
+    """Wait for a scripted upstream to record ``key``: the proxy logs before the script notices."""
+    deadline = time.monotonic() + timeout
+    while key not in record and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def _peer_closed(sock: socket.socket) -> bool:
+    """Whether the other end has closed, without consuming anything it sent."""
+    try:
+        readable = select.select([sock], [], [], 0)[0]
+        return bool(readable) and sock.recv(1, socket.MSG_PEEK) == b""
+    except OSError:
+        return True
+
+
+SLOW_DELTAS = 200  # 0.05 s apart: 10 s of tool input, far longer than any test waits
+
+
+def _slow_tool_call(api: str, record: dict[str, Any]):
+    """Answer 200 SSE and start a client tool call, then stream its input slowly, as a model writing
+    a large file does, recording when the proxy's connection closed and how many deltas went out."""
+    if api == "messages":
+        opening = [STREAM[0], TOOL_BLOCK[0]]
+        delta = {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "x"}}
+    else:
+        opening = [RESPONSES_STREAM[0], {"type": "response.output_item.added", "output_index": 0,
+                                         "item": {"type": "function_call", "name": "shell", "call_id": "call_9"}}]
+        delta = {"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "x"}
+
+    def script(sock: socket.socket, got: bytearray) -> None:
+        read_request(sock, got)
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+        for raw in [sse(e) for e in opening]:
+            sock.sendall(b"%x\r\n%s\r\n" % (len(raw), raw))
+        raw = sse(delta)
+        for sent in range(SLOW_DELTAS):
+            if _peer_closed(sock):
+                record.update(closed_at=time.monotonic(), sent=sent)
+                return
+            try:
+                sock.sendall(b"%x\r\n%s\r\n" % (len(raw), raw))
+            except OSError:
+                record.update(closed_at=time.monotonic(), sent=sent)
+                return
+            time.sleep(0.05)
+        record["completed"] = time.monotonic()
+    return script
+
+
+@pytest.mark.parametrize("api, path, body", [("messages", "/v1/messages", REQUEST_BYTES),
+                                             ("responses", "/v1/responses", RESPONSES_BYTES)],
+                         ids=["messages", "responses"])
+def test_a_client_leaving_during_the_hold_closes_upstream_at_once(make_proxy, scripted_upstream, api, path, body):
+    # QA 2026-11-05: Esc during a held tool call let upstream generate, and bill, to the end (37.9 s),
+    # because nothing is written to the client during the hold, so no write could fail.
+    record: dict[str, Any] = {}
+    url, _ = scripted_upstream(_slow_tool_call(api, record))
+    engine = StubEngine()
+    proxy, log = make_proxy(upstream=url, transform=engine, observe_usage=engine.observe_usage)
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(request_head(proxy, path) + b"Content-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
+        reply = b""
+        while b"\r\n\r\n" not in reply:
+            reply += sock.recv(65536)
+        time.sleep(0.3)  # the tool call is being held
+    left_at = time.monotonic()
+    entry = log.requests()[0]
+    wait_for(record, "closed_at")
+    assert "closed_at" in record, record
+    assert record["closed_at"] - left_at < 1.0 and record["sent"] < SLOW_DELTAS / 2
+    assert entry["client_aborted"] is True and "error" not in entry and entry["status"] == 200
+    assert entry["stream_hold"]["held_events"] >= 2 and entry["stream_hold"]["triggered"] is False
+    assert [e for e in log.events if e["event"] in ("proxy_error", "upstream_retry")] == []
+
+
+@pytest.mark.parametrize("close", ["fin", "reset"])
+def test_a_client_leaving_before_the_response_head_closes_upstream_and_logs_the_request(make_proxy,
+                                                                                       scripted_upstream, close):
+    # QA 2026-11-05 (suite F1, verify-proxy 4): after Esc the proxy kept upstream until its first byte,
+    # and a reset before the head logged only a proxy_error and left the upstream socket to the GC.
+    record: dict[str, Any] = {}
+
+    def answers_late(sock: socket.socket, got: bytearray) -> None:
+        read_request(sock, got)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not _peer_closed(sock):
+            time.sleep(0.01)
+        record["closed_at"] = time.monotonic()
+        record["closed"] = _peer_closed(sock)
+
+    url, received = scripted_upstream(answers_late, answer_ok)
+    engine = StubEngine()
+    proxy, log = make_proxy(upstream=url, transform=engine, observe_usage=engine.observe_usage)
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(request_head(proxy) + b"Content-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
+        time.sleep(0.2)
+        if close == "reset":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    left_at = time.monotonic()
+    entry = log.requests()[0]
+    wait_for(record, "closed")
+    assert record["closed"] and record["closed_at"] - left_at < 1.0
+    assert entry["client_aborted"] is True and entry["upstream_phase"] == "wait_headers" and "status" not in entry
+    assert entry["epoch"] == {"k": 0} and len(received) == 1  # the transform is on record, nothing resent
+    assert [e for e in log.events if e["event"] in ("proxy_error", "upstream_retry")] == []
+
+
+def test_a_failed_response_head_write_closes_upstream_and_logs_the_request(make_proxy, monkeypatch):
+    # QA 2026-11-05 (suite F1): a write failure between getresponse and the relay escaped the
+    # relay's finally, so the upstream connection was closed only by the GC and no entry was logged.
+    opened: list[http.client.HTTPConnection] = []
+    connection = ContextoProxy.connection
+
+    def tracked(self):
+        opened.append(connection(self))
+        return opened[-1]
+
+    def gone(self):
+        raise BrokenPipeError(errno.EPIPE, "client gone")
+
+    monkeypatch.setattr(ContextoProxy, "connection", tracked)
+    monkeypatch.setattr(proxy_module._Handler, "end_headers", gone)
+    Upstream.mode = "json"
+    proxy, log = make_proxy()
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as sock:
+        sock.sendall(request_head(proxy) + b"Content-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n%s" % (len(REQUEST_BYTES), REQUEST_BYTES))
+        assert read_until_closed(sock) == b""
+    entry = log.requests()[0]
+    assert entry["client_aborted"] is True and entry["status"] == 200
+    assert len(opened) == 1 and opened[0].sock is None  # closed by the proxy, not left to the GC
+    assert [e for e in log.events if e["event"] == "proxy_error"] == []
+
+
+def test_an_internal_error_after_upstream_answers_closes_the_upstream_connection(make_proxy, monkeypatch):
+    opened: list[http.client.HTTPConnection] = []
+    connection = ContextoProxy.connection
+
+    def tracked(self):
+        opened.append(connection(self))
+        return opened[-1]
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ContextoProxy, "connection", tracked)
+    monkeypatch.setattr("contexto.proxy.UsageReader", broken)
+    Upstream.mode = "json"
+    proxy, _ = make_proxy()
+    response, _ = call(proxy, "POST", "/v1/messages", REQUEST_BYTES, AUTH)
+    assert response.status == 502 and len(opened) == 1 and opened[0].sock is None
+
+
+TOO_LARGE = (b'{"type":"error","error":{"type":"request_too_large",'
+             b'"message":"Request exceeds the maximum allowed number of bytes."}}')
+
+
+def _answers_413_unread(ending: str):
+    """Answer 413 after the head only, the way a server with a body limit does, then close with the
+    body unread (a reset): at once, or after a half-close and a 0.5 s wait, as Go's server does."""
+    def script(sock: socket.socket, got: bytearray) -> None:
+        while b"\r\n\r\n" not in got:
+            got += sock.recv(65536)
+        sock.sendall(b"HTTP/1.1 413 Request Entity Too Large\r\nContent-Type: application/json\r\n"
+                     b"Request-Id: req_413\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s"
+                     % (len(TOO_LARGE), TOO_LARGE))
+        if ending == "half_close":
+            sock.shutdown(socket.SHUT_WR)
+            time.sleep(0.5)
+    return script
+
+
+@pytest.mark.parametrize("ending", ["reset", "half_close"])
+def test_an_upstream_answer_before_the_body_is_read_is_forwarded_not_retried(make_proxy, scripted_upstream, ending):
+    # QA 2026-11-05: over about 1 MB, the early 413 became a local 502 after the whole body was
+    # resent, and Claude Code retried that 502 eleven times (44 MB, 173 s).
+    url, received = scripted_upstream(_answers_413_unread(ending), answer_ok)
+    proxy, log = make_proxy(upstream=url)
+    big = json.loads(REQUEST_BYTES)
+    big["messages"][0]["content"] = [{"type": "text", "text": "y" * (8 * 1024 * 1024)}]
+    response, data = call(proxy, "POST", "/v1/messages", json.dumps(big).encode(), AUTH)
+    assert response.status == 413 and data == TOO_LARGE and response.getheader("Request-Id") == "req_413"
+    assert len(received) == 1 and [e for e in log.events if e["event"] == "upstream_retry"] == []
+    entry = log.requests()[0]
+    assert entry["status"] == 413 and entry["upstream_answered_early"] in ("BrokenPipeError", "ConnectionResetError")
+    assert "error" not in entry
+    assert [e["status"] for e in log.events if e["event"] == "upstream_4xx"] == [413]
+
+
+def test_the_listen_backlog_takes_a_burst_of_connections():
+    # QA 2026-11-05: socketserver's default backlog of 5 dropped 13 to 21% of a 200-connection burst.
+    assert proxy_module._LoopbackServer.request_queue_size >= 128
+
+
+def test_ctrl_c_during_the_stop_drain_ends_the_wait_quietly(make_proxy):
+    # QA 2026-11-05: a second Ctrl+C while stop() waited for in-flight requests printed a traceback.
+    class Interrupted(threading.Condition):
+        def wait(self, timeout=None):
+            raise KeyboardInterrupt
+
+    proxy, log = make_proxy()
+    proxy._idle = Interrupted()
+    proxy._in_flight = 1  # a request still being relayed
+    try:
+        proxy.stop()
+    except KeyboardInterrupt:
+        pytest.fail("Ctrl+C during the drain escaped stop()")
+    finally:
+        proxy._in_flight = 0
+    assert [e["event"] for e in log.events][-2:] == ["proxy_stop_incomplete", "proxy_stop"]
+    assert log.events[-2]["in_flight"] == 1
