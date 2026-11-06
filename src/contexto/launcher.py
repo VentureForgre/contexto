@@ -125,31 +125,39 @@ WATCHDOG_EXITED = b"exited\n"  # the child was reaped: its pid may be reused
 # after the CLI's name). The codex options are not listed: they only apply before 'codex'.
 RUN_OPTIONS = {"--bound": True, "--allow-large-bound": False, "--window-fraction": True, "--headroom-floor": True,
                "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False}
-# Claude Code's long options whose value is the next argument even when it starts with "-": every
-# ``<value>`` option in 2.1.314's and 2.1.318's ``claude --help`` (variadic ones take at least that one),
-# and the hidden main-command ones that take a prompt or a count. ``claude_options`` skips that value.
+# Claude Code's long options whose value is the next argument even when it starts with "-": every main-command
+# option declared with a required ``<value>`` in the 2.1.314 and 2.1.318 binaries, shown in ``--help`` or
+# hidden (variadic ones take at least that one). ``claude_options`` skips that value.
 CLAUDE_VALUE_OPTIONS = frozenset({
     "--add-dir", "--agent", "--agents", "--allowedTools", "--allowed-tools", "--append-system-prompt",
-    "--append-system-prompt-file", "--autocompact", "--betas", "--debug-file", "--disallowedTools",
-    "--disallowed-tools", "--effort", "--environment", "--fallback-model", "--file", "--input-format",
-    "--json-schema", "--max-budget-usd", "--mcp-config", "--model", "--name", "--output-format",
-    "--permission-mode", "--permission-prompts", "--plugin-dir", "--plugin-url",
-    "--remote-control-session-name-prefix", "--session-id", "--setting-sources", "--settings",
+    "--append-system-prompt-file", "--autocompact", "--betas", "--channels", "--dangerously-load-development-channels",
+    "--debug-file", "--disallowedTools", "--disallowed-tools", "--effort", "--environment", "--fallback-model",
+    "--file", "--forward-home-settings", "--input-format", "--json-schema", "--max-budget-usd", "--mcp-config",
+    "--model", "--name", "--output-format", "--permission-mode", "--permission-prompts", "--plugin-dir",
+    "--plugin-url", "--remote-control-session-name-prefix", "--session-id", "--setting-sources", "--settings",
     "--system-prompt", "--system-prompt-file", "--system-prompt-snapshot", "--tools",
-    # Hidden (in the 2.1.314 and 2.1.318 binaries, not in --help):
-    "--append-subagent-system-prompt", "--append-subagent-system-prompt-file", "--max-thinking-tokens",
-    "--max-turns", "--parent-session-id", "--permission-prompt-tool", "--plan-mode-instructions", "--prefill",
-    "--resume-session-at"})
+    # Hidden (in the 2.1.314 and 2.1.318 binaries, not in --help; --session-began-as-copy is 2.1.318's):
+    "--advisor", "--agent-color", "--agent-id", "--agent-name", "--agent-type", "--append-subagent-system-prompt",
+    "--append-subagent-system-prompt-file", "--attach-serve", "--client-data-url", "--correlation-id",
+    "--deep-link-last-fetch", "--deep-link-repo", "--fast-mode", "--inherit-permission-mode", "--managed-settings",
+    "--max-thinking-tokens", "--max-turns", "--messaging-socket-path", "--on-branch", "--parent-session-id",
+    "--permission-prompt-tool", "--plan-mode-instructions", "--plugin-dir-no-mcp", "--pool", "--prefill",
+    "--proactivity", "--project-config-root", "--ref", "--resume-drops-turn", "--resume-session-at",
+    "--rewind-files", "--runner-declares", "--sdk-url", "--session-began-as-copy", "--task-budget", "--team-name",
+    "--teammate-mode", "--thinking", "--thinking-display", "--watch-artifact", "--watch-artifact-no-autoreact",
+    "--workload"})
 # Claude Code's short options (2.1.314 and 2.1.318, the same): True for a flag, False when it takes a value.
 # Commander reads a cluster such as ``-pc`` or ``-rabc123`` one letter at a time: a flag is consumed and the
 # rest is read again (``-pc`` is ``-p -c``); an option that takes a value, required (``-n``) or optional
 # (``-r``, ``-d``, ``-w``), takes the rest of the argument as its value (``-rabc123`` is ``--resume abc123``,
 # and ``-rc`` resumes "c"). Measured on 2.1.318: ``claude -prabc123`` and ``claude -rc`` both fail on the
-# resume value ("abc123", "c").
-CLAUDE_SHORT_OPTIONS = {"c": True, "h": True, "p": True, "v": True, "d": False, "n": False, "r": False, "w": False}
+# resume value ("abc123", "c"). ``-h`` is not listed: it is Commander's help option, which a cluster does not
+# look up, so an ``h`` ends the cluster (``claude -hc`` is an unknown option; ``-ch`` prints help).
+CLAUDE_SHORT_OPTIONS = {"c": True, "p": True, "v": True, "d": False, "n": False, "r": False, "w": False}
 CLAUDE_SHORT_REQUIRED = frozenset({"n"})  # the short option whose value is the next argument even with a "-"
 CHOOSE_LOCK = "choose.lock"  # under $CONTEXTO_HOME: one launch at a time picks a session automatically
 CHOOSE_LOCK_WAIT_S = 5.0
+CHOOSE_LOCK_NOTICE_S = 1.0  # a wait this long is said on stderr (D59)
 CLAUDE_SESSION_HEADER = "x-claude-code-session-id"
 CLI_SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}")  # Claude Code sends a UUID
 LEGACY_USER_ID_SESSION = re.compile(r"_session_([0-9A-Fa-f-]{36})")  # user_<hash>_account_<uuid>_session_<uuid>
@@ -507,7 +515,8 @@ def resume_request(cli_args: list[str]) -> tuple[str, str | None] | None:
             if attached is not None:
                 return "resume", attached or None
             value = cli_args[i + 1] if i + 1 < len(cli_args) else None
-            return "resume", value if value and not value.startswith("-") else None
+            # Commander's dash-like test is a "-" and more, so a lone "-" is a session name (D59).
+            return "resume", value if value and (value == "-" or not value.startswith("-")) else None
     return None
 
 
@@ -616,29 +625,43 @@ def choose_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> Ses
 
 
 @contextmanager
-def choosing(home: Path) -> Iterator[None]:
+def choosing(home: Path, stderr=None) -> Iterator[None]:
     """One launch at a time picks a session automatically (reviewer A, PR #240 round 2): an exclusive
     ``flock`` on ``$CONTEXTO_HOME/choose.lock`` is held from the busy-session probe until the chosen
     session is open, with its shared ``live.lock`` taken. Two ``contexto run claude -c`` started at the
     same moment otherwise both probed the session before either held it, and shared it in 6 of 10 tries.
     The wait is bounded (``CHOOSE_LOCK_WAIT_S``); a lock that cannot be opened or taken in time only
-    costs the serialization, never the launch."""
+    costs the serialization, never the launch. A wait past ``CHOOSE_LOCK_NOTICE_S``, and its timeout, are
+    said on stderr, and Ctrl+C during it exits 130 like the version check, without a traceback (D59)."""
+    out = stderr or sys.stderr
     fd = None
     try:
-        private_dir(home, narrow=False)
-        fd = open_private(home / CHOOSE_LOCK, os.O_RDWR | os.O_NOFOLLOW)
-        deadline = time.monotonic() + CHOOSE_LOCK_WAIT_S
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
+        try:
+            private_dir(home, narrow=False)
+            fd = open_private(home / CHOOSE_LOCK, os.O_RDWR | os.O_NOFOLLOW)
+            started = time.monotonic()
+            noticed = False
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
-                time.sleep(0.01)
-    except OSError:
-        pass
-    try:
+                except BlockingIOError:
+                    waited = time.monotonic() - started
+                    if waited >= CHOOSE_LOCK_WAIT_S:
+                        print(f"contexto: another contexto launch has held {CHOOSE_LOCK} for "
+                              f"{CHOOSE_LOCK_WAIT_S:g} s; choosing without it, so two launches may pick the "
+                              f"same session", file=out, flush=True)
+                        break
+                    if not noticed and waited >= CHOOSE_LOCK_NOTICE_S:
+                        noticed = True
+                        print("contexto: waiting for another contexto launch to choose its session", file=out,
+                              flush=True)
+                    time.sleep(0.01)
+        except OSError:
+            pass
+        except KeyboardInterrupt:
+            print("contexto: interrupted", file=out, flush=True)
+            raise Terminated(signal.SIGINT) from None  # run_claude exits 128 + SIGINT
         yield
     finally:
         if fd is not None:
@@ -649,7 +672,7 @@ def pick_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> tuple
     """Choose the session (``choose_session``) and open it. A choice made automatically (a resume
     without ``--session``) is made under ``choosing``, so a concurrent launch sees this one's live lock."""
     automatic = options.session_id is None and resume_request(options.claude_args) is not None
-    with choosing(home) if automatic else nullcontext():
+    with choosing(home, stderr) if automatic else nullcontext():
         choice = choose_session(options, home, cwd, stderr)
         check_mcp_values(choice.session_id, home, sys.executable)
         try:
@@ -951,15 +974,16 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     return proxy, engine_name
 
 
-def check_cli_version(cli: str, binary: str, store: Any, *, enabled: bool = True, stderr=None) -> bool:
+def check_cli_version(cli: str, binary: str, store: Any, *, enabled: bool = True, stderr=None,
+                      installed: tuple[str | None, str | None] | None = None) -> bool:
     """D38: log the installed CLI's version (``<binary> --version``, a few seconds at most) and print one
     warning line when Contexto was not tested with it. Never raises; a CLI whose version cannot be read
     is logged, not warned about. Returns False only when the user pressed Ctrl+C during the check: the
     caller then exits ``EXIT_INTERRUPTED`` through its normal cleanup, without starting the CLI and
-    without a traceback. Shared by claude and codex."""
+    without a traceback. Shared by claude and codex; ``installed`` is a version already read (D59)."""
     out = stderr or sys.stderr
     try:
-        event, warning = launch_check(cli, binary, enabled=enabled)
+        event, warning = launch_check(cli, binary, enabled=enabled, installed=installed)
     except KeyboardInterrupt:  # the check killed its --version process group before this
         event, warning = {"event": "cli_version_check", "cli": cli, "error": "interrupted"}, None
     try:
