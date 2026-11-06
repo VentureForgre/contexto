@@ -143,6 +143,9 @@ refused, and so is a Bash command no rule allows. Not measured: organization-man
 may restrict permission rules to their own. `spikes/m2/permissions/permstub.py` repeats the `-p` check.
 Supported upstreams for end users (D35): the vendor API with an API key, or a CLIProxyAPI
 instance (its root for Claude Code, the root plus `/v1` for Codex); setup in `docs/cliproxyapi.md`.
+With no Codex upstream set, API-key mode derives one from Claude Code's upstream plus `/v1`, and
+refuses (exit 2) when that is Anthropic's API, naming `--codex-upstream https://api.openai.com/v1`
+(D54).
 
 ## Rewrite engine (normative)
 
@@ -1241,6 +1244,20 @@ use`, `--session`, `CONTEXTO_SESSION`).
   whether the floor is given or the 25,000 default) and 1 when the proxy or the session store
   cannot start (for example `CONTEXTO_HOME` is read-only; a `CONTEXTO_HOME` that is a file is refused
   first, exit 2, D55).
+
+`contexto run codex` (D54) checks its options, that `codex` is on PATH and starts (`codex --version`;
+else exit 127), and the Codex
+upstream before it opens the session or starts the proxy; a launch that fails after that, before
+Codex starts, removes the session directory it created (a resumed session is never removed). In
+API-key mode Codex's provider gets its key from `auth.command` = `/bin/sh -c <helper>`, so the helper
+runs through a shell as Claude Code runs `apiKeyHelper`. Interactive launches (no subcommand,
+`resume`, `fork`, found after the leading options) on Codex 0.156.0 or later pass `--no-daemon`,
+unless the user passed `--no-daemon` or `--remote`, so Codex's shared background app-server is not
+started for the session's CODEX_HOME and left running; when the version cannot be read, the flag is
+passed if `codex --help` lists it, else one warning is printed. `codex agents`, which needs that
+server and refuses `--no-daemon`, is refused (exit 2) unless `--remote` is given. On exit the kept CODEX_HOME loses
+`config.toml` and `packages/`; its rollouts and the plugin clone in `.tmp/` stay. The session line shows the bound, the log records `launch` and `exit` as for Claude,
+and the start-time window warning assumes a Codex fixed overhead of 19,000 tokens.
 
 `contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated
 blocks under the session directory, symlinks counted as links) and a total. `contexto sessions

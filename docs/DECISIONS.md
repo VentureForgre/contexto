@@ -1613,6 +1613,80 @@ the owner's delegation. Open decisions are listed at the end with the options an
     connects lost 13 to 21% to ETIMEDOUT, and at 128 none (QA measurement). A second Ctrl+C during
     `stop()`'s 2 s drain printed a `KeyboardInterrupt` traceback; it now ends the wait, and the
     requests still in flight are logged as `proxy_stop_incomplete`.
+- **D54. `contexto run codex`: the key helper through a shell, no Anthropic default, no orphaned
+  daemon, launch checks first.** Claude, 2026-11-05, under D0; contract change. From the 2026-11-05 QA
+  run (live-codex F1, docs-audit 1 and 2, verify-codex-orphans, install 2 and 3, launcher-ux 8 and its
+  nits), checked at zero spend on codex-cli 0.166.0 with a loopback Responses stub, a fake HOME, a
+  fresh CONTEXTO_HOME and a synthetic key.
+  - **Key helper.** Contexto split the helper into words (`shlex`) and gave Codex `command` plus `args`.
+    Codex runs `auth.command` itself, with no shell (codex-rs `ModelProviderAuthInfo`, 0.166.0); Claude
+    Code runs `apiKeyHelper`, which Contexto reuses, through one. So `echo $SYNTH_KEY | tr -d x` reached
+    the stub as `Bearer $SYNTH_KEY | tr -d x`, and `cat ~/key.txt` failed. Rule: `command = "/bin/sh"`,
+    `args = ["-c", <helper>]`. With the fix the same helper sent `Bearer key`. The helper string is one
+    TOML string (JSON escapes), so quotes, backslashes, newlines and non-ASCII text round-trip exactly.
+  - **No Anthropic default for Codex.** In API-key mode with no `--codex-upstream` and no
+    `CONTEXTO_CODEX_UPSTREAM`, the upstream was Claude Code's plus `/v1`. With no `ANTHROPIC_BASE_URL`
+    that was `https://api.anthropic.com/v1`: Codex's `/responses` would 404 there, after the user's
+    OpenAI key had gone to the wrong vendor. Rule: when the derived upstream's host is `anthropic.com` or
+    a subdomain (after IDNA normalization), refuse with exit 2 and name
+    `--codex-upstream https://api.openai.com/v1` and the CLIProxyAPI form. A derived CLIProxyAPI root
+    works as before. An explicit `--codex-upstream` or `CONTEXTO_CODEX_UPSTREAM` is never second-guessed.
+    When D52 skipped an untrusted project's `env.ANTHROPIC_BASE_URL`, Claude Code's upstream falls back
+    to Anthropic's and this refusal follows; D52's "ignored ... from .claude/settings.json" note is
+    printed first, so the user sees why (and the launch stops there, before the key helper is looked up).
+  - **`--no-daemon`.** Codex 0.166.0's TUI starts a shared background app-server pair for each
+    CODEX_HOME (`codex app-server --managed-daemon` and `codex app-server daemon pid-update-loop`) and
+    leaves it running. Each session has its own CODEX_HOME, so each interactive session left two
+    processes and about 517 MB (QA). The updater later downloaded 0.167.0 into the home (936 MB).
+    Reproduced here with main's code: 2 processes with PPID 1 and a 505 MB home after one stub turn.
+    Rule: interactive launches (no subcommand, `resume`, `fork`) pass `--no-daemon` as the first
+    argument, unless the user passed `--no-daemon` or `--remote`. The same holds in ChatGPT mode, where
+    CODEX_HOME is the user's own and a server may already run for it. The flag goes first because 0.166.0
+    accepts it before every subcommand and rejects it after `exec`. `exec` and the other
+    non-interactive subcommands start no server (measured: no process, no `packages/`) and get no flag.
+    `codex agents` is refused instead (exit 2, before the session exists) unless `--remote` sends it
+    elsewhere (reviewer B, PR #236). Measured on 0.166.0 under Contexto: it installed and started the
+    server pair in the session's CODEX_HOME and left both running (PPID 1); Codex refuses `--no-daemon`
+    with it ("requires a shared server"); `codex app-server daemon stop` stopped the server but not its
+    `pid-update-loop`; and the server's work would outlive the proxy it is configured to use. Other
+    subcommands that manage the server (`app-server`, `remote-control`) were not measured and are not
+    refused. The subcommand is the first word after the
+    leading options, with Codex's value-taking options skipped (`-i`/`--image` takes every word up
+    to the next option, so `codex -i a.png exec` opens the TUI; measured on 0.166.0). The flag is gated
+    on the installed version, read with `codex --version` only for launches that could take it. It is
+    passed from 0.156.0 on: the flag is in `codex-rs/tui/src/cli.rs` at rust-v0.156.0 and not at
+    rust-v0.155.0. When the version cannot be read, `codex --help` decides (bounded, 3 s): the flag is
+    passed if it is listed, else one warning line says Codex may leave a background app-server
+    running; the `launch` event records `codex_version_error` (reviewer A, PR #236). Only 0.166.0 was
+    run; 0.163.0 is not installed. With the fix, a turn and a `resume --last` turn on the same session
+    (9 input items: the conversation resumed) left 0 processes.
+  - **Cleanup.** A kept CODEX_HOME is kept for its rollouts. On exit Contexto now also removes
+    `packages/` (the daemon's copy of Codex's release, 417 MB; a `--no-daemon` launch makes none) as
+    well as `config.toml`. The plugin marketplace clone in `.tmp/` stays: removing it made every resumed
+    launch clone about 96 MB from github.com again (reviewer A, PR #236), and plugins are left to the
+    user. Measured with the fix: 98 MB after a first session (93 MB of it `.tmp/`, no `packages/`), still
+    98 MB after a `resume --last` on it, with the same `.tmp/plugins` inode (no second clone). A daemon a
+    user starts some other way is not stopped.
+  - **TOML.** A helper is written as a JSON-escaped TOML string, but JSON leaves DEL (U+007F) raw and
+    TOML forbids it, so Codex could not load the config (pre-existing, reviewer A); it is now written as
+    `\u007f`. A lone surrogate, which TOML cannot hold, is refused with exit 2.
+  - **Launch checks and messages.** With no `codex` on PATH, `contexto run codex` blamed a missing key
+    helper (exit 2), or, given a helper, opened a session and started the proxy before failing (exit
+    127). Every failed launch left an empty session that became the "most recent" one. Rule: options,
+    `shutil.which("codex")` and the upstream are checked before the session and the proxy. A `codex` that
+    is missing, not executable, a directory or a broken link exits 127 with D55's `cli_not_found`
+    message, as `run claude` does. `codex --version` is then read on every launch, also before the
+    session: an executable whose `#!` interpreter is missing passes `which` but cannot start, and it
+    exits 127 (`cannot be run (FileNotFoundError)`) instead of leaving a session behind (reviewer A,
+    PR #236 round 2). The same read gives the version `--no-daemon` is gated on. A failure after that and before Codex starts (no key helper, the proxy,
+    Ctrl+C during the version check) removes the session directory if this launch created it; a resumed
+    `--session` is never removed. The key helper is still resolved after the proxy starts, because the
+    config it goes into names the proxy's URL. The Codex session line now reads `session <id> (bound N,
+    upstream <source>, codex auth <mode>, engine <name>)`. The log gets `launch` (with `cli: codex`,
+    `codex_auth`, `no_daemon`) and `exit` events as Claude's does. The start-time window warning now
+    runs for Codex too, with an assumed fixed overhead of 19,000 tokens: measured 13,322 to 18,403 in
+    the M2 Codex runs and 15,694 on 0.166.0, rounded up from the largest. At bound 40,000 and the
+    default floor it now warns before Codex starts, not after the first request.
 - **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
   subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
   untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by

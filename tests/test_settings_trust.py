@@ -562,6 +562,11 @@ def run_in(repo: Path, monkeypatch, tmp_path: Path, *argv: str) -> tuple[FakeLau
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     for name in ("ANTHROPIC_BASE_URL", "CONTEXTO_CODEX_UPSTREAM", "CONTEXTO_CODEX_KEY_HELPER"):
         monkeypatch.delenv(name, raising=False)
+    bin_dir = tmp_path / "codex-bin"  # run codex checks that codex is on PATH and starts (D54); CI has none
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "codex").write_text('#!/bin/sh\n[ "$1" = --version ] && echo "codex-cli 0.166.0"\nexit 0\n')
+    (bin_dir / "codex").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.chdir(repo)
     fake, err = SessionLauncher(), io.StringIO()
     code = run_codex(parse(*argv, "codex", "exec", "hi"), launcher=fake, stderr=err)
@@ -570,9 +575,16 @@ def run_in(repo: Path, monkeypatch, tmp_path: Path, *argv: str) -> tuple[FakeLau
 
 def test_run_codex_in_a_hostile_repo_runs_nothing_and_says_how_to_proceed(tree, home, tmp_path, monkeypatch):
     # verify-security B: before D52 the stub got `Authorization: Bearer sk-evil` on /v1/responses.
+    # With the project's base URL skipped, Claude Code's upstream is Anthropic's default, which D54
+    # refuses for Codex before any session exists; the skipped URL is named first, as the reason.
     fake, err, code = run_in(hostile_repo(tree), monkeypatch, tmp_path)
+    assert code == 2 and "argv" not in fake.calls and "session" not in fake.calls
+    note = err.index("ignored env.ANTHROPIC_BASE_URL from .claude/settings.json")
+    assert note < err.index("is api.anthropic.com") and "--codex-upstream https://api.openai.com/v1" in err
+    # With an upstream of its own, the untrusted helper is what stops it (codex never started, so the
+    # helper never ran).
+    fake, err, code = run_in(hostile_repo(tree), monkeypatch, tmp_path, "--codex-upstream", "https://cpa.invalid/v1")
     assert code == 2 and "argv" not in fake.calls  # codex never started, so the helper never ran
-    assert "ignored env.ANTHROPIC_BASE_URL from .claude/settings.json" in err and "--codex-upstream" in err
     assert "no key helper: ignored apiKeyHelper from .claude/settings.json" in err and "--codex-key-helper" in err
     assert "evil" not in fake.calls.get("upstream", "")
     # Reviewer B, PR #237: the refused launch leaves no empty session behind.
@@ -586,7 +598,8 @@ def test_a_refused_launch_keeps_a_resumed_session_and_a_started_one_keeps_its_ow
     (kept / "pages").mkdir()
     _, _, code = run_in(hostile_repo(tree), monkeypatch, tmp_path, "--session", "resumed")
     assert code == 2 and (kept / "pages").is_dir()
-    fake, _, code = run_in(hostile_repo(tree), monkeypatch, tmp_path, "--codex-key-helper", "/synthetic/helper")
+    fake, _, code = run_in(hostile_repo(tree), monkeypatch, tmp_path, "--codex-key-helper", "/synthetic/helper",
+                           "--codex-upstream", "https://cpa.invalid/v1")
     assert code == 0 and paths.session_dir(tmp_path / "ctx", fake.calls["session"]).is_dir()
 
 
