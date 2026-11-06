@@ -1119,7 +1119,7 @@ def carried_tokens(messages: list[dict], estimator: TokenEstimator, paged: froze
 def measured_head(request: dict, state: EpochState, estimator: TokenEstimator) -> int | None:
     """Rule 4's measured head for this request's ``system`` and ``tools``. Usage measures the head once, so
     after a head change (D49: an MCP server's tools, a model switch) the change in the head's bytes is
-    estimated and added, or taken off, rounded toward the measured value."""
+    estimated and added, or taken off, rounded up."""
     if state.head_tokens is None or state.head_size is None:
         return state.head_tokens
     change = head_size(request) - state.head_size

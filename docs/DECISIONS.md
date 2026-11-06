@@ -1275,8 +1275,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     `bound_too_small` are logged as for any rotation.
   - **Measured head.** Usage measures the head once, at the conversation's first request, so `F` kept
     the old head after a change. The engine now keeps the byte size of the head its fingerprint names
-    and, at a head-change turn start, adds the change in bytes at the measured ratio (rounded toward
-    the measured value) to the measured head. In a measured engine run where a server adds about 7,600
+    and, at a head-change turn start, adds the change in bytes at the measured ratio (rounded up) to
+    the measured head. In a measured engine run where a server adds about 7,600
     tokens of tools at bound 30,000, `F` went from 480 to 8,920. Not recorded in the epoch record: a
     resumed engine takes it from the request, whose head the record's fingerprint must match.
   - **Pre-send check.** Every forwarded request, rotated or not, is checked against the estimate of
@@ -1292,8 +1292,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
     more. Each for tools added, system changed and model switched; the same runs with no head change
     are unchanged. 15 of the 23 new tests fail on main.
   - **Limits.** If the head changes before the first usage is measured and that usage comes from a
-    request with the new head, the change is counted twice at the next head-change turn start
-    (higher `F`, so more paging, never an overrun). The pre-send check uses the estimator; real
+    request with the new head, the change is counted twice from the next head-change turn start on,
+    for the rest of the session: `F` is higher, so more paging, never an overrun. Re-basing the byte
+    size on the measured request was tried after PR #232's review and rejected: rule 4 measures the
+    head as usage minus the window's estimate, and when the first usage arrives late, after a long
+    loop, that estimate is made before the session's ratio is known and runs high, so the head comes
+    out low (2,850 against a real 8,489 in `tests/test_head_change.py`'s late-usage case). The double
+    count covers it (11,290); the re-based head would not. The pre-send check uses the estimator; real
     usage over the bound is still logged after the response, as before.
 
 ## Open decisions

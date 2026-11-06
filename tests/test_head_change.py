@@ -202,13 +202,20 @@ def big_server(req):
     return {**req, "tools": [*req["tools"], *(mcp_tool(i, size=60) for i in range(30))]}
 
 
-def measured_turn_start(cfg, server):
+def unmeasured(engine, msgs, change=no_change):
+    """One request whose usage never arrives (a 429 or 529, a dropped stream, Esc before the answer)."""
+    _, _, ev = engine(change(base(msgs)), {}, MESSAGES)
+    return ev
+
+
+def measured_turn_start(cfg, server, first_usage_at=0):
+    """A turn whose loop connects ``server`` at step 6; usage arrives from step ``first_usage_at`` on."""
     engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
     msgs = history(2) + [user("long task")]
-    drive(engine, msgs)
+    (drive if first_usage_at == 0 else unmeasured)(engine, msgs)
     for i in range(12):
         msgs = msgs + [tool_use(i), tool_result(i, FILL)]
-        drive(engine, msgs, server if i >= 6 else no_change)
+        (drive if i + 1 >= first_usage_at else unmeasured)(engine, msgs, server if i >= 6 else no_change)
     msgs = msgs + [assistant("done"), user("memory question")]
     return drive(engine, msgs, server)
 
@@ -223,6 +230,19 @@ def test_a_measured_head_grows_with_the_tools_an_mcp_server_adds():
     assert rotation["reason"] == "head_change" and added > 7_000
     assert rotation["fixed_overhead"] > added  # before D49: the head measured at the first request alone
     assert sent_estimate(ev) <= cfg.bound and room(cfg, ev) >= cfg.min_turn_room
+
+
+def test_a_head_measured_late_never_counts_less_than_the_real_head():
+    # PR #232 review: when usage first arrives after the server connected, the change is counted twice
+    # (D49 Limits). That is kept on purpose: rule 4's late measurement alone runs low, so whatever the
+    # step usage first arrives at, F must stay at or above the real head.
+    cfg = Config(bound=30_000, headroom_floor=2_000, min_turn_room=6_000, pin_budget=200, index_budget=200)
+    real_head = len(canonical_bytes({"system": base([])["system"], "tools": big_server(base([]))["tools"]})) / 3.5
+    for first_usage_at in (0, 1, 4, 7, 8):
+        ev = measured_turn_start(cfg, big_server, first_usage_at=first_usage_at)
+        rotation = next(e for e in ev if e["event"] == "rotation")
+        assert rotation["reason"] == "head_change"
+        assert rotation["fixed_overhead"] >= real_head, first_usage_at
 
 
 # The pre-send check on every forwarded request ------------------------------------------------------
