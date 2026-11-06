@@ -24,7 +24,16 @@ same design after Claude Code works.
   page key are written to a temporary file and renamed, never left empty by a race). Never edit the user's Claude or Codex
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
-  stores or logs them.
+  stores or logs them. It serves only the local CLI (D53): a request that carries an `Origin`
+  header, or whose `Host` is not exactly one header naming `127.0.0.1:<port>` or
+  `localhost:<port>` (case-insensitive, the proxy's own port), is answered locally with 403
+  (`permission_error`), never reaches the engine, the store, or upstream, and is logged as
+  `request_refused` with its method, path and `reason` (`origin` or `host`). Claude Code 2.1.314
+  and Codex 0.166.0 send their base URL's `Host` and no `Origin`; a browser sends `Origin` on every
+  POST and CORS preflight (a no-cors `text/plain` POST included) and a DNS-rebound page sends its
+  own name as `Host`, so no web page can write to the store or move `main`. A no-cors GET carries
+  neither and is still forwarded; its response is opaque to the page and no GET is transformed.
+  The listen backlog is 128.
 - Upstream affinity (D36). The CLI's session signals reach upstream unchanged: Claude Code's
   `X-Claude-Code-Session-Id` header and `metadata.user_id`, Codex's `session-id` header and
   `prompt_cache_key`. When the upstream host name, IDNA-normalized, is not `anthropic.com`,
@@ -350,6 +359,18 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    `error: "relay: <class>"` with the status and any usage already read, which still reaches the
    engine; the client sees the stream end without its terminator (or the body end short). A proxy failure after the
    response started logs `proxy_error` with `fallback: "none"`, because no local 502 can be sent.
+   Two cases from D53. An upstream that answers before reading the whole body (a body limit's 413,
+   as nginx or Go send it, then a close) makes the send fail with `BrokenPipeError` or
+   `ConnectionResetError`; the proxy then reads the answer already sent (waiting at most 1 s) and
+   forwards it unchanged, not retried, with `upstream_answered_early: "<class>"` on the entry; only
+   when there is none is the failure retried as above. A client that closes its connection while
+   its request is in flight (Esc) is seen within 0.05 s, from the connection waiting for the
+   response head through the end of the relay, the stream hold included, and the proxy then
+   shuts the upstream connection, so upstream stops generating. The entry is logged with
+   `client_aborted: true` and no `error`: with the status and any usage read when the response had
+   started (the usage still reaches the engine), and with `upstream_phase` and no status when it
+   had not. A second Ctrl+C during the 2 s stop drain ends the wait without a traceback, and the
+   requests still in flight are logged as `proxy_stop_incomplete`.
 9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
    per-turn recall budget; the proxy reads `message_start` and `message_delta` usage. The hold's
    event splitter and the usage reader share one SSE grammar (WHATWG: a line ends at CRLF, LF, or
@@ -699,7 +720,8 @@ unknown page, never read. Tools:
     `message` or `reasoning` item; Codex 0.154.0 emits `custom_tool_call`, measured in the A6 smoke)
     until `response.completed`, `response.incomplete`, or `response.failed` (whose usage, when
     present, sets the room), an error event, or end of stream. A hold that ends at an error event
-    or end of stream, including an upstream failure mid-stream (rule 8), first observes the usage
+    or end of stream, including an upstream failure mid-stream and a client that left, which shuts
+    upstream at once (rule 8, D53), first observes the usage
     already read (`message_start`'s, for Messages), so that publish also comes before any held
     event; the held events are still released, because rule 8 forwards what upstream sent and the
     CLI decides what a stream without its terminator means. A tool call
