@@ -478,3 +478,42 @@ def test_unreadable_pages_are_one_line_errors(home, capsys):
         assert "contexto: error: the pages of session x cannot be read: " in err
     finally:
         store.pages_dir.chmod(0o700)
+
+
+# review round 4 (re-check after the D55 merges)
+
+
+def test_run_codex_refuses_a_home_that_is_a_file_like_claude(tmp_path, monkeypatch, capsys, fake_codex):
+    (tmp_path / "file").write_text("x")
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "file"))
+    code, _, err = run(capsys, "run", "--codex-auth", "chatgpt", "codex", "exec", "hi")
+    assert code == 2 and "is not a directory" in err and "Traceback" not in err
+    assert (tmp_path / "file").read_text() == "x"
+
+
+@pytest.mark.parametrize("given", [None, "s-new", "kept"])
+def test_run_claude_removes_the_session_it_created_when_the_proxy_cannot_start(home, capsys, tmp_path, monkeypatch,
+                                                                                given):
+    """D57 end to end: the proxy's bind fails (not the upstream check, which runs before any session opens);
+    a session this launch created is removed, one that existed is kept with its pages."""
+    import errno
+
+    from contexto.proxy import ContextoProxy
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "claude"
+    fake.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(99)\n")  # never reached
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    make(home, "kept", 1_000_000)
+
+    def refuse(self, port=0):
+        raise OSError(errno.EADDRINUSE, "Address already in use")
+
+    monkeypatch.setattr(ContextoProxy, "start", refuse)
+    argv = ["run", "--upstream", "http://127.0.0.1:9"] + (["--session", given] if given else []) + ["claude", "-p", "x"]
+    code, _, err = run(capsys, *argv)
+    assert code == 1 and "cannot start the proxy" in err and "Traceback" not in err, err
+    assert sessions(home) == ["kept"]
+    assert len(list((home / "sessions" / "kept" / "pages").iterdir())) == 1

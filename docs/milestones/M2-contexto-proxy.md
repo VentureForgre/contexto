@@ -271,7 +271,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    smaller than sending unrotated; the launcher warns at start when a typical head (28,000
    tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
    seat) leaves less than 25,000 tokens of window budget, says that recall will barely fit or, at a
-   budget of 0 or less, not fit at all, and suggests a larger `--bound` (D55). Example
+   budget of 0 or less, that it may not fit at all (a "may": measured heads ran as low as 15,689), and
+   suggests a larger `--bound` (D55). Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
    OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
    thinking strips will be frequent at 150k for large heads (see O3).
@@ -1134,11 +1135,22 @@ A store resumed while prune deletes its session waits, starts empty, and prints 
   process holds (another launch has it open: two launches on one store would share its epoch record
   and recall room, rule 16), it prints why on stderr and opens a new session; at exit it then names
   any other session that served the conversation, since the conversation is split across two stores.
-  Arguments after `--` are not read, nor the value of a Claude Code 2.1.314 option that takes one
-  (`--append-system-prompt --continue` is a prompt). `--session` always wins and is never questioned.
+  An automatic choice is serialized across launches: an exclusive `flock` on
+  `$CONTEXTO_HOME/choose.lock` is held from the busy-session probe until the chosen session is open
+  with its `live.lock` taken (waiting at most 5 seconds), so launches started at the same moment see
+  each other. Options are read as Claude Code's Commander parser reads them (2.1.314 and 2.1.318 alike):
+  arguments after `--` are not, nor the value of a long option that takes one (`<value>` in `--help`,
+  and the hidden prompt-like ones), so `--append-system-prompt --continue` is a prompt; a short-option
+  cluster is split letter by letter, a flag (`c`, `h`, `p`, `v`) consumed and the rest read again, and
+  an option that takes a value (`d`, `n`, `r`, `w`) takes the rest of the argument, so `-pc` continues
+  and `-rabc123` resumes `abc123`. `--session` always wins and is never questioned.
   If a `--continue` lands in a conversation the chosen session never served (one run without
   Contexto), a warning says so at exit; not with `--fork-session`, whose new id continues the same
-  history. After Claude Code exits, when a request named a Claude Code session, the
+  history. A fork keeps the session that served the conversation it forks, on purpose: the history up
+  to the fork point and the pins are that session's. Both branches then share its pages, pins and
+  recall room, a search in one can return turns written only in the other, and switching between them
+  re-rotates (the engine logs `head_changed` or `history_diverged`). The launcher says so when it
+  reuses a session for a fork; `--session NEW` gives the fork its own store. After Claude Code exits, when a request named a Claude Code session, the
   launcher prints `contexto run --session S [the launch's Contexto options] claude --resume <id>` with
   the last id seen, because Claude Code's own exit hint (`claude --resume <id>`) bypasses Contexto.
 - Signals. SIGTERM, SIGHUP and SIGQUIT are forwarded to Claude Code while it runs; SIGUSR1, SIGUSR2

@@ -496,7 +496,8 @@ def test_start_warning_depends_on_bound_and_assumed_overhead(env, upstream, tmp_
     assert "about 17,000" in warning and "below 25,000" in warning and "--bound 103,000" in warning
     assert "recall" in warning  # says plainly what a small window costs
     negative = start_warning(50_000, None, ASSUMED_OVERHEAD_DEFAULT)
-    assert "leaves no window budget" in negative and "recall will not fit" in negative
+    # The overhead is the top of the measured range, so a budget of 0 or less is a "may" (reviewer B, PR #240).
+    assert "may leave no window budget" in negative and "recall may not fit at all" in negative
     assert assumed_overhead({}) == ASSUMED_OVERHEAD_DEFAULT
     assert assumed_overhead({"OPENRIG_SESSION_NAME": "x"}) == ASSUMED_OVERHEAD_OPENRIG
     quiet = launch(env, "--upstream", upstream, "--session", "w1", "claude", cwd=tmp_path)
@@ -844,6 +845,12 @@ def test_continue_that_lands_in_another_conversation_is_reported_at_exit(env, up
     # Reviewer A, PR #240: a value of an option that takes one is not an option, even with a leading "-".
     (["--append-system-prompt", "--continue"], None), (["--model", "-c", "-p"], None),
     (["--add-dir", "a", "-c"], ("continue", None)), (["--session-id", "-r", "x"], None),
+    (["--prefill", "--continue"], None),  # a hidden option that takes a prompt
+    # Short-option clusters, read as Claude Code's Commander parser does (reviewer A, PR #240 round 2).
+    (["-pc", "hi"], ("continue", None)), (["-cp", "hi"], ("continue", None)),
+    ([f"-r{CLAUDE_A}", "-p"], ("resume", CLAUDE_A)), ([f"-pr{CLAUDE_A}"], ("resume", CLAUDE_A)),
+    (["-pr", CLAUDE_A], ("resume", CLAUDE_A)), (["-rc"], ("resume", "c")), (["-pdx", "-c"], ("continue", None)),
+    (["-n", "-c"], None), (["-nmine", "-c"], ("continue", None)), (["-pz", "-c"], ("continue", None)),
 ])
 def test_resume_request(args, expected):
     assert launcher.resume_request(args) == expected
@@ -1212,3 +1219,81 @@ def test_an_empty_session_option_is_an_invalid_id(env, upstream, tmp_path):
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == EXIT_USAGE and "invalid session id: ''" in err and "Traceback" not in err, err
     assert not Path(env["FAKE_RECORD"]).exists()
+
+
+# PR #240 round-2 follow-ups
+
+RACE_PICK = """
+import io, sys, time
+from pathlib import Path
+from contexto import launcher
+home, cwd, go, done = map(Path, sys.argv[1:5])
+while not go.exists():
+    time.sleep(0.0005)
+choice, store = launcher.pick_session(launcher.LaunchOptions(claude_args=["-c"]), home, cwd, io.StringIO())
+print(choice.session_id, flush=True)
+while not done.exists():  # keep the session open, as a running launch does
+    time.sleep(0.01)
+"""
+
+
+def test_launches_started_together_never_share_an_automatically_picked_session(tmp_path):
+    """Reviewer A: two `contexto run claude -c` started at once shared one store in 6 of 10 tries; the
+    choice is now serialized on $CONTEXTO_HOME/choose.lock until the chosen session's live lock is held."""
+    from contexto.store import SessionStore
+
+    home, cwd = tmp_path / "home", tmp_path / "work"
+    cwd.mkdir()
+    seeded = SessionStore(home, "served")
+    seeded.set_workdir(cwd)
+    seeded.record_cli_session("claude", CLAUDE_A)
+    del seeded
+    for attempt in range(4):
+        go, done = tmp_path / f"go{attempt}", tmp_path / f"done{attempt}"
+        racers = [subprocess.Popen([sys.executable, "-c", RACE_PICK, str(home), str(cwd), str(go), str(done)],
+                                   stdout=subprocess.PIPE, text=True) for _ in range(4)]
+        try:
+            time.sleep(0.5)  # every racer has started Python and is waiting
+            go.touch()
+            chosen = [racer.stdout.readline().strip() for racer in racers]
+        finally:
+            done.touch()
+            for racer in racers:
+                racer.communicate(timeout=30)
+        assert chosen.count("served") == 1 and len(set(chosen)) == 4, chosen
+
+
+def test_a_fork_says_it_shares_the_original_session(env, upstream, tmp_path):
+    served = first_run(env, upstream, tmp_path)
+    proc = launch(dict(env, FAKE_REQUEST="1", FAKE_CLAUDE_SESSION=CLAUDE_B), "--upstream", upstream, "claude",
+                  "--resume", CLAUDE_A, "--fork-session", "-p", "fork", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert session_from(err) == served
+    assert f"the fork shares Contexto session {served}" in err and "--session NEW" in err
+    assert set(meta(env, served)["cli_sessions"]["claude"]) == {CLAUDE_A, CLAUDE_B}
+
+
+def test_a_signal_during_a_failed_spawn_decides_the_exit_code(monkeypatch):
+    def failing_popen(argv, env=None):
+        os.kill(os.getpid(), signal.SIGTERM)  # arrives while the child is being started
+        time.sleep(0.05)  # the handler runs
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", failing_popen)
+    assert launcher.run_child(["claude-gone"]) == 128 + signal.SIGTERM
+
+
+def test_the_watchdog_forgets_the_child_before_the_handlers_are_restored():
+    seen = []
+
+    class Watch:
+        def watch(self, pid):
+            pass
+
+        def forget(self):
+            seen.append(signal.getsignal(signal.SIGTERM))
+
+    before = signal.getsignal(signal.SIGTERM)
+    assert launcher.run_child([sys.executable, "-c", "pass"], watchdog=Watch()) == 0
+    assert seen and seen[0] is not before and signal.getsignal(signal.SIGTERM) is before

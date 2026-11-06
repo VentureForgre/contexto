@@ -1,0 +1,33 @@
+name: New Claude Code or Codex version
+description: Contexto warns that your CLI version was not tested, or a new CLI version broke something.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Contexto recognises parts of the CLI's requests by text the CLI writes, so each new CLI version
+        is checked with the routine in [docs/cli-updates.md](https://github.com/VentureForgre/contexto/blob/main/docs/cli-updates.md).
+        Do not paste conversation text, page files, API keys or tokens here.
+  - type: input
+    id: contexto-version
+    attributes:
+      label: Contexto version
+      description: Output of `contexto --version`.
+    validations:
+      required: true
+  - type: input
+    id: cli-version
+    attributes:
+      label: CLI and version
+      description: Output of `claude --version` or `codex --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: warning
+    attributes:
+      label: The warning or error Contexto printed
+      render: text
+  - type: textarea
+    id: what-broke
+    attributes:
+      label: Anything that went wrong beyond the warning
+      description: Leave this empty if the session worked and you only saw the version warning.

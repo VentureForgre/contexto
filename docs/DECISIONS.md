@@ -1495,7 +1495,28 @@ the owner's delegation. Open decisions are listed at the end with the options an
     spawn (a signal during it is sent once the child exists). The value of a Claude Code option that
     takes one (from 2.1.314's `--help`) is not read as `-c` or `--resume`, and the exit's metadata
     write cannot raise out of the cleanup. Left: two launches that probe the same free session within
-    the same few milliseconds can still both take it.
+    the same few milliseconds can still both take it (closed by the round-2 follow-ups below).
+  - **Round-2 follow-ups (reviewers A and B, PR #240).** Two `contexto run claude -c` started at the
+    same moment still shared one store in 6 of 10 tries: both probed before either held the session.
+    The automatic choice now runs under an exclusive `flock` on `$CONTEXTO_HOME/choose.lock` until the
+    chosen session's `live.lock` is held (bounded at 5 seconds); in the new test, four racers released
+    together shared in 3 of 4 without the lock and never with it. Claude Code 2.1.314 and 2.1.318 parse
+    options with the same Commander code (read from both binaries, with flag-and-value combining on):
+    in a short cluster a flag is consumed and the rest read again, and an option that takes a value
+    (`-d`, `-n`, `-r`, `-w`) takes the rest of the argument. `claude -prabc123` and `claude -rc` failed
+    on 2.1.318 on the resume values "abc123" and "c". So `-pc` and `-cp` continue and `-r<id>` resumes,
+    and Contexto now reads them so; it also skips the values of hidden prompt-like options
+    (`--prefill`, `--append-subagent-system-prompt`, `--plan-mode-instructions`, and others found in
+    both binaries). Fork: reviewer B measured that `--resume C --fork-session` reopens C's session and
+    that switching back to C then logs `history_diverged` and re-rotates, with search able to return
+    the other branch's turns. Decided: a fork keeps the original's session, because its history up to
+    the fork point and its pins are there and a new store would page that history again without the
+    pins; the launcher now says so at launch and names `--session NEW` for a separate store. Rejected:
+    a new session per fork (loses the pins, the problem D55 set out to fix). The start-up warning at a
+    budget of 0 or less now says "may": reviewer B measured budgets of 7,411 to 9,311 at bound 30,000
+    (headroom 5,000) where the 28,000 assumption gave -3,000. Also: a signal received during a spawn
+    that fails exits 128 + N instead of 127; the watchdog forgets claude's pid before the handlers are
+    restored, and the temporary directory is removed before the watchdog's `done`.
 - **D57. User-facing command fixes from the 2026-11-05 QA run.** Claude, 2026-11-05, under D0; contract
   change. The install, docs-audit, live-claude, store-mcp and launcher-ux reports, reproduced at zero
   spend on v0.5.8 with stub CLIs and synthetic stores; 42 new or extended tests fail on v0.5.8 and pass
@@ -1572,6 +1593,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
     that hides the one meant. `sessions prune --session ''` is an invalid id (exit 1) again, checked
     before the prefix rule, which had reported it as the start of every session. `run --help` and
     `proxy --help` say `--session` takes the full id; the readers' default names "or one in use".
+  - **Round 4 (re-check after D55 and its follow-ups merged).** `run codex` with a `CONTEXTO_HOME` that
+    is a file exited 1, while `run claude` refuses it up front with 2 (D55): `launcher.open_session`, which
+    both CLIs use, now checks the home, so codex exits 2 too. Whether the launch created its session is now
+    recorded in `pick_session`, where the D55 follow-ups open the store; a test makes the proxy's bind fail in
+    `run claude` and checks that a session the launch created is removed and an existing one is kept.
 
 ## Open decisions
 
