@@ -64,13 +64,57 @@ proxy (Anthropic Messages API)        mcp server (stdio, JSON-RPC)
 Upstream resolution: the launcher computes the base URL Claude Code would otherwise use, in this
 order (measured in M0, PR #16 findings 1 and 1a: a settings-file `env.ANTHROPIC_BASE_URL`
 overrides the process environment, and in a git worktree the main checkout's
-`settings.local.json` wins): explicit `--upstream`; else the first settings file that sets
-`env.ANTHROPIC_BASE_URL`, in Claude Code's precedence (in a worktree the main checkout's
-`.claude/settings.local.json` first, then the local, project, and user settings files, the user's
-being `$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35); else
-`ANTHROPIC_BASE_URL` in the process environment; else `https://api.anthropic.com`. The launcher's
-own flag-level `--settings` outranks all of these, which is what makes the proxy attachment work.
-Organization-managed settings still outrank `--settings`; document that limit.
+`settings.local.json` wins; the file list re-measured for D52): explicit `--upstream`; else the
+first settings file that sets `env.ANTHROPIC_BASE_URL`, in Claude Code's precedence: the main
+checkout's `.claude/settings.local.json` (the parent of the git common dir: the repository root,
+also from a subdirectory, or the main checkout from a linked worktree; a submodule's own root),
+then the working directory's own `.claude/settings.local.json` and `.claude/settings.json`, then
+the user settings file (`$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35).
+From a subdirectory the repository root's `settings.json` is not read, and outside git no parent
+directory's files are (D52, 27 layouts with Claude Code 2.1.314). Else `ANTHROPIC_BASE_URL` in the
+process environment; else `https://api.anthropic.com`. The launcher's own flag-level `--settings`
+outranks all of these, which is what makes the proxy attachment work. Organization-managed
+settings still outrank `--settings`; document that limit.
+
+Project settings trust (D52): every settings file above except the user's comes with the
+repository. `contexto run claude` and `contexto proxy` use them as Claude Code does: Claude Code
+uses a project's base URL and `apiKeyHelper` in `-p` mode with no trust check (unless
+`CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set, below), and interactively only after its "do you trust
+this folder" dialog, which it still shows behind Contexto, so a
+proxy upstream taken from an untrusted project matches what Claude Code would use once the user
+accepts. One difference remains before the dialog is answered: Claude Code sends `HEAD /api/hello`
+(no credential, no content) while the dialog is shown, and through Contexto that request reaches
+the untrusted project's base URL even if the user declines, where plain `claude` sends it to the
+user's own upstream (reviewer B, PR #237; measured with Claude Code 2.1.314; neither sends it with
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`). The project's host learns the user's address, the
+Claude Code version and the time. `--upstream` pins the upstream in a repository the user does not
+trust. `contexto run codex` does not: Codex runs the `apiKeyHelper` it is given without asking
+and plain Codex ignores `.claude/`, so for Codex a project file's `apiKeyHelper` and base URL
+count only when Claude Code has recorded the folder as trusted, that is
+`projects[<real path>].hasTrustDialogAccepted` is `true` in Claude Code's global config
+(`$CLAUDE_CONFIG_DIR/.claude.json` or `~/.claude.json`, or a non-empty legacy `.config.json` in the
+config directory) for the working directory or a parent up to the nearest directory with a `.git`
+entry (of any kind, valid or not), or for the main checkout of a genuine linked worktree
+(its `.git` file names `<M>/.git/worktrees/<name>`, whose `commondir` names `<M>/.git` and whose
+`gitdir` points back at that `.git` file); outside git, for the working directory or any parent.
+The layout is read from the file system, never from `git`: a folder unpacked from an archive
+writes its own `.git`, so git's answer is the folder's (reviewer A, PR #237). The same genuine
+worktree test decides whose `settings.local.json` is the main checkout's. While
+`CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is truthy no folder counts as trusted, as for Claude Code, which
+then shows its dialog everywhere. The variable is read from the environment Contexto starts with
+(a settings file's `env` cannot set it), as Claude Code reads it: `1`, `true`, `yes` or `on` in
+any case, after JavaScript's `trim()`, which also strips U+FEFF. While it is truthy no project file
+counts for `contexto run claude` and `contexto proxy` either: Claude Code in `-p` mode then drops a
+project file's `env` (but a short list of safe variables) and its `apiKeyHelper`, so plain
+`claude -p` goes to the user's upstream (reviewer A, PR #237 round 3; measured on 2.1.314 and
+2.1.318). Interactively Claude Code shows its dialog and, once it is accepted, uses the project's
+base URL (measured); Contexto skips the project files there too, the stricter side, and
+`--upstream` pins any upstream. When a project file is skipped for that reason the note names the
+variable and offers only the flags or unsetting it. Otherwise the file is skipped and
+Contexto says which file it ignored and how to proceed (`--codex-key-helper`, `--codex-upstream`,
+or running `claude` there once and accepting the dialog). `--codex-key-helper`,
+`CONTEXTO_CODEX_KEY_HELPER`, `--upstream`, `--codex-upstream`, and the user settings file are never
+gated.
 
 Tool permissions (D44): the same `--settings` file sets `permissions.allow` to one rule per Contexto
 MCP tool, by its exact name: `mcp__contexto__contexto_recall`, `_pin`, `_close`, `_state`, and
@@ -918,10 +962,44 @@ turns before it, usually where such rules are given. Tools:
   snapshot write only marks the snapshot stale (search then says "in view not checked") and logs
   `retained_stale`, not `store_error`; it does not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Only the main
   conversation publishes the room, the snapshot, and the window (`set_window`): the engine keeps state per conversation (the
-  main one, subagents, side requests), and the main conversation is the one with the most turn
-  starts, re-evaluated at each turn start: it changes only when another conversation has strictly
-  more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
-  stay main. The choice is made before the request is transformed, so a request that fails after
+  main one, subagents, side requests). The first conversation seen is main, and the choice is
+  re-evaluated at each turn start of another conversation, which takes over when (D50):
+  - its Claude Code session id differs from main's, its User-Agent entrypoint is main's, and, unless
+    both are the interactive CLI's `cli`, main is idle (the response to its newest request released no
+    client tool call, no response of main's that may have released one arrived after it, and main
+    has sent no request since); and either no
+    conversation has been main in that session yet (`/clear` starts a new
+    id), or it was the first conversation main in its session and that session lost main to another
+    session's id and has sent no request of this conversation since (`/resume` sends the resumed
+    conversation's id again). The id is `X-Claude-Code-Session-Id`, else the `session_id` in
+    `metadata.user_id`; subagents and side requests carry the id of the conversation they run for
+    (measured on Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318). Headless sessions run `/clear`
+    and `/compact` too (`claude -p --input-format stream-json`, the Agent SDK; `/clear` starts a new
+    id under `sdk-cli`, measured on 2.1.314 and 2.1.318). A `claude -p` or SDK process run from a
+    tool has its own id and an `sdk-*` entrypoint: its own under an interactive lead, so it does not
+    qualify, or, under a headless lead, the lead's inherited `sdk-cli`, and then it runs inside one
+    of main's tool calls, so main is not idle and it does not qualify either. A session that keeps
+    sending beside the new main returns only by turn starts; two sessions that take turns, each idle
+    while the other is prompted, follow the one prompted;
+  - its session id and entrypoint are main's, and its first message is
+    Claude Code's compaction summary: a user message whose content is a string starting "This
+    session is being continued from a previous conversation that ran out of context. The summary
+    below covers the earlier portion of the conversation." and a newline (`/compact` and
+    auto-compaction keep the session id but start a new first message, measured on 2.1.314 and
+    2.1.318, interactive and headless). It becomes that session's main, so a later `/resume` of the session returns to it;
+  - main has never sent a request with a tool list and this conversation has (Claude Code's title,
+    topic, and quota side requests have none, and one is often the session's first request);
+  - or it has strictly more turn starts than main (a tie keeps the current one).
+
+  Only a conversation seen with a tool list takes over by the first three rules (for Codex, which
+  sends no Claude Code session id, only the fourth applies). A request whose `metadata.user_id` has
+  `parent_session_id` (an agent-team teammate, in process or in its own pane, on 2.1.314), and one
+  carrying `X-Claude-Code-Agent-Id` (every subagent request on 2.1.302 to 2.1.318, and an in-process
+  teammate's), never takes over, by any rule. The engine logs content-free
+  `main_changed` with `reason` (`new_cli_session`, `resumed_cli_session`, `compacted`,
+  `after_side_request`, or `more_turn_starts`) and the request's `turn_starts` on the request that takes over; never the
+  session id. Main moves only at a request, never at a response: a response that arrives after
+  another conversation's request took over publishes a side room. The choice is made before the request is transformed, so a request that fails after
   its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them (they publish side rooms instead, D40, see the per-turn
   recall budget), so their tool calls see the main conversation's snapshot, and for a subagent
   "in view" refers to the main conversation's window (a documented subagent limitation); the MCP

@@ -1372,6 +1372,129 @@ the owner's delegation. Open decisions are listed at the end with the options an
     Code's system prompt, from 426 to 741, so the acceptance harness's head is 47,786 (47,628 before);
     its preamble base follows the fixed lines by the estimator, 380 tokens (300 before).
 
+- **D52. Settings files as Claude Code reads them, and project settings for Codex only from a
+  trusted folder.** Claude, 2026-11-05, under D0; contract change. QA run 2026-11-05 (verify-security
+  B and C, security finding 2, launcher-ux finding 1). All measurements with real Claude Code 2.1.314
+  and codex-cli 0.166.0 against local stub upstreams, with a scratch `CLAUDE_CONFIG_DIR` and `HOME`;
+  zero spend.
+  - **Which files.** In 27 layouts (`claude -p`, one stub port per settings file and one for the
+    process environment), Claude Code read, highest first: the main checkout's
+    `.claude/settings.local.json` (the parent of the git common dir, so the repository root also from
+    a subdirectory, and the main checkout from a linked worktree, as M0 finding 1a measured; for a
+    submodule, whose common dir is under the superproject's `.git/modules`, the submodule's own
+    root), then the working directory's own `settings.local.json` and `settings.json`, then the user
+    file. From a subdirectory it did not read the repository root's `settings.json` (nor a linked
+    worktree root's files from the worktree's subdirectory), and outside git it read no parent's
+    files. A committed `settings.local.json` is read like an untracked one (2 layouts). Contexto read
+    the git toplevel's two files instead of the working directory's and got 8 of the 27 wrong; it now
+    matches all 27 (`tests/test_upstream.py` has one test for each of the 25 that differ in which file
+    wins). A project file that is also the
+    user file (the working directory is the home directory) is listed once, as the user's.
+  - **The hole.** `contexto run codex` took the `apiKeyHelper` and the base URL from the same files,
+    project first, and wrote the helper as Codex's `auth.command`, which Codex runs without asking.
+    QA's proof of concept: a repository whose `.claude/settings.json` names a helper that appends to a
+    marker file and prints `sk-evil`, and a base URL on a stub; `contexto run codex exec` in it ran the
+    helper twice and the stub got `Authorization: Bearer sk-evil`; with only the base URL in the
+    project, the user's own helper's key went to the project's host. Plain Codex ignores `.claude/`
+    (and an untrusted `.codex/config.toml`); interactive Claude Code asks "Quick safety check: Is this
+    a project you created or one you trust?" (default "No, exit") before using them.
+  - **Rule.** For Codex, a project file's `apiKeyHelper` and `env.ANTHROPIC_BASE_URL` count only when
+    Claude Code has recorded the folder as trusted; otherwise the file is skipped, the next one wins
+    (the user's, the process environment, the default), and stderr names the ignored file and the way
+    on (`--codex-key-helper` or `--codex-upstream`, or run `claude` there once and accept the
+    dialog; the helper message also names `CONTEXTO_CODEX_KEY_HELPER`). With no helper left, the
+    launch stops with exit 2 before Codex starts and removes the session directory it created (a
+    resumed `--session` is kept; reviewer B, PR #237, consistent with D54's rule for every failed
+    launch). The flag and environment helpers, `--upstream`, `--codex-upstream`, and the user file
+    are never gated. A trust lookup happens only when a project file sets the key.
+  - **The layout comes from the file system, not git** (reviewer A, PR #237 round 1). A folder that
+    does not come from `git clone` (a zip, a tarball, a release asset) writes its own `.git`, so
+    `git rev-parse` answers what the folder says. Reviewer A found 8 layouts where the first version
+    said trusted and Claude Code 2.1.314 showed its dialog, and the folder's `apiKeyHelper` became
+    Codex's `auth.command`. With a trusted repository T: `H/.git` a file naming `T/.git` (absolute,
+    and relative), H's own `.git/commondir` naming `T/.git`, a fake worktree entry inside H whose
+    `commondir` names `T/.git`, and `H/.git` naming T's real worktree entry. With a trusted non-git
+    parent P: `P/H/.git` a garbage file, an empty `.git` directory, and a valid repository with
+    `core.worktree` set elsewhere (git fails or reports a toplevel that is not a parent, and the
+    first version then counted every parent). Measured again here, with the pty and with `claude
+    -p`: in all 8 Claude Code showed the dialog and read H's own `settings.json`, never T's
+    `settings.local.json`; the first version read T's in the 5 with T. Rule now: the toplevel is
+    the nearest directory, the working directory or a parent, with a `.git` entry of any kind, and
+    nothing above it counts. The main checkout is another directory only for a genuine linked
+    worktree: the `.git` file names `<M>/.git/worktrees/<name>`, that entry's `commondir` names
+    `<M>/.git`, and its `gitdir` points back at this very `.git` file, which a hostile folder cannot
+    write inside `<M>/.git`. Relative paths resolve against each file's directory, as git 2.48+
+    writes them with `--relative-paths`. Files are read only when regular, at most 4,096 bytes, so a
+    FIFO or huge `.git` cannot hang or flood the lookup. Contexto now matches Claude Code in all 8
+    and in 4 controls that stay trusted (a linked worktree, its subdirectory, a relative-path
+    worktree, a plain folder under a trusted parent), and still in all 27 order layouts. No `git`
+    subprocess is run any more, and one walk serves both the order and the trust check.
+  - **How Claude Code records trust** (read from the 2.1.314 binary, then measured in a pty: the
+    dialog shown or not, 20 cases, and 12 more for the `.git` layouts above). Accepting the dialog
+    in `repo/sub` writes `projects["<real path of repo>"].hasTrustDialogAccepted: true` to
+    `$CLAUDE_CONFIG_DIR/.claude.json`
+    (`~/.claude.json` without `CLAUDE_CONFIG_DIR`, measured with a scratch `HOME`; a non-empty legacy
+    `.config.json` in the config directory is read instead, measured; `.claude-custom-oauth.json` with
+    `CLAUDE_CODE_CUSTOM_OAUTH_URL`, read, not measured). A folder counts as trusted when the key is
+    exactly `true` for the working directory or a parent up to the git toplevel (a key on `repo/sub`
+    trusts `repo/sub/deeper`, not `repo`), or for the main checkout of a genuine linked worktree (a
+    linked worktree and its subdirectories are trusted when the main checkout is); outside git, for
+    the working directory or any parent. A folder above the git toplevel does not count, nor does a key recorded unresolved
+    (`/tmp/...` for `/private/tmp/...`) or with a trailing slash. Not copied: Claude Code's own
+    session-only trust (a home directory accepted in one session) and its sandbox flag; both only
+    make Contexto ignore a file Claude Code would use, and the message says how to proceed.
+  - **Why not gate `contexto run claude`.** Claude Code itself reads those files: in `-p` mode with no
+    trust check (QA measured the project helper running and the key going to the project's base
+    URL with plain `claude -p`), interactively after its dialog, which still appears behind
+    Contexto because the launcher's `--settings` does not mark the folder trusted. The proxy's
+    upstream must be the one Claude Code would use, or accepting the dialog would send requests
+    somewhere else than plain `claude`. So `contexto run claude` (and `contexto proxy`) keep parity,
+    exposed exactly as plain `claude -p` is; pass `--upstream` to pin it. The exception is
+    `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` (next bullet but one): with it set, plain `claude -p` drops a
+    project file's base URL, and so does Contexto. One difference is left,
+    found by reviewer B (PR #237) and measured here with the pty and a stub that logs `HEAD`: while
+    the dialog is shown, Claude Code sends `HEAD /api/hello` (no credential header, no body). With
+    the project setting only a base URL, a user helper in user settings, and the dialog declined,
+    plain `claude` sent it to the user's own upstream and `contexto run claude` to the project's
+    host, because the proxy's upstream is fixed at launch. The host learns the user's address, the
+    Claude Code version and the time of the run. With `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
+    neither sent anything. Not changed here: answering `/api/hello` locally while the upstream comes
+    from an untrusted project file is possible later; for now the contract documents it and
+    `--upstream` pins the upstream.
+  - **End to end** (real `contexto run codex exec`, codex-cli 0.166.0, QA's repository): untrusted, it
+    printed both notes, exited 2, and the helper never ran; with the user's own helper and base URL
+    in user settings, the helper did not run and all 10 requests went to the user's stub; after
+    recording the folder as trusted, the project's helper ran and the requests went to the project's
+    stub.
+  - **Ignoring recorded trust (review round 2).** While `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is truthy,
+    Claude Code ignores every trust record and shows its dialog in every folder; Contexto then treats
+    every folder as untrusted for Codex (`1`, `true`, `yes` or `on`, any case). Before, it still read
+    the records, the one case where it trusted a folder Claude Code would not.
+  - **The same variable on the Claude side (review round 3).** Reviewer A found, and I measured, that
+    Claude Code in `-p` mode with the variable truthy drops a project or local settings file's `env`
+    (but a short safe list) and withholds its `apiKeyHelper`: "this session cannot show a trust
+    dialog, so this folder's settings files may set only a short list of variables". Plain
+    `claude -p` then goes to the user's upstream, while `contexto run claude -p` and `contexto
+    proxy` forwarded to the project's `env.ANTHROPIC_BASE_URL` with the runner's credential, the
+    case the variable exists for (a runner checking out content it does not trust). Measured with
+    `claude -p` on 2.1.314 and 2.1.318 against stubs, one port per file: `settings.json`,
+    `settings.local.json` and a linked worktree's main-checkout `settings.local.json`, the folder
+    trusted or not, and the variable unset, `1` or U+FEFF `1`; Contexto differed in 10 of 15 per
+    version and now matches all 30. A variable set by the project file's own `env` changed nothing in
+    either. Interactively, with the variable set, both versions showed the dialog and, after it was
+    accepted, sent the prompt to the project's base URL. Rule: while the variable is truthy, no
+    project file counts for any caller; `Upstream.ignored` names the skipped files, and `contexto run
+    claude` and `contexto proxy` print the same note as `contexto run codex`. Interactively that is
+    stricter than Claude Code, which the note and `--upstream` cover. Real `contexto run claude -p`
+    in a recorded-trusted repository went to the project's stub without the variable and to the
+    user's with it. The variable is parsed as Claude Code parses it: lower case, then JavaScript's
+    `trim()`, which strips U+FEFF (Python's `strip()` keeps it; the dialog appeared with U+FEFF
+    `1` in reviewer A's pty runs) and keeps `\x1c` to `\x1f` and `\x85`, which Python would strip.
+    With the variable set, the note says so ("is set, so no folder counts as trusted") and offers the flag or
+    unsetting it, not the dialog, which would not help (reviewers A and B, round 3).
+  - **Left open.** Claude Code may change where or how it records trust. The rule errs toward
+    untrusted where it differs from Claude Code's (a dangling `.git` symlink; a `.git` that is a FIFO
+    or another non-regular file; a bare repository's worktree): the cost is a warning and a flag.
 - **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
   subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
   untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by
@@ -1517,6 +1640,159 @@ the owner's delegation. Open decisions are listed at the end with the options an
     (headroom 5,000) where the 28,000 assumption gave -3,000. Also: a signal received during a spawn
     that fails exits 128 + N instead of 127; the watchdog forgets claude's pid before the handlers are
     restored, and the temporary directory is removed before the watchdog's `done`.
+
+- **D50. Main follows Claude Code's session id across `/clear` and `/resume`, and its compaction
+  summary across `/compact`; a side request that arrives first stays main only until the first
+  prompt.** Claude, 2026-11-05, under D0; contract
+  change. The engine keys a conversation by its first prompt and handed main over only at a turn
+  start with strictly more turn starts than main (contract PR #125). QA's verify-clear and
+  live-realworld F2 (v0.5.8): after `/clear` the new conversation has one turn start, so it stayed a
+  side conversation until it outgrew the old one. No room, snapshot or window came from the
+  conversation the user was in. Every tool call was charged against the old conversation's last
+  room, which was never republished; once that was spent, `contexto_state` and `contexto_search`
+  returned nothing, pins included. The live answer for a pinned codename was "I don't know ... my
+  contexto recall budget for this turn is used up". The same report saw the user's first turn of a
+  fresh session not be main, because Claude Code's tool-less side request arrives first and a tie
+  keeps it.
+  - **Measured** (zero spend; Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318 in a pty against a
+    loopback stub that kept every request's headers and body, isolated config dirs, fake key; 15
+    Messages requests per version). The steps: two turns, the first launching a subagent; `/clear`;
+    the same again; `/resume` of the first conversation; one turn. On every request
+    `X-Claude-Code-Session-Id` equals the `session_id` in `metadata.user_id`. `/clear` starts a new
+    id; `/resume` sends the resumed conversation's old id again; the subagents and the one-message,
+    tool-less side request Claude Code sends before each prompt carry the id of the conversation
+    they run for. The first request of the session, and the first after `/clear`, is that side request.
+    The request after `/resume` holds no marker: it is the old conversation plus the new prompt.
+  - **Other sessions on one proxy** (reviewer A, PR #238; the same setup on 2.1.314 with
+    `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, the main conversation creating a team and spawning
+    one teammate, then running `claude -p` from its Bash tool). A teammate's `metadata.user_id` adds
+    `parent_session_id`, the lead's id. In process it keeps the lead's own session id; in its own
+    tmux pane (`teammateMode` `tmux`, on an isolated tmux socket) it has its own. Its User-Agent
+    entrypoint is `cli` either way. The nested `claude -p` has its own id, no parent, and the
+    entrypoint `sdk-cli` (`claude-cli/<v> (external, <entrypoint>[, ...])`; the lead's is `cli`).
+    With the first version of this rule the tmux teammate took main at its first turn start and the
+    lead took it back at its next. The nested `claude -p` took main too, and the lead's next request
+    was a side request. Under a headless lead (`claude -p` with a Bash call that runs `claude -p`,
+    reviewer A round 2) the lead and the child both send `sdk-cli`: the binary keeps an inherited
+    `CLAUDE_CODE_ENTRYPOINT` and only turns its own `cli` into `sdk-cli` in print mode. The child has
+    its own id and no parent. With the second version of this rule the child took main, and the
+    lead, whose run has one turn start, never took it back.
+  - **Compaction** (reviewer B round 2, PR #238: live on 2.1.314 and 2.1.318, all 8 requests after a
+    `/compact` were side, and with the old room spent `contexto_state` returned nothing). Captured
+    on 2.1.314 and 2.1.318 against the stub, both manual `/compact` and auto-compaction (the stub
+    reported 995,000 input tokens on a turn; 190,000 did not trigger it). The session id does not
+    change. Claude Code first sends the summary request on main's own key: main's history with the
+    instructions appended to its last prompt. The compacted conversation's first message is then a
+    user message whose content is a plain string: "This session is being continued from a previous
+    conversation that ran out of context. The summary below covers the earlier portion of the
+    conversation.", a newline, then the summary. After it come a role `system` message, the last
+    message from before compaction kept verbatim (main's last response, which no earlier request
+    held), and the new prompt, which after `/compact` also holds the command's blocks. The same
+    form came from both versions and both triggers. It is a new key with two turn starts, so before
+    this rule it never outgrew main. Every subagent request (8 on 2.1.302 to 2.1.318, and the
+    compaction runs' 4) and the in-process teammate's carry `X-Claude-Code-Agent-Id`; no main, side,
+    nested or headless request does.
+  - **Rule.** At a turn start, a conversation also takes over main when its session id differs from
+    main's, its entrypoint is main's, main is idle unless both are the interactive `cli` (see
+    headless below), and either no conversation has been main in that session yet
+    (`new_cli_session`, after `/clear`), or it was the first conversation main in its session, and
+    that session lost main to another session's id and has sent no request of this conversation
+    since (`resumed_cli_session`, after `/resume`). It also takes over when main has never sent a
+    request with a tool list and this conversation has (`after_side_request`). Only a conversation
+    seen with a tool list takes over by these, so side requests never do. A subagent carries main's
+    id, so it never does either. A background subagent the old conversation launched before `/clear`
+    keeps the old id, and the old conversation was that session's main, so it does not take over. A
+    request with `parent_session_id` or `X-Claude-Code-Agent-Id` never takes over by any rule, so a
+    subagent that auto-compacts, or that `SendMessage` resumed more often than main has turns, never
+    becomes main. A conversation also takes over with reason `compacted` when its session id and
+    entrypoint are main's and its first message is that summary, with the exact string
+    start; a prompt that quotes it is a list with context blocks and does not match. It becomes its
+    session's main, replacing the first one, since `/resume` of the session loads the compacted
+    transcript. Its own epoch starts at 0 under the bound like any new conversation, and the old
+    conversation's pins and pages stay in the session store. Requiring main's entrypoint keeps out
+    a `claude -p` or SDK process run from an interactive lead's tool, since it sends `sdk-*`.
+  - **Headless** (reviewer A round 3: `/clear` and `/compact` are declared `supportsNonInteractive`
+    in 2.1.318; round 2 wrongly said they exist only in the interactive CLI). Captured on 2.1.314
+    and 2.1.318 with `claude -p --input-format stream-json --output-format stream-json` against the
+    stub: two prompts, `/compact`, a prompt, `/clear`, a prompt. `/compact` keeps the session id and
+    sends the same summary form as interactive; `/clear` starts a new id, User-Agent
+    `(external, sdk-cli)`, no parent, a tool list, and the same first message as an interactive
+    `/clear` (the command's blocks, then the prompt). `/resume` is not declared `supportsNonInteractive`
+    in the binary, so it was not run. A nested
+    `claude -p` under a headless lead has the same shape: a new id under the lead's inherited
+    `sdk-cli`. What tells them apart is main's state: the nested child runs inside one of main's
+    tool calls (the response to main's newest request released a client call, the Bash running it), and a
+    headless `/clear` follows main's final response. So for equal entrypoints other than `cli`, the
+    two session-id rules also need main idle: the response to its newest request released no client
+    tool call (the proxy's `tool_calls` is False, not unknown), no response of main's that may have
+    released one (True or unknown, whichever request it answers) arrived after it, and main has
+    sent no request since. A late or duplicate response, such as the end of a request the CLI gave
+    up on and retried, never makes main idle: with "its latest response" (round 3), that late end
+    made a headless lead idle while its Bash ran a nested `claude -p`, the child took main, and the
+    lead's next request was estimated at 4,775 tokens against a 4,000 bound (reviewer A round 4).
+    Updating idle from the newest request's response alone is not enough: when R1's late end comes
+    first it is the attributed one, and the retry's own response, releasing the Bash, is then
+    unattributed. So any response that may hold a client call marks main busy, whichever request
+    it answers, and only the newest request's response without one marks it idle; the test runs
+    both orders and a duplicate response. Compaction
+    keeps the session id, which a nested child never shares, so `compacted` needs no idle check. In
+    the interactive CLI the idle check is not applied, since after Esc main's latest response can
+    still show a call that was cancelled and never runs. The quiet check means two sessions both sending trade main at most once: the one that lost main by
+    id and kept sending returns only by turn starts, and the other one, having lost by turn starts,
+    never returns by id. Two sessions that take turns, each idle while the other is prompted, pass
+    the quiet check at every switch and follow the one prompted (10 switches in 10 alternations,
+    reviewer A round 2), each switch logged. Within one Claude Code process (`/clear`, `/resume`,
+    `/compact`) the switch is at the process's own next prompt, when its old conversation has no
+    call left to run. Two interactive processes on one proxy are not a supported setup, and there
+    the bound holds only while the session losing main is idle: a switch during its pending tool
+    call charges that call against the new main's room (reviewer A round 3: 1,884 tokens against a
+    500-token room). The turn-start rule on main opens the same window. Main is decided once per request, before
+    the transform, and never moves at a response: at round 2 a response of a session whose request
+    was in flight when another took over moved main back with no event (reviewer A). A session's main is the first conversation main in it, so a
+    subagent that outgrew main does not replace it, and a later `/resume` still returns to the
+    user's conversation. The turn-start rule is kept as the last case (`more_turn_starts`), so the
+    only handover D50 removes is a child session's. The id is read
+    from the header, else from `metadata.user_id`, only for the Messages API; Codex is unchanged.
+    `metadata.user_id` is parsed by `loads_bounded` (D45): a string nested past the limit gives no
+    session id; before, a deep one raised `RecursionError` and every request went upstream
+    untransformed (reviewer A round 2).
+    The request that takes over logs content-free `main_changed` with the reason and its turn
+    starts (QA found no event saying main was stale).
+  - **Result.** Replaying the captures through the engine: before, the user's first turn (3
+    requests) and all 4 of the new conversation's requests after `/clear` were not main;
+    after, every request of the user's conversation is main (from its first request after `/clear`
+    and after `/resume`), and no subagent or side request is. Over the two team captures and the headless one no teammate
+    or nested request takes main, and the lead stays main throughout. In the engine test of the live case
+    (old room spent: bound 4,000, real input 3,600), `contexto_state` returned the budget-spent
+    notice before and returns the pin after the new conversation's first request; `contexto_search`
+    finds the old conversation's paged turn. The same holds after `/compact` (reviewer B's repro).
+    Replaying the four compaction captures: before, every request of the compacted conversation was
+    side (4 of 4 on each); after, it is main from its first request (`compacted`). The two
+    stream-json captures: before, the compacted and the cleared conversations were side; after,
+    `compacted` and `new_cli_session` at their first request, with each response's `tool_calls`
+    as the stub's reply gives it. The earlier seven captures replay unchanged, the headless lead's
+    nested `claude -p` staying side.
+  - **Options considered.** Stop charging a stale main once another conversation has started a turn
+    (QA's fallback). Rejected: a subagent's first request is a turn start inside main's tool loop,
+    so main's own calls would then be bounded by the side room alone and could overfill main's
+    window. A head match (same system and tools as main at a new conversation's turn start).
+    Rejected: deferred tools and settings change the head inside one conversation, and the session id
+    is on every request of every measured version.
+  - **Not covered.** Without a session id (another client, or a Claude Code that drops both) the
+    turn-start rule alone applies, as before. Editing the first prompt with `/rewind` would give a
+    new key in the same session, which stays side until it outgrows the old one (inferred, not
+    measured). After a
+    restart whose epoch record holds another conversation, the new main still writes no record until
+    it has more turn starts than the record's (rule 16, unchanged), so that conversation can resume
+    only by rotating once. A subagent on a Claude Code that stopped sending `X-Claude-Code-Agent-Id`
+    could again take over by the turn-start rule. In a headless session, `/clear` right after an
+    SDK `interrupt()` (the response to main's newest request released a call), or with a proxy that could not tell
+    whether the response held a client call, falls back to the turn-start rule; a nested `claude -p`
+    started in the background that sends its first request after the lead ended its turn takes
+    main until the lead's next prompt, which takes it back by its id or its turn starts. If a Claude Code version sent a request of the old
+    conversation after `/clear` (none of the four measured did), a later `/resume` of it would return
+    only by turn starts. A second interactive Claude Code pointed at the same proxy with no parent
+    id (not a supported setup) takes main at its first turn start; while both send, once.
 
 - **D48. Images and documents are priced by pixels and pages, and kept out of the ratio.** Claude,
   2026-11-05, under D0; contract change (rule 3). The QA round of 2026-11-05 (verify-images, scale-engine
