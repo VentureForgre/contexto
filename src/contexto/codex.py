@@ -421,7 +421,8 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
         found = claude_key_helper(cwd, home, base_env)
         helper = found.value
         if found.ignored:
-            notes.append(untrusted_note("apiKeyHelper", found.ignored, "Pass --codex-key-helper"))
+            notes.append(untrusted_note("apiKeyHelper", found.ignored,
+                                        f"Pass --codex-key-helper (or set {KEY_HELPER_ENV})"))
     if not helper:
         raise CodexLaunchError(f"no key helper: {notes[0]}" if notes else
                                f"no key helper: pass --codex-key-helper, set {KEY_HELPER_ENV}, "
@@ -471,7 +472,9 @@ def add_arguments(parser) -> None:
 
 
 def run_codex(args, *, launcher=None, stderr=None) -> int:
-    """Run ``codex`` behind a Contexto proxy; returns the exit code (codex's, or a launcher error)."""
+    """Run ``codex`` behind a Contexto proxy; returns the exit code (codex's, or a launcher error).
+    A launch that fails before Codex starts (no key helper, for example from an untrusted folder,
+    D52) removes the session directory it created; a resumed ``--session`` is never removed."""
     import uuid
 
     from contexto import upstream as upstream_module
@@ -479,6 +482,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
     if launcher is None:
         from contexto import launcher  # builder-1's module; imported lazily
     stderr = stderr or sys.stderr
+    created: Path | None = None  # the session directory this launch made
     try:
         options = launcher.options_from_args(args)
         launcher.check_options(options)
@@ -491,18 +495,23 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                   file=stderr)
         session_id = args.session or uuid.uuid4().hex
         try:
+            existed = os.path.lexists(paths.session_dir(paths.contexto_home(), session_id))
             store = launcher.open_session(paths.contexto_home(), session_id, Path.cwd())
         except (OSError, ValueError) as exc:  # as `contexto run claude` reports it
             raise launcher.LaunchError(f"cannot open session {session_id!r}: {exc}", 2) from exc
+        created = None if existed else paths.session_dir(paths.contexto_home(), session_id)
         proxy, engine_name = launcher.start_proxy(store, target, source, launcher.engine_config(options),
                                                   args.observe_thinking, stderr=stderr)
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)
+        _remove_session(created)
         return 2
     except launcher.LaunchError as exc:
         print(f"contexto: {exc}", file=stderr)
+        _remove_session(created)
         return exc.code
     plan = None
+    started = False
     try:
         plan = plan_codex(list(args.cli_args), proxy.url, session_id, auth_mode=args.codex_auth,
                           key_helper=args.codex_key_helper, upstream=target,
@@ -515,6 +524,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         if not launcher.check_cli_version("codex", plan.argv[0], store,
                                           enabled=not getattr(args, "no_version_check", False), stderr=stderr):
             return launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started
+        started = True
         return launcher.run_child(plan.argv, plan.env, stderr=stderr)
     except CodexLaunchError as exc:
         print(f"contexto: {exc}", file=stderr)
@@ -524,3 +534,10 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             plan.cleanup()
         proxy.stop()
         launcher.report_missing_tools(proxy)  # Codex reports no MCP server that fails to start
+        if not started:
+            _remove_session(created)
+
+
+def _remove_session(created: Path | None) -> None:
+    if created is not None:
+        shutil.rmtree(created, ignore_errors=True)

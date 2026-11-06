@@ -1286,9 +1286,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
     Claude Code has recorded the folder as trusted; otherwise the file is skipped, the next one wins
     (the user's, the process environment, the default), and stderr names the ignored file and the way
     on (`--codex-key-helper` or `--codex-upstream`, or run `claude` there once and accept the
-    dialog). With no helper left, the launch stops with exit 2 before Codex starts. The flag and
-    environment helpers, `--upstream`, `--codex-upstream`, and the user file are never gated. A
-    trust lookup happens only when a project file sets the key.
+    dialog; the helper message also names `CONTEXTO_CODEX_KEY_HELPER`). With no helper left, the
+    launch stops with exit 2 before Codex starts and removes the session directory it created (a
+    resumed `--session` is kept; reviewer B, PR #237, consistent with D54's rule for every failed
+    launch). The flag and environment helpers, `--upstream`, `--codex-upstream`, and the user file
+    are never gated. A trust lookup happens only when a project file sets the key.
   - **The layout comes from the file system, not git** (reviewer A, PR #237 round 1). A folder that
     does not come from `git clone` (a zip, a tarball, a release asset) writes its own `.git`, so
     `git rev-parse` answers what the folder says. Reviewer A found 8 layouts where the first version
@@ -1331,7 +1333,16 @@ the owner's delegation. Open decisions are listed at the end with the options an
     Contexto because the launcher's `--settings` does not mark the folder trusted. The proxy's
     upstream must be the one Claude Code would use, or accepting the dialog would send requests
     somewhere else than plain `claude`. So `contexto run claude` (and `contexto proxy`) keep parity,
-    exposed exactly as plain `claude -p` is; pass `--upstream` to pin it.
+    exposed exactly as plain `claude -p` is; pass `--upstream` to pin it. One difference is left,
+    found by reviewer B (PR #237) and measured here with the pty and a stub that logs `HEAD`: while
+    the dialog is shown, Claude Code sends `HEAD /api/hello` (no credential header, no body). With
+    the project setting only a base URL, a user helper in user settings, and the dialog declined,
+    plain `claude` sent it to the user's own upstream and `contexto run claude` to the project's
+    host, because the proxy's upstream is fixed at launch. The host learns the user's address, the
+    Claude Code version and the time of the run. With `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
+    neither sent anything. Not changed here: answering `/api/hello` locally while the upstream comes
+    from an untrusted project file is possible later; for now the contract documents it and
+    `--upstream` pins the upstream.
   - **End to end** (real `contexto run codex exec`, codex-cli 0.166.0, QA's repository): untrusted, it
     printed both notes, exited 2, and the helper never ran; with the user's own helper and base URL
     in user settings, the helper did not run and all 10 requests went to the user's stub; after

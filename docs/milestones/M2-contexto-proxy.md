@@ -79,7 +79,13 @@ repository. `contexto run claude` and `contexto proxy` use them as Claude Code d
 uses a project's base URL and `apiKeyHelper` in `-p` mode with no trust check, and interactively
 only after its "do you trust this folder" dialog, which it still shows behind Contexto, so a
 proxy upstream taken from an untrusted project matches what Claude Code would use once the user
-accepts. `contexto run codex` does not: Codex runs the `apiKeyHelper` it is given without asking
+accepts. One difference remains before the dialog is answered: Claude Code sends `HEAD /api/hello`
+(no credential, no content) while the dialog is shown, and through Contexto that request reaches
+the untrusted project's base URL even if the user declines, where plain `claude` sends it to the
+user's own upstream (reviewer B, PR #237; measured with Claude Code 2.1.314; neither sends it with
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`). The project's host learns the user's address, the
+Claude Code version and the time. `--upstream` pins the upstream in a repository the user does not
+trust. `contexto run codex` does not: Codex runs the `apiKeyHelper` it is given without asking
 and plain Codex ignores `.claude/`, so for Codex a project file's `apiKeyHelper` and base URL
 count only when Claude Code has recorded the folder as trusted, that is
 `projects[<real path>].hasTrustDialogAccepted` is `true` in Claude Code's global config

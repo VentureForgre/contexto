@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from contexto import paths
 from contexto.codex import CodexLaunchError, claude_api_key_helper, plan_codex, run_codex
 from contexto.upstream import claude_global_config_path, claude_key_helper, folder_trusted, resolve_upstream
 from test_codex import PROXY, FakeLauncher, parse
@@ -279,6 +280,7 @@ def test_untrusted_project_helper_is_not_used(tree, home, tmp_path, name):
     message = str(caught.value)
     assert f"ignored apiKeyHelper from .claude/{name}" in message
     assert "--codex-key-helper" in message and "trust dialog" in message
+    assert "CONTEXTO_CODEX_KEY_HELPER" in message  # reviewer B, PR #237: the old message named it too
     assert "sk-evil" not in message and str(repo) not in message  # names the file, never the command or path
     assert not (tmp_path / "codex-home" / "config.toml").exists()
 
@@ -362,6 +364,14 @@ def test_untrusted_lookups_do_not_read_trust_when_no_project_file_sets_the_key(t
     assert resolve_upstream(env=env, cwd=tree / "repo", home=home, trusted_only=True).ignored == ()
 
 
+class SessionLauncher(FakeLauncher):
+    """FakeLauncher whose open_session creates the session directory, as the real one does."""
+
+    def open_session(self, home, session_id, workdir):
+        paths.session_dir(home, session_id).mkdir(parents=True, exist_ok=True)
+        return super().open_session(home, session_id, workdir)
+
+
 def run_in(repo: Path, monkeypatch, tmp_path: Path, *argv: str) -> tuple[FakeLauncher, str, int]:
     monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
@@ -369,7 +379,7 @@ def run_in(repo: Path, monkeypatch, tmp_path: Path, *argv: str) -> tuple[FakeLau
     for name in ("ANTHROPIC_BASE_URL", "CONTEXTO_CODEX_UPSTREAM", "CONTEXTO_CODEX_KEY_HELPER"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(repo)
-    fake, err = FakeLauncher(), io.StringIO()
+    fake, err = SessionLauncher(), io.StringIO()
     code = run_codex(parse(*argv, "codex", "exec", "hi"), launcher=fake, stderr=err)
     return fake, err.getvalue(), code
 
@@ -381,6 +391,19 @@ def test_run_codex_in_a_hostile_repo_runs_nothing_and_says_how_to_proceed(tree, 
     assert "ignored env.ANTHROPIC_BASE_URL from .claude/settings.json" in err and "--codex-upstream" in err
     assert "no key helper: ignored apiKeyHelper from .claude/settings.json" in err and "--codex-key-helper" in err
     assert "evil" not in fake.calls.get("upstream", "")
+    # Reviewer B, PR #237: the refused launch leaves no empty session behind.
+    assert not paths.session_dir(tmp_path / "ctx", fake.calls["session"]).exists()
+
+
+def test_a_refused_launch_keeps_a_resumed_session_and_a_started_one_keeps_its_own(tree, home, tmp_path,
+                                                                                  monkeypatch):
+    kept = paths.session_dir(tmp_path / "ctx", "resumed")
+    kept.mkdir(parents=True)
+    (kept / "pages").mkdir()
+    _, _, code = run_in(hostile_repo(tree), monkeypatch, tmp_path, "--session", "resumed")
+    assert code == 2 and (kept / "pages").is_dir()
+    fake, _, code = run_in(hostile_repo(tree), monkeypatch, tmp_path, "--codex-key-helper", "/synthetic/helper")
+    assert code == 0 and paths.session_dir(tmp_path / "ctx", fake.calls["session"]).is_dir()
 
 
 def test_run_codex_sends_the_users_key_only_to_the_users_upstream(tree, home, tmp_path, monkeypatch):
