@@ -18,7 +18,9 @@ same design after Claude Code works.
   them (`.github/workflows/ci.yml`).
 - Data lives under `$CONTEXTO_HOME` (default `~/.contexto`), one directory per session:
   `sessions/<session id>/`. Nothing in it is committed. Everything under `$CONTEXTO_HOME` is
-  private to the user: directories `0700`, files `0600`, created atomically (secrets such as the
+  private to the user: directories `0700`, files `0600`, created atomically. A home Contexto creates
+  is `0700`; an existing one keeps the mode its user gave it, and one that is not a directory is
+  refused before any mode is changed (D55) (secrets such as the
   page key are written to a temporary file and renamed, never left empty by a race). Never edit the user's Claude or Codex
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
@@ -264,8 +266,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    log `window_minimal`; this keeps the request under the bound at the cost of the previous turn's
    verbatim text. Only if `W` is not positive or cannot hold even the new turn, log
    `bound_too_small` and still rotate to the minimal window (the new turn alone), which is
-   smaller than sending unrotated; the launcher warns at start when the measured
-   head leaves less than 25,000 tokens of window budget and suggests a larger `--bound`. Example
+   smaller than sending unrotated; the launcher warns at start when a typical head (28,000
+   tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
+   seat) leaves less than 25,000 tokens of window budget, says that recall will barely fit or, at a
+   budget of 0 or less, not fit at all, and suggests a larger `--bound` (D55). Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
    OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
    thinking strips will be frequent at 150k for large heads (see O3).
@@ -957,7 +961,9 @@ request's `transform_events`, before the engine's request event. The exit event 
 after `proxy_stop`, written under the transform lock (skipped if a stuck request holds the lock for 2
 seconds). The launcher prints the warning on stderr, naming the likely cause and the fix, once when
 it is first reported and once more after the CLI exits for a repeated exit event, because a TUI can
-draw over a line printed mid-run. If the check itself raises, the engine logs `toolcheck_error` with
+draw over a line printed mid-run. `contexto run claude` holds every such line while Claude Code runs
+and prints it after Claude Code exits (D55); an exit-time repeat of a line still held is not printed
+twice. If the check itself raises, the engine logs `toolcheck_error` with
 the exception's type name only and keeps the request's rewrite.
 
 Refused tools (D44): offered tools can still be refused. On every Messages API request, main or not,
@@ -1025,6 +1031,39 @@ checked against the selected entry), so a symlink swapped in at any moment canno
 or create anything outside the checked directory. Failures are per session; the exit code is 1 if
 any failed or if the session named by `--session` was skipped, with `contexto: error:` on stderr.
 A store resumed while prune deletes its session waits, starts empty, and prints a warning.
+
+**`contexto run claude` lifecycle (D55).**
+- Resume. Every request's Claude Code session id (the `X-Claude-Code-Session-Id` header, else the
+  `session_id` in `metadata.user_id`) is recorded in the session's `meta.json` as
+  `cli_sessions.claude.<id>` = last seen (wall-clock seconds; written at its first request in a launch
+  and again at exit; the newest 64 kept). The id never enters the session log. Claude Code keeps the id
+  across `--resume` and `--continue` and names its transcript after it (new only with
+  `--fork-session`; measured on 2.1.314). Without `--session`, `claude --resume <id>` (or `-r <id>`,
+  `--resume=<id>`) reuses the session that served `<id>`, and `claude --continue` (`-c`) the session
+  that last served Claude Code with this working directory; the launcher prints which. With no match,
+  or `--resume` without an id (Claude Code's picker, which Contexto cannot follow), it prints why on
+  stderr and opens a new session. Arguments after `--` are not read. `--session` always wins. If a
+  `--continue` lands in a conversation the chosen session never served (one run without Contexto),
+  a warning says so at exit. After Claude Code exits, when a request named a Claude Code session, the
+  launcher prints `contexto run --session S [the launch's Contexto options] claude --resume <id>` with
+  the last id seen, because Claude Code's own exit hint (`claude --resume <id>`) bypasses Contexto.
+- Signals. SIGTERM, SIGHUP and SIGQUIT are forwarded to Claude Code while it runs; SIGUSR1, SIGUSR2
+  and SIGALRM end it with SIGTERM; SIGINT is ignored by the launcher (the terminal delivers it). Before
+  Claude Code starts (the version check) and after it exits, those six signals run the launcher's
+  cleanup (proxy stop, temporary files, `exit` event) and exit 128 + N; the version check's process
+  group is killed on the way. SIGKILL cannot be caught: a watchdog process in its own session reads a
+  pipe from the launcher and, when the pipe closes without the launcher's `done`, sends Claude Code
+  SIGTERM and deletes the temporary directory. The session log then has no `exit` event; if the
+  watchdog is killed too, the temporary directory (proxy URL, tool names, session id, home path; no
+  secrets) stays in `$TMPDIR`.
+- Checks before any session is opened, each a usage error (exit 2) unless noted: Contexto's own
+  `contexto run` options right after `claude` (the message shows the command with them moved before
+  `claude`); a malformed upstream URL, named with its source; a `$CONTEXTO_HOME` that is not a
+  directory; and `${` in the home, the session id or the interpreter path, which Claude Code would
+  expand in the MCP config (2.1.314 expands `${VAR}` and `${VAR:-x}` in `command`, `args` and `env`,
+  keeps `$VAR`, and has no escape). A `claude` on PATH that is not executable, a broken symlink or a
+  directory is named with what is wrong (exit 127). The MCP server gets `--session=<id>` as one
+  argument, so an id starting with `-` stays a value.
 
 ## Lanes
 
