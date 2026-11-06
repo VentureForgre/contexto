@@ -773,6 +773,9 @@ def test_continue_that_lands_in_another_conversation_is_reported_at_exit(env, up
     (["--resume", CLAUDE_A, "-p"], ("resume", CLAUDE_A)), (["-r", CLAUDE_A], ("resume", CLAUDE_A)),
     ([f"--resume={CLAUDE_A}"], ("resume", CLAUDE_A)), (["--resume"], ("resume", None)),
     (["--resume", "-p", "x"], ("resume", None)), (["-p", "--", "--continue"], None),
+    # Reviewer A, PR #240: a value of an option that takes one is not an option, even with a leading "-".
+    (["--append-system-prompt", "--continue"], None), (["--model", "-c", "-p"], None),
+    (["--add-dir", "a", "-c"], ("continue", None)), (["--session-id", "-r", "x"], None),
 ])
 def test_resume_request(args, expected):
     assert launcher.resume_request(args) == expected
@@ -1004,3 +1007,132 @@ def test_a_warning_raised_while_claude_runs_is_printed_after_it_exits(env, upstr
     assert proc.returncode == 0, err
     warning = next(line for line in err.splitlines() if "refused Contexto's contexto_recall" in line)
     assert err.index("claude-still-running") < err.index(warning)
+
+
+# Reviewer A on PR #240
+
+
+@pytest.mark.parametrize("args", [["--resume", CLAUDE_A], ["--continue"]])
+def test_an_automatically_picked_session_another_launch_has_open_is_not_shared(env, upstream, tmp_path, args):
+    from contexto.store import SessionStore
+
+    served = first_run(env, upstream, tmp_path)
+    held = SessionStore(Path(env["CONTEXTO_HOME"]), served)  # holds live.lock, as a running launch does
+    try:
+        proc = launch(dict(env, FAKE_REQUEST="1", FAKE_CLAUDE_SESSION=CLAUDE_A), "--upstream", upstream,
+                      "claude", *args, "-p", "again", cwd=tmp_path)
+        _, err = proc.communicate(timeout=30)
+        assert proc.returncode == 0, err
+        assert session_from(err) != served and "another launch has open" in err
+        assert f"pass --session {served} before 'claude' to share it" in err
+        # At exit: the conversation is now in two stores, and the earlier one is named.
+        assert f"Claude Code session {CLAUDE_A} was also served by Contexto session {served}" in err
+        proc = launch(env, "--upstream", upstream, "--session", served, "claude", "--resume", CLAUDE_A, cwd=tmp_path)
+        _, err = proc.communicate(timeout=30)
+        assert session_from(err) == served  # an explicit --session is never questioned
+    finally:
+        del held
+
+
+def test_resume_names_the_other_sessions_that_served_the_id(tmp_path):
+    import io
+
+    from contexto.store import SessionStore
+
+    for name, seen_at in (("older", 100.0), ("newer", 200.0)):
+        store = SessionStore(tmp_path, name)
+        store.record_cli_session("claude", CLAUDE_A, seen_at)
+        del store
+    err = io.StringIO()
+    choice = launcher.choose_session(LaunchOptions(claude_args=["--resume", CLAUDE_A]), tmp_path, tmp_path, err)
+    assert choice.session_id == "newer" and not choice.unmatched
+    assert "served by Contexto session newer (newest; also served by older" in err.getvalue()
+
+
+@pytest.mark.parametrize("fork", [False, True])
+def test_continue_with_fork_session_is_not_reported_as_another_conversation(tmp_path, fork):
+    import io
+
+    class Recorder:
+        last, seen = CLAUDE_B, {CLAUDE_B: 1.0}
+
+    args = ["-c", "--fork-session"] if fork else ["-c"]
+    err = io.StringIO()
+    launcher.after_exit(LaunchOptions(claude_args=args), tmp_path, "s", Recorder(),
+                        launcher.SessionChoice("s", continued={CLAUDE_A}), err)
+    assert ("pages and pins come from another conversation" in err.getvalue()) is not fork
+    assert err.getvalue().splitlines()[-1].endswith(f"claude --resume {CLAUDE_B}")
+
+
+def test_flush_never_raises_even_when_the_seen_ids_change_under_it():
+    class GrowingStore:
+        def __init__(self, recorder):
+            self.recorder = recorder
+
+        def record_cli_session(self, cli, cli_session, seen_at=None):
+            self.recorder.seen[f"late-{len(self.recorder.seen)}"] = 1.0  # a late handler thread adds an id
+
+    recorder = launcher.SessionRecorder(lambda r, h, e: (r, h, []), None)
+    recorder.store = GrowingStore(recorder)
+    recorder.seen = {CLAUDE_A: 1.0, CLAUDE_B: 2.0}
+    recorder.flush()
+
+
+def _sleeper() -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+@pytest.mark.parametrize("forgotten", [False, True])
+def test_the_watchdog_signals_only_a_child_it_was_not_told_has_exited(tmp_path, forgotten):
+    from contexto.store.memory import MemoryStore
+
+    tmp = tmp_path / "contexto-run-x"
+    tmp.mkdir()
+    child = _sleeper()
+    try:
+        watchdog = launcher.Watchdog.start(tmp, MemoryStore())
+        watchdog.watch(child.pid)
+        if forgotten:
+            watchdog.forget()  # what run_child sends once the child is reaped: its pid may be reused
+        watchdog.process.stdin.close()  # the launcher died without "done"
+        watchdog.process.wait(timeout=10)
+        assert not tmp.exists()
+        if forgotten:
+            with pytest.raises(subprocess.TimeoutExpired):
+                child.wait(timeout=0.5)
+        else:
+            assert child.wait(timeout=10) == -signal.SIGTERM
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_signal_before_the_child_exists_is_forwarded_once_it_does():
+    forwarding = launcher._ChildSignals()
+    previous = forwarding.install()
+    child = None
+    try:
+        forwarding._forward(signal.SIGUSR1, None)  # arrives during the spawn
+        child = _sleeper()
+        forwarding.attach(child)
+        assert child.wait(timeout=10) == -signal.SIGTERM
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+def test_run_child_tells_the_watchdog_the_child_was_reaped():
+    sent = []
+
+    class Watch:
+        def watch(self, pid):
+            sent.append(("pid", pid))
+
+        def forget(self):
+            sent.append(("exited",))
+
+    assert launcher.run_child([sys.executable, "-c", "raise SystemExit(4)"], watchdog=Watch()) == 4
+    assert [m[0] for m in sent] == ["pid", "exited"]

@@ -1040,20 +1040,29 @@ A store resumed while prune deletes its session waits, starts empty, and prints 
   across `--resume` and `--continue` and names its transcript after it (new only with
   `--fork-session`; measured on 2.1.314). Without `--session`, `claude --resume <id>` (or `-r <id>`,
   `--resume=<id>`) reuses the session that served `<id>`, and `claude --continue` (`-c`) the session
-  that last served Claude Code with this working directory; the launcher prints which. With no match,
-  or `--resume` without an id (Claude Code's picker, which Contexto cannot follow), it prints why on
-  stderr and opens a new session. Arguments after `--` are not read. `--session` always wins. If a
-  `--continue` lands in a conversation the chosen session never served (one run without Contexto),
-  a warning says so at exit. After Claude Code exits, when a request named a Claude Code session, the
+  that last served Claude Code with this working directory; the launcher prints which, and for
+  `--resume` names any other session that served the id too. With no match, `--resume` without an id
+  (Claude Code's picker, which Contexto cannot follow), or a picked session whose `live.lock` another
+  process holds (another launch has it open: two launches on one store would share its epoch record
+  and recall room, rule 16), it prints why on stderr and opens a new session; at exit it then names
+  any other session that served the conversation, since the conversation is split across two stores.
+  Arguments after `--` are not read, nor the value of a Claude Code 2.1.314 option that takes one
+  (`--append-system-prompt --continue` is a prompt). `--session` always wins and is never questioned.
+  If a `--continue` lands in a conversation the chosen session never served (one run without
+  Contexto), a warning says so at exit; not with `--fork-session`, whose new id continues the same
+  history. After Claude Code exits, when a request named a Claude Code session, the
   launcher prints `contexto run --session S [the launch's Contexto options] claude --resume <id>` with
   the last id seen, because Claude Code's own exit hint (`claude --resume <id>`) bypasses Contexto.
 - Signals. SIGTERM, SIGHUP and SIGQUIT are forwarded to Claude Code while it runs; SIGUSR1, SIGUSR2
   and SIGALRM end it with SIGTERM; SIGINT is ignored by the launcher (the terminal delivers it). Before
   Claude Code starts (the version check) and after it exits, those six signals run the launcher's
   cleanup (proxy stop, temporary files, `exit` event) and exit 128 + N; the version check's process
-  group is killed on the way. SIGKILL cannot be caught: a watchdog process in its own session reads a
-  pipe from the launcher and, when the pipe closes without the launcher's `done`, sends Claude Code
-  SIGTERM and deletes the temporary directory. The session log then has no `exit` event; if the
+  group is killed on the way. The forwarding handlers are installed before Claude Code is spawned, and
+  a signal that arrives during the spawn is sent once it exists. SIGKILL cannot be caught: a watchdog
+  process in its own session reads a pipe from the launcher (`pid <n>` at the spawn, `exited` once
+  Claude Code is reaped, `done` from the cleanup) and, when the pipe closes without `done`, sends
+  Claude Code SIGTERM unless it has exited (a reaped pid may be reused) and deletes the temporary
+  directory. The session log then has no `exit` event; if the
   watchdog is killed too, the temporary directory (proxy URL, tool names, session id, home path; no
   secrets) stays in `$TMPDIR`.
 - Checks before any session is opened, each a usage error (exit 2) unless noted: Contexto's own

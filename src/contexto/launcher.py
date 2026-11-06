@@ -70,6 +70,7 @@ before claude starts.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -81,7 +82,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -90,10 +91,10 @@ from urllib.parse import urlsplit
 from contexto.cliversions import launch_check
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
 from contexto.mcp import TOOLS as MCP_TOOLS
-from contexto.paths import contexto_home, mcp_env
+from contexto.paths import contexto_home, mcp_env, session_dir
 from contexto.private import affinity_salt
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
-from contexto.store import SessionStore
+from contexto.store import LIVE_LOCK, SessionStore
 from contexto.toolcheck import denied_tools_message, missing_tools_message
 from contexto.upstream import Upstream, resolve_upstream
 
@@ -113,10 +114,21 @@ FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 # (claude's runtime may give SIGUSR1 a meaning of its own, such as a debugger).
 TERMINATING_SIGNALS = (signal.SIGUSR1, signal.SIGUSR2, signal.SIGALRM)
 WATCHDOG_DONE = b"done\n"
+WATCHDOG_EXITED = b"exited\n"  # the child was reaped: its pid may be reused
 # Contexto's own ``contexto run`` options, and whether each takes a value (D55: a hint when one is put
 # after the CLI's name). The codex options are added by contexto.codex.
 RUN_OPTIONS = {"--bound": True, "--allow-large-bound": False, "--window-fraction": True, "--headroom-floor": True,
                "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False}
+# Claude Code 2.1.314's options whose value is the next argument even when it starts with "-" (``<value>``
+# in ``claude --help``; variadic ones take at least that one). ``claude_options`` skips it.
+CLAUDE_VALUE_OPTIONS = frozenset({
+    "--add-dir", "--agent", "--agents", "--allowedTools", "--allowed-tools", "--append-system-prompt",
+    "--append-system-prompt-file", "--autocompact", "--betas", "--debug-file", "--disallowedTools",
+    "--disallowed-tools", "--effort", "--environment", "--fallback-model", "--file", "--input-format",
+    "--json-schema", "--max-budget-usd", "--mcp-config", "--model", "-n", "--name", "--output-format",
+    "--permission-mode", "--permission-prompts", "--plugin-dir", "--plugin-url",
+    "--remote-control-session-name-prefix", "--session-id", "--setting-sources", "--settings",
+    "--system-prompt", "--system-prompt-file", "--system-prompt-snapshot", "--tools"})
 CLAUDE_SESSION_HEADER = "x-claude-code-session-id"
 CLI_SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}")  # Claude Code sends a UUID
 LEGACY_USER_ID_SESSION = re.compile(r"_session_([0-9A-Fa-f-]{36})")  # user_<hash>_account_<uuid>_session_<uuid>
@@ -409,11 +421,13 @@ class SessionRecorder:
             self.store.record_cli_session(self.cli, cli_session, self.seen[cli_session])
 
     def flush(self) -> None:
-        for cli_session, seen_at in self.seen.items():
-            try:
+        """Record each id's last-seen time; runs in the cleanup, so it never raises. A copy is read: a
+        request still in a handler after ``proxy_stop_incomplete`` can add an id meanwhile."""
+        try:
+            for cli_session, seen_at in list(self.seen.items()):
                 self.store.record_cli_session(self.cli, cli_session, seen_at)
-            except Exception:
-                return
+        except Exception:
+            pass
 
     def __getattr__(self, name: str) -> Any:
         transform = self.__dict__.get("transform")
@@ -422,13 +436,27 @@ class SessionRecorder:
         return getattr(transform, name)
 
 
+def claude_options(cli_args: list[str]) -> Iterator[tuple[int, str]]:
+    """(index, argument) of each argument Claude Code reads as an option, up to ``--``. The value of an
+    option in ``CLAUDE_VALUE_OPTIONS`` is skipped even when it starts with ``-`` (``--append-system-prompt
+    --continue`` is a prompt, not a continue)."""
+    i = 0
+    while i < len(cli_args):
+        arg = cli_args[i]
+        if arg == "--":
+            return
+        if arg.startswith("-"):
+            yield i, arg
+            if arg in CLAUDE_VALUE_OPTIONS:
+                i += 1
+        i += 1
+
+
 def resume_request(cli_args: list[str]) -> tuple[str, str | None] | None:
     """What Claude Code will resume: ``("continue", None)`` for ``-c``/``--continue``, ``("resume", id)``
     for ``-r``/``--resume <id>`` or ``--resume=<id>``, ``("resume", None)`` for ``--resume`` without a
-    value (Claude Code's picker), else None. Arguments after ``--`` are not options."""
-    for i, arg in enumerate(cli_args):
-        if arg == "--":
-            return None
+    value (Claude Code's picker), else None. Only arguments ``claude_options`` names are read."""
+    for i, arg in claude_options(cli_args):
         if arg in ("-c", "--continue"):
             return "continue", None
         if arg in ("-r", "--resume"):
@@ -437,6 +465,11 @@ def resume_request(cli_args: list[str]) -> tuple[str, str | None] | None:
         if arg.startswith("--resume="):
             return "resume", arg.split("=", 1)[1] or None
     return None
+
+
+def forks(cli_args: list[str]) -> bool:
+    """``--fork-session``: Claude Code gives the resumed or continued conversation a new id."""
+    return any(arg == "--fork-session" for _, arg in claude_options(cli_args))
 
 
 def served_sessions(home: Path) -> list[tuple[float, str, str, Path | None]]:
@@ -458,46 +491,78 @@ def served_sessions(home: Path) -> list[tuple[float, str, str, Path | None]]:
     return found
 
 
-def choose_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> tuple[str, set[str] | None]:
-    """The session for this launch, and for ``--continue`` the Claude Code sessions it had served (so
-    the exit can tell when Claude Code continued another conversation). ``--session`` wins; without it,
-    ``--resume <id>`` takes the session that served ``<id>`` and ``--continue`` the one that last served
-    Claude Code in ``cwd``. Otherwise a new session, with a line on stderr saying why when a resume was
-    asked for."""
+def session_in_use(home: Path, session_id: str) -> bool:
+    """Whether another process has the session open: the proxy, launcher and MCP server each hold a
+    shared lock on its ``live.lock`` (D37), so a non-blocking exclusive lock fails. False when the lock
+    cannot be opened (the open that follows reports a real problem)."""
+    try:
+        fd = os.open(session_dir(home, session_id) / LIVE_LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except (OSError, ValueError):
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)  # releases the probe's lock
+    return False
+
+
+@dataclass
+class SessionChoice:
+    session_id: str
+    continued: set[str] | None = None  # --continue: the Claude Code sessions the chosen session had served
+    unmatched: bool = False  # a resume was asked for, and this launch got a new session
+
+
+def choose_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> SessionChoice:
+    """The session for this launch. ``--session`` wins and is never questioned. Without it, ``--resume
+    <id>`` takes the session that served ``<id>`` (naming any other that served it too) and
+    ``--continue`` the one that last served Claude Code in ``cwd``, unless that session is in use by
+    another launch: two launches on one store share its epoch record and its recall room, which the
+    contract leaves out of scope, so a new session opens instead. Every other resume gets a new session
+    with a line on stderr saying why."""
     if options.session_id:
-        return options.session_id, None
+        return SessionChoice(options.session_id)
     request = resume_request(options.claude_args)
     new = uuid.uuid4().hex
     if request is None:
-        return new, None
+        return SessionChoice(new)
+
+    def say(message: str) -> None:
+        print(f"contexto: {message}", file=stderr, flush=True)
+
     kind, wanted = request
     if kind == "resume" and wanted is None:
-        print("contexto: --resume without a session id opens Claude Code's picker, and Contexto cannot tell "
-              "which conversation you will pick, so this launch uses a new Contexto session. To keep the "
-              "conversation's store, run: contexto run claude --resume <id>", file=stderr, flush=True)
-        return new, None
+        say("--resume without a session id opens Claude Code's picker, and Contexto cannot tell which "
+            "conversation you will pick, so this launch uses a new Contexto session. To keep the "
+            "conversation's store, run: contexto run claude --resume <id>")
+        return SessionChoice(new, unmatched=True)
     served = served_sessions(home)
     if kind == "resume":
+        shown = wanted if CLI_SESSION_ID.fullmatch(wanted) else repr(wanted)  # a search term, not an id
         matches = [s for s in served if s[2] == wanted]
-        if not matches:
-            shown = wanted if CLI_SESSION_ID.fullmatch(wanted) else repr(wanted)  # a search term, not an id
-            print(f"contexto: no Contexto session has served Claude Code session {shown}; starting a new "
-                  f"session (pass --session ID before 'claude' to use a given one)", file=stderr, flush=True)
-            return new, None
-        session = max(matches, key=lambda s: s[0])[1]
-        print(f"contexto: Claude Code session {wanted} was served by Contexto session {session}; resuming it",
-              file=stderr, flush=True)
-        return session, None
-    here = cwd.resolve()
-    matches = [s for s in served if s[3] == here]
+        found = f"Claude Code session {shown} was served by Contexto session "
+        missing = f"no Contexto session has served Claude Code session {shown}"
+    else:
+        here = cwd.resolve()
+        matches = [s for s in served if s[3] == here]
+        found = "the last Contexto session to serve Claude Code in this directory is "
+        missing = "no Contexto session has served Claude Code in this directory"
     if not matches:
-        print("contexto: no Contexto session has served Claude Code in this directory; starting a new session "
-              "(pass --session ID before 'claude' to use a given one)", file=stderr, flush=True)
-        return new, None
+        say(f"{missing}; starting a new session (pass --session ID before 'claude' to use a given one)")
+        return SessionChoice(new, unmatched=True)
     session = max(matches, key=lambda s: s[0])[1]
-    print(f"contexto: continuing Contexto session {session}, the last to serve Claude Code in this directory",
-          file=stderr, flush=True)
-    return session, {s[2] for s in served if s[1] == session}
+    if session_in_use(home, session):
+        say(f"{found}{session}, which another launch has open; starting a new session (pass --session "
+            f"{session} before 'claude' to share it)")
+        return SessionChoice(new, unmatched=True)
+    others = sorted({s[1] for s in matches if s[1] != session}) if kind == "resume" else []
+    also = f" (newest; also served by {', '.join(others)}: pass --session ID to use one of those)" if others else ""
+    say(f"{found}{session}{also}; {'resuming' if kind == 'resume' else 'continuing'} it")
+    return SessionChoice(session, {s[2] for s in served if s[1] == session} if kind == "continue" else None)
 
 
 def resume_command(options: LaunchOptions, session_id: str, cli_session: str) -> str:
@@ -626,6 +691,8 @@ for line in iter(sys.stdin.buffer.readline, b""):
         sys.exit(0)
     if line.startswith(b"pid "):
         pid = int(line[4:])
+    if line == b"exited\n":
+        pid = None
 if pid is not None:
     try:
         os.kill(pid, signal.SIGTERM)
@@ -638,9 +705,11 @@ shutil.rmtree(sys.argv[1], ignore_errors=True)
 class Watchdog:
     """Ends claude and removes the temporary files if the launcher dies without its cleanup (SIGKILL;
     macOS has no PDEATHSIG). A small Python process in its own session (no terminal signal reaches it)
-    reads a pipe from the launcher: ``pid <n>`` when claude starts, ``done`` from the cleanup. End of
-    file without ``done`` means the launcher is gone: it sends claude SIGTERM (Claude Code exits on it)
-    and deletes the temporary directory. The session log gets no ``exit`` event in that case."""
+    reads a pipe from the launcher: ``pid <n>`` when claude starts, ``exited`` once it is reaped (its
+    pid may then be reused, so it is never signalled after that), ``done`` from the cleanup. End of
+    file without ``done`` means the launcher is gone: it sends claude SIGTERM if claude has not exited
+    (Claude Code exits on it) and deletes the temporary directory. The session log gets no ``exit``
+    event in that case."""
 
     def __init__(self, process: subprocess.Popen) -> None:
         self.process = process
@@ -658,6 +727,9 @@ class Watchdog:
 
     def watch(self, pid: int) -> None:
         self._send(f"pid {pid}\n".encode())
+
+    def forget(self) -> None:
+        self._send(WATCHDOG_EXITED)
 
     def done(self) -> None:
         self._send(WATCHDOG_DONE)
@@ -815,26 +887,36 @@ def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None
     """Run a CLI with the terminal passed through and return its exit code (128 + N if it died from
     signal N, 127 if it cannot be started). Ctrl+C reaches it through the terminal while the
     launcher ignores SIGINT; SIGTERM, SIGHUP and SIGQUIT are forwarded, and SIGUSR1, SIGUSR2 and
-    SIGALRM end it with SIGTERM. ``watchdog`` is told the child's pid. Shared by claude and codex."""
+    SIGALRM end it with SIGTERM. The handlers are installed before the spawn, so a signal that arrives
+    while the child starts is held and forwarded once it exists, not lost or raised mid-spawn.
+    ``watchdog`` is told the child's pid when it starts and told to forget it once it is reaped, so a
+    later death of the launcher never signals a reused pid. Shared by claude and codex."""
+    forwarding = _ChildSignals()
+    previous = forwarding.install()
+    child: subprocess.Popen | None = None
     try:
-        child = subprocess.Popen(argv, env=env)
-    except (FileNotFoundError, PermissionError) as exc:
-        print(f"contexto: cannot start {argv[0]!r}: {exc.strerror}", file=stderr or sys.stderr)
-        return EXIT_NOT_FOUND
-    previous = _install_signal_handlers(child)
-    if watchdog is not None:
-        watchdog.watch(child.pid)
-    try:
+        try:
+            child = subprocess.Popen(argv, env=env)
+        except (FileNotFoundError, PermissionError) as exc:
+            print(f"contexto: cannot start {argv[0]!r}: {exc.strerror}", file=stderr or sys.stderr)
+            return EXIT_NOT_FOUND
+        if watchdog is not None:
+            watchdog.watch(child.pid)
+        forwarding.attach(child)
         return exit_code(child.wait())
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
-        if child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                child.kill()
+        if child is not None:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+            if watchdog is not None:
+                watchdog.forget()
 
 
 def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
@@ -848,7 +930,8 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     check_upstream(upstream)
     home = contexto_home()
     check_home(home)
-    session_id, continued = choose_session(options, home, Path.cwd(), stderr)
+    choice = choose_session(options, home, Path.cwd(), stderr)
+    session_id = choice.session_id
     check_mcp_values(session_id, home, sys.executable)
     try:
         store = open_session(home, session_id, Path.cwd())
@@ -897,40 +980,66 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
         store.log({"event": "exit", "code": code})
-        after_exit(options, session_id, recorder, continued, stderr)
+        after_exit(options, home, session_id, recorder, choice, stderr)
 
 
-def after_exit(options: LaunchOptions, session_id: str, recorder: SessionRecorder, continued: set[str] | None,
-               stderr) -> None:
-    """The last lines, after claude exited (D55): a ``--continue`` that Claude Code took to a conversation
-    the chosen session never served, and the command that resumes this conversation through Contexto
-    (Claude Code's own exit hint, ``claude --resume <id>``, bypasses it). Nothing when no request named
-    a Claude Code session."""
-    if recorder.last is None:
+def after_exit(options: LaunchOptions, home: Path, session_id: str, recorder: SessionRecorder,
+               choice: SessionChoice, stderr) -> None:
+    """The last lines, after claude exited (D55), when a request named a Claude Code session:
+    - a ``--continue`` that Claude Code took to a conversation the chosen session never served (not
+      with ``--fork-session``, whose new id continues the same history);
+    - a resume that got a new session while another session served the same conversation (the
+      picker, a search term, or a session in use): the conversation is now split across two stores;
+    - the command that resumes this conversation through Contexto (Claude Code's own exit hint,
+      ``claude --resume <id>``, bypasses it)."""
+    last = recorder.last
+    if last is None:
         return
-    if continued is not None and not continued & set(recorder.seen):
-        print(f"contexto: warning: Claude Code continued session {recorder.last}, which Contexto session "
-              f"{session_id} had not served (its latest conversation here ran without Contexto?), so that "
-              f"session's pages and pins come from another conversation. Resume by id to avoid this.",
-              file=stderr, flush=True)
+    if choice.continued is not None and not forks(options.claude_args) and not choice.continued & set(recorder.seen):
+        print(f"contexto: warning: Claude Code continued session {last}, which Contexto session {session_id} "
+              f"had not served (its latest conversation here ran without Contexto?), so that session's pages "
+              f"and pins come from another conversation. Resume by id to avoid this.", file=stderr, flush=True)
+    if choice.unmatched:
+        others = sorted({s[1] for s in served_sessions(home) if s[2] == last and s[1] != session_id})
+        if others:
+            print(f"contexto: Claude Code session {last} was also served by Contexto session "
+                  f"{', '.join(others)}; its earlier pages and pins are there, and a later resume picks this "
+                  f"session (the newest) unless you pass --session ID.", file=stderr, flush=True)
     print(f"contexto: resume this conversation through Contexto with: "
-          f"{resume_command(options, session_id, recorder.last)}", file=stderr, flush=True)
+          f"{resume_command(options, session_id, last)}", file=stderr, flush=True)
 
 
-def _install_signal_handlers(child: subprocess.Popen) -> dict[int, Any]:
-    """Keep the launcher alive through the user's Ctrl+C and forward termination to claude: the
-    forwarded signals as they are, the other terminating ones as SIGTERM. Python handlers (not SIG_IGN)
-    are used, so nothing is inherited by the child."""
-    previous: dict[int, Any] = {}
+class _ChildSignals:
+    """``run_child``'s handlers: keep the launcher alive through the user's Ctrl+C and forward
+    termination to the child, the forwarded signals as they are and the other terminating ones as
+    SIGTERM. A signal that arrives before the child exists is kept and sent by ``attach``. Python
+    handlers (not SIG_IGN) are used, so nothing is inherited by the child."""
 
-    def ignore(signum, frame) -> None:
+    def __init__(self) -> None:
+        self.child: subprocess.Popen | None = None
+        self.pending: int | None = None
+
+    def install(self) -> dict[int, Any]:
+        previous: dict[int, Any] = {signal.SIGINT: signal.signal(signal.SIGINT, self._ignore)}
+        for signum in (*FORWARDED_SIGNALS, *TERMINATING_SIGNALS):
+            previous[signum] = signal.signal(signum, self._forward)
+        return previous
+
+    def attach(self, child: subprocess.Popen) -> None:
+        self.child = child
+        if self.pending is not None:
+            self._send(self.pending)
+
+    def _ignore(self, signum: int, frame: Any) -> None:
         pass
 
-    def forward(signum, frame) -> None:
-        if child.poll() is None:
-            child.send_signal(signum if signum in FORWARDED_SIGNALS else signal.SIGTERM)
+    def _forward(self, signum: int, frame: Any) -> None:
+        signum = signum if signum in FORWARDED_SIGNALS else signal.SIGTERM
+        if self.child is None:
+            self.pending = signum
+        else:
+            self._send(signum)
 
-    previous[signal.SIGINT] = signal.signal(signal.SIGINT, ignore)
-    for signum in (*FORWARDED_SIGNALS, *TERMINATING_SIGNALS):
-        previous[signum] = signal.signal(signum, forward)
-    return previous
+    def _send(self, signum: int) -> None:
+        if self.child is not None and self.child.poll() is None:
+            self.child.send_signal(signum)

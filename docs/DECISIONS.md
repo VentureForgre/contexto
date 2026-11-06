@@ -1310,6 +1310,20 @@ the owner's delegation. Open decisions are listed at the end with the options an
     `${VAR}` and `${VAR:-x}` (not `$VAR`) in an MCP config's command, args and env, and `$${X}` gives
     `$` plus the value, so there is no escape: `${` in the home, the session id or the interpreter path
     is refused. The MCP server's `--session=<id>` is one argument (an id starting with `-` broke it).
+  - **Review round 1 (reviewer A, PR #240).** Automatic reuse put two live launches on one store
+    (`-c` in two terminals, or `--resume <id>` while `<id>` was open elsewhere), which the contract
+    leaves out of scope and which charges both conversations to one recall room: a session picked
+    automatically is now probed with a non-blocking exclusive lock on its `live.lock`, as prune does,
+    and when another process holds it the launch opens a new session and says so; `--session` still
+    shares on purpose. A resume through the picker, a search term or a busy session splits a
+    conversation across two stores: the resume line names every other session that served the id, and
+    the exit names the earlier one. `-c --fork-session` no longer gets the "another conversation"
+    warning. The watchdog is told `exited` once claude is reaped, so a SIGKILL during the up to 4
+    seconds of cleanup cannot signal a reused pid, and `run_child` installs its handlers before the
+    spawn (a signal during it is sent once the child exists). The value of a Claude Code option that
+    takes one (from 2.1.314's `--help`) is not read as `-c` or `--resume`, and the exit's metadata
+    write cannot raise out of the cleanup. Left: two launches that probe the same free session within
+    the same few milliseconds can still both take it.
 
 ## Open decisions
 
