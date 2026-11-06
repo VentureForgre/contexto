@@ -481,3 +481,15 @@ def test_the_replay_approval_is_the_combined_approval_minus_the_recorded_h1_spen
     bad.write_text("{}")
     assert run.main(["replay", "--cc-jsonl", str(jsonl), "--out", str(tmp_path / "o2"), "--approved", "1",
                      "--h1-record", str(bad), "--seat-settings", str(seat), "--upstream", stub]) == 2
+
+
+def test_a_note_keeps_the_converted_blocks_cache_control_and_reads_name_when_tool_name_is_null():
+    from acceptance.replay import _unsent_tool_notes
+    messages = [{"role": "system", "content": [
+        {"type": "tool_addition", "tool": {"type": "tool_reference", "tool_name": None,
+                                           "name": "mcp__contexto__contexto_pin"},
+         "cache_control": {"type": "ephemeral"}}]}]
+    out, noted = _unsent_tool_notes(messages, sent={"Bash"})
+    assert noted == ["mcp__contexto__contexto_pin"]
+    assert out[0]["content"] == [{"type": "text", "text": "Tool mcp__contexto__contexto_pin loaded.",
+                                  "cache_control": {"type": "ephemeral"}}]

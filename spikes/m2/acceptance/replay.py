@@ -192,7 +192,7 @@ def _reference_name(block: Any) -> str | None:
     ``tool_addition`` and ``tool_removal`` blocks (2.1.318 writes both spellings)."""
     if not isinstance(block, dict) or block.get("type") != "tool_reference":
         return None
-    name = block.get("tool_name", block.get("name"))
+    name = block.get("tool_name") or block.get("name")
     return name if isinstance(name, str) else None
 
 
@@ -222,6 +222,9 @@ def _unsent_tool_notes(messages: list[dict[str, Any]], sent: set[str]) -> tuple[
     and references to it stay. A ``tool_use`` naming a removed tool is left as sent: the API accepts
     it with ``tool_choice`` ``none`` (the same request 1 held content turn 5's ``contexto_pin`` call).
     Returns the new messages and the noted names, in order."""
+    # The tools the baseline can name: those it sends, plus any non-Contexto tool a history block defines
+    # inline. One pass over the whole history, not position by position: Claude Code defines an inline tool
+    # before referencing it, so where an addition sits does not change which references stay valid.
     available = set(sent)
     for m in messages:
         for b in m.get("content") if isinstance(m.get("content"), list) else []:
@@ -232,9 +235,11 @@ def _unsent_tool_notes(messages: list[dict[str, Any]], sent: set[str]) -> tuple[
                     available.add(name)
     noted: list[str] = []
 
-    def note(name: str, verb: str = "loaded") -> dict[str, Any]:
+    def note(name: str, original: dict[str, Any], verb: str = "loaded") -> dict[str, Any]:
         noted.append(name)
-        return {"type": "text", "text": f"Tool {name} {verb}."}
+        text = {"type": "text", "text": f"Tool {name} {verb}."}
+        # Keep the block's cache breakpoint: Claude Code marks the last inline-tools block with one.
+        return {**text, "cache_control": original["cache_control"]} if "cache_control" in original else text
 
     def block(b: Any) -> Any:
         if not isinstance(b, dict):
@@ -242,14 +247,14 @@ def _unsent_tool_notes(messages: list[dict[str, Any]], sent: set[str]) -> tuple[
         kind = b.get("type")
         name = _reference_name(b)
         if name is not None:
-            return b if name in available else note(name)
+            return b if name in available else note(name, b)
         if kind == "tool_result" and isinstance(b.get("content"), list):
             inner = [block(x) for x in b["content"]]
             return {**b, "content": inner} if inner != b["content"] else b
         if kind in ("tool_addition", "tool_removal"):
             name = _added_name(b)
             if name is not None and name not in available:
-                return note(name, "loaded" if kind == "tool_addition" else "removed")
+                return note(name, b, "loaded" if kind == "tool_addition" else "removed")
         return b
 
     out = []
