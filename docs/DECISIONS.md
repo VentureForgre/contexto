@@ -2021,7 +2021,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     conversation.", a newline, then the summary. After it come a role `system` message, the last
     message from before compaction kept verbatim (main's last response, which no earlier request
     held), and the new prompt, which after `/compact` also holds the command's blocks. The same
-    form came from both versions and both triggers. It is a new key with two turn starts, so before
+    form came from both versions and both triggers. (Corrected by D59: those captures ran with
+    Claude Code's attribution reminder off. With the default reminder the first message is a list,
+    the reminder block and then the summary block, and the rule below never matched it on 2.1.314 or
+    2.1.318.) It is a new key with two turn starts, so before
     this rule it never outgrew main. Every subagent request (8 on 2.1.302 to 2.1.318, and the
     compaction runs' 4) and the in-process teammate's carry `X-Claude-Code-Agent-Id`; no main, side,
     nested or headless request does.
@@ -2039,7 +2042,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     subagent that auto-compacts, or that `SendMessage` resumed more often than main has turns, never
     becomes main. A conversation also takes over with reason `compacted` when its session id and
     entrypoint are main's and its first message is that summary, with the exact string
-    start; a prompt that quotes it is a list with context blocks and does not match. It becomes its
+    start; a prompt that quotes it is a list with context blocks and does not match (D59: the summary
+    is now found after leading `<system-reminder>` blocks, in a string or a list, and must be followed
+    by a blank line, which a prompt quoting the sentence does not have). It becomes its
     session's main, replacing the first one, since `/resume` of the session loads the compacted
     transcript. Its own epoch starts at 0 under the bound like any new conversation, and the old
     conversation's pins and pages stay in the session store. Requiring main's entrypoint keeps out
@@ -2082,8 +2087,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     the quiet check at every switch and follow the one prompted (10 switches in 10 alternations,
     reviewer A round 2), each switch logged. Within one Claude Code process (`/clear`, `/resume`,
     `/compact`) the switch is at the process's own next prompt, when its old conversation has no
-    call left to run; an auto-compaction inside a tool loop switches at the loop's next request
-    instead, once the summary request was answered with no client call (D59). Two interactive processes on one proxy are not a supported setup, and there
+    call left to run; a compaction that keeps a pending tool call after the summary switches at the
+    compacted conversation's first request instead, once the summary request was answered with no
+    client call (D59). Two interactive processes on one proxy are not a supported setup, and there
     the bound holds only while the session losing main is idle: a switch during its pending tool
     call charges that call against the new main's room (reviewer A round 3: 1,884 tokens against a
     500-token room). The turn-start rule on main opens the same window. Main is decided once per request, before
@@ -2361,16 +2367,20 @@ the owner's delegation. Open decisions are listed at the end with the options an
     state answer "an internal error ... Try once more", which cannot succeed, and `contexto run` named
     only a path; at `live.lock` no store opened. Rule: both raise `LockFileDamagedError`, a
     `NotRegularFileError`, whose message names the file and says to delete it; the MCP server's
-    reply for a `meta.lock` says which file is damaged and that trying again will not help, and the
-    `mcp_call` entry names the file. The session is still not opened with either damaged, on purpose:
+    reply says which file is damaged, what is refused (recall, search and state for `meta.lock`, whose
+    pins and closes still work; every tool for `live.lock`) and that trying again will not help, and
+    for `meta.lock` the `mcp_call` entry names the file. With a damaged `live.lock` the MCP server
+    starts without the session, so the CLI shows that reply rather than a server that failed to start
+    (review of #246). `contexto run` does not open the session with either damaged, on purpose:
     without `meta.lock` the room charges are not serialized, and without `live.lock` prune would take
     a running session for an idle one. Deleting the file is the whole repair (tested). A pin still
     works with a damaged `meta.lock`, since it writes no metadata.
-  - **Auto-compaction inside a tool loop (#238).** When Claude Code auto-compacts between a released
-    tool call and its result, the compacted conversation's first request is the summary, a role
-    `system` message, then that `tool_use` and its result: no turn start, so `compacted` waited for
-    the next prompt and the loop's Contexto calls were charged against the old conversation's room
-    as published after the summary request, about 0 near the bound. Engine repro (bound 4,000, real
+  - **Compaction inside a tool loop (#238).** Reviewer B of #238 saw a compacted conversation whose
+    first request was the summary, a role `system` message, then a pending `tool_use` and its result:
+    no turn start, so `compacted` waited for the next prompt and the loop's Contexto calls were
+    charged against the old conversation's room as published after the summary request, about 0 near
+    the bound. (The captures below did not produce that form: there an auto-compaction between a tool
+    call and its result puts the result in the summary request.) Engine repro (bound 4,000, real
     input 3,600 then 3,700): on main the loop's request is side and `contexto_state` returns 0
     characters, `turn_budget: spent`; now it takes main (`compacted`) and returns the pin (1,413
     characters, room left 2,258). Rule: at a request with no turn start only the `compacted` rule is
@@ -2378,7 +2388,30 @@ the owner's delegation. Open decisions are listed at the end with the options an
     answered with no client tool call; so no call of the old conversation is outstanding to be
     charged to the new room. When the summary's response may hold a call (unknown) or is unanswered,
     the handover waits for the next prompt as before. A subagent, another session or another
-    entrypoint never qualifies, as at a turn start.
+    entrypoint never qualifies, as at a turn start, and only the compacted conversation's first
+    request does (review of #246: a late request of an older compaction otherwise took main back and
+    pointed a later `/resume` at it).
+  - **Claude Code's compaction was never recognised (review of #246, reviewer B; dates from D50).**
+    D50 matched a first message whose content is a plain string. Captured on 2.1.314 and 2.1.318
+    against a loopback stub (zero spend; headless `/compact` through `--input-format stream-json`,
+    headless auto-compaction from a Bash call whose usage reported 995,000 input tokens, and
+    interactive `/compact` in a pty): with Claude Code's default attribution reminder, the compacted
+    conversation's first message is a list, the attribution `<system-reminder>` block, then the
+    summary block; after `/compact` the command's blocks and the new prompt follow in that same
+    message, and a role `system` message comes next. With the attribution set empty, `/compact` (2.1.318)
+    sent a list starting with the summary and auto-compaction (2.1.314) a plain string, D50's form.
+    In every capture the sentence is followed by a blank line and Claude Code's
+    `<tools-used-before-summary>` reminder. Replaying the 8 captures through the engine: before, the
+    compacted conversation was main in 1 (the plain string), side in 7; after, main in all 8, with
+    `main_changed: compacted` at its first request. Through `contexto run` with real 2.1.314 and
+    2.1.318 against the stub, headless `/compact` and auto-compaction (4 runs): the compacted request
+    is main with `compacted`; main's engine, same run, left it side. Rule: the summary is the first
+    text after any leading `<system-reminder>` text blocks, in a string or a list, and it must start
+    with the sentence and a blank line; a prompt that starts with the sentence and goes on in the same
+    paragraph does not match (tested in both forms). A first prompt that reproduced Claude Code's
+    whole first line and blank line, in main's own session and entrypoint, would match; a prompt in a
+    new session or after `/clear` has another session id and never qualifies. The fixture is the 8
+    captures' Messages requests, scrubbed (`tests/fixtures/make_compaction_shapes.py`).
   - **Text.** D50's "never makes main idle" now names the window reviewer A found (a late end that
     arrives first leaves main idle until the retry's response), and the comment in `_observe_usage`
     says the same. The test of a response without an input count (#244) made the conversation busy

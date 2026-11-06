@@ -678,8 +678,9 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   as unreadable (`page_unreadable`), the ledger (`ledger.jsonl` or `ledger.lock`) as damaged,
   `page.key` as a key file error, `meta.lock` and `live.lock` as damage that names the file and says
   to delete it, after which the next open makes a new one (D59: every room charge and metadata write
-  takes `meta.lock`, so recall, search and state fail and a launch cannot open the session; a store
-  cannot open without `live.lock`, which tells prune the session is in use), and
+  takes `meta.lock`, so recall, search and state fail, pins and closes still work, and a launch
+  cannot open the session; a store cannot open without `live.lock`, which tells prune the session is
+  in use, so the MCP server then starts without the session and every tool call says so), and
   the log is not written. Every write is whole (a short write continues). A temporary file is
   removed when its write fails (a full disk), and temporary files left by a process that died
   mid-write are removed when a store opens for writing, once they are more than 10 minutes old
@@ -726,8 +727,10 @@ object or null, or a tool name that is not a string, is invalid params (`-32602`
 returns a tool result with `isError: true`, never a JSON-RPC error, and the call is logged
 `mcp_call` with `ok: false` and the error class: on a damaged ledger, `contexto_pin`,
 `contexto_close` and `contexto_state` say the ledger is damaged and name `contexto sessions show
-<session>`; on a damaged `meta.lock`, a call that charges the room says which file is damaged, that
-the user deletes it, and that trying again will not help, and the log entry names the file (D59);
+<session>`; on a damaged `meta.lock` or `live.lock`, a call that needs it says which file is damaged,
+what is refused (recall, search and state for `meta.lock`, every tool for `live.lock`), that the user
+deletes the file, and that trying again will not help; for `meta.lock` the log entry names the file,
+and for `live.lock`, whose session is not opened, nothing is logged (D59);
 any other unexpected failure says the call failed with its error class. An error echoes
 a value from the request at most 100 characters long, with its length noted, and a tool error's text
 is at most 1,000 characters. A page id that is not `pg_` and exactly 16 lowercase hex digits is an
@@ -1044,15 +1047,22 @@ unknown page, never read. Tools:
     sending beside the new main returns only by turn starts; two sessions that take turns, each idle
     while the other is prompted, follow the one prompted;
   - its session id and entrypoint are main's, and its first message is
-    Claude Code's compaction summary: a user message whose content is a string starting "This
-    session is being continued from a previous conversation that ran out of context. The summary
-    below covers the earlier portion of the conversation." and a newline (`/compact` and
-    auto-compaction keep the session id but start a new first message, measured on 2.1.314 and
-    2.1.318, interactive and headless). It becomes that session's main, so a later `/resume` of the session returns to it.
-    This rule alone also applies inside a tool loop, at a request with no turn start, once main's newest
-    request (Claude Code's summary request) was answered with no client tool call (D59): an
-    auto-compaction between a tool call and its result sends the summary, then that `tool_use` and
-    its result, under the new key, and it takes over there instead of at the next prompt;
+    Claude Code's compaction summary: a user message whose first text, after any leading
+    `<system-reminder>` text blocks, starts "This session is being continued from a previous
+    conversation that ran out of context. The summary below covers the earlier portion of the
+    conversation." and a blank line (D59). `/compact` and auto-compaction keep the session id but
+    start a new first message. Measured on 2.1.314 and 2.1.318, interactive and headless: with Claude
+    Code's default attribution reminder the content is a list, that reminder block, then the summary
+    block (after `/compact` the command's blocks and the new prompt follow in the same message), then a
+    role `system` message; with the attribution set empty, a list that starts with the summary
+    (`/compact`) or a plain string (auto-compaction). A prompt that starts with the sentence and goes on
+    in the same paragraph does not match. It becomes that session's main, so a later `/resume` of the
+    session returns to it. This rule alone also applies at the compacted conversation's first request
+    when it has no turn start, once main's newest request (Claude Code's summary request) was answered
+    with no client tool call (D59): a compaction that kept a pending `tool_use` and its result after
+    the summary takes over there instead of at the next prompt (in the captures an auto-compaction
+    between a tool call and its result puts the result in the summary request, so the compacted
+    conversation starts at a turn start);
   - main has never sent a request with a tool list and this conversation has (Claude Code's title,
     topic, and quota side requests have none, and one is often the session's first request);
   - or it has strictly more turn starts than main (a tie keeps the current one).
