@@ -1428,6 +1428,74 @@ the owner's delegation. Open decisions are listed at the end with the options an
     approval and a token cap). The early close was measured against the scripted stub only. In esc a
     side request asks for a background agent's progress ("Describe your most recent action in 3-5
     words ..."). Its first prompt matches no `Agent` call, so it opens no room that could close early.
+- **D55. `contexto run claude` resumes through Contexto, survives signals, and keeps out of the TUI.**
+  Claude, 2026-11-05, under D0; contract change. From the QA run of 2026-11-05 (reports launcher-ux 2,
+  4 to 8; live-claude 1; live-realworld F3 to F5; live-fidelity 6; security 3, 4 and 7). Measured at zero
+  spend with Claude Code 2.1.314 against a loopback stub (fresh `CLAUDE_CONFIG_DIR`, fake key).
+  - **Resume.** Three testers resumed a conversation (`--resume <id>`, `--continue`, or Claude Code's
+    exit hint `claude --resume <id>`) and got a new Contexto session: the whole history was paged again
+    into an empty store (session ac6b456b duplicated 73a20a20's 6 pages), and pins and closed
+    obligations were out of reach. Measured: Claude Code's `X-Claude-Code-Session-Id` header, the
+    `session_id` in `metadata.user_id` (now a JSON object), the transcript's file name and the `-p`
+    result's `session_id` are one id; it survives `--resume` and `--continue` and is new with
+    `--fork-session`. So the launcher wraps the engine and records each id the proxy sees in the
+    session's metadata (`cli_sessions`), and without `--session` it reuses the session that served
+    `--resume <id>`, or for `--continue` the one that last served Claude Code in this directory. Real
+    2.1.314 through the changed launcher: the resumed and continued launches reopened the first
+    session and the engine logged `epoch_resumed` (before: `epoch_not_resumed`, `no_record`). After
+    exit the launcher prints the `contexto run --session S ... claude --resume <id>` command.
+    Rejected: reading Claude Code's transcript directory to learn which conversation `--continue` will
+    pick (it is Claude Code's private layout); instead a `--continue` that lands in a conversation the
+    session never served is reported at exit. `--resume` with no id opens Claude Code's picker, which
+    Contexto cannot follow, so it gets a new session and a line saying so. Codex is not covered
+    (contexto.codex, D54's area); `start_proxy(cli=...)` and `record_cli_session` are shaped for it.
+  - **Signals.** The launcher handled only SIGINT, SIGTERM and SIGHUP, and only while claude ran. On
+    SIGQUIT (Ctrl+\\), SIGUSR1/2 or SIGALRM it died, and claude kept running against a dead proxy with
+    the temporary files left; SIGTERM or SIGHUP during the version check left the files and no `exit`
+    event. Now SIGQUIT is forwarded like SIGTERM, the other three end claude with SIGTERM (Claude
+    Code's runtime may give SIGUSR1 a meaning), and outside claude's run all six unwind through the
+    cleanup (exit 128 + N). For SIGKILL, macOS has no parent-death signal, and the CLI's code is not
+    ours: a watchdog process in its own session holds a pipe from the launcher and, on end of file
+    without `done`, sends claude SIGTERM and removes the temporary directory. Measured with real
+    2.1.314 waiting on a slow stub: after `kill -9` of the launcher, claude was gone within 2 seconds
+    and `$TMPDIR` was empty; `kill -QUIT` exited 131 with the `exit` event logged. Left by SIGKILL: no
+    `exit` event; if the watchdog is killed too, the temporary directory stays (no secrets). Rejected:
+    sweeping stale `contexto-run-*` directories at the next launch (it leaves claude running) and
+    forwarding SIGUSR1 as is.
+  - **Notices while claude runs.** The "measured window budget" warning was written while Claude
+    Code's TUI owned the terminal: it landed in the input box and garbled the next redraw. The
+    launcher's notices are now logged at once and printed after claude exits, in order; the start-up
+    warnings still print before it starts. Codex keeps printing mid-run (its launcher does not hold).
+  - **Start-up warning.** The assumed fixed overhead was 55,000; measured on 2.1.314 with tool search
+    on it was 18,641 to 27,925 (live-fidelity, live-realworld), so bound 60,000 was reported as about
+    -20,000 tokens of budget when the real figure was 7,000 to 14,000, and "rotations will page often"
+    undersold a session whose turns ran out of recall room. The default is now 28,000 (the top of the
+    measured range; OpenRig's 92,000 is unchanged), and the warning says recall will barely fit, or
+    at a budget of 0 or less that it will not fit.
+  - **Messages and checks.** Contexto's own options right after `claude` (Claude Code 2.1.314 said
+    "unknown option '--session' (Did you mean --version?)") are refused with the command rewritten;
+    `--upstream 'http://[::1'` gave a traceback and an empty session, and is now a usage error naming
+    the URL's source; a `claude` that is not executable, a broken symlink or a directory is named as
+    such instead of "not found on PATH". `$CONTEXTO_HOME` was forced to 0700 even when it existed (a
+    regular file was chmodded before the launch failed): an existing home now keeps its mode (sessions/
+    is still narrowed), and a non-directory is refused before any change. Claude Code 2.1.314 expands
+    `${VAR}` and `${VAR:-x}` (not `$VAR`) in an MCP config's command, args and env, and `$${X}` gives
+    `$` plus the value, so there is no escape: `${` in the home, the session id or the interpreter path
+    is refused. The MCP server's `--session=<id>` is one argument (an id starting with `-` broke it).
+  - **Review round 1 (reviewer A, PR #240).** Automatic reuse put two live launches on one store
+    (`-c` in two terminals, or `--resume <id>` while `<id>` was open elsewhere), which the contract
+    leaves out of scope and which charges both conversations to one recall room: a session picked
+    automatically is now probed with a non-blocking exclusive lock on its `live.lock`, as prune does,
+    and when another process holds it the launch opens a new session and says so; `--session` still
+    shares on purpose. A resume through the picker, a search term or a busy session splits a
+    conversation across two stores: the resume line names every other session that served the id, and
+    the exit names the earlier one. `-c --fork-session` no longer gets the "another conversation"
+    warning. The watchdog is told `exited` once claude is reaped, so a SIGKILL during the up to 4
+    seconds of cleanup cannot signal a reused pid, and `run_child` installs its handlers before the
+    spawn (a signal during it is sent once the child exists). The value of a Claude Code option that
+    takes one (from 2.1.314's `--help`) is not read as `-c` or `--resume`, and the exit's metadata
+    write cannot raise out of the cleanup. Left: two launches that probe the same free session within
+    the same few milliseconds can still both take it.
 
 ## Open decisions
 
