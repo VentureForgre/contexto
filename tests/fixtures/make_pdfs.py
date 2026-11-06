@@ -33,10 +33,7 @@ EXPECTED = {
     "incremental-edited-page-3.pdf": 3,
     "pdflib-indirect-length-1.pdf": 1,
     "pdflib-indirect-length-7.pdf": 7,
-}
-# Files whose page count runs high on purpose (true pages here): an incremental save that deleted pages
-# leaves the superseded page tree listing them (D48 review round 4).
-OVERCOUNTED = {
+    # an incremental save that deleted 30 of 40 pages: the superseded page tree still lists them (D48 round 4)
     "pymupdf-incremental-deleted-40-to-10.pdf": 10,
 }
 
@@ -222,7 +219,7 @@ def main() -> None:
     }
     for name, data in made.items():
         (OUT / name).write_bytes(data)
-        print(f"{name}: {len(data)} bytes, {EXPECTED.get(name) or OVERCOUNTED[name]} pages")
+        print(f"{name}: {len(data)} bytes, {EXPECTED[name]} pages")
 
 
 if __name__ == "__main__":

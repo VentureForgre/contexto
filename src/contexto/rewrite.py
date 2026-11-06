@@ -174,6 +174,17 @@ MEDIA_FIRST_UNCERTAINTY = 0.1
 RESTORED_RATIO_RANGE = (1.0, 6.0)  # bytes per token a restore accepts; outside it the seed is safer (A2e)
 
 
+class Measured(NamedTuple):
+    """D48: what the ratio needs of the last measured request to learn from the next one's difference."""
+
+    scope: tuple  # (epoch, k, degraded, head fingerprint) it was sent in
+    count: int  # messages sent
+    prefix: str  # anchor_hash of every message sent
+    text_bytes: int  # bytes sent, media left out
+    real: int  # its real input tokens
+    keys: tuple  # its media's content keys
+
+
 class Store(Protocol):
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]: ...
     def pinned_text(self, budget_tokens: int) -> str: ...
@@ -228,10 +239,10 @@ class EpochState:
     # D48: whether that request only appended to the last measured one (same epoch, window and degraded
     # state, its last message unchanged at the same index), so their media cancel in a difference.
     last_sent_appends: bool = False
-    last_sent_anchor: tuple[int, str] = (0, "")  # (message count, last message hash) as sent; (0, "") unchained
-    # D48: (epoch, k, degraded, message count, last message hash, text bytes, real tokens, media keys) of
-    # the last request whose usage was measured. Per-request, never recorded.
-    last_measured: tuple | None = None
+    last_sent_scope: tuple = ()  # D48: (epoch, k, degraded, head fingerprint) the request was sent in
+    # D48: (message count, anchor_hash of every message as sent); (0, "") when it may not start a chain
+    last_sent_anchor: tuple[int, str] = (0, "")
+    last_measured: Measured | None = None  # D48: the last request whose usage was measured. Per-request.
     last_input_tokens: int | None = None  # real upstream input of the previous request
     max_turn_growth: int = 0
     last_turn_start_n: int | None = None  # history length at the previous turn start
@@ -1510,28 +1521,29 @@ def text_usage(sent_bytes: int, real: int, media: MediaCost, ratio: float | None
     return text_bytes, math.ceil(tokens)
 
 
-def appended_usage(previous: tuple | None, scope: tuple, text_bytes: int, real: int,
-                   keys: tuple) -> tuple[int, int] | None:
-    """D48: the text bytes and real tokens a request added to the last measured one, when it only
-    appended to it and carries the same media (``keys``): the media cancel exactly, so the appended text
-    is measured with no floor or estimate. None otherwise, or when the difference is not positive or its
-    ratio lands outside ``MEDIA_TEXT_RATIO_RANGE``."""
-    if not keys or previous is None or previous[:3] != scope[:3] or previous[7] != keys:
+def appended_usage(previous: Measured | None, text_bytes: int, real: int, keys: tuple) -> tuple[int, int] | None:
+    """D48: the text bytes and real tokens a request added to the last measured one, for a request that
+    only appended to it (``appends_to``, checked when it was sent) and carries the same media (``keys``):
+    the media cancel exactly, so the appended text is measured with no floor or estimate. None otherwise,
+    or when the difference is not positive or its ratio lands outside ``MEDIA_TEXT_RATIO_RANGE``."""
+    if not keys or previous is None or previous.keys != keys:
         return None
-    added_bytes, added_tokens = text_bytes - previous[5], real - previous[6]
+    added_bytes, added_tokens = text_bytes - previous.text_bytes, real - previous.real
     low, high = MEDIA_TEXT_RATIO_RANGE
     if added_bytes <= 0 or added_tokens <= 0 or not low <= added_bytes / added_tokens <= high:
         return None
     return added_bytes, added_tokens
 
 
-def appends_to(previous: tuple | None, scope: tuple, messages: list[dict]) -> bool:
-    """Whether ``messages`` (as sent) only append to the last measured request: the same epoch, window and
-    degraded state, and that request's last message unchanged at the same index."""
-    if previous is None or previous[:3] != scope:
+def appends_to(previous: Measured | None, scope: tuple, hashes: tuple[str, ...]) -> bool:
+    """Whether a request whose sent messages have ``hashes`` only appends to the last measured request: the
+    same epoch, window, degraded state and head (``scope``), and every message that request sent unchanged
+    (rule 10's normalised hashes, so a moved ``cache_control`` is no change). An edit to an earlier message
+    (a ``window_changed`` resync keeps the epoch and window) or a head change would put its own bytes
+    and tokens into the difference."""
+    if previous is None or previous.scope != scope or not 0 < previous.count <= len(hashes):
         return False
-    count, last = previous[3], previous[4]
-    return 0 < count <= len(messages) and message_hash(messages[count - 1]) == last
+    return anchor_hash(hashes[:previous.count]) == previous.prefix
 
 
 def sent_media(items: list, *, measure_bytes: bool = True) -> MediaCost:
@@ -1623,12 +1635,13 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     window_estimate = estimate_items(estimator, window)
     window_media = sent_media(window, measure_bytes=False)
     sent_items = upstream[field_name]
-    scope = (state.epoch, state.k, state.degraded)
+    scope = (state.epoch, state.k, state.degraded, fingerprint)
+    sent_hashes = tuple(message_hash(m) for m in sent_items)
     state = replace(state, hashes=tuple(message_hash(m) for m in messages), last_sent_bytes=sent,
                     last_sent_media=sent_media(sent_items), last_estimate=sent_estimate,
                     last_sent_media_keys=media_keys(split_media(sent_items)[1]),
-                    last_sent_appends=appends_to(state.last_measured, scope, sent_items),
-                    last_sent_anchor=usage_identity(sent_items),
+                    last_sent_appends=appends_to(state.last_measured, scope, sent_hashes), last_sent_scope=scope,
+                    last_sent_anchor=(len(sent_hashes), anchor_hash(sent_hashes)),
                     last_window_tokens=window_estimate,
                     last_window_floor=window_estimate - window_media.tokens + window_media.floor,
                     pending_usage=usage_identity(messages))
@@ -2678,8 +2691,7 @@ class RewriteEngine:
             # estimate (text_usage).
             media, keys = state.last_sent_media, state.last_sent_media_keys
             text_bytes = state.last_sent_bytes - media.bytes
-            scope = (state.epoch, state.k, state.degraded)
-            appended = (appended_usage(state.last_measured, scope, text_bytes, real, keys)
+            appended = (appended_usage(state.last_measured, text_bytes, real, keys)
                         if state.last_sent_appends else None)
             if appended is not None:
                 self.estimator.observe(*appended)
@@ -2688,7 +2700,8 @@ class RewriteEngine:
                                                      self.estimator.measured_bytes_per_token)
                 if text_tokens is not None:
                     self.estimator.observe(text_bytes, text_tokens)
-            measured = (*scope, *state.last_sent_anchor, text_bytes, real, keys) if state.last_sent_anchor[0] else None
+            measured = (Measured(state.last_sent_scope, *state.last_sent_anchor, text_bytes, real, keys)
+                        if state.last_sent_anchor[0] else None)
             state = replace(state, last_input_tokens=real, pending_usage=None, last_measured=measured)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried

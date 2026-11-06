@@ -81,6 +81,8 @@ MEDIA_DEPTH = 10  # messages, message, content, tool_result, content, document, 
 _PAGE_OBJECT = re.compile(rb"/Type\s{0,16}/Page(?![A-Za-z])")
 _PAGE_TREE = re.compile(rb"/Type\s{0,16}/Pages\b")
 _COUNT = re.compile(rb"/Count\s{0,16}(\d{1,9})(?!\d)")
+_CATALOG = re.compile(rb"/Type\s{0,16}/Catalog\b")
+_ROOT_REFERENCE = re.compile(rb"/Pages\s{1,16}(\d{1,9})\s{1,16}\d{1,5}\s{1,16}R\b")
 _REFERENCE = re.compile(rb"(?<!\d)(\d{1,9})\s{1,16}\d{1,5}\s{1,16}R\b")
 _OBJECT_HEADER = re.compile(rb"(?<!\d)(\d{1,9})\s{1,16}\d{1,5}\s{1,16}obj\Z")  # searched up to "obj"
 _OBJECT_TABLE = re.compile(rb"(\d{1,9})\s{1,16}(\d{1,9})(?!\d)")
@@ -329,6 +331,15 @@ def _count_pdf_pages(data: str) -> PdfCount:
     found, tree = len(scan.pages), scan.tree
     if scan.capped:  # more page objects or tree nodes than a document has: crafted, so trust neither
         return PdfCount(PDF_MAX_PAGES, False)
+    drawn = scan.drawn()
+    if drawn is not None:
+        # The catalog's page tree, as a renderer walks it: its root's count and the pages it reaches, each
+        # node by its latest definition, so pages an incremental save deleted and nodes no catalog reaches
+        # do not count. Page objects whose number was not found cannot be placed, so they count too.
+        root_count, reached = drawn
+        unplaced = sum(1 for page in scan.pages if not isinstance(page, int))
+        pages = min(PDF_MAX_PAGES, max(root_count, reached + unplaced))
+        return PdfCount(pages, True, max(1, min(root_count, reached, PDF_MAX_PAGES)))
     floor = scan.floor_pages()
     if not complete:
         return PdfCount(min(PDF_MAX_PAGES, max(found, tree)), True, floor) if tree else PdfCount(PDF_MAX_PAGES, False)
@@ -349,33 +360,73 @@ class _PageScan:
         self.capped = False
         self.page_matches = 0
         self.tree_matches = 0
+        self.nodes: dict[int, tuple[tuple[int, int], int, list[int]]] = {}  # number -> (position, count, kids)
+        self.root: tuple[tuple[int, int], int] | None = None  # the latest catalog's (position, root node number)
         self.stored: list[tuple[int, int]] = []  # spans of object streams stored without a filter, in order
 
     def add(self, buffer: bytes, numbers: tuple[list[int], list[int]] | None = None,
-            skip: list[tuple[int, int]] = ()) -> bool:
-        """Scan one buffer: the PDF, or an object stream's content with its offset table (``numbers``:
-        offsets, object numbers). Page objects inside a ``skip`` span were counted with their stream.
-        False, and ``capped``, once the PDF passes ``PDF_MAX_PAGE_OBJECTS`` or ``PDF_MAX_TREE_NODES``,
-        which no real document reaches."""
+            skip: list[tuple[int, int]] = (), base: int | None = None) -> bool:
+        """Scan one buffer: the PDF, or an object stream's content (starting at ``base`` in the file) with
+        its offset table (``numbers``: offsets, object numbers). Objects inside a ``skip`` span were read
+        with their stream. False, and ``capped``, once the PDF passes ``PDF_MAX_PAGE_OBJECTS`` or
+        ``PDF_MAX_TREE_NODES`` (catalogs included), which no real document reaches."""
         starts = [span[0] for span in skip]
+
+        def skipped(at: int) -> bool:
+            index = bisect.bisect_right(starts, at) - 1
+            return index >= 0 and at < skip[index][1]
+
+        def position(at: int) -> tuple[int, int]:  # file order, so a later definition supersedes
+            return (at, 0) if base is None else (base, at)
+
         for match in _PAGE_OBJECT.finditer(buffer):
-            index = bisect.bisect_right(starts, match.start()) - 1
-            if index >= 0 and match.start() < skip[index][1]:
+            if skipped(match.start()):
                 continue
             self.page_matches += 1
             if self.page_matches > PDF_MAX_PAGE_OBJECTS:
                 self.capped = True
                 return False
             self.pages.add(self._number(buffer, match.start(), numbers))
-        for match in _PAGE_TREE.finditer(buffer):
-            self.tree_matches += 1
-            if self.tree_matches > PDF_MAX_TREE_NODES:
-                self.capped = True
-                return False
-            count, kids = _node(buffer, match.start(), match.end())
-            self.tree = max(self.tree, count)
-            self.kids.update(kids)
+        for pattern in (_PAGE_TREE, _CATALOG):
+            for match in pattern.finditer(buffer):
+                if skipped(match.start()):
+                    continue
+                self.tree_matches += 1
+                if self.tree_matches > PDF_MAX_TREE_NODES:
+                    self.capped = True
+                    return False
+                number = self._number(buffer, match.start(), numbers)
+                at = position(match.start())
+                if pattern is _CATALOG:
+                    root = _root_reference(buffer, match.start(), match.end())
+                    if root is not None and (self.root is None or at > self.root[0]):
+                        self.root = (at, root)
+                    continue
+                count, kids = _node(buffer, match.start(), match.end())
+                self.tree = max(self.tree, count)
+                self.kids.update(kids)
+                if isinstance(number, int) and (number not in self.nodes or at > self.nodes[number][0]):
+                    self.nodes[number] = (at, count, kids)
         return True
+
+    def drawn(self) -> tuple[int, int] | None:
+        """(the root node's count, the page objects it reaches through ``/Kids``) for the latest catalog's
+        page tree, each node by its latest definition; None when the root or its count was not read."""
+        if self.root is None or self.root[1] not in self.nodes or not self.nodes[self.root[1]][1]:
+            return None
+        seen: set[int] = set()
+        stack, reached = [self.root[1]], set()
+        while stack:
+            number = stack.pop()
+            if number in seen:
+                continue
+            seen.add(number)
+            for kid in self.nodes[number][2]:
+                if kid in self.nodes:
+                    stack.append(kid)
+                elif kid in self.pages:
+                    reached.add(kid)
+        return self.nodes[self.root[1]][1], len(reached)
 
     def floor_pages(self) -> int:
         """Pages the floor may count: numbered page objects that a ``/Kids`` array references, at most the
@@ -422,6 +473,18 @@ def _node(buffer: bytes, start: int, end: int) -> tuple[int, list[int]]:
     return count, kids
 
 
+def _root_reference(buffer: bytes, start: int, end: int) -> int | None:
+    """The page tree root a ``/Type /Catalog`` dictionary at ``start`` names (``/Pages N G R``): the nearest
+    after it, else before it, without crossing a ``>``, within ``PDF_TREE_WINDOW``."""
+    stop = buffer.find(b">", end, end + PDF_TREE_WINDOW)
+    after = _ROOT_REFERENCE.search(buffer, end, stop if stop >= 0 else min(len(buffer), end + PDF_TREE_WINDOW))
+    if after is not None:
+        return int(after.group(1))
+    gt = buffer.rfind(b">", max(0, start - PDF_TREE_WINDOW), start)
+    before = _ROOT_REFERENCE.search(buffer, gt + 1 if gt >= 0 else max(0, start - PDF_TREE_WINDOW), start)
+    return int(before.group(1)) if before is not None else None
+
+
 def _object_stream_pages(pdf: bytes, scan: _PageScan) -> bool:
     """Scan a PDF's object streams, where PDF 1.5 and later can keep their page objects and page tree.
     Each stream is read (Flate inflated, or as stored when it has no filter, as PyMuPDF writes them),
@@ -459,7 +522,7 @@ def _object_stream_pages(pdf: bytes, scan: _PageScan) -> bool:
             if inflater.unconsumed_tail or not inflater.eof:  # an output bound, or a stream longer than read
                 return False
         budget -= len(out)
-        if not scan.add(out, _object_table(header, out)):
+        if not scan.add(out, _object_table(header, out), base=body):
             return False
     return True
 

@@ -46,7 +46,7 @@ from contexto.tokens import (
     pdf_pages,
     split_media,
 )
-from fixtures.make_pdfs import EXPECTED, OVERCOUNTED
+from fixtures.make_pdfs import EXPECTED
 
 EP = "/v1/messages"
 W, H = 1440, 900
@@ -871,18 +871,13 @@ def test_a_floor_that_runs_high_never_raises_the_ratio(tmp_path, pdf, cost):
     """Round 4: once a ratio was measured, a floor above the PDF's real cost was booked as sparse text: the
     ratio rose to 3.75-5.06 (true 3.0) and requests crossed the bound unflagged. Files: a PyMuPDF save that
     deleted 30 of 40 pages incrementally (the superseded tree still lists 40), a crafted orphan page-tree
-    node, and pages cheaper than the 1,000 floor."""
+    node, and pages cheaper than the 1,000 floor. Since round 5 the first two count right (the catalog's
+    tree, by latest definitions), and the cheap pages still floor high."""
     raw = {"deleted": _fixture_bytes("pymupdf-incremental-deleted-40-to-10.pdf"), "orphan": _orphan_node_pdf(),
            "cheap": base64.b64decode(pdf_b64(20, filler=20_000))}[pdf]
     result = _pdf_session(tmp_path, raw, cost)
     assert max(r for r in result["ratios"] if r is not None) <= 3.0 * 1.005
     assert result["unflagged"] == []
-
-
-def test_the_overcounted_fixture_errs_high():
-    for name, pages in OVERCOUNTED.items():
-        count = pdf_page_count(_fixture(name))
-        assert count.pages >= pages and count.counted
 
 
 def test_drift_to_denser_text_is_learned_with_a_pdf_in_view(tmp_path):
@@ -908,3 +903,90 @@ def test_a_pdf_pasted_first_learns_the_ratio_by_the_third_request(tmp_path):
     result = _pdf_session(tmp_path, raw, 10 * 4_568, paste_first=True, turns=3)
     assert result["ratios"][2] is not None and 2.9 <= result["ratios"][2] <= 3.0 * 1.005
     assert result["unflagged"] == []
+
+
+# Reviewer A, PR #234, round 5: the append chain forms only for a true append ---------------------------------
+
+def _chain_session(tmp_path, change: str, monkeypatch) -> list:
+    """Three measured requests carrying the same screenshot, then a fourth changed by ``change``: none (a plain
+    append), an edit to an earlier message, a rotation, a head change, a new screenshot, or a request
+    forwarded unchanged after a failed transform. Returns what the fourth learned as a difference."""
+    from contexto import rewrite as rw
+
+    learned: list = []
+    real_appended = rw.appended_usage
+    monkeypatch.setattr(rw, "appended_usage", lambda *a: learned.append(real_appended(*a)) or learned[-1])
+    eng = _engine(tmp_path, **({"bound": 40_000, "headroom_floor": 5_000, "min_turn_room": 1_000}
+                               if change == "rotation" else {}))
+    shot = image_block(data=png_b64(1200, 900, payload=2_000))
+    msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "look " + "words " * 3_000}, shot]}]
+    head = dict(HEAD)
+
+    def send(messages):
+        req = {**head, "messages": list(messages)}
+        upstream, _, _ = eng(req, {}, EP)
+        eng.observe_usage(EP, {"input_tokens": _real_usage(upstream), "output_tokens": 10}, req)
+
+    send(msgs)
+    for call in ("t0", "t1"):
+        msgs += [{"role": "assistant", "content": [{"type": "tool_use", "id": call, "name": "Read", "input": {}}]},
+                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call,
+                                               "content": "x = 1 " * 2_000}]}]
+        send(msgs)
+    learned.clear()
+    if change == "edit":  # an earlier message, not the last one sent (2ef88a4 compared only that)
+        msgs[2] = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t0",
+                                                "content": "[Old tool result content cleared]"}]}
+    if change == "head":
+        head = {**HEAD, "tools": [{"name": "Extra", "input_schema": {"type": "object"}}]}
+    if change == "media":
+        other = image_block(data=png_b64(800, 600, payload=2_000))
+        msgs[0] = {"role": "user", "content": [msgs[0]["content"][0], other]}
+    if change == "rotation":
+        msgs += [{"role": "assistant", "content": [{"type": "text", "text": "done " * 3_000}]},
+                 {"role": "user", "content": [{"type": "text", "text": "next " + "words " * 6_000}]}]
+    else:
+        msgs += [{"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "Read", "input": {}}]},
+                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2",
+                                               "content": "y = 2 " * 2_000}]}]
+    if change == "failed":
+        state = next(iter(eng.states.values()))
+        req = {**head, "messages": list(msgs)}
+        _, forwarded, _ = rw.forward_original(req, msgs, state, "test", [])
+        eng.states[next(iter(eng.states))] = forwarded
+        eng.observe_usage(EP, {"input_tokens": _real_usage(req), "output_tokens": 10}, req)
+        assert next(iter(eng.states.values())).last_measured is None  # a forwarded request starts no chain
+        return learned
+    send(msgs)
+    return learned
+
+
+def test_a_plain_append_with_the_same_media_learns_its_difference(tmp_path, monkeypatch):
+    learned = _chain_session(tmp_path, "none", monkeypatch)
+    assert len(learned) == 1 and learned[0] is not None and 2.9 <= learned[0][0] / learned[0][1] <= 3.1
+
+
+@pytest.mark.parametrize("change", ["edit", "rotation", "head", "media", "failed"])
+def test_the_chain_does_not_form_unless_the_request_only_appends(tmp_path, monkeypatch, change):
+    """Round 5: only the last measured message was compared, so an edit to an earlier one (a window_changed
+    resync keeps the epoch and window) chained, and its bytes went into the difference: 6 of 6 bound
+    crossings unflagged against 2 of 6 for the control. Every sent message must be unchanged, in the same
+    epoch, window, degraded state and head, with the same media."""
+    assert all(result is None for result in _chain_session(tmp_path, change, monkeypatch))
+
+
+def test_pages_count_as_the_catalog_tree_draws_them():
+    """Round 5 (reviewer B): the deleted-pages file counted 40 pages for 10, so pasting it logged
+    window_minimal and bound_too_small and the launcher told the user to raise --bound. Each node counts
+    by its latest definition, from the latest catalog's root, so deleted pages and orphan nodes do not."""
+    assert pdf_page_count(_fixture("pymupdf-incremental-deleted-40-to-10.pdf")) == (10, True, 10)
+    assert pdf_page_count(base64.b64encode(_orphan_node_pdf()).decode()) == (1, True, 1)
+
+
+def test_the_deleted_pages_file_pasted_first_does_not_advise_a_larger_bound(tmp_path):
+    eng = _engine(tmp_path)
+    doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                          "data": _fixture("pymupdf-incremental-deleted-40-to-10.pdf")}}
+    req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "read this"}, doc]}]}
+    _, _, events = eng(req, {}, EP)
+    assert not {"window_minimal", "bound_too_small", "turn_room_low"} & {e["event"] for e in events}
