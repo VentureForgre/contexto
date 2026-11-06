@@ -1,10 +1,13 @@
 """Which conversation is main after `/clear`, `/resume`, and at a fresh session's start (D50).
 
-The request shapes are the ones Claude Code 2.1.302, 2.1.310, and 2.1.314 sent to a local stub
-(zero spend): every Messages request carries the CLI's session id in ``X-Claude-Code-Session-Id``
+The request shapes are the ones Claude Code 2.1.302, 2.1.310, 2.1.314, and 2.1.318 sent to a local
+stub (zero spend): every Messages request carries the CLI's session id in ``X-Claude-Code-Session-Id``
 and in ``metadata.user_id``; ``/clear`` starts a new id, ``/resume`` sends the resumed
 conversation's old id again, and subagents and the tool-less side request sent before each prompt
-carry the id of the conversation they belong to.
+carry the id of the conversation they belong to. On 2.1.314 an agent-team teammate adds
+``parent_session_id`` (the lead's id) to ``metadata.user_id``, keeping the lead's own id in process
+and having its own in a tmux pane, and a ``claude -p`` run from the Bash tool has its own id and
+the User-Agent entrypoint ``sdk-cli`` where the interactive CLI's is ``cli``.
 """
 
 from __future__ import annotations
@@ -26,13 +29,14 @@ OLD, NEW = "237dedfa-8ca9-43b9-ad3c-4a6ebcb1a084", "916e1695-b1be-43de-abe8-eb4f
 SUBAGENT_TOOLS = [{"name": "Bash", "input_schema": {"type": "object"}}]
 
 
-def headers(session: str | None) -> dict[str, str]:
-    found = {"User-Agent": "claude-cli/2.1.314 (external, cli)"}
+def headers(session: str | None, entrypoint: str = "cli") -> dict[str, str]:
+    found = {"User-Agent": f"claude-cli/2.1.314 (external, {entrypoint})"}
     return {**found, "X-Claude-Code-Session-Id": session} if session else found
 
 
-def metadata(session: str) -> dict:
-    return {"user_id": json.dumps({"device_id": "0" * 64, "account_uuid": "", "session_id": session})}
+def metadata(session: str, parent: str | None = None) -> dict:
+    fields = {"device_id": "0" * 64, "account_uuid": "", "session_id": session}
+    return {"user_id": json.dumps({**fields, "parent_session_id": parent} if parent else fields)}
 
 
 def main_request(messages: list[dict], session: str, **extra) -> dict:
@@ -50,8 +54,9 @@ def subagent_request(session: str, turns: int = 1) -> dict:
     return request(conversation("SUB-TASK do it", turns), tools=SUBAGENT_TOOLS, metadata=metadata(session))
 
 
-def send(engine: RewriteEngine, req: dict, session: str | None, input_tokens: int = 300) -> list[dict]:
-    _, _, events = engine(req, headers(session), MESSAGES)
+def send(engine: RewriteEngine, req: dict, session: str | None, input_tokens: int = 300,
+         entrypoint: str = "cli") -> list[dict]:
+    _, _, events = engine(req, headers(session, entrypoint), MESSAGES)
     engine.observe_usage(MESSAGES, {"input_tokens": input_tokens}, req)
     return events
 
@@ -205,3 +210,88 @@ def test_codex_session_ids_are_not_read():
     _, _, events = engine(codex_request(other), {"session-id": NEW}, RESPONSES_PATH)
     assert events[-1]["main"] is False and "main_changed" not in [e["event"] for e in events]
 
+
+
+# Other Claude Code sessions on the same proxy (reviewer A, PR #238) ----------------------------------
+
+TEAM, NESTED, OTHER = ("aaaaaaaa-0000-4000-8000-00000000000" + d for d in "123")
+
+
+def teammate(session: str, turns: int) -> dict:
+    """A teammate's request: its inbox messages are new turn starts; ``parent_session_id`` is the lead's."""
+    return request(conversation("<teammate-message>TEAMMATE research</teammate-message>", turns),
+                   tools=SUBAGENT_TOOLS, metadata=metadata(session, parent=OLD))
+
+
+def changes(events: list[dict]) -> list[str]:
+    return [e["reason"] for e in events if e["event"] == "main_changed"]
+
+
+def test_a_teammate_never_takes_main_in_a_pane_or_in_process():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    lead = lambda turns: main_request(conversation("lead conversation", turns), OLD)  # noqa: E731
+    send(engine, lead(3), OLD, input_tokens=2_500)
+    room, record = store.turn_room(), store.epoch_record()
+    for turns in (1, 2, 5):  # a tmux teammate's own id, then more turn starts than the lead
+        assert send(engine, teammate(TEAM, turns), TEAM)[-1]["main"] is False
+        assert send(engine, teammate(OLD, turns), OLD)[-1]["main"] is False  # in process: the lead's id
+    assert store.turn_room()[:2] == room[:2] and store.epoch_record() == record
+    assert record["conversation"] == keyed(ANTHROPIC, lead(3))
+    assert send(engine, lead(4), OLD)[-1]["main"] is True
+
+
+def test_a_claude_p_run_from_the_bash_tool_never_takes_main():
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    send(engine, main_request(conversation("lead conversation", 3, mid_loop=True), OLD), OLD)
+    room = store.turn_room()
+    nested = main_request(conversation("NESTED-P hello", 1), NESTED)
+    for entrypoint in ("sdk-cli", "sdk-ts", "sdk-py"):
+        assert send(engine, nested, NESTED, entrypoint=entrypoint)[-1]["main"] is False
+    assert store.turn_room() == room
+    assert send(engine, main_request(conversation("lead conversation", 3, mid_loop=True), OLD), OLD)[-1]["main"]
+
+
+def test_two_live_sessions_cannot_trade_main_at_each_turn_start():
+    """Another interactive session sharing the proxy takes main once, at its first turn start; the
+    lead keeps running, so the lead returns only by the turn-start rule, and the other session never
+    regains main by its id."""
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    lead = lambda turns, loop=False: main_request(conversation("lead", turns, mid_loop=loop), OLD)  # noqa: E731
+    other = lambda turns: main_request(conversation("other", turns), OTHER)  # noqa: E731
+    reasons = changes(send(engine, lead(3), OLD))
+    reasons += changes(send(engine, other(1), OTHER))
+    assert reasons == ["new_cli_session"]
+    assert send(engine, lead(3, loop=True), OLD)[-1]["main"] is False  # the lead was mid tool loop
+    for turns in range(4, 8):
+        reasons += changes(send(engine, lead(turns), OLD))
+        reasons += changes(send(engine, other(turns - 2), OTHER))
+    assert reasons == ["new_cli_session", "more_turn_starts"]
+
+
+def test_resume_after_a_subagent_took_main_by_turn_starts_goes_back_to_the_users_conversation():
+    """Reviewer A's finding 2: a SendMessage-resumed subagent outgrew main, then /clear and /resume."""
+    store = MemoryStore(key=b"k" * 32)
+    engine = RewriteEngine(store, config=CONFIG)
+    send(engine, main_request(conversation("old conversation", 2), OLD), OLD)
+    assert changes(send(engine, subagent_request(OLD, turns=3), OLD)) == ["more_turn_starts"]
+    send(engine, main_request(conversation("after clear", 4), NEW), NEW)
+    events = send(engine, main_request(conversation("old conversation", 3), OLD), OLD)
+    assert changes(events) == ["resumed_cli_session"]
+    assert store.retained_current()[3][0]["text"] == "old conversation"
+
+
+def test_clear_and_resume_can_go_back_and_forth():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=CONFIG)
+    sessions = {OLD: "old conversation", NEW: "after clear", OTHER: "cleared again"}
+    reasons = changes(send(engine, main_request(conversation(sessions[OLD], 2), OLD), OLD))
+    turns = 2
+    for session in (NEW, OTHER, OLD, NEW, OLD, OTHER):
+        turns += 1
+        events = send(engine, main_request(conversation(sessions[session], turns if session == OLD else 1), session),
+                      session)
+        assert events[-1]["main"] is True
+        reasons += changes(events)
+    assert reasons == ["new_cli_session", "new_cli_session", "resumed_cli_session", "resumed_cli_session",
+                       "resumed_cli_session", "resumed_cli_session"]

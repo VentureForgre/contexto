@@ -1277,21 +1277,42 @@ the owner's delegation. Open decisions are listed at the end with the options an
     id; `/resume` sends the resumed conversation's old id again; the subagents and the one-message,
     tool-less side request Claude Code sends before each prompt carry the id of the conversation
     they run for. The first request of the session, and the first after `/clear`, is that side request.
+    The request after `/resume` holds no marker: it is the old conversation plus the new prompt.
+  - **Other sessions on one proxy** (reviewer A, PR #238; the same setup on 2.1.314 with
+    `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, the main conversation creating a team and spawning
+    one teammate, then running `claude -p` from its Bash tool). A teammate's `metadata.user_id` adds
+    `parent_session_id`, the lead's id. In process it keeps the lead's own session id; in its own
+    tmux pane (`teammateMode` `tmux`, on an isolated tmux socket) it has its own. Its User-Agent
+    entrypoint is `cli` either way. The nested `claude -p` has its own id, no parent, and the
+    entrypoint `sdk-cli` (`claude-cli/<v> (external, <entrypoint>[, ...])`; the lead's is `cli`).
+    With the first version of this rule the tmux teammate took main at its first turn start and the
+    lead took it back at its next. The nested `claude -p` took main too, and the lead's next request
+    was a side request.
   - **Rule.** At a turn start, a conversation also takes over main when its session id differs from
-    main's and no other conversation has been main in that session (`new_cli_session` after
-    `/clear`, `resumed_cli_session` after `/resume`), or when main has never sent a request with a
-    tool list and this conversation has (`after_side_request`). Only a conversation seen with a tool
-    list takes over by these two, so side requests never do, and a subagent never does since it
-    carries main's id. A background subagent the old conversation launched before `/clear` keeps the
-    old id, whose main was the old conversation, so it does not take over either. The turn-start
-    rule is kept as the third case (`more_turn_starts`), so D50 only adds handovers. The id is read
+    main's, its entrypoint is main's, and either no conversation has been main in that session yet
+    (`new_cli_session`, after `/clear`), or it was the first conversation main in its session, and
+    that session lost main to another session's id and has sent no request of this conversation
+    since (`resumed_cli_session`, after `/resume`). It also takes over when main has never sent a
+    request with a tool list and this conversation has (`after_side_request`). Only a conversation
+    seen with a tool list takes over by these, so side requests never do. A subagent carries main's
+    id, so it never does either. A background subagent the old conversation launched before `/clear`
+    keeps the old id, and the old conversation was that session's main, so it does not take over. A
+    request with `parent_session_id` never takes over by any rule. The entrypoint check keeps out a
+    `claude -p` or SDK process run from a tool, since `/clear` and `/resume` keep the process. The
+    quiet check means two sessions running at once trade main at most once: the one that lost main
+    by id and kept sending returns only by turn starts, and the other one, having lost by turn
+    starts, never returns by id. A session's main is the first conversation main in it, so a
+    subagent that outgrew main does not replace it, and a later `/resume` still returns to the
+    user's conversation. The turn-start rule is kept as the last case (`more_turn_starts`), so the
+    only handover D50 removes is a child session's. The id is read
     from the header, else from `metadata.user_id`, only for the Messages API; Codex is unchanged.
     The request that takes over logs content-free `main_changed` with the reason and its turn
     starts (QA found no event saying main was stale).
   - **Result.** Replaying the captures through the engine: before, the user's first turn (3
     requests) and all 4 of the new conversation's requests after `/clear` were not main;
     after, every request of the user's conversation is main (from its first request after `/clear`
-    and after `/resume`), and no subagent or side request is. In the engine test of the live case
+    and after `/resume`), and no subagent or side request is. Over the two team captures no teammate or nested request
+    takes main, and the lead stays main throughout. In the engine test of the live case
     (old room spent: bound 4,000, real input 3,600), `contexto_state` returned the budget-spent
     notice before and returns the pin after the new conversation's first request; `contexto_search`
     finds the old conversation's paged turn.
@@ -1308,7 +1329,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     restart whose epoch record holds another conversation, the new main still writes no record until
     it has more turn starts than the record's (rule 16, unchanged), so that conversation can resume
     only by rotating once. A subagent resumed by `SendMessage` more often than main has turns can
-    still take over by the turn-start rule.
+    still take over by the turn-start rule. If a Claude Code version sent a request of the old
+    conversation after `/clear` (none of the four measured did), a later `/resume` of it would return
+    only by turn starts. A second interactive Claude Code pointed at the same proxy with no parent
+    id (not a supported setup) takes main at its first turn start, once.
 
 ## Open decisions
 

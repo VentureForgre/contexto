@@ -839,17 +839,23 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   conversation publishes the room, the snapshot, and the window (`set_window`): the engine keeps state per conversation (the
   main one, subagents, side requests). The first conversation seen is main, and the choice is
   re-evaluated at each turn start of another conversation, which takes over when (D50):
-  - its Claude Code session id differs from main's and no other conversation has been main in that
-    session: `/clear` starts a new session id, `/resume` sends the resumed conversation's id again.
-    The id is `X-Claude-Code-Session-Id`, else the `session_id` in `metadata.user_id`; subagents and
-    side requests carry the id of the conversation they run for (measured on Claude Code 2.1.302,
-    2.1.310, 2.1.314 and 2.1.318);
+  - its Claude Code session id differs from main's, its User-Agent entrypoint (`cli`, `sdk-cli`, ...)
+    is main's, and either no conversation has been main in that session yet (`/clear` starts a new
+    id), or it was the first conversation main in its session and that session lost main to another
+    session's id and has sent no request of this conversation since (`/resume` sends the resumed
+    conversation's id again). The id is `X-Claude-Code-Session-Id`, else the `session_id` in
+    `metadata.user_id`; subagents and side requests carry the id of the conversation they run for
+    (measured on Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318). A `claude -p` or SDK process run
+    from a tool has its own id and another entrypoint (`sdk-cli` on 2.1.314), so it does not qualify;
+    a session that keeps running beside the new main returns only by turn starts;
   - main has never sent a request with a tool list and this conversation has (Claude Code's title,
     topic, and quota side requests have none, and one is often the session's first request);
   - or it has strictly more turn starts than main (a tie keeps the current one).
 
   Only a conversation seen with a tool list takes over by the first two rules (for Codex, which
-  sends no Claude Code session id, only the third applies). The engine logs content-free
+  sends no Claude Code session id, only the third applies). A request whose `metadata.user_id` has
+  `parent_session_id` (an agent-team teammate, in process or in its own pane, on 2.1.314) never
+  takes over. The engine logs content-free
   `main_changed` with `reason` (`new_cli_session`, `resumed_cli_session`, `after_side_request`, or
   `more_turn_starts`) and the request's `turn_starts` on the request that takes over; never the
   session id. The choice is made before the request is transformed, so a request that fails after

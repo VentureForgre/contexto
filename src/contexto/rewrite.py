@@ -1650,27 +1650,43 @@ def keyed(dialect: Dialect, request: dict) -> str:
 
 
 CLAUDE_CODE_SESSION_HEADER = "x-claude-code-session-id"
+# Claude Code's User-Agent: claude-cli/<version> (<user type>, <entrypoint>[, agent-sdk/...][, ...])
+_CLAUDE_CODE_ENTRYPOINT = re.compile(r"claude-cli/\S+ \([^,()]*,\s*([^,()\s]+)")
 
 
-def claude_code_session(request: dict, headers: dict[str, str]) -> str | None:
-    """D50: Claude Code's own session id for a Messages request, from ``X-Claude-Code-Session-Id``,
-    else from the ``session_id`` in ``metadata.user_id`` (a JSON string); None when neither has one.
-    Measured on 2.1.302, 2.1.310, and 2.1.314: both carry the same id on every request; ``/clear``
-    starts a new one, ``/resume`` sends the resumed conversation's id again, and subagents and side
-    requests carry the id of the conversation they run for."""
-    found = next((v for k, v in headers.items() if k.lower() == CLAUDE_CODE_SESSION_HEADER), None)
-    if isinstance(found, str) and found:
-        return found
+class ClaudeCodeSession(NamedTuple):
+    """D50: the Claude Code session a Messages request belongs to."""
+
+    id: str
+    parent: str | None  # metadata.user_id's parent_session_id: set by an agent-team teammate
+    entrypoint: str | None  # the User-Agent's entrypoint: cli (interactive), sdk-cli (claude -p), sdk-ts, ...
+
+
+def claude_code_session(request: dict, headers: dict[str, str]) -> ClaudeCodeSession | None:
+    """D50: Claude Code's own session for a Messages request, or None without an id. The id is
+    ``X-Claude-Code-Session-Id``, else the ``session_id`` in ``metadata.user_id`` (a JSON string).
+    Measured on 2.1.302, 2.1.310, 2.1.314, and 2.1.318: both carry the same id on every request;
+    ``/clear`` starts a new one, ``/resume`` sends the resumed conversation's id again, and subagents
+    and side requests carry the id of the conversation they run for. On 2.1.314 a teammate's
+    requests carry ``parent_session_id`` (the lead's id; an in-process teammate keeps the lead's own
+    id, a tmux one has its own), and a ``claude -p`` run from the Bash tool has its own id and the
+    entrypoint ``sdk-cli``, where the interactive CLI's is ``cli``."""
     meta = request.get("metadata")
     user_id = meta.get("user_id") if isinstance(meta, dict) else None
-    if not isinstance(user_id, str):
-        return None
     try:
-        parsed = json.loads(user_id)
+        parsed = json.loads(user_id) if isinstance(user_id, str) else None
     except ValueError:
+        parsed = None
+    fields = parsed if isinstance(parsed, dict) else {}
+    found = next((v for k, v in headers.items() if k.lower() == CLAUDE_CODE_SESSION_HEADER), None)
+    session = found if isinstance(found, str) and found else fields.get("session_id")
+    if not isinstance(session, str) or not session:
         return None
-    session = parsed.get("session_id") if isinstance(parsed, dict) else None
-    return session if isinstance(session, str) and session else None
+    parent = fields.get("parent_session_id")
+    agent = next((v for k, v in headers.items() if k.lower() == "user-agent"), None)
+    match = _CLAUDE_CODE_ENTRYPOINT.match(agent) if isinstance(agent, str) else None
+    return ClaudeCodeSession(session, parent if isinstance(parent, str) and parent else None,
+                             match.group(1) if match else None)
 
 
 def window_record(store: Store) -> tuple[float, str | None] | None:
@@ -1952,12 +1968,14 @@ class RewriteEngine:
         self.restored: dict | None = None  # the sizing_restored event, once the first request restored it
         self._turn_starts: dict[str, int] = {}  # A14: conversation key -> turn starts at its latest request
         self._main: str | None = None  # A14: the conversation that publishes the room and the snapshot
-        # D50: per conversation key, Claude Code's session id at its latest request; the keys seen with
-        # a request the dialect judges (for Claude Code, one with a tool list); per session id, the
-        # conversation last main in it; and why main last moved, for the request's main_changed event.
-        self._cli_sessions: dict[str, str | None] = {}
+        # D50: per conversation key, Claude Code's session at its latest request; the keys seen with a
+        # request the dialect judges (for Claude Code, one with a tool list); per session id, the first
+        # conversation main in it, and, for a session that lost main to another session's id, whether
+        # that conversation has stayed quiet since; and why main last moved, for main_changed.
+        self._cli_sessions: dict[str, ClaudeCodeSession | None] = {}
         self._judged: set[str] = set()
         self._session_mains: dict[str, str] = {}
+        self._displaced: dict[str, bool] = {}
         self._main_reason: str | None = None
         self._restore_pending = True  # A2f: the restore waits for a request on the recorded model
         self._restore_record: tuple[float, str | None] | None = None  # the previous engine's, read once
@@ -2010,6 +2028,9 @@ class RewriteEngine:
         if previous is not None and previous != self._main:  # content-free: a reason and a count, no id
             resumed.append({"event": "main_changed", "reason": self._main_reason,
                             "turn_starts": self._turn_starts[key]})
+        session = self._cli_sessions.get(key)
+        if not main and session and session.id in self._displaced and self._session_mains.get(session.id) == key:
+            self._displaced[session.id] = False  # still running beside the new main: not a /resume later
         owner = _WINDOW_OWNER.set(main)
         try:
             upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator,
@@ -2184,17 +2205,25 @@ class RewriteEngine:
         """Contract PR #125 (477151e): only the main conversation publishes the room and the retained
         snapshot; the session store holds one of each and the MCP server cannot tell which conversation
         called it. The first conversation seen is main. At each of a conversation's turn starts the
-        choice is re-evaluated: it becomes main only with strictly more turn starts than the current
-        main (a tie keeps the current one), so a subagent or side request, with about one turn start,
-        never takes over, and main never changes inside a tool loop. The window (``set_window``) follows
+        choice is re-evaluated (``_takes_over``): it becomes main with strictly more turn starts than
+        the current main (a tie keeps the current one), so a subagent or side request, with about one
+        turn start, never takes over, or by D50's Claude Code rules; main never changes inside a tool
+        loop. The window (``set_window``) follows
         the same choice, committed before the transform; when main moves away from a conversation, its
         last publish is forgotten, since the new main replaces the store's window, so it publishes again
         if it becomes main again."""
+        previous = self._main
         main, self._turn_starts[key] = self._main_after(key, messages, dialect)
         self._set_main(main)
         session = self._cli_sessions.get(main)
-        if session and main in self._judged:
-            self._session_mains[session] = main
+        if previous is not None and previous != main:
+            lost = self._cli_sessions.get(previous)
+            if lost and self._main_reason in ("new_cli_session", "resumed_cli_session"):
+                self._displaced[lost.id] = True
+            if session:
+                self._displaced.pop(session.id, None)
+        if session and session.parent is None and main in self._judged:
+            self._session_mains.setdefault(session.id, main)
         return key == self._main
 
     def _set_main(self, key: str) -> None:
@@ -2220,20 +2249,33 @@ class RewriteEngine:
         prompt. Only a conversation seen with a request the dialect judges (for Claude Code, one with
         a tool list) takes over by them, so its title, topic, and quota side requests never do:
 
-        - ``new_cli_session`` and ``resumed_cli_session``: its Claude Code session id differs from
-          main's, and no other conversation has been main in that session. ``/clear`` starts a new
-          session with one turn start, which the turn-start rule would keep a side conversation until
-          it outgrew the old one; ``/resume`` returns to a session whose conversation was main. A
-          subagent or side request carries its parent's id, so it is never another session's.
+        - ``new_cli_session``: its Claude Code session id differs from main's and no conversation has
+          been main in that session yet. ``/clear`` starts a new session with one turn start, which the
+          turn-start rule would keep a side conversation until it outgrew the old one. A subagent or
+          side request carries its parent's id, so it is never another session's.
+        - ``resumed_cli_session``: its session id differs from main's, it was the first conversation
+          main in its session, and that session lost main to another session's id and has sent no
+          request of this conversation since: ``/resume`` of a conversation the user had cleared.
+          A session that kept running beside the new main regains main only by the turn-start rule,
+          so two live sessions cannot trade main at each turn start.
         - ``after_side_request``: main is a conversation never seen with a tool list, which happens
           when a side request is the session's first request; the user's first prompt ties it at one
           turn start.
 
+        The session rules need the same entrypoint as main's (``/clear`` and ``/resume`` keep the
+        process, so a ``claude -p`` or SDK child run from a tool, with its own id, never qualifies).
+        A child session (``parent_session_id``: an agent-team teammate) never takes over at all.
         Codex requests carry no Claude Code session id, so only the turn-start rule applies to them."""
+        session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
+        if session and session.parent:
+            return None
         if key in self._judged:
-            session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
-            if session and current and session != current and self._session_mains.get(session, key) == key:
-                return "resumed_cli_session" if session in self._session_mains else "new_cli_session"
+            if (session and current and session.id != current.id and session.entrypoint == current.entrypoint):
+                owner = self._session_mains.get(session.id)
+                if owner is None:
+                    return "new_cli_session"
+                if owner == key and self._displaced.get(session.id):
+                    return "resumed_cli_session"
             if main not in self._judged:
                 return "after_side_request"
         return "more_turn_starts" if turn_starts > self._turn_starts.get(main, 0) else None
