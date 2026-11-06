@@ -50,7 +50,10 @@ def no_change(req):
 KINDS = [tools_added, system_changed, model_switched]
 
 
-def base(messages, system_text="synthetic head, model claude-haiku-5-5"):
+BASE_SYSTEM = "synthetic head, model claude-haiku-5-5"
+
+
+def base(messages, system_text=BASE_SYSTEM):
     return request(messages, system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
 
 
@@ -188,12 +191,18 @@ def test_head_change_pages_to_half_the_window_as_before(change):
 
 # The measured head follows a head change -----------------------------------------------------------
 
-def drive(engine, msgs, change=no_change, ratio=3.5):
-    """One request through the engine with usage that matches the estimator at ``ratio`` bytes per token."""
-    req = change(base(msgs))
+RATIO = 3.5  # the fixtures' real bytes per token: usage is what the engine sent, at this ratio
+SLACK = 1_000  # what rule 4 also counts in the head: the request's JSON around the messages, carried text
+
+
+def drive(engine, msgs, change=no_change, system_text=BASE_SYSTEM, measured=True, ratio=RATIO):
+    """One request through the engine. Its usage matches the estimator at ``ratio`` bytes per token, or
+    never arrives if not ``measured`` (a 429 or 529, a dropped stream, Esc before the answer)."""
+    req = change(base(msgs, system_text))
     _, _, ev = engine(req, {}, MESSAGES)
-    real = request_event(ev)["sent_bytes"] / ratio
-    engine.observe_usage(MESSAGES, {"input_tokens": int(real), "output_tokens": 5}, req)
+    if measured:
+        real = request_event(ev)["sent_bytes"] / ratio
+        engine.observe_usage(MESSAGES, {"input_tokens": int(real), "output_tokens": 5}, req)
     return ev
 
 
@@ -202,47 +211,174 @@ def big_server(req):
     return {**req, "tools": [*req["tools"], *(mcp_tool(i, size=60) for i in range(30))]}
 
 
-def unmeasured(engine, msgs, change=no_change):
-    """One request whose usage never arrives (a 429 or 529, a dropped stream, Esc before the answer)."""
-    _, _, ev = engine(change(base(msgs)), {}, MESSAGES)
-    return ev
+def real_head(req, ratio=RATIO):
+    """The head's real tokens: its ``system`` and ``tools`` at the fixtures' ratio."""
+    return len(canonical_bytes({"system": req["system"], "tools": req["tools"]})) / ratio
 
 
-def measured_turn_start(cfg, server, first_usage_at=0):
-    """A turn whose loop connects ``server`` at step 6; usage arrives from step ``first_usage_at`` on."""
+def main_state(engine):
+    (state,) = engine.states.values()
+    return state
+
+
+def measured_turn_start(cfg, server, first_usage_at=0, steps=12, system_text=BASE_SYSTEM):
+    """A turn of ``steps`` reads whose loop connects ``server`` at read 6; usage arrives from read
+    ``first_usage_at`` on (0: from the turn's first request). Returns the engine and the next turn start's
+    events, with the turn start's request."""
     engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
     msgs = history(2) + [user("long task")]
-    (drive if first_usage_at == 0 else unmeasured)(engine, msgs)
-    for i in range(12):
+    drive(engine, msgs, system_text=system_text, measured=first_usage_at == 0)
+    for i in range(steps):
         msgs = msgs + [tool_use(i), tool_result(i, FILL)]
-        (drive if i + 1 >= first_usage_at else unmeasured)(engine, msgs, server if i >= 6 else no_change)
+        drive(engine, msgs, server if i >= 6 else no_change, system_text, measured=i + 1 >= first_usage_at)
     msgs = msgs + [assistant("done"), user("memory question")]
-    return drive(engine, msgs, server)
+    return engine, drive(engine, msgs, server, system_text), server(base(msgs, system_text))
+
+
+def assert_measured_once(engine, req, ev, cfg):
+    """Rule 4 as amended (D49): the measured head is at least the real head, the head change counted once,
+    and the turn start goes out under the bound by the estimate and by the real count."""
+    head = main_state(engine).head_tokens
+    assert real_head(req) <= head < real_head(req) + SLACK, (head, real_head(req))
+    assert sent_estimate(ev) <= cfg.bound and request_event(ev)["sent_bytes"] / RATIO <= cfg.bound
 
 
 def test_a_measured_head_grows_with_the_tools_an_mcp_server_adds():
     # With real usage the head is measured once (rule 4); a server that adds several thousand tokens of
     # tools must count in F at the head-change turn start, or the window is sized for the old head.
     cfg = Config(bound=30_000, headroom_floor=2_000, min_turn_room=6_000, pin_budget=200, index_budget=200)
-    ev = measured_turn_start(cfg, big_server)
+    _, ev, _ = measured_turn_start(cfg, big_server)
     rotation = next(e for e in ev if e["event"] == "rotation")
-    added = (len(canonical_bytes(big_server(base([]))["tools"])) - len(canonical_bytes(base([])["tools"]))) / 3.5
+    added = (len(canonical_bytes(big_server(base([]))["tools"])) - len(canonical_bytes(base([])["tools"]))) / RATIO
     assert rotation["reason"] == "head_change" and added > 7_000
     assert rotation["fixed_overhead"] > added  # before D49: the head measured at the first request alone
     assert sent_estimate(ev) <= cfg.bound and room(cfg, ev) >= cfg.min_turn_room
 
 
-def test_a_head_measured_late_never_counts_less_than_the_real_head():
-    # PR #232 review: when usage first arrives after the server connected, the change is counted twice
-    # (D49 Limits). That is kept on purpose: rule 4's late measurement alone runs low, so whatever the
-    # step usage first arrives at, F must stay at or above the real head.
-    cfg = Config(bound=30_000, headroom_floor=2_000, min_turn_room=6_000, pin_budget=200, index_budget=200)
-    real_head = len(canonical_bytes({"system": base([])["system"], "tools": big_server(base([]))["tools"]})) / 3.5
-    for first_usage_at in (0, 1, 4, 7, 8):
-        ev = measured_turn_start(cfg, big_server, first_usage_at=first_usage_at)
-        rotation = next(e for e in ev if e["event"] == "rotation")
-        assert rotation["reason"] == "head_change"
-        assert rotation["fixed_overhead"] >= real_head, first_usage_at
+# Rule 4 measures the head right whenever the first usage arrives ------------------------------------
+# Before the D49 amendment the head was the first measured input minus the window's estimate made before
+# the session's ratio was known (tool output at 1.5 bytes per token), so a first usage after a long loop
+# measured it thousands of tokens low, for the rest of the session.
+
+@pytest.mark.parametrize("late", [False, True])
+def test_a_late_first_usage_keeps_turn_starts_under_the_bound(late):
+    # PR #244 review: no usage until read 26 measured a head of 490 against a real 20,095; turn starts
+    # 2 to 4 kept the window (rotation_noop) and turn starts 4 and 5 went out at 32,047 and 32,031 real.
+    cfg = Config(bound=30_000, headroom_floor=5_000, min_turn_room=1_000, pin_budget=200, index_budget=200)
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
+    msgs = history(2) + [user("long task")]
+    drive(engine, msgs, system_text=LIVE_SYSTEM, measured=not late)
+    n = 0
+    for t, steps in enumerate([26, 6, 6, 6, 6]):
+        for i in range(steps):
+            msgs = msgs + [tool_use(n), tool_result(n, FILL)]
+            n += 1
+            drive(engine, msgs, system_text=LIVE_SYSTEM, measured=not late or t > 0 or i == steps - 1)
+        msgs = msgs + [assistant("done"), user(f"next {t}")]
+        ev = drive(engine, msgs, system_text=LIVE_SYSTEM)
+        assert_measured_once(engine, base(msgs, LIVE_SYSTEM), ev, cfg)
+        rotation = next((e for e in ev if e["event"] == "rotation"), None)
+        assert rotation is None or rotation["fixed_overhead"] >= real_head(base(msgs, LIVE_SYSTEM)), t + 1
+
+
+@pytest.mark.parametrize("server", [no_change, big_server])
+@pytest.mark.parametrize("steps", [12, 20, 24])
+def test_a_late_first_usage_with_a_20000_token_system_prompt_counts_the_whole_head(server, steps):
+    # PR #244 review: with the live head, first usage at the loop's last read, F came out 236 to 9,346
+    # under the real head even with the head change counted twice.
+    engine, ev, req = measured_turn_start(LIVE, server, first_usage_at=steps, steps=steps, system_text=LIVE_SYSTEM)
+    assert_measured_once(engine, req, ev, LIVE)
+
+
+@pytest.mark.parametrize("server", [no_change, big_server])
+@pytest.mark.parametrize("first_usage_at", [0, 1, 4, 7, 8, 12])
+def test_a_head_measured_at_any_step_is_at_least_the_real_head_and_counts_a_change_once(server, first_usage_at):
+    # Usage first arriving after the server connected (read 6) measures the new head: re-based on the
+    # measured request, the next head-change turn start adds nothing (before: the change twice).
+    engine, ev, req = measured_turn_start(ROOM, server, first_usage_at=first_usage_at)
+    assert_measured_once(engine, req, ev, ROOM)
+    assert room(ROOM, ev) >= ROOM.min_turn_room
+
+
+def test_a_resumed_first_request_with_a_long_history_measures_the_whole_head():
+    # PR #244 review: an engine's first request can carry a long history at k == 0 (a restarted proxy with
+    # no epoch record it can resume, in the middle of a loop). With 18 reads the head was measured at 6,582
+    # against 20,095, and W at 38,117 instead of about 24,400.
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=LIVE)
+    msgs = history(2) + [user("long task")]
+    for i in range(18):
+        msgs = msgs + [tool_use(i), tool_result(i, FILL)]
+    drive(engine, msgs, system_text=LIVE_SYSTEM)
+    head = real_head(base(msgs, LIVE_SYSTEM))
+    assert main_state(engine).k == 0 and head <= main_state(engine).head_tokens < head + SLACK
+    assert main_state(engine).window_budget <= LIVE.bound - LIVE.headroom_floor - head
+    n = 18
+    for t in range(4):
+        msgs = msgs + [assistant("done"), user(f"next {t}")]
+        assert_measured_once(engine, base(msgs, LIVE_SYSTEM), drive(engine, msgs, system_text=LIVE_SYSTEM), LIVE)
+        for _ in range(8):
+            msgs = msgs + [tool_use(n), tool_result(n, FILL)]
+            n += 1
+            drive(engine, msgs, system_text=LIVE_SYSTEM)
+
+
+def test_unattributed_usage_before_the_first_measurement_leaves_the_head_to_it():
+    # Usage for an older request (still in flight when the next was sent) is usage_unattributed: it is
+    # neither the head's measurement nor paired with the newest request's bytes.
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=ROOM)
+    msgs = history(2) + [user("long task")]
+    drive(engine, msgs, measured=False)
+    sent = []
+    for i in range(12):
+        msgs = msgs + [tool_use(i), tool_result(i, FILL)]
+        if i == 9:  # the usage of read 7's request arrives after read 8's was sent
+            events = engine.observe_usage(MESSAGES, {"input_tokens": 9_000, "output_tokens": 5}, sent[-2])
+            assert [e["event"] for e in events] == ["usage_unattributed"]
+            assert main_state(engine).head_tokens is None
+        drive(engine, msgs, big_server if i >= 6 else no_change, measured=i == 11)
+        sent.append(big_server(base(msgs)) if i >= 6 else base(msgs))
+    msgs = msgs + [assistant("done"), user("memory question")]
+    ev = drive(engine, msgs, big_server)
+    assert_measured_once(engine, big_server(base(msgs)), ev, ROOM)
+
+
+@pytest.mark.parametrize("ratio", [2.5, 3.5, 4.5])
+def test_a_late_first_usage_on_the_responses_dialect_measures_the_whole_head(ratio):
+    # Codex: the window's estimate before the first usage is at 3.5 bytes per token for every item, so a
+    # session whose real ratio is higher measured the head low. At a lower real ratio that estimate is the
+    # smaller window and the head errs high (6,601 tokens over at 2.5), which pages more but never overruns.
+    from test_codex import call, lead, output, prompt
+    from test_codex import request as codex_request
+
+    cfg = Config(bound=60_000, headroom_floor=10_000, min_turn_room=1_000, pin_budget=200, index_budget=200)
+    tools = [{"type": "function", "name": f"synthetic_tool_{i}", "description": "synthetic tool " * 60,
+              "parameters": {"type": "object"}} for i in range(30)]
+
+    def make(items):
+        return codex_request(items, instructions=LIVE_SYSTEM, tools=tools)
+
+    def send(items, measured=True):
+        _, _, ev = engine(make(items), {}, "/responses")
+        if measured:
+            real = int(request_event(ev)["sent_bytes"] / ratio)
+            engine.observe_usage("/responses", {"input_tokens": real, "output_tokens": 5}, make(items))
+        return ev
+
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
+    head = len(canonical_bytes({"instructions": LIVE_SYSTEM, "tools": tools})) / ratio
+    items = lead() + [prompt("long task")]
+    send(items, measured=False)
+    n = 0
+    for t, steps in enumerate([26, 6, 6, 6]):
+        for i in range(steps):
+            items = items + [call(n), output(n, FILL)]
+            n += 1
+            send(items, measured=t > 0 or i == steps - 1)
+        items = items + [prompt(f"next {t}")]
+        ev = send(items)
+        measured = main_state(engine).head_tokens
+        assert head <= measured and (ratio < 3.5 or measured < head + SLACK), (t, measured, head)
+        assert sent_estimate(ev) <= cfg.bound and request_event(ev)["sent_bytes"] / ratio <= cfg.bound
 
 
 # The pre-send check on every forwarded request ------------------------------------------------------

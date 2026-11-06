@@ -249,10 +249,13 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    usage with the bound and the estimate: log `over_bound` from real usage when it exceeds the
    bound, and `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
-   index), in tokens, taken from measured usage once available (the first request's input is the
-   head) and from the estimator before that. After a head change (rule 6) the measured head is
-   adjusted by the estimated size of the change in `system` and `tools` bytes, so a server that adds
-   tools or a model switch counts in `F` (D49). The window budget is `W = bound - headroom - F`, and
+   index), in tokens, taken from measured usage once available and from the estimator before that.
+   The first measured request's input, minus its non-carried messages, is the head; the messages
+   count at that request's own ratio (their share of its bytes), or at the estimate made before the
+   send when that is lower, so the head errs high whenever the first usage arrives (D49 as amended).
+   After a head change (rule 6) the measured head is adjusted by the estimated size of the change in
+   `system` and `tools` bytes since the measured request, so a server that adds tools or a model
+   switch counts in `F` once (D49). The window budget is `W = bound - headroom - F`, and
    the retained window after rotation targets `window_fraction * W` (default 0.5), so the window
    can grow before the next trigger. Choose the smallest `k` (retain as many recent turns as fit)
    within that target, retaining the newest complete turn and the new turn (except under the
