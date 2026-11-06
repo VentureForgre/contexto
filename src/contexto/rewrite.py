@@ -67,7 +67,9 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   messages), so lane B's search can list in-view lines first. The store stamps it with the request
   sequence that both of the request's room publishes carry. A failed write logs ``retained_stale``
   (not degraded mode). Only the main conversation publishes the room and the snapshot: the first one
-  seen, replaced at a turn start only by a conversation with strictly more turn starts. Every other
+  seen, replaced at a turn start by a conversation with strictly more turn starts, by the first
+  request with a tool list after a tool-less side request, or by Claude Code's next session after
+  ``/clear`` or ``/resume`` (D50, ``RewriteEngine._takes_over``). Every other
   conversation (a subagent, a side request) publishes a side room at each response instead (D40):
   ``set_side_room(room_id, bound - (input + output) - headroom_floor)`` when the response may hold a
   client tool call, ``set_side_room(room_id, None)`` when it holds none, where ``room_id`` is the
@@ -122,6 +124,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import json
 import math
 import os
 import posixpath
@@ -1646,6 +1649,30 @@ def keyed(dialect: Dialect, request: dict) -> str:
         _DIALECT.reset(token)
 
 
+CLAUDE_CODE_SESSION_HEADER = "x-claude-code-session-id"
+
+
+def claude_code_session(request: dict, headers: dict[str, str]) -> str | None:
+    """D50: Claude Code's own session id for a Messages request, from ``X-Claude-Code-Session-Id``,
+    else from the ``session_id`` in ``metadata.user_id`` (a JSON string); None when neither has one.
+    Measured on 2.1.302, 2.1.310, and 2.1.314: both carry the same id on every request; ``/clear``
+    starts a new one, ``/resume`` sends the resumed conversation's id again, and subagents and side
+    requests carry the id of the conversation they run for."""
+    found = next((v for k, v in headers.items() if k.lower() == CLAUDE_CODE_SESSION_HEADER), None)
+    if isinstance(found, str) and found:
+        return found
+    meta = request.get("metadata")
+    user_id = meta.get("user_id") if isinstance(meta, dict) else None
+    if not isinstance(user_id, str):
+        return None
+    try:
+        parsed = json.loads(user_id)
+    except ValueError:
+        return None
+    session = parsed.get("session_id") if isinstance(parsed, dict) else None
+    return session if isinstance(session, str) and session else None
+
+
 def window_record(store: Store) -> tuple[float, str | None] | None:
     """The ratio and model the previous engine gave ``set_window``, or None when there is no ratio or
     the store cannot be read."""
@@ -1925,6 +1952,13 @@ class RewriteEngine:
         self.restored: dict | None = None  # the sizing_restored event, once the first request restored it
         self._turn_starts: dict[str, int] = {}  # A14: conversation key -> turn starts at its latest request
         self._main: str | None = None  # A14: the conversation that publishes the room and the snapshot
+        # D50: per conversation key, Claude Code's session id at its latest request; the keys seen with
+        # a request the dialect judges (for Claude Code, one with a tool list); per session id, the
+        # conversation last main in it; and why main last moved, for the request's main_changed event.
+        self._cli_sessions: dict[str, str | None] = {}
+        self._judged: set[str] = set()
+        self._session_mains: dict[str, str] = {}
+        self._main_reason: str | None = None
         self._restore_pending = True  # A2f: the restore waits for a request on the recorded model
         self._restore_record: tuple[float, str | None] | None = None  # the previous engine's, read once
         self._restore_mismatch_logged = False  # sizing_not_restored model_changed is logged once
@@ -1967,7 +2001,15 @@ class RewriteEngine:
         # the transform, whose turn-start rotation may publish the window, so a request that fails after
         # that publish (a genuine bug, or degraded mode's forwarded original) still leaves it recorded
         # as main and the previous main's publish forgotten. publishes() below agrees for this request.
+        if dialect.name == "anthropic":
+            self._cli_sessions[key] = claude_code_session(request, headers)
+        if dialect.judges_session_start(request):
+            self._judged.add(key)
+        previous = self._main
         main = self.publishes(key, request.get(dialect.field) or [], dialect)
+        if previous is not None and previous != self._main:  # content-free: a reason and a count, no id
+            resumed.append({"event": "main_changed", "reason": self._main_reason,
+                            "turn_starts": self._turn_starts[key]})
         owner = _WINDOW_OWNER.set(main)
         try:
             upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator,
@@ -2150,6 +2192,9 @@ class RewriteEngine:
         if it becomes main again."""
         main, self._turn_starts[key] = self._main_after(key, messages, dialect)
         self._set_main(main)
+        session = self._cli_sessions.get(main)
+        if session and main in self._judged:
+            self._session_mains[session] = main
         return key == self._main
 
     def _set_main(self, key: str) -> None:
@@ -2163,9 +2208,35 @@ class RewriteEngine:
         starts = _turn_starts(messages, dialect)
         main = key if self._main is None else self._main
         at_start = bool(starts) and not any(dialect.is_assistant(m) for m in messages[starts[-1]:])
-        if at_start and key != main and len(starts) > self._turn_starts.get(main, 0):
-            main = key
+        if at_start and key != main:
+            reason = self._takes_over(key, main, len(starts))
+            if reason:
+                main, self._main_reason = key, reason
         return main, len(starts)
+
+    def _takes_over(self, key: str, main: str, turn_starts: int) -> str | None:
+        """D50: why the conversation ``key``, at a turn start, replaces ``main``, or None. The turn-start
+        rule above, plus two cases it got wrong for Claude Code, which keys a conversation by its first
+        prompt. Only a conversation seen with a request the dialect judges (for Claude Code, one with
+        a tool list) takes over by them, so its title, topic, and quota side requests never do:
+
+        - ``new_cli_session`` and ``resumed_cli_session``: its Claude Code session id differs from
+          main's, and no other conversation has been main in that session. ``/clear`` starts a new
+          session with one turn start, which the turn-start rule would keep a side conversation until
+          it outgrew the old one; ``/resume`` returns to a session whose conversation was main. A
+          subagent or side request carries its parent's id, so it is never another session's.
+        - ``after_side_request``: main is a conversation never seen with a tool list, which happens
+          when a side request is the session's first request; the user's first prompt ties it at one
+          turn start.
+
+        Codex requests carry no Claude Code session id, so only the turn-start rule applies to them."""
+        if key in self._judged:
+            session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
+            if session and current and session != current and self._session_mains.get(session, key) == key:
+                return "resumed_cli_session" if session in self._session_mains else "new_cli_session"
+            if main not in self._judged:
+                return "after_side_request"
+        return "more_turn_starts" if turn_starts > self._turn_starts.get(main, 0) else None
 
     def _publish_retained(self, state: EpochState, messages: list[dict], dialect: Dialect,
                           events: list[dict]) -> None:
