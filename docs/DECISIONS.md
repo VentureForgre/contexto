@@ -2702,7 +2702,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   force pushed: the tagged commits are all on `main` and stay there, and their wheels and sdists,
   which did not hold the hostname, are no longer published. Versions still come from the latest tag,
   so the next release follows v0.5.24. A backup of each release's notes, assets and tags is kept
-  outside the repository. Old commits and pull request diffs still hold the hostname (D42).
+  outside the repository. Old commits, pull request diffs and pull request comments still hold the
+  hostname (D42).
 
 ## Open decisions
 

@@ -5,7 +5,7 @@ turns (``turn_5x(t, opus=False)``) at the test's configuration; its fallback pag
 message, which v0.2.8 classified as carried text. The record it writes at the last turn start is
 saved as JSON. Zero spend: no CLI and no model, only the engine and an in-memory store.
 
-    git show v0.2.8:src/contexto/rewrite.py > /tmp/rewrite_v028.py
+    git show 0a8e4c3:src/contexto/rewrite.py  # v0.2.8's commit; the tag was deleted (D62) > /tmp/rewrite_v028.py
     PYTHONPATH=src:tests .venv/bin/python tests/fixtures/make_v028_epoch_record.py /tmp/rewrite_v028.py
 """
 

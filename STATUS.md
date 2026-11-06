@@ -1,7 +1,7 @@
 # Contexto status
 
 Updated 2026-11-06 by claude (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
-D48 to D61, and live acceptance run #4). Decisions taken and still open, with reasons:
+D48 to D61, live acceptance run #4, and deleting the v0.1.0 to v0.4.0 releases, D62). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -41,7 +41,8 @@ compaction never fires, and accuracy equals full context.
   owner's approval, 197 old branches were deleted (QA had found the hostname on 197 of 232 public
   branches), with no force push. The same day, with the owner's approval, the releases and tags
   v0.1.0 to v0.4.0 were deleted (D62), because GitHub's source archives of those 19 releases held the
-  hostname; their commits stay on `main`. Old commits and pull request diffs still hold it.
+  hostname; their commits stay on `main`. Old commits, pull request diffs and pull request comments
+  still hold it (D42).
 - CI and releases run on GitHub-hosted runners (PR #213): Python 3.12 to 3.15 on Ubuntu, 3.12 and
   3.15 on macOS, and Ruff lint (`uvx ruff@0.17.2 check .`; `ruff format` is not enforced). `ci` is a
   required check in the main ruleset, and workflow runs on fork pull requests need approval for all
@@ -586,7 +587,7 @@ Still open:
 ## What is left (as of 2026-11-06)
 
 Definition of done for this project: M2 acceptance passed on both CLIs (done), every release
-published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
+from v0.5.0 on published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
 
 Earlier work, all merged and released: the 30M plan (D32 to D34, #202 to #205, by v0.4.0), the
 2026-10-24 work (D35 to D41, v0.5.0 and v0.5.1), and the 2026-10-25 work (D43 to D47, v0.5.2 to
@@ -625,9 +626,9 @@ Needs the owner:
   127 levels; if the Responses API accepts a request past Contexto's 512, that request goes
   upstream untransformed, which is why `request_too_deep` fails acceptance 1. A Responses check
   needs a live call.
-- Old commits and pull request diffs still hold the owner's proxy hostname (the v0.1.0 to v0.4.0
-  releases and tags that carried it in their source archives were deleted, D62). Removing it from
-  commits would mean rewriting history, which needs force pushes, and pull request diffs would still
+- Old commits, pull request diffs and pull request comments still hold the owner's proxy hostname
+  (the v0.1.0 to v0.4.0 releases and tags that carried it in their source archives were deleted,
+  D62). Removing it from commits would mean rewriting history, which needs force pushes, and pull request diffs would still
   keep it unless GitHub Support purges them. The hostname has been public since 2026-10-24, so what
   protects the proxy is its own access control.
 
@@ -641,7 +642,8 @@ Needs the owner:
   logins live in CLIProxyAPI or the vendor's own CLI, never in Contexto, and users follow their
   providers' terms.
 - O5: settled by D29. v0.1.0 was cut from f990703 (tag and GitHub Release on this
-  repository, sdist and wheel attached, no package registry).
+  repository, sdist and wheel attached, no package registry; the release and tag were deleted with
+  v0.1.1 to v0.4.0 on 2026-11-06, D62).
 - O6: resolved by D36, deployed on the owner's proxy 2026-10-24 and verified for cache reuse. The
   dropped-thinking check ran on 2026-10-25 UTC (`docs/research/O6-thinking-check.md`). A 7-turn
   claude-opus-5-5 session with `--observe-thinking` made 18 requests; 14 of 17 main requests
