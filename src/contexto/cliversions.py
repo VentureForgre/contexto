@@ -228,8 +228,8 @@ class ClientVersions:
     injected context (``Dialect.session_start_seen`` returns True or False, not None). That is the main
     conversation's first request: Claude Code's title, topic, and quota side requests have no tool
     list, and a subagent's requests start from a tool call of a main turn, so after it. The engine's
-    ``main`` (``RewriteEngine.publishes``) is not used: when a tool-less side request arrives first, it
-    stays main through the real conversation's whole first turn. Requests that cannot tell (None) leave
+    ``main`` (``RewriteEngine.publishes``) is not used: a tool-less side request that arrives first is
+    main until the real conversation's first request (D50). Requests that cannot tell (None) leave
     the check open, for at most ``MAX_UNJUDGED`` of them."""
 
     def __init__(self) -> None:
