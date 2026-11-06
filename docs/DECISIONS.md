@@ -1256,6 +1256,56 @@ the owner's delegation. Open decisions are listed at the end with the options an
     role `system` text, so a one-reminder queued prompt placed after other text there (for example a
     nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
     (reviewer B, PR #230 round 2).
+- **D54. `contexto run codex`: the key helper through a shell, no Anthropic default, no orphaned
+  daemon, launch checks first.** Claude, 2026-11-05, under D0; contract change. From the 2026-11-05 QA
+  run (live-codex F1, docs-audit 1 and 2, verify-codex-orphans, install 2 and 3, launcher-ux 8 and its
+  nits), checked at zero spend on codex-cli 0.166.0 with a loopback Responses stub, a fake HOME, a
+  fresh CONTEXTO_HOME and a synthetic key.
+  - **Key helper.** Contexto split the helper into words (`shlex`) and gave Codex `command` plus `args`.
+    Codex runs `auth.command` itself, with no shell (codex-rs `ModelProviderAuthInfo`, 0.166.0); Claude
+    Code runs `apiKeyHelper`, which Contexto reuses, through one. So `echo $SYNTH_KEY | tr -d x` reached
+    the stub as `Bearer $SYNTH_KEY | tr -d x`, and `cat ~/key.txt` failed. Rule: `command = "/bin/sh"`,
+    `args = ["-c", <helper>]`. With the fix the same helper sent `Bearer key`. The helper string is one
+    TOML string (JSON escapes), so quotes, backslashes, newlines and non-ASCII text round-trip exactly.
+  - **No Anthropic default for Codex.** In API-key mode with no `--codex-upstream` and no
+    `CONTEXTO_CODEX_UPSTREAM`, the upstream was Claude Code's plus `/v1`. With no `ANTHROPIC_BASE_URL`
+    that was `https://api.anthropic.com/v1`: Codex's `/responses` would 404 there, after the user's
+    OpenAI key had gone to the wrong vendor. Rule: when the derived upstream's host is `anthropic.com` or
+    a subdomain (after IDNA normalization), refuse with exit 2 and name
+    `--codex-upstream https://api.openai.com/v1` and the CLIProxyAPI form. A derived CLIProxyAPI root
+    works as before. An explicit `--codex-upstream` or `CONTEXTO_CODEX_UPSTREAM` is never second-guessed.
+  - **`--no-daemon`.** Codex 0.166.0's TUI starts a shared background app-server pair for each
+    CODEX_HOME (`codex app-server --managed-daemon` and `codex app-server daemon pid-update-loop`) and
+    leaves it running. Each session has its own CODEX_HOME, so each interactive session left two
+    processes and about 517 MB (QA). The updater later downloaded 0.167.0 into the home (936 MB).
+    Reproduced here with main's code: 2 processes with PPID 1 and a 505 MB home after one stub turn.
+    Rule: interactive launches (no subcommand, `resume`, `fork`) pass `--no-daemon` as the first
+    argument, unless the user passed `--no-daemon` or `--remote`. The same holds in ChatGPT mode, where
+    CODEX_HOME is the user's own and a server may already run for it. The flag goes first because 0.166.0
+    accepts it before every subcommand and rejects it after `exec`. `exec` and the other
+    non-interactive subcommands start no server (measured: no process, no `packages/`) and get no flag.
+    The flag is gated on the installed version, read with `codex --version` only for launches that
+    could take it. It is passed from 0.156.0 on: the flag is in `codex-rs/tui/src/cli.rs` at
+    rust-v0.156.0 and not at rust-v0.155.0. Only 0.166.0 was run; 0.163.0 is not installed. With the
+    fix, a turn and a `resume --last` turn on the same session (9 input items: the conversation
+    resumed) left 0 processes and a 4.6 to 4.9 MB home.
+  - **Cleanup.** A kept CODEX_HOME is kept for its rollouts. On exit Contexto now also removes
+    `packages/` (Codex's copy of its release, 417 MB) and `.tmp/` (the plugin marketplace clone, 96 MB)
+    as well as `config.toml`; Codex rebuilds both when it needs them. A daemon a user starts some other
+    way is not stopped.
+  - **Launch checks and messages.** With no `codex` on PATH, `contexto run codex` blamed a missing key
+    helper (exit 2), or, given a helper, opened a session and started the proxy before failing (exit
+    127). Every failed launch left an empty session that became the "most recent" one. Rule: options,
+    `shutil.which("codex")` (exit 127, `'codex' not found on PATH`) and the upstream are checked before
+    the session and the proxy. A failure after that and before Codex starts (no key helper, the proxy,
+    Ctrl+C during the version check) removes the session directory if this launch created it; a resumed
+    `--session` is never removed. The key helper is still resolved after the proxy starts, because the
+    config it goes into names the proxy's URL. The Codex session line now reads `session <id> (bound N,
+    upstream <source>, codex auth <mode>, engine <name>)`. The log gets `launch` (with `cli: codex`,
+    `codex_auth`, `no_daemon`) and `exit` events as Claude's does. The start-time window warning now
+    runs for Codex too, with an assumed fixed overhead of 19,000 tokens: measured 13,322 to 18,403 in
+    the M2 Codex runs and 15,694 on 0.166.0, rounded up from the largest. At bound 40,000 and the
+    default floor it now warns before Codex starts, not after the first request.
 
 ## Open decisions
 
