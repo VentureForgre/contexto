@@ -9,7 +9,8 @@ fails, and what was tested.
 
 If you run Contexto yourself, it supports two kinds of upstream:
 
-- the vendor's API with your own API key (Anthropic for Claude Code, OpenAI for Codex);
+- the vendor's API with your own API key (Anthropic for Claude Code, OpenAI for Codex: pass
+  `--codex-upstream https://api.openai.com/v1` or set `CONTEXTO_CODEX_UPSTREAM` to it);
 - a CLIProxyAPI instance, reached with one of its client keys.
 
 A subscription login (claude.ai, ChatGPT) belongs in CLIProxyAPI or in the vendor's own CLI, never
@@ -92,8 +93,10 @@ The session line on stderr ends with where the upstream came from, for example
   settings above Codex goes to `http://127.0.0.1:8317/v1`. To set it on its own, pass
   `--codex-upstream http://127.0.0.1:8317/v1` or set `CONTEXTO_CODEX_UPSTREAM`. Keep the `/v1`:
   Codex sends `POST /responses`, and CLIProxyAPI answers `<root>/responses` with a 404 and an
-  empty body.
-- Key: Codex runs the helper and sends the key as `Authorization: Bearer`. Without
+  empty body. If Claude Code's upstream is Anthropic's API (no `ANTHROPIC_BASE_URL`), Contexto
+  refuses to derive the Codex upstream from it and asks for `--codex-upstream` (D54).
+- Key: Codex runs the helper through `/bin/sh -c`, as Claude Code runs `apiKeyHelper` (so `~`,
+  `$VAR` and pipes work), and sends the key as `Authorization: Bearer`. Without
   `--codex-key-helper` or `CONTEXTO_CODEX_KEY_HELPER`, Contexto uses the `apiKeyHelper` from your
   Claude Code settings, so the setup above serves both CLIs with one key. If Claude Code gets its
   key from `ANTHROPIC_AUTH_TOKEN` instead, pass a helper. A helper or base URL in a project's

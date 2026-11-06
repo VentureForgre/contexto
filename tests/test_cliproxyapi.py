@@ -454,7 +454,8 @@ def test_codex_api_key_mode_uses_the_key_helper_for_cliproxyapi(tmp_path):
     try:
         config = (launch.codex_home / "config.toml").read_text()
         assert launch.upstream == "http://127.0.0.1:8317/v1"
-        assert 'command = "/bin/cat"' in config and 'args = ["/keys/cpa-client-key"]' in config
+        # Through a shell, as Claude Code runs apiKeyHelper (D54).
+        assert 'command = "/bin/sh"' in config and 'args = ["-c", "/bin/cat /keys/cpa-client-key"]' in config
         assert "supports_websockets = false" in config
     finally:
         launch.cleanup()

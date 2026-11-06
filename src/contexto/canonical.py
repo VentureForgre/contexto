@@ -2,7 +2,9 @@
 reader for JSON that comes from outside Contexto.
 
 Canonical JSON is ``json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)``
-encoded as UTF-8: keys sorted, no whitespace, non-ASCII characters kept as themselves.
+encoded as UTF-8: keys sorted, no whitespace, non-ASCII characters kept as themselves. A lone UTF-16
+surrogate, which has no UTF-8 form, is written as its JSON escape (``utf8``), so the bytes still
+parse back to the same value (D58).
 """
 
 from __future__ import annotations
@@ -27,8 +29,16 @@ def canonical_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def utf8(text: str) -> bytes:
+    """``text`` as UTF-8, with a lone UTF-16 surrogate (tool output cut in the middle of an emoji, say)
+    written as its backslash-u escape instead of raising (D58). Strings without one encode exactly as
+    ``str.encode("utf-8")`` does. In JSON text the escape is the same string again, as in
+    ``proxy.serialize_request``; elsewhere it is a stable stand-in for hashes and byte counts."""
+    return text.encode("utf-8", "backslashreplace")
+
+
 def canonical_bytes(obj: Any) -> bytes:
-    return canonical_json(obj).encode("utf-8")
+    return utf8(canonical_json(obj))
 
 
 def nesting_exceeds(value: Any, limit: int = MAX_JSON_DEPTH) -> bool:

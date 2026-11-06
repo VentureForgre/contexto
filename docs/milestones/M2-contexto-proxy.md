@@ -143,6 +143,9 @@ refused, and so is a Bash command no rule allows. Not measured: organization-man
 may restrict permission rules to their own. `spikes/m2/permissions/permstub.py` repeats the `-p` check.
 Supported upstreams for end users (D35): the vendor API with an API key, or a CLIProxyAPI
 instance (its root for Claude Code, the root plus `/v1` for Codex); setup in `docs/cliproxyapi.md`.
+With no Codex upstream set, API-key mode derives one from Claude Code's upstream plus `/v1`, and
+refuses (exit 2) when that is Anthropic's API, naming `--codex-upstream https://api.openai.com/v1`
+(D54).
 
 ## Rewrite engine (normative)
 
@@ -675,6 +678,25 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   holds a shared `flock` on `live.lock` in the session directory until it exits; the descriptor is
   not inherited by child processes. A session whose lock another process holds is in use, and
   `contexto sessions prune` never deletes it. Stores never follow a symlinked `live.lock`.
+- **File safety (D58):** a session directory must be a real directory. One that is a symlink is
+  refused by every command that opens it (the proxy, the launcher, the MCP server, `recall`,
+  `state`, `sessions show`), as `sessions list` leaves it out and prune refuses it. A symlinked
+  `CONTEXTO_HOME` works everywhere, and a symlinked `sessions/` everywhere but prune. Files in a
+  session are never opened through a symlink, and a symlink, FIFO, device or directory in a file's
+  place is refused without blocking: `meta.json`, `epoch.json` and `retained.json` read as absent, a page
+  as unreadable (`page_unreadable`), the ledger (`ledger.jsonl` or `ledger.lock`) as damaged,
+  `page.key` as a key file error, and
+  the log is not written. Every write is whole (a short write continues). A temporary file is
+  removed when its write fails (a full disk), and temporary files left by a process that died
+  mid-write are removed when a store opens for writing, once they are more than 10 minutes old
+  (`stale_temp_removed`, with the count). A
+  log line cut short by a full disk is never joined to the next event, which starts on a new line.
+- **Lone surrogates (D58):** a lone UTF-16 surrogate in a string (which Claude Code does not send,
+  and the Messages API refuses) is stored, hashed, counted and written to the MCP client as its
+  JSON escape (`\ud83d`), so pages, ledger records and log lines stay valid UTF-8 JSON that reads
+  back to the same string, and nothing raises on it. The CLI writes a character its stdout or
+  stderr cannot encode as the same backslash escape, so `contexto state` and `contexto recall`
+  print such a pin or page.
 - **Pinned text** starts with fixed instruction lines, then lists open obligations, active
   decisions, then verified facts, newest first, each with its id, capped at `pin_budget` (default
   6,000 tokens). The instruction lines must say that earlier turns are paged out and how to reach
@@ -704,7 +726,16 @@ pin a standing rule, preference, or obligation the user states as an obligation 
 pin arguments (`{"kind": "obligation", "text": ...}`), even when its reply is one word, and to keep
 it open until the user withdraws it (D51): the
 preamble is sent only from the first rotation, and the instructions are what the model sees in the
-turns before it, usually where such rules are given. Tools:
+turns before it, usually where such rules are given. Errors (D58): an id that is not a string, a
+number or null is an invalid request (`-32600`, `id: null`); `params` that is present and not an
+object or null, or a tool name that is not a string, is invalid params (`-32602`). A tool that fails
+returns a tool result with `isError: true`, never a JSON-RPC error, and the call is logged
+`mcp_call` with `ok: false` and the error class: on a damaged ledger, `contexto_pin`,
+`contexto_close` and `contexto_state` say the ledger is damaged and name `contexto sessions show
+<session>`; any other unexpected failure says the call failed with its error class. An error echoes
+a value from the request at most 100 characters long, with its length noted, and a tool error's text
+is at most 1,000 characters. A page id that is not `pg_` and exactly 16 lowercase hex digits is an
+unknown page, never read. Tools:
 
 - `contexto_recall(page_id)` returns the page's messages rendered as plain text (thinking omitted),
   exactly, up to a per-call limit with `offset` for more. The limit is the smaller of 32,000
@@ -904,8 +935,9 @@ turns before it, usually where such rules are given. Tools:
   description names only the kinds it accepts (`event`, `decision`, `obligation`, `artifact`,
   `reference`) and says what the pinned state shows: open obligations and active decisions, and an
   event, artifact, or reference only when verified (`epistemic: verified`, with a provenance source;
-  D51).
-- `contexto_close(obligation_id, note)` appends a closure.
+  D51). A `text` of whitespace only is refused. Pinning an `event`, `artifact` or `reference` that is
+  not `verified` says in its reply that the pinned state will not show it (D58).
+- `contexto_close(obligation_id, note)` appends a closure. A `note` of whitespace only is refused.
 - `contexto_state()` returns the full pinned state without the budget cap.
 - `contexto_search(query)`: word search over page stubs and text (D34). The query is split on
   whitespace; a page matches when every word occurs in it, case-insensitively and in any order. A
@@ -1039,8 +1071,11 @@ turns before it, usually where such rules are given. Tools:
   "in view" refers to the main conversation's window (a documented subagent limitation); the MCP
   server cannot tell which conversation issued a call. Matches in the
   snapshot (a retained entry matches as a page does: every word of the query in its text, and its
-  matching lines chosen by the same rule) are listed first, labeled in view, newest first, as the matching line only, at most 3
-  per reply (the newest 3 across the window, the rest counted in one line), charged,
+  matching lines chosen by the same rule) are listed first, labeled in view with their turn, newest first, as the matching line only, at most 3
+  per reply (the label is the entry's count of turn starts less one, which is the page numbering, from 0, while every page holds a
+  whole turn; once the bounded fallback has paged carried text, which takes page turn numbers too, or a resync has restarted the
+  CLI's turn count, in-view numbers run behind recent page numbers and can repeat one; no tool takes a turn number; the logged span
+  keeps the entry's own `turn`, which counts turn starts from 1; D58) (the newest 3 across the window, the rest counted in one line), charged,
   skipping the current turn's own question: entries with role `user` in the snapshot's newest
   turn are never matched, since that text is what is being asked, not a
   statement about it (B22; inferred from reviewer-2's zero-spend reach re-check on main 8571095: an offline
@@ -1250,6 +1285,20 @@ use`, `--session`, `CONTEXTO_SESSION`).
   whether the floor is given or the 25,000 default) and 1 when the proxy or the session store
   cannot start (for example `CONTEXTO_HOME` is read-only; a `CONTEXTO_HOME` that is a file is refused
   first, exit 2, D55).
+
+`contexto run codex` (D54) checks its options, that `codex` is on PATH and starts (`codex --version`;
+else exit 127), and the Codex
+upstream before it opens the session or starts the proxy; a launch that fails after that, before
+Codex starts, removes the session directory it created (a resumed session is never removed). In
+API-key mode Codex's provider gets its key from `auth.command` = `/bin/sh -c <helper>`, so the helper
+runs through a shell as Claude Code runs `apiKeyHelper`. Interactive launches (no subcommand,
+`resume`, `fork`, found after the leading options) on Codex 0.156.0 or later pass `--no-daemon`,
+unless the user passed `--no-daemon` or `--remote`, so Codex's shared background app-server is not
+started for the session's CODEX_HOME and left running; when the version cannot be read, the flag is
+passed if `codex --help` lists it, else one warning is printed. `codex agents`, which needs that
+server and refuses `--no-daemon`, is refused (exit 2) unless `--remote` is given. On exit the kept CODEX_HOME loses
+`config.toml` and `packages/`; its rollouts and the plugin clone in `.tmp/` stay. The session line shows the bound, the log records `launch` and `exit` as for Claude,
+and the start-time window warning assumes a Codex fixed overhead of 19,000 tokens.
 
 `contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated
 blocks under the session directory, symlinks counted as links) and a total. `contexto sessions

@@ -31,7 +31,7 @@ import zlib
 from collections import OrderedDict
 from typing import Any, NamedTuple
 
-from contexto.canonical import canonical_bytes
+from contexto.canonical import canonical_bytes, utf8
 
 TEXT_BYTES_PER_TOKEN = 3.5
 TOOL_RESULT_BYTES_PER_TOKEN = 1.5
@@ -116,7 +116,7 @@ class MediaCost(NamedTuple):
 
 
 def _size(data: str | bytes) -> int:
-    return len(data.encode("utf-8")) if isinstance(data, str) else len(data)
+    return len(utf8(data)) if isinstance(data, str) else len(data)
 
 
 def _tokens(n: int, ratio: float) -> int:

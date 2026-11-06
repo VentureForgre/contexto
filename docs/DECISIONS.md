@@ -1839,6 +1839,80 @@ the owner's delegation. Open decisions are listed at the end with the options an
     connects lost 13 to 21% to ETIMEDOUT, and at 128 none (QA measurement). A second Ctrl+C during
     `stop()`'s 2 s drain printed a `KeyboardInterrupt` traceback; it now ends the wait, and the
     requests still in flight are logged as `proxy_stop_incomplete`.
+- **D54. `contexto run codex`: the key helper through a shell, no Anthropic default, no orphaned
+  daemon, launch checks first.** Claude, 2026-11-05, under D0; contract change. From the 2026-11-05 QA
+  run (live-codex F1, docs-audit 1 and 2, verify-codex-orphans, install 2 and 3, launcher-ux 8 and its
+  nits), checked at zero spend on codex-cli 0.166.0 with a loopback Responses stub, a fake HOME, a
+  fresh CONTEXTO_HOME and a synthetic key.
+  - **Key helper.** Contexto split the helper into words (`shlex`) and gave Codex `command` plus `args`.
+    Codex runs `auth.command` itself, with no shell (codex-rs `ModelProviderAuthInfo`, 0.166.0); Claude
+    Code runs `apiKeyHelper`, which Contexto reuses, through one. So `echo $SYNTH_KEY | tr -d x` reached
+    the stub as `Bearer $SYNTH_KEY | tr -d x`, and `cat ~/key.txt` failed. Rule: `command = "/bin/sh"`,
+    `args = ["-c", <helper>]`. With the fix the same helper sent `Bearer key`. The helper string is one
+    TOML string (JSON escapes), so quotes, backslashes, newlines and non-ASCII text round-trip exactly.
+  - **No Anthropic default for Codex.** In API-key mode with no `--codex-upstream` and no
+    `CONTEXTO_CODEX_UPSTREAM`, the upstream was Claude Code's plus `/v1`. With no `ANTHROPIC_BASE_URL`
+    that was `https://api.anthropic.com/v1`: Codex's `/responses` would 404 there, after the user's
+    OpenAI key had gone to the wrong vendor. Rule: when the derived upstream's host is `anthropic.com` or
+    a subdomain (after IDNA normalization), refuse with exit 2 and name
+    `--codex-upstream https://api.openai.com/v1` and the CLIProxyAPI form. A derived CLIProxyAPI root
+    works as before. An explicit `--codex-upstream` or `CONTEXTO_CODEX_UPSTREAM` is never second-guessed.
+    When D52 skipped an untrusted project's `env.ANTHROPIC_BASE_URL`, Claude Code's upstream falls back
+    to Anthropic's and this refusal follows; D52's "ignored ... from .claude/settings.json" note is
+    printed first, so the user sees why (and the launch stops there, before the key helper is looked up).
+  - **`--no-daemon`.** Codex 0.166.0's TUI starts a shared background app-server pair for each
+    CODEX_HOME (`codex app-server --managed-daemon` and `codex app-server daemon pid-update-loop`) and
+    leaves it running. Each session has its own CODEX_HOME, so each interactive session left two
+    processes and about 517 MB (QA). The updater later downloaded 0.167.0 into the home (936 MB).
+    Reproduced here with main's code: 2 processes with PPID 1 and a 505 MB home after one stub turn.
+    Rule: interactive launches (no subcommand, `resume`, `fork`) pass `--no-daemon` as the first
+    argument, unless the user passed `--no-daemon` or `--remote`. The same holds in ChatGPT mode, where
+    CODEX_HOME is the user's own and a server may already run for it. The flag goes first because 0.166.0
+    accepts it before every subcommand and rejects it after `exec`. `exec` and the other
+    non-interactive subcommands start no server (measured: no process, no `packages/`) and get no flag.
+    `codex agents` is refused instead (exit 2, before the session exists) unless `--remote` sends it
+    elsewhere (reviewer B, PR #236). Measured on 0.166.0 under Contexto: it installed and started the
+    server pair in the session's CODEX_HOME and left both running (PPID 1); Codex refuses `--no-daemon`
+    with it ("requires a shared server"); `codex app-server daemon stop` stopped the server but not its
+    `pid-update-loop`; and the server's work would outlive the proxy it is configured to use. Other
+    subcommands that manage the server (`app-server`, `remote-control`) were not measured and are not
+    refused. The subcommand is the first word after the
+    leading options, with Codex's value-taking options skipped (`-i`/`--image` takes every word up
+    to the next option, so `codex -i a.png exec` opens the TUI; measured on 0.166.0). The flag is gated
+    on the installed version, read with `codex --version` only for launches that could take it. It is
+    passed from 0.156.0 on: the flag is in `codex-rs/tui/src/cli.rs` at rust-v0.156.0 and not at
+    rust-v0.155.0. When the version cannot be read, `codex --help` decides (bounded, 3 s): the flag is
+    passed if it is listed, else one warning line says Codex may leave a background app-server
+    running; the `launch` event records `codex_version_error` (reviewer A, PR #236). Only 0.166.0 was
+    run; 0.163.0 is not installed. With the fix, a turn and a `resume --last` turn on the same session
+    (9 input items: the conversation resumed) left 0 processes.
+  - **Cleanup.** A kept CODEX_HOME is kept for its rollouts. On exit Contexto now also removes
+    `packages/` (the daemon's copy of Codex's release, 417 MB; a `--no-daemon` launch makes none) as
+    well as `config.toml`. The plugin marketplace clone in `.tmp/` stays: removing it made every resumed
+    launch clone about 96 MB from github.com again (reviewer A, PR #236), and plugins are left to the
+    user. Measured with the fix: 98 MB after a first session (93 MB of it `.tmp/`, no `packages/`), still
+    98 MB after a `resume --last` on it, with the same `.tmp/plugins` inode (no second clone). A daemon a
+    user starts some other way is not stopped.
+  - **TOML.** A helper is written as a JSON-escaped TOML string, but JSON leaves DEL (U+007F) raw and
+    TOML forbids it, so Codex could not load the config (pre-existing, reviewer A); it is now written as
+    `\u007f`. A lone surrogate, which TOML cannot hold, is refused with exit 2.
+  - **Launch checks and messages.** With no `codex` on PATH, `contexto run codex` blamed a missing key
+    helper (exit 2), or, given a helper, opened a session and started the proxy before failing (exit
+    127). Every failed launch left an empty session that became the "most recent" one. Rule: options,
+    `shutil.which("codex")` and the upstream are checked before the session and the proxy. A `codex` that
+    is missing, not executable, a directory or a broken link exits 127 with D55's `cli_not_found`
+    message, as `run claude` does. `codex --version` is then read on every launch, also before the
+    session: an executable whose `#!` interpreter is missing passes `which` but cannot start, and it
+    exits 127 (`cannot be run (FileNotFoundError)`) instead of leaving a session behind (reviewer A,
+    PR #236 round 2). The same read gives the version `--no-daemon` is gated on. A failure after that and before Codex starts (no key helper, the proxy,
+    Ctrl+C during the version check) removes the session directory if this launch created it; a resumed
+    `--session` is never removed. The key helper is still resolved after the proxy starts, because the
+    config it goes into names the proxy's URL. The Codex session line now reads `session <id> (bound N,
+    upstream <source>, codex auth <mode>, engine <name>)`. The log gets `launch` (with `cli: codex`,
+    `codex_auth`, `no_daemon`) and `exit` events as Claude's does. The start-time window warning now
+    runs for Codex too, with an assumed fixed overhead of 19,000 tokens: measured 13,322 to 18,403 in
+    the M2 Codex runs and 15,694 on 0.166.0, rounded up from the largest. At bound 40,000 and the
+    default floor it now warns before Codex starts, not after the first request.
 - **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
   subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
   untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by
@@ -2223,6 +2297,104 @@ the owner's delegation. Open decisions are listed at the end with the options an
     `proxy --session` id (empty, or over 255 bytes) is now a usage error, exit 2, checked before the store
     opens. D52's removal of a session a refused Codex launch created is kept as the one mechanism for
     `run codex`; `run claude` and `proxy` keep `discard_new_session`, so no launch removes a session twice.
+
+- **D58. The store and the MCP server stay up and say what is wrong.** Claude, 2026-11-05, under D0;
+  contract change. From the 2026-11-05 QA run on main 4e2c4cd (store-mcp, verify-surrogate,
+  scale-engine finding 2, verify-obligations finding 3), all reproduced at zero spend first.
+  - **Lone surrogates.** One `\ud83d` with no low half raised `UnicodeEncodeError` at every strict
+    `encode("utf-8")` (canonical JSON, the token estimate, the preamble hash, page ids, ledger lines,
+    the session log), so the engine logged `transform_error` and forwarded untransformed from then
+    on, and a page could never hold the turn. In the MCP server the reply write was outside its try:
+    a page id, tool name, method or request id holding one ended the process (rc 1), and the call
+    failed with "Connection closed" until Claude Code respawned it. verify-surrogate showed Claude
+    Code 2.1.302 to 2.1.318 replaces lone surrogates with U+FFFD in every API request, and the API
+    answers 400 to a body holding one, so this was downgraded to low; MCP tool inputs reach the
+    server unsanitized, so that half was reachable. Rule: such a character is encoded as its JSON
+    escape (`backslashreplace`, as `proxy.serialize_request` already did), which in JSON text is the
+    same string again: pages, ledger lines and log lines stay valid UTF-8 JSON that reads back
+    exactly, and the client reads the same string it sent. Strings without one encode byte for byte
+    as before, so no existing page id, record id or hash changes. QA's test (8 cases, 7 failing on
+    main) passes: the 40-turn conversation with the surrogate in turn 0, 3 or 39 is paged and
+    bounded, and the server answers the ping after each of the 4 poisoned lines. Re-encoding a
+    32,000-character reply costs about 23 microseconds.
+  - **Tool errors.** The tools caught only `ValueError`, so a damaged ledger (`LedgerCorruptError`)
+    made pin, close and state a JSON-RPC `-32603 Internal error`, with no `mcp_call` logged. Now any
+    exception inside a tool is that call's tool result (`isError: true`), logged with its error
+    class: a damaged ledger says pins and closes are refused until the user repairs it and names
+    `contexto sessions show <session>`; anything else says the call failed with its class and to
+    try once more. A non-string tool name was `-32603` and is now `-32602`; ids that are objects,
+    arrays or booleans, which JSON-RPC does not allow, are `-32600` with `id: null`; `params` of
+    `[]` or `0`, which read as `{}`, are `-32602`, and `arguments` of `[]`, `0` or `false` are the
+    tool error "arguments must be an object", as `"x"` already was (reviewer B, PR #235). Errors echoed whole arguments: a 10 MB page id or
+    obligation id, or 100,000 rejected `supersedes` ids, came back in full, outside any recall room.
+    An echoed value is now at most 100 characters and a tool error at most 1,000. A pin or close note
+    of whitespace only, which passed `minLength: 1`, is refused. A pin of an `event`, `artifact` or
+    `reference` that is not `verified` returned "Recorded ..." although the pinned state shows those
+    kinds only when verified; its reply now says so and suggests a decision or an obligation (the
+    tool description is D51's).
+  - **Unknown page ids.** `get_page` took `pg_` and any number of hex digits, so a 300-digit id
+    failed in the read with `ENAMETOOLONG` and was reported "cannot be read" and logged
+    `page_unreadable`, as damage. Only `pg_` and exactly 16 lowercase hex digits name a page now;
+    anything else is "Unknown page id" and is never read.
+  - **Files that are not files.** A FIFO in place of `meta.json`, `ledger.jsonl`, `log.jsonl`,
+    `retained.json`, `epoch.json` or a page hung the MCP server, `recall`, `state`, `sessions show`
+    and the proxy; a directory in place of the ledger or the log gave tracebacks; a damaged
+    `page.key` gave the proxy a traceback (`KeyFileError` was not a `ValueError`). Every session file
+    is now opened `O_NONBLOCK | O_NOFOLLOW` and checked to be a regular file before it is read or
+    written (`contexto.private.open_regular`, `open_private`), as `affinity.salt` already was; each
+    reads as the damage it is (absent metadata, an unreadable page, a damaged ledger, a key file
+    error), and `KeyFileError` is a `ValueError` too. A symlink in a file's place is refused the
+    same way (`NotRegularFileError`): with the first head, a symlinked `ledger.jsonl` raised a plain
+    `ELOOP` that gave tracebacks in `sessions list`, `show` and `state` and stopped `contexto mcp`
+    and the proxy, where a FIFO or directory degraded (reviewer B, PR #235). `ledger.lock` the same:
+    a symlink, FIFO or directory there gave tracebacks in `sessions list` (for every session),
+    `show` and `state` and stopped `contexto mcp`; it now reads as a damaged ledger (reviewer A, PR
+    #235 round 2; the FIFO and directory cases crashed on main too). In the 21 FIFO, directory and
+    symlink cases every MCP tool and CLI reader returns within the test's 10-second limit; on main 8 fail (each FIFO blocks the MCP server on its first call, and a directory as the
+    ledger or the log raises).
+  - **Symlinked session directories: one rule.** A session directory that was a symlink was used by
+    `mcp`, the proxy, `state` and `sessions show`, which chmodded the link's target to 0700, but was
+    left out of `sessions list` and refused by prune. Rule: a session directory must be a real
+    directory, and every command refuses one that is a symlink (the error says so; a dangling link
+    keeps its "symlink to a missing target" message). Following them everywhere was rejected: prune
+    must not delete through a link, so it could never be one rule. A symlinked `log.jsonl` was
+    appended to and chmodded; files in a session are no longer opened through a symlink.
+  - **A full disk.** `write_new` removed its temporary file only after a successful write, so
+    `ENOSPC` left `.pg_<id>.json.<pid>.<rand>.tmp` in `pages/` (2 after one QA full-disk run), and
+    `_modify_meta` did the same for `meta.json`. Writes were a single `os.write`, so a short write
+    could rename a truncated `meta.json` into place, or leave a log line without its newline that
+    the next event (`proxy_start`) was appended to, losing both. Now every write continues after a
+    short write, a failed write removes its temporary file, a log event after a cut line starts on a
+    new line (the cut line stays unreadable and readers skip it), and opening a store for writing
+    removes temporary files whose process no longer runs (1 in 25 of QA's kill -9 runs left one
+    between the link and the unlink), logging `stale_temp_removed`. A file must also be more than 10
+    minutes old: a live writer whose pid this process cannot see (a container sharing the home in
+    another pid namespace, another machine) looks gone, and a live temporary file exists for
+    milliseconds (reviewer A, PR #235).
+  - **`open_existing`** did not set `clock`, so `side_rooms()`, `set_side_room()` and
+    `charge_turn_room()` raised `AttributeError` on a store opened for reading. No shipped command
+    reached it; it is set now.
+  - **Turn numbers.** Pages number paged turns from 0 (`page_out(turns, turns_paged)`) and the
+    in-view search lines showed the retained entry's count of turn starts, from 1: in one QA reply
+    the 33rd turn was "pg_... (turn 32)" and the 34th "in view (turn 34)". Rotation pages whole
+    turns (`k` is always a turn start), so the in-view label now shows that count less one: a test
+    pages 40 turns through the engine and finds each turn's unique key under its own index, paged
+    or in view. Page turn numbers are hashed into page ids and fix every page offset, so they stay;
+    the logged in-view span keeps the entry's `turn`. This holds only while every page is a whole
+    turn: carried-text pages from the bounded fallback take page turn numbers too, and a resync
+    (local compaction) restarts the CLI's count while `turns_paged` goes on, so in-view numbers then
+    run behind recent pages and can repeat one (reviewer B, PR #235: in a 40-turn store with 4
+    carried pages, CLI turn 38 was "turn 43" paged and "turn 39" named both CLI turn 39 in view and
+    CLI turn 36 paged). Labelling from the page numbering would need the turn starts before `k` and
+    `turns_paged` with each snapshot, and the epoch record that holds `turns_paged` is written only
+    at turn starts, so a label built from it would still lag a mid-turn carried page. No tool takes
+    a turn number (`contexto_recall` takes a page id and offset), so the contract says when the
+    numbers match instead.
+  - **CLI output.** The first head stored lone surrogates, but `contexto state` and `contexto
+    recall` wrote to a strict UTF-8 stdout and raised `UnicodeEncodeError`; the ledger is
+    append-only, so one such pin broke `state` for that session (reviewer B, PR #235). `cli.main`
+    now sets stdout and stderr to write an unencodable character as its backslash escape, as the
+    MCP server does; text that encodes is unchanged.
 
 ## Open decisions
 
