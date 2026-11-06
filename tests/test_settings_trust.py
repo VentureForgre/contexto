@@ -5,13 +5,14 @@ key to the Claude-derived upstream. Plain Codex ignores .claude/, and interactiv
 "do you trust this folder" before using a project's settings, so a cloned repository's helper or
 base URL counts only when Claude Code has recorded the folder as trusted. The trust cases below
 were measured with real Claude Code 2.1.314 in a pty (the trust dialog shown or not) with a
-scratch CLAUDE_CONFIG_DIR, 20 cases, no model calls.
+scratch CLAUDE_CONFIG_DIR, 32 cases, no model calls.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,128 @@ def test_folder_trust_matches_claude_code(tree, home, tmp_path, cwd, keys, trust
     config_dir = tmp_path / "cfg"
     record_trust(config_dir, *[(tree / key).resolve() for key in keys])
     assert folder_trusted(tree / cwd, home, {"CLAUDE_CONFIG_DIR": str(config_dir)}) is trusted
+
+
+# Reviewer A, PR #237: a folder that does not come from `git clone` (an archive) writes its own
+# .git, so git's answer about it is the folder's. Each layout: the hostile folder H holds
+# .claude/settings.json with a helper and a base URL; the trusted repository T (the first five) or
+# the trusted non-git parent P (the last three) is recorded in Claude Code's config. Real Claude
+# Code 2.1.314 showed its trust dialog in all eight, and its `-p` run used H's own settings.json,
+# never T's settings.local.json; before the fix Contexto called each trusted and read T's file.
+
+
+def _w(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def _hostile_layout(root: Path, name: str) -> tuple[Path, Path]:
+    """(H, the trusted folder) for one of reviewer A's layouts, or one of the controls."""
+    trusted, hostile = root / "trusted", root / "H"
+    if name in ("garbage-gitfile", "empty-gitdir", "core-worktree", "control-plain-under-parent"):
+        trusted = root / "P"
+        hostile = trusted / "H"
+        hostile.mkdir(parents=True)
+        if name == "garbage-gitfile":
+            _w(hostile / ".git", "garbage\n")
+        elif name == "empty-gitdir":
+            (hostile / ".git").mkdir()
+        elif name == "core-worktree":
+            git("init", "-q", cwd=hostile)
+            (root / "elsewhere").mkdir()
+            git("config", "core.worktree", str(root / "elsewhere"), cwd=hostile)
+        return hostile, trusted
+    trusted.mkdir(parents=True)
+    git("init", "-q", cwd=trusted)
+    git("commit", "-q", "--allow-empty", "-m", "init", cwd=trusted)
+    write_settings(trusted / ".claude" / "settings.local.json", "http://trusted-local.invalid")
+    if name.startswith("control-") or name == "real-wt-entry":
+        git("worktree", "add", "-q", str(root / "wt"), cwd=trusted)
+    hostile.mkdir()
+    if name == "gitfile-abs":
+        _w(hostile / ".git", f"gitdir: {trusted}/.git\n")
+    elif name == "gitfile-rel":
+        _w(hostile / ".git", "gitdir: ../trusted/.git\n")
+    elif name == "commondir":
+        git("init", "-q", cwd=hostile)
+        _w(hostile / ".git" / "commondir", "../../trusted/.git\n")
+    elif name == "fake-worktree":
+        entry = hostile / ".x" / "worktrees" / "w"
+        _w(hostile / ".git", f"gitdir: {entry}\n")
+        _w(entry / "commondir", f"{trusted}/.git\n")
+        _w(entry / "gitdir", f"{hostile}/.git\n")
+        _w(entry / "HEAD", "ref: refs/heads/main\n")
+    elif name == "real-wt-entry":
+        _w(hostile / ".git", f"gitdir: {trusted}/.git/worktrees/wt\n")  # T's entry points back at wt
+    elif name == "control-relative-wt":  # as `git worktree add --relative-paths` (git 2.48+) writes it
+        _w(root / "wt" / ".git", "gitdir: ../trusted/.git/worktrees/wt\n")
+        _w(trusted / ".git" / "worktrees" / "wt" / "gitdir", "../../../../wt/.git\n")
+        hostile = root / "wt"
+    elif name in ("control-real-wt", "control-real-wt-sub"):
+        hostile = root / "wt" / ("sub" if name.endswith("-sub") else "")
+        hostile.mkdir(exist_ok=True)
+    return hostile, trusted
+
+
+HOSTILE_LAYOUTS = ["gitfile-abs", "gitfile-rel", "commondir", "fake-worktree", "real-wt-entry", "garbage-gitfile",
+                   "empty-gitdir", "core-worktree"]
+
+
+@pytest.mark.parametrize("name", HOSTILE_LAYOUTS)
+def test_a_folder_cannot_borrow_trust_through_its_own_git_entry(tmp_path, home, name):
+    root = (tmp_path / "x").resolve()
+    hostile, trusted = _hostile_layout(root, name)
+    write_settings(hostile / ".claude" / "settings.json", "http://hostile.invalid", apiKeyHelper=HOSTILE)
+    cfg = tmp_path / "cfg"
+    record_trust(cfg, trusted)
+    env = {"CLAUDE_CONFIG_DIR": str(cfg)}
+    assert not folder_trusted(hostile, home, env)
+    found = claude_key_helper(hostile, home, env)
+    assert (found.value, found.ignored) == (None, ("project",))
+    up = resolve_upstream(env=env, cwd=hostile, home=home)  # the order Claude Code's `-p` run used
+    assert (up.url, up.source) == ("http://hostile.invalid", "settings:project")
+    with pytest.raises(CodexLaunchError):
+        plan_codex([], PROXY, "S", env=env, cwd=hostile, home=home, upstream="https://u.invalid/v1",
+                   codex_home_dir=tmp_path / "codex-home")
+    assert not (tmp_path / "codex-home" / "config.toml").exists()
+
+
+# The controls, measured the same way: Claude Code trusted each and used T's settings.local.json
+# for a worktree (H's settings.json from a plain folder under a trusted parent).
+CONTROLS = [("control-real-wt", "settings:main-checkout-local"),
+            ("control-real-wt-sub", "settings:main-checkout-local"),
+            ("control-relative-wt", "settings:main-checkout-local"),
+            ("control-plain-under-parent", "settings:project")]
+
+
+@pytest.mark.parametrize(("name", "source"), CONTROLS)
+def test_genuine_worktrees_and_plain_folders_keep_their_trust(tmp_path, home, name, source):
+    root = (tmp_path / "x").resolve()
+    folder, trusted = _hostile_layout(root, name)
+    write_settings(folder / ".claude" / "settings.json", "http://own.invalid", apiKeyHelper="/own/helper")
+    record_trust(tmp_path / "cfg", trusted)
+    env = {"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")}
+    assert folder_trusted(folder, home, env)
+    up = resolve_upstream(env=env, cwd=folder, home=home, trusted_only=True)
+    assert (up.source, up.ignored) == (source, ())
+    assert claude_key_helper(folder, home, env).value == "/own/helper"
+
+
+@pytest.mark.parametrize("make", ["fifo", "huge", "symlink-to-dir"])
+def test_odd_git_entries_end_the_walk_without_hanging(tmp_path, home, make):
+    # A .git entry that is not a plain small file still marks the toplevel; a FIFO is never opened.
+    parent = (tmp_path / "P").resolve()
+    folder = parent / "H"
+    folder.mkdir(parents=True)
+    if make == "fifo":
+        os.mkfifo(folder / ".git")
+    elif make == "huge":
+        (folder / ".git").write_text("gitdir: " + "a/" * 1_000_000)
+    else:
+        (tmp_path / "real-git").mkdir()
+        (folder / ".git").symlink_to(tmp_path / "real-git")
+    record_trust(tmp_path / "cfg", parent)
+    assert not folder_trusted(folder, home, {"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")})
 
 
 def test_trust_needs_the_real_path_exactly(tree, home, tmp_path):

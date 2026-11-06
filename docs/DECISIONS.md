@@ -1289,16 +1289,39 @@ the owner's delegation. Open decisions are listed at the end with the options an
     dialog). With no helper left, the launch stops with exit 2 before Codex starts. The flag and
     environment helpers, `--upstream`, `--codex-upstream`, and the user file are never gated. A
     trust lookup happens only when a project file sets the key.
+  - **The layout comes from the file system, not git** (reviewer A, PR #237 round 1). A folder that
+    does not come from `git clone` (a zip, a tarball, a release asset) writes its own `.git`, so
+    `git rev-parse` answers what the folder says. Reviewer A found 8 layouts where the first version
+    said trusted and Claude Code 2.1.314 showed its dialog, and the folder's `apiKeyHelper` became
+    Codex's `auth.command`. With a trusted repository T: `H/.git` a file naming `T/.git` (absolute,
+    and relative), H's own `.git/commondir` naming `T/.git`, a fake worktree entry inside H whose
+    `commondir` names `T/.git`, and `H/.git` naming T's real worktree entry. With a trusted non-git
+    parent P: `P/H/.git` a garbage file, an empty `.git` directory, and a valid repository with
+    `core.worktree` set elsewhere (git fails or reports a toplevel that is not a parent, and the
+    first version then counted every parent). Measured again here, with the pty and with `claude
+    -p`: in all 8 Claude Code showed the dialog and read H's own `settings.json`, never T's
+    `settings.local.json`; the first version read T's in the 5 with T. Rule now: the toplevel is
+    the nearest directory, the working directory or a parent, with a `.git` entry of any kind, and
+    nothing above it counts. The main checkout is another directory only for a genuine linked
+    worktree: the `.git` file names `<M>/.git/worktrees/<name>`, that entry's `commondir` names
+    `<M>/.git`, and its `gitdir` points back at this very `.git` file, which a hostile folder cannot
+    write inside `<M>/.git`. Relative paths resolve against each file's directory, as git 2.48+
+    writes them with `--relative-paths`. Files are read only when regular, at most 4,096 bytes, so a
+    FIFO or huge `.git` cannot hang or flood the lookup. Contexto now matches Claude Code in all 8
+    and in 4 controls that stay trusted (a linked worktree, its subdirectory, a relative-path
+    worktree, a plain folder under a trusted parent), and still in all 27 order layouts. No `git`
+    subprocess is run any more, and one walk serves both the order and the trust check.
   - **How Claude Code records trust** (read from the 2.1.314 binary, then measured in a pty: the
-    dialog shown or not, 20 cases). Accepting the dialog in `repo/sub` writes
-    `projects["<real path of repo>"].hasTrustDialogAccepted: true` to `$CLAUDE_CONFIG_DIR/.claude.json`
+    dialog shown or not, 20 cases, and 12 more for the `.git` layouts above). Accepting the dialog
+    in `repo/sub` writes `projects["<real path of repo>"].hasTrustDialogAccepted: true` to
+    `$CLAUDE_CONFIG_DIR/.claude.json`
     (`~/.claude.json` without `CLAUDE_CONFIG_DIR`, measured with a scratch `HOME`; a non-empty legacy
     `.config.json` in the config directory is read instead, measured; `.claude-custom-oauth.json` with
     `CLAUDE_CODE_CUSTOM_OAUTH_URL`, read, not measured). A folder counts as trusted when the key is
     exactly `true` for the working directory or a parent up to the git toplevel (a key on `repo/sub`
-    trusts `repo/sub/deeper`, not `repo`), or for the main checkout (a linked worktree and its
-    subdirectories are trusted when the main checkout is); outside git, for the working directory or
-    any parent. A folder above the git toplevel does not count, nor does a key recorded unresolved
+    trusts `repo/sub/deeper`, not `repo`), or for the main checkout of a genuine linked worktree (a
+    linked worktree and its subdirectories are trusted when the main checkout is); outside git, for
+    the working directory or any parent. A folder above the git toplevel does not count, nor does a key recorded unresolved
     (`/tmp/...` for `/private/tmp/...`) or with a trailing slash. Not copied: Claude Code's own
     session-only trust (a home directory accepted in one session) and its sandbox flag; both only
     make Contexto ignore a file Claude Code would use, and the message says how to proceed.
@@ -1314,8 +1337,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     in user settings, the helper did not run and all 10 requests went to the user's stub; after
     recording the folder as trusted, the project's helper ran and the requests went to the project's
     stub.
-  - **Left open.** Claude Code may change where or how it records trust; a mismatch makes Contexto
-    ignore a trusted project's file (never use an untrusted one) and says so.
+  - **Left open.** Claude Code may change where or how it records trust. The rule errs toward
+    untrusted where it differs from Claude Code's (a `.git` symlink, a bare repository's worktree):
+    the cost is a warning and a flag.
 
 ## Open decisions
 

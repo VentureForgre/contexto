@@ -84,8 +84,13 @@ and plain Codex ignores `.claude/`, so for Codex a project file's `apiKeyHelper`
 count only when Claude Code has recorded the folder as trusted, that is
 `projects[<real path>].hasTrustDialogAccepted` is `true` in Claude Code's global config
 (`$CLAUDE_CONFIG_DIR/.claude.json` or `~/.claude.json`, or a non-empty legacy `.config.json` in the
-config directory) for the working directory or a parent up to the git toplevel, or for the main
-checkout; outside git, for the working directory or any parent. Otherwise the file is skipped and
+config directory) for the working directory or a parent up to the nearest directory with a `.git`
+entry (file or directory, valid or not), or for the main checkout of a genuine linked worktree
+(its `.git` file names `<M>/.git/worktrees/<name>`, whose `commondir` names `<M>/.git` and whose
+`gitdir` points back at that `.git` file); outside git, for the working directory or any parent.
+The layout is read from the file system, never from `git`: a folder unpacked from an archive
+writes its own `.git`, so git's answer is the folder's (reviewer A, PR #237). The same genuine
+worktree test decides whose `settings.local.json` is the main checkout's. Otherwise the file is skipped and
 Contexto says which file it ignored and how to proceed (`--codex-key-helper`, `--codex-upstream`,
 or running `claude` there once and accepting the dialog). `--codex-key-helper`,
 `CONTEXTO_CODEX_KEY_HELPER`, `--upstream`, `--codex-upstream`, and the user settings file are never

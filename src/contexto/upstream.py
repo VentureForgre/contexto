@@ -5,9 +5,10 @@ Order per the M2 contract, "Upstream resolution" (PR #20 head bf1c7ad, D52), fir
 1. ``--upstream`` given explicitly.
 2. ``env.ANTHROPIC_BASE_URL`` from the settings files Claude Code loads, highest precedence first
    (measured with Claude Code 2.1.314 in 27 directory layouts, D52): the main checkout's
-   ``.claude/settings.local.json`` (the parent of the git common dir: the repository root, or the
-   main checkout from a linked worktree, M0 finding 1a; a submodule's own root), then the working
-   directory's own ``.claude/settings.local.json`` and ``.claude/settings.json``, and the user's
+   ``.claude/settings.local.json`` (the repository root, also from a subdirectory, or the main
+   checkout from a genuine linked worktree, M0 finding 1a; a submodule's own root; ``git_layout``),
+   then the working directory's own ``.claude/settings.local.json`` and ``.claude/settings.json``,
+   and the user's
    ``~/.claude/settings.json``, or ``$CLAUDE_CONFIG_DIR/settings.json`` when ``CLAUDE_CONFIG_DIR``
    is set, because Claude Code then reads its user settings from that directory (D35). From a
    subdirectory Claude Code does not read the repository root's ``settings.json``, and outside git
@@ -36,7 +37,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,31 +65,83 @@ class Setting:
     ignored: tuple[str, ...] = ()  # project kinds that set it, skipped as untrusted (trusted_only)
 
 
-def _git_layout(directory: Path) -> tuple[Path, Path] | None:
-    """(main checkout, toplevel) of the git work tree containing ``directory``, or None outside git.
-    The main checkout is the parent of the git common dir: the repository itself, or its main
-    checkout from a linked worktree. When the common dir is not a ``.git`` folder (a submodule's
-    lives under the superproject's ``.git/modules``, measured: Claude Code then reads the
-    submodule's own root) it is the toplevel."""
+@dataclass(frozen=True)
+class GitLayout:
+    """Where Claude Code's project files and trust records sit for a directory inside git."""
+    toplevel: Path  # the nearest directory, ``cwd`` or a parent, with a ``.git`` entry
+    main: Path  # the main checkout of a genuine linked worktree, else ``toplevel``
+
+
+GIT_FILE_LIMIT = 4096  # bytes read from a .git file, commondir, or gitdir; real ones are one short line
+
+
+def git_layout(directory: Path) -> GitLayout | None:
+    """The git layout around ``directory``, from the file system alone, or None when no directory
+    from ``directory`` up has a ``.git`` entry. Git itself is not asked: a folder that does not come
+    from ``git clone`` (an archive) writes its own ``.git``, so git's answer is the folder's. Any
+    ``.git`` entry, file or directory, valid or not, ends the walk (reviewer A, PR #237: a garbage
+    ``.git`` file, an empty ``.git`` directory, or ``core.worktree`` set elsewhere must not make a
+    trusted parent count; real Claude Code 2.1.314 showed its dialog in all three). The main
+    checkout differs from the toplevel only for a linked worktree that its main checkout's own
+    ``.git/worktrees/<name>/gitdir`` points back to (see ``_linked_main``); a submodule's or any
+    other ``.git`` file names no main checkout (measured: Claude Code reads a submodule's own root)."""
     try:
-        out = subprocess.run(
-            ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"],
-            capture_output=True, text=True, check=True, timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
+        here = directory.resolve()
+    except (OSError, RuntimeError):
         return None
-    lines = out.stdout.splitlines()
-    if len(lines) < 2:
+    for top in (here, *here.parents):
+        dot_git = top / ".git"
+        if os.path.lexists(dot_git):
+            return GitLayout(top, _linked_main(dot_git) or top)
+    return None
+
+
+def _read_git_file(path: Path) -> str | None:
+    """A small regular file's first line (a symlink to a FIFO or device is never opened), or None."""
+    try:
+        if not path.is_file():
+            return None
+        with path.open("rb") as f:
+            data = f.read(GIT_FILE_LIMIT)
+    except OSError:
         return None
-    common_dir, toplevel = Path(lines[0]), Path(lines[1])
-    return (common_dir.parent if common_dir.name == ".git" else toplevel), toplevel
+    lines = data.decode("utf-8", "replace").splitlines()
+    return lines[0].strip() if lines else None
+
+
+def _linked_main(dot_git: Path) -> Path | None:
+    """``M`` when ``dot_git`` is a genuine linked worktree's ``.git`` file: ``gitdir: G`` with ``G``
+    at ``M/.git/worktrees/<name>``, ``G/commondir`` naming ``M/.git``, and ``G/gitdir`` naming this
+    very ``.git`` file. A hostile folder can write the first two, not the back-pointer inside
+    ``M/.git`` (reviewer A, PR #237: a ``.git`` file or ``commondir`` aimed at a trusted repository,
+    a fake worktree, or another worktree's entry all made Contexto read the trusted repository's
+    files; Claude Code 2.1.314 read the folder's own and showed its dialog). Relative paths resolve
+    against the file's own directory, as git writes them with ``worktree.useRelativePaths``."""
+    if dot_git.is_symlink():
+        return None
+    line = _read_git_file(dot_git)
+    if not line or not line.startswith("gitdir:"):
+        return None
+    try:
+        gitdir = (dot_git.parent / line.removeprefix("gitdir:").strip()).resolve()
+        common = gitdir.parent.parent
+        if gitdir.parent.name != "worktrees" or common.name != ".git":
+            return None
+        commondir, back = _read_git_file(gitdir / "commondir"), _read_git_file(gitdir / "gitdir")
+        if not commondir or not back:
+            return None
+        if (gitdir / commondir).resolve() != common or (gitdir / back).resolve() != dot_git.resolve():
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return common.parent
 
 
 def main_checkout(directory: Path) -> Path | None:
-    """The main checkout of the git repository containing ``directory`` (see ``_git_layout``), or
+    """The main checkout of the git repository containing ``directory`` (see ``git_layout``), or
     None outside git."""
-    layout = _git_layout(directory)
-    return layout[0] if layout is not None else None
+    layout = git_layout(directory)
+    return layout.main if layout is not None else None
 
 
 def user_settings_path(home: Path, env: Mapping[str, str] | None = None) -> Path:
@@ -108,16 +160,17 @@ def user_settings_path(home: Path, env: Mapping[str, str] | None = None) -> Path
     return Path(config_dir) / "settings.json"
 
 
-def claude_settings_order(cwd: Path, home: Path, env: Mapping[str, str] | None = None) -> list[tuple[str, Path]]:
+def claude_settings_order(cwd: Path, home: Path, env: Mapping[str, str] | None = None, *,
+                          layout: GitLayout | None = None) -> list[tuple[str, Path]]:
     """(kind, path) for each settings file that can set the base URL or ``apiKeyHelper``, highest
     precedence first, as Claude Code reads them from ``cwd`` (see the module docstring). A project
     file that is the user settings file too (``cwd`` is the home directory) is listed once, as
-    ``user``."""
+    ``user``. ``layout`` is ``git_layout(cwd)`` when the caller already has it."""
     user = user_settings_path(home, env)
     order: list[tuple[str, Path]] = []
-    main = main_checkout(cwd)
-    if main is not None and not _same_path(main, cwd):
-        order.append(("main-checkout-local", main / ".claude" / "settings.local.json"))
+    layout = layout or git_layout(cwd)
+    if layout is not None and not _same_path(layout.main, cwd):
+        order.append(("main-checkout-local", layout.main / ".claude" / "settings.local.json"))
     order += [("local", cwd / ".claude" / "settings.local.json"), ("project", cwd / ".claude" / "settings.json")]
     return [(kind, path) for kind, path in order if not _same_path(path, user)] + [("user", user)]
 
@@ -147,14 +200,16 @@ def claude_global_config_path(home: Path, env: Mapping[str, str] | None = None) 
     return (config_dir or home) / f".claude{suffix}.json"
 
 
-def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None) -> bool:
+def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None, *,
+                   layout: GitLayout | None = None) -> bool:
     """Whether Claude Code has recorded ``cwd`` as trusted: ``projects[<path>].hasTrustDialogAccepted``
     is ``true`` in its global config for one of these real paths (measured with Claude Code 2.1.314,
-    D52): in a git work tree, ``cwd`` or a parent of it up to the toplevel, or the main checkout (a
-    linked worktree counts as trusted when its main checkout is; accepting the dialog records the
-    main checkout, even from a subdirectory); outside git, ``cwd`` or any parent. A folder above the
-    toplevel does not count, and neither does a path recorded unresolved (``/tmp`` for
-    ``/private/tmp``) or with a trailing slash. An unreadable config means not trusted."""
+    D52): in git (``git_layout``), ``cwd`` or a parent of it up to the toplevel, or the main
+    checkout of a genuine linked worktree (accepting the dialog records the main checkout, even
+    from a subdirectory); outside git, ``cwd`` or any parent. A folder above the toplevel does not
+    count, and neither does a path recorded unresolved (``/tmp`` for ``/private/tmp``) or with a
+    trailing slash. An unreadable config means not trusted. ``layout`` is ``git_layout(cwd)`` when
+    the caller already has it."""
     try:
         data = json.loads(claude_global_config_path(home, env).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
@@ -166,13 +221,10 @@ def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None) 
         here = cwd.resolve()
     except (OSError, RuntimeError):
         return False
-    layout = _git_layout(cwd)
+    layout = layout or git_layout(cwd)
     candidates = [here, *here.parents]
-    if layout is not None:
-        main, toplevel = (p.resolve() for p in layout)
-        if toplevel in candidates:
-            candidates = candidates[:candidates.index(toplevel) + 1]
-        candidates.append(main)
+    if layout is not None:  # git_layout's toplevel is always here or one of its parents
+        candidates = [*candidates[:candidates.index(layout.toplevel) + 1], layout.main]
     for path in candidates:
         entry = projects.get(str(path))
         if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
@@ -209,13 +261,14 @@ def claude_setting(read: Callable[[Path], str | None], cwd: Path, home: Path, en
     file counts only when ``folder_trusted``; the project kinds skipped that way are reported."""
     ignored: list[str] = []
     trusted: bool | None = None
-    for kind, path in claude_settings_order(cwd, home, env):
+    layout = git_layout(cwd)  # one walk for the order and the trust check (reviewer A's nit, PR #237)
+    for kind, path in claude_settings_order(cwd, home, env, layout=layout):
         value = read(path)
         if not value:
             continue
         if trusted_only and kind in PROJECT_KINDS:
             if trusted is None:
-                trusted = folder_trusted(cwd, home, env)
+                trusted = folder_trusted(cwd, home, env, layout=layout)
             if not trusted:
                 ignored.append(kind)
                 continue
