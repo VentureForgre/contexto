@@ -316,15 +316,15 @@ request. Its 5 rotation requests are left out of the gaps above. With PR #48 the
 **The approval figure.** `run.py live` refuses an approval below `budget.simulate`'s worst-case H1,
 so that simulation is the budget to approve. `run.py approval-table` prints it, and the table
 between the markers below is that output; a test fails if they differ. Defaults: 18 turns of 40
-KB, head 47,628, bound 150,000, 2 recalls sized by B9 (below).
+KB, head 47,681, bound 150,000, 2 recalls sized by B9 (below).
 
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,880,890 | 6,561,088 |
-| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,684,717 | 2,872,721 |
-| Full-context baseline through a plain CLI session (alternative) | 5,054,874 | - |
-| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,565,607** | **9,433,809** |
+| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,883,222 | 6,563,950 |
+| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,685,035 | 2,873,039 |
+| Full-context baseline through a plain CLI session (alternative) | 5,055,881 | - |
+| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,568,257** | **9,436,989** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
@@ -365,7 +365,8 @@ text. `Params.head` was 47,600 (the engine's `F` here) and the default turn size
 now derived (intake 2026-10-16 09:42Z): 47,600 measured in the stub dry runs (dry runs #1 to #4, main
 up to c8f0b08) plus Contexto's own tool-definition bytes since then at 3.0 bytes per token. B19 and
 B21 grew those definitions, in Claude Code's request form, from 2,743 to 2,827 bytes (main 8571095,
-dry run #5): 47,600 + ceil(84 / 3.0) = 47,628 (`budget.HEAD`). A test fails when the definitions
+dry run #5): 47,600 + ceil(84 / 3.0) = 47,628. D51's `contexto_pin` description grew them to 2,985
+bytes: 47,600 + ceil(242 / 3.0) = 47,681 (`budget.HEAD`). A test fails when the definitions
 change without updating it. The engine's own estimate of `F` rose about 85 at the dry runs'
 rotations, because it counts tool JSON more conservatively; the gate follows the measured bytes.
 

@@ -32,10 +32,11 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 # tools and preamble. The part of it this repo controls is Contexto's own tool definitions in Claude
 # Code's request form; when they change, the head moves by their byte change at OTHER_BYTES_PER_TOKEN.
 # B19 and B21 (main 8571095, dry run #5) grew them from 2,743 to 2,827 bytes: 47,600 + ceil(84 / 3.0) =
-# 47,628. test_head_follows_contexto_tool_bytes fails when the definitions change without this.
+# 47,628. D51's contexto_pin description grew them to 2,985 bytes: 47,600 + ceil(242 / 3.0) = 47,681.
+# test_head_follows_contexto_tool_bytes fails when the definitions change without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
-CONTEXTO_TOOL_BYTES = 2_827  # main 8571095
+CONTEXTO_TOOL_BYTES = 2_985  # D51
 HEAD = HEAD_MEASURED + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
 
 # Tool-loop rounds, calibrated on live run #3 (main fbb1303, 2026-10-16; intake 10:06Z). Its probe

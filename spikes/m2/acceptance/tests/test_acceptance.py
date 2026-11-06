@@ -1052,7 +1052,7 @@ def test_head_follows_contexto_tool_bytes():
                for t in TOOLS]
     measured = sum(len(json.dumps(t, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) for t in as_sent)
     assert measured == budget.CONTEXTO_TOOL_BYTES, f"Contexto's tool definitions are {measured} bytes; update budget.HEAD"
-    assert budget.HEAD == budget.Params().head == 47_628
+    assert budget.HEAD == budget.Params().head == 47_681
     assert budget.HEAD == budget.HEAD_MEASURED + math.ceil(
         (budget.CONTEXTO_TOOL_BYTES - budget.CONTEXTO_TOOL_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN)
 

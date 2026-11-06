@@ -102,7 +102,10 @@ INSTRUCTIONS = (
     "from the paged-history index to read a paged-out turn word for word before relying on its "
     "details. Use contexto_pin to record decisions and obligations as you make them, contexto_close "
     "when an obligation is done, contexto_state for the full pinned state, and contexto_search for "
-    "an exact substring when you do not know the page id."
+    "an exact substring when you do not know the page id. When the user states a standing rule, "
+    "preference, or obligation (whenever, from now on, always, never), pin it at once with contexto_pin "
+    "{\"kind\": \"obligation\", \"text\": ...}, even if your reply is one word: once its turn is paged "
+    "out, only what is pinned stays in view."
 )
 
 
@@ -149,9 +152,10 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "contexto_pin",
         "description": (
-            "Record a decision, obligation, fact, artifact, or reference in this session's ledger so it "
-            "stays in the pinned state after older turns are paged out. To replace an earlier record, "
-            "list its id in supersedes."
+            "Record a decision or an obligation (a user's standing rule or preference is one) in this "
+            "session's ledger: open obligations and active decisions stay in the pinned state after older "
+            "turns are paged out; an event, artifact, or reference does only when verified (epistemic "
+            "verified, with a provenance source). To replace an earlier record, list its id in supersedes."
         ),
         "inputSchema": {
             "type": "object",
