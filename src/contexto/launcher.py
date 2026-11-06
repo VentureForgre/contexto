@@ -26,39 +26,60 @@ Limit: organization-managed settings outrank ``--settings``; if they set ``ANTHR
 Claude Code bypasses the proxy and Contexto cannot keep the prompt bounded. ``CLAUDE_CONFIG_DIR`` is
 never set and no user configuration file is edited.
 
+Resume (D55): the proxy records each Claude Code session id it serves (the ``X-Claude-Code-Session-Id``
+header, else ``metadata.user_id``) in the session's metadata. Claude Code keeps that id across
+``--resume`` and ``--continue`` (new only with ``--fork-session``; measured on 2.1.314), and names its
+transcript after it. Without ``--session``, ``claude --resume <id>`` reuses the Contexto session that
+served ``<id>``, and ``claude --continue`` the one that last served Claude Code in this directory; with
+no match, or ``--resume`` without an id (Claude Code's picker), the launch says so on stderr and opens
+a new session. After claude exits, the launcher prints the command that resumes the conversation
+through Contexto, since Claude Code's own exit hint (``claude --resume <id>``) bypasses it.
+
 Signals: Ctrl+C in a terminal reaches every process in the foreground group, so Claude Code gets
 it directly; the launcher ignores SIGINT while claude runs so that an interrupt meant for claude
-does not tear down the proxy under it. SIGTERM and SIGHUP sent to the launcher are forwarded to
-claude. Terminal resize (SIGWINCH) goes from the kernel to claude without the launcher's help.
+does not tear down the proxy under it. SIGTERM, SIGHUP and SIGQUIT sent to the launcher are forwarded
+to claude; SIGUSR1, SIGUSR2 and SIGALRM, which would otherwise kill the launcher alone, end claude
+with SIGTERM. Before claude starts (the version check) and after it exits, these signals unwind
+through the launcher's cleanup and exit 128 + N. SIGKILL cannot be caught, so a watchdog process
+(its own session, so terminal signals miss it) holds a pipe from the launcher: when the pipe closes
+without the launcher's "done", it sends claude SIGTERM and removes the temporary files. What a SIGKILL
+leaves: the session log has no ``exit`` event, and if the watchdog is killed too, the temporary
+directory stays in ``$TMPDIR`` (the proxy URL, the tool names, the session id and the home path;
+no secrets). Terminal resize (SIGWINCH) goes from the kernel to claude without the launcher's help.
 
 Window budget (contract rule 4): the engine keeps ``W = bound - headroom - F`` tokens for the
 working window, where ``F`` is the fixed overhead (system, tools, carried content, pinned text, and
 page index). ``F`` is only measured after the first upstream response, so at start the launcher
 warns when an assumed ``F`` leaves less than 25,000 tokens: 92,000 inside an OpenRig seat (M0
-measured seat heads of 82k to 84k before pins) and 55,000 otherwise (a throwaway head near 46k
-plus pins and index). Once the engine measures ``F``, a ``bound_too_small`` event or a window
-budget under 25,000 is shown on stderr once. So is a main conversation running without Contexto's
-MCP tools (``contexto.toolcheck``): neither CLI reports an MCP server that fails to start, so the
-proxy checks and the launcher warns, during the run or at exit, and once more after the CLI exits if
-the session ended still without them. So is the first Contexto tool call Claude Code refused for
-lack of a permission rule (``mcp_tools_denied``, D44). So is a CLI version Contexto was not tested with
-(``contexto.cliversions``, D38: ``<cli> --version`` at start; ``contexto run --no-version-check
-<cli>`` or ``CONTEXTO_NO_VERSION_CHECK=1`` skips it). stderr stays quiet otherwise.
+measured seat heads of 82k to 84k before pins) and 28,000 otherwise (D55: 18,641 to 27,925 measured
+on Claude Code 2.1.314 with tool search on). Once the engine measures ``F``, a ``bound_too_small``
+event or a window budget under 25,000 is reported once. So is a main conversation running without
+Contexto's MCP tools (``contexto.toolcheck``): neither CLI reports an MCP server that fails to start,
+so the proxy checks and the launcher warns. So is the first Contexto tool call Claude Code refused for
+lack of a permission rule (``mcp_tools_denied``, D44). While claude runs it owns the terminal, and a
+line written then lands inside its TUI (D55), so these reports are logged at once and printed after
+claude exits. So is a CLI version Contexto was not tested with (``contexto.cliversions``, D38:
+``<cli> --version`` at start; ``contexto run --no-version-check <cli>`` or
+``CONTEXTO_NO_VERSION_CHECK=1`` skips it), before claude starts. stderr stays quiet otherwise.
 
-Exit codes: claude's own code; 128 + N if claude died from signal N; 2 for a usage error such as
-a bound above the guard; 1 if the proxy cannot start; 127 if ``claude`` is not on PATH; 130 for a
-Ctrl+C during the version check, before claude starts.
+Exit codes: claude's own code; 128 + N if claude died from signal N, or if the launcher got signal N
+before claude started; 2 for a usage error such as a bound above the guard; 1 if the proxy cannot
+start; 127 if ``claude`` is not on PATH or cannot be run; 130 for a Ctrl+C during the version check,
+before claude starts.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -74,26 +95,49 @@ from contexto.private import affinity_salt
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import SessionStore
 from contexto.toolcheck import denied_tools_message, missing_tools_message
-from contexto.upstream import resolve_upstream
+from contexto.upstream import Upstream, resolve_upstream
 
 DEFAULT_BOUND = 150_000
 REPORT_LOCK_TIMEOUT_S = 2.0  # report_missing_tools: how long the exit waits for a request still in the engine
 MIN_WINDOW_BUDGET = 25_000
 DEFAULT_HEADROOM_FLOOR = 25_000
 ASSUMED_OVERHEAD_OPENRIG = 92_000
-ASSUMED_OVERHEAD_DEFAULT = 55_000
+ASSUMED_OVERHEAD_DEFAULT = 28_000  # D55: 18,641 to 27,925 measured on Claude Code 2.1.314, tool search on
 BOUND_GUARD = 170_000  # below Claude Code's idle compaction (200,000) with room for an over-bound turn
 EXIT_USAGE = 2
 EXIT_PROXY = 1
 EXIT_NOT_FOUND = 127
 EXIT_INTERRUPTED = 130  # 128 + SIGINT: Ctrl+C before the CLI started
-FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+# Signals whose default action would kill the launcher alone; while claude runs they end it with SIGTERM
+# (claude's runtime may give SIGUSR1 a meaning of its own, such as a debugger).
+TERMINATING_SIGNALS = (signal.SIGUSR1, signal.SIGUSR2, signal.SIGALRM)
+WATCHDOG_DONE = b"done\n"
+# Contexto's own ``contexto run`` options, and whether each takes a value (D55: a hint when one is put
+# after the CLI's name). The codex options are added by contexto.codex.
+RUN_OPTIONS = {"--bound": True, "--allow-large-bound": False, "--window-fraction": True, "--headroom-floor": True,
+               "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False}
+CLAUDE_SESSION_HEADER = "x-claude-code-session-id"
+CLI_SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}")  # Claude Code sends a UUID
+LEGACY_USER_ID_SESSION = re.compile(r"_session_([0-9A-Fa-f-]{36})")  # user_<hash>_account_<uuid>_session_<uuid>
+# Claude Code expands ``${VAR}`` (and ``${VAR:-default}``) in an MCP config's command, args and env, with
+# no escape (2.1.314: ``$${X}`` gives ``$`` and the value); ``$VAR`` is kept as written.
+MCP_CONFIG_EXPANSION = "${"
 
 
 class LaunchError(Exception):
     def __init__(self, message: str, code: int) -> None:
         super().__init__(message)
         self.code = code
+
+
+class Terminated(BaseException):
+    """A terminating signal while claude is not running. A BaseException, like KeyboardInterrupt, so
+    the version check's ``except Exception`` lets it through to the launcher's cleanup."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
 
 
 @dataclass
@@ -127,6 +171,76 @@ def check_user_args(claude_args: list[str]) -> None:
                 "prompt that is exactly --settings or starts with --settings= is refused too.", EXIT_USAGE)
 
 
+def check_misplaced_options(cli: str, cli_args: list[str]) -> None:
+    """D55: Contexto's own options right after the CLI's name go to the CLI, which refuses them with its
+    own error (Claude Code 2.1.314: "unknown option '--session' (Did you mean --version?)"). Refuse them
+    first, naming the command with those options moved before the CLI's name. Only the leading
+    arguments are read: later ones can be a prompt or another option's value."""
+    moved: list[str] = []
+    rest = list(cli_args)
+    while rest:
+        name = rest[0].split("=", 1)[0]
+        if name not in RUN_OPTIONS:
+            break
+        takes_value = RUN_OPTIONS[name] and "=" not in rest[0]
+        moved += rest[:2] if takes_value else rest[:1]
+        rest = rest[2:] if takes_value else rest[1:]
+    if moved:
+        first = moved[0].split("=", 1)[0]
+        raise LaunchError(
+            f"{first} after '{cli}' is a Contexto option, and everything after '{cli}' goes to the CLI "
+            f"unchanged. Put Contexto's options before '{cli}': {shlex.join(['contexto', 'run', *moved, cli, *rest])}",
+            EXIT_USAGE)
+
+
+def check_upstream(upstream: Upstream) -> None:
+    """A malformed upstream URL is a usage error naming where it came from, before any session is opened
+    (``http://[::1`` raised ValueError from ``urlsplit`` with a traceback and left an empty session)."""
+    try:
+        parts = urlsplit(upstream.url)
+        _ = parts.port  # parsed on access; raises for a bad one
+        ok = parts.scheme in ("http", "https") and bool(parts.hostname)
+        problem = "upstream must be an http(s) base URL"
+    except ValueError as exc:
+        ok, problem = False, str(exc)
+    if not ok:
+        raise LaunchError(f"invalid upstream {upstream.url!r} (from {upstream.source}): {problem}", EXIT_USAGE)
+
+
+def check_home(home: Path) -> None:
+    """``$CONTEXTO_HOME`` must be a directory or not exist yet; it is never chmodded here (a home the user
+    made is kept as it is; one Contexto creates is 0700)."""
+    if os.path.lexists(home) and not home.is_dir():
+        raise LaunchError(f"CONTEXTO_HOME {str(home)!r} is not a directory", EXIT_USAGE)
+
+
+def check_mcp_values(session_id: str, home: Path, executable: str) -> None:
+    """D55: Claude Code expands ``${VAR}`` in the MCP config it is given, so a home, session id or
+    interpreter path holding ``${`` would make the MCP server open another store (or run another
+    program), with no warning. There is no escape, so such a value is refused."""
+    for what, value in (("CONTEXTO_HOME", str(home)), ("the session id", session_id),
+                        ("the Python interpreter path", executable)):
+        if MCP_CONFIG_EXPANSION in value:
+            raise LaunchError(f"{what} {value!r} contains '${{': Claude Code would expand it in the MCP config, "
+                              f"and Contexto's MCP server would read another store. Use a value without '${{'.",
+                              EXIT_USAGE)
+
+
+def cli_not_found(name: str, path: str | None = None) -> str:
+    """Why ``shutil.which`` found no usable ``name``: a non-executable file, a broken symlink or a
+    directory on PATH is named with what is wrong; otherwise "not found on PATH"."""
+    candidates = [Path(name)] if os.sep in name else [
+        Path(d or os.curdir) / name for d in (os.environ.get("PATH", "") if path is None else path).split(os.pathsep)]
+    for candidate in candidates:
+        if candidate.is_symlink() and not candidate.exists():
+            return f"'{name}' at {candidate} is a broken symlink (to {os.readlink(candidate)})"
+        if candidate.is_dir():
+            return f"'{name}' at {candidate} is a directory, not a program"
+        if candidate.is_file() and not os.access(candidate, os.X_OK):
+            return f"'{name}' at {candidate} is not executable (chmod +x it, or fix PATH)"
+    return f"'{name}' not found on PATH"
+
+
 def check_bound(bound: int, allow_large_bound: bool) -> None:
     if bound <= 0:
         raise LaunchError(f"--bound must be positive, got {bound}", EXIT_USAGE)
@@ -152,15 +266,21 @@ def assumed_overhead(env: dict[str, str] | None = None) -> int:
 
 
 def start_warning(bound: int, headroom_floor: int | None, overhead: int) -> str | None:
-    """A one-line warning when the assumed window budget is below MIN_WINDOW_BUDGET, else None."""
+    """A one-line warning when the assumed window budget is below MIN_WINDOW_BUDGET, else None. It says
+    what that costs: at bound 60,000 on 2.1.314 every epoch logged ``turn_room_low`` and a turn ran out of
+    recall room after 5 searches (QA 2026-11-05), so "rotations will page often" undersold it."""
     headroom = headroom_floor if headroom_floor is not None else DEFAULT_HEADROOM_FLOOR
     budget = bound - headroom - overhead
     if budget >= MIN_WINDOW_BUDGET:
         return None
     suggested = headroom + overhead + 2 * MIN_WINDOW_BUDGET
-    return (f"window budget about {budget:,} tokens (bound {bound:,} - headroom {headroom:,} - assumed fixed "
-            f"overhead {overhead:,}) is below {MIN_WINDOW_BUDGET:,}; rotations will page often. "
-            f"Consider --bound {suggested:,} or more.")
+    sizing = f"bound {bound:,} - headroom {headroom:,} - typical fixed overhead {overhead:,}"
+    if budget <= 0:
+        return (f"bound {bound:,} leaves no window budget ({sizing} = {budget:,} tokens): the engine keeps only "
+                f"the new turn, requests may exceed the bound, and recall will not fit. "
+                f"Use --bound {suggested:,} or more.")
+    return (f"window budget about {budget:,} tokens ({sizing}) is below {MIN_WINDOW_BUDGET:,}: turns page out "
+            f"almost at once and recalled pages will barely fit, if at all. Consider --bound {suggested:,} or more.")
 
 
 class NoticeLog:
@@ -168,12 +288,27 @@ class NoticeLog:
     first window budget under MIN_WINDOW_BUDGET, first ``mcp_tools_denied`` (D44), and first
     ``mcp_tools_missing`` (from a request, or logged at exit by ``report_missing_tools``) are also shown
     on stderr, once each; an exit-time ``mcp_tools_missing`` that repeats a mid-run one is shown once
-    more, after the CLI exited."""
+    more, after the CLI exited.
+
+    Between ``hold`` and ``release`` (while the CLI owns the terminal) the lines are kept and printed at
+    ``release``, in order: a line written mid-run landed in Claude Code's input box and garbled the next
+    redraw (D55). A repeat of a warning still held is not added."""
 
     def __init__(self, store: Any, stderr) -> None:
         self.store = store
         self.stderr = stderr
         self.shown: set[str] = set()
+        self.held: list[str] | None = None
+        self.held_keys: set[str] = set()
+
+    def hold(self) -> None:
+        if self.held is None:
+            self.held, self.held_keys = [], set()
+
+    def release(self) -> None:
+        held, self.held = self.held or [], None
+        for message in held:
+            print(f"contexto: {message}", file=self.stderr, flush=True)
 
     def log(self, event: dict[str, Any]) -> None:
         self.store.log(event)
@@ -210,9 +345,180 @@ class NoticeLog:
                            if isinstance(overhead, int) else f"measured window budget {budget:,} is small.")
 
     def _once(self, key: str, message: str) -> None:
-        if key not in self.shown:
-            self.shown.add(key)
+        if key in self.shown:
+            return
+        self.shown.add(key)
+        if self.held is None:
             print(f"contexto: {message}", file=self.stderr, flush=True)
+        elif not (key == "mcp_tools_missing_exit" and "mcp_tools_missing" in self.held_keys):
+            self.held.append(message)
+            self.held_keys.add(key)
+
+
+def claude_session(headers: dict[str, str], request: Any) -> str | None:
+    """Claude Code's session id for a request: the ``X-Claude-Code-Session-Id`` header, else
+    ``metadata.user_id`` (a JSON object with ``session_id`` on 2.1.314, ``..._session_<uuid>`` before);
+    None when absent or not a plain id. The same id names Claude Code's transcript and is what
+    ``claude --resume`` takes (measured on 2.1.314)."""
+    for name, value in headers.items():
+        if name.lower() == CLAUDE_SESSION_HEADER:
+            return value if isinstance(value, str) and CLI_SESSION_ID.fullmatch(value) else None
+    metadata = request.get("metadata") if isinstance(request, dict) else None
+    user_id = metadata.get("user_id") if isinstance(metadata, dict) else None
+    if not isinstance(user_id, str):
+        return None
+    if user_id.startswith("{"):
+        try:
+            value = json.loads(user_id).get("session_id")
+        except (ValueError, AttributeError):
+            return None
+    else:
+        match = LEGACY_USER_ID_SESSION.search(user_id)
+        value = match.group(1) if match else None
+    return value if isinstance(value, str) and CLI_SESSION_ID.fullmatch(value) else None
+
+
+class SessionRecorder:
+    """The engine with one addition (D55): each request's Claude Code session id is recorded in the
+    session's metadata, at its first request in this launch (so a launch killed later still has it) and
+    with its last-seen time at exit (``flush``), so ``--continue`` can pick the session that served
+    Claude Code last. Recording never fails or changes a request. Every other attribute is the engine's
+    (``tools_verdict``, ``preserves_input``)."""
+
+    def __init__(self, transform: Callable[..., Any], store: Any, cli: str = "claude") -> None:
+        self.transform = transform
+        self.store = store
+        self.cli = cli
+        self.seen: dict[str, float] = {}  # Claude Code session id -> last seen, wall-clock seconds
+        self.last: str | None = None
+
+    def __call__(self, request: dict[str, Any], headers: dict[str, str], endpoint: str) -> Any:
+        try:
+            self._note(claude_session(headers, request))
+        except Exception:  # bookkeeping for the next launch; never fail a request for it
+            pass
+        return self.transform(request, headers, endpoint)
+
+    def _note(self, cli_session: str | None) -> None:
+        if cli_session is None:
+            return
+        first = cli_session not in self.seen
+        self.seen[cli_session] = time.time()
+        self.last = cli_session
+        if first:
+            self.store.record_cli_session(self.cli, cli_session, self.seen[cli_session])
+
+    def flush(self) -> None:
+        for cli_session, seen_at in self.seen.items():
+            try:
+                self.store.record_cli_session(self.cli, cli_session, seen_at)
+            except Exception:
+                return
+
+    def __getattr__(self, name: str) -> Any:
+        transform = self.__dict__.get("transform")
+        if transform is None:
+            raise AttributeError(name)
+        return getattr(transform, name)
+
+
+def resume_request(cli_args: list[str]) -> tuple[str, str | None] | None:
+    """What Claude Code will resume: ``("continue", None)`` for ``-c``/``--continue``, ``("resume", id)``
+    for ``-r``/``--resume <id>`` or ``--resume=<id>``, ``("resume", None)`` for ``--resume`` without a
+    value (Claude Code's picker), else None. Arguments after ``--`` are not options."""
+    for i, arg in enumerate(cli_args):
+        if arg == "--":
+            return None
+        if arg in ("-c", "--continue"):
+            return "continue", None
+        if arg in ("-r", "--resume"):
+            value = cli_args[i + 1] if i + 1 < len(cli_args) else None
+            return "resume", value if value and not value.startswith("-") else None
+        if arg.startswith("--resume="):
+            return "resume", arg.split("=", 1)[1] or None
+    return None
+
+
+def served_sessions(home: Path) -> list[tuple[float, str, str, Path | None]]:
+    """Every Claude Code session a Contexto session under ``home`` served: (last seen, Contexto session
+    id, Claude Code session id, the Contexto session's workdir). A session that cannot be read is
+    skipped: the lookup must never stop a launch."""
+    try:
+        names = [entry.name for entry in (Path(home) / "sessions").iterdir()]
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        try:
+            store = SessionStore.open_existing(home, name)
+            served, workdir = store.cli_sessions("claude"), store.workdir()
+        except Exception:
+            continue
+        found += [(seen_at, name, cli_session, workdir) for cli_session, seen_at in served.items()]
+    return found
+
+
+def choose_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> tuple[str, set[str] | None]:
+    """The session for this launch, and for ``--continue`` the Claude Code sessions it had served (so
+    the exit can tell when Claude Code continued another conversation). ``--session`` wins; without it,
+    ``--resume <id>`` takes the session that served ``<id>`` and ``--continue`` the one that last served
+    Claude Code in ``cwd``. Otherwise a new session, with a line on stderr saying why when a resume was
+    asked for."""
+    if options.session_id:
+        return options.session_id, None
+    request = resume_request(options.claude_args)
+    new = uuid.uuid4().hex
+    if request is None:
+        return new, None
+    kind, wanted = request
+    if kind == "resume" and wanted is None:
+        print("contexto: --resume without a session id opens Claude Code's picker, and Contexto cannot tell "
+              "which conversation you will pick, so this launch uses a new Contexto session. To keep the "
+              "conversation's store, run: contexto run claude --resume <id>", file=stderr, flush=True)
+        return new, None
+    served = served_sessions(home)
+    if kind == "resume":
+        matches = [s for s in served if s[2] == wanted]
+        if not matches:
+            shown = wanted if CLI_SESSION_ID.fullmatch(wanted) else repr(wanted)  # a search term, not an id
+            print(f"contexto: no Contexto session has served Claude Code session {shown}; starting a new "
+                  f"session (pass --session ID before 'claude' to use a given one)", file=stderr, flush=True)
+            return new, None
+        session = max(matches, key=lambda s: s[0])[1]
+        print(f"contexto: Claude Code session {wanted} was served by Contexto session {session}; resuming it",
+              file=stderr, flush=True)
+        return session, None
+    here = cwd.resolve()
+    matches = [s for s in served if s[3] == here]
+    if not matches:
+        print("contexto: no Contexto session has served Claude Code in this directory; starting a new session "
+              "(pass --session ID before 'claude' to use a given one)", file=stderr, flush=True)
+        return new, None
+    session = max(matches, key=lambda s: s[0])[1]
+    print(f"contexto: continuing Contexto session {session}, the last to serve Claude Code in this directory",
+          file=stderr, flush=True)
+    return session, {s[2] for s in served if s[1] == session}
+
+
+def resume_command(options: LaunchOptions, session_id: str, cli_session: str) -> str:
+    """The command that resumes Claude Code session ``cli_session`` through Contexto session
+    ``session_id`` with this launch's Contexto options."""
+    args = ["contexto", "run", "--session", session_id]
+    if options.bound != DEFAULT_BOUND:
+        args += ["--bound", str(options.bound)]
+    if options.allow_large_bound:
+        args.append("--allow-large-bound")
+    if options.window_fraction is not None:
+        args += ["--window-fraction", str(options.window_fraction)]
+    if options.headroom_floor is not None:
+        args += ["--headroom-floor", str(options.headroom_floor)]
+    if options.upstream:
+        args += ["--upstream", options.upstream]
+    if options.observe_thinking:
+        args.append("--observe-thinking")
+    if not options.version_check:
+        args.append("--no-version-check")
+    return shlex.join([*args, "claude", "--resume", cli_session])
 
 
 def open_session(home: Path, session_id: str, workdir: Path) -> Any:
@@ -258,11 +564,12 @@ def settings_payload(proxy_url: str) -> dict[str, Any]:
 
 def mcp_payload(session_id: str, home: Path) -> dict[str, Any]:
     # Claude Code starts the server in the user's project; -P keeps that directory off sys.path,
-    # so a project's own contexto package cannot run in place of the installed server.
+    # so a project's own contexto package cannot run in place of the installed server. One
+    # --session=<id> token, so an id starting with "-" is not read as an option.
     return {"mcpServers": {MCP_SERVER_NAME: {
         "type": "stdio",
         "command": sys.executable,
-        "args": ["-P", "-m", "contexto", "mcp", "--session", session_id],
+        "args": ["-P", "-m", "contexto", "mcp", f"--session={session_id}"],
         "env": mcp_env(home),
     }}}
 
@@ -279,13 +586,110 @@ def exit_code(returncode: int) -> int:
     return 128 - returncode if returncode < 0 else returncode
 
 
+class LaunchSignals:
+    """The launcher's terminating signals while claude is not running (D55): SIGTERM, SIGHUP, SIGQUIT,
+    SIGUSR1, SIGUSR2 and SIGALRM raise ``Terminated``, which unwinds through the cleanup (the version
+    check kills its ``--version`` process group on the way). Without this, a SIGTERM or SIGHUP during the
+    version check killed the launcher outright and left the temporary files. ``disarm`` makes them
+    no-ops once the cleanup starts, so a second signal cannot cut it short; ``run_child`` installs its
+    own forwarding handlers while claude runs. Outside the main thread nothing is installed."""
+
+    def __init__(self) -> None:
+        self.armed = True
+        self.previous: dict[int, Any] = {}
+
+    def __enter__(self) -> LaunchSignals:
+        for signum in (*FORWARDED_SIGNALS, *TERMINATING_SIGNALS):
+            try:
+                self.previous[signum] = signal.signal(signum, self._raise)
+            except ValueError:  # not the main thread
+                break
+        return self
+
+    def _raise(self, signum: int, frame: Any) -> None:
+        if self.armed:
+            raise Terminated(signum)
+
+    def disarm(self) -> None:
+        self.armed = False
+
+    def __exit__(self, *exc: Any) -> None:
+        for signum, handler in self.previous.items():
+            signal.signal(signum, handler)
+
+
+WATCHDOG = r"""
+import os, shutil, signal, sys
+pid = None
+for line in iter(sys.stdin.buffer.readline, b""):
+    if line == b"done\n":
+        sys.exit(0)
+    if line.startswith(b"pid "):
+        pid = int(line[4:])
+if pid is not None:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+shutil.rmtree(sys.argv[1], ignore_errors=True)
+"""
+
+
+class Watchdog:
+    """Ends claude and removes the temporary files if the launcher dies without its cleanup (SIGKILL;
+    macOS has no PDEATHSIG). A small Python process in its own session (no terminal signal reaches it)
+    reads a pipe from the launcher: ``pid <n>`` when claude starts, ``done`` from the cleanup. End of
+    file without ``done`` means the launcher is gone: it sends claude SIGTERM (Claude Code exits on it)
+    and deletes the temporary directory. The session log gets no ``exit`` event in that case."""
+
+    def __init__(self, process: subprocess.Popen) -> None:
+        self.process = process
+
+    @classmethod
+    def start(cls, tmp: Path, store: Any) -> Watchdog | None:
+        try:
+            process = subprocess.Popen([sys.executable, "-I", "-S", "-c", WATCHDOG, str(tmp)],
+                                       stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, start_new_session=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            store.log({"event": "watchdog_unavailable", "error": type(exc).__name__})
+            return None
+        return cls(process)
+
+    def watch(self, pid: int) -> None:
+        self._send(f"pid {pid}\n".encode())
+
+    def done(self) -> None:
+        self._send(WATCHDOG_DONE)
+        try:
+            if self.process.stdin is not None:
+                self.process.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def _send(self, data: bytes) -> None:
+        try:
+            if self.process.stdin is not None:
+                self.process.stdin.write(data)
+                self.process.stdin.flush()
+        except (OSError, ValueError):  # the watchdog is gone; the launch goes on without it
+            pass
+
+
 def run_claude(options: LaunchOptions, *, stderr=None) -> int:
     stderr = stderr or sys.stderr
-    try:
-        return _run(options, stderr)
-    except LaunchError as exc:
-        print(f"contexto run: {exc}", file=stderr)
-        return exc.code
+    with LaunchSignals() as signals:
+        try:
+            return _run(options, stderr, signals)
+        except LaunchError as exc:
+            print(f"contexto run: {exc}", file=stderr)
+            return exc.code
+        except Terminated as exc:
+            return 128 + exc.signum
 
 
 def options_from_args(args: Any) -> LaunchOptions:
@@ -314,7 +718,10 @@ def session_affinity_key(store: Any, upstream_url: str) -> str | None:
     home, session_id = getattr(store, "home", None), getattr(store, "session_id", None)
     if home is None or not isinstance(session_id, str):
         return None
-    host = urlsplit(upstream_url).hostname
+    try:
+        host = urlsplit(upstream_url).hostname
+    except ValueError:  # malformed; the proxy refuses the URL right after this
+        return None
     if not host or is_vendor_host(host):
         return None
     try:
@@ -325,9 +732,11 @@ def session_affinity_key(store: Any, upstream_url: str) -> str | None:
 
 
 def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dict[str, int | float],
-                observe_thinking: bool, *, stderr=None) -> tuple[ContextoProxy, str]:
+                observe_thinking: bool, *, stderr=None, cli: str | None = None) -> tuple[ContextoProxy, str]:
     """Build the rewrite engine for ``store`` and start the proxy on 127.0.0.1 with a free port.
-    Returns ``(proxy, engine_name)``; the caller stops the proxy. Shared by claude and codex."""
+    Returns ``(proxy, engine_name)``; the caller stops the proxy. Shared by claude and codex. With
+    ``cli="claude"`` the engine is wrapped in a ``SessionRecorder`` (``proxy.transform``), so the
+    session records which Claude Code sessions it served (D55)."""
     # The previous launch's MCP server record must not count for this one (contexto.toolcheck): a
     # back-to-back launch can start within the check's clock slack of that server's tools/list.
     clear = getattr(store, "clear_mcp_listed", None)
@@ -337,6 +746,8 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     except Exception:  # a diagnostic record; never stop a launch for it
         pass
     transform, observe_usage, engine_name = build_engine(store, config)
+    if cli == "claude":
+        transform = SessionRecorder(transform, store)
     key = session_affinity_key(store, upstream_url)
     try:
         proxy = ContextoProxy(upstream_url, NoticeLog(store, stderr or sys.stderr), transform,
@@ -399,16 +810,20 @@ def report_missing_tools(proxy: ContextoProxy) -> None:
             lock.release()
 
 
-def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None) -> int:
+def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None,
+              watchdog: Watchdog | None = None) -> int:
     """Run a CLI with the terminal passed through and return its exit code (128 + N if it died from
     signal N, 127 if it cannot be started). Ctrl+C reaches it through the terminal while the
-    launcher ignores SIGINT; SIGTERM and SIGHUP are forwarded. Shared by claude and codex."""
+    launcher ignores SIGINT; SIGTERM, SIGHUP and SIGQUIT are forwarded, and SIGUSR1, SIGUSR2 and
+    SIGALRM end it with SIGTERM. ``watchdog`` is told the child's pid. Shared by claude and codex."""
     try:
         child = subprocess.Popen(argv, env=env)
     except (FileNotFoundError, PermissionError) as exc:
         print(f"contexto: cannot start {argv[0]!r}: {exc.strerror}", file=stderr or sys.stderr)
         return EXIT_NOT_FOUND
     previous = _install_signal_handlers(child)
+    if watchdog is not None:
+        watchdog.watch(child.pid)
     try:
         return exit_code(child.wait())
     finally:
@@ -422,25 +837,33 @@ def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None
                 child.kill()
 
 
-def _run(options: LaunchOptions, stderr) -> int:
+def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
+    check_misplaced_options("claude", options.claude_args)
     check_user_args(options.claude_args)
     check_options(options)
     claude = shutil.which(options.claude_bin)
     if claude is None:
-        raise LaunchError(f"'{options.claude_bin}' not found on PATH", EXIT_NOT_FOUND)
+        raise LaunchError(cli_not_found(options.claude_bin), EXIT_NOT_FOUND)
     upstream = resolve_upstream(options.upstream, cwd=Path.cwd())
+    check_upstream(upstream)
     home = contexto_home()
-    session_id = options.session_id or uuid.uuid4().hex
+    check_home(home)
+    session_id, continued = choose_session(options, home, Path.cwd(), stderr)
+    check_mcp_values(session_id, home, sys.executable)
     try:
         store = open_session(home, session_id, Path.cwd())
     except (OSError, ValueError) as exc:
         raise LaunchError(f"cannot open session {session_id!r}: {exc}", EXIT_USAGE) from exc
     config = engine_config(options)
     proxy, engine_name = start_proxy(store, upstream.url, upstream.source, config, options.observe_thinking,
-                                     stderr=stderr)
-    tmp = Path(tempfile.mkdtemp(prefix="contexto-run-"))  # mode 0700, removed on exit
+                                     stderr=stderr, cli="claude")
+    notices, recorder = proxy.session_log, proxy.transform
+    tmp: Path | None = None
+    watchdog: Watchdog | None = None
     code = EXIT_PROXY
     try:
+        tmp = Path(tempfile.mkdtemp(prefix="contexto-run-"))  # mode 0700, removed on exit
+        watchdog = Watchdog.start(tmp, store)
         settings = write_private_json(tmp, "settings.json", settings_payload(proxy.url))
         mcp = write_private_json(tmp, "mcp.json", mcp_payload(session_id, home))
         store.log({"event": "launch", "cli": "claude", "session": session_id, "config": config,
@@ -457,18 +880,47 @@ def _run(options: LaunchOptions, stderr) -> int:
             print(f"contexto: {warning}", file=stderr, flush=True)
             store.log({"event": "window_budget_warning", "bound": options.bound,
                        "assumed_overhead": assumed_overhead()})
-        code = run_child(claude_argv(claude, settings, mcp, options.claude_args), stderr=stderr)
+        notices.hold()  # claude owns the terminal until it exits (D55)
+        code = run_child(claude_argv(claude, settings, mcp, options.claude_args), stderr=stderr, watchdog=watchdog)
         return code
+    except Terminated as exc:
+        code = 128 + exc.signum
+        raise
     finally:
+        signals.disarm()
         proxy.stop()
         report_missing_tools(proxy)
-        shutil.rmtree(tmp, ignore_errors=True)
+        recorder.flush()
+        notices.release()
+        if watchdog is not None:
+            watchdog.done()
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
         store.log({"event": "exit", "code": code})
+        after_exit(options, session_id, recorder, continued, stderr)
+
+
+def after_exit(options: LaunchOptions, session_id: str, recorder: SessionRecorder, continued: set[str] | None,
+               stderr) -> None:
+    """The last lines, after claude exited (D55): a ``--continue`` that Claude Code took to a conversation
+    the chosen session never served, and the command that resumes this conversation through Contexto
+    (Claude Code's own exit hint, ``claude --resume <id>``, bypasses it). Nothing when no request named
+    a Claude Code session."""
+    if recorder.last is None:
+        return
+    if continued is not None and not continued & set(recorder.seen):
+        print(f"contexto: warning: Claude Code continued session {recorder.last}, which Contexto session "
+              f"{session_id} had not served (its latest conversation here ran without Contexto?), so that "
+              f"session's pages and pins come from another conversation. Resume by id to avoid this.",
+              file=stderr, flush=True)
+    print(f"contexto: resume this conversation through Contexto with: "
+          f"{resume_command(options, session_id, recorder.last)}", file=stderr, flush=True)
 
 
 def _install_signal_handlers(child: subprocess.Popen) -> dict[int, Any]:
-    """Keep the launcher alive through the user's Ctrl+C and forward termination to claude.
-    Python handlers (not SIG_IGN) are used, so nothing is inherited by the child."""
+    """Keep the launcher alive through the user's Ctrl+C and forward termination to claude: the
+    forwarded signals as they are, the other terminating ones as SIGTERM. Python handlers (not SIG_IGN)
+    are used, so nothing is inherited by the child."""
     previous: dict[int, Any] = {}
 
     def ignore(signum, frame) -> None:
@@ -476,9 +928,9 @@ def _install_signal_handlers(child: subprocess.Popen) -> dict[int, Any]:
 
     def forward(signum, frame) -> None:
         if child.poll() is None:
-            child.send_signal(signum)
+            child.send_signal(signum if signum in FORWARDED_SIGNALS else signal.SIGTERM)
 
     previous[signal.SIGINT] = signal.signal(signal.SIGINT, ignore)
-    for signum in FORWARDED_SIGNALS:
+    for signum in (*FORWARDED_SIGNALS, *TERMINATING_SIGNALS):
         previous[signum] = signal.signal(signum, forward)
     return previous
