@@ -138,6 +138,7 @@ from typing import Any, ClassVar, NamedTuple, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
+from contexto.pdfpages import PDF_MAX_PAGES
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import is_own_block, is_own_item, own_call_ids, render_page
@@ -151,6 +152,7 @@ from contexto.tokens import (
     media_parts,
     prime_media,
     split_media,
+    uncertain_documents,
 )
 from contexto.toolcheck import ToolCheck
 
@@ -1695,6 +1697,11 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
                     last_sent_appends=appends_to(state.last_measured, scope, hashes), last_sent_scope=scope,
                     last_sent_anchor=(len(hashes), anchor_hash(hashes)),
                     pending_usage=usage_identity(messages))
+    uncertain = uncertain_documents(messages[previous_n:]) if n > previous_n else 0
+    if uncertain:
+        # D48: a PDF whose pages are not certain counts as the API's maximum; say so when it arrives.
+        events.append({"event": "pdf_pages_uncertain", "epoch": state.epoch, "documents": uncertain,
+                       "pages": PDF_MAX_PAGES})
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
     if rotated:

@@ -310,20 +310,23 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    tokens after scaling its long edge down to 2,576 pixels, between 64 and 4,784, with the size read
    from the PNG, JPEG, GIF, or WebP header, and 4,784 when it cannot be read (a URL, a file id,
    another format); a PDF costs 4,568 tokens a page (3,000 text tokens plus a page image at 1,568),
-   its pages never counted low (D48, round 7): the larger of its page objects, wherever they are
-   (content streams and object streams too, Flate or stored without a filter, every version, each
-   object number once) and the largest `/Count` of any page tree node, at most 600 (the API's limit).
-   So a large PDF is estimated generously (a typical page costs about 1,583), and the turn it is
-   pasted on can page the earlier conversation where an equal-cost text turn would not; pages an
-   incremental save deleted, a page tree node no catalog reaches, and page objects shown as text in a
-   content stream count too. Every fallback errs high: a PDF with neither page objects nor a tree, or
-   that cannot be decoded, is one page per 3 KB; a PDF with an object stream that cannot be read
-   (another filter, a predictor, encryption, or a bound below) is its page tree's count, else 600
-   pages; a PDF with more page objects or tree nodes than a document has is 600; a document by URL or
-   file id is 10 pages; a document of plain text or content blocks is text. Parsing a PDF never
-   raises and is bounded: at most 32 MB of base64, 128 object streams, 2 MB read per stream and 4 MB
-   per PDF, and, over the whole PDF with its object streams, 10,000 page objects, 1,000 tree nodes
-   and 20,000 `/Kids` references, each read through a bounded window. Counts are cached by content
+   its pages trusted only when the count is certain, otherwise 600 (the API's maximum, the only
+   always-safe value; D48, round 8). Certain means a PDF lexer (PDF whitespace including NUL,
+   comments, `#xx` escapes in names, any spacing) read every object in file order, every stream's
+   body ended at `endstream` where its `/Length` (direct, or indirect and resolved) says, no object
+   header was inside a skipped body, every object stream was inflated (Flate or stored) within the
+   budget below and its objects read, and every indirect `/Type` or `/Count` resolved; the pages are
+   then the object numbers whose `/Type` is `/Page`, each once over every version, or the `/Kids`
+   references that are not page tree nodes, whichever is more, raised by any `/Count`, at most 600.
+   Anything else is 600 pages, and the request that brings such a PDF logs `pdf_pages_uncertain`: an
+   object stream not inflated (another filter, a predictor, damaged data, the budget spent), a token
+   the lexer cannot read, a bound passed, no pages found, base64 that cannot be decoded or is over 32
+   MB, a document by URL or file id. So a large PDF is estimated generously (a typical page costs
+   about 1,583), the turn it is pasted on can page the earlier conversation where an equal-cost text
+   turn would not, and pages an incremental save deleted or a page tree node no catalog reaches count
+   too; a document of plain text or content blocks is text. Parsing a PDF never raises and is
+   bounded: at most 32 MB of base64, 16 MB inflated per PDF and 4 MB per object stream, 1,000,000
+   tokens, 200,000 objects, 50,000 `/Kids` references and nesting 64. Counts are cached by content
    (65,536 PDFs, least recently used dropped). The proxy calls the engine's `prime` with each request
    before it takes its transform lock, which counts the request's PDFs into that cache, so the
    transform finds them counted.

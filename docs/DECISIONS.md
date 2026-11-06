@@ -1280,28 +1280,21 @@ the owner's delegation. Open decisions are listed at the end with the options an
     tokens a page plus the page image at the older 1,568-token limit, since the image comes on top
     (reviewer A, PR #234). The measured 3-page PDF cost 1,583 a page, so typical pages are far under
     it; a page of small-font code or tables can still cost more than 3,000 text tokens, so this is a
-    generous allowance, not a hard maximum. A PDF is never counted low (round 7, the orchestrator's
-    decision, below): its pages are the larger of its `/Type /Page` objects, wherever they are (in
-    content streams and object streams too, Flate or stored without a filter as PyMuPDF writes them,
-    every version) and the largest `/Count` of any page tree node, at most 600 (the API's limit). Pages
-    an incremental save deleted, which the superseded tree still lists, count (a PyMuPDF file with 30 of
-    40 pages deleted counts 40), as do a page-tree node no catalog reaches (reviewer A's orphan-node
-    file counts 41 for 1) and page objects shown as text in a content stream (a reportlab file with
-    `pageCompression=0` whose pages show a minimal PDF counts 21 for 20).
-    Page objects count once per object
-    number, read from the `N G obj` header or an object stream's offset table. Counts are cached by
-    content, least recently used dropped,
-    up to 65,536 PDFs (288 bytes each measured, 18.8 MB at most), so no request holds enough PDFs to cycle
-    the cache: round 2 measured 70 PDFs parsed 280 times in 4 estimates with a 64-entry FIFO, and round
-    3 a session at 300 PDFs parsing 910 times inside one engine call with a 256-entry LRU (4,500 over
-    the session); now each PDF is parsed once (300, none inside the last call). Every fallback errs high,
-    since the bound depends on it: a PDF with neither pages nor a tree, or whose base64 cannot be
-    decoded, is one page per 3 KB (the most compact text pages); a PDF with an object stream that was
-    not read is its page tree's count (the document's own total), else 600; a PDF with more page
-    objects (10,000) or page-tree nodes (1,000) than a document has, counted over the whole PDF with
-    its object streams, is 600. A document by URL or file
-    id is 10 pages; a document of plain text or content blocks, and a Responses `input_file` of text,
-    is text.
+    generous allowance, not a hard maximum. A PDF's page count is trusted only when it is certain, and is
+    otherwise the API's maximum, 600 (round 8, the orchestrator's rule, below): certain means every
+    object, and every object in every object stream, was read by a PDF lexer (`contexto.pdfpages`), and
+    the pages are then the object numbers whose `/Type` is `/Page`, each once over every version, or the
+    `/Kids` references that are not tree nodes, whichever is more, raised by any `/Count`. Pages an
+    incremental save deleted, which the superseded tree still lists, count (a PyMuPDF file with 30 of 40
+    pages deleted counts 40), as do a page-tree node no catalog reaches (reviewer A's orphan-node file
+    counts 41 for 1).
+    Counts are cached by content, least recently used dropped, up to 65,536 PDFs (288 bytes each
+    measured, 18.8 MB at most), so no request holds enough PDFs to cycle the cache: round 2 measured 70
+    PDFs parsed 280 times in 4 estimates with a 64-entry FIFO, and round 3 a session at 300 PDFs parsing
+    910 times inside one engine call with a 256-entry LRU (4,500 over the session); now each PDF is
+    parsed once (300, none inside the last call). A PDF whose count is not certain (round 8, below),
+    whose base64 cannot be decoded or is over 32 MB, or a document by URL or file id, counts as 600
+    pages; a document of plain text or content blocks, and a Responses `input_file` of text, is text.
   - **Real producers** (`tests/fixtures/pdf/`, made by `tests/fixtures/make_pdfs.py`): reportlab,
     fpdf2, pikepdf (libqpdf) object streams with and without linearization, PyMuPDF's unfiltered object
     streams, macOS Quartz through `cupsfilter` and `sips`, incremental updates that add or rewrite a
@@ -1325,7 +1318,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     read from the object's start (a nested `/DecodeParms` dictionary hid them), and inflated one at a
     time with `max_length`, at most 128 streams, 2 MB each and 4 MB a PDF, scanned and dropped (50
     zlib bombs in 197 KB peaked at 195 MB, now 4 MB, and count as 600 pages); a stream with another
-    filter, a predictor, or encryption is not read; any other failure is a guess. Round 2 found the
+    filter, a predictor, or encryption is not read; any other failure counted as a guess then (600 since
+    round 8). Round 2 found the
     scans linear but slow (the page-tree regex scanned every `/Count` in up to 40 MB, about 170 ns a
     byte): the tree is now read only at `/Type /Pages`, through an 8 KB window on each side, and at
     most 10,000 page objects and 1,000 tree nodes are read per PDF. Round 3 found those caps applied
@@ -1493,11 +1487,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     from that allowance (the new turn fits `W` with its PDFs at their floor), the event says
     `media_allowance` and the launcher says the PDF is estimated generously and the bound does not need
     to change; images do not count toward it, since an image's estimate is its price, not an allowance
-    (reviewer A, round 7). A later genuine `bound_too_small` is still reported. The one-page-per-3 KB
-    size guess stays a fallback for a PDF with no page objects and no page tree: in the max it would
-    price any PDF carrying images or fonts at hundreds of pages (QA's 3-page, 1.7 MB PDF at about 433),
-    and adds no safety, since every page the API renders is a page object the scan finds or sits in an
-    object stream that was not read, which already counts the tree's total or 600. Measured, bound
+    (reviewer A, round 7). A later genuine `bound_too_small` is still reported. (Round 7 kept a
+    one-page-per-3 KB size guess for a PDF with no page objects and no page tree; round 8 replaces it
+    with 600.) Measured, bound
     150,000, the default 17k head, pages at 1,583 (reviewer B's `midpaste`; the same at 5971e84, with
     the learned cost, and now):
 
@@ -1516,11 +1508,54 @@ the owner's delegation. Open decisions are listed at the end with the options an
     near the bound (A's `learn7.py --reread 40000`), one crossing unflagged at 6.5% over the estimate,
     now no crossing; crafted streams with a `/Length` that lies long or no `endstream`, counted 1 to 12
     pages for 20 or 300, now at least the true count.
+  - **Round 8: a page count is certain, or 600 (the orchestrator's rule, final for this PR).** Reviewer
+    A found two more ways to count low with nothing flagged, and that `PdfCount.counted` was never read
+    before the send: an object stream not read left the count at whatever `/Count` the scan reached, a
+    leaf node or a planted orphan (a valid file of standard Flate object streams with the root page tree
+    written last counted 126 of 600 pages, and reading it was estimated at 687,851 for a real 1,062,103
+    on a 900,000 bound, with no event); and pages written in valid ways the regexes missed (a comment,
+    `#xx` escapes, NUL as whitespace, 17 spaces, an indirect or missing `/Type`, a nested dictionary
+    before `/Count`) counted 1 to 12 of 50 (137,531 estimated for 166,453 on 150,000, no event). So the
+    regex scan is replaced by a PDF lexer (`contexto.pdfpages`): PDF whitespace including NUL, comments,
+    `#xx` escapes in names, any spacing, nested literal strings and hex strings. Objects are read in
+    file order; a stream's body is skipped by its `/Length` (direct, or an indirect one resolved, as
+    qpdf writes them after the stream) and must end there at `endstream`; an object header inside a
+    skipped body (a `/Length` that lies long) is not certain; every object stream is inflated (Flate, or
+    stored without a filter) within a 16 MB budget for the PDF, with no cap on how many, and its objects
+    read by its offset table; an indirect `/Type` or `/Count` is resolved from the objects read. The
+    count is certain only if all of that succeeds and pages are found; otherwise, and for any bound
+    passed (1,000,000 tokens, 200,000 objects, 50,000 `/Kids` references, nesting 64), the PDF counts as
+    600 pages and its request logs `pdf_pages_uncertain` (the documents and the 600). A `/Count` can
+    raise the count but never stands in for an unread part.
+    Real producers, 100 to 600 pages, certain and exact (pikepdf's count; 639 pages caps at 600):
+    reportlab compressed and uncompressed; re-saved by qpdf (pikepdf) with object streams, linearized,
+    and in QDF mode; PyMuPDF with object streams and 20 links a page; macOS `cupsfilter`; 25 files, 6 to
+    1,470 ms (the slowest a 600-page PyMuPDF file with 12,000 links, measured under `tracemalloc`; about
+    0.6 s untraced), at most 24 MB traced. Every fixture is certain; all count exactly but the
+    deleted-pages file (40 for 10, high on purpose). Hostile files, each 600 and uncertain: objects,
+    `/Type /Page` objects or `/Count` to 24 MB, at most 0.57 s and 53 MB (the token bound); nesting, an
+    unclosed string, 50 zlib bombs and 10,000 tiny streams in under 0.07 s. That is slower than round
+    7's regex scan (0.15 s at worst) and still bounded; the count runs before the transform lock
+    (priming) and once per PDF.
+
+    | reviewer A's round-8 repro | a205901 | now |
+    |---|---|---|
+    | root page tree after 139 to 608 Flate object streams (300 to 600 pages) | 126 to 488 pages, certain | exact, or 600 uncertain where the budget runs out (truth 600) |
+    | reading the 600-page one on a 900,000 bound | 687,851 for a real 1,062,103, no event | 2,853,083, `pdf_pages_uncertain`, flagged |
+    | a comment, `#xx` keys or values, 17 spaces, NUL, indirect `/Type`, a nested dictionary (50 pages) | 11 or 12, guessed | 50, certain |
+    | 3 visible and 47 hidden pages; all hidden with an orphan `/Count 1` | 3 and 1, certain | 50, certain |
+    | object streams under `ASCIIHexDecode`, `/Fl#61teDecode`, or over 2 MB, beside an orphan `/Count 1` | 1, certain | 600 uncertain (hex), 50 certain (escaped name, over 2 MB) |
+    | no `/Type` anywhere (pages and tree) | 11, guessed | 600, uncertain |
+    | the hidden 50-page file read on a 150,000 bound | 137,531 for a real 166,453, no event | 315,683, flagged |
+
+    The deleted-pages floor stays high (reviewer A, low): its superseded tree lists 40 pages, so the
+    floor is 40,000 for a real 15,830 and a dense head measured on that first request comes out at 0.44
+    to 0.66 of the true head (`W` 11k to 45k over the equal-cost control's); in 30 sessions run to the
+    bound none crossed it, since later measurements correct the head. Accepted: the count over-counts,
+    which is safe.
   - **Also not covered.** A PDF crafted to claim more pages than it has raises its estimate. An
     encrypted PDF with object streams counts 600 pages (reviewer B); Anthropic asks for PDFs without
-    encryption. A PDF whose `/Kids` the windows cannot read (a nested dictionary in a page tree node, or
-    an object stream past a bound) floors at fewer pages (a 600-page qpdf re-save that uses up the
-    inflate budget floors at 305), which only makes its first ratio more uncertain. Twenty crafted PDFs
+    encryption. Twenty crafted PDFs
     posted at once still slow other sessions: reviewer B measured the text session's worst wait at 0.43
     to 0.48 s, about 8 times main's 0.06 s on the same loaded machine (338 to 358 ms in round 4; 18.6 s at
     d95e5df), as regex work contends for the GIL. A screenshot in a paged turn is still not recallable as
