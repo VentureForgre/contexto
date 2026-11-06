@@ -314,6 +314,7 @@ DISPOSABLE_HOME_DIRS = ("packages",)
 # 13,322 to 18,403 tokens (docs/research/M2-codex-step1-live.md, M2-codex-acceptance-150k.md) and
 # 15,694 on 0.166.0 (QA, 2026-11-05); the largest, rounded up.
 ASSUMED_OVERHEAD = 19_000
+MEASURED_OVERHEADS = "13,322 to 18,403"
 
 
 class CodexLaunchError(RuntimeError):
@@ -732,7 +733,8 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                                           stderr=stderr, installed=installed):
             code = launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started
             return code
-        warning = launcher.start_warning(options.bound, options.headroom_floor, ASSUMED_OVERHEAD)
+        warning = launcher.start_warning(options.bound, options.headroom_floor, ASSUMED_OVERHEAD,
+                                         MEASURED_OVERHEADS)
         if warning:
             print(f"contexto: {warning}", file=stderr, flush=True)
             store.log({"event": "window_budget_warning", "bound": options.bound, "assumed_overhead": ASSUMED_OVERHEAD})

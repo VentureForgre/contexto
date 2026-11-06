@@ -342,7 +342,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    its PDFs at 1,583 a page, and every PDF in it is certain, the engine logs `pdf_allowance` (the sizing,
    `new_turn_tokens` and `pdf_allowance_tokens`) in place of `bound_too_small`, and rotates the same way;
    with an uncertain PDF in the turn it logs `bound_too_small` with `pdf_uncertain` (how many) when the
-   turn would fit with each uncertain PDF at 0, and a plain `bound_too_small` when it would not (D61). The
+   turn would fit with each uncertain PDF at 0 and each certain one at a typical page, and a plain `bound_too_small` when it would not (D61). The
    launcher shows `pdf_allowance` once as a generous estimate under which the turn may fit, not a
    promise; `bound_too_small` with `pdf_uncertain` once as a PDF that could not be read fully, without
    advising a larger bound outright; and `pdf_pages_uncertain` once. A document of plain text or
@@ -396,7 +396,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
    seat) leaves less than 25,000 tokens of window budget, says that recall will barely fit or, at a
    budget of 0 or less, that it may not fit at all (a "may": measured overheads ran as low as 13,842 on
-   Claude Code 2.1.314), and suggests a larger `--bound` (D55). Example
+   Claude Code 2.1.314 with a fresh config, and 13,322 on Codex, whose warning quotes its own range), and suggests a larger `--bound` (D55). Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
    OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
    thinking strips will be frequent at 150k for large heads (see O3).

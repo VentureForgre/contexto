@@ -2618,15 +2618,21 @@ the owner's delegation. Open decisions are listed at the end with the options an
     the tool output at 1.8 to 3.0, the first input count at request 30 or never; 32 sessions of 36
     requests): turn starts over the bound unflagged in 26 sessions on main (up to 44,202), in 1 now (a
     2.0 head and a 1.8 window with no input count ever: 30,034 to 30,166). Tool-loop requests over it
-    unflagged in 30 sessions on main, 12 now, all with a head at 2.5 bytes a token or denser.
-  - **A v0.5.8 record's head (#244 reviewer A).** `resume_state` adopted `head_tokens` from the record
+    unflagged in 30 sessions on main, 12 now, all with a head at 2.5 bytes a token or denser. Reviewer A's
+    harness (1,440 sessions at bound 30,000): requests over the bound unflagged 6,451 on main, 445 now;
+    turn starts over it 89, now 0; sessions whose responses all carry an input count unchanged. The cost:
+    Codex sessions with no input count rotate 9 to 20% more often, since tool output now counts higher.
+  - **An older record's head (#244 reviewer A).** `resume_state` adopted `head_tokens` from the record
     unchanged, so a head v0.5.8 measured low (0 for a 25,365-token head on a resumed first request)
     stayed with the session after the upgrade, the round-1 overrun shape. Rule: the record carries
     `head_rule` (2), the head measurement it was taken under. A record without it resumes with no
     measured head and no `W`: at `k = 0` the next usage measures the head again (a head of 1 recorded,
     466 measured for a true 467 at 4 bytes a token), and at `k > 0` rule 4 estimates it, as for any
-    unmeasured head. The store accepts the field or its absence, so an older record still resumes. A
-    record written by this version has the field, which v0.5.8 refuses: a downgrade starts from epoch 0.
+    unmeasured head. Every release through v0.5.23 writes records without the field, and a record cannot
+    tell which rule it was written under, so a correct head from v0.5.9 on is dropped and measured again
+    too; the bound is unaffected. The store accepts the field or its absence, so an older record still
+    resumes. A record written by this version has the field, which earlier versions refuse: a downgrade
+    starts from epoch 0.
   - **Crafted JPEGs (#234 reviewer A, round 10).** The JPEG walk stepped one marker at a time over up to
     192 KB, and every image in view is priced on every request under the transform lock. 100 images of
     196,000 fill bytes priced in 0.97 s, of 98,000 RST markers in 0.75 s, of 49,000 2-byte segments in
@@ -2636,7 +2642,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     1920x1080, the others cost 4,787.
   - **Patches (#234 reviewer A, round 10).** D48's four count_tokens results are exactly
     `ceil(w / 28) * ceil(h / 28) + 3` (641, 1,719, 2,694, 3,243), and `w * h / 750` alone undercounts a
-    thin image (2576x29: 100 against 187) and about 1 size in 4 above 500 pixels an edge (by up to 31).
+    thin image (2576x29: 100 against 187) and some larger sizes (reviewer A measured 6.6% to 27.7% of
+    sizes above 500 pixels an edge, by up to 34 to 91, depending on how the sizes are sampled).
     Rule: an image costs the higher of the two after scaling, each edge scaled in whole pixels rounded up,
     between 64 and 4,787: the documented 4,784 is 92 x 52 patches at the 2,576-pixel edge, plus the 3.
     The floor (the ratio's lower bound) is unchanged, the pixel formula alone, which stays under the
@@ -2652,8 +2659,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     bound.
   - **The start warning's low end.** The launcher's warning for a bound that may leave no window budget
     said measured overheads run "from about 15,700" (a QA head of 15,689 against a stub). Measured on
-    Claude Code 2.1.314 the overhead runs as low as 13,842; the warning, its comment and rule 4 now say
-    so (left to this PR by the docs pass, since it is code).
+    Claude Code 2.1.314 with a fresh config the overhead runs as low as 13,842; the warning, its comment
+    and rule 4 now say so (left to this PR by the docs pass, since it is code). `run codex` quotes Codex's
+    own measured range, 13,322 to 18,403, not Claude Code's (reviewer B).
   - **Already fixed.** The two code comments #234's reviewer A named (a document "far above what it
     costs" in `rewrite.py`, and the floor taken off real usage in `tokens.py`'s docstring) were corrected
     by D60 (#248). The stale `media_allowance` assertion in `tests/test_image_estimate.py` is removed.

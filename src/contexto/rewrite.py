@@ -2008,10 +2008,11 @@ RECORD_INT = ("epoch", "k", "strip_upto", "turns_paged", "max_turn_growth", "las
 
 RECORD_NULLABLE = frozenset({"last_turn_start_n", "head_tokens", "initial_carried", "last_carried_text_count",
                              "turn_room_low_epoch", "window_budget"})
-# D61: the rule 4 head measurement a record's head_tokens was taken under. Records without it were written
-# before D49's amendment (v0.5.8 and earlier), whose head could be measured far low (0 for a 25,365-token head
-# on a resumed first request); a resume drops that head and the W sized from it, so the head is measured
-# again at k == 0 and estimated at k > 0.
+# D61: the rule 4 head measurement a record's head_tokens was taken under. Every release through v0.5.23
+# writes records without it. Those from before D49's amendment (v0.5.8 and earlier) could hold a head measured
+# far low (0 for a 25,365-token head on a resumed first request), and a record cannot tell which rule it was
+# written under, so a resume drops the head and the W sized from it for all of them: the head is measured
+# again at k == 0 and estimated at k > 0 (a correct head from v0.5.9 on is simply measured again).
 HEAD_RULE = 2
 
 

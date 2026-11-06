@@ -536,8 +536,5 @@ class TokenEstimator:
     def estimate_messages(self, messages: list[dict[str, Any]]) -> int:
         return estimate_message_tokens(messages, self.measured_bytes_per_token)
 
-    def estimate_value(self, value: Any) -> int:
-        return estimate_value_tokens(value, self.measured_bytes_per_token)
-
     def estimate_items(self, items: list[Any]) -> int:
         return estimate_item_tokens(items, self.measured_bytes_per_token)

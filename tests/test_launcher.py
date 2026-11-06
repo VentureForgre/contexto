@@ -499,7 +499,9 @@ def test_start_warning_depends_on_bound_and_assumed_overhead(env, upstream, tmp_
     negative = start_warning(50_000, None, ASSUMED_OVERHEAD_DEFAULT)
     # The overhead is the top of the measured range, so a budget of 0 or less is a "may" (reviewer B, PR #240).
     assert "may leave no window budget" in negative and "recall may not fit at all" in negative
-    assert "run from 13,842 to about 28,000" in negative  # the measured low end on 2.1.314 (was "about 15,700")
+    assert "run from 13,842 (a fresh config) to about 28,000" in negative  # 2.1.314's low end (was "about 15,700")
+    codex = start_warning(30_000, None, 19_000, "13,322 to 18,403")  # run codex quotes Codex's own range
+    assert "run from 13,322 to 18,403" in codex and "28,000" not in codex
     assert assumed_overhead({}) == ASSUMED_OVERHEAD_DEFAULT
     assert assumed_overhead({"OPENRIG_SESSION_NAME": "x"}) == ASSUMED_OVERHEAD_OPENRIG
     quiet = launch(env, "--upstream", upstream, "--session", "w1", "claude", cwd=tmp_path)

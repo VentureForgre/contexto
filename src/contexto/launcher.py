@@ -306,10 +306,17 @@ def assumed_overhead(env: dict[str, str] | None = None) -> int:
     return ASSUMED_OVERHEAD_OPENRIG if env.get("OPENRIG_SESSION_NAME") else ASSUMED_OVERHEAD_DEFAULT
 
 
-def start_warning(bound: int, headroom_floor: int | None, overhead: int) -> str | None:
+# The measured fixed overheads the warning quotes: Claude Code 2.1.314 ran as low as 13,842 with a fresh
+# config and up to 27,925 with tool search on (D55, D61).
+MEASURED_OVERHEADS = "13,842 (a fresh config) to about 28,000"
+
+
+def start_warning(bound: int, headroom_floor: int | None, overhead: int,
+                  measured: str = MEASURED_OVERHEADS) -> str | None:
     """A one-line warning when the assumed window budget is below MIN_WINDOW_BUDGET, else None. It says
     what that costs: at bound 60,000 on 2.1.314 every epoch logged ``turn_room_low`` and a turn ran out of
-    recall room after 5 searches (QA 2026-11-05), so "rotations will page often" undersold it."""
+    recall room after 5 searches (QA 2026-11-05), so "rotations will page often" undersold it. ``measured``
+    is the CLI's measured overhead range, quoted when the budget may be 0 or less."""
     headroom = headroom_floor if headroom_floor is not None else DEFAULT_HEADROOM_FLOOR
     budget = bound - headroom - overhead
     if budget >= MIN_WINDOW_BUDGET:
@@ -317,10 +324,10 @@ def start_warning(bound: int, headroom_floor: int | None, overhead: int) -> str 
     suggested = headroom + overhead + 2 * MIN_WINDOW_BUDGET
     sizing = f"bound {bound:,} - headroom {headroom:,} - typical fixed overhead {overhead:,}"
     if budget <= 0:
-        # The overhead is the top of the measured range, and measured overheads ran as low as 13,842 (Claude
-        # Code 2.1.314), so this is a "may", not a "will".
+        # The overhead is the top of the measured range, and measured overheads run lower, so this is a
+        # "may", not a "will".
         return (f"bound {bound:,} may leave no window budget ({sizing} = {budget:,} tokens; measured overheads "
-                f"run from 13,842 to about 28,000): the engine may keep only the new turn, requests may exceed "
+                f"run from {measured}): the engine may keep only the new turn, requests may exceed "
                 f"the bound, and recall may not fit at all. Use --bound {suggested:,} or more.")
     return (f"window budget about {budget:,} tokens ({sizing}) is below {MIN_WINDOW_BUDGET:,}: turns page out "
             f"almost at once and recalled pages will barely fit, if at all. Consider --bound {suggested:,} or more.")

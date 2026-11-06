@@ -367,9 +367,9 @@ class FakeLauncher:
         from contexto.launcher import cli_not_found
         return cli_not_found(name)
 
-    def start_warning(self, bound, headroom_floor, overhead):
+    def start_warning(self, bound, headroom_floor, overhead, measured):
         from contexto.launcher import start_warning
-        return start_warning(bound, headroom_floor, overhead)
+        return start_warning(bound, headroom_floor, overhead, measured)
 
     def open_session(self, home, session_id, workdir):
         self.calls["session"] = session_id
@@ -908,6 +908,7 @@ def test_run_codex_logs_launch_and_exit_and_warns_early_like_claude(tmp_path, mo
             in seen["err"])
     # Before codex starts; 40,000 - 25,000 - 19,000 leaves no budget (launcher.start_warning's wording, D55, #245).
     assert "bound 40,000 may leave no window budget" in seen["err"] and "Use --bound 94,000 or more" in seen["err"]
+    assert "run from 13,322 to 18,403" in seen["err"]  # Codex's own measured overheads, not Claude Code's
     assert seen["argv"] == [codex_bin, "--no-daemon"]  # interactive, on the stub's 0.166.0
     events = log_events(tmp_path / "ctx", "W1")
     launch = next(e for e in events if e["event"] == "launch")
