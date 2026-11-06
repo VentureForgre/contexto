@@ -1256,6 +1256,45 @@ the owner's delegation. Open decisions are listed at the end with the options an
     role `system` text, so a one-reminder queued prompt placed after other text there (for example a
     nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
     (reviewer B, PR #230 round 2).
+- **D49. A head change is sized like any other rotation, and every forwarded request is checked
+  against the bound.** Claude, 2026-11-05, under D0; contract change (rules 3 to 6). QA 2026-11-05
+  (live-realworld F1, verify-headchange) found that any byte change to `system` or `tools` (tool
+  search loading a tool, an MCP server connecting, a model switch, which renames the model in the
+  system prompt) sent the next turn start down a branch of its own. It kept `choose_k`'s fallback,
+  the newest complete turn whatever its size; it skipped rule 4's minimal window and
+  `bound_too_small` and rule 3's room rotation; with `W` at or below zero it paged nothing and logged
+  nothing; and the pre-send check skipped every rotated request. Live, after a plan-then-implement turn
+  on bound 60,000, the turn started with recall room -4,243 against the 12,000 minimum, every
+  `contexto_search` came back `turn_budget: spent`, and the answer was wrong.
+  - **Rule.** A head change still starts a new epoch at the next turn start, even when nothing is
+    paged (the cached prefix is lost anyway, so stripping thinking there costs nothing more). Its `k`
+    is chosen by the same steps as a size rotation: the minimal window, and `bound_too_small` when even
+    the new turn does not fit, when `W` cannot hold the newest complete turn; else rule 4's
+    `0.5 * W` target, with rule 3's room target when it restores `min_turn_room`. With room to spare it
+    pages exactly as before. The rotation keeps `reason: "head_change"`; `window_minimal` and
+    `bound_too_small` are logged as for any rotation.
+  - **Measured head.** Usage measures the head once, at the conversation's first request, so `F` kept
+    the old head after a change. The engine now keeps the byte size of the head its fingerprint names
+    and, at a head-change turn start, adds the change in bytes at the measured ratio (rounded toward
+    the measured value) to the measured head. In a measured engine run where a server adds about 7,600
+    tokens of tools at bound 30,000, `F` went from 480 to 8,920. Not recorded in the epoch record: a
+    resumed engine takes it from the request, whose head the record's fingerprint must match.
+  - **Pre-send check.** Every forwarded request, rotated or not, is checked against the estimate of
+    what is sent (`sent_estimate` after a rotation) and logged `over_bound` with `source: "estimate"`
+    and `in_tool_loop`. Only `in_tool_loop: true`, and degraded mode, are the logged exception; at a
+    turn start it goes with `bound_too_small` or means the sizing did not hold, so PR #48 review's
+    concern (a turn-start overrun read as rule 5's exception) still holds through that field.
+  - **Measured (engine, zero spend, `tests/test_head_change.py` scenarios, before → after).** Bound
+    8,000, a 12-read loop: sent 17,158 to 17,353 → 599 to 794 estimated tokens, room -10,353 → 6,206
+    or more, events `turn_room_low` → `window_minimal`. Bound 30,000 with `min_turn_room` 6,000, an
+    18-read loop: room 2,349 to 2,544 → 27,191 or more. Bound 60,000 with a 20,000-token head and a
+    22-read turn (the live shape): sent 51,050 to 51,406 → 20,681 to 21,037, room -16,406 → 13,963 or
+    more. Each for tools added, system changed and model switched; the same runs with no head change
+    are unchanged. 15 of the 23 new tests fail on main.
+  - **Limits.** If the head changes before the first usage is measured and that usage comes from a
+    request with the new head, the change is counted twice at the next head-change turn start
+    (higher `F`, so more paging, never an overrun). The pre-send check uses the estimator; real
+    usage over the bound is still logged after the response, as before.
 - **D54. `contexto run codex`: the key helper through a shell, no Anthropic default, no orphaned
   daemon, launch checks first.** Claude, 2026-11-05, under D0; contract change. From the 2026-11-05 QA
   run (live-codex F1, docs-audit 1 and 2, verify-codex-orphans, install 2 and 3, launcher-ux 8 and its
@@ -1323,6 +1362,62 @@ the owner's delegation. Open decisions are listed at the end with the options an
     runs for Codex too, with an assumed fixed overhead of 19,000 tokens: measured 13,322 to 18,403 in
     the M2 Codex runs and 15,694 on 0.166.0, rounded up from the largest. At bound 40,000 and the
     default floor it now warns before Codex starts, not after the first request.
+- **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
+  subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
+  untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by
+  Claude Code's auto-updater, which deleted 2.1.310, and Codex at 0.166.0. The D38 routine
+  (`docs/cli-updates.md`, Claude steps 1 to 7, Codex steps 1 to 4) ran on each with zero spend,
+  binaries run by path and `DISABLE_AUTOUPDATER=1`; the numbers are in
+  `docs/research/M2-claude-code-2.1.318.md`. 2.1.310 could not be run side by side.
+  - **What did not change.** Session start, every context block's kind, the hook prefixes, the
+    missing-tools verdicts (True, False, True in 6 of 6 sets), the D44 refusal (5 / 0, 0 / 5, 4 / 1)
+    and argstub's 8 of 8 are the same on both versions. In the four reminders matrices (52 runs),
+    Contexto's code never missed a session start and found no context block without a kind (705 bodies
+    with tools per matrix with tool search on, 782 with it off). Codex 0.166.0 sends the 0.163.0
+    section tags and request shapes; only its built-in provider, which Contexto does not use, adds a
+    role-less `configuration_update` item. The CLI changes that do not change a classification:
+    claude-opus-5-5 gets no `<total_tokens>` countdown from 2.1.314 on, so an effort change on a turn
+    with no other system message comes as a settings-only message (3 to 12 per opus-5-5 run; none on
+    2.1.302), read as settings (contract rule 2a). And 2.1.318's `--resume` re-sends 4 old
+    file-changed notes where 2.1.314 sent 80.
+  - **What changed: subagent stop reports.** Since 2.1.312 a subagent run that used tools is reported
+    with their names first, in `<tools-used-before-summary>Bash</tools-used-before-summary>`. It comes
+    in three places. (1) It is indented above a foreground hand-back's `[Subagent hand-back]` frame,
+    so the result no longer started with the frame and the call was an unknown shape. (2) While main
+    is idle, it is a `<system-reminder>` text block of its own ahead of the notice's block, and only a
+    user message's first text block was read, so the stop was missed. (3) It opens the `system` notice
+    during main's tool loop, which was still read, since a system message is searched whole. Captured
+    on 2.1.314 and 2.1.318 (the same apart from agent ids), on the fg, stop, resume, bgidle and esc
+    scenarios, `agent_runs` gave 1 stop for none of fg, stop, bgidle and esc; resume gave 3.
+    Unchanged: the subagent's first prompt, the launch receipt, `resumedAgentId`, and the resumed
+    run's `SendMessage`-named notice.
+  - **Rule.** The element and the whitespace around it are skipped at the start of an `Agent` call's
+    result. A user message whose first text block is a `<system-reminder>` holding only the element
+    is read at its second text block, and only when that block opens with `<system-reminder>`. A
+    notice block that is not wrapped after it (`[SYSTEM NOTIFICATION ...` alone, which counts as a
+    first block) does not count there, and other text before a hand-back's frame still leaves the
+    call unknown. The 2.1.302 shapes are read as before. With the rule, the captures give 1 stop for
+    fg, stop, bgidle and esc and 3 for resume on both versions. The engine tests run on those
+    captures, scrubbed (`tests/fixtures/subagent_shapes_2_1_31x.json`).
+  - **Lists.** `TESTED_VERSIONS` gains 2.1.314, 2.1.318 and 0.166.0, and `SUBAGENT_SHAPES_TESTED`
+    gains 2.1.314 and 2.1.318. The session-start, context-block and hook measured-on constants become
+    2.1.318, and the Codex section constant 0.166.0. 2.1.312 was only partly measured (by QA) and
+    stays out.
+  - **The spikes.** `carried/live_probe.sh` and `carried/probe.sh` drove `~/.local/bin/claude` with
+    the real `HOME`, and `codex/probe.sh` and `codex/smoke.sh` ran Codex with the real `HOME`. Claude
+    Code's auto-updater was left on in the carried scripts and `cliversion/check.sh`. Now every one
+    takes a binary (an argument, or `CLAUDE=` / `CODEX=`) and defaults to the one on `PATH`, uses a
+    temp `HOME`, and sets `DISABLE_AUTOUPDATER=1` for Claude Code. The reminders harness reads
+    `CLAUDE=`, and `run_all.sh` passes extra arguments to every run, so the tool-search-off matrix
+    needs no script edit. `subagents/run.sh` printed `rc=0` with an empty capture when its stub could
+    not bind (the port is drawn from 200, and another run held it). `run.sh` and `drive.py` now take a
+    free port, wait for the stub's `listening` line, fail when it does not come, and run Claude Code
+    under a scrubbed environment and a temp `HOME`. `docs/cli-updates.md` says every run must set
+    `DISABLE_AUTOUPDATER=1`.
+  - **Not done.** No live check ran on 2.1.314, 2.1.318 or 0.166.0 (routine step 9 needs the owner's
+    approval and a token cap). The early close was measured against the scripted stub only. In esc a
+    side request asks for a background agent's progress ("Describe your most recent action in 3-5
+    words ..."). Its first prompt matches no `Agent` call, so it opens no room that could close early.
 
 ## Open decisions
 

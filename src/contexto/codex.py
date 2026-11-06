@@ -57,8 +57,9 @@ TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
 # Rechecked on 0.163.0 for D38, with zero spend against loopback stubs: spikes/m2/cliversion/check.sh
 # (one `codex exec`) and spikes/m2/codex/probe.sh (five auth and provider scenarios) showed the same
 # six openings in every scenario, the environment_context message last in the lead; the AGENTS.md
-# header was not exercised.
-CONTEXT_SECTIONS_CODEX_VERSION = "0.163.0"
+# header was not exercised. Rechecked on 0.166.0 for D56 the same way: the same six openings; only the
+# built-in provider's requests (never Contexto's custom provider) add a role-less configuration_update item.
+CONTEXT_SECTIONS_CODEX_VERSION = "0.166.0"
 CONTEXT_SECTION = re.compile(
     r"\s*(?:<(?:skills_instructions|permissions instructions|collaboration_mode|multi_agent_role|"
     r"multi_agent_mode|environment_context)>|# AGENTS\.md instructions for )")
