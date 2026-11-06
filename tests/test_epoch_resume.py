@@ -100,12 +100,59 @@ def test_the_record_holds_exactly_the_agreed_fields():
         "epoch", "k", "strip_upto", "turns_paged", "max_turn_growth", "last_turn_count", "carried_text_streak",
         "window_minimal_count", "last_turn_start_n", "head_tokens", "initial_carried", "last_carried_text_count",
         "turn_room_low_epoch", "window_budget", "pinned_text", "index_text", "preamble_sha256", "head_fingerprint",
-        "dialect", "conversation", "model", "paged_carried", "config", "anchor"])
+        "dialect", "conversation", "model", "paged_carried", "config", "anchor", "head_rule"])
     last = turns(6)[-1]
     assert record["anchor"] == {"n": len(last), "hash": anchor_hash([message_hash(m) for m in last])}
     assert record["dialect"] == "anthropic" and record["conversation"].startswith("anthropic:")
     assert record["model"] == "claude-haiku-5-5" and isinstance(record["paged_carried"], list)
     assert json.loads(json.dumps(record)) == record  # JSON as is
+
+
+@pytest.mark.parametrize("marked", [True, False])
+def test_a_head_from_a_record_written_before_the_head_rule_is_measured_again(marked):
+    # PR #244 review A (D61): v0.5.8 measured a head as low as 0 (a late first usage, output-only usage, a
+    # long resumed first request), and its record kept that head after the upgrade, so the session went on
+    # sizing W from it. A record without head_rule drops its head and the W sized from it: at k == 0 the
+    # next usage measures the head again; a record written under the amended rule keeps its head. Usage is
+    # at 4 bytes a token, sparser than the 3.5 seed, so the window counts at its byte share and the head
+    # measures close to its own size.
+    config = Config(bound=60_000, pin_budget=200, index_budget=200)
+    sequence = turns(3)
+    store = EpochStore()
+    before = RewriteEngine(store, config=config)
+    for messages in sequence[:-1]:
+        _, events = send(before, messages)
+        real = by_name(events, "request")["sent_bytes"] // 4
+        before.observe_usage(MESSAGES, {"input_tokens": real, "output_tokens": 5}, request(messages))
+    head = next(iter(before.states.values())).head_tokens
+    record = {**store.writes[-1], "head_tokens": 1, "window_budget": 59_000}
+    assert record["head_rule"] == 2 and record["k"] == 0 and head > 100
+    if not marked:
+        del record["head_rule"]  # as v0.5.8 wrote it
+    after = RewriteEngine(EpochStore(record), config=config)
+    _, events = send(after, sequence[-1])
+    state = next(iter(after.states.values()))
+    assert "epoch_resumed" in names(events)
+    assert (state.head_tokens, state.window_budget) == ((1, 59_000) if marked else (None, None))
+    real = by_name(events, "request")["sent_bytes"] // 4
+    after.observe_usage(MESSAGES, {"input_tokens": real, "output_tokens": 5}, request(sequence[-1]))
+    state = next(iter(after.states.values()))
+    assert state.head_tokens == 1 if marked else head <= state.head_tokens < head + 50, (head, state.head_tokens)
+    assert state.window_budget < 59_000 or marked
+
+
+def test_a_record_written_before_the_head_rule_resumes_past_k_0_with_an_estimated_head():
+    # D61: at k > 0 no usage measures the head again; rule 4 estimates it, as for any unmeasured head.
+    store = EpochStore()
+    before = RewriteEngine(store, config=CONFIG)
+    for messages in turns(7)[:-1]:
+        send(before, messages)
+    assert store.record["k"] > 0 and store.record["head_rule"] == 2
+    store.record = {k: v for k, v in store.record.items() if k != "head_rule"} | {"head_tokens": 0}
+    engine = RewriteEngine(store, config=CONFIG)
+    _, events = send(engine, turns(7)[-1])
+    state = next(iter(engine.states.values()))
+    assert "epoch_resumed" in names(events) and state.k > 0 and state.head_tokens is None
 
 
 def test_writes_happen_at_turn_starts_only():

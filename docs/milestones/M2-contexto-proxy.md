@@ -302,14 +302,17 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    real input, the measured head, or `estimate_error`, and logs `usage_unattributed` (the epoch,
    the request's message count, and the expected one); it still counts for `over_bound` and the
    published room, which describe what the model received.
-   Until the first real usage arrives, count `tool_result` content at 1.5 bytes per token and
+   Until the first real usage arrives, count `tool_result` content, and on Codex each tool output
+   item (`function_call_output` and any other `*_output`, D61), at 1.5 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
    character, and M0 saw log-heavy tool output near 1.8 bytes per token, so 1.5 errs high); after
    that, use the session's measured bytes-per-token ratio. Images (D48: Messages `image`, Responses
    `input_image`, top level or inside a `tool_result` or tool output) are not priced by their bytes:
-   an image costs `width * height / 750` tokens after scaling its long edge down to 2,576 pixels,
-   between 64 and 4,784, with the size read from the PNG, JPEG, GIF, or WebP header, and 4,784 when it
-   cannot be read (a URL, a file id, another format). A PDF (Messages `document` with a base64 PDF, a
+   an image costs the higher of `width * height / 750` and its 28-pixel patches plus 3,
+   `ceil(width / 28) * ceil(height / 28) + 3` (D61), after scaling its long edge down to 2,576 pixels,
+   between 64 and 4,787, with the size read from the PNG, JPEG, GIF, or WebP header, and 4,787 when it
+   cannot be read (a URL, a file id, another format, or a JPEG whose frame header is not within 256
+   markers; a run of JPEG fill bytes counts as one). A PDF (Messages `document` with a base64 PDF, a
    URL or a file id; Responses `input_file`) is never estimated low (D60): it costs 4,568 tokens a page
    (3,000 text plus an image at the 1,568-token limit), its pages counted only when certain, else 600
    pages (the API's maximum), and the request that brings an uncertain one logs `pdf_pages_uncertain`
@@ -338,7 +341,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    (65,536, least recently used dropped). When a turn start's new turn does not fit `W` but would with
    its PDFs at 1,583 a page, and every PDF in it is certain, the engine logs `pdf_allowance` (the sizing,
    `new_turn_tokens` and `pdf_allowance_tokens`) in place of `bound_too_small`, and rotates the same way;
-   with an uncertain PDF in the turn it logs `bound_too_small` with `pdf_uncertain` (how many). The
+   with an uncertain PDF in the turn it logs `bound_too_small` with `pdf_uncertain` (how many) when the
+   turn would fit with each uncertain PDF at 0 and each certain one at a typical page, and a plain `bound_too_small` when it would not (D61). The
    launcher shows `pdf_allowance` once as a generous estimate under which the turn may fit, not a
    promise; `bound_too_small` with `pdf_uncertain` once as a PDF that could not be read fully, without
    advising a larger bound outright; and `pdf_pages_uncertain` once. A document of plain text or
@@ -396,8 +400,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    smaller than sending unrotated; the launcher warns at start when a typical head (28,000
    tokens, measured 18,641 to 27,925 on Claude Code 2.1.314 with tool search on; 92,000 in an OpenRig
    seat) leaves less than 25,000 tokens of window budget, says that recall will barely fit or, at a
-   budget of 0 or less, that it may not fit at all (a "may": measured heads ran as low as 15,689), and
-   suggests a larger `--bound` (D55). Example
+   budget of 0 or less, that it may not fit at all (a "may": measured overheads ran as low as 13,842 on
+   Claude Code 2.1.314 with a fresh config, and 13,322 on Codex, whose warning quotes its own range), and suggests a larger `--bound` (D55). Example
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
    OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
    thinking strips will be frequent at 150k for large heads (see O3).
@@ -534,7 +538,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       behaves exactly as the old one would have: `epoch`, `k`, `strip_upto`, `turns_paged`, the
       exact `pinned_text` and `index_text` sent in that epoch, a SHA-256 of the rendered preamble
       as sent, `head_fingerprint`, `paged_carried`
-      (hashes only), `head_tokens`, `initial_carried`, `max_turn_growth`, the turn-start counters
+      (hashes only), `head_tokens` and the rule it was measured under (`head_rule`, 2 since D61),
+      `initial_carried`, `max_turn_growth`, the turn-start counters
       (`last_turn_start_n`, `last_turn_count`, `last_carried_text_count`, `carried_text_streak`),
       `window_budget`, `window_minimal_count`, and `turn_room_low_epoch`; the whole engine
       configuration (every setting, including the recall preamble options and budgets); the
@@ -551,8 +556,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       own code hashes to the recorded SHA-256 (so a code change that renders differently does not
       resume); the request's head fingerprint equals the record's; the request has at least `n`
       messages; and its first `n` messages hash to the anchor. A resume adopts every recorded
-      field, seeds rule 10's previous-request hashes with the hashes of those first `n` messages
-      (so the request is matched as an append and does not start a new epoch), makes this
+      field, except that a record without `head_rule` 2 (written before D49's amendment, whose head
+      could be measured far low) resumes with no measured head and no `W`: at `k = 0` the next usage
+      measures the head again, and at `k > 0` rule 4 estimates it (D61). It seeds rule 10's
+      previous-request hashes with the hashes of those first `n` messages (so the request is
+      matched as an append and does not start a new epoch), makes this
       conversation the main one, and continues append-only (rules 1 to 3). A resume at a turn
       start applies rule 4's decisions (room and size) to that request itself. The record holds no
       per-request usage, so that first decision uses a full estimate instead of the previous

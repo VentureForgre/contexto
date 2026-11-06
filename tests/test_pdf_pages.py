@@ -1054,9 +1054,10 @@ def test_media_free_and_image_only_requests_never_count_pages(tmp_path, monkeypa
 
 # PR #248 round 2 (reviewer B): the PDF's allowance is not a bound that is too small -----------------------
 
-def _paste_at_turn_start(tmp_path, block: dict | None, *, bound: int = 150_000, history: int = 60_000) -> list[dict]:
-    """About ``history`` tokens of conversation, then ``block`` (or 60,000 tokens of text) pasted with a
-    new prompt. Returns that request's events."""
+def _paste_at_turn_start(tmp_path, block: dict | list[dict] | None, *, bound: int = 150_000,
+                         history: int = 60_000) -> list[dict]:
+    """About ``history`` tokens of conversation, then ``block`` (or blocks, or 60,000 tokens of text) pasted
+    with a new prompt. Returns that request's events."""
     eng = RewriteEngine(SessionStore(tmp_path, "pdf"), config=Config(bound=bound))
     rng = random.Random(6)
     msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "start"}]}]
@@ -1073,7 +1074,8 @@ def _paste_at_turn_start(tmp_path, block: dict | None, *, bound: int = 150_000, 
                                                "content": " ".join(rng.choices(["a", "bb", "c"], k=3_000))}]}]
     extra = block if block is not None else {"type": "text", "text": " ".join(rng.choices(["a", "bb"], k=90_000))}
     msgs += [{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
-             {"role": "user", "content": [{"type": "text", "text": "and this"}, extra]}]
+             {"role": "user", "content": [{"type": "text", "text": "and this"},
+                                          *(extra if isinstance(extra, list) else [extra])]}]
     return eng({**HEAD, "messages": list(msgs)}, {}, EP)[2]
 
 
@@ -1102,6 +1104,22 @@ def test_an_uncertain_pdf_pasted_at_a_turn_start_is_a_bound_too_small(tmp_path, 
     events = _paste_at_turn_start(tmp_path, doc(_listing(pages, direct=True)), history=20_000)
     names = [e["event"] for e in events]
     assert "pdf_allowance" not in names and "pdf_pages_uncertain" in names
+    (small,) = [e for e in events if e["event"] == "bound_too_small"]
+    assert small["pdf_uncertain"] == 1
+
+
+def test_an_uncertain_pdf_beside_text_over_the_window_is_a_plain_bound_too_small(tmp_path):
+    """PR #248 re-check (reviewer A, D61): an uncertain 1-page listing pasted with about 250,000 tokens of
+    text at bound 150,000 logged bound_too_small with pdf_uncertain, and the launcher said a larger --bound
+    helps only if the PDF is long, though the text alone needs one. Marked only when the turn would fit with
+    the uncertain PDF at 0; otherwise plain, so the launcher advises a larger --bound."""
+    text = {"type": "text", "text": " ".join(random.Random(7).choices(["a", "bb", "ccc"], k=300_000))}
+    events = _paste_at_turn_start(tmp_path / "over", [doc(_listing(1, direct=True)), text], history=20_000)
+    (small,) = [e for e in events if e["event"] == "bound_too_small"]
+    assert "pdf_uncertain" not in small
+    assert small["new_turn_tokens"] - PDF_MAX_PAGES * PDF_PAGE_TOKENS > small["window_budget"]
+    # The same PDF beside a short prompt is still marked: the turn would fit without it
+    events = _paste_at_turn_start(tmp_path / "fits", doc(_listing(1, direct=True)), history=20_000)
     (small,) = [e for e in events if e["event"] == "bound_too_small"]
     assert small["pdf_uncertain"] == 1
 
@@ -1209,11 +1227,28 @@ def test_the_proxy_counts_pdfs_before_it_takes_the_transform_lock(monkeypatch):
     assert parses == [False, False]
 
 
-def test_hostile_pdfs_do_not_hold_up_another_session():
+def test_hostile_pdfs_do_not_hold_up_another_session(monkeypatch):
     """Round 9: 20 PDFs of 24 x ``%`` held another session's text request for 48 s (one of 30 x ``%``, 114 s).
     Twenty sessions each post a hostile PDF of 200,000 tokens; they are parsed outside the transform lock, one
     at a time, pausing for the GIL, so a text request from another session waits on none of them (0.005 to
-    0.12 s measured with the clients in another process; main 0.014 s)."""
+    0.12 s measured with the clients in another process; main 0.014 s). The wall clock is only a backstop: with
+    the parse queue removed the text request waited 0.89 to 1.65 s, under it (PR #248 re-check, D61), so the
+    test asserts the queue itself: every PDF parsed, never two at once."""
+    parsing, most, parsed = [0], [0], []
+    guard = threading.Lock()
+
+    def one_at_a_time(pdf):
+        with guard:
+            parsing[0] += 1
+            most[0] = max(most[0], parsing[0])
+        try:
+            return count_pages(pdf)
+        finally:
+            with guard:
+                parsing[0] -= 1
+                parsed.append(len(pdf))
+
+    monkeypatch.setattr(tokens, "count_pages", one_at_a_time)
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
     proxy = ContextoProxy(f"http://127.0.0.1:{server.server_address[1]}", MemoryStore(key=b"k" * 32),
@@ -1235,6 +1270,7 @@ def test_hostile_pdfs_do_not_hold_up_another_session():
         server.shutdown()
         server.server_close()
     assert waited < BACKSTOP_SECONDS  # 0.010 to 0.018 s here; the lexer of 323bf9e: 48 s
+    assert len(parsed) == 20 and most[0] == 1
 
 
 @pytest.mark.parametrize("field", ["messages", "input"])

@@ -165,11 +165,11 @@ def test_store_failure_enters_degraded_mode_with_the_responses_dialect():
 def test_room_condition_rotates_the_responses_dialect_too():
     """A12 (contract PR #115) on the Responses dialect: the room alone fires a rotation, logged with
     reason min_turn_room, and the lead items stay first."""
-    items = history(6) + [prompt("new prompt")]
-    quiet = Config(bound=10_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=0)
+    items = history(6) + [prompt("new prompt")]  # 12,378 tokens with the outputs at the 1.5 seed (D61)
+    quiet = Config(bound=13_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=0)
     _, _, ev, _ = run(items, config=quiet)
     assert "rotation" not in names(ev)  # the size trigger alone would not rotate here
-    roomy = Config(bound=10_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=2_000)
+    roomy = Config(bound=13_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=2_000)
     up, st, ev, _ = run(items, config=roomy)
     assert [e["reason"] for e in ev if e["event"] == "rotation"] == ["min_turn_room"] and st.k > 4
     assert up["input"][:4] == lead()
@@ -367,9 +367,9 @@ class FakeLauncher:
         from contexto.launcher import cli_not_found
         return cli_not_found(name)
 
-    def start_warning(self, bound, headroom_floor, overhead):
+    def start_warning(self, bound, headroom_floor, overhead, measured):
         from contexto.launcher import start_warning
-        return start_warning(bound, headroom_floor, overhead)
+        return start_warning(bound, headroom_floor, overhead, measured)
 
     def open_session(self, home, session_id, workdir):
         self.calls["session"] = session_id
@@ -908,6 +908,7 @@ def test_run_codex_logs_launch_and_exit_and_warns_early_like_claude(tmp_path, mo
             in seen["err"])
     # Before codex starts; 40,000 - 25,000 - 19,000 leaves no budget (launcher.start_warning's wording, D55, #245).
     assert "bound 40,000 may leave no window budget" in seen["err"] and "Use --bound 94,000 or more" in seen["err"]
+    assert "run from 13,322 to 18,403" in seen["err"]  # Codex's own measured overheads, not Claude Code's
     assert seen["argv"] == [codex_bin, "--no-daemon"]  # interactive, on the stub's 0.166.0
     events = log_events(tmp_path / "ctx", "W1")
     launch = next(e for e in events if e["event"] == "launch")

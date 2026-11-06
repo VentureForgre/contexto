@@ -1,16 +1,18 @@
 """The token estimator both lanes use (M2 contract, rewrite engine rule 3).
 
-Before a session has real usage, tool_result content counts 1.5 bytes per token and all other
-text 3.5 (intake decision 2026-10-16 01:27Z, contract PR #44; tool output such as numeric logs tokenizes densely, and
-M0 measured about 1.8 bytes per token for it, so the seed errs toward overcounting). Once the proxy
+Before a session has real usage, tool_result content (and a Codex tool's output item, D61) counts 1.5
+bytes per token and all other text 3.5 (intake decision 2026-10-16 01:27Z, contract PR #44; tool output
+such as numeric logs tokenizes densely, and M0 measured about 1.8 bytes per token for it, so the seed
+errs toward overcounting). Once the proxy
 reports real usage (``TokenEstimator.observe``), the session's cumulative measured bytes-per-token
 ratio replaces both seeds.
 
 Images (D48) are priced by what the model sees, not by their base64 bytes, which overcounted a
 screenshot 55 to 270 times: an image costs ``width * height / 750`` tokens after the API's downscaling
-to a 2,576-pixel long edge, at most 4,784 (Anthropic's high-resolution tier; dimensions read from the
-PNG, JPEG, GIF, or WebP header). An image whose size cannot be read (a URL, a file id, an unknown
-format) gets the largest cost it can have, 4,784 tokens, since the bound depends on it.
+to a 2,576-pixel long edge, or its 28-pixel patches plus 3 when that is more (D61), at most 4,787
+(Anthropic's high-resolution tier; dimensions read from the PNG, JPEG, GIF, or WebP header). An image
+whose size cannot be read (a URL, a file id, an unknown format, a JPEG whose frame header is not within
+256 markers) gets the largest cost it can have, 4,787 tokens, since the bound depends on it.
 
 A PDF is never estimated low (D60): it costs ``PDF_PAGE_TOKENS`` a page, its pages counted only when
 certain (``contexto.pdfpages``), else ``PDF_MAX_PAGES``, the API's maximum. That covers a document by base64,
@@ -47,10 +49,16 @@ TOOL_RESULT_BYTES_PER_TOKEN = 1.5
 # long edge and at most 4,784 tokens on the high-resolution tier (Opus 4.7 and later, Sonnet 5 and
 # later), to 1,568 pixels and tokens on the models before it. count_tokens on claude-haiku-5-5 measured
 # 641, 1,719, 2,694 and 3,243 for 800x600, 1440x900, 1920x1080 and 2000x1250 (formula: 640 to 3,334).
+# Those four are exactly ceil(w / 28) * ceil(h / 28) + 3, 28-pixel patches and 3 more tokens (PR #234
+# review A), which the pixel formula undercounts for a thin image (100 for 2576x29, against 187) and for
+# about 1 size in 4 above 500 pixels an edge, by up to 31 tokens; an image is priced at the higher of the
+# two (D61). The 4,784-token maximum is 92 x 52 patches at the 2,576-pixel edge, so 4,787 with the 3.
 PIXELS_PER_TOKEN = 750
+PATCH_PIXELS = 28
+PATCH_EXTRA_TOKENS = 3
 IMAGE_MAX_EDGE = 2_576
-IMAGE_MAX_TOKENS = 4_784
-IMAGE_MIN_TOKENS = 64  # a thin or tiny image: patch rounding is not modelled, so never price it near 0
+IMAGE_MAX_TOKENS = 4_784 + PATCH_EXTRA_TOKENS
+IMAGE_MIN_TOKENS = 64  # a tiny image is never priced near 0, as a few patches would
 IMAGE_FLOOR_MAX_EDGE = 1_568  # the older models' downscaling: the lowest cost an image can have
 IMAGE_FLOOR_MAX_TOKENS = 1_568
 IMAGE_FLOOR_SHARE = 0.95  # measured costs ran up to 3% under the formula (2,694 for 2,765)
@@ -71,7 +79,13 @@ JPEG_HEAD_CHARS = 262_144  # a JPEG's frame header follows its EXIF and ICC segm
 MEDIA_KEYS = ("content", "output", "source")  # where a block or item can hold media
 MEDIA_DEPTH = 10  # messages, message, content, tool_result, content, document, source, content, image
 
+# D61: markers a JPEG's walk reads before giving up on finding the frame header. Real files reach it within a
+# few dozen; crafted ones of fill bytes, standalone markers or 2-byte segments walked up to 196,608 bytes one
+# marker at a time and priced 30 times slower than a normal JPEG on every request.
+JPEG_MAX_MARKERS = 256
+
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
+_JPEG_FILL = re.compile(rb"\xff+")
 _NOT_BASE64 = re.compile(r"[^A-Za-z0-9+/]")
 _PDF_PAGES: OrderedDict[tuple[int, int], PdfCount] = OrderedDict()  # (length, hash) of base64 data -> count
 _PDF_PAGES_LOCK = threading.Lock()  # the proxy fills the cache outside its transform lock (prime_media)
@@ -263,15 +277,16 @@ def image_size(head: bytes) -> tuple[int, int] | None:
 
 
 def _jpeg_size(head: bytes) -> tuple[int, int] | None:
-    """The frame size from the first start-of-frame segment (SOF0 to SOF15 but DHT, JPG, and DAC)."""
+    """The frame size from the first start-of-frame segment (SOF0 to SOF15 but DHT, JPG, and DAC), within
+    ``JPEG_MAX_MARKERS`` markers; a run of fill bytes is skipped in one step (D61)."""
     i = 2
-    while i + 9 <= len(head):
-        if head[i] != 0xFF:
+    for _ in range(JPEG_MAX_MARKERS):
+        if i + 9 > len(head) or head[i] != 0xFF:
+            return None
+        i = _JPEG_FILL.match(head, i).end() - 1  # the last 0xFF before the marker
+        if i + 9 > len(head):
             return None
         marker = head[i + 1]
-        if marker == 0xFF:  # fill byte
-            i += 1
-            continue
         if marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:  # segments without a length
             i += 2
             continue
@@ -281,15 +296,20 @@ def _jpeg_size(head: bytes) -> tuple[int, int] | None:
         if marker == 0xDA:  # start of scan: no frame header came first
             return None
         i += 2 + struct.unpack(">H", head[i + 2:i + 4])[0]
-    return None
+    return None  # past the cap: a crafted file (fill runs, standalone markers, tiny segments), priced as unknown
 
 
 def image_tokens(width: int, height: int, *, max_edge: int = IMAGE_MAX_EDGE, max_tokens: int = IMAGE_MAX_TOKENS,
-                 min_tokens: int = IMAGE_MIN_TOKENS) -> int:
-    """``width * height / 750`` after scaling the long edge down to ``max_edge``, between ``min_tokens``
-    and ``max_tokens``."""
-    scale = min(1.0, max_edge / max(width, height))
-    return min(max_tokens, max(min_tokens, math.ceil(width * scale * height * scale / PIXELS_PER_TOKEN)))
+                 min_tokens: int = IMAGE_MIN_TOKENS, patches: bool = True) -> int:
+    """After scaling the long edge down to ``max_edge``, the higher of ``width * height / 750`` and, when
+    ``patches``, ``ceil(width / 28) * ceil(height / 28) + 3`` (D61), between ``min_tokens`` and ``max_tokens``."""
+    long = max(width, height)
+    scale = min(1.0, max_edge / long)
+    tokens = math.ceil(width * scale * height * scale / PIXELS_PER_TOKEN)
+    if patches:  # each edge scaled in integers, rounded up, so the long one is max_edge exactly
+        edges = [edge if long <= max_edge else -(-edge * max_edge // long) for edge in (width, height)]
+        tokens = max(tokens, math.prod(-(-edge // PATCH_PIXELS) for edge in edges) + PATCH_EXTRA_TOKENS)
+    return min(max_tokens, max(min_tokens, tokens))
 
 
 def _image_cost(block: dict) -> tuple[int, int]:
@@ -306,7 +326,8 @@ def _image_cost(block: dict) -> tuple[int, int]:
     if not size or min(size) <= 0:
         return IMAGE_MAX_TOKENS, 0  # a URL, a file id, or a header that cannot be read
     width, height = size
-    floor = image_tokens(width, height, max_edge=IMAGE_FLOOR_MAX_EDGE, max_tokens=IMAGE_FLOOR_MAX_TOKENS, min_tokens=0)
+    floor = image_tokens(width, height, max_edge=IMAGE_FLOOR_MAX_EDGE, max_tokens=IMAGE_FLOOR_MAX_TOKENS, min_tokens=0,
+                         patches=False)
     return image_tokens(width, height), math.floor(floor * IMAGE_FLOOR_SHARE)
 
 
@@ -474,6 +495,22 @@ def estimate_value_tokens(value: Any, bytes_per_token: float | None = None) -> i
             + (media_cost(found).tokens if found else 0))
 
 
+def is_tool_output(item: Any) -> bool:
+    """A Responses item a tool returned (``function_call_output``, ``custom_tool_call_output``, ...)."""
+    return isinstance(item, dict) and isinstance(item.get("type"), str) and item["type"].endswith("_output")
+
+
+def estimate_item_tokens(items: list[Any], bytes_per_token: float | None = None) -> int:
+    """A Responses item list as ``estimate_value_tokens`` prices it, except that before a ratio is measured
+    a tool's output item counts at the tool-output seed, as a ``tool_result`` block does (D61)."""
+    outputs = [item for item in items if is_tool_output(item)] if not bytes_per_token else []
+    if not outputs:
+        return estimate_value_tokens(items, bytes_per_token)
+    rest = [item for item in items if not is_tool_output(item)]
+    return ((estimate_value_tokens(rest) if rest else 0)
+            + estimate_value_tokens(outputs, TOOL_RESULT_BYTES_PER_TOKEN))
+
+
 class TokenEstimator:
     """Per-session estimator: the defaults until real usage arrives, then the measured ratio."""
 
@@ -499,5 +536,5 @@ class TokenEstimator:
     def estimate_messages(self, messages: list[dict[str, Any]]) -> int:
         return estimate_message_tokens(messages, self.measured_bytes_per_token)
 
-    def estimate_value(self, value: Any) -> int:
-        return estimate_value_tokens(value, self.measured_bytes_per_token)
+    def estimate_items(self, items: list[Any]) -> int:
+        return estimate_item_tokens(items, self.measured_bytes_per_token)
