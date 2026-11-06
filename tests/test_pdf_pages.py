@@ -482,6 +482,102 @@ def test_form_fields_and_name_trees_are_not_pages():
     assert count_pages(raw) == (2, True)
 
 
+# PR #248 round 1 (reviewer A): pages listed twice, and a dead copy of an indirect value ------------------
+
+def _xref_pdf(objects: list[tuple[int, bytes]], *, dead: list[tuple[int, bytes]] = (), root: int = 1) -> bytes:
+    """``objects`` (number, value or object stream) with a correct xref table, then ``dead`` objects that no
+    xref entry names, so a reader that follows the xref (qpdf, pypdf) never takes them."""
+    out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
+    offsets = {}
+    for number, value in objects:
+        offsets[number] = len(out)
+        out += value if value.startswith(b"%d 0 obj" % number) else b"%d 0 obj\n%s\nendobj\n" % (number, value)
+    for number, value in dead:
+        out += value if value.startswith(b"%d 0 obj" % number) else b"%d 0 obj\n%s\nendobj\n" % (number, value)
+    xref, size = len(out), max(offsets) + 1
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % size
+    out += b"".join(b"%010d 00000 n \n" % offsets[n] if n in offsets else b"0000000000 65535 f \n"
+                    for n in range(1, size))
+    out += b"trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, root, xref)
+    return bytes(out)
+
+
+PAGE = b"<< /Parent 2 0 R /MediaBox [0 0 612 792] >>"  # untyped: qpdf, pypdf and MuPDF read it as a page
+
+
+def _repeated_page(times: int) -> bytes:
+    """One page object listed ``times`` in the root's /Kids, /Count 1: qpdf and pypdf read ``times`` pages."""
+    return _xref_pdf([(1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+                      (2, b"<< /Type /Pages /Kids [ %s ] /Count 1 >>" % b" ".join([b"4 0 R"] * times)),
+                      (4, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>")])
+
+
+def _dead_copy(placement: str) -> bytes:
+    """The root's /Kids is ``900 0 R``, an array of 50 untyped pages; a later copy of 900 that no xref names
+    lists one. With ``type`` the pages' /Type is ``902 0 R`` (/Page) and the dead 902 is /Pagex."""
+    objects = [(1, b"<< /Type /Catalog /Pages 2 0 R >>"), (2, b"<< /Type /Pages /Kids 900 0 R /Count 1 >>"),
+               (900, b"[ %s ]" % b" ".join(b"%d 0 R" % (10 + i) for i in range(50)))]
+    page = PAGE if placement != "type" else PAGE.replace(b"<< ", b"<< /Type 902 0 R ")
+    objects += [(10 + i, page) for i in range(50)]
+    dead = [(900, b"[ 10 0 R ]")]
+    if placement == "type":
+        objects.append((902, b"/Page"))
+        dead = [(902, b"/Pagex"), (900, b"[ 10 0 R ]")]
+    elif placement == "object-stream":
+        dead = [(5_000, objstm(5_000, {900: b"[ 10 0 R ]"}))]
+    elif placement == "untyped-root":
+        objects[1] = (2, b"<< /Kids 900 0 R /Count 1 >>")
+    return _xref_pdf(objects, dead=dead)
+
+
+def test_a_page_listed_many_times_counts_each_time():
+    """A renderer counts every /Kids entry that reaches a page: 50 entries of one page object are 50 pages
+    (a647487: 1, certain; read at 90,865 on 150k it was estimated at 95,472 for a real 170,074, unflagged)."""
+    assert count_pages(_repeated_page(50)) == (50, True)
+    assert count_pages(_repeated_page(700)) == (PDF_MAX_PAGES, True)
+    # Shared below two nodes, a page counts under each
+    raw = _xref_pdf([(1, b"<< /Type /Catalog /Pages 2 0 R >>"), (2, b"<< /Type /Pages /Kids [3 0 R 5 0 R] >>"),
+                     (3, b"<< /Type /Pages /Parent 2 0 R /Kids [4 0 R 4 0 R] >>"),
+                     (5, b"<< /Type /Pages /Parent 2 0 R /Kids [4 0 R 3 0 R] >>"), (4, PAGE)])
+    assert count_pages(raw) == (5, True)
+
+
+@pytest.mark.parametrize("child_kids", [b"[4 0 R 3 0 R]", b"[4 0 R 2 0 R]"], ids=["self", "to-the-root"])
+def test_a_cycle_in_the_page_tree_is_uncertain(child_kids):
+    raw = _xref_pdf([(1, b"<< /Type /Catalog /Pages 2 0 R >>"), (2, b"<< /Type /Pages /Kids [3 0 R 4 0 R] >>"),
+                     (3, b"<< /Type /Pages /Parent 2 0 R /Kids %s >>" % child_kids), (4, PAGE)])
+    assert count_pages(raw) == (PDF_MAX_PAGES, False)
+
+
+@pytest.mark.parametrize("placement", ["later", "object-stream", "type", "untyped-root"])
+def test_a_dead_copy_of_an_indirect_value_never_hides_pages(placement):
+    """An indirect /Kids or /Type resolved to the copy read last, not the one the xref names, so a later
+    dead copy hid 49 of 50 pages (a647487: 1, certain). Every version of the target counts."""
+    assert count_pages(_dead_copy(placement)) == (50, True)
+
+
+def test_versions_of_a_structural_value_must_agree():
+    """An object stream's /N, or a stream's indirect /Length, with two versions that differ is uncertain."""
+    stream = objstm(5, {10: b"<< /Type /Page >>"}).replace(b"/N 1", b"/N 7 0 R")
+    raw = b"%PDF-1.7\n7 0 obj 1 endobj\n" + stream
+    assert count_pages(raw) == (1, True)
+    assert count_pages(raw + b"7 0 obj 2 endobj\n") == (PDF_MAX_PAGES, False)
+    body = b"BT ET"
+    page = b"1 0 obj << /Type /Page /Contents 4 0 R >> endobj\n4 0 obj << /Length 5 0 R >>\nstream\n" + body
+    page += b"\nendstream\nendobj\n5 0 obj %d endobj\n" % len(body)
+    assert count_pages(b"%PDF-1.7\n" + page) == (1, True)
+    assert count_pages(b"%PDF-1.7\n" + page + b"5 0 obj 99 endobj\n") == (PDF_MAX_PAGES, False)
+
+
+@pytest.mark.parametrize("raw", [_repeated_page(50), _dead_copy("later")], ids=["repeated", "dead-copy"])
+@pytest.mark.parametrize("pasted", [True, False], ids=["pasted", "read"])
+def test_reviewer_a_files_near_the_bound_are_never_estimated_low(tmp_path, raw, pasted):
+    seen = _session(tmp_path, raw, 50 * TYPICAL, pasted=pasted)
+    carrying = [(estimate, real) for estimate, real, _, carries in seen if carries]
+    assert carrying[0][0] - carrying[0][1] >= 50 * (PDF_PAGE_TOKENS - TYPICAL) - 50
+    assert all(estimate >= real * 0.995 for estimate, real in carrying)
+
+
 # Round 9: the lexer is linear, its memory flat, and its work bounded ------------------------------------------
 
 ROUND_9 = {
@@ -838,6 +934,31 @@ def test_priming_never_raises():
     for request in (None, [], {"messages": 5}, {"messages": [{"content": [{"type": "document", "source": 3}]}]},
                     {"input": [{"type": "input_file", "file_data": "data:application/pdf;base64,%%%"}]}):
         engine.prime(request)
+
+
+def test_threads_waiting_on_the_same_pdf_parse_it_once(monkeypatch):
+    """PR #248 round 1 (nit): the count went into the cache after the parse lock was released, so a thread
+    waiting on that lock could parse the same PDF again."""
+    calls, started = [], threading.Event()
+    real = tokens.count_pages
+
+    def slow(raw):
+        calls.append(1)
+        started.set()
+        time.sleep(0.2)
+        return real(raw)
+
+    monkeypatch.setattr(tokens, "count_pages", slow)
+    data = b64(simple_pdf(2))
+    first = threading.Thread(target=pdf_page_count, args=(data,))
+    first.start()
+    started.wait(5)
+    others = [threading.Thread(target=pdf_page_count, args=(data,)) for _ in range(5)]
+    for thread in others:
+        thread.start()
+    for thread in [first, *others]:
+        thread.join()
+    assert len(calls) == 1 and pdf_page_count(data) == (2, True)
 
 
 def test_a_request_with_300_pdfs_parses_each_once(monkeypatch):

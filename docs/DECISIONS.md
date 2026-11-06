@@ -2329,18 +2329,35 @@ the owner's delegation. Open decisions are listed at the end with the options an
     - every object in the file and in every object stream, with every object stream inflated within
       16 MB per PDF and 4 MB per stream;
     - every stream ending where its `/Length` says, the `/Length` being direct or an integer object
-      that finally holds the length it was read at;
+      every version of which holds the length it was read at;
     - no `N G obj` header in a byte it passes over: a stream body, a string or a comment. Whitespace,
       NUL and comments between the tokens are allowed for. A reader that follows the xref finds an
       object at such an offset, so this is how a `/Length` that lies long, or a page written inside a
       string, is caught.
-    The pages are then the object numbers typed `/Page` in any version, together with the leaves of the
-    page tree's `/Kids`, each number once. A node is typed `/Pages`, or has `/Kids` and is reached from a
-    catalog's `/Pages` or from another node, so a form field's or a name tree's `/Kids` is not a page
-    list. Any node's `/Count` may raise the count but never stands in for a part that was not read. The
-    count is at most 600. Anything else is not certain: another filter or a predictor on an object
-    stream, a token the lexer cannot read, an indirect value whose target was not read, `/Kids` holding
-    anything but references, a bound passed, or no pages at all.
+    Every version of an object counts. So does every version of the object an indirect value names
+    (`/Kids 900 0 R`, `/Type 902 0 R`), since the lexer does not know which one the xref names, and a
+    dead copy can only add. The pages are the larger of two counts:
+    - the object numbers typed `/Page` in any version, together with the leaves of the page tree's
+      `/Kids`, each number once. A node is typed `/Pages`, or has `/Kids` and is reached from a
+      catalog's `/Pages` or from another node, so a form field's or a name tree's `/Kids` is not a
+      page list;
+    - the tree as a renderer walks it, from each catalog's root and each node no node lists: every
+      `/Kids` entry that is not a node is a page, each time it is listed, and a node counts the pages
+      of whichever version holds the most.
+    Any version of any node's `/Count` may raise the count but never stands in for a part that was not
+    read. The count is at most 600. Anything else is not certain: another filter or a predictor on an
+    object stream; an object stream's `/N`, `/First`, `/Filter` or `/DecodeParms` with versions that
+    differ; a cycle in the page tree; a token the lexer cannot read; an indirect value whose target was
+    not read; `/Kids` holding anything but references; a bound passed; or no pages at all.
+  - **PR #248 round 1 (reviewer A).** Two shapes counted low while certain, and both are fixed:
+    - one page object listed 50 times in the root's `/Kids` counted 1 (qpdf and pypdf read 50);
+    - an indirect `/Kids` or `/Type` resolved to the copy read last, so a later copy that no xref
+      entry names (a plain object, one in an object stream, or a dead `/Type /Pagex`) hid 49 of 50
+      pages.
+    Read at 90,865 on a 150,000 bound, each was estimated at 95,472 for a real 170,074 and sent
+    unflagged. Both now count 50, certain, and the same reads are flagged before the send. A
+    PDF is also parsed once however many threads wait on it, since its count is cached before the
+    parse lock is released.
   - **The lexer (PR #234 round 9).** The round-9 parser used one token regex. Its nested quantifiers
     backtracked exponentially on comment runs (22 `%` then a newline and `)`: 0.43 s, 4 times more for
     every 2 more `%`; a 140-byte PDF held the proxy for 229 s). They backtracked quadratically on digit

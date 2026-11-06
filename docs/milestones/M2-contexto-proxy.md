@@ -314,11 +314,17 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    pages (the API's maximum), and the request that brings an uncertain one logs `pdf_pages_uncertain`
    (the epoch, how many, and 600). Pages are certain only when a PDF lexer read every object in the
    file and in every object stream (all inflated, at most 16 MB per PDF and 4 MB per stream), every
-   stream ended where its `/Length` (direct, or an integer object that finally holds it) says, and no
-   `N G obj` could sit inside a stream body, string or comment; they are then the object numbers typed
-   `/Page` in any version together with the leaves of the page tree's `/Kids` (a node is typed `/Pages`,
-   or has `/Kids` and is reached from a catalog's `/Pages` or another node), each once, raised by any
-   node's `/Count`, at most 600. A document by URL or file id, one over 32 MB of base64, and one the
+   stream ended where its `/Length` (direct, or an integer object every version of which holds it)
+   says, and no `N G obj` could sit inside a stream body, string or comment. Every version of an object
+   counts, and so does every version of the object an indirect value names, since the lexer does not
+   know which one the xref names. The pages are the larger of two counts, raised by any version of any
+   node's `/Count`, at most 600. The first is the object numbers typed `/Page` in any version, together
+   with the leaves of the page tree's `/Kids`, each number once. A node is typed `/Pages`, or has `/Kids`
+   and is reached from a catalog's `/Pages` or another node. The second is the tree as a renderer walks
+   it: from each catalog's root, and each node no node lists, every `/Kids` entry that is not a node is a
+   page, each time it is listed, and a node counts the pages of whichever version holds the most. A
+   cycle in the tree is not certain, nor are an object stream's `/N`, `/First`, `/Filter` or
+   `/DecodeParms` whose versions differ. A document by URL or file id, one over 32 MB of base64, and one the
    lexer cannot read are never certain. The lexer is one pass with no backtracking: at most 400,000
    steps (tokens, comments, string delimiters, skipped delimiters) per PDF, past which it is not
    certain (0.25 s at most; skipped runs cost no memory). The proxy counts a request's PDFs before it

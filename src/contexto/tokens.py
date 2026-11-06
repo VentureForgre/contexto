@@ -263,7 +263,7 @@ def pdf_page_count(data: str) -> PdfCount:
         if result is not None:
             _PDF_PAGES.move_to_end(key)
             return result
-    with _PDF_PARSE_LOCK:
+    with _PDF_PARSE_LOCK:  # cached before it is released, so a PDF is parsed once however many threads wait
         with _PDF_PAGES_LOCK:
             result = _PDF_PAGES.get(key)  # counted while this thread waited
         if result is None:
@@ -272,11 +272,11 @@ def pdf_page_count(data: str) -> PdfCount:
                 result = count_pages(pdf) if pdf else UNCERTAIN
             except Exception:  # a hostile or damaged PDF must not break the transform (D60)
                 result = UNCERTAIN
-    with _PDF_PAGES_LOCK:
-        _PDF_PAGES[key] = result
-        _PDF_PAGES.move_to_end(key)
-        while len(_PDF_PAGES) > PDF_CACHE_SIZE:
-            _PDF_PAGES.popitem(last=False)
+        with _PDF_PAGES_LOCK:
+            _PDF_PAGES[key] = result
+            _PDF_PAGES.move_to_end(key)
+            while len(_PDF_PAGES) > PDF_CACHE_SIZE:
+                _PDF_PAGES.popitem(last=False)
     return result
 
 
