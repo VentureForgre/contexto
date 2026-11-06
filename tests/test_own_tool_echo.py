@@ -18,6 +18,7 @@ import pytest
 from contexto import mcp
 from contexto.codex import RESPONSES
 from contexto.rewrite import ANTHROPIC, retained_entries
+from contexto.store import SessionStore
 from contexto.store.memory import MemoryStore
 from contexto.store.pages import build_stub, index_line, searchable_text
 from contexto.store.render import own_call_ids, render_page
@@ -185,6 +186,30 @@ OTHER = {
                              'await tools["mcp__contexto__contexto_search"]({query: "x"});\n'
                              'return await tools.exec_command({cmd: "ECHOED-QUERY"});'),
     "exec_no_tool": codex_turn("custom_tool_call", "exec", 'return "ECHOED-QUERY";'),
+    # Reviewer A on PR #242: other ways the code can reach a tool. Any mention of tools that is not a
+    # literal Contexto call keeps the whole call searchable.
+    "exec_destructured": codex_turn("custom_tool_call", "exec",
+                                    "const { exec_command } = tools;\n"
+                                    'await tools.mcp__contexto__contexto_search({query: "a"});\n'
+                                    'return await exec_command({cmd: "grep -rn ECHOED-QUERY src"});'),
+    "exec_alias": codex_turn("custom_tool_call", "exec",
+                             'await tools.mcp__contexto__contexto_search({query: "a"});\n'
+                             'const t = tools;\nreturn await t.exec_command({cmd: "ECHOED-QUERY"});'),
+    "exec_computed": codex_turn("custom_tool_call", "exec",
+                                'const n = "exec_command";\n'
+                                'await tools["mcp__contexto__contexto_search"]({query: "a"});\n'
+                                'return await tools[n]({cmd: "ECHOED-QUERY"});'),
+    "exec_optional": codex_turn("custom_tool_call", "exec",
+                                'await tools.mcp__contexto__contexto_search({query: "a"});\n'
+                                'return await tools?.exec_command({cmd: "ECHOED-QUERY"});'),
+    "exec_json_arguments": codex_turn("function_call", "exec", {
+        "code": 'await tools["mcp__contexto__contexto_search"]({query: "a"});\n'
+                'return await tools["exec_command"]({cmd: "ECHOED-QUERY"});'}),
+    "exec_comment_only": codex_turn("custom_tool_call", "exec",
+                                    '// tools.mcp__contexto__contexto_search({query: "a"})\nreturn "ECHOED-QUERY";'),
+    "exec_uncalled_reference": codex_turn("custom_tool_call", "exec",
+                                          'const f = tools.mcp__contexto__contexto_search;\n'
+                                          'return await f({query: "ECHOED-QUERY"});'),
 }
 
 
@@ -215,3 +240,31 @@ def test_in_view_search_skips_own_calls():
         assert not any("ECHOED" in t for t in texts), (dialect.name, texts)
     kept = [e["text"] for e in retained_entries(OTHER["claude_other_tool"], 0, ANTHROPIC)]
     assert any("ECHOED-MARKER" in t for t in kept)
+
+
+def test_a_page_written_before_d51_has_its_stub_rebuilt_in_memory(tmp_path):
+    """Up to v0.5.8 the stub took paths from an echoed search reply, so a path search ranked the echo
+    page above its source (reviewer A on PR #242). The stub is rebuilt when read; the file is not."""
+    path = "docs/release/codename.md"
+    store = SessionStore(tmp_path, "s1")
+    [source] = store.page_out([chat(f"The release codename is Juniper, see {path}.", "OK")], 0)
+    echo = [{"role": "user", "content": "what is the codename"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": SEARCH,
+                                               "input": {"query": "codename"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                          "content": f"{source} (turn 0)\n> 15: The release codename is Juniper, "
+                                                     f"see {path}."}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "It is Juniper."}]}]
+    [probe] = store.page_out([echo], 1)
+    page_file = store.dir / "pages" / f"{probe}.json"
+    record = json.loads(page_file.read_text())
+    assert path not in record["stub"]["paths"]
+    record["stub"]["paths"].append(path)  # the stub v0.5.8 wrote for this page
+    page_file.write_text(json.dumps(record))
+    written = page_file.read_bytes()
+
+    reopened = SessionStore(tmp_path, "s1")
+    assert reopened.search(path) == [source]
+    assert path not in reopened.get_page(probe)["stub"]["paths"]
+    assert path not in next(line for line in reopened.index_text(6000).splitlines() if line.startswith(probe))
+    assert page_file.read_bytes() == written  # pages are immutable: rebuilt in memory only

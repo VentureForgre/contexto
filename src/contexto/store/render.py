@@ -41,20 +41,24 @@ def recall_limit(window_tokens: int | None, bytes_per_token: float | None) -> tu
 # tools["mcp__contexto__contexto_search"](...) or tools.mcp__contexto__contexto_search(...).
 OWN_TOOL_PREFIX = "mcp__contexto__"
 CODE_MODE_TOOL = "exec"
-_CODE_MODE_CALL = re.compile(r"""\btools\s*(?:\[\s*["'`]([^"'`]+)["'`]\s*\]|\.([A-Za-z_$][\w$]*))""")
+_TOOLS_WORD = re.compile(r"\btools\b")
+# A literal call of one of Contexto's tools on the code-mode tools object: the whole reference and its "(".
+_OWN_CODE_CALL = re.compile(r"""\btools\s*(?:\[\s*(["'`])mcp__contexto__\w+\1\s*\]|\.mcp__contexto__\w+)\s*\(""")
 _CALL_TYPES = ("function_call", "custom_tool_call")
 _OUTPUT_TYPES = ("function_call_output", "custom_tool_call_output")
 
 
 def _own_call(name: Any, arguments: Any) -> bool:
-    """A call of one of Contexto's own tools. An exec call counts when every tool its code calls is one
-    (it calls at least one); one that also runs another tool is that tool's output too, so it stays."""
+    """A call of one of Contexto's own tools. An exec call counts only when every mention of ``tools`` in
+    its code is a literal call of a Contexto tool (at least one) and the code has no comment: any other
+    way of reaching a tool (destructuring, an alias, a computed or optional member, escaped quotes) may
+    run another tool, whose output must stay searchable, so such a call is not counted (D51)."""
     if isinstance(name, str) and name.startswith(OWN_TOOL_PREFIX):
         return True
-    if name != CODE_MODE_TOOL or not isinstance(arguments, str):
+    if name != CODE_MODE_TOOL or not isinstance(arguments, str) or "//" in arguments or "/*" in arguments:
         return False
-    called = [a or b for a, b in _CODE_MODE_CALL.findall(arguments)]
-    return bool(called) and all(tool.startswith(OWN_TOOL_PREFIX) for tool in called)
+    own = len(_OWN_CODE_CALL.findall(arguments))
+    return own > 0 and own == len(_TOOLS_WORD.findall(arguments))
 
 
 def own_call_ids(messages: Any) -> set[str]:

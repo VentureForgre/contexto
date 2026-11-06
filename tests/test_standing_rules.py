@@ -31,7 +31,8 @@ def test_both_texts_say_to_pin_a_standing_rule_at_once_even_for_a_one_word_reply
 def test_the_instructions_give_the_pin_arguments_and_stay_short():
     # Claude Code defers the tool, so its schema is not loaded when the rule is stated (QA live-fidelity 5).
     assert '{"kind": "obligation", "text": ...}' in mcp.INSTRUCTIONS
-    # Both texts are sent on every request: the D51 sentence adds at most about 60 tokens to each.
+    # Both texts are sent on every request: by the estimator the D51 sentence adds 77 tokens to the
+    # instructions (122 to 199) and 66 to the pin line (40 to 106).
     assert len(mcp.INSTRUCTIONS) <= 700 and len(RULE_LINES[2]) <= 380
 
 
