@@ -1,4 +1,4 @@
-"""Upstream resolution (M2 contract, PR #20 head bf1c7ad): flag, settings, env, default."""
+"""Upstream resolution (M2 contract, PR #20 head bf1c7ad, D52): flag, settings, env, default."""
 
 from __future__ import annotations
 
@@ -85,25 +85,114 @@ def test_linked_worktree_reads_main_checkout_local_settings_first(repo_with_work
     write_settings(main / ".claude" / "settings.local.json", "http://main.invalid")
     write_settings(tree / ".claude" / "settings.local.json", "http://tree.invalid")
     assert main_checkout(tree).resolve() == main.resolve()
-    assert main_checkout(main) is None
+    assert main_checkout(main).resolve() == main.resolve()  # a repository is its own main checkout
     kinds = [kind for kind, _ in claude_settings_order(tree, home)]
     assert kinds == ["main-checkout-local", "local", "project", "user"]
     up = resolve_upstream(env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tree, home=home)
     assert (up.url, up.source) == ("http://main.invalid", "settings:main-checkout-local")
 
 
-def test_worktree_subdirectory_uses_its_toplevel(repo_with_worktree, home):
+def test_worktree_subdirectory_reads_the_main_checkout_and_its_own_files_not_the_worktree_root(
+        repo_with_worktree, home):
+    # D52, measured with Claude Code 2.1.314: from <worktree>/a/b neither of the worktree root's
+    # files is read; the main checkout's local file and a/b's own files are.
     main, tree = repo_with_worktree
     sub = tree / "a" / "b"
     sub.mkdir(parents=True)
     write_settings(tree / ".claude" / "settings.local.json", "http://tree.invalid")
+    assert resolve_upstream(env={}, cwd=sub, home=home).source == "default"
+    write_settings(sub / ".claude" / "settings.json", "http://sub.invalid")
+    assert resolve_upstream(env={}, cwd=sub, home=home).url == "http://sub.invalid"
+    write_settings(main / ".claude" / "settings.local.json", "http://main.invalid")
     up = resolve_upstream(env={}, cwd=sub, home=home)
-    assert (up.url, up.source) == ("http://tree.invalid", "settings:local")
+    assert (up.url, up.source) == ("http://main.invalid", "settings:main-checkout-local")
 
 
 def test_main_checkout_itself_has_no_extra_layer(repo_with_worktree, home):
     main, _ = repo_with_worktree
     assert [kind for kind, _ in claude_settings_order(main, home)] == ["local", "project", "user"]
+    sub = main / "sub"
+    sub.mkdir()
+    assert claude_settings_order(sub, home)[0] == ("main-checkout-local", main / ".claude" / "settings.local.json")
+
+
+def test_home_directory_settings_are_listed_once_as_user(home):
+    # From the home directory, the project settings file is the user settings file; listed as the
+    # user's so the Codex trust gate (D52) never drops the user's own apiKeyHelper.
+    assert [kind for kind, _ in claude_settings_order(home, home)] == ["local", "user"]
+
+
+# D52: real Claude Code 2.1.314, `claude -p` with a fresh CLAUDE_CONFIG_DIR against stub upstreams
+# (one port per file, the process environment on another), 27 layouts; the two not listed here
+# repeat two below with the root's settings.local.json committed, same result. Each entry: the
+# working directory, the files that set env.ANTHROPIC_BASE_URL, and the file whose URL Claude Code
+# used ("env" when none). Before D52 Contexto read the git toplevel's files instead of the working
+# directory's and got 8 of these wrong (marked *).
+LAYOUTS = [
+    ("repo", ["repo/.claude/settings.json"], "repo/.claude/settings.json"),
+    ("repo/sub", ["repo/.claude/settings.json"], "env"),  # *
+    ("repo/sub", ["repo/sub/.claude/settings.json", "repo/.claude/settings.json"],
+     "repo/sub/.claude/settings.json"),  # *
+    ("repo/sub/deeper", ["repo/.claude/settings.json"], "env"),  # *
+    ("repo/sub", ["repo/.claude/settings.local.json"], "repo/.claude/settings.local.json"),
+    ("repo/sub", ["repo/sub/.claude/settings.json", "repo/.claude/settings.local.json"],
+     "repo/.claude/settings.local.json"),
+    ("repo/sub", ["repo/sub/.claude/settings.local.json", "repo/.claude/settings.json"],
+     "repo/sub/.claude/settings.local.json"),  # *
+    ("repo/sub", ["repo/sub/.claude/settings.local.json", "repo/.claude/settings.local.json"],
+     "repo/.claude/settings.local.json"),
+    ("repo/sub", ["repo/sub/.claude/settings.json", "repo/sub/.claude/settings.local.json"],
+     "repo/sub/.claude/settings.local.json"),  # *
+    ("repo/sub", ["user"], "user"),
+    ("repo/sub", ["user", "repo/sub/.claude/settings.json"], "repo/sub/.claude/settings.json"),  # *
+    ("repo/sub/deeper", ["repo/sub/.claude/settings.local.json"], "env"),
+    ("repo/sub/deeper", ["repo/.claude/settings.local.json"], "repo/.claude/settings.local.json"),
+    ("repo", ["repo/.claude/settings.json", "repo/.claude/settings.local.json"], "repo/.claude/settings.local.json"),
+    ("plain", ["plain/.claude/settings.json"], "plain/.claude/settings.json"),
+    ("plain/child", ["plain/.claude/settings.json"], "env"),
+    ("plain/child", ["plain/.claude/settings.local.json"], "env"),
+    ("wt", ["repo/.claude/settings.local.json"], "repo/.claude/settings.local.json"),
+    ("wt", ["repo/.claude/settings.local.json", "wt/.claude/settings.local.json"], "repo/.claude/settings.local.json"),
+    ("wt/sub", ["wt/.claude/settings.json"], "env"),  # *
+    ("wt/sub", ["wt/.claude/settings.local.json"], "env"),  # *
+    ("wt", ["wt/.claude/settings.json", "repo/.claude/settings.json"], "wt/.claude/settings.json"),
+    ("wt/sub", ["repo/.claude/settings.local.json", "wt/sub/.claude/settings.json"],
+     "repo/.claude/settings.local.json"),
+    ("repo/sm", ["repo/.claude/settings.local.json"], "env"),
+    ("repo/sm/sub", ["repo/sm/.claude/settings.local.json"], "repo/sm/.claude/settings.local.json"),
+]
+
+
+@pytest.fixture
+def layouts(tmp_path: Path) -> Path:
+    """repo (git, with sub/deeper and a submodule sm with sub), wt (a linked worktree of repo, with
+    sub), and plain/child (no git), under one root."""
+    root = tmp_path / "layouts"
+    repo, lib = root / "repo", root / "lib"
+    (repo / "sub" / "deeper").mkdir(parents=True)
+    (lib / "sub").mkdir(parents=True)
+    (lib / "sub" / ".keep").write_text("")
+    git("init", "-q", cwd=lib)
+    git("add", ".", cwd=lib)
+    git("commit", "-q", "-m", "lib", cwd=lib)
+    git("init", "-q", cwd=repo)
+    git("commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
+    git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "sm", cwd=repo)
+    git("worktree", "add", "-q", str(root / "wt"), cwd=repo)
+    (root / "wt" / "sub").mkdir()
+    (root / "plain" / "child").mkdir(parents=True)
+    return root
+
+
+@pytest.mark.parametrize(("cwd", "files", "used"), LAYOUTS, ids=[f"{c}:{','.join(f)}" for c, f, _ in LAYOUTS])
+def test_settings_files_match_claude_code_per_layout(layouts, home, cwd, files, used):
+    config_dir = layouts.parent / "cfg"
+    for name in files:
+        path = config_dir / "settings.json" if name == "user" else layouts / name
+        write_settings(path, f"http://{name.replace('/', '-').replace('.', '-')}.invalid")
+    env = {"ANTHROPIC_BASE_URL": "http://env.invalid", "CLAUDE_CONFIG_DIR": str(config_dir)}
+    up = resolve_upstream(env=env, cwd=layouts / cwd, home=home)
+    assert up.url == f"http://{used.replace('/', '-').replace('.', '-')}.invalid"
 
 
 def test_source_label_never_contains_url_or_path(repo_with_worktree, home):

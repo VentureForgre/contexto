@@ -64,13 +64,57 @@ proxy (Anthropic Messages API)        mcp server (stdio, JSON-RPC)
 Upstream resolution: the launcher computes the base URL Claude Code would otherwise use, in this
 order (measured in M0, PR #16 findings 1 and 1a: a settings-file `env.ANTHROPIC_BASE_URL`
 overrides the process environment, and in a git worktree the main checkout's
-`settings.local.json` wins): explicit `--upstream`; else the first settings file that sets
-`env.ANTHROPIC_BASE_URL`, in Claude Code's precedence (in a worktree the main checkout's
-`.claude/settings.local.json` first, then the local, project, and user settings files, the user's
-being `$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35); else
-`ANTHROPIC_BASE_URL` in the process environment; else `https://api.anthropic.com`. The launcher's
-own flag-level `--settings` outranks all of these, which is what makes the proxy attachment work.
-Organization-managed settings still outrank `--settings`; document that limit.
+`settings.local.json` wins; the file list re-measured for D52): explicit `--upstream`; else the
+first settings file that sets `env.ANTHROPIC_BASE_URL`, in Claude Code's precedence: the main
+checkout's `.claude/settings.local.json` (the parent of the git common dir: the repository root,
+also from a subdirectory, or the main checkout from a linked worktree; a submodule's own root),
+then the working directory's own `.claude/settings.local.json` and `.claude/settings.json`, then
+the user settings file (`$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set, D35).
+From a subdirectory the repository root's `settings.json` is not read, and outside git no parent
+directory's files are (D52, 27 layouts with Claude Code 2.1.314). Else `ANTHROPIC_BASE_URL` in the
+process environment; else `https://api.anthropic.com`. The launcher's own flag-level `--settings`
+outranks all of these, which is what makes the proxy attachment work. Organization-managed
+settings still outrank `--settings`; document that limit.
+
+Project settings trust (D52): every settings file above except the user's comes with the
+repository. `contexto run claude` and `contexto proxy` use them as Claude Code does: Claude Code
+uses a project's base URL and `apiKeyHelper` in `-p` mode with no trust check (unless
+`CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set, below), and interactively only after its "do you trust
+this folder" dialog, which it still shows behind Contexto, so a
+proxy upstream taken from an untrusted project matches what Claude Code would use once the user
+accepts. One difference remains before the dialog is answered: Claude Code sends `HEAD /api/hello`
+(no credential, no content) while the dialog is shown, and through Contexto that request reaches
+the untrusted project's base URL even if the user declines, where plain `claude` sends it to the
+user's own upstream (reviewer B, PR #237; measured with Claude Code 2.1.314; neither sends it with
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`). The project's host learns the user's address, the
+Claude Code version and the time. `--upstream` pins the upstream in a repository the user does not
+trust. `contexto run codex` does not: Codex runs the `apiKeyHelper` it is given without asking
+and plain Codex ignores `.claude/`, so for Codex a project file's `apiKeyHelper` and base URL
+count only when Claude Code has recorded the folder as trusted, that is
+`projects[<real path>].hasTrustDialogAccepted` is `true` in Claude Code's global config
+(`$CLAUDE_CONFIG_DIR/.claude.json` or `~/.claude.json`, or a non-empty legacy `.config.json` in the
+config directory) for the working directory or a parent up to the nearest directory with a `.git`
+entry (of any kind, valid or not), or for the main checkout of a genuine linked worktree
+(its `.git` file names `<M>/.git/worktrees/<name>`, whose `commondir` names `<M>/.git` and whose
+`gitdir` points back at that `.git` file); outside git, for the working directory or any parent.
+The layout is read from the file system, never from `git`: a folder unpacked from an archive
+writes its own `.git`, so git's answer is the folder's (reviewer A, PR #237). The same genuine
+worktree test decides whose `settings.local.json` is the main checkout's. While
+`CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is truthy no folder counts as trusted, as for Claude Code, which
+then shows its dialog everywhere. The variable is read from the environment Contexto starts with
+(a settings file's `env` cannot set it), as Claude Code reads it: `1`, `true`, `yes` or `on` in
+any case, after JavaScript's `trim()`, which also strips U+FEFF. While it is truthy no project file
+counts for `contexto run claude` and `contexto proxy` either: Claude Code in `-p` mode then drops a
+project file's `env` (but a short list of safe variables) and its `apiKeyHelper`, so plain
+`claude -p` goes to the user's upstream (reviewer A, PR #237 round 3; measured on 2.1.314 and
+2.1.318). Interactively Claude Code shows its dialog and, once it is accepted, uses the project's
+base URL (measured); Contexto skips the project files there too, the stricter side, and
+`--upstream` pins any upstream. When a project file is skipped for that reason the note names the
+variable and offers only the flags or unsetting it. Otherwise the file is skipped and
+Contexto says which file it ignored and how to proceed (`--codex-key-helper`, `--codex-upstream`,
+or running `claude` there once and accepting the dialog). `--codex-key-helper`,
+`CONTEXTO_CODEX_KEY_HELPER`, `--upstream`, `--codex-upstream`, and the user settings file are never
+gated.
 
 Tool permissions (D44): the same `--settings` file sets `permissions.allow` to one rule per Contexto
 MCP tool, by its exact name: `mcp__contexto__contexto_recall`, `_pin`, `_close`, `_state`, and

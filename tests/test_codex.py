@@ -997,3 +997,23 @@ def test_a_codex_that_cannot_run_exits_127_before_making_a_session(tmp_path, mon
         else:
             assert f"'codex' at {codex} is not executable" in err.getvalue()
         assert session_names(tmp_path / "ctx") == []
+
+
+def test_a_skipped_untrusted_base_url_is_named_before_the_anthropic_refusal(tmp_path, monkeypatch, codex_bin):
+    """D52 with D54: the project's base URL is skipped (folder not trusted), so Claude Code's upstream falls
+    back to Anthropic's, which Codex refuses; the user must first learn why it fell back."""
+    from contexto import launcher
+
+    project = Path.cwd()  # the autouse fixture's empty work folder; no trust is recorded for it
+    (project / ".claude").mkdir()
+    (project / ".claude" / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://cpa.invalid"}}))
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ctx"))
+    monkeypatch.setattr(launcher, "run_child", lambda *a, **k: pytest.fail("codex must not start"))
+    err = io.StringIO()
+    assert run_codex(parse("--codex-key-helper", "echo k", "codex"), stderr=err) == 2
+    lines = err.getvalue().splitlines()
+    assert len(lines) == 2, lines
+    assert lines[0].startswith("contexto: ignored env.ANTHROPIC_BASE_URL from .claude/settings.json")
+    assert "--codex-upstream" in lines[0]
+    assert "is api.anthropic.com" in lines[1] and "--codex-upstream https://api.openai.com/v1" in lines[1]
+    assert session_names(tmp_path / "ctx") == []

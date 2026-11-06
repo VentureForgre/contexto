@@ -99,7 +99,10 @@ The session line on stderr ends with where the upstream came from, for example
   `$VAR` and pipes work), and sends the key as `Authorization: Bearer`. Without
   `--codex-key-helper` or `CONTEXTO_CODEX_KEY_HELPER`, Contexto uses the `apiKeyHelper` from your
   Claude Code settings, so the setup above serves both CLIs with one key. If Claude Code gets its
-  key from `ANTHROPIC_AUTH_TOKEN` instead, pass a helper.
+  key from `ANTHROPIC_AUTH_TOKEN` instead, pass a helper. A helper or base URL in a project's
+  `.claude/` files counts for Codex only when Claude Code has recorded the folder as trusted (run
+  `claude` there once and accept the trust dialog); otherwise Contexto ignores it and says so
+  (D52).
 - Leave `--codex-auth` at its default, `apikey`.
 - Contexto keeps Codex on HTTP (D22). CLIProxyAPI's WebSocket route for Responses is not used.
 
