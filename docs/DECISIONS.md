@@ -1256,6 +1256,45 @@ the owner's delegation. Open decisions are listed at the end with the options an
     role `system` text, so a one-reminder queued prompt placed after other text there (for example a
     nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
     (reviewer B, PR #230 round 2).
+- **D49. A head change is sized like any other rotation, and every forwarded request is checked
+  against the bound.** Claude, 2026-11-05, under D0; contract change (rules 3 to 6). QA 2026-11-05
+  (live-realworld F1, verify-headchange) found that any byte change to `system` or `tools` (tool
+  search loading a tool, an MCP server connecting, a model switch, which renames the model in the
+  system prompt) sent the next turn start down a branch of its own. It kept `choose_k`'s fallback,
+  the newest complete turn whatever its size; it skipped rule 4's minimal window and
+  `bound_too_small` and rule 3's room rotation; with `W` at or below zero it paged nothing and logged
+  nothing; and the pre-send check skipped every rotated request. Live, after a plan-then-implement turn
+  on bound 60,000, the turn started with recall room -4,243 against the 12,000 minimum, every
+  `contexto_search` came back `turn_budget: spent`, and the answer was wrong.
+  - **Rule.** A head change still starts a new epoch at the next turn start, even when nothing is
+    paged (the cached prefix is lost anyway, so stripping thinking there costs nothing more). Its `k`
+    is chosen by the same steps as a size rotation: the minimal window, and `bound_too_small` when even
+    the new turn does not fit, when `W` cannot hold the newest complete turn; else rule 4's
+    `0.5 * W` target, with rule 3's room target when it restores `min_turn_room`. With room to spare it
+    pages exactly as before. The rotation keeps `reason: "head_change"`; `window_minimal` and
+    `bound_too_small` are logged as for any rotation.
+  - **Measured head.** Usage measures the head once, at the conversation's first request, so `F` kept
+    the old head after a change. The engine now keeps the byte size of the head its fingerprint names
+    and, at a head-change turn start, adds the change in bytes at the measured ratio (rounded toward
+    the measured value) to the measured head. In a measured engine run where a server adds about 7,600
+    tokens of tools at bound 30,000, `F` went from 480 to 8,920. Not recorded in the epoch record: a
+    resumed engine takes it from the request, whose head the record's fingerprint must match.
+  - **Pre-send check.** Every forwarded request, rotated or not, is checked against the estimate of
+    what is sent (`sent_estimate` after a rotation) and logged `over_bound` with `source: "estimate"`
+    and `in_tool_loop`. Only `in_tool_loop: true`, and degraded mode, are the logged exception; at a
+    turn start it goes with `bound_too_small` or means the sizing did not hold, so PR #48 review's
+    concern (a turn-start overrun read as rule 5's exception) still holds through that field.
+  - **Measured (engine, zero spend, `tests/test_head_change.py` scenarios, before → after).** Bound
+    8,000, a 12-read loop: sent 17,158 to 17,353 → 599 to 794 estimated tokens, room -10,353 → 6,206
+    or more, events `turn_room_low` → `window_minimal`. Bound 30,000 with `min_turn_room` 6,000, an
+    18-read loop: room 2,349 to 2,544 → 27,191 or more. Bound 60,000 with a 20,000-token head and a
+    22-read turn (the live shape): sent 51,050 to 51,406 → 20,681 to 21,037, room -16,406 → 13,963 or
+    more. Each for tools added, system changed and model switched; the same runs with no head change
+    are unchanged. 15 of the 23 new tests fail on main.
+  - **Limits.** If the head changes before the first usage is measured and that usage comes from a
+    request with the new head, the change is counted twice at the next head-change turn start
+    (higher `F`, so more paging, never an overrun). The pre-send check uses the estimator; real
+    usage over the bound is still logged after the response, as before.
 - **D55. `contexto run claude` resumes through Contexto, survives signals, and keeps out of the TUI.**
   Claude, 2026-11-05, under D0; contract change. From the QA run of 2026-11-05 (reports launcher-ux 2,
   4 to 8; live-claude 1; live-realworld F3 to F5; live-fidelity 6; security 3, 4 and 7). Measured at zero
