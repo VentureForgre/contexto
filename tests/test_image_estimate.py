@@ -10,17 +10,24 @@ The session tests use a synthetic upstream that charges text at 3.0 bytes per to
 from __future__ import annotations
 
 import base64
+import http.client
+import json
 import math
 import random
 import struct
+import threading
 import time
 import tracemalloc
 import zlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
+from contexto import tokens
 from contexto.canonical import canonical_json
 from contexto.codex import RESPONSES
+from contexto.proxy import ContextoProxy
 from contexto.rewrite import Config, RewriteEngine
 from contexto.store import SessionStore
 from contexto.store.memory import MemoryStore
@@ -39,6 +46,7 @@ from contexto.tokens import (
     pdf_pages,
     split_media,
 )
+from fixtures.make_pdfs import EXPECTED
 
 EP = "/v1/messages"
 W, H = 1440, 900
@@ -71,6 +79,11 @@ def jpeg_bytes(width: int, height: int, exif: int = 30_000) -> bytes:
     return out + b"\xff\xda" + bytes(200_000)
 
 
+def counted(data: str) -> tuple[int, bool]:
+    """(pages, counted) of a base64 PDF."""
+    return tuple(pdf_page_count(data)[:2])
+
+
 def image_block(seed: int = 1, data: str | None = None, media_type: str = "image/png") -> dict:
     return {"type": "image", "source": {"type": "base64", "media_type": media_type,
                                         "data": data if data is not None else png_b64(seed=seed)}}
@@ -82,7 +95,7 @@ def pdf_b64(pages: int, *, object_stream: bool = False, filler: int = 300_000) -
         packed = zlib.compress(objs)
         objs = b"9 0 obj << /Type /ObjStm /N %d /Filter /FlateDecode /Length %d >>\nstream\n" % (
             pages, len(packed)) + packed + b"\nendstream endobj\n"
-    body = b"%PDF-1.5\n2 0 obj << /Type /Pages /Kids [] >> endobj\n" + objs
+    body = b"%%PDF-1.5\n2 0 obj << /Type /Pages /Count %d /Kids [] >> endobj\n" % pages + objs
     return base64.b64encode(body + random.Random(5).randbytes(filler)).decode()
 
 
@@ -159,7 +172,7 @@ def test_document_block_is_not_priced_by_base64_bytes():
     # The QA stand-in (random bytes after the header) has no readable pages: its count is a guess of one
     # page per 3 KB, which errs high, since the bound depends on it (reviewer A, PR #234).
     unreadable = base64.b64encode(b"%PDF-1.4\n" + random.Random(3).randbytes(300_000)).decode()
-    assert pdf_page_count(unreadable) == (101, False)
+    assert counted(unreadable) == (101, False)
 
 
 def test_pdf_pages_are_counted_from_page_objects_and_object_streams():
@@ -326,11 +339,11 @@ def test_codex_function_call_output_image_is_media():
 
 def test_a_guessed_page_count_does_not_raise_the_ratio_floor():
     guessed = base64.b64encode(b"%PDF-1.4\n" + random.Random(3).randbytes(300_000)).decode()
-    assert pdf_page_count(guessed) == (101, False) and pdf_page_count(pdf_b64(3)) == (3, True)
+    assert counted(guessed) == (101, False) and counted(pdf_b64(3)) == (3, True)
     doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": guessed}}
     assert media_cost([doc]) == (0, 101 * PDF_PAGE_TOKENS, PDF_FLOOR_PAGE_TOKENS)
-    counted = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64(3)}}
-    assert media_cost([counted]).floor == 3 * PDF_FLOOR_PAGE_TOKENS
+    read = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64(3)}}
+    assert media_cost([read]).floor == 3 * PDF_FLOOR_PAGE_TOKENS
 
 
 # Reviewer A, PR #234: hostile and unusual PDFs ----------------------------------------------------
@@ -346,7 +359,7 @@ def _timed_count(raw: bytes) -> tuple[tuple[int, bool], float, int]:
     tracemalloc.start()
     started = time.perf_counter()
     try:
-        result = pdf_page_count(data)
+        result = counted(data)
         return result, time.perf_counter() - started, tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
@@ -360,7 +373,7 @@ def _object_stream(body: bytes, extra: bytes = b"") -> bytes:
 
 def test_a_count_with_thousands_of_digits_does_not_raise(tmp_path):
     raw = b"%PDF-1.7\n<</Type/Pages/Count " + b"9" * 5000 + b">>"
-    assert pdf_page_count(base64.b64encode(raw).decode()) == (2, False)  # no count read: one page per 3 KB
+    assert counted(base64.b64encode(raw).decode()) == (2, False)  # no count read: one page per 3 KB
     eng = _engine(tmp_path)
     req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "read this"}, _doc(raw)]}]}
     upstream, _, events = eng(req, {}, EP)  # v0.5.8 head: ValueError, so the proxy sent every request unwindowed
@@ -390,16 +403,16 @@ def test_zlib_bombs_are_bounded_in_memory_and_time():
 def test_too_many_object_streams_is_a_guess():
     page = b"3 0 obj << /Type /Page >> endobj "
     raw = b"%PDF-1.7\n" + _object_stream(page) * 200
-    assert pdf_page_count(base64.b64encode(raw).decode()) == (600, False)  # 128 read, the rest unknown
+    assert counted(base64.b64encode(raw).decode()) == (600, False)  # 128 read, the rest unknown
     with_tree = raw + b"2 0 obj << /Type /Pages /Count 200 >> endobj"
-    assert pdf_page_count(base64.b64encode(with_tree).decode()) == (200, True)  # the tree's own total
+    assert counted(base64.b64encode(with_tree).decode()) == (200, True)  # the tree's own total
 
 
 def test_line_wrapped_base64_is_counted():
-    clean = pdf_b64(100, filler=300_049)  # a length whose wrapped form failed to decode on the head: (1, False)
+    clean = pdf_b64(100, filler=300_035)  # a length whose wrapped form failed to decode at 2ae9ff4: (1, False)
     wrapped = "\n".join(clean[i:i + 76] for i in range(0, len(clean), 76))
-    assert pdf_page_count(clean) == pdf_page_count(wrapped) == (100, True)
-    assert pdf_page_count("\r\n".join(clean[i:i + 64] for i in range(0, len(clean), 64))) == (100, True)
+    assert counted(clean) == counted(wrapped) == (100, True)
+    assert counted("\r\n".join(clean[i:i + 64] for i in range(0, len(clean), 64))) == (100, True)
     image = "\n".join(png_b64(payload=200)[i:i + 76] for i in range(0, 300, 76))
     assert estimate_message_tokens([{"role": "user", "content": [image_block(data=image)]}]) == REAL_IMAGE_TOKENS
 
@@ -408,7 +421,7 @@ def test_object_stream_with_a_nested_dictionary_is_read():
     pages = b"".join(b"%d 0 obj << /Type /Page /Parent 2 0 R >> endobj " % (i + 3) for i in range(100))
     tree = b"2 0 obj << /Type /Pages /Count 100 /Kids [] >> endobj "
     raw = b"%PDF-1.5\n" + _object_stream(tree + pages, b"/DecodeParms << /Columns 4 >>")
-    assert pdf_page_count(base64.b64encode(raw).decode()) == (100, True)  # the head: (1, False)
+    assert counted(base64.b64encode(raw).decode()) == (100, True)  # the head: (1, False)
 
 
 @pytest.mark.parametrize("extra", [b"/DecodeParms << /Predictor 12 /Columns 4 >>", b"/Filter2 /LZWDecode"])
@@ -417,7 +430,7 @@ def test_an_unreadable_object_stream_errs_high(extra):
     raw = b"%PDF-1.5\n" + _object_stream(pages, extra)
     if b"LZW" in extra:
         raw = raw.replace(b"/Filter /FlateDecode", b"/Filter /LZWDecode")
-    assert pdf_page_count(base64.b64encode(raw).decode()) == (600, False)
+    assert counted(base64.b64encode(raw).decode()) == (600, False)
 
 
 # Reviewer A, PR #234: the Codex floor and the measured head -------------------------------------
@@ -450,3 +463,157 @@ def test_a_document_in_the_first_request_does_not_zero_the_head(tmp_path):
     eng.observe_usage(EP, {"input_tokens": _real_usage(upstream) + 20 * 1_583, "output_tokens": 10}, req)
     state = next(iter(eng.states.values()))
     assert true_head <= state.head_tokens <= true_head + 20 * 1_583  # the head: 0
+
+
+# Reviewer A, PR #234, round 2: real producers, speed, the cache, and a floor that errs low -----------
+
+FIXTURES = Path(__file__).parent / "fixtures" / "pdf"
+
+
+def _fixture(name: str) -> str:
+    return base64.b64encode((FIXTURES / name).read_bytes()).decode()
+
+
+@pytest.mark.parametrize("name", sorted(EXPECTED))
+def test_real_producers_count_exactly(name):
+    """reportlab, fpdf2, pikepdf (libqpdf) object streams with and without linearization, macOS Quartz
+    (cupsfilter, sips), incremental updates that add or rewrite a page, and PDFlib's object stream with
+    an indirect /Length (round 2: /Length 15 0 R was read as 1 byte, so the file counted 600 pages)."""
+    assert pdf_page_count(_fixture(name)) == (EXPECTED[name], True, EXPECTED[name])
+
+
+def test_a_pdflib_file_does_not_page_the_window(tmp_path):
+    eng = _engine(tmp_path)
+    msgs: list[dict] = []
+    for t in range(3):
+        msgs.append({"role": "user", "content": [{"type": "text", "text": f"turn {t} " + "words " * 500}]})
+        _send(eng, msgs)
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
+    pdf = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                          "data": _fixture("pdflib-indirect-length-1.pdf")}}
+    msgs.append({"role": "user", "content": [{"type": "text", "text": "read this"}, pdf]})
+    upstream, events, estimate, real = _send(eng, msgs)
+    # 23c42ea: page_out, rotation, window_minimal, bound_too_small, turn_room_low; estimate 2,763,637
+    assert not {"page_out", "rotation", "window_minimal", "bound_too_small"} & {e["event"] for e in events}
+    assert estimate < real + 2 * PDF_PAGE_TOKENS
+
+
+def test_the_floor_takes_the_lower_of_the_two_counts():
+    pages = b"".join(b"%d 0 obj << /Type /Page /Parent 2 0 R >> endobj " % (i + 3) for i in range(20))
+    raw = b"%PDF-1.4\n2 0 obj << /Type /Pages /Count 3 /Kids [] >> endobj " + pages
+    assert pdf_page_count(base64.b64encode(raw).decode()) == (20, True, 3)  # estimate high, floor low
+    only_pages = b"%PDF-1.4\n" + pages
+    assert pdf_page_count(base64.b64encode(only_pages).decode()) == (20, True, 1)  # one claim: floor one page
+
+
+def test_a_crafted_page_count_does_not_raise_the_ratio(tmp_path):
+    """A 1-page PDF (the upstream charges 1,583) that claims 40 pages in both its page objects and its tree.
+    At 23c42ea the ratio went from 3.0 to 5.73 and a later Read was estimated 11% low."""
+    eng = _engine(tmp_path)
+    pages = b"".join(b"%d 0 obj << /Type /Page /Parent 2 0 R >> endobj " % (i + 3) for i in range(40))
+    raw = b"%PDF-1.4\n2 0 obj << /Type /Pages /Count 40 /Kids [] >> endobj " + pages
+    doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                          "data": base64.b64encode(raw).decode()}}
+    msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "read this"}, doc]}]
+    req = {**HEAD, "messages": list(msgs)}
+    upstream, _, _ = eng(req, {}, EP)
+    eng.observe_usage(EP, {"input_tokens": _real_usage(upstream) + 1_583, "output_tokens": 10}, req)
+    assert eng.estimator.measured_bytes_per_token <= 3.0
+    rng = random.Random(7)
+    text = " ".join(rng.choices(["def", "return", "self", "value", "x", "=", "(", ")"], k=30_000))
+    msgs += [{"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read",
+                                                "input": {"file_path": "big.py"}}]},
+             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": text}]}]
+    req = {**HEAD, "messages": list(msgs)}
+    upstream, _, events = eng(req, {}, EP)
+    estimate = next(e for e in events if e["event"] == "request")["estimate"]
+    assert estimate >= _real_usage(upstream) + 1_583  # never under the real cost
+
+
+def _inflating(count: int, body: bytes) -> bytes:
+    stream = _object_stream(body)
+    return b"%PDF-1.7\n" + stream * count
+
+
+@pytest.mark.parametrize("case", ["inflate", "cap"])
+def test_crafted_pdfs_parse_in_well_under_a_second(case):
+    """Round 2: 50 KB that inflates to 5 streams of /Count took 2.2 s, and the 32 MB worst case 6 s,
+    under the proxy's one transform lock."""
+    inflate = _inflating(5, b"/Count 1 " * (3_990_000 // 9))
+    raw = inflate if case == "inflate" else inflate + b"/Count 1 " * (((24 << 20) - len(inflate)) // 9)
+    result, seconds, _ = _timed_count(raw)
+    assert seconds < 1 and result[:2] == (600, False)
+
+
+def test_the_page_cache_keeps_more_than_64_pdfs(monkeypatch):
+    """Round 2: with 70 PDFs in the window the 64-entry FIFO parsed every PDF 4 times a request."""
+    calls = []
+    real = tokens._count_pdf_pages
+    monkeypatch.setattr(tokens, "_count_pdf_pages", lambda data: calls.append(1) or real(data))
+    docs = [{"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                            "data": pdf_b64(1, filler=1_000 + i)}} for i in range(70)]
+    messages = [{"role": "user", "content": docs}]
+    tokens._PDF_PAGES.clear()
+    for _ in range(4):
+        estimate_message_tokens(messages)
+    assert len(calls) == 70
+
+
+class _Upstream(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        data = b'{"type":"message","content":[],"usage":{"input_tokens":5,"output_tokens":1}}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def test_the_proxy_counts_pdfs_before_it_takes_the_transform_lock():
+    """Round 2: parsing ran under the lock every session waits on; the proxy primes the cache first."""
+    seen: list[tuple[str, bool]] = []
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config())
+
+    class Spy:
+        preserves_input = True
+
+        def prime(self, request):
+            seen.append(("prime", proxy.transform_lock.locked()))
+            engine.prime(request)
+
+        def __call__(self, request, headers, endpoint):
+            seen.append(("transform", proxy.transform_lock.locked()))
+            return engine(request, headers, endpoint)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+    proxy = ContextoProxy(f"http://127.0.0.1:{server.server_address[1]}", MemoryStore(key=b"k" * 32), Spy())
+    proxy.start()
+    try:
+        data = pdf_b64(3, filler=2_024)
+        tokens._PDF_PAGES.clear()
+        doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}}
+        body = json.dumps({**HEAD, "stream": False, "messages": [{"role": "user", "content": [doc]}]}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=10)
+        conn.request("POST", EP, body=body, headers={"Content-Type": "application/json", "x-api-key": "synthetic"})
+        assert conn.getresponse().status == 200
+        conn.close()
+    finally:
+        proxy.stop()
+        server.shutdown()
+        server.server_close()
+    assert seen == [("prime", False), ("transform", True)]
+    assert (len(data), hash(data)) in tokens._PDF_PAGES
+
+
+def test_priming_never_raises():
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=Config())
+    for request in (None, [], {"messages": 5}, {"messages": [{"content": [{"type": "document", "source": 3}]}]},
+                    {"input": [{"type": "input_file", "file_data": "data:application/pdf;base64,%%%"}]}):
+        engine.prime(request)

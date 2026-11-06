@@ -1377,31 +1377,60 @@ the owner's delegation. Open decisions are listed at the end with the options an
     (reviewer A, PR #234). The measured 3-page PDF cost 1,583 a page, so typical pages are far under
     it; a page of small-font code or tables can still cost more than 3,000 text tokens, so this is a
     generous allowance, not a hard maximum. Pages are the larger of the `/Type /Page` objects (in
-    Flate object streams too) and the page tree's `/Count`, at most 600 (the API's limit), cached by
-    content because the engine estimates a history many times per request. Every fallback errs high,
+    Flate object streams too) and the page tree's largest `/Count`, at most 600 (the API's limit).
+    Page objects count once per object number, read from the `N G obj` header or an object stream's
+    offset table, so an incremental update that rewrites a page does not count it twice. Counts are
+    cached by content, 256 PDFs with the least recently used dropped: the engine estimates a history
+    many times per request, and round 2 measured 70 PDFs parsed 280 times in 4 estimates with the
+    64-entry FIFO cache, 70 now. Every fallback errs high,
     since the bound depends on it: a PDF with neither pages nor a tree, or whose base64 cannot be
     decoded, is one page per 3 KB (the most compact text pages); a PDF with an object stream that was
-    not read is its page tree's count (the document's own total), else 600. A document by URL or file
+    not read is its page tree's count (the document's own total), else 600; a PDF with more page
+    objects (10,000) or page-tree nodes (1,000) than a document has is 600. A document by URL or file
     id is 10 pages; a document of plain text or content blocks, and a Responses `input_file` of text,
     is text.
+  - **Real producers** (`tests/fixtures/pdf/`, made by `tests/fixtures/make_pdfs.py`): reportlab,
+    fpdf2, pikepdf (libqpdf) object streams with and without linearization, macOS Quartz through
+    `cupsfilter` and `sips`, incremental updates that add or rewrite a page, and the object stream
+    PDFlib+PDI 9 writes, with an indirect `/Length 15 0 R` (written by hand; PDFlib is commercial).
+    All 10 count exactly. Round 2 found the indirect `/Length` read as 1 byte (the regex backtracked
+    to the first digit), so a 1-page PDFlib file counted 600 pages and logged `bound_too_small`
+    (estimate 2,760,637 for a real 18,916; now 24,405 for 21,442); an indirect length now reads the
+    stream up to 1 MB and stops at its end, and the rewritten page counted twice (4 for 3).
   - **Hostile PDFs** (reviewer A, PR #234). A PDF can come from any file the agent reads, and the engine
     runs under the proxy's one transform lock, so parsing is bounded and never raises: numbers are read
     to at most 9 digits (a 5,000-digit `/Count` raised `ValueError`, and the proxy then sent every
     request unwindowed); every regex repetition is bounded, so scans are linear (720 KB of `/Count`
     took 130 s, 180 KB 7.4 s, now 0.03 s); object streams are found from `/Type /ObjStm`, their header
     read from the object's start (a nested `/DecodeParms` dictionary hid them), and inflated one at a
-    time with `max_length`, at most 128 streams, 4 MB each and 16 MB a PDF, scanned and dropped (50
-    zlib bombs in 197 KB peaked at 195 MB, now 13 MB, and count as 600 pages); a stream with another
-    filter, a predictor, or encryption is not read; any other failure is a guess.
+    time with `max_length`, at most 128 streams, 2 MB each and 4 MB a PDF, scanned and dropped (50
+    zlib bombs in 197 KB peaked at 195 MB, now 4 MB, and count as 600 pages); a stream with another
+    filter, a predictor, or encryption is not read; any other failure is a guess. Round 2 found the
+    scans linear but slow (the page-tree regex scanned every `/Count` in up to 40 MB, about 170 ns a
+    byte): the tree is now read only at `/Type /Pages` (at most 1,000), through an 8 KB window on each
+    side, page objects stop at 10,000, and the proxy counts a request's PDFs before it takes the
+    transform lock every session waits on (`RewriteEngine.prime`). Worst cases, one PDF: 50 KB that
+    inflates to 5 streams of `/Count` 2.22 s → 0.001 s; `/Count` to the 32 MB cap 3.56 s → 0.07 s; 4
+    such streams plus `/Count` to the cap 5.81 s → 0.06 s; the slowest case found now (`/Type /Pagex`
+    to the cap) 0.15 s; peak 56 MB traced, the decoded file. Through the real proxy, 20 sessions each
+    pasting a distinct crafted PDF, with a text-only session probing 1 s in: 50 KB each, 44.6 s wall
+    and the probe waiting 43.5 s → 1.0 s and 0.0 s (main 1.0 s, 0.0 s); 32 MB each, 8.1 s and 0.0 s
+    (main 8.2 s, 0.0 s; reviewer A measured 124 s at 23c42ea).
   - **Where media is found.** Message content, `tool_result` content, a document's content source, and
     Responses message content and tool output lists, at most 10 levels down. An image-shaped object in a
     tool's input is text the model wrote and is not priced as an image (and is never walked, so a tool
     input deeper than Python's recursion limit still estimates).
-  - **The ratio.** It is learned from text only. Each request remembers its media's bytes and the lowest
-    cost the media can have; `observe_usage` adds the request's bytes minus the media bytes and its real
-    tokens minus that floor. On Claude the floor is 95% of the image formula on the older 1,568-pixel,
-    1,568-token limit (measured costs ran up to 3% under the formula), 1,000 tokens a counted PDF page
-    and one page for a guessed count, and 0 for an image of unknown size. On Codex the floor is 0:
+  - **The ratio.** It is learned from text only. Each request remembers its media's bytes and a floor
+    at or under the media's real cost; `observe_usage` adds the request's bytes minus the media bytes
+    and its real tokens minus that floor. A floor above the real cost would book the excess as text
+    and raise the ratio, so the floor errs low wherever the estimate errs high. On Claude it is 95% of
+    the image formula on the older 1,568-pixel, 1,568-token limit (measured costs ran up to 3% under
+    the formula) and 0 for an image of unknown size; for a PDF, 1,000 tokens a page for the smaller of
+    its page objects and its page tree's count when both were read, else one page (both counts are the
+    file's own claims, and incremental updates or a crafted file can raise them). As a last guard, when
+    the floor would put a request's text above 3.5 bytes a token (the text seed; honest requests
+    measured 2.9 to 3.0), the floor ran high and none is taken off: round 2's 1-page PDF claiming 20 or
+    40 pages took the ratio to 4.54 and 10.24 at 23c42ea, 2.87 now. On Codex the floor is 0:
     OpenAI prices images by tiles (1,105 tokens for 1920x1080 at high detail, 85 at low), under
     Claude's floor, which made the ratio 4.31 instead of 3.0 in reviewer A's case. Taking off a floor at
     or under the real cost makes any error land on the text side as over-counting, never
@@ -1429,9 +1458,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **Not covered.** Image prices on models before the high-resolution tier are lower (at most about
     1,568 tokens), so there the estimate errs high by up to 3 times per large image; the floor keeps the
     ratio safe. Codex uses the same formula; OpenAI prices images by tiles, lower than this, so a Codex
-    estimate errs high. The 1,000-token PDF page floor is not measured for blank or image-only pages. A
-    PDF crafted to claim more pages than it has (fake page objects or `/Count`) raises its estimate
-    and its floor alike. A screenshot in a paged turn is still not recallable as an image (unchanged).
+    estimate errs high. The 1,000-token PDF page floor is not measured for blank or image-only pages;
+    the 3.5 ceiling catches a floor that runs high on a request whose text is mostly code or JSON, not
+    on prose near 4 bytes a token. A PDF crafted to claim more pages than it has raises its estimate.
+    An encrypted PDF with object streams counts 600 pages (reviewer B); Anthropic asks for PDFs without
+    encryption. A PDF whose page tree has no `/Count` (no producer above omits it) floors at one page,
+    so its cost lands on the text side and the ratio errs low. A page deleted by an incremental update
+    still counts. A screenshot in a paged turn is still not recallable as an image (unchanged).
 
 ## Open decisions
 

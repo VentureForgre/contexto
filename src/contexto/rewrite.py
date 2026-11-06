@@ -138,7 +138,7 @@ from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
 from contexto.store.render import render_page
-from contexto.tokens import TEXT_BYTES_PER_TOKEN, MediaCost, TokenEstimator, media_cost, split_media
+from contexto.tokens import TEXT_BYTES_PER_TOKEN, MediaCost, TokenEstimator, media_cost, prime_media, split_media
 from contexto.toolcheck import ToolCheck
 
 MESSAGES = "/v1/messages"
@@ -151,6 +151,9 @@ STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
 RETAINED_ROLES = ("user", "assistant", "tool_result")  # A14: the roles set_retained accepts (lane B PR #128)
+# D48: a request whose text would measure above this many bytes a token once its media floor is taken off
+# had a floor above the media's real cost (a page count a file inflated); its floor is dropped instead.
+MEDIA_RATIO_CEILING = TEXT_BYTES_PER_TOKEN
 RESTORED_RATIO_RANGE = (1.0, 6.0)  # bytes per token a restore accepts; outside it the seed is safer (A2e)
 
 
@@ -2348,6 +2351,13 @@ class RewriteEngine:
         self._side_rooms[room_id] = _SideRoom(key, len(messages), anchor_hash(hashes), now, frozenset(call_ids),
                                               prompt, runs)
 
+    def prime(self, request: dict) -> None:
+        """D48: count the request's PDFs into the page-count cache. The proxy calls this before it takes
+        its transform lock, so parsing a large or crafted PDF does not hold up every other session; the
+        engine then finds the counts cached. Reads the request only, and never raises."""
+        if isinstance(request, dict):
+            prime_media([request.get("messages"), request.get("input")])
+
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
         dialect = dialect_for(endpoint)
@@ -2403,8 +2413,12 @@ class RewriteEngine:
         else:
             # The session's measured ratio from now on, of text only (D48): the request's media bytes and
             # the least its media can have cost are taken out, so a screenshot cannot inflate the ratio.
+            # A floor that would put the text above the ceiling ran high, so it is not taken off.
             media = state.last_sent_media
-            self.estimator.observe(state.last_sent_bytes - media.bytes, real - media.floor)
+            text_bytes, floor = state.last_sent_bytes - media.bytes, media.floor
+            if floor and text_bytes > MEDIA_RATIO_CEILING * (real - floor):
+                floor = 0
+            self.estimator.observe(text_bytes, real - floor)
             state = replace(state, last_input_tokens=real, pending_usage=None)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried
