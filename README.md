@@ -536,11 +536,61 @@ ids exits 2, and an unknown full id starts a new, empty session with that id, so
 ## Troubleshooting
 
 **Which upstream does `contexto run` use?** The first of: `--upstream`; `env.ANTHROPIC_BASE_URL` from
-the first Claude Code settings file that sets it (in a git worktree, the main checkout's
-`.claude/settings.local.json` first, then the project's `.claude/settings.local.json`, then
-`.claude/settings.json`, then `~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json` when
-`CLAUDE_CONFIG_DIR` is set); `ANTHROPIC_BASE_URL` in the environment;
-`https://api.anthropic.com`. The session log records which source won, never the URL.
+the first Claude Code settings file that sets it: the main checkout's `.claude/settings.local.json`
+(the repository root, also from a subdirectory; the main checkout from a linked worktree), then the
+current directory's own `.claude/settings.local.json`, then `.claude/settings.json`, then
+`~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`); `ANTHROPIC_BASE_URL` in the
+environment; `https://api.anthropic.com`. From a subdirectory the repository root's `settings.json`
+is not read, as in Claude Code. The session log records which source won, never the URL.
+
+`contexto run claude` uses project settings as Claude Code does. In `-p` mode Claude Code has no
+trust check, so pass `--upstream` to pin the upstream in a repository you do not trust. While
+`CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set, Contexto uses no project `.claude/` settings file for any
+CLI, as `claude -p` does then: the base URL comes from your user settings, the environment or
+`--upstream`, and Codex's key from `--codex-key-helper`, `CONTEXTO_CODEX_KEY_HELPER` or your user
+settings. Contexto prints which file it ignored.
+
+**Opening an untrusted repository with `contexto run claude`.** While Claude Code shows its "do you
+trust this folder" dialog it sends `HEAD /api/hello` (no key, no content). Through Contexto that ping
+goes to the repository's own `ANTHROPIC_BASE_URL` even if you decline, so that host learns your
+address, Claude Code version and the time; plain `claude` sends it to your own upstream. In a
+repository you do not trust, run `contexto run --upstream <your upstream> claude` to pin the
+upstream, or set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`.
+
+**"ignored ... from .claude/settings.json" (Codex).** A project's helper or base URL counts for
+Codex only in a folder Claude Code has recorded as trusted. Pass `--codex-key-helper` (or set
+`CONTEXTO_CODEX_KEY_HELPER`) and `--codex-upstream`, or run `claude` there once and accept the trust
+dialog.
+
+**"`--session` after 'claude' is a Contexto option".** Contexto's options go before `claude`; the
+message shows the command rewritten.
+
+**403 from the proxy, or a request you sent by hand is refused.** The proxy accepts `Host`
+`127.0.0.1` or `localhost` with any port, so an SSH port forward or port 80 works. A request naming
+another host (for example `host.docker.internal` from a container) or carrying an `Origin` header
+gets 403 `permission_error`. Point the CLI at `localhost` or `127.0.0.1` through a forward instead.
+
+**"`<session>/meta.lock` is damaged" or "`live.lock` is damaged".** A symlink, FIFO or directory
+stands where the lock file should be. Delete it, and Contexto makes a new one at the next start.
+Until then `contexto run` does not open the session; with a damaged `meta.lock` recall, search and
+state are refused (pins and closes still work), and with a damaged `live.lock` every tool is.
+
+**`over_bound` in the session log.** `over_bound` with `in_tool_loop: false` at a turn start is
+logged next to `bound_too_small` (the bound is too small for the head and the new prompt) or when the
+rotation's sizing did not hold; only `in_tool_loop: true` is the expected tool-loop overrun. A head
+change (tool search loading a tool, an MCP server connecting, a model switch) is sized like any
+other rotation.
+
+**"a large PDF is estimated generously ..." or "a PDF could not be read fully ...".** A PDF is
+estimated at 4,568 tokens a page, more than most pages cost, so a large one pasted at a turn start
+can page the earlier conversation (it stays recallable); the first notice says that only the PDF's
+allowance fell short, not the bound. When Contexto cannot count a PDF's pages for certain (encrypted
+object streams, pages that show PDF source as text, a PDF by URL or file id) it counts 600 pages,
+the API's maximum, and logs `pdf_pages_uncertain`. Such a PDF is over any bound, so the turn keeps
+only its own messages.
+
+**Warnings while Claude Code runs** (window budget, missing or refused tools) are printed after it
+exits, so they do not land in its input box.
 
 **Requests bypass the proxy.** Organization-managed Claude Code settings outrank the launcher's
 `--settings`. If they set `ANTHROPIC_BASE_URL`, Claude Code talks to that URL directly.
@@ -581,7 +631,7 @@ answers Codex's tool list request, and the proxy checks for that record. For Cod
 crashes after it answered cannot be detected: the record stays.
 
 **"warning: Claude Code refused Contexto's contexto_search ..." ("you haven't granted it yet").**
-The tools are there, but Claude Code would not run them. Claude Code 2.1.302 and 2.1.310 in `-p`
+The tools are there, but Claude Code would not run them. Claude Code 2.1.302 to 2.1.318 in `-p`
 mode refuse any MCP tool that no permission rule allows, so without a rule `contexto run claude -p`
 loses recall. The launcher's `--settings` allows exactly `mcp__contexto__contexto_recall`, `_pin`,
 `_close`, `_state`, and `_search`, and nothing else. These tools only touch your own local data:
@@ -604,7 +654,9 @@ the session log records each distinct version the requests name, once (`cli_vers
 `session_start_unrecognised` if the session start was not recognised. [docs/cli-updates.md](docs/cli-updates.md) is how a new version gets tested.
 
 **"window budget about N tokens ... is below 25,000".** The bound leaves little room for turns after
-the fixed overhead, so rotations page often. Start again with the suggested `--bound`.
+the fixed overhead, so turns page out almost at once and recalled pages barely fit. Start again with
+the suggested `--bound`. At a budget of 0 or less the warning says the bound "may leave no window
+budget": the start-up figure assumes the top of the measured overheads.
 
 **502 "contexto proxy: upstream unreachable (...)".** The proxy could not reach the upstream. It opens
 a new connection per request and retries once when the connection, TLS handshake, or request send
@@ -641,12 +693,24 @@ counts, and event names but no prompt or response text. See [What is stored and 
 ## Known limitations
 
 - **Tested scope.** Claude Code acceptance ran on two models (claude-haiku-5-5 and
-  claude-opus-5-5), one bound and one upstream, on Claude Code 2.1.301 and 2.1.302. On 2.1.310,
-  where tool search is on by default, only a short live recall check ran. Codex passed the long-run
-  and recall criteria on one model at bound 64,000 and at the default 150,000; its answer accuracy
-  against a full-context baseline was not measured.
-- **Standing rules** survive paging only if they open their message or the model pinned them
+  claude-opus-5-5), one bound and one upstream, on Claude Code 2.1.301, 2.1.302 and 2.1.318 (tool
+  search on by default). On 2.1.310 only a short live recall check ran; 2.1.314 passed the zero-spend
+  checks only. Codex passed the long-run and recall criteria on one model at bound 64,000 and at the
+  default 150,000, on codex-cli 0.163.0; 0.166.0 passed the zero-spend checks only. Its answer
+  accuracy against a full-context baseline was not measured.
+- **Standing rules** survive paging only if they open their message or the model pinned them. The
+  model is told to pin them when stated, but that was measured on one model and 8 rules
   ([Rules you give once](#rules-you-give-once)).
+- **Images** are estimated from their pixel size. A screenshot in a turn that has been paged out is
+  not recallable as an image: `contexto_recall` shows it as `[image omitted]`, and the model sees only
+  the turn's text.
+- **PDFs** are never estimated low, at the cost of running high: 4,568 tokens a page, about 2.9 times
+  a typical page, and 600 pages for a PDF whose pages cannot be counted for certain. A large PDF can
+  page the earlier conversation on the turn it is pasted on; a dense page (small-font code, tables)
+  can still cost more than 4,568.
+- **Damaged lock files.** A symlink, FIFO or directory at a session's `meta.lock` or `live.lock`
+  stops `contexto run` from opening that session until you delete the file
+  ([Troubleshooting](#troubleshooting)).
 - **New CLI versions** can change the text Contexto recognises in their requests. Until a version is
   tested, the launch warns ([Troubleshooting](#troubleshooting)).
 - **Cache efficiency** depends on the upstream route. A proxy that spreads one session over several
@@ -666,18 +730,20 @@ counts, and event names but no prompt or response text. See [What is stored and 
 |---|---|---|
 | `run` | the CLI's | Claude Code's or Codex's own exit code |
 | `run` | 128 + N | The CLI died from signal N |
-| `run` | 1 | The proxy could not start |
-| `run` | 2 | Usage error, for example `--bound` above 170,000, a `--settings` after `claude`, or no Codex key helper or upstream |
-| `run` | 127 | `claude` or `codex` is not on `PATH` |
-| `run` | 130 | Ctrl+C during the version check, before the CLI started |
-| `proxy` | 1 | The proxy could not start: an invalid session id, a port in use or not allowed, or an invalid upstream |
+| `run` | 1 | Contexto could not start: the proxy, or the session store (for example a `CONTEXTO_HOME` that exists but cannot be written) |
+| `run` | 2 | Usage error, for example `--bound` above 170,000 or not above the headroom floor (25,000 by default), an invalid `--session` id or one that only starts existing ids, a `CONTEXTO_HOME` that is a file, a `--settings` after `claude`, no Codex key helper, or a Codex upstream that would be Anthropic's API |
+| `run` | 127 | `claude` or `codex` is not on `PATH` or cannot be run, checked before anything starts |
+| `run` | 130 | Ctrl+C during the version check or while waiting for another launch to choose its session, before the CLI started |
+| `proxy` | 1 | Could not start: a port in use, or an invalid upstream |
+| `proxy` | 2 | `--port` outside 0 to 65535, an invalid `--session` id (`''` included), an id that only starts existing session ids, or a `CONTEXTO_HOME` that is a file |
 | `mcp` | 0 | The CLI closed the server's input (the normal end) |
-| `mcp` | 1 | Invalid session id |
+| `mcp` | 1 | An invalid or unknown session id (it serves existing sessions only) |
 | `mcp` | 2 | Invalid `--search-cache-mb` |
-| `sessions`, `recall`, `state` | 0 | Success (an empty session list is a success) |
-| `sessions`, `recall`, `state` | 1 | Unknown or invalid session id, unknown page id, an offset past the end of the page, or an unreadable ledger |
+| `sessions`, `recall`, `search`, `state` | 0 | Success (an empty session list, or a search with no match, is a success) |
+| `sessions`, `recall`, `search`, `state` | 1 | Unknown, ambiguous or invalid session id, pages that cannot be read, an unknown or malformed page id, an offset past the end of the page, an unreadable ledger, or a `CONTEXTO_HOME` that is not a directory |
 | `sessions prune` | 1 | A session could not be deleted, or the session named by `--session` was skipped (in use, active in the last 10 minutes, or unsafe to delete) |
-| any | 2 | Unknown command or option, or a missing argument (`contexto` with no command prints help and exits 2) |
+| `sessions prune` | 2 | `--session` is not a session but the start of existing ids (prune needs the full id) |
+| any | 2 | Unknown command or option, an invalid option value (for example `--bound abc`), or a missing argument (`contexto` with no command prints help and exits 2) |
 
 ## Contributing and security
 
