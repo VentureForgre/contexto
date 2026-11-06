@@ -1522,7 +1522,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     `contexto sessions show <session>`; anything else says the call failed with its class and to
     try once more. A non-string tool name was `-32603` and is now `-32602`; ids that are objects,
     arrays or booleans, which JSON-RPC does not allow, are `-32600` with `id: null`; `params` of
-    `[]` or `0`, which read as `{}`, are `-32602`. Errors echoed whole arguments: a 10 MB page id or
+    `[]` or `0`, which read as `{}`, are `-32602`, and `arguments` of `[]`, `0` or `false` are the
+    tool error "arguments must be an object", as `"x"` already was (reviewer B, PR #235). Errors echoed whole arguments: a 10 MB page id or
     obligation id, or 100,000 rejected `supersedes` ids, came back in full, outside any recall room.
     An echoed value is now at most 100 characters and a tool error at most 1,000. A pin or close note
     of whitespace only, which passed `minLength: 1`, is refused. A pin of an `event`, `artifact` or
@@ -1540,9 +1541,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
     is now opened `O_NONBLOCK | O_NOFOLLOW` and checked to be a regular file before it is read or
     written (`contexto.private.open_regular`, `open_private`), as `affinity.salt` already was; each
     reads as the damage it is (absent metadata, an unreadable page, a damaged ledger, a key file
-    error), and `KeyFileError` is a `ValueError` too. In the 12 FIFO and directory cases every MCP
-    tool and CLI reader returns within the test's 10-second limit; on main 8 fail (each FIFO blocks
-    the MCP server on its first call, and a directory as the ledger or the log raises).
+    error), and `KeyFileError` is a `ValueError` too. A symlink in a file's place is refused the
+    same way (`NotRegularFileError`): with the first head, a symlinked `ledger.jsonl` raised a plain
+    `ELOOP` that gave tracebacks in `sessions list`, `show` and `state` and stopped `contexto mcp`
+    and the proxy, where a FIFO or directory degraded (reviewer B, PR #235). In the 18 FIFO,
+    directory and symlink cases every MCP tool and CLI reader returns within the test's 10-second
+    limit; on main 8 fail (each FIFO blocks the MCP server on its first call, and a directory as the
+    ledger or the log raises).
   - **Symlinked session directories: one rule.** A session directory that was a symlink was used by
     `mcp`, the proxy, `state` and `sessions show`, which chmodded the link's target to 0700, but was
     left out of `sessions list` and refused by prune. Rule: a session directory must be a real
@@ -1558,7 +1563,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     short write, a failed write removes its temporary file, a log event after a cut line starts on a
     new line (the cut line stays unreadable and readers skip it), and opening a store for writing
     removes temporary files whose process no longer runs (1 in 25 of QA's kill -9 runs left one
-    between the link and the unlink), logging `stale_temp_removed`.
+    between the link and the unlink), logging `stale_temp_removed`. A file must also be more than 10
+    minutes old: a live writer whose pid this process cannot see (a container sharing the home in
+    another pid namespace, another machine) looks gone, and a live temporary file exists for
+    milliseconds (reviewer A, PR #235).
   - **`open_existing`** did not set `clock`, so `side_rooms()`, `set_side_room()` and
     `charge_turn_room()` raised `AttributeError` on a store opened for reading. No shipped command
     reached it; it is set now.
@@ -1568,7 +1576,21 @@ the owner's delegation. Open decisions are listed at the end with the options an
     turns (`k` is always a turn start), so the in-view label now shows that count less one: a test
     pages 40 turns through the engine and finds each turn's unique key under its own index, paged
     or in view. Page turn numbers are hashed into page ids and fix every page offset, so they stay;
-    the logged in-view span keeps the entry's `turn`.
+    the logged in-view span keeps the entry's `turn`. This holds only while every page is a whole
+    turn: carried-text pages from the bounded fallback take page turn numbers too, and a resync
+    (local compaction) restarts the CLI's count while `turns_paged` goes on, so in-view numbers then
+    run behind recent pages and can repeat one (reviewer B, PR #235: in a 40-turn store with 4
+    carried pages, CLI turn 38 was "turn 43" paged and "turn 39" named both CLI turn 39 in view and
+    CLI turn 36 paged). Labelling from the page numbering would need the turn starts before `k` and
+    `turns_paged` with each snapshot, and the epoch record that holds `turns_paged` is written only
+    at turn starts, so a label built from it would still lag a mid-turn carried page. No tool takes
+    a turn number (`contexto_recall` takes a page id and offset), so the contract says when the
+    numbers match instead.
+  - **CLI output.** The first head stored lone surrogates, but `contexto state` and `contexto
+    recall` wrote to a strict UTF-8 stdout and raised `UnicodeEncodeError`; the ledger is
+    append-only, so one such pin broke `state` for that session (reviewer B, PR #235). `cli.main`
+    now sets stdout and stderr to write an unencodable character as its backslash escape, as the
+    MCP server does; text that encodes is unchanged.
 
 ## Open decisions
 

@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import stat
+import time
 from pathlib import Path
 
 DIR_MODE = 0o700
@@ -52,6 +53,17 @@ class NotRegularFileError(OSError):
     """A FIFO, device, directory or socket stands where a session file should be."""
 
 
+def _open_nofollow(path: Path, flags: int, mode: int = 0o777) -> int:
+    """``os.open`` with ``O_NOFOLLOW``; a symlink at ``path`` is refused as ``NotRegularFileError``, so every
+    reader treats it as it treats a FIFO or a directory there (D58)."""
+    try:
+        return os.open(path, flags | os.O_NOFOLLOW, mode)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.EMLINK) and os.path.islink(path):  # EMLINK on FreeBSD
+            raise NotRegularFileError(f"{path} is a symlink") from e
+        raise
+
+
 def _check_regular(fd: int, path: Path) -> None:
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
@@ -61,10 +73,10 @@ def _check_regular(fd: int, path: Path) -> None:
 def open_private(path: Path, flags: int) -> int:
     """``os.open`` with ``O_CREAT`` semantics that leaves the file at 0600; returns the fd.
 
-    A symlink at ``path`` is never followed (OSError, ELOOP), and anything but a regular file there
+    A symlink at ``path`` is never followed (``NotRegularFileError``), and anything but a regular file there
     is refused (``NotRegularFileError``) without blocking: the open is ``O_NONBLOCK``, so a FIFO does
     not wait for a reader. The descriptor is then made blocking again."""
-    fd = os.open(path, flags | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, FILE_MODE)
+    fd = _open_nofollow(path, flags | os.O_CREAT | os.O_NONBLOCK, FILE_MODE)
     _check_regular(fd, path)
     try:
         os.set_blocking(fd, True)
@@ -77,9 +89,10 @@ def open_private(path: Path, flags: int) -> int:
 
 def open_regular(path: Path, *, follow: bool = False) -> int:
     """A read-only descriptor for the regular file at ``path``. Never blocks on a FIFO and refuses
-    anything but a regular file (``NotRegularFileError``); a symlink is refused (OSError, ELOOP)
-    unless ``follow``, for a file that is not Contexto's own (a pinned file source)."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | (0 if follow else os.O_NOFOLLOW))
+    anything but a regular file (``NotRegularFileError``), a symlink included unless ``follow``, for a
+    file that is not Contexto's own (a pinned file source)."""
+    flags = os.O_RDONLY | os.O_NONBLOCK
+    fd = os.open(path, flags) if follow else _open_nofollow(path, flags)
     _check_regular(fd, path)
     return fd
 
@@ -121,12 +134,17 @@ def temp_name(path: Path) -> Path:
 
 
 _TEMP = re.compile(r"\..+\.(\d+)\.[0-9a-f]{8}\.tmp")
+# A temporary file lives for milliseconds while it is written. One older than this whose process is gone
+# is left over; the age also covers a writer whose pid this process cannot see (another pid namespace,
+# such as a container sharing the home, or another machine), whose process check would say gone.
+STALE_TEMP_AGE_S = 600
 
 
-def remove_stale_temps(directory: Path) -> int:
+def remove_stale_temps(directory: Path, min_age_s: float = STALE_TEMP_AGE_S) -> int:
     """Remove the temporary files (``temp_name``) in ``directory`` left by processes that no longer
     run, such as one killed between writing a page and removing its temporary name; return how many.
-    A file whose process still runs (or whose id was reused) is left alone."""
+    Only a file modified more than ``min_age_s`` ago whose process is not running is removed; a file
+    whose process still runs (or whose id was reused) is left alone."""
     removed = 0
     try:
         names = os.listdir(directory)
@@ -137,7 +155,8 @@ def remove_stale_temps(directory: Path) -> int:
         if match is None or _alive(int(match.group(1))):
             continue
         try:
-            if stat.S_ISREG(os.stat(Path(directory) / name, follow_symlinks=False).st_mode):
+            st = os.stat(Path(directory) / name, follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode) and time.time() - st.st_mtime > min_age_s:
                 os.unlink(Path(directory) / name)
                 removed += 1
         except OSError:

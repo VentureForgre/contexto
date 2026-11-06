@@ -566,18 +566,22 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   `contexto sessions prune` never deletes it. Stores never follow a symlinked `live.lock`.
 - **File safety (D58):** a session directory must be a real directory. One that is a symlink is
   refused by every command that opens it (the proxy, the launcher, the MCP server, `recall`,
-  `state`, `sessions show`), as `sessions list` leaves it out and prune refuses it. Files in a
-  session are never opened through a symlink, and a FIFO, device or directory in a file's place
-  is refused without blocking: `meta.json`, `epoch.json` and `retained.json` read as absent, a page
+  `state`, `sessions show`), as `sessions list` leaves it out and prune refuses it. A symlinked
+  `CONTEXTO_HOME` works everywhere, and a symlinked `sessions/` everywhere but prune. Files in a
+  session are never opened through a symlink, and a symlink, FIFO, device or directory in a file's
+  place is refused without blocking: `meta.json`, `epoch.json` and `retained.json` read as absent, a page
   as unreadable (`page_unreadable`), the ledger as damaged, `page.key` as a key file error, and
   the log is not written. Every write is whole (a short write continues). A temporary file is
   removed when its write fails (a full disk), and temporary files left by a process that died
-  mid-write are removed when a store opens for writing (`stale_temp_removed`, with the count). A
+  mid-write are removed when a store opens for writing, once they are more than 10 minutes old
+  (`stale_temp_removed`, with the count). A
   log line cut short by a full disk is never joined to the next event, which starts on a new line.
 - **Lone surrogates (D58):** a lone UTF-16 surrogate in a string (which Claude Code does not send,
   and the Messages API refuses) is stored, hashed, counted and written to the MCP client as its
   JSON escape (`\ud83d`), so pages, ledger records and log lines stay valid UTF-8 JSON that reads
-  back to the same string, and nothing raises on it.
+  back to the same string, and nothing raises on it. The CLI writes a character its stdout or
+  stderr cannot encode as the same backslash escape, so `contexto state` and `contexto recall`
+  print such a pin or page.
 - **Pinned text** starts with fixed instruction lines, then lists open obligations, active
   decisions, then verified facts, newest first, each with its id, capped at `pin_budget` (default
   6,000 tokens). The instruction lines must say that earlier turns are paged out and how to reach
@@ -918,8 +922,10 @@ unknown page, never read. Tools:
   server cannot tell which conversation issued a call. Matches in the
   snapshot (a retained entry matches as a page does: every word of the query in its text, and its
   matching lines chosen by the same rule) are listed first, labeled in view with their turn, newest first, as the matching line only, at most 3
-  per reply (the label counts turns as pages do, from 0, so a turn reads the same number paged or in view; the logged span keeps the
-  entry's own `turn`, which counts turn starts from 1; D58) (the newest 3 across the window, the rest counted in one line), charged,
+  per reply (the label is the entry's count of turn starts less one, which is the page numbering, from 0, while every page holds a
+  whole turn; once the bounded fallback has paged carried text, which takes page turn numbers too, or a resync has restarted the
+  CLI's turn count, in-view numbers run behind recent page numbers and can repeat one; no tool takes a turn number; the logged span
+  keeps the entry's own `turn`, which counts turn starts from 1; D58) (the newest 3 across the window, the rest counted in one line), charged,
   skipping the current turn's own question: entries with role `user` in the snapshot's newest
   turn are never matched, since that text is what is being asked, not a
   statement about it (B22; inferred from reviewer-2's zero-spend reach re-check on main 8571095: an offline

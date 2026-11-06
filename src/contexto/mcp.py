@@ -365,7 +365,8 @@ class Server:
 
     def _tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
         name = params["name"]
-        args = params.get("arguments") or {}
+        args = params.get("arguments")
+        args = {} if args is None else args  # [], 0 or false is not an object (D58)
         event: dict[str, Any] = {"event": "mcp_call", "tool": name}
         try:
             if not isinstance(args, dict):

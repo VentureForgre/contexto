@@ -15,10 +15,11 @@ import os
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
-from contexto import cli, mcp
+from contexto import cli, mcp, private
 from contexto.rewrite import Config, RewriteEngine
 from contexto.store import SessionNotFoundError, SessionStore
 from contexto.store.memory import MemoryStore
@@ -100,6 +101,29 @@ def test_a_logged_lone_surrogate_keeps_the_line_valid(home):
 
 def test_a_lone_surrogate_counts_as_its_escape_on_the_wire():
     assert estimate_tokens(LONE) == estimate_tokens("\\ud83d")  # six bytes, as the request carries it
+
+
+def contexto(home, *argv):
+    """The real CLI in a child process, whose stdout and stderr are strict UTF-8 pipes."""
+    env = {**os.environ, "CONTEXTO_HOME": str(home), "PYTHONIOENCODING": "utf-8"}
+    env.pop("CONTEXTO_SESSION", None)
+    return subprocess.run([sys.executable, "-m", "contexto", *argv], capture_output=True, env=env, timeout=60)
+
+
+def test_state_prints_a_pin_holding_a_lone_surrogate(home):
+    store = SessionStore(home, "s1")
+    tool(mcp.Server(store, io.StringIO(), io.StringIO()), "contexto_pin", {"kind": "decision", "text": f"keep {LONE}"})
+    done = contexto(home, "state", "--session", "s1")
+    assert done.returncode == 0 and b"Traceback" not in done.stderr
+    assert b"keep \\ud83d" in done.stdout
+
+
+def test_recall_prints_a_page_holding_a_lone_surrogate(home):
+    store = SessionStore(home, "s1")
+    (pid,) = store.page_out([[{"role": "user", "content": [{"type": "text", "text": f"cut {LONE} here"}]}]], 0)
+    done = contexto(home, "recall", "--session", "s1", pid)
+    assert done.returncode == 0 and b"Traceback" not in done.stderr
+    assert b"cut \\ud83d here" in done.stdout
 
 
 def test_a_lone_surrogate_in_a_diagnostic_does_not_break_stderr(home):
@@ -228,18 +252,21 @@ def test_an_event_after_a_cut_log_line_starts_its_own_line(home, monkeypatch):
     assert [e["event"] for e in events(store, "before")] == ["before"]
 
 
-def test_temporary_files_of_dead_processes_are_removed_when_a_store_opens(home):
+def test_old_temporary_files_of_dead_processes_are_removed_when_a_store_opens(home):
     store = SessionStore(home, "s1")
     dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True)
     pid = int(dead.stdout)
+    old = time.time() - private.STALE_TEMP_AGE_S - 60
     stale = store.pages_dir / f".pg_0123456789abcdef.json.{pid}.0a1b2c3d.tmp"
-    stale.write_bytes(b"{")
-    mine = store.pages_dir / f".pg_0123456789abcdef.json.{os.getpid()}.0a1b2c3d.tmp"
-    mine.write_bytes(b"{")  # a live process's write in progress
+    mine = store.pages_dir / f".pg_0123456789abcdef.json.{os.getpid()}.0a1b2c3d.tmp"  # a live process's
+    fresh = store.dir / f".meta.json.{pid}.0123abcd.tmp"  # a writer this process cannot see, mid-write
     other = store.dir / "notes.tmp"
-    other.write_bytes(b"x")
+    for path in (stale, mine, fresh, other):
+        path.write_bytes(b"{")
+    for path in (stale, mine, other):
+        os.utime(path, (old, old))
     reopened = SessionStore(home, "s1")
-    assert not stale.exists() and mine.exists() and other.exists()
+    assert not stale.exists() and mine.exists() and fresh.exists() and other.exists()
     assert events(reopened, "stale_temp_removed")[-1]["files"] == 1
 
 
@@ -284,11 +311,18 @@ def planted(home, name, kind):
     store.set_retained(1, 0, [])
     path = store.pages_dir / f"{pid}.json" if name == "page" else store.dir / name
     path.unlink(missing_ok=True)
-    os.mkfifo(path) if kind == "fifo" else path.mkdir()
+    if kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "directory":
+        path.mkdir()
+    else:  # a symlink to a file outside the session, which is never followed
+        target = home / f"outside-{name}"
+        target.write_bytes(b"{}\n")
+        path.symlink_to(target)
     return pid
 
 
-@pytest.mark.parametrize("kind", ["fifo", "directory"])
+@pytest.mark.parametrize("kind", ["fifo", "directory", "symlink"])
 @pytest.mark.parametrize("name", ["meta.json", "ledger.jsonl", "log.jsonl", "retained.json", "epoch.json", "page"])
 def test_a_fifo_or_directory_in_a_files_place_never_blocks_or_crashes(home, capsys, name, kind):
     pid = planted(home, name, kind)
@@ -308,6 +342,15 @@ def test_a_fifo_or_directory_in_a_files_place_never_blocks_or_crashes(home, caps
                  ["sessions", "list"]):
         finishes(lambda argv=argv: cli.main(argv))
     assert "Traceback" not in capsys.readouterr().err
+
+
+def test_a_symlinked_ledger_degrades_like_a_damaged_one(home, capsys):
+    planted(home, "ledger.jsonl", "symlink")
+    store = SessionStore(home, "s1")  # the proxy and the MCP server still open the session
+    result = tool(mcp.Server(store, io.StringIO(), io.StringIO()), "contexto_pin", {"kind": "decision", "text": "x"})
+    assert result["isError"] is True and text_of(result).startswith("Not recorded: this session's ledger is damaged")
+    assert cli.main(["sessions", "list", "--json"]) == 0 and json.loads(capsys.readouterr().out)[0]["records"] is None
+    assert (home / "outside-ledger.jsonl").read_bytes() == b"{}\n"
 
 
 def test_a_fifo_page_key_is_refused_at_once(home, capsys):
@@ -379,6 +422,13 @@ def test_an_id_that_is_not_a_string_number_or_null_is_an_invalid_request(msg_id)
     server = mcp.Server(MemoryStore("s1"), io.StringIO(), io.StringIO())
     reply = server.handle_line(json.dumps({"jsonrpc": "2.0", "id": msg_id, "method": "ping"}))
     assert reply["id"] is None and reply["error"]["code"] == mcp.INVALID_REQUEST
+
+
+@pytest.mark.parametrize("arguments", [[], 0, False, "x"])
+def test_arguments_that_are_not_an_object_are_a_tool_error(arguments):
+    server = mcp.Server(MemoryStore("s1"), io.StringIO(), io.StringIO())
+    result = call(server, "tools/call", {"name": "contexto_state", "arguments": arguments})["result"]
+    assert result["isError"] is True and text_of(result) == "arguments must be an object"
 
 
 @pytest.mark.parametrize("params", [[], 0, "x", False])
