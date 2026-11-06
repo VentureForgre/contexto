@@ -854,7 +854,8 @@ def test_continue_that_lands_in_another_conversation_is_reported_at_exit(env, up
     (["-n", "-c"], None), (["-nmine", "-c"], ("continue", None)), (["-pz", "-c"], ("continue", None)),
     # D59 (review of #245): -h is Commander's help option, which a cluster does not look up; a lone "-" is a
     # session name; hidden options that take a value, read from the 2.1.314 and 2.1.318 binaries.
-    (["-hc"], None), (["-ch"], ("continue", None)), (["-r", "-"], ("resume", "-")), (["--resume", "-"], ("resume", "-")),
+    (["-hc"], None), (["-ch"], ("continue", None)), (["-r", "-"], ("resume", "-")),
+    (["--resume", "-"], ("resume", "-")),
     (["--thinking", "--continue"], None), (["--task-budget", "-c"], None), (["--workload", "-r", "x"], None),
     (["--session-began-as-copy", "-c"], None),
 ])

@@ -1571,7 +1571,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     top results of `search("prod password")` were the attacker's, and the victim's next request
     logged `main: false`. The proxy also forwarded CORS preflights and relayed upstream's CORS
     headers. Rule: a request with an `Origin` header, or without exactly one `Host` naming
-    `127.0.0.1:<port>` or `localhost:<port>`, gets a local 403 and `request_refused`. Claude Code
+    `127.0.0.1:<port>` or `localhost:<port>`, gets a local 403 and `request_refused` (D59 accepts any
+    port or none). Claude Code
     2.1.314 and Codex 0.166.0 send neither (QA header survey); both still answered through
     `contexto run` against a stub with no refusal. `localhost` is accepted because a user may point a
     CLI at it; IPv6 is not, since the proxy does not listen there. The body of a refused request is
@@ -1919,14 +1920,20 @@ the owner's delegation. Open decisions are listed at the end with the options an
     tool call (the proxy's `tool_calls` is False, not unknown), no response of main's that may have
     released one (True or unknown, whichever request it answers) arrived after it, and main has
     sent no request since. A late or duplicate response, such as the end of a request the CLI gave
-    up on and retried, never makes main idle: with "its latest response" (round 3), that late end
-    made a headless lead idle while its Bash ran a nested `claude -p`, the child took main, and the
-    lead's next request was estimated at 4,775 tokens against a 4,000 bound (reviewer A round 4).
-    Updating idle from the newest request's response alone is not enough: when R1's late end comes
-    first it is the attributed one, and the retry's own response, releasing the Bash, is then
-    unattributed. So any response that may hold a client call marks main busy, whichever request
-    it answers, and only the newest request's response without one marks it idle; the test runs
-    both orders and a duplicate response. Compaction
+    up on and retried, must not leave main idle while a call is out: with "its latest response"
+    (round 3), that late end made a headless lead idle while its Bash ran a nested `claude -p`, the
+    child took main, and the lead's next request was estimated at 4,775 tokens against a 4,000 bound
+    (reviewer A round 4). Updating idle from the newest request's response alone is not enough: when
+    R1's late end comes first it is the attributed one, and the retry's own response, releasing the
+    Bash, is then unattributed. So any response that may hold a client call marks main busy,
+    whichever request it answers, and only the newest request's response without one marks it idle;
+    the test runs both orders and a duplicate response. One short window remains (reviewer A, round
+    5): when R1's late end comes first, main is idle until the retry's response arrives. A nested
+    child cannot start in it, since it runs in a call that response releases; only a session already
+    running can take main then (a `claude -p` the lead backgrounded earlier, or a call Claude Code
+    started before `message_stop` on the `hold_skipped` path), and the lead's calls are then charged
+    against its side room, so the bound holds. Closing it would need a count of the responses still
+    outstanding per request, which would leave main busy after any response that never arrives. Compaction
     keeps the session id, which a nested child never shares, so `compacted` needs no idle check. In
     the interactive CLI the idle check is not applied, since after Esc main's latest response can
     still show a call that was cancelled and never runs. The quiet check means two sessions both sending trade main at most once: the one that lost main by
@@ -1935,7 +1942,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     the quiet check at every switch and follow the one prompted (10 switches in 10 alternations,
     reviewer A round 2), each switch logged. Within one Claude Code process (`/clear`, `/resume`,
     `/compact`) the switch is at the process's own next prompt, when its old conversation has no
-    call left to run. Two interactive processes on one proxy are not a supported setup, and there
+    call left to run; an auto-compaction inside a tool loop switches at the loop's next request
+    instead, once the summary request was answered with no client call (D59). Two interactive processes on one proxy are not a supported setup, and there
     the bound holds only while the session losing main is idle: a switch during its pending tool
     call charges that call against the new main's room (reviewer A round 3: 1,884 tokens against a
     500-token room). The turn-start rule on main opens the same window. Main is decided once per request, before
@@ -2169,6 +2177,74 @@ the owner's delegation. Open decisions are listed at the end with the options an
     append-only, so one such pin broke `state` for that session (reviewer B, PR #235). `cli.main`
     now sets stdout and stderr to write an unencodable character as its backslash escape, as the
     MCP server does; text that encodes is unchanged.
+
+- **D59. Review follow-ups from the 2026-11-05 fix round.** Claude, 2026-11-06, under D0; contract
+  change (Stack, rule 8, the store's file safety, the MCP errors, main selection, the version check,
+  the `contexto run claude` lifecycle). The low findings reviewers left on PRs #235, #236, #238, #239,
+  #244 and #245, each reproduced first by a test that fails on main 2388752. Zero spend: loopback
+  stubs, fake CLIs, and the 2.1.314 and 2.1.318 binaries read as files.
+  - **Host check by name (#239).** D53 required the proxy's own port in `Host`. An `ssh -R 9000:...`
+    forward sends `Host: localhost:9000`, a proxy on port 80 gets `Host: 127.0.0.1` from clients that
+    omit the default port, and both got 403. The port added nothing: a browser cannot put another port
+    in `Host` on a connection to this socket, and a DNS-rebound page fails on the name. Rule: exactly
+    one `Host` naming `127.0.0.1` or `localhost`, with any port of up to five digits or none; an
+    `Origin` is still refused. `localhost.`, `evil@127.0.0.1` and a non-numeric port are still
+    refused. Not covered: `host.docker.internal` from a devcontainer is refused for its name, as before.
+  - **No abort after the last event (#239).** A client that closes once it has `message_stop`, before
+    the chunk terminator, was logged `client_aborted: true` (reviewer A: 5 of 5 runs with the
+    terminator 0.3 s late). Rule: the relay records when the stream's last event (`message_stop`, or
+    a Responses end event) has been written to the client, with nothing still held; a close after
+    that still shuts upstream but is not an abort. Log-only: nothing in `src` reads the flag.
+  - **The choose.lock wait (#245).** Ctrl+C while another launch held `choose.lock` printed a
+    `KeyboardInterrupt` traceback, and the wait of up to 5 s, then the unserialized choice, were
+    silent. Rule: past 1 s the launcher prints "waiting for another contexto launch to choose its
+    session"; at the timeout it says it chooses without the lock and that two launches may pick the
+    same session; Ctrl+C prints `contexto: interrupted` and exits 130, as the version check does,
+    with the lock descriptor closed. Measured with a real `contexto run claude -c` subprocess and the
+    lock held by the test: on main a traceback and death by SIGINT, now exit 130 with no traceback.
+  - **Claude Code options (#245).** Read from the 2.1.314 and 2.1.318 binaries: the main command's
+    chain runs from `.name("claude")` to `run_main_options_built`, and declares 79 options with a
+    required value in 2.1.314 and 80 in 2.1.318 (adding `--session-began-as-copy`). 36 of them were
+    missing from the skip list, among them `--thinking`, `--thinking-display`, `--task-budget`,
+    `--fast-mode`, `--workload`, `--agent-name` and `--sdk-url`, so `--thinking --continue` read as a
+    continue where Claude Code takes `--continue` as the value. The list is now exactly that set.
+    `-h` is Commander's `helpOption`, which a cluster does not look up: `claude -hc` is an unknown
+    option and `claude -ch` prints help (reviewer A, 2.1.318), so `h` is no longer a flag and ends a
+    cluster; `-ch` still reads as a continue, which is harmless since Claude Code then only prints
+    help. Commander's dash-like test is a `-` followed by more, so `-r -` resumes the session named
+    `-`; Contexto read it as the picker.
+  - **One `codex --version` (#236).** `run_codex` read the version for the `--no-daemon` gate and the
+    version check read it again. With a `--version` that hangs, a `codex exec` launch through a stub
+    took 6.02 s on main and takes 3.51 s now (two runs each). The check takes the version already
+    read.
+  - **Damaged lock files (#235).** A symlink, FIFO or directory at `meta.lock` made recall, search and
+    state answer "an internal error ... Try once more", which cannot succeed, and `contexto run` named
+    only a path; at `live.lock` no store opened. Rule: both raise `LockFileDamagedError`, a
+    `NotRegularFileError`, whose message names the file and says to delete it; the MCP server's
+    reply for a `meta.lock` says which file is damaged and that trying again will not help, and the
+    `mcp_call` entry names the file. The session is still not opened with either damaged, on purpose:
+    without `meta.lock` the room charges are not serialized, and without `live.lock` prune would take
+    a running session for an idle one. Deleting the file is the whole repair (tested). A pin still
+    works with a damaged `meta.lock`, since it writes no metadata.
+  - **Auto-compaction inside a tool loop (#238).** When Claude Code auto-compacts between a released
+    tool call and its result, the compacted conversation's first request is the summary, a role
+    `system` message, then that `tool_use` and its result: no turn start, so `compacted` waited for
+    the next prompt and the loop's Contexto calls were charged against the old conversation's room
+    as published after the summary request, about 0 near the bound. Engine repro (bound 4,000, real
+    input 3,600 then 3,700): on main the loop's request is side and `contexto_state` returns 0
+    characters, `turn_budget: spent`; now it takes main (`compacted`) and returns the pin (1,413
+    characters, room left 2,258). Rule: at a request with no turn start only the `compacted` rule is
+    asked, and only when main is idle, that is, main's newest request (the summary request) was
+    answered with no client tool call; so no call of the old conversation is outstanding to be
+    charged to the new room. When the summary's response may hold a call (unknown) or is unanswered,
+    the handover waits for the next prompt as before. A subagent, another session or another
+    entrypoint never qualifies, as at a turn start.
+  - **Text.** D50's "never makes main idle" now names the window reviewer A found (a late end that
+    arrives first leaves main idle until the retry's response), and the comment in `_observe_usage`
+    says the same. The test of a response without an input count (#244) made the conversation busy
+    only from a fresh request, which is already busy, so a skipped busy mark went unnoticed; it now
+    makes main idle by a complete response first. With the idle update moved after the early return,
+    the new test fails in its True and None cases; the old one failed only in its False case.
 
 ## Open decisions
 
