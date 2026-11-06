@@ -1256,6 +1256,59 @@ the owner's delegation. Open decisions are listed at the end with the options an
     role `system` text, so a one-reminder queued prompt placed after other text there (for example a
     nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
     (reviewer B, PR #230 round 2).
+- **D53. The proxy serves only the local CLI, and stops upstream when the CLI goes away.** Claude,
+  2026-11-05, under D0; contract change (Stack, rule 8, the stream hold). From the QA run of 2026-11-05 on
+  main 4e2c4cd (reports security 1, verify-security A, proxy-robustness 2, 3 and 7, verify-proxy 1,
+  2, 4 and 5, suite F1). All measurements at zero spend, against loopback stubs.
+  - **Host and Origin.** The proxy took any request on its port. A page served from localhost, or
+    from anywhere in a browser without Chrome's Local Network Access, could scan the ephemeral
+    ports (all 16,361 in 1,042 ms), POST `text/plain` with no preflight, and have the engine treat
+    it as a conversation: in the QA proof of concept the store went from 25 to 79 pages, all five
+    top results of `search("prod password")` were the attacker's, and the victim's next request
+    logged `main: false`. The proxy also forwarded CORS preflights and relayed upstream's CORS
+    headers. Rule: a request with an `Origin` header, or without exactly one `Host` naming
+    `127.0.0.1:<port>` or `localhost:<port>`, gets a local 403 and `request_refused`. Claude Code
+    2.1.314 and Codex 0.166.0 send neither (QA header survey); both still answered through
+    `contexto run` against a stub with no refusal. `localhost` is accepted because a user may point a
+    CLI at it; IPv6 is not, since the proxy does not listen there. The body of a refused request is
+    read before the 403, because closing on unread bytes sends a reset that can discard the answer.
+    A per-launch secret in the base URL path would be stronger, but needs launcher and Codex config
+    changes, and the header check already stops every browser path. `Sec-Fetch-*` is not checked:
+    it would only add no-cors GETs, which are never transformed and whose answers a page cannot read.
+  - **Client gone.** The proxy noticed a client had left only when a write failed, and while it
+    waits for the response head or holds a tool call it writes nothing. Esc during a held tool
+    input therefore let upstream generate, and bill, to the end. Measured with the real CLIs
+    interrupted 3 s into a 40 s held stream (160 deltas 0.25 s apart) through `contexto proxy`:
+    on main, upstream kept its socket 38.05 s after the interrupt and sent all 164 events, for both
+    `claude -p` and `codex exec`. With this change, 0.21 s and 0.23 s and 15 events, close to the
+    0.13 s and 0.16 s the QA run measured with the CLIs talking to upstream directly. Rule: each
+    forwarded request has a watch thread that polls the client socket every 0.05 s (`poll` and a
+    one-byte `MSG_PEEK`, so nothing is consumed) from the upstream connect to the end of the relay.
+    When it sees a close or a reset, it shuts the upstream socket, so the blocked read returns at
+    once, and the entry is logged `client_aborted: true`. A byte from the client (a pipelined
+    request) ends the watch. A client that half-closes its sending side while it still reads now
+    counts as gone; neither CLI does that, and nginx treats it the same way. A request cut off
+    before the response head now gets its `request` entry, with `upstream_phase`, its transform
+    events and its epoch; before, it got only `proxy_error`, and the upstream socket was left to the
+    garbage collector. The response head is written inside the relay's `try`, and the watch closes
+    the upstream connection on every path, so a failed head write or an internal error after
+    upstream answered no longer leaks that socket.
+  - **Early answer.** An upstream that answers 413 after the head and closes without reading a body
+    over about 1 MB made the send fail with `BrokenPipeError`. Rule 8 then resent the whole body
+    and answered a local 502, and Claude Code retried that 502. On main, with real `claude -p`, a
+    2 MB prompt and such a stub, the 60 s cap stopped a run that had drawn 14 upstream 413s and
+    forwarded none; the QA run had measured 11 client requests, 44 MB and 173 s ending in "API
+    Error: 502". Rule: after a `BrokenPipeError` or `ConnectionResetError` in `send`, the proxy reads
+    the answer upstream already sent (waiting at most 1 s, so a timeout or a silent close still
+    goes to the retry) and forwards it, logging `upstream_answered_early`. With this change, in 4
+    runs, Claude Code got the 413 in 0.2 to 0.3 s from one upstream request and printed its own
+    "Request too large" advice. In 3 of those runs the send failed and the early path answered; in
+    1 the body was written before the stub closed. Over TLS the answer is read the same way, but a
+    TLS upstream was not tested.
+  - **Small fixes.** The listen backlog goes from socketserver's 5 to 128: at 5, a burst of 200
+    connects lost 13 to 21% to ETIMEDOUT, and at 128 none (QA measurement). A second Ctrl+C during
+    `stop()`'s 2 s drain printed a `KeyboardInterrupt` traceback; it now ends the wait, and the
+    requests still in flight are logged as `proxy_stop_incomplete`.
 
 ## Open decisions
 
