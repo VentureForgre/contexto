@@ -77,6 +77,7 @@ from contexto.private import affinity_salt
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import SessionStore
 from contexto.store.prune import discard_new_session
+from contexto.store.sessions import named, starting_with
 from contexto.toolcheck import denied_tools_message, missing_tools_message
 from contexto.upstream import resolve_upstream
 
@@ -221,7 +222,12 @@ class NoticeLog:
 
 def open_session(home: Path, session_id: str, workdir: Path) -> Any:
     """Create the session and record the directory claude runs in, before claude starts (lane B
-    checks file sources against it for staleness)."""
+    checks file sources against it for staleness). An id that is not a session but starts existing ones
+    is refused (D57): the readers take a prefix, so a new session under it would hide the one meant."""
+    starts = [] if session_dir(home, session_id).exists() else starting_with(home, session_id)
+    if starts:
+        raise LaunchError(f"--session {session_id!r} is not a session but the start of {named(starts)}; give the "
+                          "full id to resume one, or a different id for a new session", EXIT_USAGE)
     store = SessionStore(home, session_id)
     store.set_workdir(workdir)
     return store
@@ -277,6 +283,11 @@ def claude_argv(claude: str, settings: Path, mcp: Path, claude_args: list[str]) 
     reads the next argument as a config file, and ``contexto run claude "prompt"`` failed with "MCP
     config file not found". The ``=`` form ends the option at its own token."""
     return [claude, f"--settings={settings}", f"--mcp-config={mcp}", *claude_args]
+
+
+def session_env(session_id: str, env: dict[str, str] | None = None) -> dict[str, str]:
+    """``env`` (default the process environment) with ``CONTEXTO_SESSION`` set to the launched session."""
+    return {**(os.environ if env is None else env), "CONTEXTO_SESSION": session_id}
 
 
 def exit_code(returncode: int) -> int:
@@ -480,7 +491,9 @@ def _run(options: LaunchOptions, stderr) -> int:
             print(f"contexto: {warning}", file=stderr, flush=True)
             store.log({"event": "window_budget_warning", "bound": options.bound,
                        "assumed_overhead": assumed_overhead()})
-        code = run_child(claude_argv(claude, settings, mcp, options.claude_args), stderr=stderr)
+        # The CLI's shell commands (`contexto state`, `contexto search`) then name this session (D57).
+        code = run_child(claude_argv(claude, settings, mcp, options.claude_args), session_env(session_id),
+                         stderr=stderr)
         return code
     finally:
         proxy.stop()

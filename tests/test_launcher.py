@@ -50,7 +50,8 @@ if args == ["--version"]:  # contexto run's version check (D38)
         time.sleep(30)
     print(os.environ.get("FAKE_VERSION", "2.1.302 (Claude Code)"))
     sys.exit(0)
-record = {"argv": args, "pid": os.getpid(), "env_base_url": os.environ.get("ANTHROPIC_BASE_URL")}
+record = {"argv": args, "pid": os.getpid(), "env_base_url": os.environ.get("ANTHROPIC_BASE_URL"),
+          "env_session": os.environ.get("CONTEXTO_SESSION")}
 for flag, key in (("--settings=", "settings"), ("--mcp-config=", "mcp")):
     path = next(a for a in args if a.startswith(flag))[len(flag):]  # the launcher's one-token form
     record[key + "_path"] = path
@@ -362,6 +363,27 @@ def test_a_small_bound_above_the_floor_is_accepted_with_the_warning(env, upstrea
     proc = launch(env, "--upstream", upstream, "--bound", "25001", "--session", "small", "claude", cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == 0 and "window budget" in err
+
+
+def test_a_session_id_that_only_starts_existing_ones_is_refused(env, upstream, tmp_path):
+    """D57, reviewer B on PR #241: `--session 5238` made a new empty session that the readers then preferred
+    (an exact id wins over a prefix) to the session 52385048... the user meant."""
+    sessions = Path(env["CONTEXTO_HOME"]) / "sessions"
+    for sid in ("52385048ed0d", "5238ffff"):
+        open_session(Path(env["CONTEXTO_HOME"]), sid, tmp_path)
+    proc = launch(env, "--upstream", upstream, "--session", "5238", "claude", "-p", "hi", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE and "Traceback" not in err
+    assert "--session '5238' is not a session but the start of 2 sessions: 52385048ed0d, 5238ffff" in err
+    assert sorted(p.name for p in sessions.iterdir()) == ["52385048ed0d", "5238ffff"]
+    assert not Path(env["FAKE_RECORD"]).exists()
+    # A full id is resumed, and a new id that no session starts with is created; claude is told which.
+    for sid in ("52385048ed0d", "52385048ed0d-2"):
+        proc = launch(env, "--upstream", upstream, "--session", sid, "claude", "-p", "hi", cwd=tmp_path)
+        proc.communicate(timeout=30)
+        assert proc.returncode == 0
+        assert json.loads(Path(env["FAKE_RECORD"]).read_text())["env_session"] == sid
+    assert sorted(p.name for p in sessions.iterdir()) == ["52385048ed0d", "52385048ed0d-2", "5238ffff"]
 
 
 def test_claude_version_runs_without_a_session_or_proxy(env, tmp_path):

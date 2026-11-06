@@ -127,22 +127,41 @@ def list_sessions(home: Path) -> list[SessionInfo]:
 AMBIGUOUS_SHOWN = 5  # matching ids an ambiguous-prefix error names
 
 
+def check_home(home: Path) -> None:
+    """SessionNotFoundError when the data directory exists but is not a directory: one message for every
+    reader (D57), rather than "no sessions under <file>/sessions" or a raw ``[Errno 20]``."""
+    if Path(home).exists() and not Path(home).is_dir():
+        raise SessionNotFoundError(f"{home} is not a directory (check $CONTEXTO_HOME)")
+
+
+def starting_with(home: Path, prefix: str) -> list[str]:
+    """Ids of the sessions that start with ``prefix`` and are not ``prefix`` itself, sorted."""
+    return sorted(i for i in session_ids(home) if i.startswith(prefix) and i != prefix)
+
+
+def named(ids: list[str]) -> str:
+    """``session <id>``, or ``<n> sessions: <id>, <id>, ...`` (at most ``AMBIGUOUS_SHOWN`` ids)."""
+    if len(ids) == 1:
+        return f"session {ids[0]}"
+    return (f"{len(ids)} sessions: " + ", ".join(ids[:AMBIGUOUS_SHOWN])
+            + (", ..." if len(ids) > AMBIGUOUS_SHOWN else ""))
+
+
 def resolve_session(home: Path, given: str, how: str | None = None) -> str:
     """The session ``given`` names: that exact id, else the one session id that starts with it (D57).
     SessionNotFoundError for an invalid id, no match, or a prefix of several ids."""
+    check_home(home)
     try:
         path = session_dir(home, given)
     except ValueError as e:
         raise SessionNotFoundError(str(e)) from e
     if path.is_dir():
         return given
-    matches = sorted(i for i in session_ids(home) if i.startswith(given))
+    matches = starting_with(home, given)
     if len(matches) == 1:
         return matches[0]
     if matches:
-        shown = ", ".join(matches[:AMBIGUOUS_SHOWN]) + (", ..." if len(matches) > AMBIGUOUS_SHOWN else "")
-        raise SessionNotFoundError(f"session id prefix {given!r} matches {len(matches)} sessions: {shown}; "
-                                   "give more characters")
+        raise SessionNotFoundError(f"session id prefix {given!r} matches {named(matches)}; give more characters")
     raise SessionNotFoundError(f"no session {given!r} under {Path(home) / 'sessions'}"
                                + (f" (from {how})" if how else ""))
 
@@ -152,13 +171,30 @@ def is_empty(info: SessionInfo) -> bool:
     return info.pages == 0 and info.records == 0
 
 
+def in_use(home: Path, session_id: str) -> bool:
+    """Whether another process holds the session open (its ``live.lock``, as prune probes it, without the
+    idle grace): a running proxy or MCP server, so the session is live even before it pages anything."""
+    from contexto.store.prune import SessionLiveError, check_not_live  # prune imports this module
+
+    try:
+        check_not_live(home, session_id, now=0.0, grace=float("-inf"))
+    except SessionLiveError:
+        return True
+    except (SessionNotFoundError, ValueError, OSError):
+        return False
+    return False
+
+
 def select_session(home: Path, explicit: str | None) -> tuple[str, str]:
     """(session id, how it was chosen). Raises SessionNotFoundError with a clear message.
 
     ``--session`` (even an empty one, which is refused as invalid), else a non-empty ``CONTEXTO_SESSION``,
-    each an exact id or a unique prefix; else the most recently active session with pages or ledger
-    records, so a failed launch or a session that never paged does not hide the last one with content;
-    else, when every session is empty, the most recent one."""
+    each an exact id or a unique prefix; else the most recently active session that has pages or ledger
+    records or is in use by another process, so a failed launch's empty session does not hide the last
+    one with content while a live session that has not paged yet is still found; else, when every
+    session is empty and idle, the most recent one. ``contexto run`` sets ``CONTEXTO_SESSION`` for the
+    CLI it runs, so commands the CLI runs name its session in any case."""
+    check_home(home)
     if explicit is not None:
         how, sid = "--session", explicit
     elif os.environ.get("CONTEXTO_SESSION"):
@@ -167,12 +203,8 @@ def select_session(home: Path, explicit: str | None) -> tuple[str, str]:
         sessions = list_sessions(home)
         if not sessions:
             raise SessionNotFoundError(f"no sessions under {Path(home) / 'sessions'}")
-        if not is_empty(sessions[0]):
-            return sessions[0].id, "most recent"
-        filled = next((s for s in sessions if not is_empty(s)), None)
-        if filled is None:
-            return sessions[0].id, "most recent"
-        return filled.id, "most recent with pages or pins"
+        chosen = next((i for i, s in enumerate(sessions) if not is_empty(s) or in_use(home, s.id)), 0)
+        return sessions[chosen].id, "most recent" if chosen == 0 else "most recent with pages or pins, or in use"
     return resolve_session(home, sid, how), how
 
 

@@ -191,15 +191,12 @@ def test_a_unique_prefix_names_a_session_everywhere(home, capsys, monkeypatch):
     code, _, err = run(capsys, "state")
     assert code == 0 and err.strip() == "session 7f3a91c2 (CONTEXTO_SESSION)"
     monkeypatch.delenv("CONTEXTO_SESSION")
-    code, out, _ = run(capsys, "sessions", "prune", "--session", "7f3a")
-    assert code == 0 and "7f3a91c2" in out and "Dry run" in out
 
 
 def test_an_ambiguous_prefix_is_an_error_naming_the_matches(home, capsys):
     make(home, "7f3a01", 1_000_000)
     make(home, "7f3a02", 1_000_000)
-    for argv in (["state", "--session", "7f3a"], ["sessions", "show", "7f3a"],
-                 ["sessions", "prune", "--session", "7f3a", "--yes"]):
+    for argv in (["state", "--session", "7f3a"], ["sessions", "show", "7f3a"]):
         code, out, err = run(capsys, *argv)
         assert code == 1 and "Traceback" not in err
         assert "session id prefix '7f3a' matches 2 sessions: 7f3a01, 7f3a02; give more characters" in err
@@ -301,10 +298,10 @@ def test_the_default_session_skips_empty_ones(home, capsys):
     make(home, "pins-only", 500_000, prompts=(), pins=1)
     make(home, "empty-newest", 3_000_000, prompts=())
     code, _, err = run(capsys, "recall", pid)
-    assert code == 0 and err.strip() == "session with-pages (most recent with pages or pins)"
+    assert code == 0 and err.strip() == "session with-pages (most recent with pages or pins, or in use)"
     shutil.rmtree(home / "sessions" / "with-pages")
     code, _, err = run(capsys, "state")
-    assert code == 0 and err.strip() == "session pins-only (most recent with pages or pins)"
+    assert code == 0 and err.strip() == "session pins-only (most recent with pages or pins, or in use)"
 
 
 def test_the_default_is_the_newest_session_when_all_are_empty(home, capsys):
@@ -341,3 +338,121 @@ def test_python_dash_m_help_runs_without_a_store(tmp_path):
                           env={**os.environ, "CONTEXTO_HOME": str(tmp_path / "h")}, timeout=60)
     assert proc.returncode == 0 and "WORDS" in proc.stdout
     assert not Path(tmp_path / "h").exists()
+
+
+# review round 1 (reviewer B, PR #241)
+
+
+@pytest.fixture
+def fake_codex(tmp_path, monkeypatch):
+    """A `codex` on PATH that must never run: these launches are refused before it starts."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "codex"
+    fake.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(99)\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+def test_run_codex_refuses_a_session_id_that_only_starts_existing_ones(home, capsys, fake_codex):
+    make(home, "52385048ed0d", 1_000_000)
+    code, _, err = run(capsys, "run", "--session", "5238", "--codex-auth", "chatgpt", "codex", "exec", "hi")
+    assert code == 2 and "Traceback" not in err
+    assert ("--session '5238' is not a session but the start of session 52385048ed0d; give the full id to resume "
+            "one, or a different id for a new session") in err
+    assert sessions(home) == ["52385048ed0d"]
+
+
+def test_run_codex_refuses_an_empty_session_id(home, capsys, fake_codex):
+    code, _, err = run(capsys, "run", "--session", "", "--codex-auth", "chatgpt", "codex", "exec", "hi")
+    assert code == 2 and "invalid session id: ''" in err
+    assert sessions(home) == []
+
+
+def test_sessions_show_json_marks_a_cut_page_list(home, capsys):
+    make(home, "s1", 1_000_000, prompts=[f"q {i}" for i in range(22)])
+    _, out, _ = run(capsys, "sessions", "show", "s1", "--json")
+    summary = json.loads(out)
+    assert len(summary["page_list"]) == 20 and summary["page_list_truncated"] is True and summary["pages"] == 22
+    _, out, _ = run(capsys, "sessions", "show", "s1", "--json", "--all")
+    assert json.loads(out)["page_list_truncated"] is False
+
+
+def test_a_home_that_is_a_file_gets_one_message_everywhere(tmp_path, monkeypatch, capsys):
+    (tmp_path / "file").write_text("")
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "file"))
+    monkeypatch.delenv("CONTEXTO_SESSION", raising=False)
+    expected = f"contexto: error: {tmp_path / 'file'} is not a directory (check $CONTEXTO_HOME)\n"
+    for argv in (["sessions", "list"], ["sessions", "show", "x"], ["sessions", "prune", "--keep", "1"],
+                 ["sessions", "prune", "--session", "x"], ["state"], ["search", "w"],
+                 ["recall", "pg_0000000000000000"], ["state", "--session", "x"]):
+        code, out, err = run(capsys, *argv)
+        assert (code, out, err) == (1, "", expected), argv
+
+
+# review round 1 (reviewer A, PR #241)
+
+
+@pytest.mark.parametrize("extra", [[], ["--yes"], ["--yes", "--json"], ["--older-than", "1d", "--yes"]])
+def test_prune_needs_the_full_id_and_never_deletes_by_prefix(home, capsys, extra):
+    make(home, "work-old", 1_000_000)
+    make(home, "abc123", 1_000_000)
+    code, out, err = run(capsys, "sessions", "prune", "--session", "w", *extra)
+    assert code == 2 and "Traceback" not in err
+    message = "--session 'w' is not a session but the start of session work-old; prune needs the full id"
+    assert message in err
+    if "--json" in extra:
+        assert json.loads(out) == {"error": message}
+    assert sessions(home) == ["abc123", "work-old"]
+    code, out, _ = run(capsys, "sessions", "prune", "--session", "work-old", "--yes")
+    assert code == 0 and "removed work-old" in out and sessions(home) == ["abc123"]
+    code, _, err = run(capsys, "sessions", "prune", "--session", "work-old", "--yes")  # run twice: harmless
+    assert code == 1 and "no session 'work-old'" in err and sessions(home) == ["abc123"]
+
+
+def test_a_live_session_that_has_not_paged_is_the_default(home, capsys):
+    make(home, "oldpages", 1_000_000, pins=1)
+    live = SessionStore(home, "fresh-live")  # held open, as a running proxy holds it
+    live.log({"event": "request", "status": 200})
+    code, out, err = run(capsys, "state")
+    assert code == 0 and err.strip() == "session fresh-live (most recent)" and "duty 0" not in out
+    make(home, "junk-newer", 9_000_000_000, prompts=())  # an idle empty session after it
+    code, _, err = run(capsys, "search", "hello")
+    assert code == 0 and err.splitlines()[0] == "session fresh-live (most recent with pages or pins, or in use)"
+    live.release()
+    code, _, err = run(capsys, "state")
+    assert err.strip() == "session oldpages (most recent with pages or pins, or in use)"
+
+
+def test_run_codex_tells_codex_its_session(home, capsys, tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    seen = tmp_path / "seen"
+    fake = bin_dir / "codex"
+    fake.write_text(f"#!{sys.executable}\nimport os\nopen({str(seen)!r}, 'w').write(os.environ['CONTEXTO_SESSION'])\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    code, _, err = run(capsys, "run", "--no-version-check", "--session", "cx1", "--codex-key-helper", "echo k",
+                       "--codex-upstream", "http://127.0.0.1:9/v1", "codex", "exec", "hi")
+    assert code == 0, err
+    assert seen.read_text() == "cx1"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
+def test_unreadable_pages_are_one_line_errors(home, capsys):
+    store, _ = make(home, "x", 1_000_000)
+    store.pages_dir.chmod(0)
+    try:
+        code, out, err = run(capsys, "sessions", "show", "x")
+        assert code == 1 and "Traceback" not in err and out.startswith("Session: x\n")
+        assert "contexto: error: the pages of session x cannot be read: " in err
+        code, out, err = run(capsys, "sessions", "show", "x", "--json")
+        assert code == 1 and json.loads(out)["page_list"] is None
+        code, out, err = run(capsys, "search", "hello")
+        assert code == 1 and out == "" and "Traceback" not in err
+        assert "contexto: error: the pages of session x cannot be read: " in err
+        code, out, err = run(capsys, "state")
+        assert code == 1 and out.startswith("No pinned records.") and "paged out" not in out
+        assert "contexto: error: the pages of session x cannot be read: " in err
+    finally:
+        store.pages_dir.chmod(0o700)

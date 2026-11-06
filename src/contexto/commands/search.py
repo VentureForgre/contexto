@@ -51,7 +51,10 @@ def run(args: argparse.Namespace) -> int:
     say_session(session_id, how)
     query = " ".join(args.words)
     store = SessionStore.open_existing(home, session_id)
-    found = store.search(query)
+    try:
+        found = store.search(query)
+    except OSError as e:  # the pages directory itself cannot be read
+        return fail(f"the pages of session {session_id} cannot be read: {e}")
     shown = 0
     for page_id in found:
         if shown == args.limit:

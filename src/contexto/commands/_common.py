@@ -6,7 +6,7 @@ import sys
 
 EXIT_OK = 0
 EXIT_ERROR = 1  # unknown session or page, bad offset, unreadable store
-# Exit code 2 is argparse's usage error.
+EXIT_USAGE = 2  # argparse's usage error, and a prune --session that is only the start of session ids
 
 SESSION_HELP = "session id, or a unique prefix of one"
 

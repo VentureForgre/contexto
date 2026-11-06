@@ -8,6 +8,7 @@ turns are paged out and the commands that list and search them. ``--raw`` prints
 from __future__ import annotations
 
 import argparse
+import os
 
 from contexto.commands._common import EXIT_OK, add_session_option, fail, say_session
 from contexto.paths import contexto_home
@@ -47,7 +48,10 @@ def run(args: argparse.Namespace) -> int:
         return fail(f"cannot read the ledger of session {session_id}: {e}")
     print(pinned or "No pinned records.")
     print()
-    pages = page_count(store)
+    try:
+        pages = page_count(store)
+    except OSError as e:  # the pins stand; the page count is reported in one line
+        return fail(f"the pages of session {session_id} cannot be read: {e}")
     if pages:
         print(f"{pages} turn{'' if pages == 1 else 's'} paged out: list them with "
               f"`contexto sessions show {session_id}`, search them with "
@@ -58,7 +62,9 @@ def run(args: argparse.Namespace) -> int:
 
 
 def page_count(store: SessionStore) -> int:
-    """Page files in the store, counted as ``contexto sessions list`` counts them (no page is read)."""
-    if not store.pages_dir.is_dir():
+    """Page files in the store (no page is read); OSError when the pages directory cannot be listed."""
+    try:
+        names = os.listdir(store.pages_dir)
+    except FileNotFoundError:
         return 0
-    return sum(1 for p in store.pages_dir.glob("pg_*.json") if p.is_file())
+    return sum(1 for n in names if n.startswith("pg_") and n.endswith(".json") and (store.pages_dir / n).is_file())

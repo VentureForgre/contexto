@@ -72,4 +72,3 @@ def run(args: argparse.Namespace) -> int:
     finally:
         proxy.stop()
     return 0
-

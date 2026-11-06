@@ -1011,17 +1011,27 @@ the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
 Exit codes and `--help` documented in README.
 
 Store-reading commands (D57). A session is named by its id or a unique prefix of it (an exact id
-wins; a prefix of several ids is an error naming them, exit 1) in `--session`, `CONTEXTO_SESSION`,
-`sessions show ID`, and `sessions prune --session`; `contexto mcp --session` and `contexto run
---session` take exact ids only. An empty `--session` is an invalid id, never "not given". An id
-longer than 255 bytes is invalid everywhere (`paths.session_dir`). With no `--session` or
-`CONTEXTO_SESSION`, `recall`, `search`, and `state` use the most recently active session that has
-pages or ledger records, else the most recent session; stderr names the choice (`most recent`,
-`most recent with pages or pins`, `--session`, `CONTEXTO_SESSION`).
+wins; a prefix of several ids is an error naming them, exit 1) in `--session` and `CONTEXTO_SESSION`
+for `recall`, `search`, and `state`, and in `sessions show ID`. `sessions prune --session`,
+`contexto mcp --session`, and `contexto run --session` take exact ids only. `prune` and `run` refuse,
+with exit 2 and the matching ids named, an id that is not a session but the start of existing ids:
+prune is irreversible, and a new session under a prefix would hide the one meant from the readers
+(an exact id wins). A new full id still creates its session in `run`. An empty `--session` is an
+invalid id, never "not given", in every command. An id longer than 255 bytes is invalid everywhere
+(`paths.session_dir`). A `CONTEXTO_HOME` that exists but is not a directory is one error for every
+reader: "<home> is not a directory (check $CONTEXTO_HOME)", exit 1. `contexto run` sets
+`CONTEXTO_SESSION=<id>` in the environment of the CLI it runs, claude or codex, so the CLI's shell
+commands name its session. With no `--session` or `CONTEXTO_SESSION`, `recall`, `search`, and
+`state` use the most recently active session that has pages or ledger records or that another
+process holds open (its `live.lock`, probed as prune probes it, without the idle grace), else the
+most recent session; stderr names the choice (`most recent`, `most recent with pages or pins, or in
+use`, `--session`, `CONTEXTO_SESSION`).
 - `sessions show` lists the pages after the summary, newest first, one index line each without the
   identifiers (`pg_<id> turn N: <opening user text> [tools] [files]`): the 20 newest, all with
-  `--all`; `--json` adds `page_list` (`id`, `turn`, `line`) under the same limit, and
-  `upstream_4xx_model`. `upstream_4xx` counts each upstream 4xx once (the proxy's `request` entries
+  `--all`; `--json` adds `page_list` (`id`, `turn`, `line`) under the same limit,
+  `page_list_truncated`, and `upstream_4xx_model`. A pages directory that cannot be read leaves the
+  summary printed (`page_list` null in `--json`) and a one-line error, exit 1; `search` reports it in
+  one line and `state` after the pins, exit 1. `upstream_4xx` counts each upstream 4xx once (the proxy's `request` entries
   are not counted, only the separate events), and `upstream_4xx_model` those on the transformed
   model paths, apart from Claude Code's keyless `HEAD /api/hello` probe.
 - `search WORDS... [--session ID] [--limit N]` (default 10) runs the store search `contexto_search`
@@ -1041,8 +1051,7 @@ pages or ledger records, else the most recent session; stderr names the choice (
 - `contexto proxy --port` outside 0 to 65535 is a usage error (exit 2). `contexto run` exits 2 for
   a usage error (including an invalid session id and a `--bound` not above the headroom floor,
   whether the floor is given or the 25,000 default) and 1 when the proxy or the session store
-  cannot start (for example `CONTEXTO_HOME` is a file or read-only). `sessions list` exits 1 when
-  the home is not a directory.
+  cannot start (for example `CONTEXTO_HOME` is a file or read-only).
 
 `contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated
 blocks under the session directory, symlinks counted as links) and a total. `contexto sessions

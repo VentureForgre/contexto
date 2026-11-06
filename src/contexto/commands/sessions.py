@@ -8,8 +8,8 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from contexto.commands._common import EXIT_ERROR, EXIT_OK, SESSION_HELP, fail
-from contexto.paths import contexto_home
+from contexto.commands._common import EXIT_ERROR, EXIT_OK, EXIT_USAGE, SESSION_HELP, fail
+from contexto.paths import contexto_home, session_dir
 from contexto.store import SessionNotFoundError, SessionStore
 from contexto.store.prune import (
     ACTIVE_GRACE_S,
@@ -19,7 +19,8 @@ from contexto.store.prune import (
     remove_session,
     select,
 )
-from contexto.store.sessions import list_sessions, resolve_session, session_summary
+from contexto.store.sessions import check_home, list_sessions, resolve_session, session_summary, starting_with
+from contexto.store.sessions import named as name_sessions
 
 PAGES_SHOWN = 20  # pages `sessions show` lists without --all
 
@@ -73,7 +74,7 @@ def register(subparsers) -> None:
                        help="select sessions with no activity for DURATION (for example 30d, 12h, 90m, 2w)")
     prune.add_argument("--keep", type=_count, metavar="N",
                        help="keep the N sessions with the most recent activity; select the rest")
-    prune.add_argument("--session", metavar="ID", help=f"select this one session ({SESSION_HELP})")
+    prune.add_argument("--session", metavar="ID", help="select this one session (its full id)")
     prune.add_argument("--yes", action="store_true", help="delete; without it nothing is deleted")
     prune.add_argument("--json", action="store_true",
                        help="print JSON: dry_run, total_bytes, and each selected session with its status")
@@ -82,8 +83,10 @@ def register(subparsers) -> None:
 
 def run_list(args: argparse.Namespace) -> int:
     home = contexto_home()
-    if home.exists() and not home.is_dir():
-        return fail(f"{home} is not a directory (check $CONTEXTO_HOME)")
+    try:
+        check_home(home)
+    except SessionNotFoundError as e:
+        return fail(str(e))
     sessions = list_sessions(home)
     if args.json:
         print(json.dumps([vars(s) for s in sessions], indent=2, sort_keys=True))
@@ -119,8 +122,15 @@ def run_prune(args: argparse.Namespace) -> int:
     home = contexto_home()
     now = time.time()
     try:
-        if args.session is not None:
-            args.session = resolve_session(home, args.session)
+        check_home(home)
+        if args.session is not None and starting_with(home, args.session) and not _is_session(home, args.session):
+            # Prune is irreversible: a mistyped or already deleted id must not delete another session (D57).
+            message = (f"--session {args.session!r} is not a session but the start of "
+                       f"{name_sessions(starting_with(home, args.session))}; prune needs the full id")
+            if args.json:
+                print(json.dumps({"error": message}, indent=2, sort_keys=True))
+            fail(message)
+            return EXIT_USAGE
         chosen = select(home, older_than=args.older_than, keep=args.keep, session_id=args.session, now=now)
     except (SessionNotFoundError, ValueError, OSError) as e:  # UnsafeSessionPathError is a ValueError
         if args.json:  # stdout stays parseable: a script reads {"error": ...} and the exit code
@@ -195,19 +205,32 @@ def run_prune(args: argparse.Namespace) -> int:
     return EXIT_ERROR if failed or refused else EXIT_OK
 
 
+def _is_session(home, session_id: str) -> bool:
+    try:
+        return session_dir(home, session_id).is_dir()
+    except ValueError:
+        return False
+
+
 def run_show(args: argparse.Namespace) -> int:
     home = contexto_home()
     try:
         session_id = resolve_session(home, args.session_id)
         summary = session_summary(home, session_id)
-        pages = SessionStore.open_existing(home, session_id).page_list()
     except (SessionNotFoundError, ValueError) as e:
         return fail(str(e))
+    try:
+        pages = SessionStore.open_existing(home, session_id).page_list()
+    except OSError as e:  # the summary still stands; the page list is reported in one line
+        pages, unreadable = [], f"the pages of session {session_id} cannot be read: {e}"
+    else:
+        unreadable = None
     listed = pages if args.all else pages[:PAGES_SHOWN]
     if args.json:
-        summary["page_list"] = listed
+        summary["page_list"] = None if unreadable else listed
+        summary["page_list_truncated"] = len(listed) < len(pages)  # --all lists every page
         print(json.dumps(summary, indent=2, sort_keys=True))
-        return EXIT_OK
+        return fail(unreadable) if unreadable else EXIT_OK
     labels = [("id", "Session"), ("created", "Created"), ("last_activity", "Last activity"),
               ("pages", "Pages"), ("records", "Ledger records"), ("active_records", "Active records"),
               ("open_obligations", "Open obligations"), ("log_events", "Log events"),
@@ -220,6 +243,8 @@ def run_show(args: argparse.Namespace) -> int:
     print(f"Last epoch: {json.dumps(last_epoch, sort_keys=True) if last_epoch else 'none logged'}")
     problems = summary["ledger_problems"]
     print(f"Ledger: {'intact' if not problems else '; '.join(problems)}")
+    if unreadable:
+        return fail(unreadable)
     if not pages:
         print("Pages, newest first: none (no turns paged out yet)")
         return EXIT_OK
