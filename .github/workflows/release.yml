@@ -176,7 +176,9 @@ jobs:
           shopt -s nullglob
           files=(dist/*.tar.gz dist/*.whl)
           if [ "${#files[@]}" -gt 0 ] && [ ! -f dist/SHA256SUMS ]; then
-            (cd dist && sha256sum -- "${files[@]#dist/}" > SHA256SUMS)
+            # Sorted by name, the order release-build.sh writes.
+            mapfile -t names < <(printf '%s\n' "${files[@]#dist/}" | LC_ALL=C sort)
+            (cd dist && sha256sum -- "${names[@]}" > SHA256SUMS)
           fi
       - name: Attest the build provenance of the rebuilt sdist and wheel
         if: hashFiles('dist/SHA256SUMS') != ''

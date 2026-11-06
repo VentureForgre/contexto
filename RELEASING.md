@@ -157,8 +157,13 @@ v4.2.2. To update one, resolve the new tag's commit (`gh api repos/<owner>/<repo
 (`version: "0.13.7"`); keep it inside the `uv_build` range in `pyproject.toml` (`>=0.8,<0.14`) and
 move both together.
 
-The release job has `id-token: write` and `attestations: write` on top of `contents: write`, for the
-attestation only. No other job gets them.
+The release and reattach jobs have `id-token: write` and `attestations: write` on top of
+`contents: write`, for the attestation only. No other job gets them.
+
+The attestation runs before the upload. If it fails, the release exists with its notes but without
+its files; run the reattach job for that tag to attach and attest them. Reattaching an older tag
+rebuilds it with the pinned uv, so the new wheel differs from the one first published in one line
+of its `WHEEL` file (the uv version that built it), and its checksum changes with it.
 
 ## Dry run
 

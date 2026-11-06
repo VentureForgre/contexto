@@ -45,7 +45,7 @@ What it includes:
 
 ## Results
 
-Each acceptance run is a scripted session whose history reaches at least 2.5 times the bound. Its
+Each acceptance run is a scripted session whose history grows well past the bound. Its
 probe turns ask 54 questions about details spread through that history. The same questions then go
 to the same model with the whole history in its context (the baseline).
 
@@ -53,7 +53,7 @@ to the same model with the whole history in its context (the baseline).
 |---|---|---|
 | Claude Code 2.1.301, claude-haiku-5-5, bound 150,000 | 51 of 54 answered correctly, against 48 for the baseline. No compaction. Largest request 109,868 tokens. Prompt cache reused on 36 of 37 eligible requests. | [M2-acceptance-run3.md](docs/research/M2-acceptance-run3.md) |
 | Claude Code 2.1.302, claude-opus-5-5, bound 150,000 | 53 of 54, against 54 for the baseline. No compaction. Cache reused on 54 of 55 eligible requests. The run added the permission rule that `contexto run` now sets itself. | [M2-acceptance-opus.md](docs/research/M2-acceptance-opus.md) |
-| Codex 0.163.0, gpt-6-astra, bound 150,000 | History of 375,922 tokens (2.5 times the bound) with no compaction. Largest request 108,565 tokens. All 61 requests succeeded. No baseline was run. | [M2-codex-acceptance-150k.md](docs/research/M2-codex-acceptance-150k.md) |
+| Codex 0.163.0, gpt-6-astra, bound 150,000 | History of about 233,000 tokens (about 1.55 times the bound; 375,922 as the test harness prices them) with no compaction. Largest request 108,565 tokens. All 61 requests succeeded. No baseline was run. | [M2-codex-acceptance-150k.md](docs/research/M2-codex-acceptance-150k.md) |
 
 In the claude-haiku-5-5 run, Contexto used 46.6% fewer input tokens than plain Claude Code would have
 for the same session, and cost 49.7% less. The plain Claude Code figures are modeled from measured

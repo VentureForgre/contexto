@@ -74,10 +74,10 @@ body:
       label: Contexto's lines on stderr
       description: |
         The session line printed at start (`contexto: session <id> (bound ..., upstream ...)`) and every
-        line that starts with `contexto:` or `warning:`.
+        line that starts with `contexto:` or `warning:`. Leave empty if the command printed none.
       render: text
     validations:
-      required: true
+      required: false
   - type: textarea
     id: session-show
     attributes:

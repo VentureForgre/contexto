@@ -88,7 +88,8 @@ that did not change. Workflow runs on pull requests from forks wait for a mainta
 - Do not commit API keys, tokens, Claude or Codex settings, real transcripts, or anything from
   `~/.contexto`.
 
-Every pull request is reviewed by the maintainer and by two AI reviewer agents. The agents post their
+Every pull request is checked by two AI reviewer agents, and pull requests from outside contributors
+are also reviewed by the maintainer. The agents post their
 verdicts as comments from the maintainer's account, titled "Reviewer A" and "Reviewer B". A pull
 request merges once both approve its latest commit; a new push needs new verdicts. How the maintainer
 runs the project with AI agents is in [docs/maintainer-process.md](docs/maintainer-process.md).
