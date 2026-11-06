@@ -1,7 +1,7 @@
 # Contexto status
 
-Updated 2026-11-06 by claude (v0.5.23: the 2026-11-05 QA run and the fix round, PRs #232 to #248,
-D48 to D60, and live acceptance run #4). Decisions taken and still open, with reasons:
+Updated 2026-11-06 by claude (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
+D48 to D61, and live acceptance run #4). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -24,12 +24,12 @@ compaction never fires, and accuracy equals full context.
   normal use (a pasted screenshot, a head change from tool search or a model switch, `/clear`), that
   standing rules were lost once paged, and two security holes (a project's `apiKeyHelper` run by
   `contexto run codex` with no trust check, and no Host or Origin check on the proxy). The fix round
-  (PRs #232 to #248, D48 to D60, v0.5.9 to v0.5.23) fixed all of them, each PR with two reviewer
+  (PRs #232 to #250, D48 to D61, v0.5.9 to v0.5.24) fixed all of them, each PR with two reviewer
   agents; details under "QA run and fix round" below.
-- Latest release: v0.5.23 (main 08ec571, 2026-11-06). Releases from v0.5.13 on carry `SHA256SUMS`
+- Latest release: v0.5.24 (main d38e87d, 2026-11-06). Releases from v0.5.13 on carry `SHA256SUMS`
   and a build provenance attestation (PR #233).
-- Tests on main (08ec571, v0.5.23, with this docs pass): 3162 passed, 1 skipped, 1 xfailed on macOS,
-  Python 3.13 (local run, 2026-11-06, 6 min 6 s).
+- Tests on main (d38e87d, v0.5.24): 3185 passed, 1 skipped, 1 xfailed on macOS, Python 3.13 (PR #250's
+  head before its review fixes, 2026-11-06); CI green on Linux and macOS, Python 3.12 to 3.15.
 - Tested CLI versions (`TESTED_VERSIONS`): Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318;
   codex-cli 0.154.0, 0.163.0 and 0.166.0 (D56). 2.1.318 has the full live acceptance; 2.1.314 and
   0.166.0 the zero-spend routine only.
@@ -63,7 +63,8 @@ What each decision changed, with the key numbers (full text in `docs/DECISIONS.m
   by base64 size: a screenshot measured at 641 to 3,243 tokens was estimated at 124,000 to 429,000,
   so one pasted screenshot paged the whole window and logged `bound_too_small` with advice to restart.
   Now `width * height / 750` after scaling to a 2,576-pixel long edge, 64 to 4,784 (estimates 640 to
-  3,334 for the four measured sizes). Images and documents are kept out of the bytes-per-token
+  3,334 for the four measured sizes); since D61 the higher of that and the image's 28-pixel patches
+  plus 3, at most 4,787. Images and documents are kept out of the bytes-per-token
   ratio, which two screenshots had pushed from 2.87 to 39.4; after the fix it stays 3.00.
 - **D49 (PR #232, v0.5.9; amended by PR #244, v0.5.18): a head change is sized like any rotation.**
   Tool search loading a tool, an MCP server connecting, or a model switch took a branch that skipped
@@ -505,7 +506,8 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   nothing and is not read by the missing-tools check (it still goes to the model unchanged); files
   nested memory imports with `@path` are carried within the cap; the cap counts each block as its
   page; a queued prompt in a role `system` text is not read by the missing-tools check.
-- D48: images are priced by their pixels (`width * height / 750`, 64 to 4,784), and images and
+- D48: images are priced by their pixels (`width * height / 750`, 64 to 4,784; D61: or the 28-pixel
+  patches plus 3 when higher, at most 4,787), and images and
   documents are kept out of the bytes-per-token ratio, so a screenshot no longer pages the window.
 - D49: a head change is sized like any rotation, and every forwarded request is checked against the
   bound; amended (PR #244) to measure the head from the first usage that has an input count.
@@ -537,22 +539,29 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
 
 ## Open follow-ups
 
-PR #250 (D61, under review) fixes the first six items below, the low findings the fix round's
-reviews left; until it merges, these are open:
+PR #250 (D61, v0.5.24) fixed the low findings the fix round's reviews left:
+- **Codex tool output** counts at the 1.5 bytes-a-token tool-output seed until real usage arrives,
+  as Claude's tool results do. Reviewer A's harness (1,440 sessions at bound 30,000): requests over
+  the bound unflagged 6,451 on main, 445 now; turn starts over it 89, now 0. Codex sessions that
+  never report an input count rotate 9 to 20% more often.
+- **Older epoch records** (every release through v0.5.23) resume with their head and window budget
+  dropped, so the head is measured again; v0.5.8's low heads no longer carry over. A downgrade
+  starts from epoch 0.
+- **Images:** a crafted JPEG no longer slows pricing (100 images 0.75 to 0.97 s, now 0.032 to
+  0.037 s); thin images are priced at their 28-pixel patches when that is higher.
+- **Start warning:** quotes 13,842 (Claude Code 2.1.314, a fresh config) to about 28,000, and for
+  Codex its own 13,322 to 18,403.
+- **Uncertain PDFs:** the `pdf_uncertain` advice appears only when the PDF is why the turn does not
+  fit; otherwise the launcher advises a larger `--bound`.
 
-- Bound risk on Codex (#244 review B, pre-existing): when Codex responses carry no input count
-  until request 30, turn starts reached 36,011 real tokens at bound 30,000 with nothing logged. Count
-  `function_call_output` at the 1.5 tool-output seed.
-- Epoch records written by v0.5.8 keep their low measured head when a session resumes after the
-  upgrade (#244 review A).
-- Images (#234 reviews): crafted JPEG fill and marker runs price about 30 times slower (100 images
-  held the lock 2.77 s first, about 1 s later); the pixel formula can be up to 88 tokens under
-  `ceil(w/28) * ceil(h/28) + 3` for thin images; high-resolution screenshots in a conversation's first
-  request make the head run high (log-only `turn_room_low` and `window_minimal` at bound 60,000);
-  Codex pages show no `[image omitted]` marker for a screenshot (as on v0.5.8).
-- The start-up warning quotes an overhead floor of 15,700; measured on 2.1.314 it is 13,842 (#245).
-- The uncertain-PDF notice says "a larger --bound helps only if the PDF is long" even when the text
-  alone is over the window (#248 re-check).
+Still open:
+
+- A head denser than the 3.5 text seed is estimated low until the first usage, on Codex and Claude
+  alike, so tool-loop requests can still go over the bound unflagged when no response carries an
+  input count (12 of 32 synthetic Codex sessions in D61's measurement, 445 requests in reviewer A's).
+- High-resolution screenshots in a conversation's first request make the head run high (log-only
+  `turn_room_low` and `window_minimal` at bound 60,000); Codex pages show no `[image omitted]` marker
+  for a screenshot (as on v0.5.8).
 - Not started: a byte budget per search on the pages `contexto_search` reads (D41 follow-up): it
   reads and renders up to 53 pages per search with no cap on their size (18.5 MB of page JSON for
   one multi-word query at 3,000 pages sized like real turns).
@@ -573,8 +582,8 @@ The 2026-11-05 QA run's fix round is merged and released: D49 (#232, v0.5.9; ame
 v0.5.18), D56 (#243, v0.5.10), D51 (#242, v0.5.11), D55 (#240, v0.5.12; #245, v0.5.13), the docs for
 first-time users and release checksums (#233, v0.5.13), D52 (#237, v0.5.14), D50 (#238, v0.5.15),
 D53 (#239, v0.5.16), D57 (#241, v0.5.17), D58 (#235, v0.5.19), D54 (#236, v0.5.20), D48 (#234) and
-the replay fix (#247) in v0.5.21, D59 (#246, v0.5.22), D60 (#248, v0.5.23). Live acceptance run #4
-passed on v0.5.20. Left: the code follow-ups above (PR #250, D61).
+the replay fix (#247) in v0.5.21, D59 (#246, v0.5.22), D60 (#248, v0.5.23), the docs pass (#249) and
+D61 (#250, v0.5.24). Live acceptance run #4 passed on v0.5.20. Left: the open follow-ups above.
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
@@ -655,7 +664,9 @@ Needs the owner:
   Contexto's tools were deferred. 2.1.310 had only a one-fact live recall check (D46), and 2.1.314
   the zero-spend routine only. Codex acceptance ran on gpt-6-astra at bounds 64,000 (D30) and
   150,000 on codex-cli 0.163.0, through the owner's proxy; 0.166.0 had the zero-spend routine only.
-- Images (D48) cost `width * height / 750` tokens, 64 to 4,784, the high-resolution tier's formula.
+- Images (D48, D61) cost the higher of `width * height / 750` and the 28-pixel patches plus 3, 64 to
+  4,787, the high-resolution tier's formulas; the patch model is inferred from four measurements and no
+  live call checked a thin image.
   On models before that tier images cost less (at most about 1,568), so the estimate errs high by up
   to 3 times per large image. Codex uses the same formula and OpenAI prices images by tiles, lower,
   so a Codex estimate errs high: two turns an equal-cost text control keeps were paged in reviewer
@@ -868,6 +879,7 @@ Needs the owner:
 | v0.5.21 | cbc9683 | #234 (D48): images priced by their pixels; images and documents kept out of the ratio. Harness: #247 (replay turns `tool_reference` blocks for removed tools into text) |
 | v0.5.22 | 33b54e6 | #246 (D59): the fix round's review follow-ups |
 | v0.5.23 | 08ec571 | #248 (D60): a PDF is never estimated low: 4,568 tokens a page when counted for certain, else 600 pages |
+| v0.5.24 | d38e87d | #250 (D61): Codex tool output at the 1.5 seed before usage, older epoch records re-measure their head, bounded JPEG walk and patch pricing, Codex's own overhead range in its start warning, `pdf_uncertain` only when the PDF is the cause |
 
 Each is a tag and a GitHub Release on this repository with the wheel and sdist attached; there is
 no package registry release.

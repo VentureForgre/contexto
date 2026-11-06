@@ -66,15 +66,15 @@ requests, not run end to end ([M2-usage-savings-run3.md](docs/research/M2-usage-
 ## Install
 
 Contexto needs Python 3.12 or later, macOS or Linux, and has no runtime dependencies. Install the
-wheel from the latest release, [v0.5.23](https://github.com/VentureForgre/contexto/releases/tag/v0.5.23).
+wheel from the latest release, [v0.5.24](https://github.com/VentureForgre/contexto/releases/tag/v0.5.24).
 It is not on PyPI: the PyPI package named `contexto` is an unrelated project, so
 `pip install contexto` installs the wrong thing. Use the release URL or the downloaded wheel.
 
 Straight from the release URL, with no GitHub login:
 
 ```sh
-pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.23/contexto-0.5.23-py3-none-any.whl
-contexto --version                                    # contexto 0.5.23
+pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.24/contexto-0.5.24-py3-none-any.whl
+contexto --version                                    # contexto 0.5.24
 ```
 
 `pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment. To check
@@ -83,8 +83,8 @@ the download before installing, follow [Checking the download](#checking-the-dow
 Or download it first with the GitHub CLI:
 
 ```sh
-gh release download v0.5.23 --repo VentureForgre/contexto --pattern 'contexto-0.5.23-py3-none-any.whl'
-uv tool install ./contexto-0.5.23-py3-none-any.whl   # or: pipx install ./contexto-0.5.23-py3-none-any.whl
+gh release download v0.5.24 --repo VentureForgre/contexto --pattern 'contexto-0.5.24-py3-none-any.whl'
+uv tool install ./contexto-0.5.24-py3-none-any.whl   # or: pipx install ./contexto-0.5.24-py3-none-any.whl
 ```
 
 `pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`.
@@ -99,11 +99,11 @@ this repository's release workflow before you install it. Releases from v0.5.13 
 install from the file:
 
 ```sh
-gh release download v0.5.23 --repo VentureForgre/contexto \
-  --pattern 'contexto-0.5.23-py3-none-any.whl' --pattern SHA256SUMS
+gh release download v0.5.24 --repo VentureForgre/contexto \
+  --pattern 'contexto-0.5.24-py3-none-any.whl' --pattern SHA256SUMS
 shasum -a 256 -c SHA256SUMS --ignore-missing          # Linux: sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify contexto-0.5.23-py3-none-any.whl --repo VentureForgre/contexto   # needs gh auth login
-pipx install ./contexto-0.5.23-py3-none-any.whl
+gh attestation verify contexto-0.5.24-py3-none-any.whl --repo VentureForgre/contexto   # needs gh auth login
+pipx install ./contexto-0.5.24-py3-none-any.whl
 ```
 
 For v0.5.12 and earlier, compare `shasum -a 256 contexto-<version>-py3-none-any.whl` with the digest
