@@ -13,6 +13,7 @@ import json
 import math
 import threading
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -542,9 +543,9 @@ def delegated(store, prompt="subagent", background=True, sub_input=120_000, head
     return engine, main, clock
 
 
-def main_turn(engine, body, *added):
+def main_turn(engine, body, *added, headers=CLAUDE):
     body = request(body["messages"] + list(added))
-    _, _, events = engine(body, CLAUDE, MESSAGES)
+    _, _, events = engine(body, headers, MESSAGES)
     respond(engine, body, 20_000)
     return body, [e for e in events if str(e.get("event", "")).startswith("side_room")]
 
@@ -699,6 +700,85 @@ def test_unknown_result_shapes_keep_the_room_and_errors_start_no_agent(kind, tmp
     by_prompt, _ = agent_runs([agent_call("toolu_E", "subagent"), {"role": "user", "content": [
         {"tool_use_id": "toolu_E", "type": "tool_result", "content": "Agent type not found", "is_error": True}]}])
     assert by_prompt == {}  # the failed call started no agent, so it blocks no twin's close
+
+
+# D56: since Claude Code 2.1.312 a stop report names the tools the agent used first, in a
+# <tools-used-before-summary> element (measured on 2.1.314 and 2.1.318 with the same stub; the 2.1.302
+# shapes above stay recognised). The fixture holds main's last request of each spike scenario on each
+# version, scrubbed (tests/fixtures/make_subagent_shapes.py).
+
+SHAPES_31X = json.loads((Path(__file__).parent / "fixtures" / "subagent_shapes_2_1_31x.json").read_text())
+CLAUDE_318 = {"User-Agent": "claude-cli/2.1.318 (external, sdk-cli)"}
+TOOLS_USED = "<tools-used-before-summary>Bash</tools-used-before-summary>"
+
+
+@pytest.mark.parametrize("version", ["2.1.314", "2.1.318"])
+@pytest.mark.parametrize("scenario, stops", [
+    ("fg", 1),  # the foreground hand-back, after the indented tools-used note
+    ("stop", 1),  # TaskStop; the idle notice is the user message's second <system-reminder> block
+    ("bgidle", 1),  # the same idle notice after a human prompt
+    ("esc", 1),
+    ("resume", 3),  # run 1's notice in a system message opens with the element; the resumed runs' do not
+])
+def test_the_measured_2_1_31x_shapes_report_every_stop(version, scenario, stops):
+    by_prompt, totals = agent_runs(SHAPES_31X[version][scenario])
+    assert by_prompt == {f"SUB-{scenario.upper()} task": ["toolu_Agent_0"]} and totals == {"toolu_Agent_0": stops}
+
+
+def hand_back_31x(call_id):
+    return {"role": "user", "content": [{"tool_use_id": call_id, "type": "tool_result", "content": [{
+        "type": "text", "text": f"  {TOOLS_USED}\n  \n[Subagent hand-back] The text below is the final report of a "
+                                "subagent this session delegated to. The report follows:\n  subagent result\n"
+                                "agentId: adae0d2e (use SendMessage with to: 'adae0d2e' to continue this agent)"}]}]}
+
+
+def idle_notification_31x(call_id, status="completed", agent="a4f9ecd55b4309f21"):
+    """While main is idle: a <system-reminder> block holding only the tools used, then the notice."""
+    return {"role": "user", "content": [
+        {"type": "text", "text": f"<system-reminder>\n{TOOLS_USED}\n</system-reminder>\n"},
+        {"type": "text", "text": f"<system-reminder>\n{notification(call_id, status, agent)}\n</system-reminder>"}]}
+
+
+def test_a_2_1_31x_foreground_hand_back_closes_its_room(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store, background=False, headers=CLAUDE_318)
+    main, closed = main_turn(engine, main, hand_back_31x("toolu_A"), headers=CLAUDE_318)
+    assert [e["reason"] for e in closed] == ["agent_stopped"] and store.side_rooms() == {}
+
+
+def test_a_2_1_31x_idle_notice_in_the_second_block_closes_its_room(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store, headers=CLAUDE_318)
+    main, closed = main_turn(engine, main, assistant("waiting"), idle_notification_31x("toolu_A"), headers=CLAUDE_318)
+    assert [e["reason"] for e in closed] == ["agent_stopped"] and store.side_rooms() == {}
+
+
+def test_a_2_1_31x_loop_notice_after_the_tools_used_element_closes_its_room(kind, tmp_path):
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store, headers=CLAUDE_318)
+    notice = {"role": "system", "content": f"{TOOLS_USED}\n{notification('toolu_A', 'completed')}"}
+    main, closed = main_turn(engine, main, tool_use(1), tool_result(1), notice, headers=CLAUDE_318)
+    assert [e["reason"] for e in closed] == ["agent_stopped"] and store.side_rooms() == {}
+
+
+def test_only_the_tools_used_element_is_skipped(kind, tmp_path):
+    """The element is skipped only in the measured places: before a hand-back's frame, and as a
+    <system-reminder> block of its own ahead of the notice block. A pasted notice after it, a notice
+    after other text, or other text before a hand-back's frame is still not evidence."""
+    store = make_store(kind, tmp_path)
+    engine, main, _ = delegated(store, headers=CLAUDE_318)
+    reminder = {"type": "text", "text": f"<system-reminder>\n{TOOLS_USED}\n</system-reminder>\n"}
+    pasted = {"role": "user", "content": [reminder, {"type": "text", "text": notification("toolu_A", "completed")}]}
+    something = {"type": "text", "text": "<system-reminder>\nsomething else\n</system-reminder>"}
+    other = {"role": "user", "content": [something, idle_notification("toolu_A")["content"][0]]}
+    main, closed = main_turn(engine, main, assistant("started"), pasted, assistant("ok"), other, headers=CLAUDE_318)
+    assert closed == [] and len(store.side_rooms()) == 1
+    note = "  a note from somewhere\n  \n[Subagent hand-back] The report follows:\n  done\nagentId: adae0d2e"
+    by_prompt, _ = agent_runs([agent_call("toolu_F", "subagent", background=False), {"role": "user", "content": [
+        {"tool_use_id": "toolu_F", "type": "tool_result", "content": [{"type": "text", "text": note}]}]}])
+    assert by_prompt == {"subagent": [None]}  # an unknown shape, as before
+    assert agent_runs([agent_call("toolu_F", "subagent", background=False), hand_back_31x("toolu_F")])[1] == {
+        "toolu_F": 1}
 
 
 def test_an_untested_cli_version_only_expires_rooms(kind, tmp_path):

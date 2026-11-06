@@ -5,15 +5,17 @@
 # four-turn session with a per-turn context hook, a two-turn session with UserPromptSubmit and
 # PostToolUse hooks (turn 1 runs a tool), a five-turn session with an output-style change and a plan-mode
 # toggle, a session on a model without an effort setting, and a four-turn session that adds and removes an
-# MCP server. Isolated config, dummy key, scrubbed env,
+# MCP server. Isolated config dir and HOME, dummy key, scrubbed env, auto-updater off,
 # pinned model. Output: <repo>/.contexto/spikes/M2-A2/live-shapes.jsonl
+# Usage: spikes/m2/carried/live_probe.sh [claude-binary]   (default: claude on PATH, then ~/.local/bin)
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$S/../../.." && pwd)"
+CLAUDE="${1:-$(command -v claude || echo "$HOME/.local/bin/claude")}"
 OUT="$REPO/.contexto/spikes/M2-A2"
 TMP="$(cd "$(mktemp -d /tmp/m2-live.XXXXXX)" && pwd -P)"
 PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])")
-mkdir -p "$OUT" "$TMP/cwd" "$TMP/config"
+mkdir -p "$OUT" "$TMP/cwd" "$TMP/config" "$TMP/home"
 echo "synthetic file" > "$TMP/cwd/synthetic.txt"
 : > "$OUT/live-shapes.jsonl"
 python3 "$S/fake_model_stub.py" "$PORT" "$OUT/live-shapes.jsonl" "$TMP/cwd/synthetic.txt" > "$OUT/fake-stub.err" 2>&1 &
@@ -23,9 +25,9 @@ sleep 1
 SID=$(python3 -c "import uuid; print(uuid.uuid4())")
 turn() {  # turn <label> <claude args...>
   echo "{\"scenario\": \"$1\"}" >> "$OUT/live-shapes.jsonl"; shift
-  (cd "$TMP/cwd" && env -i HOME="$HOME" PATH="$PATH" TERM=dumb CLAUDE_CONFIG_DIR="$TMP/config" \
-    ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_API_KEY="dummy-not-a-credential" \
-    perl -e 'alarm 90; exec @ARGV' "$HOME/.local/bin/claude" -p --model claude-haiku-5-5 \
+  (cd "$TMP/cwd" && env -i HOME="$TMP/home" PATH="$PATH" TERM=dumb CLAUDE_CONFIG_DIR="$TMP/config" \
+    ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_API_KEY="dummy-not-a-credential" DISABLE_AUTOUPDATER=1 \
+    perl -e 'alarm 90; exec @ARGV' "$CLAUDE" -p --model claude-haiku-5-5 \
     --strict-mcp-config --allowedTools Read "$@" < /dev/null > /dev/null 2>&1)
   echo "  exit $?" >&2
 }
