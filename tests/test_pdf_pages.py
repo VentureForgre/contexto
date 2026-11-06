@@ -578,6 +578,138 @@ def test_reviewer_a_files_near_the_bound_are_never_estimated_low(tmp_path, raw, 
     assert all(estimate >= real * 0.995 for estimate, real in carrying)
 
 
+# PR #248 round 2 (reviewer A): a dead version that makes a page look like a node, and merging cost --------
+
+def _page_as_node(shape: str) -> bytes:
+    """Reviewer A's low2 shapes: page 4 listed 50 times (/Count 1), and a version, dead or alive, that makes
+    it look like a node. qpdf and pypdf read 50 for each (qpdf errors on the last)."""
+    objects = [(1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+               (2, b"<< /Type /Pages /Kids [ %s ] /Count 1 >>" % b" ".join([b"4 0 R"] * 50)),
+               (4, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>")]
+    dead: list[tuple[int, bytes]] = []
+    if shape == "dead-pages-node":
+        dead = [(4, b"<< /Type /Pages /Kids [] /Count 0 >>")]
+    elif shape == "dead-kids-in-object-stream":
+        dead = [(5_000, objstm(5_000, {4: b"<< /Kids [] >>"}))]
+    elif shape.startswith("indirect-type"):
+        objects[2] = (4, b"<< /Type 902 0 R /Parent 2 0 R /MediaBox [0 0 612 792] >>")
+        objects.append((902, b"/Page"))
+        dead = [(902, b"/Pages")] if shape == "indirect-type" else [(5_000, objstm(5_000, {902: b"/Pages"}))]
+    else:  # a page that also carries /Kids []
+        objects[2] = (4, b"<< /Type /Page /Kids [] /Parent 2 0 R /MediaBox [0 0 612 792] >>")
+    return _xref_pdf(objects, dead=dead)
+
+
+PAGE_AS_NODE = ["dead-pages-node", "dead-kids-in-object-stream", "indirect-type", "indirect-type-object-stream",
+                "page-with-empty-kids"]
+
+
+@pytest.mark.parametrize("shape", PAGE_AS_NODE)
+def test_a_version_that_makes_a_page_a_node_never_hides_it(shape):
+    """193a0cc: (1, True) for each, since the walk counted a kid that some version makes a node by the pages
+    under it, 0. A kid the walk reaches counts at least one page, so a dead copy can only add."""
+    assert count_pages(_page_as_node(shape)) == (50, True)
+
+
+@pytest.mark.parametrize("pasted", [True, False], ids=["pasted", "read"])
+def test_a_page_made_a_node_near_the_bound_is_never_estimated_low(tmp_path, pasted):
+    """193a0cc, at 90,865 on 150k: 95,472 estimated for a real 170,074, unflagged."""
+    seen = _session(tmp_path, _page_as_node("dead-pages-node"), 50 * TYPICAL, pasted=pasted)
+    carrying = [(estimate, real) for estimate, real, _, carries in seen if carries]
+    assert carrying[0][0] - carrying[0][1] >= 50 * (PDF_PAGE_TOKENS - TYPICAL) - 50
+
+
+def _merging(shape: str) -> bytes:
+    """Reviewer A's quad shapes: one indirect value with many versions, named by many objects (193a0cc: up
+    to 66.7 s for 1.3 MB, unpaid by the step budget)."""
+    out = [b"%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"]
+    if shape == "kids: 32 versions, 16,000 nodes":
+        out += [b"900 0 obj [ %s ] endobj\n" % b" ".join(b"%d 0 R" % (10 + i) for i in range(2_048))] * 32
+        out += [b"%d 0 obj <</Type/Pages/Kids 900 0 R>> endobj\n" % (100_000 + i) for i in range(16_000)]
+    elif shape == "kids: 1 version, 30,000 nodes":
+        out.append(b"900 0 obj [ %s ] endobj\n" % b" ".join(b"%d 0 R" % (10 + i) for i in range(4_000)))
+        out += [b"%d 0 obj <</Type/Pages/Kids 900 0 R>> endobj\n" % (100_000 + i) for i in range(30_000)]
+    elif shape == "length: 30,000 versions, 15,000 streams":
+        out += [b"77 0 obj 1 endobj\n"] * 30_000
+        out += [b"%d 0 obj <</Length 77 0 R>>\nstream\nx\nendstream endobj\n" % (100_000 + i) for i in range(15_000)]
+        out.append(b"5 0 obj <</Type/Page>> endobj\n")
+    elif shape == "length: interleaved versions":
+        out += [b"77 0 obj 1 endobj\n%d 0 obj <</Length 77 0 R>>\nstream\nx\nendstream endobj\n" % (100_000 + i)
+                for i in range(15_000)]
+        out.append(b"5 0 obj <</Type/Page>> endobj\n")
+    elif shape == "count: 30,000 versions, 20,000 nodes":
+        out += [b"903 0 obj 1 endobj\n"] * 30_000
+        out += [b"%d 0 obj <</Type/Pages/Count 903 0 R/Kids[5 0 R]>> endobj\n" % (100_000 + i) for i in range(20_000)]
+        out.append(b"5 0 obj <</Type/Page>> endobj\n")
+    elif shape == "type: 30,000 versions, 20,000 objects":
+        out += [b"902 0 obj /Page endobj\n"] * 30_000
+        out += [b"%d 0 obj <</Type 902 0 R>> endobj\n" % (100_000 + i) for i in range(20_000)]
+    elif shape == "filter: 20,000 versions, 5,000 object streams":
+        out += [b"904 0 obj /FlateDecode endobj\n"] * 20_000
+        data = zlib.compress(b"10 0 << /Type /Page >>")
+        out += [b"%d 0 obj <</Type/ObjStm/N 1/First 5/Filter 904 0 R/Length %d>>\nstream\n" % (100_000 + i, len(data))
+                + data + b"\nendstream endobj\n" for i in range(5_000)]
+    else:  # kids: 200 versions, each listing every node
+        out += [b"900 0 obj [ %s ] endobj\n" % b" ".join(b"%d 0 R" % (200_000 + i) for i in range(500))] * 200
+        out += [b"%d 0 obj <</Type/Pages/Kids 900 0 R>> endobj\n" % (200_000 + i) for i in range(500)]
+    return b"".join(out)
+
+
+MERGING = ["kids: 32 versions, 16,000 nodes", "kids: 1 version, 30,000 nodes",
+           "length: 30,000 versions, 15,000 streams", "length: interleaved versions",
+           "count: 30,000 versions, 20,000 nodes", "type: 30,000 versions, 20,000 objects",
+           "filter: 20,000 versions, 5,000 object streams", "kids: 200 versions listing every node"]
+
+
+@pytest.mark.parametrize("shape", MERGING)
+def test_merging_versions_is_paid_in_steps(shape):
+    """Resolving every version, and walking the tree, are charged to the step budget and memoised per object
+    and version count, so each shape stays near rule 3's 0.25 s (0.16 to 0.24 s measured; 193a0cc up to
+    66.7 s, and another session's 1-page PDF waited 63.4 s behind one)."""
+    raw = _merging(shape)
+    result, seconds = timed(raw)
+    assert seconds < 0.5
+    assert result == ((1, True) if shape.startswith(("length: 30", "filter")) else (PDF_MAX_PAGES, False))
+
+
+def test_a_long_number_is_not_copied():
+    """Round 2 (nit): 30 MB of digits peaked at 30 MB, a copy of the token."""
+    raw = b"%PDF-1.7\n1 0 obj " + b"7" * (30 << 20) + b" endobj\n"
+    assert peak_memory(raw) < 1 << 20 and count_pages(raw) == (PDF_MAX_PAGES, False)
+    assert count_pages(simple_pdf(1) + b"9 0 obj [ 12345678901234567890 -12345678901234 1.234567890123456 ] endobj\n"
+                       ) == (1, True)
+
+
+def test_the_smallest_waiting_pdf_is_parsed_first():
+    """Another session's 1-page PDF waited for every large PDF queued before it (4.5 s behind 20 that spend
+    the step budget); smallest first, it waits for the parse in progress (0.22 to 0.25 s)."""
+    order: list[int] = []
+    gate = tokens._PDF_PARSING
+    held = threading.Event()
+    release = threading.Event()
+
+    def first():
+        with gate.hold(1_000):
+            held.set()
+            release.wait(5)
+
+    def waiter(size):
+        with gate.hold(size):
+            order.append(size)
+
+    threads = [threading.Thread(target=first)]
+    threads[0].start()
+    held.wait(5)
+    for size in (900, 5, 300, 5, 40):
+        threads.append(threading.Thread(target=waiter, args=(size,)))
+        threads[-1].start()
+        time.sleep(0.02)
+    release.set()
+    for thread in threads:
+        thread.join(5)
+    assert order == [5, 5, 40, 300, 900]
+
+
 # Round 9: the lexer is linear, its memory flat, and its work bounded ------------------------------------------
 
 ROUND_9 = {
@@ -816,6 +948,81 @@ def test_media_free_and_image_only_requests_never_count_pages(tmp_path, monkeypa
     eng({**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"},
                                                             image_block(data=png_b64(payload=100))]}]}, {}, EP)
     assert not calls
+
+
+# PR #248 round 2 (reviewer B): the PDF's allowance is not a bound that is too small -----------------------
+
+def _paste_at_turn_start(tmp_path, block: dict | None, *, bound: int = 150_000, history: int = 60_000) -> list[dict]:
+    """About ``history`` tokens of conversation, then ``block`` (or 60,000 tokens of text) pasted with a
+    new prompt. Returns that request's events."""
+    eng = RewriteEngine(SessionStore(tmp_path, "pdf"), config=Config(bound=bound))
+    rng = random.Random(6)
+    msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "start"}]}]
+    for step in range(200):
+        req = {**HEAD, "messages": list(msgs)}
+        upstream, _, _ = eng(req, {}, EP)
+        real = math.ceil(len(canonical_json(upstream)) / 3.0)
+        eng.observe_usage(EP, {"input_tokens": real, "output_tokens": 10}, req)
+        if real > history:
+            break
+        use = {"type": "tool_use", "id": f"t{step}", "name": "Read", "input": {}}
+        msgs += [{"role": "assistant", "content": [use]},
+                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{step}",
+                                               "content": " ".join(rng.choices(["a", "bb", "c"], k=3_000))}]}]
+    extra = block if block is not None else {"type": "text", "text": " ".join(rng.choices(["a", "bb"], k=90_000))}
+    msgs += [{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+             {"role": "user", "content": [{"type": "text", "text": "and this"}, extra]}]
+    return eng({**HEAD, "messages": list(msgs)}, {}, EP)[2]
+
+
+def test_a_large_pdf_pasted_at_a_turn_start_is_not_a_bound_too_small(tmp_path):
+    """B: about 26 typical pages or more pasted at a turn start logged bound_too_small, and the launcher told
+    the user to restart with a larger --bound, falsely in 35 of 38 pastes (30 PyMuPDF pages: 146,623
+    estimated for a real 57,137). The turn fits with the PDF at 1,583 a page, so the event says the PDF's
+    allowance fell short; the rotation is the same."""
+    events = _paste_at_turn_start(tmp_path / "pdf", doc((FIXTURES / "pymupdf-links-objstm-30.pdf").read_bytes()))
+    names = [e["event"] for e in events]
+    assert "pdf_allowance" in names and "bound_too_small" not in names and "window_minimal" in names
+    (allowance,) = [e for e in events if e["event"] == "pdf_allowance"]
+    assert allowance["pdf_allowance_tokens"] == 30 * (PDF_PAGE_TOKENS - TYPICAL)
+    assert allowance["new_turn_tokens"] - allowance["pdf_allowance_tokens"] <= allowance["window_budget"]
+    # Text that really does not fit is still a bound that is too small
+    text = [e["event"] for e in _paste_at_turn_start(tmp_path / "text", None, bound=100_000, history=20_000)]
+    assert "bound_too_small" in text and "pdf_allowance" not in text
+
+
+def test_an_uncertain_pdf_pasted_at_a_turn_start_is_its_allowance(tmp_path):
+    """An uncertain PDF counts 600 pages; with its pages unknown it is taken at its floor, 0."""
+    events = _paste_at_turn_start(tmp_path, doc((FIXTURES / "qdf-listing-20.pdf").read_bytes()), history=20_000)
+    names = [e["event"] for e in events]
+    assert "pdf_allowance" in names and "pdf_pages_uncertain" in names and "bound_too_small" not in names
+
+
+class _Store:
+    def __init__(self):
+        self.events = []
+
+    def log(self, event):
+        self.events.append(event)
+
+
+def test_the_launcher_explains_a_pdf_allowance_and_an_uncertain_pdf():
+    import io
+
+    from contexto.launcher import NoticeLog
+
+    err = io.StringIO()
+    notices = NoticeLog(_Store(), err)
+    sizing = {"bound": 150_000, "fixed_overhead": 9_414, "window_budget": 115_586}
+    notices.log({"event": "request", "transform_events": [{"event": "pdf_allowance", **sizing}]})
+    notices.log({"event": "request", "transform_events": [{"event": "pdf_pages_uncertain", "documents": 1,
+                                                            "pages": PDF_MAX_PAGES}]})
+    lines = err.getvalue().splitlines()
+    assert len(lines) == 2 and all("--bound" not in line for line in lines)
+    assert "PDF is estimated generously" in lines[0] and "does not need to change" in lines[0]
+    assert "could not be read fully" in lines[1] and "600 pages" in lines[1]
+    notices.log({"event": "request", "transform_events": [{"event": "bound_too_small", **sizing}]})
+    assert "Restart with a larger --bound" in err.getvalue()  # a bound that really is too small still says so
 
 
 # Priming before the proxy's lock, and the cache ---------------------------------------------------------

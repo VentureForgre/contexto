@@ -21,8 +21,10 @@ class or one literal, matched at a position or searched forward, so none can bac
 whitespace, regular characters or hex digits is passed in one C call, and a container whose value the
 count does not need is skipped to its next delimiter the same way. Every token, comment, string
 delimiter and skipped delimiter is a step, and a PDF that takes more than ``PDF_MAX_STEPS`` is not
-certain, so the time is linear in the input and bounded per PDF (about 0.25 s at most), and the parse
-pauses briefly every few thousand steps so other threads get the GIL. Skipped runs make no Python objects;
+certain, so the time is linear in the input and bounded per PDF (about 0.27 s at most). Resolving every
+version of an indirect value and walking the page tree are paid in the same steps, each value read once
+per object and version count. The parse pauses briefly every few thousand steps so other threads get the
+GIL. Skipped runs, and regular tokens too long to matter, make no Python objects;
 what is kept (a few keys of each dictionary, page-tree references, at most ``PDF_MAX_ARRAY`` items of
 an array) takes at most a step each, so it is bounded by the steps too, and inflated data by
 ``PDF_INFLATE_BUDGET``, one object stream at a time.
@@ -73,6 +75,7 @@ _VALUE_STOP = re.compile(rb"[()<>\[\]{}/%]|obj")
 # A cross-reference table's entries and subsection headers: digits, f, n and whitespace only, so it holds no
 # object header and is passed in one match.
 _XREF_RUN = re.compile(rb"[0-9fn\x00\t\n\x0c\r ]*")
+_INTEGER_RUN = re.compile(rb"[+-]?[0-9]+")
 _NOT_WHITE = re.compile(rb"[^\x00\t\n\x0c\r ]")
 
 # Token kinds
@@ -192,6 +195,12 @@ class _Reader:
         self.lengths: list[tuple[int, int]] = []  # indirect /Length objects used, and the length taken
         self.shapes: dict[tuple, dict] = {}  # one dictionary per distinct kept content ({/Type /Page})
         self.integers: dict[int, list[int]] | None = None
+        # Memos, so a value named by many objects, or with many versions, is read once (all charged in steps)
+        self.agreed: dict[tuple[int, int], Any] = {}  # (number, versions) -> the value every version holds
+        self.named: dict[tuple[int, int], frozenset] = {}  # (number, versions) -> the names a /Type can be
+        self.kids_named: dict[int, list[list]] = {}  # number -> the /Kids arrays it can be
+        self.counts_named: dict[int, int] = {}  # number -> the largest /Count it can be
+        self.checked: set[int] = set()  # ids of /Kids arrays checked to hold references only
         # The lexer's position, buffer and whether skipped bytes are checked for object headers
         self.buf, self.at, self.end, self.check = pdf, 0, len(pdf), True
 
@@ -228,6 +237,9 @@ class _Reader:
         if kind == _REGULAR:
             j = _REGULAR_RUN.match(buf, i, end).end()
             self.at = j
+            if j - i > 13:  # longer than any keyword or integer the count reads: classified in place, not copied
+                number = _INTEGER_RUN.match(buf, i, j)
+                return (_INT, _BIG) if number and number.end() == j else (_OTHER, _SKIPPED)
             text = buf[i:j]
             if text.isdigit():
                 return _INT, int(text) if j - i <= 12 else _BIG
@@ -547,7 +559,7 @@ class _Reader:
                     raise _Uncertain
             self.add(number, value)
         for dictionary, start, end in self.streams:
-            if b"ObjStm" in self.resolve_all(dictionary.get(b"Type")) or b"First" in dictionary:
+            if b"ObjStm" in self.kinds(dictionary.get(b"Type")) or b"First" in dictionary:
                 self.object_stream(dictionary, start, end)
 
     def add(self, number: int, value: Any) -> None:
@@ -563,9 +575,16 @@ class _Reader:
             value = None
         self.defined.setdefault(number, []).append(value)
 
+    def spend(self, steps: int) -> None:
+        """Charge work other than a token (resolving versions, walking the page tree) to the step budget."""
+        self.steps -= steps
+        if self.steps < self.pause:
+            self.yield_or_stop()
+
     def resolve_all(self, value: Any) -> list:
         """What ``value`` can be: a reference's target in every version read (the xref names one, and the
-        lexer does not know which), anything else as it is. A target not read is uncertain."""
+        lexer does not know which), anything else as it is. A target not read is uncertain. The caller pays
+        for reading the list, once per (object, versions) through the memos below."""
         if not isinstance(value, _Ref):
             return [value]
         if value not in self.defined:
@@ -576,9 +595,64 @@ class _Reader:
         """``value`` resolved where every version must agree (a stream's filter, an object stream's table):
         versions that differ are uncertain."""
         values = self.resolve_all(value)
-        if any(other != values[0] for other in values[1:]):
-            raise _Uncertain
-        return values[0]
+        if not isinstance(value, _Ref):
+            return values[0]
+        key = (int(value), len(values))
+        if key not in self.agreed:
+            self.spend(sum(len(v) if isinstance(v, (list, dict)) else 1 for v in values))
+            if any(other != values[0] for other in values[1:]):
+                raise _Uncertain
+            self.agreed[key] = values[0]
+        return self.agreed[key]
+
+    def kinds(self, value: Any) -> frozenset:
+        """The names a ``/Type`` can be, over every version of its target."""
+        if not isinstance(value, _Ref):
+            return frozenset((value,)) if isinstance(value, bytes) else frozenset()
+        values = self.resolve_all(value)
+        key = (int(value), len(values))
+        found = self.named.get(key)
+        if found is None:
+            self.spend(len(values))
+            found = self.named[key] = frozenset(v for v in values if isinstance(v, bytes))
+        return found
+
+    def kid_arrays(self, value: Any) -> list[list]:
+        """The arrays a ``/Kids`` can be, over every version of its target, each checked once: references
+        only, else uncertain (a direct page, or a tree that was not read)."""
+        if isinstance(value, _Ref) and int(value) in self.kids_named:
+            return self.kids_named[int(value)]
+        arrays = self.resolve_all(value)
+        self.spend(len(arrays))
+        for kids in arrays:
+            if not isinstance(kids, list):
+                raise _Uncertain
+            if id(kids) not in self.checked:
+                self.spend(len(kids))
+                if not all(isinstance(kid, _Ref) for kid in kids):
+                    raise _Uncertain
+                self.checked.add(id(kids))
+        if isinstance(value, _Ref):
+            self.kids_named[int(value)] = arrays
+        return arrays
+
+    def largest_count(self, value: Any) -> int:
+        """The largest a ``/Count`` can be, over every version of its target (any non-integer is uncertain)."""
+        if isinstance(value, _Ref) and int(value) in self.counts_named:
+            return self.counts_named[int(value)]
+        values = self.resolve_all(value)
+        self.spend(len(values))
+        largest = 0
+        for count in values:
+            if count is _BIG:
+                largest = PDF_MAX_PAGES
+            elif type(count) is int:
+                largest = max(largest, count)
+            else:
+                raise _Uncertain
+        if isinstance(value, _Ref):
+            self.counts_named[int(value)] = largest
+        return largest
 
     def stream(self, dictionary: dict) -> tuple[int, int]:
         """Pass over a stream's body: it must end where its /Length says, followed by ``endstream``."""
@@ -685,25 +759,31 @@ class _Reader:
     # The count ------------------------------------------------------------------------------------
 
     def counted(self) -> PdfCount:
+        sizes: dict[int, set[int]] = {}
         for number, size in self.lengths:
-            if any(type(value) is not int or value != size for value in self.defined.get(number, [None])):
-                raise _Uncertain  # the stream was read at a length a version of its object does not have
+            sizes.setdefault(number, set()).add(size)
+        self.spend(len(self.lengths))
+        for number, read_at in sizes.items():
+            values = self.defined.get(number, [None])
+            self.spend(len(values))
+            if len(read_at) > 1 or any(type(value) is not int or value not in read_at for value in values):
+                raise _Uncertain  # a stream was read at a length a version of its object does not have
         # Every version of each object, and of each object an indirect value names, may be the one the xref
         # names, so a page is any version typed /Page, a node's /Kids are each version's, and a /Count the
-        # largest: a dead redefinition can only add.
+        # largest. The walk counts a kid at least once, so a dead redefinition can only add.
         typed, nodes, roots = set(), set(), set()
-        kids_of: dict[int, list[list]] = {}
+        kids_of: dict[int, dict[int, list]] = {}  # node -> its /Kids arrays, by identity
         for number, dictionary in self.versions:
-            kinds = self.resolve_all(dictionary.get(b"Type"))
+            self.step()
+            kinds = self.kinds(dictionary.get(b"Type"))
             if b"Page" in kinds:
                 typed.add(number)
             if b"Pages" in kinds:
                 nodes.add(number)
             if b"Kids" in dictionary:
-                for kids in self.resolve_all(dictionary[b"Kids"]):
-                    if not isinstance(kids, list) or not all(isinstance(kid, _Ref) for kid in kids):
-                        raise _Uncertain  # a direct page, or a tree that was not read
-                    kids_of.setdefault(number, []).append(kids)
+                arrays = self.kid_arrays(dictionary[b"Kids"])
+                self.spend(len(arrays))
+                kids_of.setdefault(number, {}).update((id(kids), kids) for kids in arrays)
             if b"Pages" in dictionary:  # a catalog names the tree's root
                 root = dictionary[b"Pages"]
                 if isinstance(root, dict):
@@ -714,9 +794,16 @@ class _Reader:
         # typed or not), so a form field's or a name tree's /Kids is never counted as pages.
         nodes |= roots & kids_of.keys()
         listed: set[int] = set()
+        read: set[int] = set()  # arrays whose entries were read
         queue = list(nodes)
         while queue:
-            for kids in kids_of.get(queue.pop(), ()):
+            arrays = kids_of.get(queue.pop(), {})
+            self.spend(1 + len(arrays))
+            for key, kids in arrays.items():
+                if key in read:
+                    continue
+                read.add(key)
+                self.spend(len(kids))
                 for kid in kids:
                     if kid not in listed:
                         listed.add(kid)
@@ -724,48 +811,54 @@ class _Reader:
                             nodes.add(kid)
                             queue.append(kid)
         # A renderer counts every /Kids entry that reaches a page, so a page listed twice is two pages.
-        walked = _tree_pages(kids_of, nodes, (roots & nodes) | (nodes - listed))
+        walked = self.tree_pages(kids_of, nodes, (roots & nodes) | (nodes - listed))
         pages = max(len(typed | (listed - nodes)), walked)
         if not pages:
             raise _Uncertain  # a PDF whose pages the reader cannot see
         largest = 0
         for number, dictionary in self.versions:
             if number in nodes and b"Count" in dictionary:
-                for count in self.resolve_all(dictionary[b"Count"]):
-                    if count is _BIG:
-                        largest = PDF_MAX_PAGES
-                    elif type(count) is int:
-                        largest = max(largest, count)
-                    else:
-                        raise _Uncertain
+                self.step()
+                largest = max(largest, self.largest_count(dictionary[b"Count"]))
         return PdfCount(min(PDF_MAX_PAGES, max(pages, largest)), True)
 
-
-def _tree_pages(kids_of: dict[int, list[list]], nodes: set[int], roots: set[int]) -> int:
-    """The most pages a renderer can reach from any of ``roots``: every /Kids entry that is not a node is a
-    page, with multiplicity, and a node counts the pages under it in whichever of its versions holds the
-    most (at most ``PDF_MAX_PAGES``). A cycle is uncertain. Iterative, each node's versions read once."""
-    pages: dict[int, int] = {}
-    for root in roots:
-        stack, path = [root], set()
-        while stack:
-            node = stack[-1]
-            if node in pages:
+    def tree_pages(self, kids_of: dict[int, dict[int, list]], nodes: set[int], roots: set[int]) -> int:
+        """The most pages a renderer can reach from any of ``roots``. Every /Kids entry counts: a kid that is
+        not a node as one page, a node as the pages under it but at least one, since a version that makes a
+        page look like a node (a dead ``/Kids []``) may not be the one the xref names. A node counts at
+        whichever of its versions holds the most; at most ``PDF_MAX_PAGES``; a cycle is uncertain. The walk
+        is iterative over nodes and arrays, each read once and charged in steps."""
+        arrays = {key: kids for versions in kids_of.values() for key, kids in versions.items()}
+        self.spend(len(arrays))
+        done: dict[tuple[bool, int], int] = {}  # (is a node, number or array id) -> its pages
+        for root in roots:
+            stack, path = [(True, root)], set()
+            while stack:
+                vertex = stack[-1]
+                if vertex in done:
+                    stack.pop()
+                    continue
+                is_node, key = vertex
+                if vertex not in path:
+                    path.add(vertex)
+                    below = ([(False, array) for array in kids_of.get(key, ())] if is_node else
+                             [(True, kid) for kid in dict.fromkeys(arrays[key]) if kid in nodes])
+                    self.spend(1 + (len(below) if is_node else len(arrays[key])))
+                    for child in below:
+                        if child in path:
+                            raise _Uncertain  # a node lists itself, directly or further down
+                        if child not in done:
+                            stack.append(child)
+                    continue
+                if is_node:
+                    total = max((done[(False, array)] for array in kids_of.get(key, ())), default=0)
+                else:
+                    total = sum(max(done[(True, kid)], 1) if kid in nodes else 1 for kid in arrays[key])
+                self.spend(1 + (len(kids_of.get(key, ())) if is_node else len(arrays[key])))
+                done[vertex] = min(PDF_MAX_PAGES, total)
+                path.discard(vertex)
                 stack.pop()
-                continue
-            below = [kid for kids in kids_of.get(node, ()) for kid in kids if kid in nodes and kid not in pages]
-            if node not in path:
-                path.add(node)
-                if any(kid in path for kid in below):
-                    raise _Uncertain  # a node lists itself, directly or further down
-                stack.extend(below)
-                continue
-            pages[node] = min(PDF_MAX_PAGES, max(
-                (sum(pages[kid] if kid in nodes else 1 for kid in kids) for kids in kids_of.get(node, ())),
-                default=0))
-            path.discard(node)
-            stack.pop()
-    return max((pages[root] for root in roots), default=0)
+        return max((done[(True, root)] for root in roots), default=0)
 
 
 def _integer_object(pdf: bytes, p: int) -> tuple[int, int] | None:

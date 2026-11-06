@@ -322,15 +322,22 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    node's `/Count`, at most 600. The first is the object numbers typed `/Page` in any version, together
    with the leaves of the page tree's `/Kids`, each number once. A node is typed `/Pages`, or has `/Kids`
    and is reached from a catalog's `/Pages` or another node. The second is the tree as a renderer walks
-   it: from each catalog's root, and each node no node lists, every `/Kids` entry that is not a node is a
-   page, each time it is listed, and a node counts the pages of whichever version holds the most. A
+   it: from each catalog's root, and each node no node lists, every `/Kids` entry is counted each time it
+   is listed, a kid that is not a node as one page and a node as the pages under it but at least one,
+   and a node counts the pages of whichever version holds the most. So a dead copy can only add. A
    cycle in the tree is not certain, nor are an object stream's `/N`, `/First`, `/Filter` or
    `/DecodeParms` whose versions differ. A document by URL or file id, one over 32 MB of base64, and one the
    lexer cannot read are never certain. The lexer is one pass with no backtracking: at most 400,000
-   steps (tokens, comments, string delimiters, skipped delimiters) per PDF, past which it is not
-   certain (0.25 s at most; skipped runs cost no memory). The proxy counts a request's PDFs before it
-   takes the transform lock, one PDF at a time, and caches counts by content (65,536, least recently
-   used dropped). A document of plain text or content blocks is text.
+   steps per PDF, past which it is not certain. A step is a token, comment, string delimiter or skipped
+   delimiter, and each value read in resolving versions or walking the page tree, each read once per
+   object and version count. A PDF takes at most about 0.27 s, and skipped runs and long tokens cost no
+   memory. The proxy counts a request's PDFs before it takes the transform lock, one PDF at a time,
+   the smallest waiting first, and caches counts by content (65,536, least recently used dropped). When
+   a turn start's new turn does not fit `W` but would with its PDFs at 1,583 a page (an uncertain one
+   at its floor, 0), the engine logs `pdf_allowance` (the sizing, `new_turn_tokens` and
+   `pdf_allowance_tokens`) in place of `bound_too_small`, and rotates the same way. The launcher shows
+   it, and `pdf_pages_uncertain`, once each, without advising a larger bound. A document of plain text
+   or content blocks is text.
    The ratio is learned from text only: each observed request's image and document (media) bytes are
    left out of its bytes, and their cost out of its real tokens. That cost lies at or under the
    media's estimate (a PDF's is its pages' allowance, which a dense page can exceed) and is meant to

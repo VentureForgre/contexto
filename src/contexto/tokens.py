@@ -26,11 +26,15 @@ from __future__ import annotations
 
 import base64
 import binascii
+import heapq
+import itertools
 import math
 import re
 import struct
 import threading
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, NamedTuple
 
 from contexto.canonical import canonical_bytes, utf8
@@ -55,6 +59,7 @@ IMAGE_FLOOR_SHARE = 0.95  # measured costs ran up to 3% under the formula (2,694
 # of that range plus an image at the older 1,568-token limit, so a dense page (small-font code or tables)
 # fits too.
 PDF_PAGE_TOKENS = 3_000 + IMAGE_FLOOR_MAX_TOKENS
+PDF_TYPICAL_PAGE_TOKENS = 1_583  # the measured page, for telling the allowance from the bound (D60)
 PDF_MAX_BASE64 = 32 << 20  # base64 characters a PDF is decoded from: the API's request limit
 # PDFs whose counts are kept, least recently used dropped first; an entry is a key and a 2-tuple (under
 # 300 bytes), so this costs at most about 19 MB, and no request holds enough PDFs to cycle it.
@@ -69,10 +74,40 @@ _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
 _NOT_BASE64 = re.compile(r"[^A-Za-z0-9+/]")
 _PDF_PAGES: OrderedDict[tuple[int, int], PdfCount] = OrderedDict()  # (length, hash) of base64 data -> count
 _PDF_PAGES_LOCK = threading.Lock()  # the proxy fills the cache outside its transform lock (prime_media)
-# One PDF is parsed at a time: parsing holds the GIL, and twenty parses at once starved another session's
-# request of it (a text request waited 2.05 s behind 20 hostile PDFs; one at a time, pausing as the lexer
-# does, 0.005 to 0.12 s; main 0.014 to 0.58 s, its time spent reading the same bodies).
-_PDF_PARSE_LOCK = threading.Lock()
+
+
+class _SmallestFirst:
+    """A lock for parsing one PDF at a time, granted to the waiter with the smallest PDF first (in arrival
+    order among equals). Parsing holds the GIL, and twenty parses at once starved another session's request
+    of it (a text request waited 2.05 s behind 20 hostile PDFs; one at a time, pausing as the lexer does,
+    0.005 to 0.12 s; main 0.014 to 0.58 s, its time spent reading the same bodies). Smallest first, an
+    ordinary PDF waits for at most the parse in progress, not for twenty large ones queued before it
+    (4.5 s in arrival order)."""
+
+    def __init__(self) -> None:
+        self._changed = threading.Condition()
+        self._busy = False
+        self._waiting: list[tuple[int, int]] = []  # a heap of (size, ticket)
+        self._tickets = itertools.count()
+
+    @contextmanager
+    def hold(self, size: int) -> Iterator[None]:
+        with self._changed:
+            entry = (size, next(self._tickets))
+            heapq.heappush(self._waiting, entry)
+            while self._busy or self._waiting[0] != entry:
+                self._changed.wait()
+            heapq.heappop(self._waiting)
+            self._busy = True
+        try:
+            yield
+        finally:
+            with self._changed:
+                self._busy = False
+                self._changed.notify_all()
+
+
+_PDF_PARSING = _SmallestFirst()
 
 
 class MediaCost(NamedTuple):
@@ -263,7 +298,7 @@ def pdf_page_count(data: str) -> PdfCount:
         if result is not None:
             _PDF_PAGES.move_to_end(key)
             return result
-    with _PDF_PARSE_LOCK:  # cached before it is released, so a PDF is parsed once however many threads wait
+    with _PDF_PARSING.hold(len(data)):  # cached before release, so a PDF is parsed once however many wait
         with _PDF_PAGES_LOCK:
             result = _PDF_PAGES.get(key)  # counted while this thread waited
         if result is None:
@@ -290,6 +325,18 @@ def uncertain_documents(value: Any) -> int:
     pages are not certain (a PDF the reader could not read fully, or one by URL or file id)."""
     return sum(1 for block in split_media(value)[1]
                if _media_kind(block) == "document" and not _document_count(block).counted)
+
+
+def pdf_allowance(value: Any) -> int:
+    """Tokens by which the PDFs in ``value`` (a message or item list) are estimated over a typical cost:
+    their allowance less 1,583 a page when their pages are certain, less nothing (their floor) when not.
+    A turn that fits its window with this taken off falls short only by the PDFs' allowance (D60)."""
+    allowance = 0
+    for block in split_media(value)[1]:
+        if _media_kind(block) == "document":
+            count = _document_count(block)
+            allowance += count.pages * (PDF_PAGE_TOKENS - (PDF_TYPICAL_PAGE_TOKENS if count.counted else 0))
+    return allowance
 
 
 def prime_media(value: Any) -> None:

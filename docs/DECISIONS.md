@@ -2444,15 +2444,16 @@ the owner's delegation. Open decisions are listed at the end with the options an
       object at such an offset, so this is how a `/Length` that lies long, or a page written inside a
       string, is caught.
     Every version of an object counts. So does every version of the object an indirect value names
-    (`/Kids 900 0 R`, `/Type 902 0 R`), since the lexer does not know which one the xref names, and a
-    dead copy can only add. The pages are the larger of two counts:
+    (`/Kids 900 0 R`, `/Type 902 0 R`), since the lexer does not know which one the xref names. The
+    pages are the larger of two counts:
     - the object numbers typed `/Page` in any version, together with the leaves of the page tree's
       `/Kids`, each number once. A node is typed `/Pages`, or has `/Kids` and is reached from a
       catalog's `/Pages` or from another node, so a form field's or a name tree's `/Kids` is not a
       page list;
-    - the tree as a renderer walks it, from each catalog's root and each node no node lists: every
-      `/Kids` entry that is not a node is a page, each time it is listed, and a node counts the pages
-      of whichever version holds the most.
+    - the tree as a renderer walks it, from each catalog's root and each node no node lists. Every
+      `/Kids` entry counts each time it is listed: a kid that is not a node as one page, and a node as
+      the pages under it but at least one, since the version that makes it a node may be dead. A node
+      counts the pages of whichever version holds the most. So a dead copy can only add.
     Any version of any node's `/Count` may raise the count but never stands in for a part that was not
     read. The count is at most 600. Anything else is not certain: another filter or a predictor on an
     object stream; an object stream's `/N`, `/First`, `/Filter` or `/DecodeParms` with versions that
@@ -2467,6 +2468,34 @@ the owner's delegation. Open decisions are listed at the end with the options an
     unflagged. Both now count 50, certain, and the same reads are flagged before the send. A
     PDF is also parsed once however many threads wait on it, since its count is cached before the
     parse lock is released.
+  - **PR #248 round 2.** Reviewer A found that merging versions was quadratic and unpaid by the step
+    budget, and that a dead version could still hide pages. Reviewer B found the allowance's false
+    advice. All are fixed:
+    - **Merging cost.** M objects naming one value of K versions of W entries cost M × K × W. A
+      1.3 MB PDF (an indirect `/Kids` of 2,048 entries in 32 versions, named by 16,000 nodes) took
+      66.7 s, and another session's 1-page PDF waited 63.4 s behind it, 110.9 s behind 20 smaller
+      copies (main 0.003 s). Every value read in resolving versions and walking the tree now costs a
+      step, and each resolution is memoised per object and version count, so a value named many times
+      is read once. The walk runs over nodes and arrays, each array summed once. The eight shapes now
+      take 0.16 to 0.24 s, uncertain (or certain and exact where every version agrees).
+    - **A page made to look like a node.** A version of a page that makes it look like a node (a dead
+      `/Type /Pages`, a dead `/Kids []`, a dead `/Pages` copy of an indirect `/Type`, or a page that also
+      carries `/Kids []`) made the walk count its 50 entries at 0, so 50 pages counted 1, certain. A
+      kid the walk reaches now counts at least one page; an empty real node errs high by 1.
+    - **Smallest first.** Parsing is still one PDF at a time, now the smallest waiting first. Behind 20
+      PDFs that spend the step budget, another session's 1-page PDF waited 4.5 s in arrival order and
+      waits 0.22 to 0.25 s now (its text requests 0.010 to 0.014 s).
+    - **Long tokens.** A regular token over 13 bytes is classified in place, not copied: 30 MB of digits
+      peaked at 30 MB, now under 1 MB.
+    - **The allowance is not the bound (reviewer B).** About 26 typical pages or more pasted at a turn
+      start logged `bound_too_small`, and the launcher told the user to restart with a larger `--bound`,
+      in 38 of 68 pastes, 35 of them falsely: 30 PyMuPDF pages were estimated at 146,623 for a real
+      57,137, and even the largest bound allowed without `--allow-large-bound` cannot hold them. When
+      the new turn would fit `W` with its PDFs at 1,583 a page (an uncertain PDF at its floor, 0), the
+      engine logs `pdf_allowance` instead, with the same sizing, `new_turn_tokens` and
+      `pdf_allowance_tokens`. The rotation is unchanged. The launcher says once that a large PDF is
+      estimated generously and the bound does not need to change. `pdf_pages_uncertain` is now shown
+      too, once: a PDF could not be read fully and is counted at the maximum, 600 pages.
   - **The lexer (PR #234 round 9).** The round-9 parser used one token regex. Its nested quantifiers
     backtracked exponentially on comment runs (22 `%` then a newline and `)`: 0.43 s, 4 times more for
     every 2 more `%`; a 140-byte PDF held the proxy for 229 s). They backtracked quadratically on digit
@@ -2480,10 +2509,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
       passed in one match: it holds only digits, `f`, `n` and whitespace.
     - Every token, comment, string delimiter and skipped delimiter is a step. Past 400,000 steps per PDF
       the count is not certain.
+    - Resolving versions and walking the page tree are charged to the same steps (round 2).
     - Every 4,096 steps the lexer sleeps 0.1 ms. `sleep(0)` would hand the GIL straight back and restart
       a waiting thread's switch timer: a text request then waited 1.9 s behind 20 hostile PDFs.
     - The proxy counts a request's PDFs before it takes the transform lock (`RewriteEngine.prime`), one
-      PDF at a time. Twenty parsing at once starved another session's request of the GIL (2.05 s).
+      PDF at a time, the smallest waiting first. Twenty parsing at once starved another session's request
+      of the GIL (2.05 s).
     - Counts are cached by content: 65,536 entries, least recently used dropped first.
     - The inflate budget is checked before every object stream, so once it is spent exactly the next
       stream is not inflated (zlib reads a `max_length` of 0 as no limit).
@@ -2494,8 +2525,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
       count exactly and certain, the 650-page file at 600. The one PyMuPDF file with 30 of 40 pages
       deleted by an incremental save counts 40, high on purpose. The 28 committed fixtures: 25 exact and
       certain, that deleted-pages file high, and the two listings uncertain (below). The heaviest real
-      file, 600 pages with 25 links a page (15,000 annotations), takes 342,100 steps and 0.17 s; a
-      300-page PyMuPDF file with 20 links a page takes 145,858 steps and 0.06 s.
+      file, 600 pages with 25 links a page (15,000 annotations), takes 360,116 steps and 0.19 s, the
+      count included; a 300-page PyMuPDF file with 20 links a page takes 147,374 steps and 0.07 s.
     - The #234 repros from rounds 3 to 9 are each exact and certain, or 600 and uncertain. Round 8's
       hidden-syntax variants (comments, `#xx` escapes, NUL, 17 spaces, an indirect or missing `/Type`,
       an untyped tree, 3 visible pages and 47 hidden, an orphan `/Count`) read 50 of 50, certain. Its
@@ -2503,7 +2534,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
       links a page) are exact or 600. 128-stream marker floods take under 0.05 s. The lying `/Length`
       and missing `endstream` files, and `N G obj` hidden in a body, a string or a comment, are 600. A
       redefined or missing indirect `/Length` is 600.
-    - Hostile inputs, single, at most 0.25 s each:
+    - Hostile inputs, at most 0.27 s each, single or 20 at once (round 2: 43 inputs, reviewer A's 29
+      lexer stress inputs and round-2 shapes among them; the slowest, 20,000 versions of the page tree,
+      0.255 s single and 0.272 s with 20 at once):
       - 2 million `/Count 1`: 0.21 s, uncertain;
       - 16 MB of `%\n`: 0.12 s;
       - 16 MB of spaces, NULs or CRLFs inside an object: 0.01 s, still certain;
@@ -2526,10 +2559,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **Not covered.**
     - **The allowance runs high for typical pages,** 2.9 times at 1,583 a page, and an uncertain PDF
       far more (600 pages, 2.74 million tokens). A large PDF pasted at a turn start can therefore page
-      the earlier conversation, log `bound_too_small` and `turn_room_low`, and make the launcher advise
-      a larger `--bound`. For example, 30 PyMuPDF pages pasted at 103,608 are estimated at 154,217 for a
-      real 64,701. This is the cost of never estimating a PDF low; a follow-up could tell the user that
-      the PDF's allowance, not the bound, fell short (#234 round 6's `media_allowance`).
+      the earlier conversation and log `turn_room_low`: in reviewer B's runs, 30 PyMuPDF pages pasted at
+      60,000 kept 1 message where an equal-cost text control kept 41. This is the cost of never
+      estimating a PDF low; the launcher now says it is the PDF's allowance (`pdf_allowance`), not the
+      bound, that fell short.
+    - **Parsing is one PDF at a time.** A PDF can wait for the parse in progress (0.27 s at most), and
+      a large one for the smaller PDFs queued with it; 20 PDFs that spend the step budget take about
+      5 s together.
     - **Pages that show PDF syntax are uncertain.** Uncompressed content streams that show `N G obj` as
       text are 600. Examples are a PDF tutorial, or reportlab with `pageCompression=0` listing a PDF's
       source. The lexer cannot tell such text from an object a reader finds by its offset.

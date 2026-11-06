@@ -328,6 +328,7 @@ def start_warning(bound: int, headroom_floor: int | None, overhead: int) -> str 
 
 class NoticeLog:
     """Session log wrapper: everything goes to the store; the engine's first bound_too_small event,
+    first ``pdf_allowance`` and ``pdf_pages_uncertain`` (D60),
     first window budget under MIN_WINDOW_BUDGET, first ``mcp_tools_denied`` (D44), and first
     ``mcp_tools_missing`` (from a request, or logged at exit by ``report_missing_tools``) are also shown
     on stderr, once each; an exit-time ``mcp_tools_missing`` that repeats a mid-run one is shown once
@@ -372,7 +373,15 @@ class NoticeLog:
             if inner is event:
                 continue
             budget, overhead = inner.get("window_budget"), inner.get("fixed_overhead")
-            if inner.get("event") == "bound_too_small":
+            if inner.get("event") == "pdf_pages_uncertain":
+                self._once("pdf_pages_uncertain", "a PDF could not be read fully, so it is counted at the "
+                           "maximum, 600 pages; earlier messages may be paged out for it, and stay recallable.")
+            elif inner.get("event") == "pdf_allowance":
+                # D60: the turn fits at a typical page cost; only the PDF's allowance does not.
+                self._once("pdf_allowance", "a large PDF is estimated generously (4,568 tokens a page, more than "
+                           "most pages cost), so this turn kept only its own messages; the earlier ones are "
+                           "recallable, and the bound does not need to change.")
+            elif inner.get("event") == "bound_too_small":
                 # Rule 4 window_minimal (contract PR #50): the engine still rotates, to a window of
                 # only the new turn, which can still put the request over the bound.
                 bound = inner.get("bound")
