@@ -213,7 +213,7 @@ def test_the_environment_message_is_session_start_with_or_without_output_config(
     assert "output_config" in opus[1] and "output_config" not in sonnet[1]
     assert classify_system(opus, 1) == "session_start"
     assert classify_system(sonnet, 1) == "session_start"  # tagged, no settings fields
-    assert SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION == "2.1.310"
+    assert SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION == "2.1.318"
 
 
 # D46: a subagent's environment message with tool search on (2.1.310 by default), captured with zero

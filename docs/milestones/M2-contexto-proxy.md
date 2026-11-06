@@ -227,8 +227,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    would actually restore a room of at least `min_turn_room`; otherwise the engine does not rotate
    for the room and logs `turn_room_low` once per epoch. When both triggers fire at the same turn
    start, the room-sized target is used if that rotation would restore the room and page at least
-   as far as the bound trigger's target; otherwise the bound trigger's own target applies. A head
-   change and the minimal window keep their own sizing. A turn that starts below `min_turn_room`
+   as far as the bound trigger's target; otherwise the bound trigger's own target applies. The
+   minimal window keeps its own sizing; a head change is sized like these (rule 6, D49). A turn that starts below `min_turn_room`
    and still publishes a room below it after the decision logs `turn_room_low`, once per epoch. This keeps a small bound from rotating on
    every turn (reviewer-2: a plain re-trigger would thrash at bounds of 42,000 to 100,000).
    `budget.simulate` models both conditions. Estimate = last upstream
@@ -267,7 +267,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    bound, and `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and
    index), in tokens, taken from measured usage once available (the first request's input is the
-   head) and from the estimator before that. The window budget is `W = bound - headroom - F`, and
+   head) and from the estimator before that. After a head change (rule 6) the measured head is
+   adjusted by the estimated size of the change in `system` and `tools` bytes, so a server that adds
+   tools or a model switch counts in `F` (D49). The window budget is `W = bound - headroom - F`, and
    the retained window after rotation targets `window_fraction * W` (default 0.5), so the window
    can grow before the next trigger. Choose the smallest `k` (retain as many recent turns as fit)
    within that target, retaining the newest complete turn and the new turn (except under the
@@ -287,9 +289,16 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
    thinking strips will be frequent at 150k for large heads (see O3).
 5. **Never rotate inside a tool loop** (D17). A turn that grows past the bound is sent as is and
-   recorded as over-bound in the session log; the next turn start rotates.
+   recorded as over-bound in the session log; the next turn start rotates. Every request forwarded,
+   rotated or not, is checked before the send against the estimate of what is sent: over the bound,
+   it is logged `over_bound` with `source: "estimate"` and `in_tool_loop` (D49). Only
+   `in_tool_loop: true`, and degraded mode under rule 14, are the logged exception; at a turn start
+   it goes with `bound_too_small` or means the rotation's sizing did not hold.
 6. **Head change.** If the CLI's `system` or `tools` change (byte fingerprint), start a new epoch at
-   the next turn start; never rewrite them.
+   the next turn start; never rewrite them. The cached prefix is lost anyway, so the epoch starts
+   even when nothing is paged. It is sized like any other rotation (D49): rule 4's target, the
+   minimal window and `bound_too_small` when `W` cannot hold the newest complete turn, and rule 3's
+   room target when that restores `min_turn_room`; the rotation event keeps `reason: "head_change"`.
 7. **Usage.** Return the upstream `usage` unchanged. The CLI therefore sees the bounded prompt's
    real size.
 8. **Errors.** Forward upstream errors unchanged. Never retry by silently changing the request.
@@ -724,15 +733,21 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
       age, room, and spend.
     - Closing when the agent stops. A side room closes before its expiry only on evidence in main's
       own history that every run of the subagent holding it has stopped (measured on Claude Code
-      2.1.302 against a scripted stub, `spikes/m2/subagents/`). The subagent is matched by its first
-      prompt: its first user message carries a `<system-reminder>` block and then main's `Agent`
-      (or `Task`) call's `prompt`, unchanged. A stop is one of two measured shapes: the call's
-      result is a foreground hand-back (it starts `[Subagent hand-back]`), or a
-      `<task-notification>` names the call's tool-use id, or the id of a `SendMessage` call whose
+      2.1.302, 2.1.310, 2.1.314 and 2.1.318 against a scripted stub, `spikes/m2/subagents/`). The
+      subagent is matched by its first prompt: its first user message carries a `<system-reminder>`
+      block and then main's `Agent` (or `Task`) call's `prompt`, unchanged. A stop is one of two
+      measured shapes: the call's result is a foreground hand-back (it starts `[Subagent hand-back]`),
+      or a `<task-notification>` names the call's tool-use id, or the id of a `SendMessage` call whose
       result says it resumed that call's agent (`resumedAgentId`; a resumed run's notice names the
       `SendMessage`). A notice counts only where the CLI puts it: in a `system` message (during
       main's tool loop), or in a user message whose content, or first text block, opens with the
       `<system-reminder>` wrapper or `[SYSTEM NOTIFICATION - NOT USER INPUT]` (while main is idle).
+      D56: since Claude Code 2.1.312 a run that used tools is reported with their names first, in a
+      `<tools-used-before-summary>` element. Before a hand-back it is indented above the frame, and it
+      is skipped there; while main is idle it is a `<system-reminder>` text block of its own, and the
+      notice then counts in the next text block only if that block opens with the wrapper; in a
+      `system` message it opens the notice's text, which is searched whole. A tools-used element
+      anywhere else changes nothing.
       A notice in assistant text, or pasted into a human message, never counts. The background
       launch receipt (`Async agent launched successfully.`) is not a stop; an error result means the
       call started no agent; any other result shape leaves the call unknown, so its prompt's rooms
@@ -981,7 +996,7 @@ Refused tools (D44): offered tools can still be refused. On every Messages API r
 the check reads the trailing user messages (every user message after the last assistant message,
 role `system` messages among them skipped; the results may be split across them in any order): a
 `tool_result` with `is_error` whose text is Claude Code 2.1.302's refusal ("Claude requested
-permissions to use <tool>, but you haven't granted it yet.", the same on 2.1.310) counts when its
+permissions to use <tool>, but you haven't granted it yet.", the same on 2.1.310, 2.1.314 and 2.1.318) counts when its
 `tool_use_id` is a string naming an `mcp__contexto__` tool call of an assistant message in the request
 and the refusal names that tool; another tool's result that quotes the text does not, nor does a
 result whose id is not a string. The first one in a session logs `mcp_tools_denied` (`dialect`,

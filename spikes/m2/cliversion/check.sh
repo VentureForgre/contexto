@@ -2,7 +2,7 @@
 # Zero-spend first check of a CLI version (D38, docs/cli-updates.md): one `claude -p` and one
 # `codex exec` request to a loopback stub that answers 401, then classify.py reads them with
 # Contexto's recognisers. Each CLI runs under env -i with a temp HOME, CLAUDE_CONFIG_DIR or
-# CODEX_HOME, and a fake key; nothing reaches a model. Bodies stay in the printed temp directory.
+# CODEX_HOME, a fake key, and Claude Code's auto-updater off; nothing reaches a model. Bodies stay in the printed temp directory.
 # Usage (repo root, venv active): spikes/m2/cliversion/check.sh [claude-binary] [codex-binary]
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"
@@ -21,7 +21,7 @@ echo "codex --version: $("$CODEX" --version 2>&1 | head -1)"
 cd "$TMP/cwd" || exit 1
 env -i HOME="$TMP/home" PATH="$PATH" TERM=dumb CLAUDE_CONFIG_DIR="$TMP/claude-config" \
   ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_API_KEY=sk-ant-fake-not-a-key \
-  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_TELEMETRY=1 \
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_TELEMETRY=1 DISABLE_AUTOUPDATER=1 \
   perl -e 'alarm 40; exec @ARGV' "$CLAUDE" -p "synthetic probe" < /dev/null > "$TMP/claude.out" 2>&1
 printf '{"OPENAI_API_KEY":"dummy-not-a-credential"}' > "$TMP/codex-home/auth.json"
 env -i HOME="$TMP/home" PATH="$PATH" TERM=dumb CODEX_HOME="$TMP/codex-home" \
