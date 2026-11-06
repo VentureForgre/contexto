@@ -245,7 +245,17 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    Until the first real usage arrives, count `tool_result` content at 1.5 bytes per token and
    other text at 3.5 (lane 2 measured numeric and log-heavy content near 0.55 tokens per
    character, and M0 saw log-heavy tool output near 1.8 bytes per token, so 1.5 errs high); after
-   that, use the session's measured bytes-per-token ratio. After every response, compare real
+   that, use the session's measured bytes-per-token ratio. Image and document blocks (D48: Messages
+   `image` and `document`, Responses `input_image` and `input_file`, top level or inside a
+   `tool_result` or tool output) are not priced by their bytes: an image costs `width * height / 750`
+   tokens after scaling its long edge down to 2,576 pixels, at most 4,784, with the size read from the
+   PNG, JPEG, GIF, or WebP header, and 4,784 when it cannot be read (a URL, a file id, another
+   format); a PDF costs 3,000 tokens a page, its pages counted from its page objects (in object
+   streams too), else its page tree, else one per 50 KB, and a document by URL or file id 10 pages;
+   a document of plain text or content blocks is text. The ratio is learned from text only: each
+   observed request's media bytes are left out of its bytes, and the lowest cost its media can have
+   (images scaled to 1,568 pixels and at most 1,568 tokens, 1,000 tokens a counted PDF page and one
+   page when the count is a guess or unknown, 0 for an image of unknown size) is taken off its real tokens. After every response, compare real
    usage with the bound and the estimate: log `over_bound` from real usage when it exceeds the
    bound, and `estimate_error` when real usage exceeds the estimate by more than 10%.
 4. **Rotation.** Fixed overhead `F` = system + tools + carried content + preamble (pinned and

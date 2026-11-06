@@ -1257,6 +1257,60 @@ the owner's delegation. Open decisions are listed at the end with the options an
     nested CLAUDE.md from a Read in the same round) does not start the text and is read whole
     (reviewer B, PR #230 round 2).
 
+- **D48. Images and documents are priced by pixels and pages, and kept out of the ratio.** Claude,
+  2026-11-05, under D0; contract change (rule 3). The QA round of 2026-11-05 (verify-images, scale-engine
+  finding 1) found every image and document block priced by its base64 bytes: a Read-tool screenshot
+  that count_tokens measured at 641 to 3,243 tokens (claude-haiku-5-5, Claude Code 2.1.314, which scales
+  Read images to a 2,000-pixel long edge) was estimated at 124,000 to 429,000 inside a `tool_result` and
+  53,000 to 184,000 pasted; a 3-page PDF measured at 4,748 was estimated at 498,000. One pasted
+  screenshot at the default 150,000 bound paged the whole retained window and logged `window_minimal`,
+  `bound_too_small` and `turn_room_low`, so the launcher told the user to restart with a larger bound.
+  The image bytes also went into the measured bytes-per-token ratio: 2.87 became 39.4 after two
+  screenshots in a live run, and later text was under-estimated (a tool loop estimated at 61,000 was
+  really 81,000 against a 60,000 bound). The Codex estimate had the same flaw for `input_image`.
+  - **Images.** `width * height / 750` tokens after scaling the long edge down to 2,576 pixels, at most
+    4,784: Anthropic's documented formula and limits for the high-resolution tier (Opus 4.7 and later,
+    Sonnet 5 and later). The size comes from the decoded header: PNG IHDR, GIF screen descriptor, WebP
+    VP8, VP8L and VP8X, and the first JPEG start-of-frame segment within the first 192 KB (after EXIF and
+    ICC segments). An image whose size cannot be read (a URL or file-id source, another format, a damaged
+    header) gets 4,784, the largest cost an image can have. The formula gives 640, 1,728, 2,765 and 3,334
+    for the four measured sizes (measured 641, 1,719, 2,694 and 3,243).
+  - **Documents.** A PDF is 3,000 tokens a page, the top of Anthropic's documented 1,500 to 3,000 text
+    tokens a page; the measured 3-page PDF cost 1,583 a page, so this errs high. Pages are counted from
+    `/Type /Page` objects, in Flate-compressed object streams too, else the page tree's `/Count`, else one
+    page per 50 KB of file, between 1 and 600 (the API's limit), cached by content because the engine
+    estimates a history many times per request. A document by URL or file id is 10 pages; a document of
+    plain text or content blocks, and a Responses `input_file` of text, is text.
+  - **Where media is found.** Message content, `tool_result` content, a document's content source, and
+    Responses message content and tool output lists, at most 10 levels down. An image-shaped object in a
+    tool's input is text the model wrote and is not priced as an image (and is never walked, so a tool
+    input deeper than Python's recursion limit still estimates).
+  - **The ratio.** It is learned from text only. Each request remembers its media's bytes and the lowest
+    cost the media can have (images on the older 1,568-pixel, 1,568-token limit, 1,000 tokens a counted
+    PDF page and one page for a guessed count, 0 for an image of unknown size); `observe_usage` adds the request's bytes minus the media bytes and
+    its real tokens minus that floor. Taking off the floor rather than the estimate makes any error in
+    the media cost land on the text side as over-counting, never under-counting. Pages are unchanged:
+    a page keeps the image as sent, `render_page` shows `[image omitted]`, and search and recall skip it;
+    only the page's `tokens` metadata is now realistic.
+  - **Measured** (synthetic upstream at 3.0 bytes per text token plus `w*h/750` per image, QA-sized
+    images; `tests/test_image_estimate.py`), v0.5.8 then this change:
+
+    | case | v0.5.8 | D48 |
+    |---|---|---|
+    | 800x600 PNG in a `tool_result` / pasted (measured 641) | 124,088 / 53,166 | 678 / 640 |
+    | 1440x900 PNG (measured 1,719) | 416,621 / 178,537 | 1,766 / 1,728 |
+    | 1920x1080 JPEG (measured 2,694) | 406,955 / 174,394 | 2,803 / 2,765 |
+    | 2000x1250 JPEG (measured 3,243) | 429,355 / 183,994 | 3,372 / 3,334 |
+    | 3-page PDF, 1.7 MB base64 (measured 4,748) | 498,397 | 9,000 |
+    | pasted screenshot after 6 turns, bound 150,000 | estimate 261,033; window_minimal, bound_too_small, turn_room_low; 1 of 13 messages sent | estimate 54,466 for a real 54,487; no events; 13 of 13 sent |
+    | ratio after 2 Read screenshots, then after 25 text requests (true 3.0) | 36.44, then 59.15 | 2.97, then 2.95 |
+    | 55 KB Read in the tool loop after them, bound 60,000 | estimate 23,877 for a real 59,618 | 60,245 for 59,618 |
+
+  - **Not covered.** Image prices on models before the high-resolution tier are lower (at most about
+    1,568 tokens), so there the estimate errs high by up to 3 times per large image; the floor keeps the
+    ratio safe. Codex uses the same formula; OpenAI prices images by tiles, lower than this, so a Codex
+    estimate errs high. A screenshot in a paged turn is still not recallable as an image (unchanged).
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.
