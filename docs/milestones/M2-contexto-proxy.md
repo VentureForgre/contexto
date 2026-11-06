@@ -308,13 +308,26 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    `input_image`, top level or inside a `tool_result` or tool output) are not priced by their bytes:
    an image costs `width * height / 750` tokens after scaling its long edge down to 2,576 pixels,
    between 64 and 4,784, with the size read from the PNG, JPEG, GIF, or WebP header, and 4,784 when it
-   cannot be read (a URL, a file id, another format). Documents (Messages `document` with a base64
-   PDF, a URL or a file id; Responses `input_file`) are estimated by their bytes as text, as before
-   D48, pending a separate decision on pricing them by page; a document of plain text or content
-   blocks is text.
+   cannot be read (a URL, a file id, another format). A PDF (Messages `document` with a base64 PDF, a
+   URL or a file id; Responses `input_file`) is never estimated low (D60): it costs 4,568 tokens a page
+   (3,000 text plus an image at the 1,568-token limit), its pages counted only when certain, else 600
+   pages (the API's maximum), and the request that brings an uncertain one logs `pdf_pages_uncertain`
+   (the epoch, how many, and 600). Pages are certain only when a PDF lexer read every object in the
+   file and in every object stream (all inflated, at most 16 MB per PDF and 4 MB per stream), every
+   stream ended where its `/Length` (direct, or an integer object that finally holds it) says, and no
+   `N G obj` could sit inside a stream body, string or comment; they are then the object numbers typed
+   `/Page` in any version together with the leaves of the page tree's `/Kids` (a node is typed `/Pages`,
+   or has `/Kids` and is reached from a catalog's `/Pages` or another node), each once, raised by any
+   node's `/Count`, at most 600. A document by URL or file id, one over 32 MB of base64, and one the
+   lexer cannot read are never certain. The lexer is one pass with no backtracking: at most 400,000
+   steps (tokens, comments, string delimiters, skipped delimiters) per PDF, past which it is not
+   certain (0.25 s at most; skipped runs cost no memory). The proxy counts a request's PDFs before it
+   takes the transform lock, one PDF at a time, and caches counts by content (65,536, least recently
+   used dropped). A document of plain text or content blocks is text.
    The ratio is learned from text only: each observed request's image and document (media) bytes are
    left out of its bytes, and their cost out of its real tokens. That cost lies at or under the
-   media's estimate (a document's is its bytes) and is meant to lie at or over their floor (on Claude
+   media's estimate (a PDF's is its pages' allowance, which a dense page can exceed) and is meant to
+   lie at or over their floor (on Claude
    95% of the image formula on the older 1,568-pixel, 1,568-token limit, 0 for an image of unknown
    size; 0 for a document; on Codex 0, since OpenAI's tile prices go lower), though the floor can run
    high. A request that only appends to the last measured one (same epoch, window, degraded state

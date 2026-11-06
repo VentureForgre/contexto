@@ -2310,6 +2310,113 @@ the owner's delegation. Open decisions are listed at the end with the options an
     now sets stdout and stderr to write an unencodable character as its backslash escape, as the
     MCP server does; text that encodes is unchanged.
 
+- **D60. A PDF is never estimated low.** Claude, 2026-11-06, under D0; contract change (rule 3). It
+  replaces D48's estimate for documents, which priced a PDF by its bytes as text (as v0.5.8 did). Bytes
+  err high only for a PDF of more than about 4 KB a page pasted (2 KB in a Read result); a compact one
+  is undercounted. At 1,583 tokens a page (the measured 3-page PDF), 25 of the 28 fixtures under
+  `tests/fixtures/pdf/` (0.07 to 2.4 KB a page) were estimated pasted at 0.02 to 0.59 of their cost, and
+  in a Read result at 0.05 to 1.37. A 7-page PDFlib file was estimated at 230 tokens for about 11,081. Read
+  in a tool loop 9,600 tokens under a 150,000 bound, it was estimated at 140,705 for a real 151,540, and
+  the request went out over the bound unflagged.
+  - **The rule.** A PDF costs its pages times 4,568 tokens: 3,000 text tokens (the top of Anthropic's
+    documented 1,500 to 3,000 a page) plus a page image at the older 1,568-token limit. The page count
+    must be certain. When it is not, the PDF counts as 600 pages (the API's maximum), and the request
+    that brings it logs `pdf_pages_uncertain` (epoch, documents, pages). This covers a Claude `document`
+    (base64, URL or file id) and a Codex `input_file`. A document by URL or file id, one over 32 MB of
+    base64, and one that does not decode are never certain. For the ratio a document is still media with
+    floor 0 (D48), so it never raises the ratio; its estimate caps what it can be charged.
+  - **Certain.** A PDF lexer (`contexto.pdfpages`) must have read:
+    - every object in the file and in every object stream, with every object stream inflated within
+      16 MB per PDF and 4 MB per stream;
+    - every stream ending where its `/Length` says, the `/Length` being direct or an integer object
+      that finally holds the length it was read at;
+    - no `N G obj` header in a byte it passes over: a stream body, a string or a comment. Whitespace,
+      NUL and comments between the tokens are allowed for. A reader that follows the xref finds an
+      object at such an offset, so this is how a `/Length` that lies long, or a page written inside a
+      string, is caught.
+    The pages are then the object numbers typed `/Page` in any version, together with the leaves of the
+    page tree's `/Kids`, each number once. A node is typed `/Pages`, or has `/Kids` and is reached from a
+    catalog's `/Pages` or from another node, so a form field's or a name tree's `/Kids` is not a page
+    list. Any node's `/Count` may raise the count but never stands in for a part that was not read. The
+    count is at most 600. Anything else is not certain: another filter or a predictor on an object
+    stream, a token the lexer cannot read, an indirect value whose target was not read, `/Kids` holding
+    anything but references, a bound passed, or no pages at all.
+  - **The lexer (PR #234 round 9).** The round-9 parser used one token regex. Its nested quantifiers
+    backtracked exponentially on comment runs (22 `%` then a newline and `)`: 0.43 s, 4 times more for
+    every 2 more `%`; a 140-byte PDF held the proxy for 229 s). They backtracked quadratically on digit
+    runs (40,000 digits: 7.2 s) and kept a frame per repeat (4 MB of spaces: 571 MB RSS; 16 MB of `%\n`:
+    2,560 MB). The lexer is now a hand-written single pass:
+    - Each regular expression is one character class or one literal, matched at a position or searched
+      forward. A run of whitespace, regular characters or hex digits is passed in one C call, and none
+      can backtrack.
+    - A dictionary keeps only the keys the count reads. The value of any other key, and any container
+      under it, is skipped to its next delimiter without making objects. A cross-reference table is
+      passed in one match: it holds only digits, `f`, `n` and whitespace.
+    - Every token, comment, string delimiter and skipped delimiter is a step. Past 400,000 steps per PDF
+      the count is not certain.
+    - Every 4,096 steps the lexer sleeps 0.1 ms. `sleep(0)` would hand the GIL straight back and restart
+      a waiting thread's switch timer: a text request then waited 1.9 s behind 20 hostile PDFs.
+    - The proxy counts a request's PDFs before it takes the transform lock (`RewriteEngine.prime`), one
+      PDF at a time. Twenty parsing at once starved another session's request of the GIL (2.05 s).
+    - Counts are cached by content: 65,536 entries, least recently used dropped first.
+    - The inflate budget is checked before every object stream, so once it is spent exactly the next
+      stream is not inflated (zlib reads a `max_length` of 0 as no limit).
+  - **Measured (no live calls).**
+    - Real producers. 48 generated files: reportlab (compressed, uncompressed, 25 links a page,
+      platypus, 650 pages), PyMuPDF (plain, links, object streams), fpdf2, cupsfilter and sips, each
+      re-saved by qpdf (through pikepdf) with object streams, linearized, and some in QDF or plain. 47
+      count exactly and certain, the 650-page file at 600. The one PyMuPDF file with 30 of 40 pages
+      deleted by an incremental save counts 40, high on purpose. The 28 committed fixtures: 25 exact and
+      certain, that deleted-pages file high, and the two listings uncertain (below). The heaviest real
+      file, 600 pages with 25 links a page (15,000 annotations), takes 342,100 steps and 0.17 s; a
+      300-page PyMuPDF file with 20 links a page takes 145,858 steps and 0.06 s.
+    - The #234 repros from rounds 3 to 9 are each exact and certain, or 600 and uncertain. Round 8's
+      hidden-syntax variants (comments, `#xx` escapes, NUL, 17 spaces, an indirect or missing `/Type`,
+      an untyped tree, 3 visible pages and 47 hidden, an orphan `/Count`) read 50 of 50, certain. Its
+      object streams under ASCIIHex or over 4 MB are 600. The split object streams (up to 600 pages, 100
+      links a page) are exact or 600. 128-stream marker floods take under 0.05 s. The lying `/Length`
+      and missing `endstream` files, and `N G obj` hidden in a body, a string or a comment, are 600. A
+      redefined or missing indirect `/Length` is 600.
+    - Hostile inputs, single, at most 0.25 s each:
+      - 2 million `/Count 1`: 0.21 s, uncertain;
+      - 16 MB of `%\n`: 0.12 s;
+      - 16 MB of spaces, NULs or CRLFs inside an object: 0.01 s, still certain;
+      - a 16 MB string: 0.06 s;
+      - 4 million escapes or nested parentheses: 0.05 s;
+      - a million nested brackets: 0.000 s;
+      - 1,000 zlib bombs: 0.012 s.
+      Python allocations peak under 1 MB for all but the bombs (one 4 MB stream at a time, 8.5 MB peak).
+    - Concurrency. 20 sessions each post a 900 KB PDF of 200,000 tokens, and a text request from another
+      session follows 0.3 s later. It waited 0.005 to 0.12 s with the clients in another process (main:
+      0.014 to 0.58 s, its time spent reading the same bodies), against 48 s at 323bf9e. Twenty such
+      parses at once peak under 16 MB of Python allocations together.
+    - The estimate. Each committed fixture is estimated at 4,568 a page, 2.89 times a 1,583-token page,
+      pasted or read. The PDFlib file read near the bound is estimated at 172,415 for 151,540 and
+      flagged `over_bound` before the send, where main sent it unflagged. Pasted at a turn start, the
+      rotation pages enough for the request to fit (28,292 sent on a 150,000 bound).
+    - Media-free and image-only sessions are byte-identical to main: 560 requests in 8 sessions (Claude
+      and Codex, text only and with screenshots, bounds 60,000 and 150,000, 7 to 10 rotations each at
+      60,000) give the same forwarded bodies and events.
+  - **Not covered.**
+    - **The allowance runs high for typical pages,** 2.9 times at 1,583 a page, and an uncertain PDF
+      far more (600 pages, 2.74 million tokens). A large PDF pasted at a turn start can therefore page
+      the earlier conversation, log `bound_too_small` and `turn_room_low`, and make the launcher advise
+      a larger `--bound`. For example, 30 PyMuPDF pages pasted at 103,608 are estimated at 154,217 for a
+      real 64,701. This is the cost of never estimating a PDF low; a follow-up could tell the user that
+      the PDF's allowance, not the bound, fell short (#234 round 6's `media_allowance`).
+    - **Pages that show PDF syntax are uncertain.** Uncompressed content streams that show `N G obj` as
+      text are 600. Examples are a PDF tutorial, or reportlab with `pageCompression=0` listing a PDF's
+      source. The lexer cannot tell such text from an object a reader finds by its offset.
+    - **Deleted pages count high.** Pages an incremental save deleted still count, because every
+      version counts.
+    - **Some PDFs are never certain.** Encrypted object streams, and object streams under another
+      filter or a predictor, are 600. So is a PDF that needs more than 400,000 steps (about 300 or more
+      pages with 60 or more links a page). Anthropic refuses encrypted PDFs.
+    - **A document by URL or file id is always 600 pages,** so it is over any bound. Claude Code's Read
+      tool sends PDFs as base64.
+    - **A dense page can cost more than 4,568:** small-font code or tables. The estimate is then low by
+      the difference, as D48 said of its 3,000.
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.
