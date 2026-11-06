@@ -22,6 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from contexto.store import SessionStore
+
 CLAUDE = shutil.which("claude")
 pytestmark = pytest.mark.skipif(CLAUDE is None, reason="claude CLI not installed")
 EXPECTED = {"mcp__contexto__contexto_recall", "mcp__contexto__contexto_pin", "mcp__contexto__contexto_close",
@@ -67,6 +69,7 @@ def test_real_claude_code_lists_all_five_contexto_tools(tmp_path):
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
+        SessionStore(tmp_path / "home", "real-client")  # the launcher creates the session first (D57)
         mcp_config = tmp_path / "mcp.json"  # the real CLI entry point, as the launcher will configure it
         mcp_config.write_text(json.dumps({"mcpServers": {"contexto": {
             "command": sys.executable,

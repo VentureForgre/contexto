@@ -45,9 +45,12 @@ lack of a permission rule (``mcp_tools_denied``, D44). So is a CLI version Conte
 (``contexto.cliversions``, D38: ``<cli> --version`` at start; ``contexto run --no-version-check
 <cli>`` or ``CONTEXTO_NO_VERSION_CHECK=1`` skips it). stderr stays quiet otherwise.
 
+``claude --version`` and ``--help`` (alone) run claude directly, with no session or proxy.
+
 Exit codes: claude's own code; 128 + N if claude died from signal N; 2 for a usage error such as
-a bound above the guard; 1 if the proxy cannot start; 127 if ``claude`` is not on PATH; 130 for a
-Ctrl+C during the version check, before claude starts.
+a bound above the guard or an invalid session id; 1 if the proxy or the session store cannot start
+(for example ``CONTEXTO_HOME`` is not a writable directory); 127 if ``claude`` is not on PATH; 130
+for a Ctrl+C during the version check, before claude starts.
 """
 
 from __future__ import annotations
@@ -69,10 +72,11 @@ from urllib.parse import urlsplit
 from contexto.cliversions import launch_check
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
 from contexto.mcp import TOOLS as MCP_TOOLS
-from contexto.paths import contexto_home, mcp_env
+from contexto.paths import contexto_home, mcp_env, session_dir
 from contexto.private import affinity_salt
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import SessionStore
+from contexto.store.prune import discard_new_session
 from contexto.toolcheck import denied_tools_message, missing_tools_message
 from contexto.upstream import resolve_upstream
 
@@ -301,9 +305,15 @@ def check_options(options: LaunchOptions) -> None:
     check_bound(options.bound, options.allow_large_bound)
     if options.window_fraction is not None and not 0 < options.window_fraction < 1:
         raise LaunchError(f"--window-fraction must be between 0 and 1, got {options.window_fraction}", EXIT_USAGE)
-    if options.headroom_floor is not None and not 0 < options.headroom_floor < options.bound:
-        raise LaunchError(f"--headroom-floor must be between 0 and the bound, got {options.headroom_floor}",
-                          EXIT_USAGE)
+    # The default floor is checked like an explicit one (D57): the engine's headroom is never below it.
+    if options.headroom_floor is None:
+        if options.bound <= DEFAULT_HEADROOM_FLOOR:
+            raise LaunchError(
+                f"--bound {options.bound:,} is not above the headroom floor ({DEFAULT_HEADROOM_FLOOR:,}, the "
+                f"default), so no turn fits: use a larger --bound, or a smaller --headroom-floor", EXIT_USAGE)
+    elif not 0 < options.headroom_floor < options.bound:
+        raise LaunchError(f"--headroom-floor must be above 0 and below the bound ({options.bound:,}), "
+                          f"got {options.headroom_floor:,}", EXIT_USAGE)
 
 
 def session_affinity_key(store: Any, upstream_url: str) -> str | None:
@@ -422,22 +432,35 @@ def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None
                 child.kill()
 
 
+INFO_ARGS = (["--version"], ["-v"], ["--help"], ["-h"])  # claude prints and exits: no model request
+
+
 def _run(options: LaunchOptions, stderr) -> int:
     check_user_args(options.claude_args)
     check_options(options)
     claude = shutil.which(options.claude_bin)
     if claude is None:
         raise LaunchError(f"'{options.claude_bin}' not found on PATH", EXIT_NOT_FOUND)
+    if options.claude_args in INFO_ARGS:  # nothing to bound, so no session or proxy (D57)
+        return run_child([claude, *options.claude_args], stderr=stderr)
     upstream = resolve_upstream(options.upstream, cwd=Path.cwd())
     home = contexto_home()
-    session_id = options.session_id or uuid.uuid4().hex
+    session_id = options.session_id if options.session_id is not None else uuid.uuid4().hex
     try:
+        created = not session_dir(home, session_id).exists()
         store = open_session(home, session_id, Path.cwd())
-    except (OSError, ValueError) as exc:
-        raise LaunchError(f"cannot open session {session_id!r}: {exc}", EXIT_USAGE) from exc
+    except ValueError as exc:  # an id no session can have: a usage error
+        raise LaunchError(f"cannot open session {session_id[:40]!r}: {exc}", EXIT_USAGE) from exc
+    except OSError as exc:  # the store's filesystem: Contexto cannot start (D57)
+        raise LaunchError(f"cannot open session {session_id!r}: {exc}", EXIT_PROXY) from exc
     config = engine_config(options)
-    proxy, engine_name = start_proxy(store, upstream.url, upstream.source, config, options.observe_thinking,
-                                     stderr=stderr)
+    try:
+        proxy, engine_name = start_proxy(store, upstream.url, upstream.source, config, options.observe_thinking,
+                                         stderr=stderr)
+    except LaunchError:
+        if created:  # a launch that never started leaves no empty session (D57)
+            discard_new_session(store)
+        raise
     tmp = Path(tempfile.mkdtemp(prefix="contexto-run-"))  # mode 0700, removed on exit
     code = EXIT_PROXY
     try:

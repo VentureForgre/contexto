@@ -1007,8 +1007,42 @@ checked. The routine for testing a new version is `docs/cli-updates.md`.
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run
 the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
-`contexto sessions prune`, `contexto recall <page id>`, `contexto state`. Exit codes and `--help`
-documented in README.
+`contexto sessions prune`, `contexto recall <page id>`, `contexto search <words>`, `contexto state`.
+Exit codes and `--help` documented in README.
+
+Store-reading commands (D57). A session is named by its id or a unique prefix of it (an exact id
+wins; a prefix of several ids is an error naming them, exit 1) in `--session`, `CONTEXTO_SESSION`,
+`sessions show ID`, and `sessions prune --session`; `contexto mcp --session` and `contexto run
+--session` take exact ids only. An empty `--session` is an invalid id, never "not given". An id
+longer than 255 bytes is invalid everywhere (`paths.session_dir`). With no `--session` or
+`CONTEXTO_SESSION`, `recall`, `search`, and `state` use the most recently active session that has
+pages or ledger records, else the most recent session; stderr names the choice (`most recent`,
+`most recent with pages or pins`, `--session`, `CONTEXTO_SESSION`).
+- `sessions show` lists the pages after the summary, newest first, one index line each without the
+  identifiers (`pg_<id> turn N: <opening user text> [tools] [files]`): the 20 newest, all with
+  `--all`; `--json` adds `page_list` (`id`, `turn`, `line`) under the same limit, and
+  `upstream_4xx_model`. `upstream_4xx` counts each upstream 4xx once (the proxy's `request` entries
+  are not counted, only the separate events), and `upstream_4xx_model` those on the transformed
+  model paths, apart from Claude Code's keyless `HEAD /api/hello` probe.
+- `search WORDS... [--session ID] [--limit N]` (default 10) runs the store search `contexto_search`
+  uses (pages holding every word, best first, D34) and prints each hit's index line, then its last
+  three matching lines with context, each with the offset `recall PAGE_ID --offset N` reads from.
+  Paged-out turns only. No hit: a line on stderr, exit 0.
+- `recall` refuses an argument that is not a page id (`pg_` and 16 hex digits) before any path is
+  built, exit 1.
+- `state` prints the pinned records by group, or "No pinned records.", then how many turns are
+  paged out and the commands that list and search them. `state --raw` prints the `contexto_state`
+  text the model gets, uncapped.
+- `contexto mcp` serves an existing session only, and creates none: an unknown id exits 1. A
+  session that `contexto proxy` or `contexto run claude` created is removed again when the proxy
+  cannot start (the removal goes through prune's lock check, so a session another process opened is
+  kept). `contexto run claude --version`, `-v`, `--help`, or `-h` alone runs claude directly, with no
+  session or proxy.
+- `contexto proxy --port` outside 0 to 65535 is a usage error (exit 2). `contexto run` exits 2 for
+  a usage error (including an invalid session id and a `--bound` not above the headroom floor,
+  whether the floor is given or the 25,000 default) and 1 when the proxy or the session store
+  cannot start (for example `CONTEXTO_HOME` is a file or read-only). `sessions list` exits 1 when
+  the home is not a directory.
 
 `contexto sessions list` shows each session's size on disk (`size_bytes` in `--json`: allocated
 blocks under the session directory, symlinks counted as links) and a total. `contexto sessions

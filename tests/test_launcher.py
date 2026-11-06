@@ -343,12 +343,50 @@ def test_ctrl_c_reaches_claude_and_does_not_kill_the_launcher(env, upstream, tmp
     (["--bound", "0"], EXIT_USAGE, "positive"),
     (["--window-fraction", "1.5"], EXIT_USAGE, "--window-fraction"),
     (["--bound", "100000", "--headroom-floor", "100000"], EXIT_USAGE, "--headroom-floor"),
+    # D57: the default headroom floor is checked against the bound like an explicit one
+    (["--bound", "10"], EXIT_USAGE, "--bound 10 is not above the headroom floor (25,000, the default)"),
+    (["--bound", "25000"], EXIT_USAGE, "--bound 25,000 is not above the headroom floor (25,000, the default)"),
+    (["--bound", "10", "--headroom-floor", "25000"], EXIT_USAGE,
+     "--headroom-floor must be above 0 and below the bound (10), got 25,000"),
 ])
 def test_usage_errors_exit_2_without_running_claude(env, upstream, tmp_path, args, code, message):
     proc = launch(env, "--upstream", upstream, *args, "claude", cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == code and message in err
+    assert "window budget" not in err  # refused before any warning about it
     assert not Path(env["FAKE_RECORD"]).exists()
+    assert not (Path(env["CONTEXTO_HOME"]) / "sessions").exists()
+
+
+def test_a_small_bound_above_the_floor_is_accepted_with_the_warning(env, upstream, tmp_path):
+    proc = launch(env, "--upstream", upstream, "--bound", "25001", "--session", "small", "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0 and "window budget" in err
+
+
+def test_claude_version_runs_without_a_session_or_proxy(env, tmp_path):
+    """D57: `contexto run claude --version` opened a session and a proxy just to print the version."""
+    proc = launch(env, "claude", "--version", cwd=tmp_path)
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0 and "2.1.302 (Claude Code)" in out and err == ""
+    assert not (Path(env["CONTEXTO_HOME"]) / "sessions").exists()
+
+
+def test_an_unusable_contexto_home_exits_1_not_2(env, upstream, tmp_path):
+    """D57: 2 is a usage error; a store that cannot be opened is Contexto failing to start (1)."""
+    Path(env["CONTEXTO_HOME"]).write_text("")  # a file where the data directory should be
+    proc = launch(env, "--upstream", upstream, "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 1 and "cannot open session" in err and "Traceback" not in err
+    assert not Path(env["FAKE_RECORD"]).exists()
+
+
+def test_an_invalid_upstream_leaves_no_session(env, tmp_path):
+    """D57: the session was opened before the proxy refused the upstream, and stayed behind."""
+    proc = launch(env, "--upstream", "ftp://x", "claude", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == EXIT_USAGE and "invalid upstream" in err
+    assert list((Path(env["CONTEXTO_HOME"]) / "sessions").iterdir()) == []
 
 
 def test_large_bound_is_allowed_with_the_flag(env, upstream, tmp_path):
