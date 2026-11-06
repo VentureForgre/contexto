@@ -88,6 +88,22 @@ def simple_pdf(pages: int, *, filler: int = 0, object_stream: bool = False) -> b
     return out + b"trailer << /Root 1 0 R >>\n%%EOF\n"
 
 
+# The bound is in steps (rule 3); time is a backstop against a return to super-linear work only, since hosted
+# runners take up to about 4 times the builder's machine (0.25 s there is up to 1 s on CI's macOS runner).
+BACKSTOP_SECONDS = 5
+
+
+def spent(raw: bytes) -> tuple[PdfCount, int]:
+    """(count, steps spent) for a decoded PDF: past ``PDF_MAX_STEPS`` the count is uncertain."""
+    reader = pdfpages._Reader(raw)
+    try:
+        reader.read_file()
+        result = reader.counted()
+    except pdfpages._Uncertain:
+        result = pdfpages.UNCERTAIN
+    return result, PDF_MAX_STEPS - reader.steps
+
+
 def timed(raw: bytes) -> tuple[PdfCount, float]:
     start = time.perf_counter()
     result = count_pages(raw)
@@ -169,7 +185,7 @@ def test_an_object_stream_that_cannot_be_read_is_uncertain(extra):
 def test_zlib_bombs_are_bounded():
     raw = b"%PDF-1.7\n" + b"".join(objstm(10 + i, {3: bytes(4 << 20)}) for i in range(50))  # 210 KB
     result, seconds = timed(raw)
-    assert result == (PDF_MAX_PAGES, False) and seconds < 1
+    assert result == (PDF_MAX_PAGES, False) and seconds < BACKSTOP_SECONDS
     assert peak_memory(raw) < 16 << 20  # one 4 MB stream at a time (2ae9ff4: 204 MB)
 
 
@@ -181,7 +197,7 @@ def test_the_inflate_budget_holds_once_it_is_spent_exactly(monkeypatch):
     monkeypatch.setattr(pdfpages, "PDF_INFLATE_BUDGET", size)
     raw = b"%PDF-1.7\n" + first + objstm(11, {4: bytes(64 << 20)}) + b"2 0 obj << /Type /Pages /Kids [3 0 R] >> endobj"
     result, seconds = timed(raw)
-    assert result == (PDF_MAX_PAGES, False) and seconds < 1
+    assert result == (PDF_MAX_PAGES, False) and seconds < BACKSTOP_SECONDS
     monkeypatch.setattr(pdfpages, "PDF_INFLATE_BUDGET", size)
     assert peak_memory(raw) < 4 << 20  # nothing was inflated past the budget
     monkeypatch.setattr(pdfpages, "PDF_INFLATE_BUDGET", 16 << 20)
@@ -261,7 +277,7 @@ PAGE_MARKERS = b"/Type/Page " * 9_999
 def test_marker_floods_in_object_streams_are_fast(bodies, stored):
     """Round 3: per-buffer caps multiplied across 128 object streams: 30 KB took 1.8 to 3.0 s."""
     result, seconds = timed(_object_stream_markers(bodies, stored=stored))
-    assert result == (PDF_MAX_PAGES, False) and seconds < 1
+    assert result == (PDF_MAX_PAGES, False) and seconds < BACKSTOP_SECONDS
 
 
 # Rounds 4 to 7: page trees and stream lengths -----------------------------------------------------
@@ -287,7 +303,8 @@ def test_a_crafted_wide_tree_is_bounded():
         objs.append(b"%d 0 obj << /Type /Pages /Count 600 /Kids [ %s ] >> endobj\n" % (n + 2, kids))
     raw = b"%PDF-1.4\n" + b"".join(objs)
     result, seconds = timed(raw)
-    assert result.pages == PDF_MAX_PAGES and seconds < 1 and peak_memory(raw) < 32 << 20
+    assert result.pages == PDF_MAX_PAGES and seconds < BACKSTOP_SECONDS and peak_memory(raw) < 32 << 20
+    assert spent(raw)[1] > PDF_MAX_STEPS  # the step budget is what stops it
 
 
 def _listing(pages: int, *, direct: bool) -> bytes:
@@ -664,12 +681,18 @@ MERGING = ["kids: 32 versions, 16,000 nodes", "kids: 1 version, 30,000 nodes",
 @pytest.mark.parametrize("shape", MERGING)
 def test_merging_versions_is_paid_in_steps(shape):
     """Resolving every version, and walking the tree, are charged to the step budget and memoised per object
-    and version count, so each shape stays near rule 3's 0.25 s (0.16 to 0.24 s measured; 193a0cc up to
-    66.7 s, and another session's 1-page PDF waited 63.4 s behind one)."""
+    and version count: each shape either fits the budget with its values read once (every version agrees)
+    or spends it and is uncertain. 193a0cc took up to 66.7 s, unpaid by the budget (0.16 to 0.24 s now on
+    the builder's machine, up to 1 s on CI's macOS runner)."""
     raw = _merging(shape)
     result, seconds = timed(raw)
-    assert seconds < 0.5
-    assert result == ((1, True) if shape.startswith(("length: 30", "filter")) else (PDF_MAX_PAGES, False))
+    assert seconds < BACKSTOP_SECONDS
+    counted, steps = spent(raw)
+    assert counted == result
+    if shape.startswith(("length: 30", "filter")):
+        assert result == (1, True) and steps <= PDF_MAX_STEPS
+    else:
+        assert result == (PDF_MAX_PAGES, False) and steps > PDF_MAX_STEPS
 
 
 def test_a_long_number_is_not_copied():
@@ -680,18 +703,22 @@ def test_a_long_number_is_not_copied():
                        ) == (1, True)
 
 
-def test_the_smallest_waiting_pdf_is_parsed_first():
-    """Another session's 1-page PDF waited for every large PDF queued before it (4.5 s behind 20 that spend
-    the step budget); smallest first, it waits for the parse in progress (0.22 to 0.25 s)."""
+def _queued(gate, count: int) -> None:
+    deadline = time.monotonic() + BACKSTOP_SECONDS
+    while len(gate._waiting) < count and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(gate._waiting) == count
+
+
+def _parse_order(gate, sizes, *, between=None) -> list[int]:
+    """The order ``gate`` grants waiters of ``sizes`` while one holder parses."""
     order: list[int] = []
-    gate = tokens._PDF_PARSING
-    held = threading.Event()
-    release = threading.Event()
+    held, release = threading.Event(), threading.Event()
 
     def first():
         with gate.hold(1_000):
             held.set()
-            release.wait(5)
+            release.wait(BACKSTOP_SECONDS)
 
     def waiter(size):
         with gate.hold(size):
@@ -699,15 +726,88 @@ def test_the_smallest_waiting_pdf_is_parsed_first():
 
     threads = [threading.Thread(target=first)]
     threads[0].start()
-    held.wait(5)
-    for size in (900, 5, 300, 5, 40):
+    held.wait(BACKSTOP_SECONDS)
+    for i, size in enumerate(sizes):
         threads.append(threading.Thread(target=waiter, args=(size,)))
         threads[-1].start()
-        time.sleep(0.02)
+        _queued(gate, i + 1)
+        if between:
+            between(i)
     release.set()
     for thread in threads:
-        thread.join(5)
-    assert order == [5, 5, 40, 300, 900]
+        thread.join(BACKSTOP_SECONDS)
+    return order
+
+
+def test_the_smallest_waiting_pdf_is_parsed_first():
+    """Another session's 1-page PDF waited for every large PDF queued before it (4.5 s behind 20 that spend
+    the step budget); smallest first, it waits for the parse in progress (0.22 to 0.25 s)."""
+    assert _parse_order(tokens._SmallestFirst(), (900, 5, 300, 5, 40)) == [5, 5, 40, 300, 900]
+
+
+def test_a_pdf_that_has_waited_goes_next(monkeypatch):
+    """PR #248 round 3 (reviewer A): smaller PDFs that kept arriving kept a 20-page PDF waiting 4.79 s. A
+    waiter older than ``PDF_PARSE_MAX_WAIT`` goes next, the oldest first."""
+    monkeypatch.setattr(tokens, "PDF_PARSE_MAX_WAIT", 0.05)
+    order = _parse_order(tokens._SmallestFirst(), (900, 700, 5, 3), between=lambda i: i == 1 and time.sleep(0.1))
+    # The first two have waited past the limit when the holder releases, so they go first, oldest first
+    assert order[:2] == [900, 700] and sorted(order[2:]) == [3, 5]
+    assert _parse_order(tokens._SmallestFirst(), (900, 700, 5, 3)) == [3, 5, 700, 900]  # none waited long
+
+
+def test_an_interrupted_waiter_leaves_the_queue():
+    """PR #248 round 3 (reviewer B): a waiter interrupted inside ``hold`` left its entry, and every later parse
+    waited for it forever."""
+    gate = tokens._SmallestFirst()
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with gate.hold(1_000):
+            held.set()
+            release.wait(BACKSTOP_SECONDS)
+
+    first = threading.Thread(target=holder)
+    first.start()
+    held.wait(BACKSTOP_SECONDS)
+    real_wait = gate._changed.wait
+    gate._changed.wait = lambda *args: (_ for _ in ()).throw(KeyboardInterrupt)  # the next waiter is interrupted
+    with pytest.raises(KeyboardInterrupt):
+        with gate.hold(1):
+            pass
+    gate._changed.wait = real_wait
+    assert not gate._waiting
+    release.set()
+    first.join(BACKSTOP_SECONDS)
+    done = threading.Event()
+
+    def later():
+        with gate.hold(5):
+            done.set()
+
+    threading.Thread(target=later, daemon=True).start()
+    assert done.wait(BACKSTOP_SECONDS)
+
+
+def test_a_pdf_over_the_cap_does_not_wait_for_the_parse_lock(monkeypatch):
+    monkeypatch.setattr(tokens, "PDF_MAX_BASE64", 100)
+    gate = tokens._PDF_PARSING
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with gate.hold(1):
+            held.set()
+            release.wait(BACKSTOP_SECONDS)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    held.wait(BACKSTOP_SECONDS)
+    try:
+        start = time.monotonic()
+        assert pdf_page_count(b64(simple_pdf(1, filler=200))) == (PDF_MAX_PAGES, False)
+        assert time.monotonic() - start < 2  # the holder keeps the lock for 5 s
+    finally:
+        release.set()
+        thread.join(BACKSTOP_SECONDS)
 
 
 # Round 9: the lexer is linear, its memory flat, and its work bounded ------------------------------------------
@@ -725,7 +825,8 @@ ROUND_9 = {
 def test_backtracking_inputs_are_instant(case):
     """Round 9: 20 x ``% `` took over 60 s, and 40,000 digits 7.6 s (a token regex with nested quantifiers)."""
     result, seconds = timed(ROUND_9[case])
-    assert result == (PDF_MAX_PAGES, False) and seconds < 0.1
+    assert result == (PDF_MAX_PAGES, False) and seconds < BACKSTOP_SECONDS
+    assert spent(ROUND_9[case])[1] < 1_000  # a few steps: no run of comments or digits is paid per byte
 
 
 PADDING = {"spaces": b" " * (16 << 20), "NULs": b"\x00" * (16 << 20), "CRLFs": b"\r\n" * (8 << 20),
@@ -739,7 +840,8 @@ def test_padding_costs_no_memory(padding):
     step budget."""
     raw = simple_pdf(1).replace(b"2 0 obj", b"2 0 obj" + PADDING[padding])
     result, seconds = timed(raw)
-    assert seconds < 1 and peak_memory(raw) < 4 << 20
+    assert seconds < BACKSTOP_SECONDS and peak_memory(raw) < 4 << 20
+    assert (spent(raw)[1] > PDF_MAX_STEPS) == (padding == "comment lines")  # a whitespace run is one step
     assert result == ((PDF_MAX_PAGES, False) if padding == "comment lines" else (1, True))
 
 
@@ -766,7 +868,7 @@ def test_hostile_pdfs_stop_at_the_step_budget(case):
     well under a second (about 0.2 s here at most), with flat memory."""
     raw = HOSTILE[case]
     result, seconds = timed(raw)
-    assert result == (PDF_MAX_PAGES, False) and seconds < 1
+    assert result == (PDF_MAX_PAGES, False) and seconds < BACKSTOP_SECONDS
     reader = pdfpages._Reader(raw)
     with pytest.raises(pdfpages._Uncertain):
         reader.read_file()
@@ -991,11 +1093,17 @@ def test_a_large_pdf_pasted_at_a_turn_start_is_not_a_bound_too_small(tmp_path):
     assert "bound_too_small" in text and "pdf_allowance" not in text
 
 
-def test_an_uncertain_pdf_pasted_at_a_turn_start_is_its_allowance(tmp_path):
-    """An uncertain PDF counts 600 pages; with its pages unknown it is taken at its floor, 0."""
-    events = _paste_at_turn_start(tmp_path, doc((FIXTURES / "qdf-listing-20.pdf").read_bytes()), history=20_000)
+@pytest.mark.parametrize("pages", [20, 100, 300])
+def test_an_uncertain_pdf_pasted_at_a_turn_start_is_a_bound_too_small(tmp_path, pages):
+    """PR #248 round 3 (reviewer A): an uncertain PDF was taken at 0 and logged pdf_allowance, so the user
+    read that the bound did not need to change for listings of 100 and 300 real pages (158,300 and 474,900
+    at 1,583 a page, over the bound). Its real size is unknown: bound_too_small, marked as a PDF that could
+    not be read fully."""
+    events = _paste_at_turn_start(tmp_path, doc(_listing(pages, direct=True)), history=20_000)
     names = [e["event"] for e in events]
-    assert "pdf_allowance" in names and "pdf_pages_uncertain" in names and "bound_too_small" not in names
+    assert "pdf_allowance" not in names and "pdf_pages_uncertain" in names
+    (small,) = [e for e in events if e["event"] == "bound_too_small"]
+    assert small["pdf_uncertain"] == 1
 
 
 class _Store:
@@ -1019,8 +1127,13 @@ def test_the_launcher_explains_a_pdf_allowance_and_an_uncertain_pdf():
                                                             "pages": PDF_MAX_PAGES}]})
     lines = err.getvalue().splitlines()
     assert len(lines) == 2 and all("--bound" not in line for line in lines)
-    assert "PDF is estimated generously" in lines[0] and "does not need to change" in lines[0]
+    # PR #248 round 3 (reviewer B): dense pages can still go over (161,986 on 150k), so no promise
+    assert "PDF is estimated generously" in lines[0] and "may fit" in lines[0] and "need to change" not in lines[0]
     assert "could not be read fully" in lines[1] and "600 pages" in lines[1]
+    notices.log({"event": "request", "transform_events": [{"event": "bound_too_small", "pdf_uncertain": 1,
+                                                            **sizing}]})
+    assert "could not be read fully" in err.getvalue().splitlines()[2]
+    assert "Restart with a larger --bound" not in err.getvalue()
     notices.log({"event": "request", "transform_events": [{"event": "bound_too_small", **sizing}]})
     assert "Restart with a larger --bound" in err.getvalue()  # a bound that really is too small still says so
 
@@ -1121,7 +1234,7 @@ def test_hostile_pdfs_do_not_hold_up_another_session():
         proxy.stop()
         server.shutdown()
         server.server_close()
-    assert waited < 1
+    assert waited < BACKSTOP_SECONDS  # 0.010 to 0.018 s here; the lexer of 323bf9e: 48 s
 
 
 @pytest.mark.parametrize("field", ["messages", "input"])

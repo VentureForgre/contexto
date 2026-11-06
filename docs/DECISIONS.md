@@ -2484,18 +2484,40 @@ the owner's delegation. Open decisions are listed at the end with the options an
       kid the walk reaches now counts at least one page; an empty real node errs high by 1.
     - **Smallest first.** Parsing is still one PDF at a time, now the smallest waiting first. Behind 20
       PDFs that spend the step budget, another session's 1-page PDF waited 4.5 s in arrival order and
-      waits 0.22 to 0.25 s now (its text requests 0.010 to 0.014 s).
+      waits 0.22 to 0.25 s now (its text requests 0.010 to 0.014 s). Round 3 bounds the wait of a large
+      PDF (below).
     - **Long tokens.** A regular token over 13 bytes is classified in place, not copied: 30 MB of digits
       peaked at 30 MB, now under 1 MB.
     - **The allowance is not the bound (reviewer B).** About 26 typical pages or more pasted at a turn
       start logged `bound_too_small`, and the launcher told the user to restart with a larger `--bound`,
       in 38 of 68 pastes, 35 of them falsely: 30 PyMuPDF pages were estimated at 146,623 for a real
       57,137, and even the largest bound allowed without `--allow-large-bound` cannot hold them. When
-      the new turn would fit `W` with its PDFs at 1,583 a page (an uncertain PDF at its floor, 0), the
-      engine logs `pdf_allowance` instead, with the same sizing, `new_turn_tokens` and
-      `pdf_allowance_tokens`. The rotation is unchanged. The launcher says once that a large PDF is
-      estimated generously and the bound does not need to change. `pdf_pages_uncertain` is now shown
-      too, once: a PDF could not be read fully and is counted at the maximum, 600 pages.
+      the new turn would fit `W` with its PDFs at 1,583 a page, the engine logs `pdf_allowance`
+      instead, with the same sizing, `new_turn_tokens` and `pdf_allowance_tokens`. The rotation is
+      unchanged. The launcher says once that a large PDF is estimated generously. `pdf_pages_uncertain`
+      is now shown too, once: a PDF could not be read fully and is counted at the maximum, 600 pages.
+      Of 68 pastes in B's 230 sessions, the advice now prints for 2, both real overflows that their text
+      controls share (it printed for 38).
+  - **PR #248 round 3.** Both reviewers:
+    - **The bound is in steps.** A timing test asserted under 0.5 s, and hosted runners took 0.52 to
+      1.00 s (macOS 3.15 failed 7 of 8 shapes; the builder's machine 0.16 to 0.24 s). The tests now
+      assert the steps (a shape fits the budget, or spends it and is uncertain) and keep 5 s only as a
+      backstop against super-linear work. Times here are the builder's machine's unless said otherwise.
+    - **An interrupted waiter (B).** A thread interrupted while waiting to parse left its place in the
+      queue, and every later parse would have waited for it forever. It now takes itself out, and the
+      next waiter is chosen.
+    - **A large PDF's wait is bounded (A).** Smallest first let a large PDF wait while smaller ones kept
+      arriving: a 20-page PDF waited 4.78 s while 2 threads fed 1-page ones. A PDF that has waited 1 s
+      now goes next (the longest-waiting first): it waited 1.003 s with 2 and with 4 feeding threads. The
+      next waiter is chosen once, by the parse that releases the lock, so the lock never sits free. A
+      PDF over the 32 MB base64 limit is never parsed and no longer waits.
+    - **`pdf_allowance` only for certain PDFs (A and B).** An uncertain PDF was taken at its floor, 0,
+      so the turn always "fit", and the user read that the bound did not need to change for listings of
+      100 and 300 real pages (158,300 and 474,900 at 1,583 a page). A turn with an uncertain PDF now
+      logs `bound_too_small` with `pdf_uncertain`, and the launcher says a PDF could not be read fully
+      rather than advising a larger bound outright. The `pdf_allowance` notice no longer promises that
+      the bound need not change: dense pages within the allowance can still go over (B: a real 161,986
+      on 150,000). It says the turn may fit with typical pages.
   - **The lexer (PR #234 round 9).** The round-9 parser used one token regex. Its nested quantifiers
     backtracked exponentially on comment runs (22 `%` then a newline and `)`: 0.43 s, 4 times more for
     every 2 more `%`; a 140-byte PDF held the proxy for 229 s). They backtracked quadratically on digit
@@ -2534,9 +2556,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
       links a page) are exact or 600. 128-stream marker floods take under 0.05 s. The lying `/Length`
       and missing `endstream` files, and `N G obj` hidden in a body, a string or a comment, are 600. A
       redefined or missing indirect `/Length` is 600.
-    - Hostile inputs, at most 0.27 s each, single or 20 at once (round 2: 43 inputs, reviewer A's 29
-      lexer stress inputs and round-2 shapes among them; the slowest, 20,000 versions of the page tree,
-      0.255 s single and 0.272 s with 20 at once):
+    - Hostile inputs, within the step budget, single or 20 at once, at most 0.27 s each on the builder's
+      machine (round 2: 43 inputs, reviewer A's 29 lexer stress inputs and round-2 shapes among them;
+      the slowest, 20,000 versions of the page tree, 0.255 s single and 0.272 s with 20 at once; up to
+      about 1 s on CI's hosted macOS runner):
       - 2 million `/Count 1`: 0.21 s, uncertain;
       - 16 MB of `%\n`: 0.12 s;
       - 16 MB of spaces, NULs or CRLFs inside an object: 0.01 s, still certain;
@@ -2563,9 +2586,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
       60,000 kept 1 message where an equal-cost text control kept 41. This is the cost of never
       estimating a PDF low; the launcher now says it is the PDF's allowance (`pdf_allowance`), not the
       bound, that fell short.
-    - **Parsing is one PDF at a time.** A PDF can wait for the parse in progress (0.27 s at most), and
-      a large one for the smaller PDFs queued with it; 20 PDFs that spend the step budget take about
-      5 s together.
+    - **Parsing is one PDF at a time.** A PDF waits for the parse in progress (one step budget), and
+      for smaller PDFs for at most 1 s, after which it goes next among those that have waited that long,
+      the longest-waiting first. 20 PDFs that spend the step budget take about 5 s together on the
+      builder's machine.
     - **Pages that show PDF syntax are uncertain.** Uncompressed content streams that show `N G obj` as
       text are 600. Examples are a PDF tutorial, or reportlab with `pageCompression=0` listing a PDF's
       source. The lexer cannot tell such text from an object a reader finds by its offset.

@@ -21,7 +21,8 @@ class or one literal, matched at a position or searched forward, so none can bac
 whitespace, regular characters or hex digits is passed in one C call, and a container whose value the
 count does not need is skipped to its next delimiter the same way. Every token, comment, string
 delimiter and skipped delimiter is a step, and a PDF that takes more than ``PDF_MAX_STEPS`` is not
-certain, so the time is linear in the input and bounded per PDF (about 0.27 s at most). Resolving every
+certain, so the time is linear in the input and bounded per PDF (0.27 s at most on the builder's machine,
+about 1 s on CI's hosted macOS runner). Resolving every
 version of an indirect value and walking the page tree are paid in the same steps, each value read once
 per object and version count. The parse pauses briefly every few thousand steps so other threads get the
 GIL. Skipped runs, and regular tokens too long to matter, make no Python objects;

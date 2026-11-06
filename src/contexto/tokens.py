@@ -26,12 +26,12 @@ from __future__ import annotations
 
 import base64
 import binascii
-import heapq
 import itertools
 import math
 import re
 import struct
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -64,6 +64,7 @@ PDF_MAX_BASE64 = 32 << 20  # base64 characters a PDF is decoded from: the API's 
 # PDFs whose counts are kept, least recently used dropped first; an entry is a key and a 2-tuple (under
 # 300 bytes), so this costs at most about 19 MB, and no request holds enough PDFs to cycle it.
 PDF_CACHE_SIZE = 65_536
+PDF_PARSE_MAX_WAIT = 1.0  # seconds a PDF waits for smaller ones before it is parsed next (_SmallestFirst)
 IMAGE_TYPES = frozenset({"image", "input_image"})  # Messages, Responses
 HEAD_CHARS = 64  # base64 characters that hold the PNG, GIF and WebP dimensions
 JPEG_HEAD_CHARS = 262_144  # a JPEG's frame header follows its EXIF and ICC segments: read up to 192 KB
@@ -78,33 +79,54 @@ _PDF_PAGES_LOCK = threading.Lock()  # the proxy fills the cache outside its tran
 
 class _SmallestFirst:
     """A lock for parsing one PDF at a time, granted to the waiter with the smallest PDF first (in arrival
-    order among equals). Parsing holds the GIL, and twenty parses at once starved another session's request
-    of it (a text request waited 2.05 s behind 20 hostile PDFs; one at a time, pausing as the lexer does,
-    0.005 to 0.12 s; main 0.014 to 0.58 s, its time spent reading the same bodies). Smallest first, an
-    ordinary PDF waits for at most the parse in progress, not for twenty large ones queued before it
-    (4.5 s in arrival order)."""
+    order among equals), except that a waiter that has waited ``PDF_PARSE_MAX_WAIT`` goes next, the
+    longest-waiting first, so a large PDF is never kept waiting while smaller ones keep arriving. Parsing
+    holds the GIL, and twenty parses at once starved another session's request of it (a text request
+    waited 2.05 s behind 20 hostile PDFs; one at a time, pausing as the lexer does, 0.005 to 0.12 s; main
+    0.014 to 0.58 s, its time spent reading the same bodies). Smallest first, an ordinary PDF waits for the
+    parse in progress, not for twenty large ones queued before it (4.5 s in arrival order). A waiter that
+    is interrupted takes itself out of the queue, so no later parse waits for it."""
 
     def __init__(self) -> None:
         self._changed = threading.Condition()
         self._busy = False
-        self._waiting: list[tuple[int, int]] = []  # a heap of (size, ticket)
+        self._granted: int | None = None  # the waiter chosen to go next, chosen once by the one releasing
+        self._waiting: dict[int, tuple[int, float]] = {}  # ticket -> (size, when it started waiting)
         self._tickets = itertools.count()
+
+    def _choose(self) -> None:
+        if not self._waiting:
+            self._granted = None
+            return
+        now = time.monotonic()
+        aged = [(since, ticket) for ticket, (_, since) in self._waiting.items() if now - since >= PDF_PARSE_MAX_WAIT]
+        self._granted = (min(aged)[1] if aged else
+                         min(self._waiting, key=lambda ticket: (self._waiting[ticket][0], ticket)))
+        self._changed.notify_all()
 
     @contextmanager
     def hold(self, size: int) -> Iterator[None]:
         with self._changed:
-            entry = (size, next(self._tickets))
-            heapq.heappush(self._waiting, entry)
-            while self._busy or self._waiting[0] != entry:
-                self._changed.wait()
-            heapq.heappop(self._waiting)
-            self._busy = True
+            ticket = next(self._tickets)
+            self._waiting[ticket] = (size, time.monotonic())
+            if not self._busy and self._granted is None:
+                self._choose()
+            try:
+                while self._granted != ticket:
+                    self._changed.wait()
+            except BaseException:  # interrupted while waiting: out of the queue, and another chosen if it was next
+                del self._waiting[ticket]
+                if self._granted == ticket or (not self._busy and self._granted is None):
+                    self._choose()
+                raise
+            del self._waiting[ticket]
+            self._granted, self._busy = None, True
         try:
             yield
         finally:
             with self._changed:
                 self._busy = False
-                self._changed.notify_all()
+                self._choose()
 
 
 _PDF_PARSING = _SmallestFirst()
@@ -298,21 +320,28 @@ def pdf_page_count(data: str) -> PdfCount:
         if result is not None:
             _PDF_PAGES.move_to_end(key)
             return result
+    if len(data) > PDF_MAX_BASE64:  # never parsed, so it does not wait for the parse lock
+        _cache_count(key, UNCERTAIN)
+        return UNCERTAIN
     with _PDF_PARSING.hold(len(data)):  # cached before release, so a PDF is parsed once however many wait
         with _PDF_PAGES_LOCK:
             result = _PDF_PAGES.get(key)  # counted while this thread waited
         if result is None:
             try:
-                pdf = _decode(data, len(data)) if len(data) <= PDF_MAX_BASE64 else b""
+                pdf = _decode(data, len(data))
                 result = count_pages(pdf) if pdf else UNCERTAIN
             except Exception:  # a hostile or damaged PDF must not break the transform (D60)
                 result = UNCERTAIN
-        with _PDF_PAGES_LOCK:
-            _PDF_PAGES[key] = result
-            _PDF_PAGES.move_to_end(key)
-            while len(_PDF_PAGES) > PDF_CACHE_SIZE:
-                _PDF_PAGES.popitem(last=False)
+        _cache_count(key, result)
     return result
+
+
+def _cache_count(key: tuple[int, int], result: PdfCount) -> None:
+    with _PDF_PAGES_LOCK:
+        _PDF_PAGES[key] = result
+        _PDF_PAGES.move_to_end(key)
+        while len(_PDF_PAGES) > PDF_CACHE_SIZE:
+            _PDF_PAGES.popitem(last=False)
 
 
 def _document_count(block: dict) -> PdfCount:
@@ -327,16 +356,20 @@ def uncertain_documents(value: Any) -> int:
                if _media_kind(block) == "document" and not _document_count(block).counted)
 
 
-def pdf_allowance(value: Any) -> int:
-    """Tokens by which the PDFs in ``value`` (a message or item list) are estimated over a typical cost:
-    their allowance less 1,583 a page when their pages are certain, less nothing (their floor) when not.
-    A turn that fits its window with this taken off falls short only by the PDFs' allowance (D60)."""
-    allowance = 0
+def pdf_allowance(value: Any) -> tuple[int, int]:
+    """For the PDFs in ``value`` (a message or item list): the tokens by which the certain ones are estimated
+    over a typical page cost (their allowance less 1,583 a page), and how many are not certain. A turn
+    that fits its window with that taken off, and holds no uncertain PDF, falls short only by the PDFs'
+    allowance (D60); an uncertain one's real size is unknown."""
+    allowance = uncertain = 0
     for block in split_media(value)[1]:
         if _media_kind(block) == "document":
             count = _document_count(block)
-            allowance += count.pages * (PDF_PAGE_TOKENS - (PDF_TYPICAL_PAGE_TOKENS if count.counted else 0))
-    return allowance
+            if count.counted:
+                allowance += count.pages * (PDF_PAGE_TOKENS - PDF_TYPICAL_PAGE_TOKENS)
+            else:
+                uncertain += 1
+    return allowance, uncertain
 
 
 def prime_media(value: Any) -> None:

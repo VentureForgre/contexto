@@ -330,14 +330,19 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    lexer cannot read are never certain. The lexer is one pass with no backtracking: at most 400,000
    steps per PDF, past which it is not certain. A step is a token, comment, string delimiter or skipped
    delimiter, and each value read in resolving versions or walking the page tree, each read once per
-   object and version count. A PDF takes at most about 0.27 s, and skipped runs and long tokens cost no
-   memory. The proxy counts a request's PDFs before it takes the transform lock, one PDF at a time,
-   the smallest waiting first, and caches counts by content (65,536, least recently used dropped). When
-   a turn start's new turn does not fit `W` but would with its PDFs at 1,583 a page (an uncertain one
-   at its floor, 0), the engine logs `pdf_allowance` (the sizing, `new_turn_tokens` and
-   `pdf_allowance_tokens`) in place of `bound_too_small`, and rotates the same way. The launcher shows
-   it, and `pdf_pages_uncertain`, once each, without advising a larger bound. A document of plain text
-   or content blocks is text.
+   object and version count. The bound is the steps; in time, 400,000 steps took at most 0.27 s on the
+   builder's machine and up to about 1 s on CI's hosted macOS runner. Skipped runs and long tokens cost
+   no memory. The proxy counts a request's PDFs before it takes the transform lock, one PDF at a time:
+   the smallest waiting goes first, except that one that has waited 1 s goes next (the longest-waiting
+   first), and a PDF over the base64 limit, never parsed, does not wait. Counts are cached by content
+   (65,536, least recently used dropped). When a turn start's new turn does not fit `W` but would with
+   its PDFs at 1,583 a page, and every PDF in it is certain, the engine logs `pdf_allowance` (the sizing,
+   `new_turn_tokens` and `pdf_allowance_tokens`) in place of `bound_too_small`, and rotates the same way;
+   with an uncertain PDF in the turn it logs `bound_too_small` with `pdf_uncertain` (how many). The
+   launcher shows `pdf_allowance` once as a generous estimate under which the turn may fit, not a
+   promise; `bound_too_small` with `pdf_uncertain` once as a PDF that could not be read fully, without
+   advising a larger bound outright; and `pdf_pages_uncertain` once. A document of plain text or
+   content blocks is text.
    The ratio is learned from text only: each observed request's image and document (media) bytes are
    left out of its bytes, and their cost out of its real tokens. That cost lies at or under the
    media's estimate (a PDF's is its pages' allowance, which a dense page can exceed) and is meant to

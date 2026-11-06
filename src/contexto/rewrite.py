@@ -52,7 +52,8 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   cannot hold the newest complete turn and the new turn rotates to the minimal window (only the new
   turn; ``window_minimal``, contract PR #50), and a ``W`` that is not positive or cannot hold even the
   new turn also logs ``bound_too_small`` and still rotates there, so such a request can exceed the
-  bound; ``pdf_allowance`` instead when the new turn would fit with its PDFs at a typical page cost (D60).
+  bound; ``pdf_allowance`` instead when the new turn would fit with its PDFs at a typical page cost and
+  all of them are certain (D60).
   ``F`` and ``W`` appear in these events.
 - A second rotation condition (packet A12, contract PR #115): at a turn start, when the recall room
   the request-time publish would give the new turn (``bound - estimate - headroom_floor``) is below
@@ -1378,15 +1379,19 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
                 state = new_epoch(messages, request, state, store, config, estimator, state.k, n, events,
                                   "head_change", sizing=(f, w))
             if w <= 0 or new_tokens > w:
-                # D60: when the new turn would fit with its PDFs at a typical page cost (or, uncertain, at
-                # their floor), it is the PDFs' generous allowance that falls short, not the bound.
-                allowance = pdf_allowance(messages[new_start:]) if w > 0 else 0
-                if allowance and new_tokens - allowance <= w:
+                # D60: when the new turn would fit with its PDFs at a typical page cost, and every PDF in it
+                # is certain, it is the PDFs' generous allowance that falls short, not (necessarily) the
+                # bound. An uncertain PDF's real size is unknown, so that turn is a bound too small, marked.
+                allowance, uncertain = pdf_allowance(messages[new_start:])
+                if w > 0 and allowance and not uncertain and new_tokens - allowance <= w:
                     events.append({"event": "pdf_allowance", **sizing, "epoch": state.epoch, "bound": config.bound,
                                    "new_turn_tokens": new_tokens, "pdf_allowance_tokens": allowance})
                 else:
-                    events.append({"event": "bound_too_small", **sizing, "epoch": state.epoch,
-                                   "bound": config.bound, "new_turn_tokens": new_tokens})
+                    event = {"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
+                             "new_turn_tokens": new_tokens}
+                    if uncertain:
+                        event["pdf_uncertain"] = uncertain
+                    events.append(event)
         else:
             k = choose_k(messages, state, target, estimator)
             if restores and room_k > k:
