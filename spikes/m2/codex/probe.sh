@@ -1,15 +1,17 @@
 #!/bin/bash
 # Zero-token Codex 0.154.0 probes against responses_stub.py (loopback, 401, structure only).
 # Each scenario uses its own temporary CODEX_HOME, env -i, and synthetic credentials that are not
-# real (a dummy key, or a synthetic ChatGPT-login auth.json with unsigned fake tokens).
+# real (a dummy key, or a synthetic ChatGPT-login auth.json with unsigned fake tokens), and a temp HOME.
 # Output: <repo>/.contexto/spikes/M2-A5/codex-shapes.jsonl
+# Usage: spikes/m2/codex/probe.sh [codex-binary]   (default: codex on PATH, then ~/.local/bin)
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$S/../../.." && pwd)"
+CODEX="${1:-$(command -v codex || echo "$HOME/.local/bin/codex")}"
 OUT="$REPO/.contexto/spikes/M2-A5"
 TMP="$(cd "$(mktemp -d /tmp/m2-codex.XXXXXX)" && pwd -P)"
 PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])")
-mkdir -p "$OUT" "$TMP/cwd"
+mkdir -p "$OUT" "$TMP/cwd" "$TMP/home"
 : > "$OUT/codex-shapes.jsonl"
 python3 "$S/responses_stub.py" "$PORT" "$OUT/codex-shapes.jsonl" > /dev/null 2>&1 &
 STUB=$!
@@ -21,8 +23,8 @@ run() {  # run <label> <home> <extra env assignment or ''> <codex args...>
   local label="$1" home="$2" extra="$3"; shift 3
   mkdir -p "$home"
   echo "{\"scenario\": \"$label\"}" >> "$OUT/codex-shapes.jsonl"
-  (cd "$TMP/cwd" && env -i HOME="$HOME" PATH="$PATH" TERM=dumb CODEX_HOME="$home" $extra \
-    perl -e 'alarm 60; exec @ARGV' "$HOME/.local/bin/codex" exec --skip-git-repo-check "$@" "synthetic probe prompt" \
+  (cd "$TMP/cwd" && env -i HOME="$TMP/home" PATH="$PATH" TERM=dumb CODEX_HOME="$home" $extra \
+    perl -e 'alarm 60; exec @ARGV' "$CODEX" exec --skip-git-repo-check "$@" "synthetic probe prompt" \
     < /dev/null > "$OUT/$label.out" 2>&1)
   echo "$label exit $?"
 }

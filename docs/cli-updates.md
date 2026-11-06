@@ -13,11 +13,13 @@ The single list is `TESTED_VERSIONS` in `src/contexto/cliversions.py`, oldest to
 |---|---|---|
 | Claude Code | 2.1.302 | session-start signature (D33), context-block kinds (D32), missing-tools notices, the permission refusal of Contexto's tools in `-p` mode (D44), live acceptance on Claude Opus 5.5 (PR #221, [M2-acceptance-opus.md](research/M2-acceptance-opus.md); live run #3 ran on 2.1.301) |
 | Claude Code | 2.1.310 | steps 1 to 6 below at zero spend, and the D44 permission check ([M2-claude-code-2.1.310.md](research/M2-claude-code-2.1.310.md)); tool search is on by default, and three of its shapes are read differently since D46; a live recall check with Contexto's tools deferred (credited at 145,080 tokens; 305,223 with the first attempt), not the full live acceptance |
+| Claude Code | 2.1.314, 2.1.318 | steps 1 to 7 below at zero spend, with the reminders matrix run with tool search on and off, and the D44 permission check ([M2-claude-code-2.1.318.md](research/M2-claude-code-2.1.318.md)); the request shapes are 2.1.310's, and the subagent stop reports put the tools the agent used first, which the engine reads since D56; no live check (step 9 is the owner's) |
 | Codex | 0.154.0 | Responses shapes and context sections, Codex acceptance (D30) |
 | Codex | 0.163.0 | MCP server launch and missing-tools check (v0.2.8); context sections and request shapes rechecked for D38 (Codex steps 1 to 4 below) |
+| Codex | 0.166.0 | Codex steps 1 to 4 below at zero spend for D56: the same context sections and request shapes, and the MCP launch; no live check |
 
-Hook-output signatures were measured on Claude Code 2.1.301 and re-measured on 2.1.310
-(`HOOK_SIGNATURES_CLAUDE_CODE_VERSION`), not on 2.1.302.
+Hook-output signatures were measured on Claude Code 2.1.301 and re-measured on 2.1.310, 2.1.314 and
+2.1.318 (`HOOK_SIGNATURES_CLAUDE_CODE_VERSION`), not on 2.1.302.
 
 ## What Contexto reads from the CLI's text
 
@@ -29,7 +31,7 @@ Hook-output signatures were measured on Claude Code 2.1.301 and re-measured on 2
 | deferred-tool listings and MCP notices | `src/contexto/toolcheck.py` | zero-spend captures described in its docstring |
 | the refusal of a tool no permission rule allows ("... but you haven't granted it yet.", D44) | `src/contexto/toolcheck.py` | `spikes/m2/permissions/permstub.py` (D44) |
 | `CONTEXT_SECTION` (Codex section tags), `CONTEXT_SECTIONS_CODEX_VERSION` | `src/contexto/codex.py` | `spikes/m2/codex/probe.sh` |
-| subagent shapes (`AGENT_TOOLS`, `ASYNC_LAUNCH`, `HAND_BACK`, `NOTICE_OPENINGS`, the `<task-notification>` and `resumedAgentId` patterns), gated by `SUBAGENT_SHAPES_TESTED` (D40) | `src/contexto/rewrite.py`, `src/contexto/cliversions.py` | `spikes/m2/subagents` |
+| subagent shapes (`AGENT_TOOLS`, `ASYNC_LAUNCH`, `HAND_BACK`, `NOTICE_OPENINGS`, the `<task-notification>`, `resumedAgentId` and `<tools-used-before-summary>` patterns), gated by `SUBAGENT_SHAPES_TESTED` (D40, D56) | `src/contexto/rewrite.py`, `src/contexto/cliversions.py` | `spikes/m2/subagents` |
 
 The subagent shapes are gated by version: when the latest Claude Code version seen in a request's
 `User-Agent` is not in `SUBAGENT_SHAPES_TESTED`, side rooms only expire (15 minutes) and none closes
@@ -52,7 +54,8 @@ fallback no longer keeps its latest copy (D32). If Codex renames its section tag
   stops the launch with exit code 130, before the CLI starts. The session log gets a
   `cli_version_check` event (`version`, `tested`, `tested_versions`, and `error` or `skipped`).
 - In the proxy, every request's `User-Agent` is read. Claude Code 2.1.302 sends
-  `claude-cli/2.1.302 (external, sdk-cli)` (2.1.310 the same with its version); codex-cli 0.163.0 sends `codex_exec/0.163.0 (...)`.
+  `claude-cli/2.1.302 (external, sdk-cli)` (2.1.310, 2.1.314 and 2.1.318 the same with their version);
+  codex-cli 0.163.0 sends `codex_exec/0.163.0 (...)` (0.166.0 the same with its version).
   Each distinct version is logged once as `cli_version`, and the first untested one as
   `cli_version_untested`.
 - Once per proxy, the proxy checks that the main conversation's session start was recognised. It
@@ -80,11 +83,22 @@ python3.12 -m venv .venv
 export PATH="$PWD/.venv/bin:$PATH"
 ```
 
-`check.sh` runs the `claude` and `codex` first on `PATH`, falling back to `~/.local/bin`, or the paths
-you pass as arguments. `probe.sh` always drives `~/.local/bin/codex` and the reminders spike
-`~/.local/bin/claude`; `smoke.sh` finds `codex` on a `PATH` of `.venv/bin`, `~/.local/bin`, `/usr/bin`
-and `/bin`. They use temp homes, fake keys, and loopback stubs, so they read no credential
-and reach no model. The shell may print `Alarm clock` lines: the spikes stop a CLI that keeps
+Every spike runs the `claude` and `codex` first on `PATH`, falling back to `~/.local/bin`, unless you
+name a binary. To test a version that is not your default, run it by path and leave your own install
+alone (Claude Code keeps each version under `~/.local/share/claude/versions/<version>`):
+
+- `check.sh [claude] [codex]`, `carried/live_probe.sh [claude]`, `carried/probe.sh [claude]` and
+  `codex/probe.sh [codex]` take the binary as an argument.
+- The reminders spike (`run_all.sh`), `subagents/run.sh` and `subagents/drive.py` read `CLAUDE=<binary>`,
+  and `codex/smoke.sh` reads `CODEX=<binary>`.
+- `argv/argstub.py` and `permissions/permstub.py` take `--claude-version` and run
+  `~/.local/share/claude/versions/<version>`.
+
+They use temp homes and config dirs, fake keys, and loopback stubs, so they read no credential, write
+nothing in your home, and reach no model. Each run of Claude Code must have `DISABLE_AUTOUPDATER=1`:
+otherwise the CLI may update itself during the run, repoint `~/.local/bin/claude` and delete older
+versions (a QA run lost 2.1.310 this way). The spikes set it; set it yourself for any other run,
+interactive ones included. The shell may print `Alarm clock` lines: the spikes stop a CLI that keeps
 retrying the stub's 401 with a timer, and that line is the timer firing, not a failure.
 
 ## Routine for a new Claude Code version
@@ -110,9 +124,10 @@ Everything here is zero spend unless marked.
      kind (`CONTEXT_BLOCK_KINDS`). Note new kinds and changed per-turn placement.
    - With tool search on (Claude Code's default from 2.1.310), the task tools and Contexto's MCP tools
      are deferred, so the scripted model skips the turns that call them (84 main requests instead of
-     88 on `opus55-resume`). Run the matrix a second time with `--env ENABLE_TOOL_SEARCH=false` added
-     to each `run_session.py` call, and compare that run with the previous version's.
-3. Hooks, output styles, plan mode, effort, MCP changes: `spikes/m2/carried/live_probe.sh` (zero
+     88 on `opus55-resume`). Run the matrix a second time with tool search off
+     (`run_all.sh 48 --env ENABLE_TOOL_SEARCH=false`: arguments after the turn count go to every run),
+     and compare that run with the previous version's.
+3. Hooks, output styles, plan mode, effort, MCP changes: `spikes/m2/carried/live_probe.sh [claude]` (zero
    tokens, against a fake model). Hook outputs must still start with the `HOOK_SIGNATURES` prefixes.
    The launcher's command line (about 10 s per version, against a stub):
    `python spikes/m2/argv/argstub.py --claude-version <version> --work /tmp/argstub`. The spike deletes
@@ -130,11 +145,17 @@ Everything here is zero spend unless marked.
    `<task-notification>` notices in a `system` message and in a `<system-reminder>` user message, and
    a resume's `resumedAgentId`, new turn start, and `SendMessage`-named notice. Check also that the
    subagent's environment message is still `session_start` (D46: with tool search on it starts with
-   the deferred-tool listing). Run the scenarios one at a time: `run.sh` and `drive.py` pick a random
-   port from a small range, and two runs at once can reach each other's stub. Append the version to
+   the deferred-tool listing). Since 2.1.312 a run that used tools reports their names first, in a
+   `<tools-used-before-summary>` element (D56): indented above the hand-back's frame, as a
+   `<system-reminder>` block of its own ahead of an idle notice's block, and at the start of a `system`
+   notice. Check that it still comes in those places only. Each run takes a free port and
+   waits for its stub to hold it; `run.sh` exits 1 without starting Claude Code when the stub could not
+   listen. `CX_SPIKE_DIR` sets where the captures go (one directory per version). Append the version to
    `SUBAGENT_SHAPES_TESTED` only if they are unchanged; otherwise update the shapes in
-   `src/contexto/rewrite.py` and `tests/test_subagent_room.py` and record a decision. Leaving the
-   version out is safe: side rooms then only expire.
+   `src/contexto/rewrite.py` and `tests/test_subagent_room.py`, test them on the captures (as
+   `tests/fixtures/subagent_shapes_2_1_31x.json`, written and scrubbed by
+   `tests/fixtures/make_subagent_shapes.py`), and record a decision. Leaving the version out is safe:
+   side rooms then only expire.
 6. The suite: `pytest -q`.
 7. If nothing changed: append the version to `TESTED_VERSIONS["claude"]` and bump
    `SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION` and `CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION` to it,
@@ -151,7 +172,8 @@ Everything here is zero spend unless marked.
    approved, a short live recall check at a small cost can stand in for the question a change in how
    Contexto's tools are offered raises (2.1.310: a planted fact, paged out, asked for, through
    deferred tools; D46). The stand-in spends tokens too (305,223 for 2.1.310's two attempts) and needs
-   the owner's approval of its token cap. Say in the version's decision which of the two ran.
+   the owner's approval of its token cap. Say in the version's decision which of the two ran, or that
+   neither did (2.1.314 and 2.1.318: neither yet, D56).
 
 ## Routine for a new Codex version
 
@@ -160,14 +182,16 @@ Everything here is zero spend unless marked.
    item before the first prompt should show only `section <tag>` parts, apart from the base
    instructions, with the tags listed in `spikes/m2/cliversion/README.md`. If the user
    `<environment_context>` message shows as `turn`, the section tags changed.
-2. Shapes: `spikes/m2/codex/probe.sh` (written for 0.154.0; five auth and provider scenarios). It writes
+2. Shapes: `spikes/m2/codex/probe.sh [codex]` (written for 0.154.0; five auth and provider scenarios). It writes
    `.contexto/spikes/M2-A5/codex-shapes.jsonl`: one structure-only line per request, with the header
    names, the top-level keys, and each input item's role and part tags. Check it against the table in
    `docs/research/M2-codex-adapter.md`: `POST /v1/responses` only with the full input, `store: false`,
    no `previous_response_id`, `prompt_cache_key` set; on a 401, 6 POSTs with the custom providers in
    API-key mode, and 2 POSTs plus 2 `GET /v1/models` in ChatGPT mode (0.163.0); 7 WebSocket upgrades
-   and then 6 POSTs with the built-in provider; the same section tags in every scenario.
-3. MCP launch: `spikes/m2/codex/smoke.sh preflight` (zero tokens: `contexto run codex` through the
+   and then 6 POSTs with the built-in provider; the same section tags in every scenario. On 0.166.0
+   the built-in provider's input also ends with a role-less `configuration_update` item; Contexto's own
+   provider never gets one.
+3. MCP launch: `[CODEX=<codex>] spikes/m2/codex/smoke.sh preflight` (zero tokens: `contexto run codex` through the
    proxy to `responses_stub.py` with a dummy key helper). The newest session log under
    `.contexto/spikes/M2-A6/preflight-home/sessions/` should have no `mcp_tools_missing`, which shows the
    MCP server started and answered `tools/list`. The run ends with `watchdog stop status_401`, which
