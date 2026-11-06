@@ -410,8 +410,9 @@ def test_keepalive_reaches_the_cli_while_a_tool_call_is_held(cpa, contexto):
     proxy, store = contexto(cpa)
     sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=5)
     body = json.dumps(MESSAGES_REQUEST).encode()
-    head = (f"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
-            f"Authorization: Bearer {CLIENT_KEY}\r\nContent-Length: {len(body)}\r\n\r\n").encode()
+    head = (f"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:{proxy.port}\r\n"
+            f"Content-Type: application/json\r\nAuthorization: Bearer {CLIENT_KEY}\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n").encode()
     sock.sendall(head + body)
     got = b""
     while b"keep-alive\n\n" not in got.split(b"\r\n\r\n", 1)[-1]:

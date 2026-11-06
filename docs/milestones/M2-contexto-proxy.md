@@ -24,7 +24,16 @@ same design after Claude Code works.
   page key are written to a temporary file and renamed, never left empty by a race). Never edit the user's Claude or Codex
   configuration (D0, D16).
 - The proxy listens on `127.0.0.1` only. It forwards auth headers upstream unchanged and never
-  stores or logs them.
+  stores or logs them. It serves only the local CLI (D53): a request that carries an `Origin`
+  header, or whose `Host` is not exactly one header naming `127.0.0.1:<port>` or
+  `localhost:<port>` (case-insensitive, the proxy's own port), is answered locally with 403
+  (`permission_error`), never reaches the engine, the store, or upstream, and is logged as
+  `request_refused` with its method, path and `reason` (`origin` or `host`). Claude Code 2.1.314
+  and Codex 0.166.0 send their base URL's `Host` and no `Origin`; a browser sends `Origin` on every
+  POST and CORS preflight (a no-cors `text/plain` POST included) and a DNS-rebound page sends its
+  own name as `Host`, so no web page can write to the store or move `main`. A no-cors GET carries
+  neither and is still forwarded; its response is opaque to the page and no GET is transformed.
+  The listen backlog is 128.
 - Upstream affinity (D36). The CLI's session signals reach upstream unchanged: Claude Code's
   `X-Claude-Code-Session-Id` header and `metadata.user_id`, Codex's `session-id` header and
   `prompt_cache_key`. When the upstream host name, IDNA-normalized, is not `anthropic.com`,
@@ -353,6 +362,18 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    `error: "relay: <class>"` with the status and any usage already read, which still reaches the
    engine; the client sees the stream end without its terminator (or the body end short). A proxy failure after the
    response started logs `proxy_error` with `fallback: "none"`, because no local 502 can be sent.
+   Two cases from D53. An upstream that answers before reading the whole body (a body limit's 413,
+   as nginx or Go send it, then a close) makes the send fail with `BrokenPipeError` or
+   `ConnectionResetError`; the proxy then reads the answer already sent (waiting at most 1 s) and
+   forwards it unchanged, not retried, with `upstream_answered_early: "<class>"` on the entry; only
+   when there is none is the failure retried as above. A client that closes its connection while
+   its request is in flight (Esc) is seen within 0.05 s, from the connection waiting for the
+   response head through the end of the relay, the stream hold included, and the proxy then
+   shuts the upstream connection, so upstream stops generating. The entry is logged with
+   `client_aborted: true` and no `error`: with the status and any usage read when the response had
+   started (the usage still reaches the engine), and with `upstream_phase` and no status when it
+   had not. A second Ctrl+C during the 2 s stop drain ends the wait without a traceback, and the
+   requests still in flight are logged as `proxy_stop_incomplete`.
 9. **Streaming.** Relay SSE events as they arrive, except for the stream hold described under the
    per-turn recall budget; the proxy reads `message_start` and `message_delta` usage. The hold's
    event splitter and the usage reader share one SSE grammar (WHATWG: a line ends at CRLF, LF, or
@@ -674,7 +695,8 @@ turns before it, usually where such rules are given. Tools:
     `message` or `reasoning` item; Codex 0.154.0 emits `custom_tool_call`, measured in the A6 smoke)
     until `response.completed`, `response.incomplete`, or `response.failed` (whose usage, when
     present, sets the room), an error event, or end of stream. A hold that ends at an error event
-    or end of stream, including an upstream failure mid-stream (rule 8), first observes the usage
+    or end of stream, including an upstream failure mid-stream and a client that left, which shuts
+    upstream at once (rule 8, D53), first observes the usage
     already read (`message_start`'s, for Messages), so that publish also comes before any held
     event; the held events are still released, because rule 8 forwards what upstream sent and the
     CLI decides what a stream without its terminator means. A tool call
@@ -932,10 +954,44 @@ turns before it, usually where such rules are given. Tools:
   snapshot write only marks the snapshot stale (search then says "in view not checked") and logs
   `retained_stale`, not `store_error`; it does not enter degraded mode. The index, pinned text, and stubs never read the snapshot. Only the main
   conversation publishes the room, the snapshot, and the window (`set_window`): the engine keeps state per conversation (the
-  main one, subagents, side requests), and the main conversation is the one with the most turn
-  starts, re-evaluated at each turn start: it changes only when another conversation has strictly
-  more turn starts (a tie keeps the current one), so a short side request that arrives first cannot
-  stay main. The choice is made before the request is transformed, so a request that fails after
+  main one, subagents, side requests). The first conversation seen is main, and the choice is
+  re-evaluated at each turn start of another conversation, which takes over when (D50):
+  - its Claude Code session id differs from main's, its User-Agent entrypoint is main's, and, unless
+    both are the interactive CLI's `cli`, main is idle (the response to its newest request released no
+    client tool call, no response of main's that may have released one arrived after it, and main
+    has sent no request since); and either no
+    conversation has been main in that session yet (`/clear` starts a new
+    id), or it was the first conversation main in its session and that session lost main to another
+    session's id and has sent no request of this conversation since (`/resume` sends the resumed
+    conversation's id again). The id is `X-Claude-Code-Session-Id`, else the `session_id` in
+    `metadata.user_id`; subagents and side requests carry the id of the conversation they run for
+    (measured on Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318). Headless sessions run `/clear`
+    and `/compact` too (`claude -p --input-format stream-json`, the Agent SDK; `/clear` starts a new
+    id under `sdk-cli`, measured on 2.1.314 and 2.1.318). A `claude -p` or SDK process run from a
+    tool has its own id and an `sdk-*` entrypoint: its own under an interactive lead, so it does not
+    qualify, or, under a headless lead, the lead's inherited `sdk-cli`, and then it runs inside one
+    of main's tool calls, so main is not idle and it does not qualify either. A session that keeps
+    sending beside the new main returns only by turn starts; two sessions that take turns, each idle
+    while the other is prompted, follow the one prompted;
+  - its session id and entrypoint are main's, and its first message is
+    Claude Code's compaction summary: a user message whose content is a string starting "This
+    session is being continued from a previous conversation that ran out of context. The summary
+    below covers the earlier portion of the conversation." and a newline (`/compact` and
+    auto-compaction keep the session id but start a new first message, measured on 2.1.314 and
+    2.1.318, interactive and headless). It becomes that session's main, so a later `/resume` of the session returns to it;
+  - main has never sent a request with a tool list and this conversation has (Claude Code's title,
+    topic, and quota side requests have none, and one is often the session's first request);
+  - or it has strictly more turn starts than main (a tie keeps the current one).
+
+  Only a conversation seen with a tool list takes over by the first three rules (for Codex, which
+  sends no Claude Code session id, only the fourth applies). A request whose `metadata.user_id` has
+  `parent_session_id` (an agent-team teammate, in process or in its own pane, on 2.1.314), and one
+  carrying `X-Claude-Code-Agent-Id` (every subagent request on 2.1.302 to 2.1.318, and an in-process
+  teammate's), never takes over, by any rule. The engine logs content-free
+  `main_changed` with `reason` (`new_cli_session`, `resumed_cli_session`, `compacted`,
+  `after_side_request`, or `more_turn_starts`) and the request's `turn_starts` on the request that takes over; never the
+  session id. Main moves only at a request, never at a response: a response that arrives after
+  another conversation's request took over publishes a side room. The choice is made before the request is transformed, so a request that fails after
   its turn-start rotation published the window still leaves its conversation main. Other conversations publish none of them (they publish side rooms instead, D40, see the per-turn
   recall budget), so their tool calls see the main conversation's snapshot, and for a subagent
   "in view" refers to the main conversation's window (a documented subagent limitation); the MCP

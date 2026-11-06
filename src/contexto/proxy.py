@@ -77,6 +77,8 @@ import http.client
 import inspect
 import json
 import re
+import select
+import socket
 import socketserver
 import ssl
 import threading
@@ -131,6 +133,9 @@ THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 UPSTREAM_TIMEOUT_S = 900
 STOP_DRAIN_S = 2.0  # how long stop() waits for in-flight requests to finish and log
 RETRYABLE_PHASES = frozenset({"connect", "tls", "send"})  # before the body is fully written (rule 8, PR #95)
+EARLY_RESPONSE_WAIT_S = 1.0  # how long a failed send waits for an answer upstream sent before it closed (D53)
+CLIENT_WATCH_INTERVAL_S = 0.05  # how often a request in flight checks that its client is still there (D53)
+LISTEN_BACKLOG = 128  # socketserver's default of 5 dropped 13 to 21% of a 200-connection burst
 MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_INPUT_TRANSFORMATIONS = 32  # input_transformations items logged per response
 MAX_SUMMARY_DEPTH = 16  # _scalar_summary: deeper dicts and lists become a placeholder
@@ -820,10 +825,76 @@ class _UpstreamHTTPS(http.client.HTTPSConnection):
         self.sock = self.tls_context.wrap_socket(self.sock, server_hostname=self.host)
 
 
+def _shut(conn: http.client.HTTPConnection) -> None:
+    """End an upstream connection another thread may be blocked on: its read returns at once.
+    The plain socket's shutdown, not ``SSLSocket.shutdown``, which drops TLS state that read uses."""
+    sock = conn.sock
+    if sock is not None:
+        try:
+            socket.socket.shutdown(sock, socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
+class _ClientWatch:
+    """Watches the client's socket while its request is in flight (D53). When the client goes away
+    (Esc closes the connection), the upstream connection is shut at once, so upstream stops
+    generating. Otherwise the proxy notices only when a write to the client fails, and nothing is
+    written while it waits for the response head or holds a tool call: upstream then ran, and
+    billed, to the end of a response nobody reads. The watch only peeks, so a byte the client sends
+    (a pipelined request) ends it and the request is served as before. ``close`` ends the watch and
+    closes the upstream connection, whatever path the request took."""
+
+    def __init__(self, client: socket.socket) -> None:
+        self.client = client
+        self.gone = False
+        self._upstream: http.client.HTTPConnection | None = None
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        threading.Thread(target=self._run, name="contexto-client-watch", daemon=True).start()
+
+    def attach(self, conn: http.client.HTTPConnection) -> None:
+        """The connected upstream connection to shut if the client goes away (or has already)."""
+        with self._lock:
+            self._upstream = conn
+            if self.gone:
+                _shut(conn)
+
+    def close(self) -> None:
+        self._done.set()
+        with self._lock:
+            if self._upstream is not None:
+                self._upstream.close()
+
+    def _run(self) -> None:
+        poller = select.poll()  # not select.select, which cannot watch a descriptor above 1023
+        try:
+            poller.register(self.client, select.POLLIN)  # a close or a reset is reported as readable
+        except (OSError, ValueError):  # the client's socket is already closed: nothing to watch
+            return
+        while not self._done.is_set():
+            try:
+                if not poller.poll(CLIENT_WATCH_INTERVAL_S * 1000):
+                    continue
+                if self.client.recv(1, socket.MSG_PEEK):
+                    return  # the client sent more, so it is still there
+            except OSError:  # a reset, or a socket the handler has closed
+                pass
+            if self._done.is_set():
+                return  # the request is over: a close now is the client ending a kept-alive connection
+            with self._lock:
+                self.gone = True
+                if self._upstream is not None:
+                    _shut(self._upstream)
+            return
+
+
 class _LoopbackServer(ThreadingHTTPServer):
     """``HTTPServer.server_bind`` names the server with ``socket.getfqdn(host)``, a reverse lookup
     that took 35 seconds per process on a GitHub macOS runner and delayed every launch by as much.
     Nothing reads the name, so the bound address stands in for it and no lookup is made."""
+
+    request_queue_size = LISTEN_BACKLOG
 
     def server_bind(self) -> None:
         socketserver.TCPServer.server_bind(self)
@@ -891,8 +962,11 @@ class ContextoProxy:
             self._server = None
             deadline = time.monotonic() + STOP_DRAIN_S
             with self._idle:
-                while self._in_flight and (left := deadline - time.monotonic()) > 0:
-                    self._idle.wait(left)
+                try:
+                    while self._in_flight and (left := deadline - time.monotonic()) > 0:
+                        self._idle.wait(left)
+                except KeyboardInterrupt:
+                    pass  # a second Ctrl+C ends the wait early, with no traceback; the rest is logged below
                 in_flight = self._in_flight
             if in_flight:
                 self.log({"event": "proxy_stop_incomplete", "in_flight": in_flight})
@@ -1002,9 +1076,32 @@ class _Handler(BaseHTTPRequestHandler):
         then the client only sees the connection close."""
         return "none" if self._response_started else "local_502"
 
+    def _refusal(self) -> str | None:
+        """Why the request is not from the local CLI (``"origin"`` or ``"host"``), or None (D53).
+        Claude Code and Codex send one Host, the proxy's own address, and no Origin. A browser sends
+        Origin on every POST and preflight, a no-cors text/plain POST included, and a DNS-rebound
+        page sends its own name as Host, so neither can drive the proxy or write to the store."""
+        if self.headers.get("Origin") is not None:
+            return "origin"
+        hosts = self.headers.get_all("Host") or []
+        port = self.server.server_address[1]
+        if len(hosts) != 1 or hosts[0].strip().lower() not in (f"{LISTEN_HOST}:{port}", f"localhost:{port}"):
+            return "host"
+        return None
+
     def _handle_request(self) -> None:
         started = time.monotonic()
         path_only = self.path.split("?", 1)[0]
+        if (reason := self._refusal()) is not None:
+            self.owner.log({"event": "request_refused", "method": self.command, "path": path_only, "reason": reason})
+            try:
+                self._read_body()  # closing on unread bytes sends a reset, which can discard the 403
+            except (ValueError, OSError):
+                pass
+            self._send_local_error(403, "contexto proxy: request refused (not from the local CLI)",
+                                   "permission_error")
+            self.close_connection = True
+            return
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
             # Not tunneled: a WebSocket session (Codex's default transport) would bypass the bound.
             # The launcher keeps Codex on HTTP; anything else is refused visibly, not mangled.
@@ -1123,11 +1220,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _forward(self, body: bytes, headers: Headers, entry: dict[str, Any], started: float,
                  original: dict[str, Any] | None) -> None:
+        watch = _ClientWatch(self.connection)
+        try:
+            self._relay(body, headers, entry, started, original, watch)
+        finally:
+            watch.close()  # also closes upstream on a path that raised before the relay's own close
+
+    def _relay(self, body: bytes, headers: Headers, entry: dict[str, Any], started: float,
+               original: dict[str, Any] | None, watch: _ClientWatch) -> None:
         owner = self.owner
         # Contract rule 8 (PR #95): each upstream step is named, so a failure says where it happened:
         # "connect" (TCP), "tls", "send" (headers and body), "wait_headers" (only once endheaders has
         # returned, so the whole body is written). A failure before that point is retried once, byte
-        # for byte, on a new connection: upstream cannot act on a request it never fully received.
+        # for byte, on a new connection: upstream cannot act on a request it never fully received,
+        # unless it has already answered it (D53: an early 413 is forwarded, not retried).
         # From wait_headers on, upstream may be running it, so that failure is a 502 and the CLI decides.
         retried = False
         while True:
@@ -1135,6 +1241,7 @@ class _Handler(BaseHTTPRequestHandler):
             phase, phase_started = "connect", time.monotonic()
             try:
                 conn.connect()
+                watch.attach(conn)
                 phase, phase_started = "send", time.monotonic()
                 conn.putrequest(self.command, owner.base_path + self.path, skip_host=True,
                                 skip_accept_encoding=True)
@@ -1151,9 +1258,23 @@ class _Handler(BaseHTTPRequestHandler):
             except (OSError, http.client.HTTPException) as exc:
                 # HTTPException: a malformed response head (BadStatusLine, LineTooLong, too many
                 # headers). It is raised at wait_headers, so it is never retried, and has no errno.
-                conn.close()
                 if phase == "connect":
                     phase = getattr(conn, "phase", phase)
+                if watch.gone:  # the client left and upstream was shut for it: nothing to answer or retry
+                    conn.close()
+                    entry.update(client_aborted=True, upstream_phase=phase, duration_ms=_ms(started))
+                    if retried:
+                        entry["upstream_retried"] = True
+                    self.close_connection = True
+                    owner.log(entry)
+                    return
+                if phase == "send" and isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+                    early = self._early_response(conn)
+                    if early is not None:
+                        response = early
+                        entry["upstream_answered_early"] = type(exc).__name__
+                        break
+                conn.close()
                 failure = {"upstream_phase": phase, "phase_ms": _ms(phase_started),
                            "errno": getattr(exc, "errno", None)}
                 if not retried and phase in RETRYABLE_PHASES:
@@ -1177,16 +1298,6 @@ class _Handler(BaseHTTPRequestHandler):
         length = response.getheader("Content-Length")
         chunked = length is None and self.command != "HEAD"
         expected = None if chunked else _declared_length(length, response, self.command)
-        self._response_started = True
-        self.send_response_only(response.status, response.reason)
-        for name, value in response.getheaders():
-            if name.lower() not in HOP_BY_HOP:
-                self.send_header(name, value)
-        if chunked:
-            self.send_header("Transfer-Encoding", "chunked")
-        elif length is not None:
-            self.send_header("Content-Length", length)
-        self.end_headers()
         response_bytes = 0
         # The client must not see the response complete before the engine has its usage and the
         # session log has the entry: Claude Code sends its next request right away, and the engine
@@ -1233,6 +1344,18 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
         try:
+            # The head is written inside the relay's try, so a client gone before it arrives is
+            # logged, and upstream closed, like one gone mid-stream (D53).
+            self._response_started = True
+            self.send_response_only(response.status, response.reason)
+            for name, value in response.getheaders():
+                if name.lower() not in HOP_BY_HOP:
+                    self.send_header(name, value)
+            if chunked:
+                self.send_header("Transfer-Encoding", "chunked")
+            elif length is not None:
+                self.send_header("Content-Length", length)
+            self.end_headers()
             while chunk := read_upstream():
                 response_bytes += len(chunk)
                 if hold is not None:
@@ -1271,6 +1394,11 @@ class _Handler(BaseHTTPRequestHandler):
             relay_ok = False
         finally:
             conn.close()
+            if watch.gone:  # the client left and upstream was shut for it: whatever failed after is that
+                entry.pop("error", None)
+                entry["client_aborted"] = True
+                self.close_connection = True
+                relay_ok = False
             if hold is not None and hold.held:  # upstream failed mid-hold: observe, then release in order
                 try:
                     write_events(hold.eof())
@@ -1307,6 +1435,26 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             except OSError:
                 self.close_connection = True
+
+    @staticmethod
+    def _early_response(conn: http.client.HTTPConnection) -> http.client.HTTPResponse | None:
+        """The answer upstream sent before it stopped reading the body, or None (D53). A server
+        with a body limit (nginx, Go) answers 413 after the head and closes, so the send fails while
+        the answer is already on its way: that is upstream's error, forwarded unchanged (rule 8),
+        not a 502 that makes the CLI resend the same body."""
+        sock = conn.sock
+        if sock is None:
+            return None
+        try:
+            sock.settimeout(EARLY_RESPONSE_WAIT_S)
+            response = conn.getresponse()
+        except (OSError, http.client.HTTPException):
+            return None
+        try:
+            sock.settimeout(UPSTREAM_TIMEOUT_S)  # the body is read like any other response's
+        except OSError:
+            pass
+        return response
 
     def _reject_encoded(self, encoding: str, reason: str, endpoint: str, api: str) -> None:
         """Contract rule 15 (PR #58): a body the proxy cannot decode is a client problem, not a
