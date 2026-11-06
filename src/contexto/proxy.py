@@ -1183,6 +1183,12 @@ class _Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
                 entry["transform_skipped"] = f"cannot serialize request: {type(exc).__name__}"
                 return body, headers, None
+        prime = getattr(owner.transform, "prime", None)
+        if callable(prime):
+            try:
+                prime(request)  # D60: count the request's PDFs before taking the lock that every session waits on
+            except Exception:  # an optimisation only: the transform counts them under the lock instead
+                pass
         try:
             with owner.transform_lock:
                 new_request, new_headers, events = owner.transform(request, dict(headers), endpoint)
