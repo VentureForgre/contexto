@@ -236,7 +236,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    the previous request sent in this conversation got its usage; when it did not (a 4xx or 5xx, a
    dropped stream, a response without usage, or a request still in flight), the whole request is
    estimated instead, logged content-free as `usage_missing` (epoch only) when that replaces a real
-   input. Usage is paired only with the request it measured, identified by its message count and
+   input. Usage with no input count (`output_tokens` alone) is a response without usage (D49 as
+   amended). Usage is paired only with the request it measured, identified by its message count and
    its last message's hash (rule 10): usage for any other request (the CLI's original, forwarded
    after `transform_error`, or an older request still in flight) never feeds the ratio, the last
    real input, the measured head, or `estimate_error`, and logs `usage_unattributed` (the epoch,

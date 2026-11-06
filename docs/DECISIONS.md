@@ -1295,42 +1295,70 @@ the owner's delegation. Open decisions are listed at the end with the options an
     the response, as before.
   - **Rule 4's first measurement, amended** (PR #244, from the reviews of PRs #232 and #244). The head
     was the first measured request's input minus the estimate of its non-carried messages made before
-    the send. When that request is the conversation's first, the estimate is exact enough; when the
-    first usage arrives later (a 429 or 529, a dropped stream, Esc during the answers before it) or the
-    first request already carries a long history, the estimate is made before the session's ratio is
+    the send. For a conversation's first request that estimate is close; when the first usage arrives
+    later or the first request already carries a long history, it is made before the session's ratio is
     known, counts tool output at the seed's 1.5 bytes per token, and runs thousands of tokens high, so
-    the head came out low for the rest of the session, with or without a head change. `W` came out too
-    large, `choose_k` kept the window, and turn starts went over the bound. D49's own Limits bullet
-    (the change counted twice when the head changes before the first usage) was also real, and its
-    first version said the double count covers the low head; it covers only a head change, not the
-    head lost before it.
+    the head came out low, often 0, for the rest of the session, with or without a head change. `W`
+    came out too large, `choose_k` kept the window, `turn_room_low` went unlogged, and turn starts went
+    over the bound. The first usage arrives late when earlier responses carry usage Contexto cannot
+    read (a 200 without usage, a stream cut before it, Esc), or after `usage_unattributed`; the first
+    request carries a long history when a conversation starts with no epoch record it can resume (a
+    restarted proxy, `--resume` after a CLI upgrade or a settings change). A 429 or 529 is not a
+    case: the client retries the same body, and the retry is measured. D49's own Limits bullet (the
+    change counted twice when the head changes before the first usage) was also real; its first
+    version said the double count covers the low head, which holds only when the change is larger
+    than the head lost.
     - **Rule.** The non-carried messages count at the measured request's own ratio, their share of its
       bytes (as the estimator counts them), or at the estimate made before the send when that is lower,
       so the head errs high. The head's byte size is re-based on the measured request, so a head change
-      before the first usage is in the measurement and counted once. Both sizes are kept only while
-      the head is unmeasured.
-    - **Measured (engine, zero spend, real usage at the sent bytes over a fixed ratio, before →
+      before the first usage is in the measurement and counted once. Both window sizes are kept only
+      while the head is unmeasured.
+    - **Usage with no input count** (`output_tokens` alone) is a response without usage. It was read
+      as a real input of 0: the head 0 for the session, the next request estimated as 0 plus its new
+      messages, and a recall room published from the output alone. Now nothing is measured or
+      published, and the next request logs `usage_missing` and is estimated whole (rule 3), as after a
+      200 with no usage. If no usage ever has an input count, the head is never measured and the
+      estimator stands in at its seeds for the whole session (every request estimated whole, tool
+      output at 1.5 bytes per token); real usage over the bound cannot be logged, so the pre-send check
+      is the only bound check, and the recall room stays as last published, or unpublished.
+    - **Measured, engine (zero spend, real usage at the sent bytes over a fixed ratio, before →
       after).** PR #244's repro (bound 30,000, a 20,000-token system prompt, real head 20,095, first
       usage at read 26 of a loop): head 490 → 20,694; turn starts 2 and 3 skipped paging
       (`rotation_noop`) and 4 and 5 went out at 32,047 and 32,031 real tokens, `over_bound` → every
       turn start pages to 20,657 to 20,710, as with usage from the first request. Bound 60,000, the
       same system prompt, an MCP server's 30 tools connecting at read 6 (real head 28,535), first usage
       at the last read: `F` 28,299, 22,226 and 19,189 for 12, 20 and 24 reads → 29,183 to 29,399; with
-      no server (real head 20,095), 11,419 to 2,309 → 20,743 to 20,959. Bound 30,000 with the server
-      (real head 8,489), first usage at read 0, 1, 4, 7, 8, 12: `F` 8,920, 8,741, 8,741, 12,048, 11,290,
-      8,741 → 8,921 to 9,137 (the change counted once); with no server the head was 0 against 49 from
-      read 1 on, now 198 to 396. A first request with 18 reads of history at bound 60,000: head 6,563 →
-      20,550 against 20,095, `W` 28,437 → 14,450, later turn starts 25,732 to 25,806 real → 20,742 to
-      20,816 (room 9,194 → 14,184 against 35,000). Codex at bound 60,000, first usage after 26 calls:
-      at 4.5 bytes per token the head 18,896 → 22,401 against 22,238; at 3.5 unchanged (28,800 against
-      28,591); at 2.5 unchanged and high (46,628 against 40,028), where the estimate before the send is
-      the lower window. Over the head, rule 4 counts the request's JSON around its messages and the
-      carried text, 130 to 600 tokens in these runs. 20 of the 25 new tests fail on main.
+      no server (real head 20,095), 11,419 to 2,309 → 20,743 to 20,959. Bound 30,000 with the server on
+      a 49-token head (real head 8,489), first usage at read 0, 1, 4, 7, 8, 12: `F` 8,920, 8,741,
+      8,741, 12,048, 11,290, 8,741 → 8,921 to 9,137 (the change counted once). A first request with 18
+      reads of history at bound 60,000: head 6,563 → 20,550 against 20,095, `W` 28,437 → 14,450, later
+      turn starts 25,732 to 25,806 real → 20,742 to 20,816. Codex at bound 60,000, first usage after 26
+      calls: at 4.5 bytes per token the head 18,896 → 22,401 against 22,238; at 3.5 unchanged (28,800
+      against 28,591); at 2.5 unchanged and high (46,628 against 40,028), where the estimate before the
+      send is the lower window. A33's seat replay (`spikes/m2/acceptance`, 92k head, 4 bytes per token):
+      the lowest `W` 18,907 → 18,663, the head no longer 243 low; rotations and cost unchanged.
+    - **Measured, proxy** (the real `ContextoProxy` and engine over HTTP, a stub upstream counting 3.2
+      bytes per token, first usage at request 1, 8 or 12, before → after). A 13,100-token head with the
+      server at bound 30,000 (real 23,617): usage without an input count, head 9,266 to 9,276, turn
+      starts up to 28,416 real, room -416 → head 23,838 to 24,112, turn starts at most 24,283, room
+      3,717 with `turn_room_low` logged, the same as the 529 control. A 20,000-token head with the server
+      at 60,000 (real 31,211): without an input count, head 9,258 → 31,426 to 31,716, room -1,064 →
+      3,035 as the control; without usage, head 30,925 to 35,375 → 31,426 to 31,716. A 20,000-token head
+      at 30,000 (real 21,979): without an input count, head 0 and turn starts at 32,975 real, over the
+      bound → head 22,168 to 22,428, turn starts at most 22,645; without usage at request 12, head
+      14,034, turn starts 26,779 → 22,428 and 22,645. A first request with 10, 18 or 40 reads of history
+      and a 28,000-token head (real 27,979): head 21,555, 16,001 and 732 → 28,407, 28,590 and 29,072.
+      Over the head, rule 4 counts the request's JSON around its messages and the carried text, 130 to
+      1,100 tokens in these runs. On main, 38 of the 46 new engine tests and 17 of the 30 proxy tests
+      fail (the 529 controls and some runs without usage pass).
     - **Limits.** Byte share assumes the head and the window tokenize alike. Tool output usually has
       fewer bytes per token than the head's prose and JSON, which puts the head high; a window with more
       bytes per token than the head would put it low by that difference, unless the estimate before the
       send is lower. As before, a conversation whose first request already rotates (`k > 0`) never
-      measures its head; the estimator stands in.
+      measures its head; the estimator stands in. With the head measured right, a head too large for
+      `min_turn_room` (bound 60,000, a 28,000-token head) leaves A12 nothing to restore, so later turn
+      starts keep their window (about 34,200 real, room 806, `turn_room_low` logged once) where the low
+      head used to page; PR #232 review B's finding 1, still open.
 
 ## Open decisions
 

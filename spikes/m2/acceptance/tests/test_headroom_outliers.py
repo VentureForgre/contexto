@@ -128,4 +128,6 @@ def test_the_engines_rule_17_reproduces_the_recommended_row():
     config = Config(bound=150_000)
     s = sb.summarize(sb.replay(sb.session(92_000, 56, big_read_at=28), config), config)
     assert (s["rotations"], s["window_minimal"], s["bound_too_small"]) == (15, 1, 0)
-    assert s["window_budget"][0] == 18_907 and s["usd"] == 7.3125
+    # 18,663 since D49's amendment: rule 4 counts the first prompt at its measured 4 bytes per token, not
+    # the 3.5 seed, so the head is no longer 243 tokens low (18,907 before)
+    assert s["window_budget"][0] == 18_663 and s["usd"] == 7.3125

@@ -2343,6 +2343,9 @@ class RewriteEngine:
           last real input, and the estimate checks are left alone. ``over_bound`` and the room still
           use it, since they describe what the model received.
 
+        Usage with no input count (``output_tokens`` alone) is a response without usage (D49 amended):
+        nothing is measured or published, and the next request logs ``usage_missing`` as rule 3 says.
+
         ``tool_calls`` (D40) says whether the response holds a tool call the client runs: True or
         False from the proxy's stream hold when there is one, else from the response's stop reason
         or output list, None when unknown (treated as True). The main conversation publishes its room
@@ -2354,6 +2357,9 @@ class RewriteEngine:
         dialect = dialect_for(endpoint)
         if dialect is None or endpoint == COUNT_TOKENS:
             return []
+        real = usage_tokens(usage, dialect)
+        if real <= 0:  # no input count: read as an input of 0, it measured the head as 0 (D49 amended)
+            return []
         key = keyed(dialect, request)
         state = self.states.get(key)
         if state is None:
@@ -2364,7 +2370,6 @@ class RewriteEngine:
             size = head_size(request)
         finally:
             _DIALECT.reset(token)
-        real = usage_tokens(usage, dialect)
         events: list[dict] = []
         estimate = None
         if identity != state.pending_usage:
