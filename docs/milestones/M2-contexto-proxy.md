@@ -615,7 +615,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   `CONTEXTO_HOME` works everywhere, and a symlinked `sessions/` everywhere but prune. Files in a
   session are never opened through a symlink, and a symlink, FIFO, device or directory in a file's
   place is refused without blocking: `meta.json`, `epoch.json` and `retained.json` read as absent, a page
-  as unreadable (`page_unreadable`), the ledger as damaged, `page.key` as a key file error, and
+  as unreadable (`page_unreadable`), the ledger (`ledger.jsonl` or `ledger.lock`) as damaged,
+  `page.key` as a key file error, and
   the log is not written. Every write is whole (a short write continues). A temporary file is
   removed when its write fails (a full disk), and temporary files left by a process that died
   mid-write are removed when a store opens for writing, once they are more than 10 minutes old

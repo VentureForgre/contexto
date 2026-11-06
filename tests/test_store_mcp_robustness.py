@@ -323,7 +323,8 @@ def planted(home, name, kind):
 
 
 @pytest.mark.parametrize("kind", ["fifo", "directory", "symlink"])
-@pytest.mark.parametrize("name", ["meta.json", "ledger.jsonl", "log.jsonl", "retained.json", "epoch.json", "page"])
+@pytest.mark.parametrize("name", ["meta.json", "ledger.jsonl", "ledger.lock", "log.jsonl", "retained.json",
+                                  "epoch.json", "page"])
 def test_a_fifo_or_directory_in_a_files_place_never_blocks_or_crashes(home, capsys, name, kind):
     pid = planted(home, name, kind)
 
@@ -351,6 +352,24 @@ def test_a_symlinked_ledger_degrades_like_a_damaged_one(home, capsys):
     assert result["isError"] is True and text_of(result).startswith("Not recorded: this session's ledger is damaged")
     assert cli.main(["sessions", "list", "--json"]) == 0 and json.loads(capsys.readouterr().out)[0]["records"] is None
     assert (home / "outside-ledger.jsonl").read_bytes() == b"{}\n"
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory", "symlink"])
+def test_a_ledger_lock_that_is_not_a_file_degrades_like_a_damaged_ledger(home, capsys, kind):
+    planted(home, "ledger.lock", kind)
+    store = SessionStore(home, "s1")  # the proxy and `contexto mcp` still open the session
+    assert events(store, "ledger_damaged")
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    result = tool(server, "contexto_pin", {"kind": "decision", "text": "x"})
+    assert result["isError"] is True and text_of(result).startswith("Not recorded: this session's ledger is damaged")
+    assert tool(server, "contexto_state", {})["isError"] is True
+    assert tool(server, "contexto_search", {"query": "garnet"})["isError"] is False
+    assert cli.main(["sessions", "list", "--json"]) == 0 and json.loads(capsys.readouterr().out)[0]["records"] is None
+    assert cli.main(["state", "--session", "s1"]) == 1
+    assert "ledger.lock is not a regular file" in capsys.readouterr().err
+    assert cli.main(["sessions", "show", "s1"]) == 0 and "Traceback" not in capsys.readouterr().err
+    if kind == "symlink":
+        assert (home / "outside-ledger.lock").read_bytes() == b"{}\n"
 
 
 def test_a_fifo_page_key_is_refused_at_once(home, capsys):

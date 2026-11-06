@@ -193,7 +193,10 @@ class Ledger:
             yield False
             return
         private_dir(self.data_dir)
-        fd = open_private(self.lock_path, os.O_RDWR)
+        try:
+            fd = open_private(self.lock_path, os.O_RDWR)
+        except NotRegularFileError as e:  # a symlink, FIFO or directory in its place: damage, as for the ledger (D58)
+            raise LedgerCorruptError(f"{LOCK_FILE} is not a regular file") from e
         try:
             fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
             yield True

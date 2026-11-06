@@ -54,13 +54,15 @@ class NotRegularFileError(OSError):
 
 
 def _open_nofollow(path: Path, flags: int, mode: int = 0o777) -> int:
-    """``os.open`` with ``O_NOFOLLOW``; a symlink at ``path`` is refused as ``NotRegularFileError``, so every
-    reader treats it as it treats a FIFO or a directory there (D58)."""
+    """``os.open`` with ``O_NOFOLLOW``; a symlink at ``path``, or a directory opened for writing, is refused
+    as ``NotRegularFileError``, so every caller treats it as it treats a FIFO there (D58)."""
     try:
         return os.open(path, flags | os.O_NOFOLLOW, mode)
     except OSError as e:
         if e.errno in (errno.ELOOP, errno.EMLINK) and os.path.islink(path):  # EMLINK on FreeBSD
             raise NotRegularFileError(f"{path} is a symlink") from e
+        if e.errno == errno.EISDIR:
+            raise NotRegularFileError(f"{path} is a directory") from e
         raise
 
 

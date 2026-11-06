@@ -1841,9 +1841,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
     error), and `KeyFileError` is a `ValueError` too. A symlink in a file's place is refused the
     same way (`NotRegularFileError`): with the first head, a symlinked `ledger.jsonl` raised a plain
     `ELOOP` that gave tracebacks in `sessions list`, `show` and `state` and stopped `contexto mcp`
-    and the proxy, where a FIFO or directory degraded (reviewer B, PR #235). In the 18 FIFO,
-    directory and symlink cases every MCP tool and CLI reader returns within the test's 10-second
-    limit; on main 8 fail (each FIFO blocks the MCP server on its first call, and a directory as the
+    and the proxy, where a FIFO or directory degraded (reviewer B, PR #235). `ledger.lock` the same:
+    a symlink, FIFO or directory there gave tracebacks in `sessions list` (for every session),
+    `show` and `state` and stopped `contexto mcp`; it now reads as a damaged ledger (reviewer A, PR
+    #235 round 2; the FIFO and directory cases crashed on main too). In the 21 FIFO, directory and
+    symlink cases every MCP tool and CLI reader returns within the test's 10-second limit; on main 8 fail (each FIFO blocks the MCP server on its first call, and a directory as the
     ledger or the log raises).
   - **Symlinked session directories: one rule.** A session directory that was a symlink was used by
     `mcp`, the proxy, `state` and `sessions show`, which chmodded the link's target to 0700, but was
