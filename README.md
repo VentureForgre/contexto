@@ -77,7 +77,8 @@ pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.23
 contexto --version                                    # contexto 0.5.23
 ```
 
-`pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment.
+`pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment. To check
+the download before installing, follow [Checking the download](#checking-the-download) instead.
 
 Or download it first with the GitHub CLI:
 
@@ -93,13 +94,16 @@ You also need `claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
 ### Checking the download
 
 Contexto sees every prompt and every auth header your CLI sends, so check that the wheel came from
-this repository's release workflow. Releases from v0.5.13 on carry a `SHA256SUMS` asset and a GitHub
-build provenance attestation:
+this repository's release workflow before you install it. Releases from v0.5.13 on carry a
+`SHA256SUMS` asset and a GitHub build provenance attestation. Download the wheel, check it, then
+install from the file:
 
 ```sh
-gh release download <tag> --repo VentureForgre/contexto --pattern 'SHA256SUMS'
+gh release download v0.5.23 --repo VentureForgre/contexto \
+  --pattern 'contexto-0.5.23-py3-none-any.whl' --pattern SHA256SUMS
 shasum -a 256 -c SHA256SUMS --ignore-missing          # Linux: sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify contexto-<version>-py3-none-any.whl --repo VentureForgre/contexto
+gh attestation verify contexto-0.5.23-py3-none-any.whl --repo VentureForgre/contexto   # needs gh auth login
+pipx install ./contexto-0.5.23-py3-none-any.whl
 ```
 
 For v0.5.12 and earlier, compare `shasum -a 256 contexto-<version>-py3-none-any.whl` with the digest
@@ -181,7 +185,9 @@ upstream Claude Code would use plus `/v1`, which suits a CLIProxyAPI root, or (C
 ChatGPT Codex backend. **With an OpenAI API key, pass `--codex-upstream https://api.openai.com/v1`**
 (or set `CONTEXTO_CODEX_UPSTREAM`). If Claude Code's upstream is Anthropic's API, Contexto refuses
 (exit 2) rather than send the key there. The session line names where the upstream came from, for
-example `contexto: session <id> (bound 150,000, upstream env, codex auth apikey, engine rewrite)`.
+example `contexto: session <id> (bound 150,000, upstream codex-env, codex auth apikey, engine rewrite)`.
+The Codex labels are `codex-flag`, `codex-env`, `chatgpt-default`, or `claude-<source>+/v1` (for
+example `claude-settings:project+/v1`).
 
 `contexto run codex` sets `CODEX_HOME` to `$CONTEXTO_HOME/sessions/<id>/codex-home` (mode 0700) and
 writes a `config.toml` there (mode 0600) that:
@@ -222,10 +228,9 @@ tested: [docs/cliproxyapi.md](docs/cliproxyapi.md).
 
 - **At start**, Contexto prints a session line on stderr, for example
   `contexto: session 7f3a... (bound 150,000, upstream default)` for Claude Code, or
-  `contexto: session 7f3a... (bound 150,000, upstream flag, codex auth apikey, engine rewrite)` for
-  Codex. The
-  upstream is named by where it came from (`flag`, `env`, `default`, or a settings file), never by
-  its URL.
+  `contexto: session 7f3a... (bound 150,000, upstream codex-flag, codex auth apikey, engine rewrite)`
+  for Codex. The upstream is named by where it came from (for Claude Code `flag`, `env`, `default`,
+  or a settings file; for Codex the labels above), never by its URL.
 - **In Claude Code**, `/mcp` lists the `contexto` server as connected.
 - **Nothing else is visible until the prompt nears the bound**, about 125,000 tokens with the
   defaults. Then the proxy rotates for the first time.
@@ -272,11 +277,11 @@ state in `epoch.json`, and the pinned records in `ledger.jsonl`. For Codex sessi
 started in and the Claude Code session ids it served. The session log, `log.jsonl`, holds event
 names, sizes and counts, never prompt or response text. Auth headers and keys are never stored.
 
-`$CONTEXTO_HOME` must be a directory and must not contain `${`. An existing home keeps its
+`$CONTEXTO_HOME` must be a directory, and `contexto run` refuses one that contains `${`. An existing home keeps its
 permissions; Contexto creates `sessions/` as 0700. A session directory must be a real directory:
 Contexto refuses a symlinked `sessions/<id>`. A FIFO or directory in place of a session file is
 treated as damage, never waited on. Temporary files left by a crashed process are removed the next
-time the session opens.
+time the session opens, once they are 10 minutes old.
 
 To delete one session's text, delete its whole directory or run
 `contexto sessions prune --session <id> --yes`. Deleting only `pages/` leaves copies in the other
@@ -329,7 +334,9 @@ For Claude Code, the launcher:
 proxy. SIGTERM, SIGHUP and SIGQUIT are forwarded to Claude Code; SIGUSR1, SIGUSR2 and SIGALRM end it
 with SIGTERM. If Contexto itself is killed with SIGKILL, a watchdog process ends Claude Code and
 removes the temporary files; the session log then has no `exit` event. A launch that cannot start
-(for example the proxy fails) removes the session it created; a resumed `--session` is kept.
+(for example the proxy fails) removes the session it created; a resumed `--session` is kept. One
+exception: a `claude` that is on `PATH` but cannot be executed (a bad `#!` line, for example) fails
+after the session opens, exits 127, and leaves that empty session behind.
 
 **Your own `--settings` is refused** (exit 2), because Claude Code accepts only one and the launcher
 needs it to route requests through the proxy. Put those settings in your Claude settings files
@@ -383,7 +390,7 @@ These commands read a session's store under `$CONTEXTO_HOME/sessions/<id>/` and 
 (except `sessions prune`, below).
 `recall`, `search`, and `state` pick the session from `--session ID`, else `CONTEXTO_SESSION`, else
 the most recently active session that has pages or pinned records or that another process holds
-open (else the most recent session). A session can be named by its full id (32 hex characters) or
+open (else the most recent session). A session can be named by its full id (generated ids are 32 hex characters) or
 any unique prefix, such as `7f3a`; an ambiguous prefix is an error that lists the matches. They print
 the choice to stderr (for example `session 7f3a91c2... (most recent)`), so stdout carries only the
 text. A mistyped `--session` is an error, never a new session.
@@ -502,9 +509,10 @@ response. Tool calls are logged with names, ids, sizes and character ranges, nev
 ## FAQ
 
 **Does it work with a Claude Pro or Max login?** The supported upstreams are the vendor's API with
-an API key, and CLIProxyAPI; the live acceptance runs went through CLIProxyAPI. Contexto forwards whatever credential Claude Code sends and never stores it, but running
-it with a claude.ai subscription login is not a supported setup. To use a subscription, log in to it
-in CLIProxyAPI and point Contexto at CLIProxyAPI ([docs/cliproxyapi.md](docs/cliproxyapi.md)), and
+an API key, and CLIProxyAPI; the live acceptance runs went through CLIProxyAPI. Contexto forwards
+whatever credential Claude Code sends and never stores it, but running it with a claude.ai
+subscription login is not a supported setup. To use a subscription, log in to it in CLIProxyAPI and
+point Contexto at CLIProxyAPI ([docs/cliproxyapi.md](docs/cliproxyapi.md)), and
 check your plan's terms on using it through a proxy.
 
 **Does it work with my own API key?** Yes. With `ANTHROPIC_API_KEY` or an `apiKeyHelper` set for
@@ -515,8 +523,8 @@ for an OpenAI key, `--codex-upstream https://api.openai.com/v1` ([Codex](#codex-
 request stays under the bound, a long session sends fewer input tokens than it would without
 Contexto: 46.6% fewer in the measured run ([Results](#results)). Each rotation changes the start
 of the prompt, so the request after it writes a new prompt cache instead of reading the old one.
-Between rotations the cache is reused as usual: the acceptance runs reused it on all but one
-eligible request.
+Between rotations the cache is reused as usual: each acceptance run reused it on all but at
+most one eligible request.
 
 **Does it send anything anywhere?** No. The proxy listens on `127.0.0.1` only and forwards your
 CLI's own requests to the upstream you configured. There is no telemetry and no update check. The
@@ -572,14 +580,15 @@ gets 403 `permission_error`. Point the CLI at `localhost` or `127.0.0.1` through
 
 **"`<session>/meta.lock` is damaged" or "`live.lock` is damaged".** A symlink, FIFO or directory
 stands where the lock file should be. Delete it, and Contexto makes a new one at the next start.
-Until then `contexto run` does not open the session; with a damaged `meta.lock` recall, search and
-state are refused (pins and closes still work), and with a damaged `live.lock` every tool is.
+Until then `contexto run` does not open the session; with a damaged `meta.lock` the model's recall,
+search and state tools are refused (pins and closes still work), and with a damaged `live.lock` every
+tool is. The `contexto state`, `search` and `sessions show` commands still work.
 
 **`over_bound` in the session log.** `over_bound` with `in_tool_loop: false` at a turn start is
 logged next to `bound_too_small` (the bound is too small for the head and the new prompt) or when the
-rotation's sizing did not hold; only `in_tool_loop: true` is the expected tool-loop overrun. A head
-change (tool search loading a tool, an MCP server connecting, a model switch) is sized like any
-other rotation.
+rotation's sizing did not hold; only `in_tool_loop: true` is the expected tool-loop overrun. A change to
+the fixed overhead (tool search loading a tool, an MCP server connecting, a model switch) is sized
+like any other rotation.
 
 **"a large PDF is estimated generously ..." or "a PDF could not be read fully ...".** A PDF is
 estimated at 4,568 tokens a page, more than most pages cost, so a large one pasted at a turn start
@@ -701,6 +710,9 @@ counts, and event names but no prompt or response text. See [What is stored and 
 - **Standing rules** survive paging only if they open their message or the model pinned them. The
   model is told to pin them when stated, but that was measured on one model and 8 rules
   ([Rules you give once](#rules-you-give-once)).
+- **Tool search** (Claude Code's default) defers Contexto's tools. When the model first loads one,
+  the fixed part of the prompt changes and Contexto rotates once, so that request writes a new prompt
+  cache (2 of the 6 rotations in acceptance run #4).
 - **Images** are estimated from their pixel size. A screenshot in a turn that has been paged out is
   not recallable as an image: `contexto_recall` shows it as `[image omitted]`, and the model sees only
   the turn's text.
@@ -732,9 +744,9 @@ counts, and event names but no prompt or response text. See [What is stored and 
 | `run` | 128 + N | The CLI died from signal N |
 | `run` | 1 | Contexto could not start: the proxy, or the session store (for example a `CONTEXTO_HOME` that exists but cannot be written) |
 | `run` | 2 | Usage error, for example `--bound` above 170,000 or not above the headroom floor (25,000 by default), an invalid `--session` id or one that only starts existing ids, a `CONTEXTO_HOME` that is a file, a `--settings` after `claude`, no Codex key helper, or a Codex upstream that would be Anthropic's API |
-| `run` | 127 | `claude` or `codex` is not on `PATH` or cannot be run, checked before anything starts |
+| `run` | 127 | `claude` or `codex` is not on `PATH` (checked before anything starts), or cannot be executed |
 | `run` | 130 | Ctrl+C during the version check or while waiting for another launch to choose its session, before the CLI started |
-| `proxy` | 1 | Could not start: a port in use, or an invalid upstream |
+| `proxy` | 1 | Could not start: a port in use or not allowed (for example `--port 1`), an invalid upstream, or a `CONTEXTO_HOME` that cannot be written |
 | `proxy` | 2 | `--port` outside 0 to 65535, an invalid `--session` id (`''` included), an id that only starts existing session ids, or a `CONTEXTO_HOME` that is a file |
 | `mcp` | 0 | The CLI closed the server's input (the normal end) |
 | `mcp` | 1 | An invalid or unknown session id (it serves existing sessions only) |

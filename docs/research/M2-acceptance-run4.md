@@ -183,8 +183,8 @@ request.
 - The replay labels the change: `changes_from_recorded` gives `thinking.display` updates to
   omitted, and `unsent_tool_notes` 1 block (`mcp__contexto__contexto_pin`).
 - Tests: 3 new harness tests. The 2 behaviour tests fail on main. 294 harness tests pass (291
-  before). Full suite at `213efbc`: 2880 passed, 1 skipped, 1 xfailed; 3 proxy-server tests hit
-  `EADDRNOTAVAIL` once and passed on rerun. Ruff clean.
+  before). Full suite at `213efbc`: 2883 passed, 1 skipped, 1 xfailed (2880 at first; 3 proxy-server tests
+  hit `EADDRNOTAVAIL` once and passed on rerun). Ruff clean.
 
 ### Attempt 2: the baseline ran
 
@@ -269,7 +269,7 @@ request.
 ## Figures from the Claude Code transcript
 
 Read from the Claude Code transcript this run created. The baseline has now run from it. The
-transcript stays private until the record merges, and is deleted after that.
+transcript stays private and is not part of this record.
 
 | Figure | Value |
 |---|---|

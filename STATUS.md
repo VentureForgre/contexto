@@ -75,8 +75,8 @@ What each decision changed, with the key numbers (full text in `docs/DECISIONS.m
   the head 0 and turn starts over the bound: 32,047 real at bound 30,000, now about 20,700).
 - **D50 (PR #238, v0.5.15): main follows Claude Code's session id.** After `/clear` the new
   conversation stayed a side conversation until it outgrew the old one, so recall drew on a spent
-  room and returned nothing. Main now follows `X-Claude-Code-Session-Id` across `/clear`, `/resume`
-  and `/compact`, interactive and headless, measured on 2.1.302 to 2.1.318; subagents, teammates and
+  room and returned nothing. Main now follows `X-Claude-Code-Session-Id` across `/clear` and
+  `/resume`, and the compaction summary across `/compact`, interactive and headless, measured on 2.1.302 to 2.1.318; subagents, teammates and
   nested `claude -p` never take it. Logged as `main_changed`.
 - **D51 (PR #242, v0.5.11): standing rules pinned when stated.** The model had pinned 1 of 16
   standing rules. The MCP instructions and the preamble now tell it to pin a rule as an obligation
@@ -106,8 +106,8 @@ What each decision changed, with the key numbers (full text in `docs/DECISIONS.m
   it, never with it).
 - **D56 (PR #243, v0.5.10): Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 tested** at zero
   spend; Contexto reads the new subagent stop reports (`<tools-used-before-summary>`), so side rooms
-  close early on those versions too. Spikes run a CLI by path with a temp `HOME` and
-  `DISABLE_AUTOUPDATER=1`. Numbers: `docs/research/M2-claude-code-2.1.318.md`.
+  close early on those versions too. Most spikes run a CLI by path with a temp `HOME`, and all
+  set `DISABLE_AUTOUPDATER=1`. Numbers: `docs/research/M2-claude-code-2.1.318.md`.
 - **D57 (PR #241, v0.5.17): user-facing commands.** `contexto sessions show` lists page ids,
   `contexto search` finds them, `contexto state` prints the pinned records readably (`--raw` for
   the model's text), session ids take unique prefixes for read-only commands, failed launches leave
@@ -125,7 +125,8 @@ What each decision changed, with the key numbers (full text in `docs/DECISIONS.m
   fixtures were estimated at 0.02 to 0.59 of their cost, and one read near the bound went out over
   it unflagged. A PDF now costs 4,568 tokens a page with its pages counted only when certain, else
   600 pages (`pdf_pages_uncertain`). The page lexer is a single pass with a 400,000-step budget:
-  hostile inputs take at most 0.27 s, and the round-8 parser's exponential regex is gone.
+  hostile inputs take at most 0.27 s, and the exponential regex of the earlier parser (branch `claude/pdf-pages`, found in review round 9)
+  is gone.
 - **Docs and packaging (PR #233):** README sections for first-time users (what is stored, how to
   tell it works, uninstall), SECURITY.md's full store list, release checksums and provenance.
 - **Harness (PR #247):** the baseline replay turns `tool_reference` blocks for tools it removes
@@ -139,7 +140,7 @@ from the contract. The owner approved the run on 2026-11-06.
 
 | Criterion | Result |
 |---|---|
-| 1. Long run | PASS: 45 Messages requests, all 200, 0 compaction, max upstream input 110,465 of 150,000, 0 real over-bound, 0 model 4xx, 0 local 5xx, 0 failure events, usage on 45 of 45; 6 rotations (4 `bound`, 2 `head_change` from tool search loading Contexto's tools); CLI exit 0 |
+| 1. Long run | PASS: 45 Messages requests, all 200, 0 compaction, max upstream input 110,465 of 150,000, 0 real over-bound, 0 model 4xx, 0 local 5xx, 0 failure events, usage on 45 of 45; 6 rotations (4 `bound`, 2 `head_change`, inferred from the request shapes to be tool search loading Contexto's tools); CLI exit 0 |
 | 2. Fidelity | PASS: Contexto 52 of 54, baseline 47; chain 28 / 26, obligations 6 / 3, distractor, multihop and paged-only level |
 | 3. Recall | PASS: paged-only 4 of 4 correct and credited, each through one `contexto_search` call that returned the plant's paged span before the answer |
 | 4. Cache | PASS: 38 of 38 eligible requests (1.0) |
@@ -536,8 +537,8 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
 
 ## Open follow-ups
 
-Each would be its own pull request. A code follow-up PR (D61) is in progress for the low findings
-the fix round's reviews left; until it merges, these are open:
+PR #250 (D61, under review) fixes the first six items below, the low findings the fix round's
+reviews left; until it merges, these are open:
 
 - Bound risk on Codex (#244 review B, pre-existing): when Codex responses carry no input count
   until request 30, turn starts reached 36,011 real tokens at bound 30,000 with nothing logged. Count
@@ -545,7 +546,7 @@ the fix round's reviews left; until it merges, these are open:
 - Epoch records written by v0.5.8 keep their low measured head when a session resumes after the
   upgrade (#244 review A).
 - Images (#234 reviews): crafted JPEG fill and marker runs price about 30 times slower (100 images
-  held the lock 2.8 s first, 0.9 s later); the pixel formula can be up to 88 tokens under
+  held the lock 2.77 s first, about 1 s later); the pixel formula can be up to 88 tokens under
   `ceil(w/28) * ceil(h/28) + 3` for thin images; high-resolution screenshots in a conversation's first
   request make the head run high (log-only `turn_room_low` and `window_minimal` at bound 60,000);
   Codex pages show no `[image omitted]` marker for a screenshot (as on v0.5.8).
@@ -555,8 +556,8 @@ the fix round's reviews left; until it merges, these are open:
 - Not started: a byte budget per search on the pages `contexto_search` reads (D41 follow-up): it
   reads and renders up to 53 pages per search with no cap on their size (18.5 MB of page JSON for
   one multi-word query at 3,000 pages sized like real turns).
-- Open from D49: a head too large for `min_turn_room` (bound 60,000, a 28,000-token head) leaves A12
-  nothing to restore, so later turn starts keep their window (about 34,200 real, room 806,
+- Open from D49: a head too large for `min_turn_room` (bound 60,000, a 28,000-token head) leaves the
+  minimum-room rotation (A12) nothing to restore, so later turn starts keep their window (about 34,200 real, room 806,
   `turn_room_low` logged once); PR #232 review B's finding 1.
 
 ## What is left (as of 2026-11-06)
@@ -573,7 +574,7 @@ v0.5.18), D56 (#243, v0.5.10), D51 (#242, v0.5.11), D55 (#240, v0.5.12; #245, v0
 first-time users and release checksums (#233, v0.5.13), D52 (#237, v0.5.14), D50 (#238, v0.5.15),
 D53 (#239, v0.5.16), D57 (#241, v0.5.17), D58 (#235, v0.5.19), D54 (#236, v0.5.20), D48 (#234) and
 the replay fix (#247) in v0.5.21, D59 (#246, v0.5.22), D60 (#248, v0.5.23). Live acceptance run #4
-passed on v0.5.20. Left: the code follow-ups above (D61).
+passed on v0.5.20. Left: the code follow-ups above (PR #250, D61).
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
@@ -798,7 +799,7 @@ Needs the owner:
   directory is refused by every command.
 - Windows is not supported: the store locks files with `fcntl`, the launcher forwards POSIX signals,
   and the store relies on POSIX file modes (0700 and 0600), so neither imports there. CI tests
-  Python 3.12 to 3.15 on Linux and 3.12 and 3.15 on macOS; live runs used Python 3.12.
+  Python 3.12 to 3.15 on Linux and 3.12 and 3.15 on macOS; the live runs did not record their Python version.
 - Cache efficiency depends on the upstream route: 38 of 38 in run #4 and 54 of 55 in the Opus run
   after D36. A proxy with several upstream credentials has to pin each session to one (D36).
   Subagents and side requests share the session's key, so parallel subagents load one credential's

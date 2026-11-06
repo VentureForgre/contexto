@@ -2151,7 +2151,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     under a scrubbed environment and a temp `HOME`. `docs/cli-updates.md` says every run must set
     `DISABLE_AUTOUPDATER=1`.
   - **Not done.** No live check ran on 2.1.314, 2.1.318 or 0.166.0 (routine step 9 needs the owner's
-    approval and a token cap). The early close was measured against the scripted stub only. In esc a
+    approval and a token cap). (Later: 2.1.318 passed the full live acceptance, run #4.) The early close was measured against the scripted stub only. In esc a
     side request asks for a background agent's progress ("Describe your most recent action in 3-5
     words ..."). Its first prompt matches no `Agent` call, so it opens no room that could close early.
 - **D57. User-facing command fixes from the 2026-11-05 QA run.** Claude, 2026-11-05, under D0; contract
