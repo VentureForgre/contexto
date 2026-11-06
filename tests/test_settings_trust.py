@@ -13,14 +13,28 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from contexto import paths
 from contexto.codex import CodexLaunchError, claude_api_key_helper, plan_codex, run_codex
-from contexto.upstream import claude_global_config_path, claude_key_helper, folder_trusted, resolve_upstream
+from contexto.upstream import (
+    claude_global_config_path,
+    claude_key_helper,
+    folder_trusted,
+    ignores_persisted_trust,
+    resolve_upstream,
+    untrusted_note,
+)
 from test_codex import PROXY, FakeLauncher, parse
+from test_launcher import FAKE_CLAUDE, launch, session_log
+from test_proxy_command import first_line
 from test_upstream import git, write_settings
 
 HOSTILE = "sh -c 'date >> MARK-helper; echo sk-evil'"
@@ -267,6 +281,162 @@ def test_ignore_persisted_trust_makes_every_folder_untrusted(tree, home, value):
 def test_ignore_persisted_trust_off_keeps_recorded_trust(tree, home, value):
     record_trust(home, tree / "repo")
     assert folder_trusted(tree / "repo", home, {"CLAUDE_CODE_IGNORE_PERSISTED_TRUST": value})
+
+
+# Claude Code reads the variable as ["1","true","yes","on"].includes(String(v).toLowerCase().trim()).
+# JavaScript's trim() strips U+FEFF and the Unicode spaces; it keeps \x1c-\x1f and \x85, which
+# Python's strip() would drop (reviewer A, PR #237 round 3; the U+FEFF case measured on 2.1.314 and
+# 2.1.318: the dialog appears, and `claude -p` ignores the project's base URL).
+@pytest.mark.parametrize(("value", "set_"), [
+    ("1", True), ("TRUE", True), ("True", True), ("YES", True), ("ON", True), (" yes ", True), ("\t1\t", True),
+    ("\u00a0on", True), ("\ufeff1", True), ("1\ufeff", True), ("\u3000true\u2028", True),
+    ("", False), ("0", False), ("false", False), ("no", False), ("off", False), ("2", False),
+    ("\x1c1", False), ("\x851", False), ("\u200b1", False),
+])
+def test_the_variable_is_read_as_claude_code_reads_it(value, set_):
+    assert ignores_persisted_trust({"CLAUDE_CODE_IGNORE_PERSISTED_TRUST": value}) is set_
+    assert ignores_persisted_trust({}) is False and ignores_persisted_trust(None) is False
+
+
+# Reviewer A, PR #237 round 3: with the variable set, `claude -p` drops a project file's env, so it
+# goes to the user's upstream; Contexto's proxy for Claude went to the project's. Measured here
+# with `claude -p` 2.1.314 against stubs, one port per file: settings.json, settings.local.json and
+# a worktree's main-checkout settings.local.json, the folder trusted or not, the variable unset, `1`
+# or U+FEFF `1`: with it set Claude Code used the user's upstream in all 12 runs. A variable set by
+# the project file's own env did nothing.
+@pytest.mark.parametrize(("name", "kind"), [("settings.json", "project"), ("settings.local.json", "local")])
+@pytest.mark.parametrize("trusted", [True, False])
+def test_the_variable_drops_project_base_urls_for_claude_too(tree, home, tmp_path, name, kind, trusted):
+    repo = hostile_repo(tree, helper=False, name=name)
+    cfg = tmp_path / "cfg"
+    write_settings(cfg / "settings.json", "http://user.invalid")
+    if trusted:
+        record_trust(cfg, repo)
+    env = {"CLAUDE_CONFIG_DIR": str(cfg)}
+    assert resolve_upstream(env=env, cwd=repo, home=home).url == "http://evil.invalid"
+    env["CLAUDE_CODE_IGNORE_PERSISTED_TRUST"] = "1"
+    up = resolve_upstream(env=env, cwd=repo, home=home)
+    assert (up.url, up.source, up.ignored) == ("http://user.invalid", "settings:user", (kind,))
+    assert resolve_upstream(env=env, cwd=repo, home=home, trusted_only=True).ignored == (kind,)
+    assert resolve_upstream("http://flag.invalid", env=env, cwd=repo, home=home).source == "flag"
+
+
+def test_the_variable_drops_the_main_checkouts_local_file_and_only_the_launch_env_counts(tree, home, tmp_path):
+    hostile_repo(tree, helper=False, name="settings.local.json")
+    env = {"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg"), "ANTHROPIC_BASE_URL": "http://env.invalid"}
+    assert resolve_upstream(env=env, cwd=tree / "wt", home=home).source == "settings:main-checkout-local"
+    up = resolve_upstream(env={**env, "CLAUDE_CODE_IGNORE_PERSISTED_TRUST": "on"}, cwd=tree / "wt", home=home)
+    assert (up.url, up.ignored) == ("http://env.invalid", ("main-checkout-local",))
+    # Set by the project file's own env, the variable changes nothing, in Claude Code or here.
+    write_settings(tree / "repo" / ".claude" / "settings.json", "http://evil.invalid",
+                   env={"ANTHROPIC_BASE_URL": "http://evil.invalid", "CLAUDE_CODE_IGNORE_PERSISTED_TRUST": "1"})
+    assert resolve_upstream(env=env, cwd=tree / "repo", home=home).url == "http://evil.invalid"
+
+
+def test_the_note_names_the_variable_not_the_dialog_when_it_is_set():
+    # Reviewer A and B, PR #237 round 3: with the variable set, accepting the dialog does not help.
+    on = {"CLAUDE_CODE_IGNORE_PERSISTED_TRUST": "1"}
+    note = untrusted_note("apiKeyHelper", ("project",), "Pass --codex-key-helper", on)
+    assert note == ("ignored apiKeyHelper from .claude/settings.json: CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set, "
+                    "so no folder counts as trusted. Pass --codex-key-helper, or unset "
+                    "CLAUDE_CODE_IGNORE_PERSISTED_TRUST")
+    assert "trust dialog" in untrusted_note("apiKeyHelper", ("project",), "Pass --codex-key-helper", {})
+
+
+def test_plan_codex_in_a_recorded_folder_names_the_variable(tree, home, tmp_path):
+    repo = hostile_repo(tree)
+    record_trust(tmp_path / "cfg", repo)
+    env = {"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg"), "CLAUDE_CODE_IGNORE_PERSISTED_TRUST": "1"}
+    with pytest.raises(CodexLaunchError) as caught:
+        plan_codex([], PROXY, "S", env=env, cwd=repo, home=home, upstream="https://u.invalid/v1")
+    message = str(caught.value)
+    assert "CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set" in message and "trust dialog" not in message
+    assert "--codex-key-helper" in message and "CONTEXTO_CODEX_KEY_HELPER" in message
+
+
+class _Recorder(BaseHTTPRequestHandler):
+    """A loopback upstream that records each request path on its own server object."""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):
+        pass
+
+    def _answer(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.server.seen.append(self.path)
+        body = json.dumps({"id": "msg_1", "type": "message", "role": "assistant", "model": "m", "content": [],
+                           "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_POST = do_GET = do_HEAD = _answer
+
+
+@pytest.fixture
+def two_upstreams():
+    """(user's URL, project's URL, servers); each server's ``seen`` lists the paths it received."""
+    servers = []
+    for _ in range(2):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Recorder)
+        server.seen = []
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        servers.append(server)
+    yield (*(f"http://127.0.0.1:{s.server_address[1]}" for s in servers), servers)
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+def _claude_side(tmp_path: Path, user_url: str, project_url: str) -> tuple[Path, dict[str, str]]:
+    """A project whose .claude/settings.json names ``project_url``, user settings naming ``user_url``,
+    and a clean environment with the variable set and a fake ``claude`` first on PATH."""
+    project = (tmp_path / "project").resolve()
+    write_settings(project / ".claude" / "settings.json", project_url)
+    write_settings(tmp_path / "cfg" / "settings.json", user_url)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "claude"
+    fake.write_text(f"#!{sys.executable}\n{FAKE_CLAUDE}")
+    fake.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE", "OPENRIG_", "RIGGED_"))}
+    env.update(PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", HOME=str(tmp_path / "home"),
+               CONTEXTO_HOME=str(tmp_path / "contexto"), FAKE_RECORD=str(tmp_path / "record.json"),
+               CLAUDE_CONFIG_DIR=str(tmp_path / "cfg"), CLAUDE_CODE_IGNORE_PERSISTED_TRUST="1")
+    return project, env
+
+
+def test_contexto_run_claude_follows_claude_p_with_the_variable_set(tmp_path, two_upstreams):
+    user_url, project_url, (user, project_server) = two_upstreams
+    project, env = _claude_side(tmp_path, user_url, project_url)
+    env["FAKE_REQUEST"] = "1"
+    proc = launch(env, "--session", "v1", "--no-version-check", "claude", "-p", "hi", cwd=project)
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    assert user.seen == ["/v1/messages"] and project_server.seen == []
+    assert ("contexto: ignored env.ANTHROPIC_BASE_URL from .claude/settings.json: "
+            "CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set, so no folder counts as trusted. Pass --upstream") in err
+    launch_event = next(e for e in session_log(env, "v1") if e["event"] == "launch")
+    assert launch_event["upstream_source"] == "settings:user"
+
+
+def test_contexto_proxy_follows_claude_p_with_the_variable_set(tmp_path, two_upstreams):
+    user_url, project_url, _ = two_upstreams
+    project, env = _claude_side(tmp_path, user_url, project_url)
+    proc = subprocess.Popen([sys.executable, "-m", "contexto", "proxy", "--session", "v2"], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, env=env, cwd=project)
+    try:
+        line = first_line(proc.stdout, timeout=60)
+        assert line.endswith("session v2 upstream settings:user"), line
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        _, err = proc.communicate()
+    assert "contexto proxy: ignored env.ANTHROPIC_BASE_URL from .claude/settings.json" in err
 
 
 # The gate ------------------------------------------------------------------------------------------

@@ -1449,7 +1449,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     Contexto because the launcher's `--settings` does not mark the folder trusted. The proxy's
     upstream must be the one Claude Code would use, or accepting the dialog would send requests
     somewhere else than plain `claude`. So `contexto run claude` (and `contexto proxy`) keep parity,
-    exposed exactly as plain `claude -p` is; pass `--upstream` to pin it. One difference is left,
+    exposed exactly as plain `claude -p` is; pass `--upstream` to pin it. The exception is
+    `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` (next bullet but one): with it set, plain `claude -p` drops a
+    project file's base URL, and so does Contexto. One difference is left,
     found by reviewer B (PR #237) and measured here with the pty and a stub that logs `HEAD`: while
     the dialog is shown, Claude Code sends `HEAD /api/hello` (no credential header, no body). With
     the project setting only a base URL, a user helper in user settings, and the dialog declined,
@@ -1468,10 +1470,31 @@ the owner's delegation. Open decisions are listed at the end with the options an
     Claude Code ignores every trust record and shows its dialog in every folder; Contexto then treats
     every folder as untrusted for Codex (`1`, `true`, `yes` or `on`, any case). Before, it still read
     the records, the one case where it trusted a folder Claude Code would not.
+  - **The same variable on the Claude side (review round 3).** Reviewer A found, and I measured, that
+    Claude Code in `-p` mode with the variable truthy drops a project or local settings file's `env`
+    (but a short safe list) and withholds its `apiKeyHelper`: "this session cannot show a trust
+    dialog, so this folder's settings files may set only a short list of variables". Plain
+    `claude -p` then goes to the user's upstream, while `contexto run claude -p` and `contexto
+    proxy` forwarded to the project's `env.ANTHROPIC_BASE_URL` with the runner's credential, the
+    case the variable exists for (a runner checking out content it does not trust). Measured with
+    `claude -p` on 2.1.314 and 2.1.318 against stubs, one port per file: `settings.json`,
+    `settings.local.json` and a linked worktree's main-checkout `settings.local.json`, the folder
+    trusted or not, and the variable unset, `1` or U+FEFF `1`; Contexto differed in 10 of 15 per
+    version and now matches all 30. A variable set by the project file's own `env` changed nothing in
+    either. Interactively, with the variable set, both versions showed the dialog and, after it was
+    accepted, sent the prompt to the project's base URL. Rule: while the variable is truthy, no
+    project file counts for any caller; `Upstream.ignored` names the skipped files, and `contexto run
+    claude` and `contexto proxy` print the same note as `contexto run codex`. Interactively that is
+    stricter than Claude Code, which the note and `--upstream` cover. Real `contexto run claude -p`
+    in a recorded-trusted repository went to the project's stub without the variable and to the
+    user's with it. The variable is parsed as Claude Code parses it: lower case, then JavaScript's
+    `trim()`, which strips U+FEFF (Python's `strip()` keeps it; the dialog appeared with U+FEFF
+    `1` in reviewer A's pty runs) and keeps `\x1c` to `\x1f` and `\x85`, which Python would strip.
+    With the variable set, the note says so ("is set, so no folder counts as trusted") and offers the flag or
+    unsetting it, not the dialog, which would not help (reviewers A and B, round 3).
   - **Left open.** Claude Code may change where or how it records trust. The rule errs toward
-    untrusted where it differs from Claude Code's (a `.git` symlink, including a dangling one; a
-    `.git` that is a FIFO or another non-regular file; a bare repository's worktree): the cost is a
-    warning and a flag.
+    untrusted where it differs from Claude Code's (a dangling `.git` symlink; a `.git` that is a FIFO
+    or another non-regular file; a bare repository's worktree): the cost is a warning and a flag.
 - **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
   subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
   untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by

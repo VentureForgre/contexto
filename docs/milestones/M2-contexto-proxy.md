@@ -76,8 +76,9 @@ settings still outrank `--settings`; document that limit.
 
 Project settings trust (D52): every settings file above except the user's comes with the
 repository. `contexto run claude` and `contexto proxy` use them as Claude Code does: Claude Code
-uses a project's base URL and `apiKeyHelper` in `-p` mode with no trust check, and interactively
-only after its "do you trust this folder" dialog, which it still shows behind Contexto, so a
+uses a project's base URL and `apiKeyHelper` in `-p` mode with no trust check (unless
+`CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set, below), and interactively only after its "do you trust
+this folder" dialog, which it still shows behind Contexto, so a
 proxy upstream taken from an untrusted project matches what Claude Code would use once the user
 accepts. One difference remains before the dialog is answered: Claude Code sends `HEAD /api/hello`
 (no credential, no content) while the dialog is shown, and through Contexto that request reaches
@@ -98,7 +99,16 @@ The layout is read from the file system, never from `git`: a folder unpacked fro
 writes its own `.git`, so git's answer is the folder's (reviewer A, PR #237). The same genuine
 worktree test decides whose `settings.local.json` is the main checkout's. While
 `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is truthy no folder counts as trusted, as for Claude Code, which
-then shows its dialog everywhere. Otherwise the file is skipped and
+then shows its dialog everywhere. The variable is read from the environment Contexto starts with
+(a settings file's `env` cannot set it), as Claude Code reads it: `1`, `true`, `yes` or `on` in
+any case, after JavaScript's `trim()`, which also strips U+FEFF. While it is truthy no project file
+counts for `contexto run claude` and `contexto proxy` either: Claude Code in `-p` mode then drops a
+project file's `env` (but a short list of safe variables) and its `apiKeyHelper`, so plain
+`claude -p` goes to the user's upstream (reviewer A, PR #237 round 3; measured on 2.1.314 and
+2.1.318). Interactively Claude Code shows its dialog and, once it is accepted, uses the project's
+base URL (measured); Contexto skips the project files there too, the stricter side, and
+`--upstream` pins any upstream. When a project file is skipped for that reason the note names the
+variable and offers only the flags or unsetting it. Otherwise the file is skipped and
 Contexto says which file it ignored and how to proceed (`--codex-key-helper`, `--codex-upstream`,
 or running `claude` there once and accepting the dialog). `--codex-key-helper`,
 `CONTEXTO_CODEX_KEY_HELPER`, `--upstream`, `--codex-upstream`, and the user settings file are never

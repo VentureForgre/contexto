@@ -21,7 +21,8 @@ Order per the M2 contract, "Upstream resolution" (PR #20 head bf1c7ad, D52), fir
 The project files (every file above except the user's) come from whatever repository the user
 runs in. Claude Code itself uses them in ``-p`` mode with no trust check, and interactively only
 after its "do you trust this folder" dialog, so ``contexto run claude`` reads them as Claude Code
-does. ``contexto run codex`` passes ``trusted_only``: plain Codex ignores ``.claude/``, so a project
+does, except that no project file counts while ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is set
+(``claude_setting``). ``contexto run codex`` passes ``trusted_only``: plain Codex ignores ``.claude/``, so a project
 file's base URL or ``apiKeyHelper`` counts only when Claude Code has recorded the folder as trusted
 (``folder_trusted``, D52).
 
@@ -201,9 +202,20 @@ def claude_global_config_path(home: Path, env: Mapping[str, str] | None = None) 
 
 
 # Claude Code ignores every recorded trust, and shows its dialog in every folder, while this is truthy
-# (reviewer A, PR #237 round 2). The spellings are read broadly: here a false "true" errs toward untrusted.
+# (reviewer A, PR #237 round 2); in -p mode it then also drops a project file's env and apiKeyHelper
+# (round 3). Only the environment it starts with counts, never a settings file's env.
 IGNORE_TRUST_KEY = "CLAUDE_CODE_IGNORE_PERSISTED_TRUST"
 TRUTHY = frozenset({"1", "true", "yes", "on"})
+# What JavaScript's String.prototype.trim() strips (Claude Code parses the variable with it): Unicode
+# space separators, the line terminators, and U+FEFF, which Python's str.strip() keeps (round 3).
+JS_WHITESPACE = ("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+                 "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+
+
+def ignores_persisted_trust(env: Mapping[str, str] | None) -> bool:
+    """Whether ``env`` sets ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` the way Claude Code reads it:
+    ``["1", "true", "yes", "on"].includes(String(v).toLowerCase().trim())`` (2.1.314 and 2.1.318)."""
+    return (env or {}).get(IGNORE_TRUST_KEY, "").lower().strip(JS_WHITESPACE) in TRUTHY
 
 
 def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None, *,
@@ -217,7 +229,7 @@ def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None, 
     trailing slash. An unreadable config means not trusted, and so does any folder while ``env`` sets
     ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST``. ``layout`` is ``git_layout(cwd)`` when the caller already
     has it."""
-    if (env or {}).get(IGNORE_TRUST_KEY, "").strip().lower() in TRUTHY:
+    if ignores_persisted_trust(env):
         return False
     try:
         data = json.loads(claude_global_config_path(home, env).read_text(encoding="utf-8"))
@@ -241,9 +253,14 @@ def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None, 
     return False
 
 
-def untrusted_note(what: str, kinds: tuple[str, ...], remedy: str) -> str:
-    """The warning for a setting skipped because the folder is not trusted; names the files, never paths."""
+def untrusted_note(what: str, kinds: tuple[str, ...], remedy: str, env: Mapping[str, str] | None = None) -> str:
+    """The warning for a setting skipped because the folder is not trusted, or because ``env`` sets
+    ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` (then no record helps, so the dialog is not offered as a
+    way on); names the files, never paths."""
     files = " and ".join(KIND_FILES.get(kind, kind) for kind in kinds)
+    if ignores_persisted_trust(env):
+        return (f"ignored {what} from {files}: {IGNORE_TRUST_KEY} is set, so no folder counts as trusted. "
+                f"{remedy}, or unset {IGNORE_TRUST_KEY}")
     return (f"ignored {what} from {files}: Claude Code has not recorded this folder as trusted. {remedy}, "
             f"or run claude here once and accept the trust dialog")
 
@@ -267,17 +284,23 @@ def _settings_base_url(path: Path) -> str | None:
 def claude_setting(read: Callable[[Path], str | None], cwd: Path, home: Path, env: Mapping[str, str] | None = None,
                    *, trusted_only: bool = False) -> Setting:
     """The first value ``read`` finds in ``claude_settings_order``. With ``trusted_only``, a project
-    file counts only when ``folder_trusted``; the project kinds skipped that way are reported."""
+    file counts only when ``folder_trusted``. While ``env`` sets ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST``
+    no project file counts for any caller: Claude Code in ``-p`` mode then drops a project file's
+    ``env`` and ``apiKeyHelper`` (measured on 2.1.314 and 2.1.318, D52), so the proxy must not
+    forward to its base URL. Interactively it shows its dialog and, once accepted, uses the
+    project's base URL (measured); skipping there too is the stricter side, and ``--upstream``
+    overrides. The project kinds skipped either way are reported."""
     ignored: list[str] = []
     trusted: bool | None = None
+    no_trust = ignores_persisted_trust(env)
     layout = git_layout(cwd)  # one walk for the order and the trust check (reviewer A's nit, PR #237)
     for kind, path in claude_settings_order(cwd, home, env, layout=layout):
         value = read(path)
         if not value:
             continue
-        if trusted_only and kind in PROJECT_KINDS:
+        if kind in PROJECT_KINDS and (trusted_only or no_trust):
             if trusted is None:
-                trusted = folder_trusted(cwd, home, env, layout=layout)
+                trusted = not no_trust and folder_trusted(cwd, home, env, layout=layout)
             if not trusted:
                 ignored.append(kind)
                 continue

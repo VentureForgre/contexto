@@ -74,7 +74,7 @@ from contexto.private import affinity_salt
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import SessionStore
 from contexto.toolcheck import denied_tools_message, missing_tools_message
-from contexto.upstream import resolve_upstream
+from contexto.upstream import resolve_upstream, untrusted_note
 
 DEFAULT_BOUND = 150_000
 REPORT_LOCK_TIMEOUT_S = 2.0  # report_missing_tools: how long the exit waits for a request still in the engine
@@ -429,6 +429,9 @@ def _run(options: LaunchOptions, stderr) -> int:
     if claude is None:
         raise LaunchError(f"'{options.claude_bin}' not found on PATH", EXIT_NOT_FOUND)
     upstream = resolve_upstream(options.upstream, cwd=Path.cwd())
+    if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: as Claude Code -p, no project base URL (D52)
+        print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', upstream.ignored, 'Pass --upstream', os.environ)}",
+              file=stderr)
     home = contexto_home()
     session_id = options.session_id or uuid.uuid4().hex
     try:

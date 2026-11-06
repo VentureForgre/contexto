@@ -423,7 +423,7 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
         helper = found.value
         if found.ignored:
             notes.append(untrusted_note("apiKeyHelper", found.ignored,
-                                        f"Pass --codex-key-helper (or set {KEY_HELPER_ENV})"))
+                                        f"Pass --codex-key-helper (or set {KEY_HELPER_ENV})", base_env))
     if not helper:
         raise CodexLaunchError(f"no key helper: {notes[0]}" if notes else
                                f"no key helper: pass --codex-key-helper, set {KEY_HELPER_ENV}, "
@@ -492,8 +492,8 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         target, source = codex_upstream_with_source(args.codex_auth, args.codex_upstream, dict(os.environ),
                                                     claude.url, claude.source)
         if claude.ignored and source.startswith("claude-"):
-            print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', claude.ignored, 'Pass --codex-upstream')}",
-                  file=stderr)
+            print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', claude.ignored, 'Pass --codex-upstream',
+                                              os.environ)}", file=stderr)
         session_id = args.session or uuid.uuid4().hex
         try:
             existed = os.path.lexists(paths.session_dir(paths.contexto_home(), session_id))
