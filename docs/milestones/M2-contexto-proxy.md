@@ -559,7 +559,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   answering that something is unknown; that it records decisions and obligations with
   `contexto_pin` and closes finished ones with `contexto_close`; that it pins a standing rule,
   preference, or obligation the user states (whenever, from now on, always, never) as an obligation
-  as soon as it is stated, even when its reply is one word, because an unpinned one leaves view when
+  as soon as it is stated, even when its reply is one word, and keeps it open until the user
+  withdraws it, because an unpinned one leaves view when
   its turn is paged (D51); and one worked example of a search followed by a recall. The preamble is placed before any carried context in the first
   retained turn-start message. Measured (PR #70 experiment, 415,413 tokens): with the earlier
   mechanism-only line the model made 0 tool calls in the H1 run; with this text it searched for
@@ -576,7 +577,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 `contexto mcp --session S`, stdio JSON-RPC per the MCP spec. Its `instructions` (sent at
 `initialize` and `server/discover`) name the tools and say when to use each, and tell the model to
 pin a standing rule, preference, or obligation the user states as an obligation at once, with the
-pin arguments (`{"kind": "obligation", "text": ...}`), even when its reply is one word (D51): the
+pin arguments (`{"kind": "obligation", "text": ...}`), even when its reply is one word, and to keep
+it open until the user withdraws it (D51): the
 preamble is sent only from the first rotation, and the instructions are what the model sees in the
 turns before it, usually where such rules are given. Tools:
 
@@ -781,7 +783,22 @@ turns before it, usually where such rules are given. Tools:
   every page the earlier exact, case-sensitive rule matched still matches. A query with no words
   (whitespace only) matches nothing, where the earlier rule matched almost every page. Case is
   folded one character at a time, with every final sigma written as `σ`, so a word folds the same
-  in the query and on the page. Matching pages are ranked in three groups: turn pages holding the
+  in the query and on the page. Search does not read the inputs and outputs of Contexto's search,
+  recall, and state calls (D51): a call is one of them when its tool name is
+  `mcp__contexto__contexto_search`, `_recall`, or `_state` (Claude Code, and Codex calling it
+  directly), or when it is Codex's code-mode `exec` call whose code (a custom tool's input, or the
+  string fields of a function call's JSON arguments) has no comment and in which every mention of
+  `tools` is a literal call of one of them (`tools["mcp__contexto__contexto_search"](` or
+  `tools.mcp__contexto__contexto_search(`), so any other way of reaching a tool keeps the call
+  searchable; the output is paired with its call by `tool_use_id` or `call_id` within the turn.
+  Their replies hold copies of older pages or of the pinned state, and as the newest page holding
+  them a search reply outranked the pages it quoted (QA, 2026-11-05). `contexto_pin` and
+  `contexto_close` calls are the model's own words and stay searchable. The page keeps the calls
+  verbatim and `contexto_recall` returns them; the stub's paths, the index line's identifiers, the
+  matching lines a reply shows (matched on the rendered page with those lines blanked at the same
+  offsets, and a context line inside them left out), and the retained-window entries leave them
+  out. A page written before this rule that holds such a call has its stub rebuilt from its messages
+  when read, in memory only (the file and id are unchanged). Matching pages are ranked in three groups: turn pages holding the
   whole query as typed (case-insensitively), then turn pages holding only its words, then pages
   holding only paged context blocks (system messages and Codex `developer` items, or user messages
   made only of `<system-reminder>` blocks, D32; recognised from the messages, whatever the stub),
@@ -790,19 +807,7 @@ turns before it, usually where such rules are given. Tools:
   changes (D41). A term's frequency on a page is the number of the page's texts that hold it, at
   most 3. A text is one stub field (the prompt's first 200 characters, each tool name, each path) or
   one text of the turn: each text block, each string field of a tool input, each tool output; the
-  stub repeats the prompt and the paths, so they count twice. The inputs and outputs of Contexto's
-  own tools are not texts of the turn (D51): a call is one of them when its tool name starts
-  `mcp__contexto__` (Claude Code, and Codex calling it directly), or when it is Codex's code-mode
-  `exec` call whose code has no comment and in which every mention of `tools` is a literal call of
-  one (`tools["mcp__contexto__..."](` or `tools.mcp__contexto__...(`), so any other way of reaching a
-  tool keeps the call searchable; the output is
-  paired with its call by `tool_use_id` or `call_id` within the turn. A search reply holds copies of
-  lines from older pages, and as the newest page holding them it outranked the pages it quoted (QA,
-  2026-11-05). The page keeps them verbatim and `contexto_recall` returns them; the stub's paths, the
-  index line's identifiers, the matching lines a reply shows (matched on the rendered page with
-  those lines blanked at the same offsets, and a context line inside them left out), and the
-  retained-window entries leave them out. A page written before this rule that holds an own call has
-  its stub rebuilt from its messages when read, in memory only (the file and id are unchanged). So a grep or a log that repeats a key
+  stub repeats the prompt and the paths, so they count twice. So a grep or a log that repeats a key
   many times counts once, and a turn that runs many greps counts 3. And there is no length term
   (b 0): a long turn that states a value once scores as a short page that states it once. A page
   with the term in 3 or more texts scores 1.57 times a page with it in one. Relevance is multiplied

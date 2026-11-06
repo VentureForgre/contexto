@@ -34,13 +34,13 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 # ("# MCP Server Instructions"); when either changes, the head moves by its byte change at
 # OTHER_BYTES_PER_TOKEN. B19 and B21 (main 8571095, dry run #5) grew the definitions from 2,743 to 2,827
 # bytes: 47,600 + ceil(84 / 3.0) = 47,628. D51 grew them to 2,985 bytes and the instructions from 426 to
-# 695: 47,600 + ceil(242 / 3.0) + ceil(269 / 3.0) = 47,771. test_head_follows_contexto_tool_bytes fails
+# 741: 47,600 + ceil(242 / 3.0) + ceil(315 / 3.0) = 47,786. test_head_follows_contexto_tool_bytes fails
 # when either changes without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
 CONTEXTO_TOOL_BYTES = 2_985  # D51
 CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE = 426  # main c8f0b08 (unchanged until D51)
-CONTEXTO_INSTRUCTIONS_BYTES = 695  # D51
+CONTEXTO_INSTRUCTIONS_BYTES = 741  # D51
 HEAD = (HEAD_MEASURED
         + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
         + math.ceil((CONTEXTO_INSTRUCTIONS_BYTES - CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN))
@@ -48,7 +48,7 @@ HEAD = (HEAD_MEASURED
 
 def fixed_preamble_tokens() -> int:
     """The pinned text's fixed opening lines (``contexto.store.recall.DEFAULT_LINES``) by the engine's
-    estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 367 with it."""
+    estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it."""
     from contexto.store.recall import DEFAULT_LINES
     from contexto.tokens import estimate_tokens
 
