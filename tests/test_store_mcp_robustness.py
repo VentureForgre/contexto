@@ -323,8 +323,8 @@ def planted(home, name, kind):
 
 
 @pytest.mark.parametrize("kind", ["fifo", "directory", "symlink"])
-@pytest.mark.parametrize("name", ["meta.json", "ledger.jsonl", "ledger.lock", "log.jsonl", "retained.json",
-                                  "epoch.json", "page"])
+@pytest.mark.parametrize("name", ["meta.json", "ledger.jsonl", "ledger.lock", "meta.lock", "log.jsonl",
+                                  "retained.json", "epoch.json", "page"])
 def test_a_fifo_or_directory_in_a_files_place_never_blocks_or_crashes(home, capsys, name, kind):
     pid = planted(home, name, kind)
 
@@ -370,6 +370,44 @@ def test_a_ledger_lock_that_is_not_a_file_degrades_like_a_damaged_ledger(home, c
     assert cli.main(["sessions", "show", "s1"]) == 0 and "Traceback" not in capsys.readouterr().err
     if kind == "symlink":
         assert (home / "outside-ledger.lock").read_bytes() == b"{}\n"
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory", "symlink"])
+def test_a_meta_lock_that_is_not_a_file_is_reported_as_damage_naming_it(home, capsys, kind):
+    # Review of #235: every room charge takes meta.lock, so recall, search and state answered "an internal
+    # error ... Try once more", which cannot succeed, and `contexto run` named only a path.
+    from contexto import launcher
+
+    planted(home, "meta.lock", kind)
+    store = SessionStore(home, "s1")
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    for name, arguments in (("contexto_state", {}), ("contexto_search", {"query": "garnet"})):
+        result = tool(server, name, arguments)
+        assert result["isError"] is True, result
+        assert text_of(result).startswith(f"{name} failed: this session's meta.lock is damaged (it is ")
+        assert "Try once more" not in text_of(result) and "will not help" in text_of(result)
+    assert tool(server, "contexto_pin", {"kind": "decision", "text": "x"})["isError"] is False  # no meta write
+    assert [e.get("file") for e in events(store, "mcp_call") if not e["ok"]] == ["meta.lock", "meta.lock"]
+    with pytest.raises(launcher.LaunchError, match=r"meta\.lock is damaged \(it is .*delete it"):
+        launcher.pick_session(launcher.LaunchOptions(claude_args=[], session_id="s1"), home, home, io.StringIO())
+    if kind == "symlink":
+        assert (home / "outside-meta.lock").read_bytes() == b"{}\n"
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory", "symlink"])
+def test_a_live_lock_that_is_not_a_file_is_reported_as_damage_naming_it(home, capsys, kind):
+    pid = planted(home, "live.lock", kind)
+    with pytest.raises(OSError, match=r"live\.lock is damaged \(it is .*delete it, and Contexto makes a new one"):
+        finishes(lambda: SessionStore(home, "s1"))
+    assert finishes(lambda: cli.main(["mcp", "--session", "s1"])) == 1
+    assert "live.lock is damaged" in capsys.readouterr().err
+    for argv in (["state", "--session", "s1"], ["recall", pid, "--session", "s1"], ["sessions", "show", "s1"],
+                 ["sessions", "list"]):
+        finishes(lambda argv=argv: cli.main(argv))
+    assert "Traceback" not in capsys.readouterr().err
+    lock = home / "sessions" / "s1" / "live.lock"
+    lock.rmdir() if kind == "directory" else lock.unlink()
+    assert finishes(lambda: SessionStore(home, "s1")).page_ids() == [pid]  # deleting it is the whole repair
 
 
 def test_a_fifo_page_key_is_refused_at_once(home, capsys):
