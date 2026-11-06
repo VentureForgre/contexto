@@ -1322,8 +1322,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
       taken off. On Codex the estimate is a deliberate over-estimate, so the range says nothing and the
       first ratio is learned at floor 0: gating it too kept the 3.5 seed and ran 1.9% under.
     - **Any request** whose learned text ratio lands outside 1.5 to 6 bytes a token is not learned. A
-      document's whole cost counts as text before a ratio exists, so a first request with a PDF of any
-      size lands under 1.5 and waits for the next request's difference.
+      document's whole cost counts as text before a ratio exists, so a first request with a PDF usually
+      lands under 1.5 and waits for the next request's difference. Not always: a small PDF beside much
+      text can land just above 1.5 and be learned (the #234 review measured ratios down to 1.585). A
+      low ratio counts more tokens per byte, so that errs high, the safe side.
 
     Measured (synthetic upstream at 3.0 bytes a text token, PDFs priced by bytes with floor 0; the
     sessions of `tests/test_image_estimate.py`): the suite's forms of reviewer B's round-3 sessions (a 20-page PDF at 4,568
@@ -1450,7 +1452,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     than the head lost.
     - **Rule.** The non-carried messages count at the measured request's own ratio, their share of its
       bytes (as the estimator counts them), or at the estimate made before the send when that is lower,
-      so the head errs high. The head's byte size is re-based on the measured request, so a head change
+      so the head errs high, except as Limits says below (a window with more bytes per token than the
+      head puts it low; PR #244's reviews measured up to 1,816 tokens, 7.3%, low with the bound held,
+      and A12's `turn_room_low` unlogged in 21 of 240 runs). The head's byte size is re-based on the measured request, so a head change
       before the first usage is in the measurement and counted once. Both window sizes are kept only
       while the head is unmeasured.
     - **Usage with no input count** (`output_tokens` alone) is a response without usage. It was read
@@ -1500,6 +1504,177 @@ the owner's delegation. Open decisions are listed at the end with the options an
       `min_turn_room` (bound 60,000, a 28,000-token head) leaves A12 nothing to restore, so later turn
       starts keep their window (about 34,200 real, room 806, `turn_room_low` logged once) where the low
       head used to page; PR #232 review B's finding 1, still open.
+- **D50. Main follows Claude Code's session id across `/clear` and `/resume`, and its compaction
+  summary across `/compact`; a side request that arrives first stays main only until the first
+  prompt.** Claude, 2026-11-05, under D0; contract
+  change. The engine keys a conversation by its first prompt and handed main over only at a turn
+  start with strictly more turn starts than main (contract PR #125). QA's verify-clear and
+  live-realworld F2 (v0.5.8): after `/clear` the new conversation has one turn start, so it stayed a
+  side conversation until it outgrew the old one. No room, snapshot or window came from the
+  conversation the user was in. Every tool call was charged against the old conversation's last
+  room, which was never republished; once that was spent, `contexto_state` and `contexto_search`
+  returned nothing, pins included. The live answer for a pinned codename was "I don't know ... my
+  contexto recall budget for this turn is used up". The same report saw the user's first turn of a
+  fresh session not be main, because Claude Code's tool-less side request arrives first and a tie
+  keeps it.
+  - **Measured** (zero spend; Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318 in a pty against a
+    loopback stub that kept every request's headers and body, isolated config dirs, fake key; 15
+    Messages requests per version). The steps: two turns, the first launching a subagent; `/clear`;
+    the same again; `/resume` of the first conversation; one turn. On every request
+    `X-Claude-Code-Session-Id` equals the `session_id` in `metadata.user_id`. `/clear` starts a new
+    id; `/resume` sends the resumed conversation's old id again; the subagents and the one-message,
+    tool-less side request Claude Code sends before each prompt carry the id of the conversation
+    they run for. The first request of the session, and the first after `/clear`, is that side request.
+    The request after `/resume` holds no marker: it is the old conversation plus the new prompt.
+  - **Other sessions on one proxy** (reviewer A, PR #238; the same setup on 2.1.314 with
+    `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, the main conversation creating a team and spawning
+    one teammate, then running `claude -p` from its Bash tool). A teammate's `metadata.user_id` adds
+    `parent_session_id`, the lead's id. In process it keeps the lead's own session id; in its own
+    tmux pane (`teammateMode` `tmux`, on an isolated tmux socket) it has its own. Its User-Agent
+    entrypoint is `cli` either way. The nested `claude -p` has its own id, no parent, and the
+    entrypoint `sdk-cli` (`claude-cli/<v> (external, <entrypoint>[, ...])`; the lead's is `cli`).
+    With the first version of this rule the tmux teammate took main at its first turn start and the
+    lead took it back at its next. The nested `claude -p` took main too, and the lead's next request
+    was a side request. Under a headless lead (`claude -p` with a Bash call that runs `claude -p`,
+    reviewer A round 2) the lead and the child both send `sdk-cli`: the binary keeps an inherited
+    `CLAUDE_CODE_ENTRYPOINT` and only turns its own `cli` into `sdk-cli` in print mode. The child has
+    its own id and no parent. With the second version of this rule the child took main, and the
+    lead, whose run has one turn start, never took it back.
+  - **Compaction** (reviewer B round 2, PR #238: live on 2.1.314 and 2.1.318, all 8 requests after a
+    `/compact` were side, and with the old room spent `contexto_state` returned nothing). Captured
+    on 2.1.314 and 2.1.318 against the stub, both manual `/compact` and auto-compaction (the stub
+    reported 995,000 input tokens on a turn; 190,000 did not trigger it). The session id does not
+    change. Claude Code first sends the summary request on main's own key: main's history with the
+    instructions appended to its last prompt. The compacted conversation's first message is then a
+    user message whose content is a plain string: "This session is being continued from a previous
+    conversation that ran out of context. The summary below covers the earlier portion of the
+    conversation.", a newline, then the summary. After it come a role `system` message, the last
+    message from before compaction kept verbatim (main's last response, which no earlier request
+    held), and the new prompt, which after `/compact` also holds the command's blocks. The same
+    form came from both versions and both triggers. (Corrected by D59: those captures ran with
+    Claude Code's attribution reminder off. With the default reminder the first message is a list,
+    the reminder block and then the summary block, when Claude Code keeps nothing after the summary,
+    and the rule below never matched that form. PR #246's review then found three forms on 2.1.314 and
+    2.1.318: a plain string when Claude Code keeps tail messages after the summary (the previous
+    assistant message after `/compact`, a pending tool pair after auto-compaction), which this rule
+    did match; `[reminder blocks, summary, ...]`; and `[summary, ...]`.) It is a new key with two turn starts, so before
+    this rule it never outgrew main. Every subagent request (8 on 2.1.302 to 2.1.318, and the
+    compaction runs' 4) and the in-process teammate's carry `X-Claude-Code-Agent-Id`; no main, side,
+    nested or headless request does.
+  - **Rule.** At a turn start, a conversation also takes over main when its session id differs from
+    main's, its entrypoint is main's, main is idle unless both are the interactive `cli` (see
+    headless below), and either no conversation has been main in that session yet
+    (`new_cli_session`, after `/clear`), or it was the first conversation main in its session, and
+    that session lost main to another session's id and has sent no request of this conversation
+    since (`resumed_cli_session`, after `/resume`). It also takes over when main has never sent a
+    request with a tool list and this conversation has (`after_side_request`). Only a conversation
+    seen with a tool list takes over by these, so side requests never do. A subagent carries main's
+    id, so it never does either. A background subagent the old conversation launched before `/clear`
+    keeps the old id, and the old conversation was that session's main, so it does not take over. A
+    request with `parent_session_id` or `X-Claude-Code-Agent-Id` never takes over by any rule, so a
+    subagent that auto-compacts, or that `SendMessage` resumed more often than main has turns, never
+    becomes main. A conversation also takes over with reason `compacted` when its session id and
+    entrypoint are main's and its first message is that summary, with the exact string
+    start; a prompt that quotes it is a list with context blocks and does not match (D59: the summary
+    is now found after leading `<system-reminder>` blocks, in a string or a list, and must be followed
+    by a blank line, which a prompt quoting the sentence usually does not have; one that pastes the
+    whole first line and the blank line, in main's own session and entrypoint, does match). It becomes its
+    session's main, replacing the first one, since `/resume` of the session loads the compacted
+    transcript. Its own epoch starts at 0 under the bound like any new conversation, and the old
+    conversation's pins and pages stay in the session store. Requiring main's entrypoint keeps out
+    a `claude -p` or SDK process run from an interactive lead's tool, since it sends `sdk-*`.
+  - **Headless** (reviewer A round 3: `/clear` and `/compact` are declared `supportsNonInteractive`
+    in 2.1.318; round 2 wrongly said they exist only in the interactive CLI). Captured on 2.1.314
+    and 2.1.318 with `claude -p --input-format stream-json --output-format stream-json` against the
+    stub: two prompts, `/compact`, a prompt, `/clear`, a prompt. `/compact` keeps the session id and
+    sends the same summary form as interactive; `/clear` starts a new id, User-Agent
+    `(external, sdk-cli)`, no parent, a tool list, and the same first message as an interactive
+    `/clear` (the command's blocks, then the prompt). `/resume` is not declared `supportsNonInteractive`
+    in the binary, so it was not run. A nested
+    `claude -p` under a headless lead has the same shape: a new id under the lead's inherited
+    `sdk-cli`. What tells them apart is main's state: the nested child runs inside one of main's
+    tool calls (the response to main's newest request released a client call, the Bash running it), and a
+    headless `/clear` follows main's final response. So for equal entrypoints other than `cli`, the
+    two session-id rules also need main idle: the response to its newest request released no client
+    tool call (the proxy's `tool_calls` is False, not unknown), no response of main's that may have
+    released one (True or unknown, whichever request it answers) arrived after it, and main has
+    sent no request since. A late or duplicate response, such as the end of a request the CLI gave
+    up on and retried, must not leave main idle while a call is out: with "its latest response"
+    (round 3), that late end made a headless lead idle while its Bash ran a nested `claude -p`, the
+    child took main, and the lead's next request was estimated at 4,775 tokens against a 4,000 bound
+    (reviewer A round 4). Updating idle from the newest request's response alone is not enough: when
+    R1's late end comes first it is the attributed one, and the retry's own response, releasing the
+    Bash, is then unattributed. So any response that may hold a client call marks main busy,
+    whichever request it answers, and only the newest request's response without one marks it idle;
+    the test runs both orders and a duplicate response. One short window remains (reviewer A, round
+    5): when R1's late end comes first, main is idle until the retry's response arrives. A nested
+    child cannot start in it, since it runs in a call that response releases; only a session already
+    running can take main then (a `claude -p` the lead backgrounded earlier, or a call Claude Code
+    started before `message_stop` on the `hold_skipped` path), and the lead's calls are then charged
+    against its side room, so the bound holds. Closing it would need a count of the responses still
+    outstanding per request, which would leave main busy after any response that never arrives. Compaction
+    keeps the session id, which a nested child never shares, so `compacted` needs no idle check. In
+    the interactive CLI the idle check is not applied, since after Esc main's latest response can
+    still show a call that was cancelled and never runs. The quiet check means two sessions both sending trade main at most once: the one that lost main by
+    id and kept sending returns only by turn starts, and the other one, having lost by turn starts,
+    never returns by id. Two sessions that take turns, each idle while the other is prompted, pass
+    the quiet check at every switch and follow the one prompted (10 switches in 10 alternations,
+    reviewer A round 2), each switch logged. Within one Claude Code process (`/clear`, `/resume`,
+    `/compact`) the switch is at the process's own next prompt, when its old conversation has no
+    call left to run; a compaction that keeps a pending tool call after the summary switches at the
+    compacted conversation's first request instead, once the summary request was answered with no
+    client call (D59). Two interactive processes on one proxy are not a supported setup, and there
+    the bound holds only while the session losing main is idle: a switch during its pending tool
+    call charges that call against the new main's room (reviewer A round 3: 1,884 tokens against a
+    500-token room). The turn-start rule on main opens the same window. Main is decided once per request, before
+    the transform, and never moves at a response: at round 2 a response of a session whose request
+    was in flight when another took over moved main back with no event (reviewer A). A session's main is the first conversation main in it, so a
+    subagent that outgrew main does not replace it, and a later `/resume` still returns to the
+    user's conversation. The turn-start rule is kept as the last case (`more_turn_starts`), so the
+    only handover D50 removes is a child session's. The id is read
+    from the header, else from `metadata.user_id`, only for the Messages API; Codex is unchanged.
+    `metadata.user_id` is parsed by `loads_bounded` (D45): a string nested past the limit gives no
+    session id; before, a deep one raised `RecursionError` and every request went upstream
+    untransformed (reviewer A round 2).
+    The request that takes over logs content-free `main_changed` with the reason and its turn
+    starts (QA found no event saying main was stale).
+  - **Result.** Replaying the captures through the engine: before, the user's first turn (3
+    requests) and all 4 of the new conversation's requests after `/clear` were not main;
+    after, every request of the user's conversation is main (from its first request after `/clear`
+    and after `/resume`), and no subagent or side request is. Over the two team captures and the headless one no teammate
+    or nested request takes main, and the lead stays main throughout. In the engine test of the live case
+    (old room spent: bound 4,000, real input 3,600), `contexto_state` returned the budget-spent
+    notice before and returns the pin after the new conversation's first request; `contexto_search`
+    finds the old conversation's paged turn. The same holds after `/compact` (reviewer B's repro).
+    Replaying the four compaction captures: before, every request of the compacted conversation was
+    side (4 of 4 on each); after, it is main from its first request (`compacted`). The two
+    stream-json captures: before, the compacted and the cleared conversations were side; after,
+    `compacted` and `new_cli_session` at their first request, with each response's `tool_calls`
+    as the stub's reply gives it. The earlier seven captures replay unchanged, the headless lead's
+    nested `claude -p` staying side.
+  - **Options considered.** Stop charging a stale main once another conversation has started a turn
+    (QA's fallback). Rejected: a subagent's first request is a turn start inside main's tool loop,
+    so main's own calls would then be bounded by the side room alone and could overfill main's
+    window. A head match (same system and tools as main at a new conversation's turn start).
+    Rejected: deferred tools and settings change the head inside one conversation, and the session id
+    is on every request of every measured version.
+  - **Not covered.** Without a session id (another client, or a Claude Code that drops both) the
+    turn-start rule alone applies, as before. Editing the first prompt with `/rewind` would give a
+    new key in the same session, which stays side until it outgrows the old one (inferred, not
+    measured). After a
+    restart whose epoch record holds another conversation, the new main still writes no record until
+    it has more turn starts than the record's (rule 16, unchanged), so that conversation can resume
+    only by rotating once. A subagent on a Claude Code that stopped sending `X-Claude-Code-Agent-Id`
+    could again take over by the turn-start rule. In a headless session, `/clear` right after an
+    SDK `interrupt()` (the response to main's newest request released a call), with a proxy that could not tell
+    whether the response held a client call, or after a late end of an older request that may hold a
+    call (it leaves main busy), falls back to the turn-start rule, main's behaviour before D50; a nested `claude -p`
+    started in the background that sends its first request after the lead ended its turn takes
+    main until the lead's next prompt, which takes it back by its id or its turn starts. If a Claude Code version sent a request of the old
+    conversation after `/clear` (none of the four measured did), a later `/resume` of it would return
+    only by turn starts. A second interactive Claude Code pointed at the same proxy with no parent
+    id (not a supported setup) takes main at its first turn start; while both send, once.
+
 - **D51. Standing rules are pinned when stated; Contexto's search, recall and state calls are not indexed.** Claude,
   2026-11-05, under D0; contract change. The QA run of 2026-11-05 (reports verify-obligations and
   live-fidelity) found three things.
@@ -1563,10 +1738,15 @@ the owner's delegation. Open decisions are listed at the end with the options an
     answer, so in this repro they keep 2 of the 3 detailed places, and the Juniper and Tamarind
     sources are listed compactly. A page written before D51 that holds such a call has its stub
     rebuilt when read, in memory only, so its echoed paths no longer rank it first for a path search.
-    - The `exec` rule fails safe (reviewer A on PR #242): code that reaches a tool any other way
-      (destructuring `tools`, an alias, `tools[n]`, `tools?.x`, a reference not called at once, a
-      call of any other tool) or that has a comment stays searchable, since hiding a shell command's
-      output would lose it from search; recall has it either way. A function-call `exec` is read
+    - The `exec` rule is a text check (reviewer A on PR #242): every mention of the word `tools` must
+      be a literal call of search, recall or state, and the code must hold no `//` or `/*`, in a
+      string too. Code that names `tools` any other way (destructuring, an alias, `tools[n]`,
+      `tools?.x`, a reference not called at once, a call of any other tool) or has a comment stays
+      searchable, since hiding a shell command's output would lose it from search; recall has it
+      either way. So do strings that hold `//`, `/*` or the word `tools`, which leave the echo
+      searchable. What the check cannot see (round 2): code that reaches a tool without the word
+      `tools`, through `eval`, `globalThis[...]` or Codex's `load()`, beside a Contexto call, so a
+      shell call made that way is hidden from search. A function-call `exec` is read
       from the string fields of its JSON arguments, so escaped quotes neither hide a shell call nor
       miss a search call (reviewer B).
   - **`contexto_pin` description.** It named a kind "fact" the tool rejects, and said every record
@@ -1828,62 +2008,6 @@ the owner's delegation. Open decisions are listed at the end with the options an
     runs for Codex too, with an assumed fixed overhead of 19,000 tokens: measured 13,322 to 18,403 in
     the M2 Codex runs and 15,694 on 0.166.0, rounded up from the largest. At bound 40,000 and the
     default floor it now warns before Codex starts, not after the first request.
-- **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
-  subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
-  untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by
-  Claude Code's auto-updater, which deleted 2.1.310, and Codex at 0.166.0. The D38 routine
-  (`docs/cli-updates.md`, Claude steps 1 to 7, Codex steps 1 to 4) ran on each with zero spend,
-  binaries run by path and `DISABLE_AUTOUPDATER=1`; the numbers are in
-  `docs/research/M2-claude-code-2.1.318.md`. 2.1.310 could not be run side by side.
-  - **What did not change.** Session start, every context block's kind, the hook prefixes, the
-    missing-tools verdicts (True, False, True in 6 of 6 sets), the D44 refusal (5 / 0, 0 / 5, 4 / 1)
-    and argstub's 8 of 8 are the same on both versions. In the four reminders matrices (52 runs),
-    Contexto's code never missed a session start and found no context block without a kind (705 bodies
-    with tools per matrix with tool search on, 782 with it off). Codex 0.166.0 sends the 0.163.0
-    section tags and request shapes; only its built-in provider, which Contexto does not use, adds a
-    role-less `configuration_update` item. The CLI changes that do not change a classification:
-    claude-opus-5-5 gets no `<total_tokens>` countdown from 2.1.314 on, so an effort change on a turn
-    with no other system message comes as a settings-only message (3 to 12 per opus-5-5 run; none on
-    2.1.302), read as settings (contract rule 2a). And 2.1.318's `--resume` re-sends 4 old
-    file-changed notes where 2.1.314 sent 80.
-  - **What changed: subagent stop reports.** Since 2.1.312 a subagent run that used tools is reported
-    with their names first, in `<tools-used-before-summary>Bash</tools-used-before-summary>`. It comes
-    in three places. (1) It is indented above a foreground hand-back's `[Subagent hand-back]` frame,
-    so the result no longer started with the frame and the call was an unknown shape. (2) While main
-    is idle, it is a `<system-reminder>` text block of its own ahead of the notice's block, and only a
-    user message's first text block was read, so the stop was missed. (3) It opens the `system` notice
-    during main's tool loop, which was still read, since a system message is searched whole. Captured
-    on 2.1.314 and 2.1.318 (the same apart from agent ids), on the fg, stop, resume, bgidle and esc
-    scenarios, `agent_runs` gave 1 stop for none of fg, stop, bgidle and esc; resume gave 3.
-    Unchanged: the subagent's first prompt, the launch receipt, `resumedAgentId`, and the resumed
-    run's `SendMessage`-named notice.
-  - **Rule.** The element and the whitespace around it are skipped at the start of an `Agent` call's
-    result. A user message whose first text block is a `<system-reminder>` holding only the element
-    is read at its second text block, and only when that block opens with `<system-reminder>`. A
-    notice block that is not wrapped after it (`[SYSTEM NOTIFICATION ...` alone, which counts as a
-    first block) does not count there, and other text before a hand-back's frame still leaves the
-    call unknown. The 2.1.302 shapes are read as before. With the rule, the captures give 1 stop for
-    fg, stop, bgidle and esc and 3 for resume on both versions. The engine tests run on those
-    captures, scrubbed (`tests/fixtures/subagent_shapes_2_1_31x.json`).
-  - **Lists.** `TESTED_VERSIONS` gains 2.1.314, 2.1.318 and 0.166.0, and `SUBAGENT_SHAPES_TESTED`
-    gains 2.1.314 and 2.1.318. The session-start, context-block and hook measured-on constants become
-    2.1.318, and the Codex section constant 0.166.0. 2.1.312 was only partly measured (by QA) and
-    stays out.
-  - **The spikes.** `carried/live_probe.sh` and `carried/probe.sh` drove `~/.local/bin/claude` with
-    the real `HOME`, and `codex/probe.sh` and `codex/smoke.sh` ran Codex with the real `HOME`. Claude
-    Code's auto-updater was left on in the carried scripts and `cliversion/check.sh`. Now every one
-    takes a binary (an argument, or `CLAUDE=` / `CODEX=`) and defaults to the one on `PATH`, uses a
-    temp `HOME`, and sets `DISABLE_AUTOUPDATER=1` for Claude Code. The reminders harness reads
-    `CLAUDE=`, and `run_all.sh` passes extra arguments to every run, so the tool-search-off matrix
-    needs no script edit. `subagents/run.sh` printed `rc=0` with an empty capture when its stub could
-    not bind (the port is drawn from 200, and another run held it). `run.sh` and `drive.py` now take a
-    free port, wait for the stub's `listening` line, fail when it does not come, and run Claude Code
-    under a scrubbed environment and a temp `HOME`. `docs/cli-updates.md` says every run must set
-    `DISABLE_AUTOUPDATER=1`.
-  - **Not done.** No live check ran on 2.1.314, 2.1.318 or 0.166.0 (routine step 9 needs the owner's
-    approval and a token cap). The early close was measured against the scripted stub only. In esc a
-    side request asks for a background agent's progress ("Describe your most recent action in 3-5
-    words ..."). Its first prompt matches no `Agent` call, so it opens no room that could close early.
 - **D55. `contexto run claude` resumes through Contexto, survives signals, and keeps out of the TUI.**
   Claude, 2026-11-05, under D0; contract change. From the QA run of 2026-11-05 (reports launcher-ux 2,
   4 to 8; live-claude 1; live-realworld F3 to F5; live-fidelity 6; security 3, 4 and 7). Measured at zero
@@ -1974,172 +2098,62 @@ the owner's delegation. Open decisions are listed at the end with the options an
     that fails exits 128 + N instead of 127; the watchdog forgets claude's pid before the handlers are
     restored, and the temporary directory is removed before the watchdog's `done`.
 
-- **D50. Main follows Claude Code's session id across `/clear` and `/resume`, and its compaction
-  summary across `/compact`; a side request that arrives first stays main only until the first
-  prompt.** Claude, 2026-11-05, under D0; contract
-  change. The engine keys a conversation by its first prompt and handed main over only at a turn
-  start with strictly more turn starts than main (contract PR #125). QA's verify-clear and
-  live-realworld F2 (v0.5.8): after `/clear` the new conversation has one turn start, so it stayed a
-  side conversation until it outgrew the old one. No room, snapshot or window came from the
-  conversation the user was in. Every tool call was charged against the old conversation's last
-  room, which was never republished; once that was spent, `contexto_state` and `contexto_search`
-  returned nothing, pins included. The live answer for a pinned codename was "I don't know ... my
-  contexto recall budget for this turn is used up". The same report saw the user's first turn of a
-  fresh session not be main, because Claude Code's tool-less side request arrives first and a tie
-  keeps it.
-  - **Measured** (zero spend; Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318 in a pty against a
-    loopback stub that kept every request's headers and body, isolated config dirs, fake key; 15
-    Messages requests per version). The steps: two turns, the first launching a subagent; `/clear`;
-    the same again; `/resume` of the first conversation; one turn. On every request
-    `X-Claude-Code-Session-Id` equals the `session_id` in `metadata.user_id`. `/clear` starts a new
-    id; `/resume` sends the resumed conversation's old id again; the subagents and the one-message,
-    tool-less side request Claude Code sends before each prompt carry the id of the conversation
-    they run for. The first request of the session, and the first after `/clear`, is that side request.
-    The request after `/resume` holds no marker: it is the old conversation plus the new prompt.
-  - **Other sessions on one proxy** (reviewer A, PR #238; the same setup on 2.1.314 with
-    `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, the main conversation creating a team and spawning
-    one teammate, then running `claude -p` from its Bash tool). A teammate's `metadata.user_id` adds
-    `parent_session_id`, the lead's id. In process it keeps the lead's own session id; in its own
-    tmux pane (`teammateMode` `tmux`, on an isolated tmux socket) it has its own. Its User-Agent
-    entrypoint is `cli` either way. The nested `claude -p` has its own id, no parent, and the
-    entrypoint `sdk-cli` (`claude-cli/<v> (external, <entrypoint>[, ...])`; the lead's is `cli`).
-    With the first version of this rule the tmux teammate took main at its first turn start and the
-    lead took it back at its next. The nested `claude -p` took main too, and the lead's next request
-    was a side request. Under a headless lead (`claude -p` with a Bash call that runs `claude -p`,
-    reviewer A round 2) the lead and the child both send `sdk-cli`: the binary keeps an inherited
-    `CLAUDE_CODE_ENTRYPOINT` and only turns its own `cli` into `sdk-cli` in print mode. The child has
-    its own id and no parent. With the second version of this rule the child took main, and the
-    lead, whose run has one turn start, never took it back.
-  - **Compaction** (reviewer B round 2, PR #238: live on 2.1.314 and 2.1.318, all 8 requests after a
-    `/compact` were side, and with the old room spent `contexto_state` returned nothing). Captured
-    on 2.1.314 and 2.1.318 against the stub, both manual `/compact` and auto-compaction (the stub
-    reported 995,000 input tokens on a turn; 190,000 did not trigger it). The session id does not
-    change. Claude Code first sends the summary request on main's own key: main's history with the
-    instructions appended to its last prompt. The compacted conversation's first message is then a
-    user message whose content is a plain string: "This session is being continued from a previous
-    conversation that ran out of context. The summary below covers the earlier portion of the
-    conversation.", a newline, then the summary. After it come a role `system` message, the last
-    message from before compaction kept verbatim (main's last response, which no earlier request
-    held), and the new prompt, which after `/compact` also holds the command's blocks. The same
-    form came from both versions and both triggers. (Corrected by D59: those captures ran with
-    Claude Code's attribution reminder off. With the default reminder the first message is a list,
-    the reminder block and then the summary block, and the rule below never matched it on 2.1.314 or
-    2.1.318.) It is a new key with two turn starts, so before
-    this rule it never outgrew main. Every subagent request (8 on 2.1.302 to 2.1.318, and the
-    compaction runs' 4) and the in-process teammate's carry `X-Claude-Code-Agent-Id`; no main, side,
-    nested or headless request does.
-  - **Rule.** At a turn start, a conversation also takes over main when its session id differs from
-    main's, its entrypoint is main's, main is idle unless both are the interactive `cli` (see
-    headless below), and either no conversation has been main in that session yet
-    (`new_cli_session`, after `/clear`), or it was the first conversation main in its session, and
-    that session lost main to another session's id and has sent no request of this conversation
-    since (`resumed_cli_session`, after `/resume`). It also takes over when main has never sent a
-    request with a tool list and this conversation has (`after_side_request`). Only a conversation
-    seen with a tool list takes over by these, so side requests never do. A subagent carries main's
-    id, so it never does either. A background subagent the old conversation launched before `/clear`
-    keeps the old id, and the old conversation was that session's main, so it does not take over. A
-    request with `parent_session_id` or `X-Claude-Code-Agent-Id` never takes over by any rule, so a
-    subagent that auto-compacts, or that `SendMessage` resumed more often than main has turns, never
-    becomes main. A conversation also takes over with reason `compacted` when its session id and
-    entrypoint are main's and its first message is that summary, with the exact string
-    start; a prompt that quotes it is a list with context blocks and does not match (D59: the summary
-    is now found after leading `<system-reminder>` blocks, in a string or a list, and must be followed
-    by a blank line, which a prompt quoting the sentence does not have). It becomes its
-    session's main, replacing the first one, since `/resume` of the session loads the compacted
-    transcript. Its own epoch starts at 0 under the bound like any new conversation, and the old
-    conversation's pins and pages stay in the session store. Requiring main's entrypoint keeps out
-    a `claude -p` or SDK process run from an interactive lead's tool, since it sends `sdk-*`.
-  - **Headless** (reviewer A round 3: `/clear` and `/compact` are declared `supportsNonInteractive`
-    in 2.1.318; round 2 wrongly said they exist only in the interactive CLI). Captured on 2.1.314
-    and 2.1.318 with `claude -p --input-format stream-json --output-format stream-json` against the
-    stub: two prompts, `/compact`, a prompt, `/clear`, a prompt. `/compact` keeps the session id and
-    sends the same summary form as interactive; `/clear` starts a new id, User-Agent
-    `(external, sdk-cli)`, no parent, a tool list, and the same first message as an interactive
-    `/clear` (the command's blocks, then the prompt). `/resume` is not declared `supportsNonInteractive`
-    in the binary, so it was not run. A nested
-    `claude -p` under a headless lead has the same shape: a new id under the lead's inherited
-    `sdk-cli`. What tells them apart is main's state: the nested child runs inside one of main's
-    tool calls (the response to main's newest request released a client call, the Bash running it), and a
-    headless `/clear` follows main's final response. So for equal entrypoints other than `cli`, the
-    two session-id rules also need main idle: the response to its newest request released no client
-    tool call (the proxy's `tool_calls` is False, not unknown), no response of main's that may have
-    released one (True or unknown, whichever request it answers) arrived after it, and main has
-    sent no request since. A late or duplicate response, such as the end of a request the CLI gave
-    up on and retried, must not leave main idle while a call is out: with "its latest response"
-    (round 3), that late end made a headless lead idle while its Bash ran a nested `claude -p`, the
-    child took main, and the lead's next request was estimated at 4,775 tokens against a 4,000 bound
-    (reviewer A round 4). Updating idle from the newest request's response alone is not enough: when
-    R1's late end comes first it is the attributed one, and the retry's own response, releasing the
-    Bash, is then unattributed. So any response that may hold a client call marks main busy,
-    whichever request it answers, and only the newest request's response without one marks it idle;
-    the test runs both orders and a duplicate response. One short window remains (reviewer A, round
-    5): when R1's late end comes first, main is idle until the retry's response arrives. A nested
-    child cannot start in it, since it runs in a call that response releases; only a session already
-    running can take main then (a `claude -p` the lead backgrounded earlier, or a call Claude Code
-    started before `message_stop` on the `hold_skipped` path), and the lead's calls are then charged
-    against its side room, so the bound holds. Closing it would need a count of the responses still
-    outstanding per request, which would leave main busy after any response that never arrives. Compaction
-    keeps the session id, which a nested child never shares, so `compacted` needs no idle check. In
-    the interactive CLI the idle check is not applied, since after Esc main's latest response can
-    still show a call that was cancelled and never runs. The quiet check means two sessions both sending trade main at most once: the one that lost main by
-    id and kept sending returns only by turn starts, and the other one, having lost by turn starts,
-    never returns by id. Two sessions that take turns, each idle while the other is prompted, pass
-    the quiet check at every switch and follow the one prompted (10 switches in 10 alternations,
-    reviewer A round 2), each switch logged. Within one Claude Code process (`/clear`, `/resume`,
-    `/compact`) the switch is at the process's own next prompt, when its old conversation has no
-    call left to run; a compaction that keeps a pending tool call after the summary switches at the
-    compacted conversation's first request instead, once the summary request was answered with no
-    client call (D59). Two interactive processes on one proxy are not a supported setup, and there
-    the bound holds only while the session losing main is idle: a switch during its pending tool
-    call charges that call against the new main's room (reviewer A round 3: 1,884 tokens against a
-    500-token room). The turn-start rule on main opens the same window. Main is decided once per request, before
-    the transform, and never moves at a response: at round 2 a response of a session whose request
-    was in flight when another took over moved main back with no event (reviewer A). A session's main is the first conversation main in it, so a
-    subagent that outgrew main does not replace it, and a later `/resume` still returns to the
-    user's conversation. The turn-start rule is kept as the last case (`more_turn_starts`), so the
-    only handover D50 removes is a child session's. The id is read
-    from the header, else from `metadata.user_id`, only for the Messages API; Codex is unchanged.
-    `metadata.user_id` is parsed by `loads_bounded` (D45): a string nested past the limit gives no
-    session id; before, a deep one raised `RecursionError` and every request went upstream
-    untransformed (reviewer A round 2).
-    The request that takes over logs content-free `main_changed` with the reason and its turn
-    starts (QA found no event saying main was stale).
-  - **Result.** Replaying the captures through the engine: before, the user's first turn (3
-    requests) and all 4 of the new conversation's requests after `/clear` were not main;
-    after, every request of the user's conversation is main (from its first request after `/clear`
-    and after `/resume`), and no subagent or side request is. Over the two team captures and the headless one no teammate
-    or nested request takes main, and the lead stays main throughout. In the engine test of the live case
-    (old room spent: bound 4,000, real input 3,600), `contexto_state` returned the budget-spent
-    notice before and returns the pin after the new conversation's first request; `contexto_search`
-    finds the old conversation's paged turn. The same holds after `/compact` (reviewer B's repro).
-    Replaying the four compaction captures: before, every request of the compacted conversation was
-    side (4 of 4 on each); after, it is main from its first request (`compacted`). The two
-    stream-json captures: before, the compacted and the cleared conversations were side; after,
-    `compacted` and `new_cli_session` at their first request, with each response's `tool_calls`
-    as the stub's reply gives it. The earlier seven captures replay unchanged, the headless lead's
-    nested `claude -p` staying side.
-  - **Options considered.** Stop charging a stale main once another conversation has started a turn
-    (QA's fallback). Rejected: a subagent's first request is a turn start inside main's tool loop,
-    so main's own calls would then be bounded by the side room alone and could overfill main's
-    window. A head match (same system and tools as main at a new conversation's turn start).
-    Rejected: deferred tools and settings change the head inside one conversation, and the session id
-    is on every request of every measured version.
-  - **Not covered.** Without a session id (another client, or a Claude Code that drops both) the
-    turn-start rule alone applies, as before. Editing the first prompt with `/rewind` would give a
-    new key in the same session, which stays side until it outgrows the old one (inferred, not
-    measured). After a
-    restart whose epoch record holds another conversation, the new main still writes no record until
-    it has more turn starts than the record's (rule 16, unchanged), so that conversation can resume
-    only by rotating once. A subagent on a Claude Code that stopped sending `X-Claude-Code-Agent-Id`
-    could again take over by the turn-start rule. In a headless session, `/clear` right after an
-    SDK `interrupt()` (the response to main's newest request released a call), or with a proxy that could not tell
-    whether the response held a client call, falls back to the turn-start rule; a nested `claude -p`
-    started in the background that sends its first request after the lead ended its turn takes
-    main until the lead's next prompt, which takes it back by its id or its turn starts. If a Claude Code version sent a request of the old
-    conversation after `/clear` (none of the four measured did), a later `/resume` of it would return
-    only by turn starts. A second interactive Claude Code pointed at the same proxy with no parent
-    id (not a supported setup) takes main at its first turn start; while both send, once.
-
+- **D56. Claude Code 2.1.314 and 2.1.318 and codex-cli 0.166.0 are tested; Contexto reads the new
+  subagent stop reports.** Claude, 2026-11-05, under D0; contract change. Every new user got the
+  untested-version warning: the QA run of 2026-11-05 found 2.1.314 installed, 2.1.318 installed by
+  Claude Code's auto-updater, which deleted 2.1.310, and Codex at 0.166.0. The D38 routine
+  (`docs/cli-updates.md`, Claude steps 1 to 7, Codex steps 1 to 4) ran on each with zero spend,
+  binaries run by path and `DISABLE_AUTOUPDATER=1`; the numbers are in
+  `docs/research/M2-claude-code-2.1.318.md`. 2.1.310 could not be run side by side.
+  - **What did not change.** Session start, every context block's kind, the hook prefixes, the
+    missing-tools verdicts (True, False, True in 6 of 6 sets), the D44 refusal (5 / 0, 0 / 5, 4 / 1)
+    and argstub's 8 of 8 are the same on both versions. In the four reminders matrices (52 runs),
+    Contexto's code never missed a session start and found no context block without a kind (705 bodies
+    with tools per matrix with tool search on, 782 with it off). Codex 0.166.0 sends the 0.163.0
+    section tags and request shapes; only its built-in provider, which Contexto does not use, adds a
+    role-less `configuration_update` item. The CLI changes that do not change a classification:
+    claude-opus-5-5 gets no `<total_tokens>` countdown from 2.1.314 on, so an effort change on a turn
+    with no other system message comes as a settings-only message (3 to 12 per opus-5-5 run; none on
+    2.1.302), read as settings (contract rule 2a). And 2.1.318's `--resume` re-sends 4 old
+    file-changed notes where 2.1.314 sent 80.
+  - **What changed: subagent stop reports.** Since 2.1.312 a subagent run that used tools is reported
+    with their names first, in `<tools-used-before-summary>Bash</tools-used-before-summary>`. It comes
+    in three places. (1) It is indented above a foreground hand-back's `[Subagent hand-back]` frame,
+    so the result no longer started with the frame and the call was an unknown shape. (2) While main
+    is idle, it is a `<system-reminder>` text block of its own ahead of the notice's block, and only a
+    user message's first text block was read, so the stop was missed. (3) It opens the `system` notice
+    during main's tool loop, which was still read, since a system message is searched whole. Captured
+    on 2.1.314 and 2.1.318 (the same apart from agent ids), on the fg, stop, resume, bgidle and esc
+    scenarios, `agent_runs` gave 1 stop for none of fg, stop, bgidle and esc; resume gave 3.
+    Unchanged: the subagent's first prompt, the launch receipt, `resumedAgentId`, and the resumed
+    run's `SendMessage`-named notice.
+  - **Rule.** The element and the whitespace around it are skipped at the start of an `Agent` call's
+    result. A user message whose first text block is a `<system-reminder>` holding only the element
+    is read at its second text block, and only when that block opens with `<system-reminder>`. A
+    notice block that is not wrapped after it (`[SYSTEM NOTIFICATION ...` alone, which counts as a
+    first block) does not count there, and other text before a hand-back's frame still leaves the
+    call unknown. The 2.1.302 shapes are read as before. With the rule, the captures give 1 stop for
+    fg, stop, bgidle and esc and 3 for resume on both versions. The engine tests run on those
+    captures, scrubbed (`tests/fixtures/subagent_shapes_2_1_31x.json`).
+  - **Lists.** `TESTED_VERSIONS` gains 2.1.314, 2.1.318 and 0.166.0, and `SUBAGENT_SHAPES_TESTED`
+    gains 2.1.314 and 2.1.318. The session-start, context-block and hook measured-on constants become
+    2.1.318, and the Codex section constant 0.166.0. 2.1.312 was only partly measured (by QA) and
+    stays out.
+  - **The spikes.** `carried/live_probe.sh` and `carried/probe.sh` drove `~/.local/bin/claude` with
+    the real `HOME`, and `codex/probe.sh` and `codex/smoke.sh` ran Codex with the real `HOME`. Claude
+    Code's auto-updater was left on in the carried scripts and `cliversion/check.sh`. Now every one
+    takes a binary (an argument, or `CLAUDE=` / `CODEX=`) and defaults to the one on `PATH`, uses a
+    temp `HOME`, and sets `DISABLE_AUTOUPDATER=1` for Claude Code. The reminders harness reads
+    `CLAUDE=`, and `run_all.sh` passes extra arguments to every run, so the tool-search-off matrix
+    needs no script edit. `subagents/run.sh` printed `rc=0` with an empty capture when its stub could
+    not bind (the port is drawn from 200, and another run held it). `run.sh` and `drive.py` now take a
+    free port, wait for the stub's `listening` line, fail when it does not come, and run Claude Code
+    under a scrubbed environment and a temp `HOME`. `docs/cli-updates.md` says every run must set
+    `DISABLE_AUTOUPDATER=1`.
+  - **Not done.** No live check ran on 2.1.314, 2.1.318 or 0.166.0 (routine step 9 needs the owner's
+    approval and a token cap). The early close was measured against the scripted stub only. In esc a
+    side request asks for a background agent's progress ("Describe your most recent action in 3-5
+    words ..."). Its first prompt matches no `Agent` call, so it opens no room that could close early.
 - **D57. User-facing command fixes from the 2026-11-05 QA run.** Claude, 2026-11-05, under D0; contract
   change. The install, docs-audit, live-claude, store-mcp and launcher-ux reports, reproduced at zero
   spend on v0.5.8 with stub CLIs and synthetic stores; 42 new or extended tests fail on v0.5.8 and pass
@@ -2192,7 +2206,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     and no ledger records unless another process holds them open. Not changed here: a failed `run codex`
     still leaves its session (codex.py,
     whose launch order the codex-launch area changes), and a session whose CLI never sent a request is
-    kept, since its log records the launch and the exit code.
+    kept, since its log records the launch and the exit code. (Since D52 and D54 merged, a `run codex`
+    refused before Codex starts removes the session it created too; a resumed `--session` is kept.)
   - **Validation and exit codes.** `--bound 10` started with a warning of "-79,990 tokens" while `--bound 10
     --headroom-floor 25000`, the default spelled out, was refused. The default floor is now checked like a
     given one: a bound not above 25,000 without `--headroom-floor` is a usage error (the engine's headroom
@@ -2210,7 +2225,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     `search` one line, all exit 1.
   - **Help text.** `run` and the top-level help name Codex; `mcp` says the CLI spawns it; `proxy --help`
     no longer shows "``contexto proxy``: ... (M2 contract, CLI)"; `recall`'s `PAGE_ID` and `sessions
-    show`'s `ID` have help. The `--codex-auth` help still cites D35 (codex.py, the codex-launch area).
+    show`'s `ID` have help. The `--codex-auth` help still cited D35 here (codex.py, the codex-launch area); D54 (PR #236)
+    removed that citation.
   - **Review round 2 (reviewers A and B).** `contexto proxy --session` goes through the same check as
     `run`: an id that only starts existing sessions is refused with exit 2, so it cannot create a session
     that hides the one meant. `sessions prune --session ''` is an invalid id (exit 1) again, checked
@@ -2278,7 +2294,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     a symlink, FIFO or directory there gave tracebacks in `sessions list` (for every session),
     `show` and `state` and stopped `contexto mcp`; it now reads as a damaged ledger (reviewer A, PR
     #235 round 2; the FIFO and directory cases crashed on main too). In the 21 FIFO, directory and
-    symlink cases every MCP tool and CLI reader returns within the test's 10-second limit; on main 8 fail (each FIFO blocks the MCP server on its first call, and a directory as the
+    symlink cases every MCP tool and CLI reader returns within the test's 10-second limit; on main 11 fail (reviewer A's count on PR #235; this entry first said 8, and its causes left out the
+    lock files and the symlinked ledger: each FIFO blocks the MCP server on its first call, and a directory as the
     ledger or the log raises).
   - **Symlinked session directories: one rule.** A session directory that was a symlink was used by
     `mcp`, the proxy, `state` and `sessions show`, which chmodded the link's target to 0700, but was
@@ -2379,8 +2396,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
     first request was the summary, a role `system` message, then a pending `tool_use` and its result:
     no turn start, so `compacted` waited for the next prompt and the loop's Contexto calls were
     charged against the old conversation's room as published after the summary request, about 0 near
-    the bound. (The captures below did not produce that form: there an auto-compaction between a tool
-    call and its result puts the result in the summary request.) Engine repro (bound 4,000, real
+    the bound. (The captures below did not produce that form: their auto-compaction, forced by a
+    reported 995,000-token usage, put the result in the summary request. PR #246's review found that
+    auto-compaction at Claude Code's own threshold, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=2`, does produce it
+    on 2.1.314 and 2.1.318, mostly between a Bash call and its result; through `contexto run` this
+    rule took main at the first request after each of the 32 compactions in 14 runs, where main's
+    code left that request side.) Engine repro (bound 4,000, real
     input 3,600 then 3,700): on main the loop's request is side and `contexto_state` returns 0
     characters, `turn_budget: spent`; now it takes main (`compacted`) and returns the pin (1,413
     characters, room left 2,258). Rule: at a request with no turn start only the `compacted` rule is
@@ -2391,8 +2412,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
     entrypoint never qualifies, as at a turn start, and only the compacted conversation's first
     request does (review of #246: a late request of an older compaction otherwise took main back and
     pointed a later `/resume` at it).
-  - **Claude Code's compaction was never recognised (review of #246, reviewer B; dates from D50).**
-    D50 matched a first message whose content is a plain string. Captured on 2.1.314 and 2.1.318
+  - **Claude Code's compaction was often not recognised (review of #246, reviewer B; dates from D50).**
+    D50 matched a first message whose content is a plain string. That form is real when Claude Code
+    keeps tail messages after the summary (the previous assistant message after `/compact`, a pending
+    tool pair after threshold auto-compaction; the attribution reminder then moves to the next user
+    message), and D50 matched it; round 2 of the review found it in raw captures with attribution on.
+    The captures below kept nothing after the summary. Captured on 2.1.314 and 2.1.318
     against a loopback stub (zero spend; headless `/compact` through `--input-format stream-json`,
     headless auto-compaction from a Bash call whose usage reported 995,000 input tokens, and
     interactive `/compact` in a pty): with Claude Code's default attribution reminder, the compacted

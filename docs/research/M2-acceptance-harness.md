@@ -635,7 +635,8 @@ It goes straight to the owner's proxy, bypassing Contexto.
   tool missing from `tools` (live run #4: 400 for `contexto_pin`). Each block naming a tool the baseline
   does not send (a `tool_reference`, or a `tool_addition`/`tool_removal` of an unsent tool) becomes the
   text `Tool <name> loaded.` (or `removed.`), keeping its `cache_control`; the tool's definition is not
-  sent, and the conversation's content (the tool call and its result) is unchanged. The replay output
+  sent. The tool call and the rest of its result are unchanged: only the referencing block inside the
+  result becomes the note. The replay output
   lists the converted names as `unsent_tool_notes`.
 - **Nothing edits the context.** `context_management` is dropped.
 - **Intake's check, no silent trimming.** `count_tokens` on the exact request must fit
