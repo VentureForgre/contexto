@@ -2603,6 +2603,65 @@ the owner's delegation. Open decisions are listed at the end with the options an
     - **A dense page can cost more than 4,568:** small-font code or tables. The estimate is then low by
       the difference, as D48 said of its 3,000.
 
+- **D61. Remaining review lows from the 2026-11-05 fix round.** Claude, 2026-11-06, under D0; contract
+  change (rules 3, 4 and 16). The low findings reviewers left on PRs #234, #244 and #248, each reproduced
+  first by a test that fails on main 08ec571. Zero spend: synthetic upstreams and stub tokenizers, no
+  model calls. #246's D50 nit is prose and goes to the docs pass.
+  - **Codex tool output at the tool-output seed (#244 reviewer B, round 2; pre-existing).** Codex
+    responses that carry no input count leave the pre-send estimate as the only bound check, and that
+    estimate counted `function_call_output` at the 3.5 text seed while Claude's `tool_result` counts at
+    1.5. B's repro (bound 30,000, a 20k JSON-dense head, a code or non-ASCII window, the first input
+    count at request 30) sent turn starts at up to 36,011 real tokens and tool-loop requests at up to
+    35,958, none flagged. Rule: before a ratio is measured, a Responses item whose type ends in
+    `_output` counts at 1.5 bytes per token, as a `tool_result` block does; after, every item counts at
+    the measured ratio, as before. Measured with a stub tokenizer (the head at 2.0 to 3.5 bytes a token,
+    the tool output at 1.8 to 3.0, the first input count at request 30 or never; 32 sessions of 36
+    requests): turn starts over the bound unflagged in 26 sessions on main (up to 44,202), in 1 now (a
+    2.0 head and a 1.8 window with no input count ever: 30,034 to 30,166). Tool-loop requests over it
+    unflagged in 30 sessions on main, 12 now, all with a head at 2.5 bytes a token or denser.
+  - **A v0.5.8 record's head (#244 reviewer A).** `resume_state` adopted `head_tokens` from the record
+    unchanged, so a head v0.5.8 measured low (0 for a 25,365-token head on a resumed first request)
+    stayed with the session after the upgrade, the round-1 overrun shape. Rule: the record carries
+    `head_rule` (2), the head measurement it was taken under. A record without it resumes with no
+    measured head and no `W`: at `k = 0` the next usage measures the head again (a head of 1 recorded,
+    466 measured for a true 467 at 4 bytes a token), and at `k > 0` rule 4 estimates it, as for any
+    unmeasured head. The store accepts the field or its absence, so an older record still resumes. A
+    record written by this version has the field, which v0.5.8 refuses: a downgrade starts from epoch 0.
+  - **Crafted JPEGs (#234 reviewer A, round 10).** The JPEG walk stepped one marker at a time over up to
+    192 KB, and every image in view is priced on every request under the transform lock. 100 images of
+    196,000 fill bytes priced in 0.97 s, of 98,000 RST markers in 0.75 s, of 49,000 2-byte segments in
+    0.81 s, against 0.03 s for normal JPEGs. Rule: a run of fill bytes is skipped in one step, and at most
+    256 markers are walked; past that the image is priced as unknown (real files reach the frame header
+    within a few dozen). The three shapes now take 0.032 to 0.037 s: the fill-byte image still reads as
+    1920x1080, the others cost 4,787.
+  - **Patches (#234 reviewer A, round 10).** D48's four count_tokens results are exactly
+    `ceil(w / 28) * ceil(h / 28) + 3` (641, 1,719, 2,694, 3,243), and `w * h / 750` alone undercounts a
+    thin image (2576x29: 100 against 187) and about 1 size in 4 above 500 pixels an edge (by up to 31).
+    Rule: an image costs the higher of the two after scaling, each edge scaled in whole pixels rounded up,
+    between 64 and 4,787: the documented 4,784 is 92 x 52 patches at the 2,576-pixel edge, plus the 3.
+    The floor (the ratio's lower bound) is unchanged, the pixel formula alone, which stays under the
+    patch count. The patch model is inferred from four measurements; no live call checked a thin image.
+  - **The parse queue is tested (#248 re-check, reviewer A).** The cross-session test was loosened to a
+    5 s backstop, and with the queue removed its text request waited 0.89 to 1.65 s, under it. It now
+    counts the PDFs parsing at once through `count_pages`: 1 with the queue, 19 without.
+  - **`pdf_uncertain` (#248 re-check, reviewer A).** At bound 150,000 an uncertain 1-page listing pasted
+    with about 250,000 tokens of text logged `bound_too_small` with `pdf_uncertain`, and the launcher
+    said a larger `--bound` helps only if the PDF is long, though the text alone needed one. Rule: the
+    mark is set only when the turn would fit `W` with each uncertain PDF at 0 (and each certain one at a
+    typical page); otherwise the event is a plain `bound_too_small`, and the launcher advises a larger
+    bound.
+  - **The start warning's low end.** The launcher's warning for a bound that may leave no window budget
+    said measured overheads run "from about 15,700" (a QA head of 15,689 against a stub). Measured on
+    Claude Code 2.1.314 the overhead runs as low as 13,842; the warning, its comment and rule 4 now say
+    so (left to this PR by the docs pass, since it is code).
+  - **Already fixed.** The two code comments #234's reviewer A named (a document "far above what it
+    costs" in `rewrite.py`, and the floor taken off real usage in `tokens.py`'s docstring) were corrected
+    by D60 (#248). The stale `media_allowance` assertion in `tests/test_image_estimate.py` is removed.
+  - **Not covered.** A head denser than the 3.5 text seed is still estimated low until the first usage,
+    on Codex as on Claude, so tool-loop requests can go over unflagged when no response carries an input
+    count (the 12 sessions above). Images in history are still priced once per request each; caching
+    their cost was not needed once the walk was bounded.
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.

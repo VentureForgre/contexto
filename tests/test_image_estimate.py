@@ -15,6 +15,7 @@ import json
 import math
 import random
 import struct
+import time
 import zlib
 
 import pytest
@@ -135,9 +136,59 @@ def test_jpeg_frame_after_a_large_exif_segment_is_found():
 
 
 def test_large_images_follow_the_api_downscaling_and_cap():
-    assert image_tokens(2576, 1449) == IMAGE_MAX_TOKENS  # 3.73 MP: capped at the documented maximum
+    assert image_tokens(2576, 1449) == IMAGE_MAX_TOKENS == 4_787  # 3.73 MP: the documented 4,784 patches, plus 3
     assert image_tokens(8000, 2000) == math.ceil(2576 * 644 / 750)  # long edge scaled to 2,576
-    assert image_tokens(10, 10) == image_tokens(1, 2576) == IMAGE_MIN_TOKENS  # patch rounding is not modelled
+    assert image_tokens(10, 10) == IMAGE_MIN_TOKENS
+    assert image_tokens(1, 2576) == 92 + 3  # one column of 92 patches
+
+
+@pytest.mark.parametrize(("width", "height", "measured"), [(800, 600, 641), (1440, 900, 1_719),
+                                                            (1920, 1080, 2_694), (2000, 1250, 3_243)])
+def test_an_image_is_never_priced_under_its_patches(width, height, measured):
+    """PR #234 review A (D61): the four count_tokens measurements are exactly ceil(w/28) * ceil(h/28) + 3,
+    which the pixel formula alone undercounts for a thin image (2576x29: 100 against 187) and for about 1
+    size in 4 above 500 pixels an edge. The estimate is the higher of the two, so it is at or over every
+    measurement and every patch count."""
+    patches = math.ceil(width / 28) * math.ceil(height / 28) + 3
+    assert patches == measured and image_tokens(width, height) >= measured
+    assert image_tokens(2576, 29) == 187 and image_tokens(5000, 100) == 92 * 2 + 3  # scaled: 2576 x 52
+    rng = random.Random(61)
+    for _ in range(2_000):
+        w, h = rng.randint(1, 2576), rng.randint(1, 2576)
+        assert image_tokens(w, h) >= min(IMAGE_MAX_TOKENS, math.ceil(w / 28) * math.ceil(h / 28) + 3), (w, h)
+
+
+def _crafted_jpeg(body: bytes) -> str:
+    """SOI, ``body``, then the frame header of a 1920x1080 image: the crafted shapes of PR #234 review A."""
+    sof = b"\xff\xc0" + struct.pack(">HBHHB", 17, 8, 1080, 1920, 3) + bytes(9)
+    return base64.b64encode(b"\xff\xd8" + body + sof + b"\xff\xda" + bytes(1_000)).decode()
+
+
+def _price_seconds(data: str) -> float:
+    """The fastest of 3 runs pricing a message of 50 copies of the JPEG."""
+    blocks = [{"role": "user", "content": [image_block(data=data, media_type="image/jpeg")] * 50}]
+    best = math.inf
+    for _ in range(3):
+        start = time.perf_counter()
+        estimate_message_tokens(blocks)
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
+@pytest.mark.parametrize(("body", "tokens"), [
+    (b"\xff" * 196_000, 2_765),  # fill bytes: skipped in one step, so the frame is still found
+    (b"\xff\xd0" * 98_000, IMAGE_MAX_TOKENS),  # RST markers: past the cap, priced as unknown
+    (b"\xff\xe1\x00\x02" * 49_000, IMAGE_MAX_TOKENS),  # 2-byte APP1 segments: past the cap
+], ids=["fill-bytes", "rst-markers", "two-byte-segments"])
+def test_a_crafted_jpeg_prices_as_fast_as_a_normal_one(body, tokens):
+    """PR #234 review A (D61): the JPEG walk stepped one marker at a time over 192 KB, so 100 crafted images
+    priced in 0.75 to 0.97 s against 0.03 s for normal ones (28 to 36 times), on every request, under the
+    proxy's transform lock. Fill runs are skipped in one step and at most 256 markers are walked."""
+    crafted = _crafted_jpeg(body)
+    normal = base64.b64encode(jpeg_bytes(1920, 1080, exif=len(body))).decode()
+    assert estimate_message_tokens([{"role": "user", "content": [image_block(data=crafted,
+                                                                             media_type="image/jpeg")]}]) == tokens
+    assert _price_seconds(crafted) < 4 * _price_seconds(normal) + 0.01
 
 
 @pytest.mark.parametrize("block", [
@@ -759,4 +810,4 @@ def test_screenshots_too_large_for_the_bound_say_so(tmp_path):
     req = {**HEAD, "messages": [{"role": "user", "content": [{"type": "text", "text": "compare these"}, *shots]}]}
     _, _, events = eng(req, {}, EP)
     small = [e for e in events if e["event"] == "bound_too_small"]
-    assert small and all("media_allowance" not in e for e in small)
+    assert small

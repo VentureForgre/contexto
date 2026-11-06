@@ -298,19 +298,23 @@ EPOCH_FIELDS: dict[str, Callable[[Any], bool]] = {
     "config": lambda v: isinstance(v, dict),
     "anchor": lambda v: isinstance(v, dict) and set(v) == {"n", "hash"} and _nat(v["n"]) and _hex64(v["hash"]),
 }
+# Fields a record may leave out, so a record written before one was added still reads (D61: head_rule).
+EPOCH_OPTIONAL_FIELDS: dict[str, Callable[[Any], bool]] = {"head_rule": _nat}
 
 
 def check_epoch(record: Any) -> dict[str, Any]:
-    """An epoch record with exactly the rule 16 fields, version stamped; ValueError otherwise."""
+    """An epoch record with exactly the rule 16 fields (an optional one may be absent), version stamped;
+    ValueError otherwise."""
     if not isinstance(record, dict):
         raise ValueError("an epoch record must be an object")
     if "version" in record and not _is_epoch_version(record["version"]):
         raise ValueError(f"epoch record version must be {EPOCH_VERSION}")
     fields = {k: v for k, v in record.items() if k != "version"}
-    if set(fields) != set(EPOCH_FIELDS):
-        missing, extra = sorted(set(EPOCH_FIELDS) - set(fields)), sorted(set(fields) - set(EPOCH_FIELDS))
+    checks = {**EPOCH_FIELDS, **EPOCH_OPTIONAL_FIELDS}
+    missing, extra = sorted(set(EPOCH_FIELDS) - set(fields)), sorted(set(fields) - set(checks))
+    if missing or extra:
         raise ValueError(f"epoch record fields differ (missing {missing}, unexpected {extra})")
-    bad = sorted(name for name, ok in EPOCH_FIELDS.items() if not ok(fields[name]))
+    bad = sorted(name for name, value in fields.items() if not checks[name](value))
     if bad:
         raise ValueError(f"epoch record fields have the wrong type: {bad}")
     return {**json.loads(canonical_json(fields)), "version": EPOCH_VERSION}

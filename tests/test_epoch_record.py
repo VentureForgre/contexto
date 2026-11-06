@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from contexto.store import EPOCH_FIELDS, SessionStore
+from contexto.store import EPOCH_FIELDS, EPOCH_OPTIONAL_FIELDS, SessionStore
 from contexto.store.memory import MemoryStore
 
 RECORD = {
@@ -101,7 +101,19 @@ def test_memory_store_returns_a_copy():
 
 
 def test_the_validated_fields_are_exactly_the_contracts():
-    assert set(EPOCH_FIELDS) == set(RECORD)
+    assert set(EPOCH_FIELDS) == set(RECORD) and set(EPOCH_OPTIONAL_FIELDS) == {"head_rule"}
+
+
+@pytest.mark.parametrize("value", ["2", 2.0, True, -1])
+def test_head_rule_is_optional_so_a_record_written_before_it_still_reads(store, value):
+    # D61: the engine marks the rule its head was measured under; a record without the mark (v0.5.8) still
+    # reads, and the engine decides what its head is worth.
+    store.set_epoch(RECORD)
+    assert store.epoch_record() == {**RECORD, "version": 1}
+    store.set_epoch({**RECORD, "head_rule": 2})
+    assert store.epoch_record() == {**RECORD, "head_rule": 2, "version": 1}
+    with pytest.raises(ValueError):
+        store.set_epoch({**RECORD, "head_rule": value})
 
 
 

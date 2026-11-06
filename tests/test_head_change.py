@@ -457,6 +457,46 @@ def test_a_late_first_usage_on_the_responses_dialect_measures_the_whole_head(rat
         assert sent_estimate(ev) <= cfg.bound and request_event(ev)["sent_bytes"] / ratio <= cfg.bound
 
 
+@pytest.mark.parametrize("head_ratio,window_ratio", [(2.5, 1.8), (2.5, 2.0), (3.0, 1.8), (3.0, 2.0)])
+def test_codex_tool_output_counts_at_the_tool_output_seed_before_any_usage(head_ratio, window_ratio):
+    # PR #244 review B, round 2 (D61): Codex responses that carry no input count until request 30, at bound
+    # 30,000, with a 20k JSON-dense head and dense tool output (code, non-ASCII). function_call_output was
+    # estimated at the 3.5 text seed, so turn starts went out at up to 36,011 real tokens with nothing
+    # logged (here 30,851 to 39,983 on main). Counted at the 1.5 tool-output seed, as Claude's tool_result is,
+    # no turn start goes over the bound unflagged.
+    from test_codex import call, lead, output, prompt
+    from test_codex import request as codex_request
+
+    cfg = Config(bound=30_000, headroom_floor=5_000, min_turn_room=1_000, pin_budget=200, index_budget=200)
+    tools = [{"type": "function", "name": f"synthetic_tool_{i}", "description": "synthetic tool " * 30,
+              "parameters": {"type": "object", "properties": {f"p{j}": {"type": "string", "enum": ["a", "b"]}
+                                                               for j in range(12)}}} for i in range(40)]
+    code = "for (int i = 0; i < n; ++i) { a[i] = b[i] * c[i]; }\n" * 40
+
+    def make(items):
+        return codex_request(items, instructions="synthetic system prompt\n" * 20, tools=tools)
+
+    def real(upstream):  # the stub tokenizer: the head and the items at their own ratios
+        head = canonical_bytes({"instructions": upstream["instructions"], "tools": upstream["tools"]})
+        return int(len(head) / head_ratio + len(canonical_bytes(upstream["input"])) / window_ratio)
+
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=cfg)
+    assert real(make([])) > 14_000  # the head alone, before any item
+    items, sent, unflagged = lead() + [prompt("task")], 0, []
+    for turn in range(6):
+        for step in range(6):
+            upstream, _, ev = engine(make(items), {}, "/responses")
+            sent += 1
+            if step == 0 and real(upstream) > cfg.bound and not FAILURES & {e["event"] for e in ev}:
+                unflagged.append((sent, real(upstream)))
+            if sent >= 30:
+                engine.observe_usage("/responses", {"input_tokens": real(upstream), "output_tokens": 5}, make(items))
+            items = items + [call(sent), output(sent, code)]
+        items = items + [prompt(f"next {turn}")]
+    assert sent == 36 and not unflagged
+    assert main_state(engine).epoch > 0  # the pre-send estimate paged instead
+
+
 # The pre-send check on every forwarded request ------------------------------------------------------
 
 def test_a_rotated_request_over_the_bound_is_flagged_before_the_send():

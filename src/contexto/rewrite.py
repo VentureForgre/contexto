@@ -10,7 +10,7 @@ deterministic serializer sends byte-identical prefixes within an epoch. The stor
 a turn start's rotation and a paged_changed resync (``page_out``, ``pinned_text``, ``index_text``,
 ``set_window``, ``quarantine_page``) and by ``observe_usage``
 (``log``, ``set_window``); the estimator only through ``estimate``, ``estimate_messages``,
-``estimate_value``, ``observe`` and ``measured_bytes_per_token``.
+``estimate_items``, ``observe`` and ``measured_bytes_per_token``.
 
 Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 
@@ -53,7 +53,8 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   turn; ``window_minimal``, contract PR #50), and a ``W`` that is not positive or cannot hold even the
   new turn also logs ``bound_too_small`` and still rotates there, so such a request can exceed the
   bound; ``pdf_allowance`` instead when the new turn would fit with its PDFs at a typical page cost and
-  all of them are certain (D60).
+  all of them are certain (D60); ``pdf_uncertain`` on ``bound_too_small`` when the turn holds an
+  uncertain PDF and would fit with it at 0 (D61).
   ``F`` and ``W`` appear in these events.
 - A second rotation condition (packet A12, contract PR #115): at a turn start, when the recall room
   the request-time publish would give the new turn (``bound - estimate - headroom_floor``) is below
@@ -145,6 +146,7 @@ from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, S
 from contexto.store.ledger import LedgerError
 from contexto.store.render import is_own_block, is_own_item, own_call_ids, render_page
 from contexto.tokens import (
+    PDF_PAGE_TOKENS,
     TEXT_BYTES_PER_TOKEN,
     MediaCost,
     TokenEstimator,
@@ -1381,15 +1383,18 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
             if w <= 0 or new_tokens > w:
                 # D60: when the new turn would fit with its PDFs at a typical page cost, and every PDF in it
                 # is certain, it is the PDFs' generous allowance that falls short, not (necessarily) the
-                # bound. An uncertain PDF's real size is unknown, so that turn is a bound too small, marked.
+                # bound. An uncertain PDF's real size is unknown, so that turn is a bound too small, marked
+                # when the turn would fit with each uncertain PDF at 0 (D61): otherwise the rest of the turn
+                # needs a larger bound whatever the PDF's size.
                 allowance, uncertain = pdf_allowance(messages[new_start:])
+                rest = new_tokens - allowance - uncertain * PDF_MAX_PAGES * PDF_PAGE_TOKENS
                 if w > 0 and allowance and not uncertain and new_tokens - allowance <= w:
                     events.append({"event": "pdf_allowance", **sizing, "epoch": state.epoch, "bound": config.bound,
                                    "new_turn_tokens": new_tokens, "pdf_allowance_tokens": allowance})
                 else:
                     event = {"event": "bound_too_small", **sizing, "epoch": state.epoch, "bound": config.bound,
                              "new_turn_tokens": new_tokens}
-                    if uncertain:
+                    if uncertain and w > 0 and rest <= w:
                         event["pdf_uncertain"] = uncertain
                     events.append(event)
         else:
@@ -2003,6 +2008,11 @@ RECORD_INT = ("epoch", "k", "strip_upto", "turns_paged", "max_turn_growth", "las
 
 RECORD_NULLABLE = frozenset({"last_turn_start_n", "head_tokens", "initial_carried", "last_carried_text_count",
                              "turn_room_low_epoch", "window_budget"})
+# D61: the rule 4 head measurement a record's head_tokens was taken under. Records without it were written
+# before D49's amendment (v0.5.8 and earlier), whose head could be measured far low (0 for a 25,365-token head
+# on a resumed first request); a resume drops that head and the W sized from it, so the head is measured
+# again at k == 0 and estimated at k > 0.
+HEAD_RULE = 2
 
 
 def anchor_hash(hashes: tuple[str, ...] | list[str]) -> str:
@@ -2177,7 +2187,7 @@ def epoch_record(state: EpochState, request: dict, messages: list[dict], key: st
             "head_fingerprint": state.head_fingerprint, "dialect": dialect.name, "conversation": key,
             "model": request.get("model") if isinstance(request.get("model"), str) else None,
             "paged_carried": sorted(state.paged_carried), "config": asdict(config),
-            "anchor": {"n": len(messages), "hash": anchor_hash(hashes)}}
+            "anchor": {"n": len(messages), "hash": anchor_hash(hashes)}, "head_rule": HEAD_RULE}
 
 
 def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dialect,
@@ -2212,6 +2222,8 @@ def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dia
                        head_fingerprint=record["head_fingerprint"], head_size=head_size(request), hashes=hashes,
                        paged_carried=frozenset(record["paged_carried"]),
                        **{name: record[name] for name in RECORD_INT})
+    if record.get("head_rule") != HEAD_RULE:
+        state = replace(state, head_tokens=None, window_budget=None)
     return state, ""
 
 

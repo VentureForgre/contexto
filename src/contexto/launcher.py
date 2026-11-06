@@ -317,10 +317,10 @@ def start_warning(bound: int, headroom_floor: int | None, overhead: int) -> str 
     suggested = headroom + overhead + 2 * MIN_WINDOW_BUDGET
     sizing = f"bound {bound:,} - headroom {headroom:,} - typical fixed overhead {overhead:,}"
     if budget <= 0:
-        # The overhead is the top of the measured range, and measured heads ran as low as 15,689 (QA,
-        # bound 30,000 against a stub: budgets 7,411 to 9,311), so this is a "may", not a "will".
+        # The overhead is the top of the measured range, and measured overheads ran as low as 13,842 (Claude
+        # Code 2.1.314), so this is a "may", not a "will".
         return (f"bound {bound:,} may leave no window budget ({sizing} = {budget:,} tokens; measured overheads "
-                f"run from about 15,700 to 28,000): the engine may keep only the new turn, requests may exceed "
+                f"run from 13,842 to about 28,000): the engine may keep only the new turn, requests may exceed "
                 f"the bound, and recall may not fit at all. Use --bound {suggested:,} or more.")
     return (f"window budget about {budget:,} tokens ({sizing}) is below {MIN_WINDOW_BUDGET:,}: turns page out "
             f"almost at once and recalled pages will barely fit, if at all. Consider --bound {suggested:,} or more.")

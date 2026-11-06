@@ -204,7 +204,7 @@ class ResponsesDialect(Dialect):
         return True
 
     def estimate_items(self, estimator: TokenEstimator, items: list[dict]) -> int:
-        return estimator.estimate_value(items) if items else 0
+        return estimator.estimate_items(items) if items else 0
 
     def lead_count(self, items: list[dict]) -> int:
         for i, item in enumerate(items):
