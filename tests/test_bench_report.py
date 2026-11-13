@@ -796,6 +796,18 @@ def test_a_session_may_record_its_own_cache_lifetime(tmp_path):
             "full context.") in report.render(results)
 
 
+def test_a_cache_lifetime_the_table_has_no_price_for_is_an_error_only_when_something_is_priced(tmp_path):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,), cache_ttl="2h")
+    with pytest.raises(prices.PriceError, match="no cache-write price for a cache lifetime of '2h'"):
+        report.build([out])
+    # Nothing ran, so nothing is priced: the report is still made and names the lifetime as recorded.
+    nothing = make_run(tmp_path / "nothing", repeats=1, seeds=(11,), cache_ttl="2h",
+                       not_run=[(arm, 11) for arm in ARMS])
+    results = report.build([nothing])
+    assert results["prices"]["lifetimes"][0]["by_arm"] == {"contexto": ["2h"], "full": ["2h"], "plain": ["2h"]}
+    assert "Cache writes are priced at the 2h rate for every arm" in report.render(results)
+
+
 def test_the_limit_about_one_version_is_not_printed_when_the_merged_directories_differ_in_version(tmp_path):
     first = make_run(tmp_path / "first", repeats=1, seeds=(11,))
     second = make_run(tmp_path / "second", repeats=1, seeds=(12,), contexto_version="0.5.25")

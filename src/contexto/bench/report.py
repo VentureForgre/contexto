@@ -579,6 +579,12 @@ def _manifest(runs: Sequence[records.Run]) -> dict[str, Any]:
     return merged
 
 
+def _lifetime_order(ttl: str) -> tuple[int, str]:
+    """Shortest lifetime first; one the price table does not know goes last, by its text."""
+    known = price_tables.CACHE_TTLS
+    return (known.index(ttl) if ttl in known else len(known), ttl)
+
+
 def _lifetimes(runs: Sequence[records.Run]) -> list[dict[str, Any]]:
     """The cache lifetime each directory's sessions are priced at, by arm: the unit's own
     ``cache_ttl`` when it has one, else the manifest's, else 5 minutes (``assumed``)."""
@@ -591,7 +597,7 @@ def _lifetimes(runs: Sequence[records.Run]) -> list[dict[str, Any]]:
                 unit.get("cache_ttl") or manifest["cache_ttl"] or DEFAULT_CACHE_TTL)
         arms = sorted(by_arm, key=lambda arm: (ARM_ORDER.index(arm) if arm in ARM_ORDER else len(ARM_ORDER), arm))
         out.append({"directory": position, "assumed": manifest["cache_ttl"] is None,
-                    "by_arm": {arm: sorted(by_arm[arm], key=price_tables.CACHE_TTLS.index) for arm in arms}})
+                    "by_arm": {arm: sorted(by_arm[arm], key=_lifetime_order) for arm in arms}})
     return out
 
 
@@ -897,9 +903,12 @@ def _concluded_section(block: Mapping[str, Any], h: str) -> list[str]:
 
 def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str) -> list[str]:
     bases = sorted({basis for a in block["arms"].values() for basis in a["bases"]})
-    counts = {"measured": "The counts are measured: the upstream reported them."}.get(
-        _basis_words(bases), f"The counts are {_and(bases)}: no upstream reported them." if len(bases) == 1
-        else f"The counts are {_basis_words(bases)}.")
+    if bases == ["measured"]:
+        counts = "The counts are measured: the upstream reported them."
+    elif len(bases) == 1:
+        counts = f"The counts are {bases[0]}: no upstream reported them."
+    else:
+        counts = f"The counts are {_basis_words(bases)}."
     lines = [f"{h} Tokens and requests", "",
              f"Every request that reached the upstream in the sessions counted above, side requests included. "
              f"Input is uncached, cache write and cache read added. {counts} The bound is {results['bound']:,} "
@@ -924,8 +933,8 @@ def _lifetime_words(prices: Mapping[str, Any]) -> str:
     used = {ttl for d in lifetimes for ttls in d["by_arm"].values() for ttl in ttls} or {prices["cache_ttl"]}
     assumed = any(d["assumed"] for d in lifetimes)
     if len(used) == 1:
-        return (f"Cache writes are priced at the {_rate(sorted(used))} for every arm, because a request record "
-                "does not carry its cache lifetime."
+        return (f"Cache writes are priced at the {_rate(sorted(used, key=_lifetime_order))} for every arm, because "
+                "a request record does not carry its cache lifetime."
                 + (" The manifest does not record a cache lifetime, so 5 minutes is assumed." if assumed else ""))
     parts = []
     for d in lifetimes:
