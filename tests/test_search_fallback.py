@@ -493,6 +493,48 @@ def test_an_approximate_reply_is_charged_to_the_room_and_held_to_the_limit(store
     assert lines[-1] == "  [the rest of this hit is not shown; the recall budget for this turn is used up]"
 
 
+def test_paged_reminders_come_after_turn_pages_under_their_own_line(store):
+    reminder = "<system-reminder>\nThe staging database port changed to 7000. Take it as current.\n</system-reminder>\n"
+    [context] = store.page_out([[{"role": "user", "content": [{"type": "text", "text": reminder}]}]], 60)
+    text, _ = call(store, "what is the staging database port?")
+    lines = text.split("\n")
+    turn_page = ids(store)[3]
+    assert [pid for pid, _ in DETAILED.findall(text)] == [turn_page, context]  # the reminder is newer, shown second
+    assert lines[lines.index(f"{context} (turn 60)") - 1] == mcp.SEARCH_CONTEXT_HEADER
+    assert lines[lines.index(f"{context} (turn 60)") + 1] == "  [matched: staging, database, port]"
+
+
+def test_a_codex_page_is_found_approximately_and_shows_its_line(store):
+    turn = [{"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "cfg checkout-api.retention_days=juniper-2573\nReply: OK"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}]
+    [pid] = store.page_out([turn], 70)
+    text, _ = call(store, "What value did checkoutApi.retentionDays have earlier?")
+    lines = text.split("\n")
+    assert lines[2:4] == [f"{pid} (turn 70)", "  [matched: checkoutApi.retentionDays as checkout-api.retention_days; "
+                                             "not matched: value, earlier]"]
+    assert any(line.startswith("> ") and line.endswith("cfg checkout-api.retention_days=juniper-2573")
+               for line in lines)
+
+
+def test_words_that_match_once_their_end_punctuation_is_dropped_are_logged_as_such(store):
+    text, _ = call(store, '"staging database", port?')
+    assert text.split("\n")[:3] == [mcp.SEARCH_APPROX_HEADER, f"{ids(store)[3]} (turn 3)",
+                                    "  [matched: staging, database, port]"]
+    assert last_event(store)["approximate_steps"] == ["punctuation"]
+
+
+def test_a_fallback_that_raises_fails_this_call_only(store, monkeypatch):
+    monkeypatch.setattr(store, "search_approximate", lambda query: (_ for _ in ()).throw(RuntimeError("boom")))
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    line = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "contexto_search", "arguments": {"query": "refresh_token"}}})
+    result = server.handle_line(line)["result"]
+    assert result["isError"] is True
+    assert result["content"][0]["text"] == mcp.TOOL_FAILED.format(tool="contexto_search", error="RuntimeError")
+    assert call(store, "refreshToken")[0].startswith(mcp.SEARCH_BEST_HEADER)  # strict search still answers
+
+
 def test_an_in_view_match_stops_the_fallback(store):
     store.set_window(200_000, 2.0)
     store.set_retained(1, 0, [
@@ -578,6 +620,20 @@ def test_the_command_is_unchanged_for_a_strict_hit_and_for_nothing(home, capsys)
     code, out, err = run(capsys, "search", "zzqqxx", "nightly")
     assert code == 0 and out == ""
     assert err.splitlines()[-1] == "no paged-out turn in session s1 contains every word of 'zzqqxx nightly'"
+
+
+def test_the_command_says_when_more_pages_matched_than_it_can_list(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path))
+    monkeypatch.delenv("CONTEXTO_SESSION", raising=False)
+    monkeypatch.setattr(S, "APPROX_LIMIT", 3)
+    store = SessionStore(tmp_path, "s1")
+    store.page_out([page(f"deploy number {i} finished") for i in range(8)], 0)
+    store.release()
+    code, out, err = run(capsys, "search", "what", "deploy", "finished")
+    assert code == 0 and sum(line.startswith("pg_") for line in out.splitlines()) == 3
+    assert "[5 more approximate matches: use more specific words]" in err
+    code, out, err = run(capsys, "search", "what", "deploy", "finished", "--limit", "1")
+    assert "[7 more approximate matches: rerun with --limit 3 for 2 of them, and use more specific words]" in err
 
 
 def test_the_command_limits_approximate_matches_and_says_how_many_more(tmp_path, monkeypatch, capsys):

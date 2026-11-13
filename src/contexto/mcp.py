@@ -647,7 +647,7 @@ class Server:
         return ([{"type": "text", "text": text}, {"type": "text", "text": coverage}], None,
                 {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": total,
                  # D65, content-free: whether the pages found are approximate matches, and which steps of the
-                 # fallback they needed (stop_words, long_query, fold, typo, any_word); never the words
+                 # fallback the detailed ones needed (_approximate_steps); never the words
                  "approximate": bool(steps), **({"approximate_steps": steps} if steps else {}),
                  "in_view_hits": sum(1 for _, span in lead if span) if shown else 0,
                  "in_view_more": max(0, in_view_found[0] - IN_VIEW_LIMIT) if shown else 0,

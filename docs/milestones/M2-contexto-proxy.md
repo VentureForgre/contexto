@@ -985,7 +985,9 @@ unknown page, never read. Tools:
 - `contexto_close(obligation_id, note)` appends a closure. A `note` of whitespace only is refused.
 - `contexto_state()` returns the full pinned state without the budget cap.
 - `contexto_search(query)`: word search over page stubs and text (D34). The query is split on
-  whitespace; a page matches when every word occurs in it, case-insensitively and in any order. A
+  whitespace; a page matches when every word occurs in it, case-insensitively and in any order.
+  When no page holds every word and nothing in view matches, the reply gives approximate matches
+  instead and says so (D65, at the end of this item). A
   word matches as a substring, so identifiers, paths, and parts of them (`E4127`,
   `src/contexto/mcp.py`, `TIMEOUT` in `HTTP_TIMEOUT_S`) still match, and for any query with a word
   every page the earlier exact, case-sensitive rule matched still matches. A query with no words
@@ -1152,8 +1154,9 @@ unknown page, never read. Tools:
   which measures retrieval of paged-out content. Measured basis (live run #2 chain
   analysis, builder-3, zero spend): 4 of H1's 5 extra chain misses had a newer link in the retained
   window, but the model answered from a search reply whose newest paged hit looked current.
-  Results are charged against the per-turn room. No embeddings and no similarity matching
-  (owner: not RAG): only the query's own words, ranked lexically (D34). Speed and memory (D34,
+  Results are charged against the per-turn room. No embeddings, no model call and no similarity
+  matching (owner: not RAG): only the query's own words, ranked lexically (D34), and when no page
+  holds every word, the approximate matches of D65, which are lexical too. Speed and memory (D34,
   D39): each process lists `pages/` on every call to pick up new pages and drop quarantined ones (a
   file is read again only if its inode, size, or modification time changed); pages stay immutable
   and the store format is unchanged. The proxy keeps each page's id, turn, stub, and index line.
@@ -1185,6 +1188,65 @@ unknown page, never read. Tools:
   bounds the text held between searches, not what one search reads to answer: `contexto_search`
   reads and renders each of the up to 53 pages it shows, with no cap on their size (D41; a per-search
   byte budget is a tracked follow-up).
+
+  Approximate matches (D65). The rules above are strict search, and D65 does not change them: a
+  query that some paged page holds every word of, or that matches a line in view, gets the same
+  pages in the same order and the same reply as before, byte for byte
+  (`tests/test_search_golden.py` holds 210 such replies recorded before the change). Only when the
+  strict query finds no paged page and no line in view does the server call
+  `SessionStore.search_approximate(query)`, which ranks pages by the part of the query they hold
+  (`contexto.store.search.rank_approximate`; deterministic, no dependency, no model call). The
+  steps:
+  1. Words. `"`, `'`, `` ` ``, `(` and `[` are dropped from the start of each word and `"`, `'`,
+     `` ` ``, `)`, `]`, `?`, `!`, `.`, `,`, `;` and `:` from its end. Stop words are dropped: a fixed
+     list of 89 English function and question words (`search.STOP_WORDS`: a, an, the, is, are, do,
+     does, did, what, which, where, how, of, on, in, to, and so on). A word with a digit or a symbol
+     is never a stop word. A query with no other word has no approximate matches. At most 6 words
+     are searched, the longest, so the pass costs what a strict miss of 6 words costs.
+  2. Identifier styles. A word written as an identifier (it has `_`, `-` or `.` inside, or a
+     capital after its first letter beside small letters, and at least 4 other characters, one a
+     letter) is compared without `_`, `-` and `.`, on both sides: `refresh_token`, `refreshToken`,
+     `refresh-token` and `refresh.token` match each other. A plain word, a number, a version and a
+     date are matched as typed, so `12` does not find `1.2`.
+  3. Any word. A page need not hold every word. Each word weighs its inverse document frequency
+     over the whole store. A page is returned when it holds at least 30 percent of the weight of
+     the words that some page holds. When the store holds some word of the query on no page, the
+     page must also hold more words than the number of those, and what it holds (its words, and
+     the pairs of them it has one after the other as the query does) must not be on more than half
+     the pages together; or it must hold a word that is an identifier, a number or a path and that
+     at most half the pages hold. "Half the pages" applies from 10 pages.
+  4. One typo. The longest plain word (6 to 40 small letters once folded, not an identifier) that
+     no page holds is looked for with one letter changed, added, left out, or swapped with its
+     neighbour, as a whole word on the page. It weighs half. Only one word per query is tried, and
+     the try is abandoned, deterministically, once more than 500,000 places have been checked.
+
+  Order: pages holding every searched word first; then turn pages before context-block pages; then
+  the larger share of the weight; then more pairs of words standing one after the other as in the
+  query; then relevance as in strict search (a word counted once per text, at most 3, k1 1.2,
+  times the recency prior). The newest turn page that holds every searched word takes one of the 3
+  detailed places, as in strict search. At most 50 hits are returned by the store.
+
+  The reply opens with `[no paged-out turn holds every word of that query; approximate matches,
+  most words matched first, then newest first:]` in place of the best-pages line, then
+  `[searched for: ...]` when words were dropped. It shows at most 3 pages in detail and lists at
+  most 10 more (not 50: a page that holds only some of the words can be one of thousands). The
+  page line and the listed row keep their shapes (`pg_... (turn N)`, and `pg_... (turn N) @offsets`).
+  Under each detailed page line, and after the offsets of each listed row, a line names the words
+  the page matched and the ones it did not, with the form found on the page for a folded or typo
+  match: `[matched: port, refresh_token as refreshToken; not matched: zzqqxx]`. A page's matching
+  lines are chosen by the forms found on it. The reply ends with the coverage block, is charged to
+  the recall room and held to the per-call limit like any search reply; when the fallback finds
+  nothing either, the reply is the no-hit reply as before. In-view matching is unchanged: a
+  retained entry matches only when it holds every word. The `mcp_call` event gains `approximate`
+  (true or false) and, when true, `approximate_steps`, a list among `stop_words`, `long_query`,
+  `fold`, `typo`, `any_word` and `punctuation`; it never holds a query word. Cost at 6,000
+  synthetic pages: one more pass over the store, about what a strict miss of the same words costs,
+  plus about half as much again when a word is written as an identifier, and two or three substring
+  scans per page when a typo is tried (D65 has the measured figures). Limits: no stemming, no
+  synonyms, no embeddings; a plain lower-case word does not match a separated form
+  (`retrybudget` does not find `retry_budget`); a typo is found only in a plain word and only as a
+  whole word (`databse` finds `database`, not `databases`); a second typo in the same query is not
+  searched.
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
@@ -1334,7 +1396,10 @@ use`, `--session`, `CONTEXTO_SESSION`).
 - `search WORDS... [--session ID] [--limit N]` (default 10) runs the store search `contexto_search`
   uses (pages holding every word, best first, D34) and prints each hit's index line, then its last
   three matching lines with context, each with the offset `recall PAGE_ID --offset N` reads from.
-  Paged-out turns only. No hit: a line on stderr, exit 0.
+  Paged-out turns only. No hit: a line on stderr, exit 0. When no page holds every word it prints
+  the approximate matches of D65 instead: the stderr line then ends `; approximate matches, best
+  first:`, and under each hit's index line a line names the words the page matched and the ones it
+  did not. Exit 0 either way.
 - `recall` refuses an argument that is not a page id (`pg_` and 16 hex digits) before any path is
   built, exit 1.
 - `state` prints the pinned records by group, or "No pinned records.", then how many turns are

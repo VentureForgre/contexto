@@ -1,4 +1,5 @@
-"""How ``contexto_search`` matches and ranks pages, and which lines of a page it shows (D34, D41).
+"""How ``contexto_search`` matches and ranks pages, which lines of a page it shows (D34, D41), and
+what it falls back to when no page holds every word (D65).
 
 Matching. A query is split on whitespace into words; a query with no words (empty or whitespace
 only) matches nothing. A page matches when every word occurs in its searchable text (the stub and
@@ -47,6 +48,26 @@ page's turn is when the block was paged, not when it was sent (``contexto.mcp._n
 Lines. Within a page (or an in-view message) the matching lines are those that hold the most of the
 query: lines holding the whole query if there are any, else lines holding all its words, else the
 lines holding the most of its words, a word found on fewer lines of the page counting more.
+
+Fallback (D65). Everything above is strict search, and the fallback changes none of it: ``rank`` and
+its constants are as they were. When ``rank`` finds no page (and nothing in view matches), the caller
+asks ``rank_approximate`` for pages that hold part of the query. It is deterministic, and it makes
+no model call. Its steps, each looser than strict matching (``rank_approximate`` has the detail):
+
+1. End punctuation and stop words are dropped from the query (``plan_words``, ``STOP_WORDS``), and
+   at most ``APPROX_WORDS`` words are searched. ``what port is the staging database on?`` searches
+   ``port``, ``staging`` and ``database``.
+2. A word written as an identifier is compared without ``_``, ``-`` and ``.``, so
+   ``refresh_token`` finds a page that says ``refreshToken``.
+3. A page need not hold every word: ``staging database port zzqqxx`` finds the page that holds the
+   first three. A floor keeps noise out (``APPROX_FLOOR``): a page that holds one common word of a
+   five-word query is not returned.
+4. One plain word that no page holds is tried with one letter changed: ``databse`` finds
+   ``database``.
+
+Each hit names the words it matched, how (``exact``, ``folded``, ``typo``), the form found on the
+page, and the words it did not match (``ApproxHit``), so a reply can say what is approximate about it
+(``hit_view``).
 """
 
 from __future__ import annotations

@@ -92,8 +92,9 @@ def run(args: argparse.Namespace) -> int:
             print(f"[{rest} more approximate match{'' if rest == 1 else 'es'}: rerun with --limit {total}]",
                   file=sys.stderr)
         elif rest > 0:  # more pages matched than search_approximate returns
-            print(f"[{rest} more approximate matches, {len(found)} of them listable with --limit {len(found)}: "
-                  "use more specific words]", file=sys.stderr)
+            listable = f"rerun with --limit {len(found)} for {len(found) - shown} of them, and " \
+                if len(found) > shown else ""
+            print(f"[{rest} more approximate matches: {listable}use more specific words]", file=sys.stderr)
     elif len(found) > shown:
         rest = len(found) - shown
         print(f"[{rest} more matching page{'' if rest == 1 else 's'}: rerun with --limit {len(found)}]",

@@ -408,8 +408,9 @@ text. A mistyped `--session` is an error, never a new session.
 - `contexto search WORDS [--session ID] [--limit N]`: the paged-out turns holding every word, best
   match first (at most 10 unless `--limit`), with the same search the MCP `contexto_search` tool
   uses. Each hit shows its page id, turn and opening text, then its matching lines, each with the
-  offset to pass to `contexto recall PAGE_ID --offset N`. It searches paged-out turns only. No match
-  is a success (exit 0).
+  offset to pass to `contexto recall PAGE_ID --offset N`. It searches paged-out turns only. When no
+  turn holds every word it prints approximate matches with a note ([docs/search.md](docs/search.md)).
+  No match is a success (exit 0).
 - `contexto recall PAGE_ID [--session ID] [--offset N]`: a paged-out turn as plain text, thinking
   omitted, exactly as the MCP `contexto_recall` tool renders it. Page ids (`pg_` and 16 hex digits,
   for example `pg_1cb04faa431985c5`) come from `contexto sessions show` or `contexto search`. Each chunk is at most
@@ -464,15 +465,17 @@ not start it by hand.
 
 | Tool | What it does |
 |---|---|
-| `contexto_search(query)` | Finds turns that contain every word of the query (details below) |
+| `contexto_search(query)` | Finds turns that contain every word of the query, or approximate matches when none does (details below) |
 | `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
 | `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`. Decisions and obligations always show in the pinned state; an event, artifact, or reference shows there only when verified with a provenance source, and the reply says so when it will not |
 | `contexto_close(obligation_id, note)` | Close an open obligation |
 | `contexto_state()` | The full pinned state, with no pin-budget cap. It is charged against the turn's recall budget and cut at a whole line, with a trailer, when the budget runs out |
 
 **Search.** `contexto_search` finds turns holding every word of the query, in any case and any
-order. Words match as substrings, so identifiers and paths work; there is no stemming and no fuzzy
-or similarity matching. A query with no words finds nothing. Contexto's own search, recall and
+order. Words match as substrings, so identifiers and paths work. When no turn holds every word, the
+reply gives approximate matches and says so: stop words dropped, identifier styles folded, turns
+holding most of the words, one typo ([docs/search.md](docs/search.md)). There is no stemming and no
+embedding search. A query with no words finds nothing. Contexto's own search, recall and
 state calls (a turn's earlier search replies, for example) are kept for recall but not searched,
 since they copy older pages and would outrank the turns they quote.
 

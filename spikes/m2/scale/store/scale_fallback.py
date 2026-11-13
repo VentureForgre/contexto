@@ -8,8 +8,12 @@ the strict miss. With ``--old
 FILE`` (``git show <commit>:src/contexto/store/search.py > FILE``) the ``rank`` of that file is timed
 in the same alternation, to show that a strict hit costs what it did.
 
-    python spikes/m2/scale/store/scale_bench.py --sizes 6000 --keep-store /tmp/scale   # builds the store
-    PYTHONPATH=src python spikes/m2/scale/store/scale_fallback.py --home /tmp/scale/home --session scale6000
+    python spikes/m2/scale/store/scale_fallback.py --home /tmp/scale/home --session scale6000 --build 6000
+    python spikes/m2/scale/store/scale_fallback.py --home /tmp/scale/home --session scale6000
+
+``--build N`` writes the ``N``-page synthetic store first (``scale_bench.build_store``, Messages
+dialect, seed 7, no topic floor), which takes some minutes at 6,000 pages; without it the store must
+exist. The second form reuses it.
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ import importlib.util
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from contexto.store import SessionStore
 from contexto.store import search as new_search
@@ -48,7 +54,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reps", type=int, default=5)
     parser.add_argument("--cache-mb", default="64", help="the search text budget, as the MCP server's default")
     parser.add_argument("--old", type=Path, help="a search.py of an earlier commit, to time its rank alongside")
+    parser.add_argument("--build", type=int, metavar="N", help="write an N-page synthetic store there first")
     args = parser.parse_args(argv)
+    if args.build:
+        import scale_bench
+
+        scale_bench.build_store(args.home, args.session, args.build, dialect="messages", floor=0.0, seed=7)
     store = SessionStore.open_existing(args.home, args.session)
     store.set_search_cache(text_budget_bytes(args.cache_mb))
     old_rank = None
