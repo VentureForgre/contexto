@@ -148,6 +148,8 @@ HOP_BY_HOP = frozenset({
 })
 USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 AFFINITY_HEADER = "X-Session-Affinity"
+# The one answer to a request the proxy refuses to serve (D53), whatever the reason: the body never says why.
+REFUSED_MESSAGE = "contexto proxy: request refused (not from the local CLI)"
 # Host names (and their subdomains) that serve the vendor APIs directly, including Azure OpenAI
 # and Azure AI Foundry: each has one identity per key, so the affinity header is not sent to them
 # (D36). Matching is by host name only; an IP literal upstream gets the header.
@@ -1105,8 +1107,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._read_body()  # closing on unread bytes sends a reset, which can discard the 403
             except (ValueError, OSError):
                 pass
-            self._send_local_error(403, "contexto proxy: request refused (not from the local CLI)",
-                                   "permission_error")
+            self._send_local_error(403, REFUSED_MESSAGE, "permission_error")
             self.close_connection = True
             return
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
@@ -1160,7 +1161,7 @@ class _Handler(BaseHTTPRequestHandler):
                    endpoint: str) -> tuple[bytes, Headers, dict[str, Any] | None]:
         owner = self.owner
         try:
-            request = loads_bounded(body)
+            request = self._parse(body)
         except JSONTooDeepError:
             # Rule 18: past MAX_JSON_DEPTH not every Python can serialize or walk the request, so it
             # is forwarded untransformed (decoded, if it arrived compressed: rule 15) and logged.
@@ -1230,6 +1231,12 @@ class _Handler(BaseHTTPRequestHandler):
             entry["message_count"] = entry["original_message_count"]
             return body, headers, original
         return (body if after == before else after), new_headers, original
+
+    def _parse(self, body: bytes) -> Any:
+        """The request body as JSON (ValueError when it is not, JSONTooDeepError past the depth limit).
+        Its own method so that ``contexto serve``, which reads the body to route the request, parses
+        it once (``contexto.serve``)."""
+        return loads_bounded(body)
 
     def _forward(self, body: bytes, headers: Headers, entry: dict[str, Any], started: float,
                  original: dict[str, Any] | None) -> None:
