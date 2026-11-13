@@ -164,11 +164,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "doctor", help="check that Contexto can run here: the CLIs, the upstream, keys, the store, the MCP server",
         description="Check what `contexto run` needs from this directory: Python, the claude and codex CLIs and "
-                    "their versions, the upstream and where it comes from, whether a key or key helper is "
-                    "configured, the store home, the MCP server, and variables that would make Claude Code "
-                    "bypass the proxy. Makes no network request, runs no key helper, and prints no key.",
-        epilog="Exit codes: 0 no check failed (warnings allowed); 1 a check failed; 130 Ctrl+C. "
-               "Details: docs/doctor.md.")
+                    "their versions, the Claude Code settings files, the upstream and where it comes from, "
+                    "whether a key or key helper is configured, the store home, the MCP server, and variables "
+                    "that would make Claude Code bypass the proxy. Makes no network request, runs no key "
+                    "helper, and prints no key.",
+        epilog="Exit codes: 0 no check failed (warnings allowed); 1 a check failed; 130 Ctrl+C; 143 or 129 "
+               "SIGTERM or SIGHUP. Details: docs/doctor.md.")
     parser.add_argument("--json", action="store_true", help="print the results as JSON (shape in docs/doctor.md)")
     parser.set_defaults(func=run)
 
@@ -220,6 +221,30 @@ def termination_raises() -> Iterator[None]:
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
+
+
+@contextmanager
+def signals_held() -> Iterator[None]:
+    """Hold SIGINT, SIGTERM and SIGHUP for the few statements that make something a ``finally`` has to
+    remove, and act on a held one right after. A signal raises where it lands: inside
+    ``subprocess.Popen`` while it is still returning, the caller never gets the process and cannot kill
+    it (seen with SIGHUP on a busy machine: the temporary home was removed and the server lived on).
+    Held by a handler that only records, not by a signal mask, which the new process would inherit."""
+    held: list[int] = []
+    previous: dict[int, Any] = {}
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            if signal.getsignal(signum) is not None:  # None: set from C, and cannot be put back from here
+                previous[signum] = signal.signal(signum, lambda number, frame: held.append(number))
+    except ValueError:  # not the main thread, where no signal handler runs anyway
+        pass
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if held:
+            signal.raise_signal(held[0])  # now it meets the handler it was sent to
 
 
 def run_checks(context: Context | None = None) -> list[Check]:
@@ -416,7 +441,7 @@ def check_settings(ctx: Context) -> Check:
         if problem:
             files.append({"kind": kind, "state": "unusable", "problem": problem})
             wrong.append(f"{name} {problem}")
-        elif os.path.lexists(path):
+        elif os.path.exists(path):  # follows a symlink: one that leads nowhere is an absent file
             files.append({"kind": kind, "state": "read"})
             read.append(name)
         else:
@@ -724,19 +749,23 @@ def check_mcp(env: Mapping[str, str], cwd: Path, *, command: list[str] | None = 
         details["seconds"] = round(time.monotonic() - started, 3)
         return Check("mcp", FAIL, f"MCP server {problem}", fix, details)
 
-    try:
-        tmp = Path(tempfile.mkdtemp(prefix="contexto-doctor-"))
-    except OSError as exc:  # FileNotFoundError when Python finds no usable temporary directory at all
-        raise Fault("no_temp_directory", "the check needs a temporary directory and none can be made "
-                    f"({exc.strerror or type(exc).__name__})", "Set TMPDIR to a directory you can write") from exc
+    tmp: Path | None = None
     store = child = None
     try:
+        try:
+            with signals_held():  # no signal between the directory being made and its name being kept
+                tmp = Path(tempfile.mkdtemp(prefix="contexto-doctor-"))
+        except OSError as exc:  # FileNotFoundError when Python finds no usable temporary directory at all
+            raise Fault("no_temp_directory", "the check needs a temporary directory and none can be made "
+                        f"({exc.strerror or type(exc).__name__})", "Set TMPDIR to a directory you can write") from exc
         store = SessionStore(tmp, MCP_SESSION)  # `contexto mcp` serves an existing session only (D57)
         server = mcp_payload(MCP_SESSION, tmp)["mcpServers"][SERVER_NAME]
         argv = command or [server["command"], *server["args"]]
         try:
-            child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     env={**env, **server["env"]}, cwd=cwd, start_new_session=True)
+            with signals_held():  # nor between the server starting and this having it to stop
+                child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, env={**env, **server["env"]}, cwd=cwd,
+                                         start_new_session=True)
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             return failed(f"cannot be started ({getattr(exc, 'strerror', None) or type(exc).__name__})")
         try:
@@ -763,7 +792,8 @@ def check_mcp(env: Mapping[str, str], cwd: Path, *, command: list[str] | None = 
             stop_server(child)
         if store is not None:
             store.release()  # the session's live lock, before its directory goes
-        shutil.rmtree(tmp, ignore_errors=True)
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 def stop_server(child: subprocess.Popen) -> None:

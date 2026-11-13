@@ -3,7 +3,7 @@
 Everything is synthetic: fake ``claude`` and ``codex`` scripts that only answer ``--version``, settings
 files and a store home under ``tmp_path``, and a temporary ``HOME``. The MCP check starts the real
 server from this checkout. Nothing here contacts a model or an upstream; the last test asserts that,
-with an audit hook in this process and in the MCP server doctor starts.
+with a socket audit hook in every Python process of a doctor run.
 """
 
 from __future__ import annotations
@@ -779,6 +779,14 @@ def test_an_unusable_settings_file_is_a_warning_that_names_it_and_what_is_wrong(
     assert found["claude-upstream"]["details"]["source"] == "default"  # as the launcher reads it
 
 
+def test_a_settings_symlink_that_leads_nowhere_is_an_absent_file(both, capsys, fast_mcp):
+    (both.cwd / ".claude").mkdir()
+    (both.cwd / ".claude" / "settings.json").symlink_to(both.tmp / "no-such-file")
+    _, check, line = settings_line(capsys)
+    assert check["status"] == "pass" and "no settings file" in line
+    assert check["details"]["files"][1] == {"kind": "project", "state": "absent"}
+
+
 def test_a_fifo_in_place_of_a_settings_file_is_named_without_being_opened(both):
     path = both.cwd / ".claude" / "settings.json"
     path.parent.mkdir()
@@ -959,6 +967,38 @@ def test_a_terminating_signal_during_the_mcp_check_leaves_nothing_behind(both, s
     assert not both.store.exists()
 
 
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_that_lands_while_the_server_is_being_started_still_stops_it(world, monkeypatch, signum):
+    """Seen once in four runs of the test above on a busy machine: SIGHUP arrived while
+    ``subprocess.Popen`` was still returning, the exception was raised inside it, and the check never got
+    the process it had to kill. Here the signal is sent at exactly that point."""
+    children = []
+    real = doctor.subprocess.Popen
+
+    def popen_then_signal(argv, **kwargs):
+        children.append(real(argv, **kwargs))
+        os.kill(os.getpid(), signum)
+        time.sleep(0.05)  # the handler runs here, in the main thread, before Popen has returned
+        return children[-1]
+
+    monkeypatch.setattr(doctor.subprocess, "Popen", popen_then_signal)
+    scratch = world.tmp / "scratch"
+    scratch.mkdir()
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    monkeypatch.setattr("tempfile.tempdir", None)  # re-read TMPDIR
+    try:
+        with pytest.raises(doctor.Terminated) as stopped, doctor.termination_raises():
+            mcp_check(world, fake_server(world.tmp, "import time\ntime.sleep(120)\n"))
+        assert stopped.value.signum == signum
+        assert len(children) == 1 and children[0].returncode == -signal.SIGKILL  # killed and reaped
+        assert list(scratch.iterdir()) == []  # and the temporary home is gone
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+    assert signal.getsignal(signum) is signal.SIG_DFL  # the handlers are put back
+
+
 def test_a_server_that_cannot_be_started_or_talks_nonsense_fails(world):
     missing = mcp_check(world, [str(world.tmp / "no-such-python")])
     assert missing.status == doctor.FAIL and "cannot be started" in missing.summary
@@ -1032,22 +1072,11 @@ def test_a_project_variable_under_ignored_trust_is_a_warning_that_says_may(both,
 
 # No network -----------------------------------------------------------------------------------------
 
-# Every socket event in this process while WATCHING is a list: sockets made, names resolved (also by
-# gethostbyname, which the first version's patches of socket.socket and getaddrinfo did not see;
-# reviewer A, PR #258), connections, datagrams. An audit hook cannot be removed, so it is added once.
-WATCHING: list[tuple[str, str]] | None = None
-
-
-def _watch_sockets(event: str, args: tuple) -> None:
-    if WATCHING is not None and event.startswith("socket."):
-        WATCHING.append((event, repr(args)[:80]))
-
-
-sys.addaudithook(_watch_sockets)
-
-# The same hook for the Python processes doctor starts (the MCP server), through a sitecustomize on
-# their path: each event is appended to the file SOCKET_AUDIT names.
-CHILD_AUDIT = '''
+# A sitecustomize for every Python process of a doctor run (doctor itself and the MCP server it starts):
+# an audit hook appends each socket event to the file SOCKET_AUDIT names. That covers a socket made, a
+# connection, a datagram, and a name lookup by any route; the first version patched socket.socket and
+# getaddrinfo in the test's process, which a gethostbyname call passed (reviewer A, PR #258).
+SOCKET_AUDIT = '''
 import os, sys
 
 
@@ -1061,28 +1090,32 @@ sys.addaudithook(_watch)
 '''
 
 
-def test_the_socket_watch_sees_a_name_lookup_and_a_connection():
-    """The control for the test below: both ways the first version missed or caught are recorded."""
-    global WATCHING
-    WATCHING = []
-    try:
-        socket.gethostbyname("127.0.0.1")
-        try:
-            socket.create_connection(("127.0.0.1", 9), timeout=0.2).close()
-        except OSError:
-            pass
-        seen = {event for event, _ in WATCHING}
-    finally:
-        WATCHING = None
-    assert {"socket.gethostbyname", "socket.getaddrinfo", "socket.connect"} <= seen
+def audited(world, *command: str, **env: str) -> tuple[subprocess.CompletedProcess, list[str]]:
+    """Run ``python <command>`` in the world with the socket audit on; the result and the events seen."""
+    planted, audit = world.tmp / "planted", world.tmp / "sockets.log"
+    planted.mkdir(exist_ok=True)
+    (planted / "sitecustomize.py").write_text(SOCKET_AUDIT)
+    path = os.pathsep.join(filter(None, [str(planted), os.environ.get("PYTHONPATH")]))
+    done = subprocess.run([sys.executable, *command], cwd=world.cwd, capture_output=True, text=True, timeout=120,
+                          env={**os.environ, **env, "PYTHONPATH": path, "SOCKET_AUDIT": str(audit)})
+    events = audit.read_text().splitlines() if audit.exists() else []
+    audit.unlink(missing_ok=True)
+    return done, [line.split()[1] for line in events]
 
 
-def test_doctor_connects_to_nothing_resolves_no_name_and_never_contacts_the_upstream(both, capsys, monkeypatch):
-    """The upstream it reports is a listening socket here: nothing may connect to it, from doctor or from
-    the MCP server it starts. In this process and in that server, every socket event is recorded: a
-    connection, a datagram, and a name lookup by any route (the upstreams are host names, which only a
-    lookup would turn into addresses)."""
-    global WATCHING
+def test_the_socket_audit_sees_a_name_lookup_and_a_connection(world):
+    """The control for the test below: the audit records the lookup the first version missed."""
+    _, events = audited(world, "-c", "import socket; socket.gethostbyname('127.0.0.1')")
+    assert events == ["socket.gethostbyname"]
+    _, events = audited(world, "-c", "import socket\ntry:\n    socket.create_connection(('127.0.0.1', 9), 0.2)\n"
+                                     "except OSError:\n    pass")
+    assert {"socket.getaddrinfo", "socket.connect"} <= set(events)
+
+
+def test_doctor_connects_to_nothing_resolves_no_name_and_never_contacts_the_upstream(both):
+    """The upstream doctor reports is a listening socket here, named by host name, so reaching it takes a
+    lookup and a connection. Nothing may connect to it, and no process of the run (doctor, the MCP
+    server) may touch a socket at all."""
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(8)
@@ -1100,29 +1133,19 @@ def test_doctor_connects_to_nothing_resolves_no_name_and_never_contacts_the_upst
 
     thread = threading.Thread(target=accept, daemon=True)
     thread.start()
-    planted, audit = both.tmp / "planted", both.tmp / "child-sockets.log"
-    planted.mkdir()
-    (planted / "sitecustomize.py").write_text(CHILD_AUDIT)
-    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(planted), os.environ.get("PYTHONPATH")])))
-    monkeypatch.setenv("SOCKET_AUDIT", str(audit))
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://localhost:{port}")
-    monkeypatch.setenv("CONTEXTO_CODEX_UPSTREAM", f"http://localhost:{port}/v1")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET)
-    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
     write_settings(both.cwd / ".claude" / "settings.json", {"env": {"ANTHROPIC_BASE_URL": f"http://localhost:{port}"}})
-    WATCHING = []
+    env = {"CONTEXTO_CODEX_UPSTREAM": f"http://localhost:{port}/v1", "ANTHROPIC_API_KEY": SECRET,
+           "CLAUDE_CODE_USE_BEDROCK": "1"}
     try:
         for argv in ((), ("--json",)):
-            code, out, _ = run(capsys, *argv)
-            assert code == 0, out
-            assert f"http://localhost:{port}" in out  # reported, not contacted
-            assert "MCP server started and listed its 5 tools" in out  # the real server ran, under the hook
+            done, events = audited(both, "-m", "contexto", "doctor", *argv, **env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            assert f"http://localhost:{port}" in done.stdout  # reported, not contacted
+            assert "MCP server started and listed its 5 tools" in done.stdout  # the real server ran, audited
+            assert events == []
         time.sleep(0.2)
-        seen = list(WATCHING)
     finally:
-        WATCHING = None
         stop.set()
         thread.join(timeout=2)
         listener.close()
-    assert seen == [] and accepted == []
-    assert audit.exists() is False or audit.read_text() == ""  # nor did the MCP server touch a socket
+    assert accepted == []
