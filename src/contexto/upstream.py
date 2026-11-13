@@ -212,10 +212,20 @@ JS_WHITESPACE = ("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2
                  "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
 
 
+def env_truthy(value: str | None) -> bool:
+    """Whether Claude Code reads an environment value as on:
+    ``["1", "true", "yes", "on"].includes(String(v).toLowerCase().trim())`` (read from 2.1.314 and
+    2.1.318). Measured on 2.1.322 for ``CLAUDE_CODE_USE_BEDROCK`` (D70; requests went to the Bedrock
+    stub and none to ``ANTHROPIC_BASE_URL``): on for ``1``, ``true``, ``yes``, ``on``, ``TRUE`` and
+    ``" 1 "``; off for ``0``, ``false``, ``no``, ``2``, ``enabled`` and the empty string. The same for
+    ``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` (``true``, ``yes``, ``on``, ``TRUE`` on; ``false``, ``2`` off)."""
+    return (value or "").lower().strip(JS_WHITESPACE) in TRUTHY
+
+
 def ignores_persisted_trust(env: Mapping[str, str] | None) -> bool:
-    """Whether ``env`` sets ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` the way Claude Code reads it:
-    ``["1", "true", "yes", "on"].includes(String(v).toLowerCase().trim())`` (2.1.314 and 2.1.318)."""
-    return (env or {}).get(IGNORE_TRUST_KEY, "").lower().strip(JS_WHITESPACE) in TRUTHY
+    """Whether ``env`` sets ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` the way Claude Code reads it
+    (``env_truthy``)."""
+    return env_truthy((env or {}).get(IGNORE_TRUST_KEY, ""))
 
 
 def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None, *,
@@ -296,7 +306,7 @@ def claude_setting(read: Callable[[Path], str | None], cwd: Path, home: Path, en
     layout = git_layout(cwd)  # one walk for the order and the trust check (reviewer A's nit, PR #237)
     for kind, path in claude_settings_order(cwd, home, env, layout=layout):
         value = read(path)
-        if not value:
+        if value is None:  # the file does not set it; an empty value (``_settings_env``) is still a value
             continue
         if kind in PROJECT_KINDS and (trusted_only or no_trust):
             if trusted is None:
@@ -306,6 +316,87 @@ def claude_setting(read: Callable[[Path], str | None], cwd: Path, home: Path, en
                 continue
         return Setting(value, kind, tuple(ignored))
     return Setting(None, None, tuple(ignored))
+
+
+def _settings_env(path: Path, name: str) -> str | None:
+    """``env.<name>`` in a settings file as Claude Code applies it to its environment, or None when the
+    file does not set it. An empty string is a value (it overrides the process environment). A JSON
+    ``true`` or number counts as its text: measured on 2.1.322, ``"env": {"CLAUDE_CODE_USE_BEDROCK":
+    true}`` and ``1`` (a number) both turned Bedrock on (D70)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    env = data.get("env") if isinstance(data, dict) else None
+    value = env.get(name) if isinstance(env, dict) else None
+    if isinstance(value, bool):
+        return "true" if value else "false"  # JavaScript's String(true)
+    if isinstance(value, int):
+        return str(value)
+    return value if isinstance(value, str) else None
+
+
+@dataclass(frozen=True)
+class EnvValue:
+    """An environment variable as Claude Code would see it, and where the value comes from."""
+    name: str
+    value: str | None  # None when nothing sets it
+    source: str | None  # "settings:<kind>" (see ``KIND_FILES``, or ``user``), "env", or None
+
+
+def claude_env_value(name: str, *, env: Mapping[str, str] | None = None, cwd: Path | None = None,
+                     home: Path | None = None) -> EnvValue:
+    """The value Claude Code would run with for the environment variable ``name``, launched from
+    ``cwd`` with the process environment ``env``: the first settings file ``env`` block that sets it,
+    in the order and under the trust rule ``contexto run claude`` uses for the base URL
+    (``claude_setting``), else the process environment. Measured on 2.1.322 (D70) with
+    ``CLAUDE_CODE_USE_BEDROCK`` and ``CLAUDE_CODE_GATEWAY_HINT_HEADERS``: the settings file's value
+    wins over the environment's in both directions (environment ``1`` with settings ``0`` is off,
+    environment ``0`` with settings ``1`` is on). Managed settings and a ``--settings`` file are not
+    read, as for the base URL."""
+    env = os.environ if env is None else env
+    found = claude_setting(lambda path: _settings_env(path, name), cwd or Path.cwd(), home or Path.home(), env)
+    if found.value is not None:
+        return EnvValue(name, found.value, f"settings:{found.source}")
+    value = env.get(name)
+    return EnvValue(name, value, "env" if value is not None else None)
+
+
+# D70: with one of these on, Claude Code 2.1.322 sent every request to that provider's own endpoint
+# (ANTHROPIC_BEDROCK_BASE_URL, ANTHROPIC_VERTEX_BASE_URL, ANTHROPIC_FOUNDRY_BASE_URL,
+# ANTHROPIC_BEDROCK_MANTLE_BASE_URL, ANTHROPIC_AWS_BASE_URL) and none to ANTHROPIC_BASE_URL, not even
+# HEAD /api/hello: 0 of the requests of 5 runs with the value 1 and 4 more with true.
+CLOUD_PROVIDER_KEYS = {"CLAUDE_CODE_USE_BEDROCK": "Amazon Bedrock", "CLAUDE_CODE_USE_VERTEX": "Google Vertex AI",
+                       "CLAUDE_CODE_USE_FOUNDRY": "Microsoft Foundry",
+                       "CLAUDE_CODE_USE_MANTLE": "Amazon Bedrock (Mantle)",
+                       "CLAUDE_CODE_USE_ANTHROPIC_AWS": "Claude Platform on AWS"}
+SOURCE_NAMES = {"env": "the process environment", "settings:user": "the env block of your Claude Code user settings "
+                "(~/.claude/settings.json, or settings.json in $CLAUDE_CONFIG_DIR)"}
+
+
+def cloud_provider(*, env: Mapping[str, str] | None = None, cwd: Path | None = None,
+                   home: Path | None = None) -> EnvValue | None:
+    """The cloud-provider switch that is on for a Claude Code launched from ``cwd``, or None (D70).
+    With one on, Claude Code sends nothing to ``ANTHROPIC_BASE_URL``, so a proxy it was pointed at
+    sees no request and bounds nothing. Each of ``CLOUD_PROVIDER_KEYS`` is read as Claude Code would
+    see it (``claude_env_value``) and judged by ``env_truthy``; the first one on is returned, with
+    where its value comes from. Not covered: organization-managed settings, which this module does
+    not read, and ``CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`` (the docs say Claude Code then ignores
+    these switches in settings files; not measured, so a switch found there still counts)."""
+    for name in CLOUD_PROVIDER_KEYS:
+        found = claude_env_value(name, env=env, cwd=cwd, home=home)
+        if env_truthy(found.value):
+            return found
+    return None
+
+
+def cloud_provider_note(found: EnvValue) -> str:
+    """One sentence naming the switch, where it is set and what it does; no path and no value."""
+    kind = (found.source or "").removeprefix("settings:")
+    where = SOURCE_NAMES.get(found.source or "") or f"the env block of {KIND_FILES.get(kind, kind)}"
+    provider = CLOUD_PROVIDER_KEYS.get(found.name, "a cloud provider")
+    return (f"{found.name} is set in {where}, so Claude Code sends its requests to {provider} and none to "
+            f"ANTHROPIC_BASE_URL")
 
 
 def claude_key_helper(cwd: Path, home: Path, env: Mapping[str, str] | None = None, *,

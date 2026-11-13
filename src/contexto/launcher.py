@@ -7,7 +7,8 @@ Steps (M2 contract, Architecture):
 2. Open session S in ``contexto.paths.contexto_home()`` and start ``ContextoProxy`` on
    ``127.0.0.1:<free port>`` with the rewrite engine as its transform.
 3. Write two temporary files, mode 0600, in a private temporary directory (never in the user's
-   Claude configuration): a ``--settings`` file holding ``env.ANTHROPIC_BASE_URL = <proxy URL>`` and
+   Claude configuration): a ``--settings`` file holding ``env.ANTHROPIC_BASE_URL = <proxy URL>``,
+   ``env.CLAUDE_CODE_GATEWAY_HINT_HEADERS = 1`` (D70, below) and
    ``permissions.allow`` with one rule per Contexto MCP tool, by its exact name (D44:
    ``mcp__contexto__contexto_recall`` and the other four), and an ``--mcp-config`` file that makes
    Claude Code spawn ``contexto mcp --session S`` over stdio with the current interpreter.
@@ -25,6 +26,20 @@ every Contexto tool in ``-p`` mode ("you haven't granted it yet") and the sessio
 Limit: organization-managed settings outrank ``--settings``; if they set ``ANTHROPIC_BASE_URL``,
 Claude Code bypasses the proxy and Contexto cannot keep the prompt bounded. ``CLAUDE_CONFIG_DIR`` is
 never set and no user configuration file is edited.
+
+Hint headers (D70): the ``--settings`` file asks Claude Code for its gateway hint headers
+(``contexto.hints``), which say what kind of request each one is; the rewrite engine reads them in
+place of signatures that change between Claude Code versions. The proxy then leaves them out of what
+it forwards, so the upstream gets the headers it got before, unless the user had turned them on
+themselves (``contexto.hints.user_enabled_hint_headers``: the process environment or a settings file
+``env`` block), in which case they pass through as they did. Measured on 2.1.322: the ``--settings``
+value ``1`` wins over a ``0`` in the environment and over a ``0`` in the user's settings file.
+
+Cloud providers (D70): with ``CLAUDE_CODE_USE_BEDROCK``, ``CLAUDE_CODE_USE_VERTEX``,
+``CLAUDE_CODE_USE_FOUNDRY``, ``CLAUDE_CODE_USE_MANTLE`` or ``CLAUDE_CODE_USE_ANTHROPIC_AWS`` on, in the
+environment or a settings file ``env`` block, Claude Code sends every request to that provider and
+none to ``ANTHROPIC_BASE_URL`` (measured on 2.1.322), so the session would run with no bound and
+nothing would say so. The launch is refused before a session is opened (``check_cloud_provider``).
 
 Resume (D55): the proxy records each Claude Code session id it serves (the ``X-Claude-Code-Session-Id``
 header, else ``metadata.user_id``) in the session's metadata. Claude Code keeps that id across
@@ -65,10 +80,10 @@ claude exits. So is a CLI version Contexto was not tested with (``contexto.clive
 ``claude --version`` and ``--help`` (alone) run claude directly, with no session or proxy.
 
 Exit codes: claude's own code; 128 + N if claude died from signal N, or if the launcher got signal N
-before claude started; 2 for a usage error such as a bound above the guard, an invalid session id, or
-a ``CONTEXTO_HOME`` that is not a directory; 1 if the proxy or the session store cannot start (for
-example ``CONTEXTO_HOME`` is not writable); 127 if ``claude`` is not on PATH or cannot be run; 130 for
-a Ctrl+C during the version check, before claude starts.
+before claude started; 2 for a usage error such as a bound above the guard, an invalid session id, a
+cloud-provider switch that is on (D70), or a ``CONTEXTO_HOME`` that is not a directory; 1 if the proxy
+or the session store cannot start (for example ``CONTEXTO_HOME`` is not writable); 127 if ``claude`` is
+not on PATH or cannot be run; 130 for a Ctrl+C during the version check, before claude starts.
 """
 
 from __future__ import annotations
@@ -93,6 +108,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from contexto.cliversions import launch_check
+from contexto.hints import HINT_HEADERS_KEY, user_enabled_hint_headers
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
 from contexto.mcp import TOOLS as MCP_TOOLS
 from contexto.paths import contexto_home, mcp_env, session_dir
@@ -102,7 +118,7 @@ from contexto.store import LIVE_LOCK, SessionStore
 from contexto.store.prune import discard_new_session
 from contexto.store.sessions import named, starting_with
 from contexto.toolcheck import denied_tools_message, missing_tools_message
-from contexto.upstream import Upstream, resolve_upstream, untrusted_note
+from contexto.upstream import Upstream, cloud_provider, cloud_provider_note, resolve_upstream, untrusted_note
 
 DEFAULT_BOUND = 150_000
 REPORT_LOCK_TIMEOUT_S = 2.0  # report_missing_tools: how long the exit waits for a request still in the engine
@@ -246,6 +262,24 @@ def check_upstream(upstream: Upstream) -> None:
         ok, problem = False, str(exc)
     if not ok:
         raise LaunchError(f"invalid upstream {upstream.url!r} (from {upstream.source}): {problem}", EXIT_USAGE)
+
+
+def check_cloud_provider(cwd: Path, env: dict[str, str] | None = None) -> None:
+    """D70: refuse a launch that Claude Code would send to a cloud provider. With one of the provider
+    switches on (``contexto.upstream.cloud_provider``: the process environment or a settings file
+    ``env`` block) Claude Code 2.1.322 sent nothing to ``ANTHROPIC_BASE_URL``, so the proxy would see no
+    request, the session would run with no bound, and nothing would say so. A usage error, before a
+    session is opened, naming the variable and where it is set."""
+    found = cloud_provider(env=env, cwd=cwd)
+    if found is None:
+        return
+    remedy = (f"unset {found.name} for this command (env -u {found.name} contexto run ...)" if found.source == "env"
+              else f"remove {found.name} from that env block, or set it to 0 there")
+    raise LaunchError(
+        f"{cloud_provider_note(found)}. Contexto's proxy would see no request and the session would run with "
+        f"no bound, so the launch is refused. To run through Contexto, {remedy}, and give Contexto an upstream "
+        f"that speaks the Anthropic Messages API (--upstream or ANTHROPIC_BASE_URL). To keep using the "
+        f"provider, run claude without contexto.", EXIT_USAGE)
 
 
 def check_home(home: Path) -> None:
@@ -771,10 +805,14 @@ def contexto_tool_rules() -> list[str]:
 
 
 def settings_payload(proxy_url: str) -> dict[str, Any]:
-    """The flag-level ``--settings`` content: the proxy's base URL, and an allow rule for each of Contexto's
+    """The flag-level ``--settings`` content: the proxy's base URL, the request for Claude Code's gateway
+    hint headers (D70: with a custom base URL they are off unless ``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` is
+    on; the engine reads them and the proxy removes them before forwarding, ``contexto.hints``), and an
+    allow rule for each of Contexto's
     own MCP tools (D44). Claude Code 2.1.302 refuses an MCP tool in ``-p`` mode unless a rule allows it
     ("you haven't granted it yet"), so without these rules ``contexto run claude -p`` loses recall."""
-    return {"env": {"ANTHROPIC_BASE_URL": proxy_url}, "permissions": {"allow": contexto_tool_rules()}}
+    return {"env": {"ANTHROPIC_BASE_URL": proxy_url, HINT_HEADERS_KEY: "1"},
+            "permissions": {"allow": contexto_tool_rules()}}
 
 
 def mcp_payload(session_id: str, home: Path) -> dict[str, Any]:
@@ -965,11 +1003,13 @@ def session_affinity_key(store: Any, upstream_url: str) -> str | None:
 
 
 def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dict[str, int | float],
-                observe_thinking: bool, *, stderr=None, cli: str | None = None) -> tuple[ContextoProxy, str]:
+                observe_thinking: bool, *, stderr=None, cli: str | None = None,
+                strip_hint_headers: bool = False) -> tuple[ContextoProxy, str]:
     """Build the rewrite engine for ``store`` and start the proxy on 127.0.0.1 with a free port.
     Returns ``(proxy, engine_name)``; the caller stops the proxy. Shared by claude and codex. With
     ``cli="claude"`` the engine is wrapped in a ``SessionRecorder`` (``proxy.transform``), so the
-    session records which Claude Code sessions it served (D55)."""
+    session records which Claude Code sessions it served (D55). ``strip_hint_headers`` is the proxy's
+    (D70); Codex sends no such headers and leaves it off."""
     # The previous launch's MCP server record must not count for this one (contexto.toolcheck): a
     # back-to-back launch can start within the check's clock slack of that server's tools/list.
     clear = getattr(store, "clear_mcp_listed", None)
@@ -985,7 +1025,8 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     try:
         proxy = ContextoProxy(upstream_url, NoticeLog(store, stderr or sys.stderr), transform,
                               observe_usage=observe_usage, observe_thinking=observe_thinking,
-                              upstream_source=upstream_source, affinity_key=key)
+                              upstream_source=upstream_source, affinity_key=key,
+                              strip_hint_headers=strip_hint_headers)
     except ValueError as exc:
         raise LaunchError(f"invalid upstream: {exc}", EXIT_USAGE) from exc
     try:
@@ -1096,6 +1137,7 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         raise LaunchError(cli_not_found(options.claude_bin), EXIT_NOT_FOUND)
     if options.claude_args in INFO_ARGS:  # nothing to bound, so no session or proxy (D57)
         return run_child([claude, *options.claude_args], stderr=stderr)
+    check_cloud_provider(Path.cwd())
     upstream = resolve_upstream(options.upstream, cwd=Path.cwd())
     check_upstream(upstream)
     if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: as Claude Code -p, no project base URL (D52)
@@ -1106,9 +1148,12 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     choice, store = pick_session(options, home, Path.cwd(), stderr)
     session_id = choice.session_id
     config = engine_config(options)
+    # D70: the --settings file below turns the hint headers on for the engine. They are forwarded only
+    # when the user had them on already; otherwise the upstream gets the headers it got before.
+    forward_hints = user_enabled_hint_headers(cwd=Path.cwd())
     try:
         proxy, engine_name = start_proxy(store, upstream.url, upstream.source, config, options.observe_thinking,
-                                         stderr=stderr, cli="claude")
+                                         stderr=stderr, cli="claude", strip_hint_headers=not forward_hints)
     except LaunchError:
         if choice.created:  # a launch that never started leaves no empty session (D57)
             discard_new_session(store)
@@ -1125,7 +1170,8 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         store.log({"event": "launch", "cli": "claude", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": upstream.source,
                    "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args),
-                   "affinity_header": proxy.affinity_header is not None})
+                   "affinity_header": proxy.affinity_header is not None,
+                   "hint_headers": "forwarded" if forward_hints else "stripped"})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
         if not check_cli_version("claude", claude, store, enabled=options.version_check, stderr=stderr):
