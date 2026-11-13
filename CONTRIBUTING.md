@@ -76,7 +76,7 @@ run `uv sync` once to remove it. In a plain virtual environment run `pip uninsta
 then `pip install -e .` again; until then `contexto --version` prints `0.0.0+unknown` and two
 packaging tests fail.
 
-The suite runs on macOS and Linux. Windows is not supported (see the README's Platforms note).
+The suite runs on macOS and Linux. Windows is not supported (see [Platforms](docs/install.md#platforms)).
 
 ## What CI runs
 
@@ -139,6 +139,7 @@ contribution is licensed under the same terms.
   part of the package.
 - `docs/milestones/`: design contracts. `docs/DECISIONS.md`: decisions and their reasons.
 - [docs/cli-updates.md](docs/cli-updates.md): how a new Claude Code or Codex version is tested.
+- [docs/README.md](docs/README.md): the index of the guides, design records and research notes.
 
 ## Releases
 
