@@ -5,7 +5,8 @@ Measured 2026-11-12 on macOS arm64 with the installed `claude` 2.1.322 against s
 no route off the machine). The probe scripts are in `spikes/m2/serve/`; raw captures were written
 under `/tmp` and are not in the repository. D70 in `docs/DECISIONS.md` relies on these results.
 
-Two reports follow, as the two measurement agents wrote them: the HTTP side, then the MCP side.
+Two reports follow, as the two measurement agents wrote them: the HTTP side, then the MCP side. A
+third, shorter one at the end was added with the hint-header slice: which values turn a switch on.
 
 ---
 
@@ -251,3 +252,59 @@ the stub saw.
   so I cannot say whether either is a documented, stable interface. Strings in the binary also name
   `_meta` keys `claudecode/agentId` and `claudecode/agentType`; they never appeared in a captured call.
 - macOS only, one Claude Code version.
+
+---
+
+## D70 follow-up: which values Claude Code 2.1.322 reads as on
+
+Measured 2026-11-12 for the hint-header and cloud-provider slice, with `spikes/m2/serve/q10_truthy.sh`
+(36 runs of `http_probe.py`, each one `claude -p "say hi"`; same isolation as the HTTP report above:
+scrubbed environment, temporary config directory, `stub-key`, fake AWS values, a sandbox that allows
+only localhost). Captures under `/tmp/d70-truthy/<run>/`, not in the repository. "Base" is the stub
+named by `ANTHROPIC_BASE_URL`, "provider" the second stub named by the provider's own base URL
+variable.
+
+### 1. `CLAUDE_CODE_USE_BEDROCK` in the process environment (12 runs)
+
+| Value | Requests at the provider stub | Requests at the base stub | Read as |
+|---|---|---|---|
+| `1`, `true`, `yes`, `on`, `TRUE`, `" 1 "` (padded with spaces) | 5 each | 0 | on |
+| `0`, `false`, empty string, `no`, `2`, `enabled` | 0 | 2 each (`HEAD /api/hello`, `POST /v1/messages?beta=true`) | off |
+
+The 5 requests are the ones of the HTTP report's section 4 (`GET .../inference-profiles`, three
+`.../invoke` probes, one `.../invoke-with-response-stream`). This is the rule read from the 2.1.314
+and 2.1.318 binaries for `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` (D52):
+`["1", "true", "yes", "on"].includes(String(v).toLowerCase().trim())`.
+
+### 2. The same switch in the config directory's `settings.json` `env` block (6 runs)
+
+- `"true"`: 5 requests at the provider stub, 0 at base. `"0"`: 0 and 2.
+- A JSON `true` and the number `1` (the base URL in the same file, so a rejected file would show as
+  no request at either stub): 5 at the provider stub each. Claude Code takes them as their text.
+- Environment `1` with settings `0`: 2 requests at base, 0 at the provider. Environment `0` with
+  settings `1`: 5 at the provider. The settings file's value wins in both directions.
+
+### 3. The other four switches (8 runs)
+
+`CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE` and
+`CLAUDE_CODE_USE_ANTHROPIC_AWS`, each with `true` and with `0`, with the fake provider settings of the
+HTTP report's section 4. `true`: 1, 1, 2 and 1 requests at the provider stub and 0 at base. `0`: 0 at
+the provider and 2 at base, for all four.
+
+### 4. `CLAUDE_CODE_GATEWAY_HINT_HEADERS` (10 runs)
+
+On means the Messages request carried `x-claude-code-request-class: main`.
+
+- Process environment: `true`, `yes`, `on`, `TRUE` on; `false`, `2` off (`1` and `0` are in the HTTP
+  report, section 2).
+- Environment `1` with config-directory settings `0`: off. Environment `0` with settings `1`: on.
+- A `--settings` file saying `1` with the environment at `0`: on. A `--settings` file saying `1` with
+  the config directory's settings at `0`: on. So the value `contexto run claude` passes wins over a
+  user's `0` in either place.
+
+### Not confirmed
+
+- The four other provider switches with values other than `1`, `true` and `0`.
+- Project settings files (`.claude/settings.json`, `.claude/settings.local.json`) and managed settings
+  as the place a switch is set; `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`.
+- Linux, and any other Claude Code version.

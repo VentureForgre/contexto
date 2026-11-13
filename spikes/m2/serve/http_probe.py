@@ -254,6 +254,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bedrock", action="store_true", help="CLAUDE_CODE_USE_BEDROCK=1 with a second local stub")
     p.add_argument("--flag-env", action="append", default=[], help="extra K=V for the --settings file's env block")
     p.add_argument("--cfg-env", action="append", default=[], help="extra K=V for <config dir>/settings.json's env")
+    p.add_argument("--cfg-env-json", action="append", default=[],
+                   help="K=<JSON> for <config dir>/settings.json's env: a value that is not a string (true, 1)")
     p.add_argument("--second", action="store_true",
                    help="start a second local stub, named 'provider'; {PORT2} in --env values is its port")
     p.add_argument("--model", default=None)
@@ -379,6 +381,9 @@ def main() -> None:
             k, _, v = pair.partition("=")
             v = v.replace("{BASE}", base).replace("{PORT}", str(main_stub.server_port))
             target[k] = v.replace("{PORT2}", str(second.server_port)) if second else v
+    for pair in args.cfg_env_json:
+        k, _, v = pair.partition("=")
+        config_settings["env"][k] = json.loads(v)
     claude = os.environ.get("CLAUDE") or str(Path.home() / ".local/bin/claude")
     argv = [claude]
     if args.bare:
