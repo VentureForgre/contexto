@@ -237,6 +237,15 @@ def test_the_last_run_of_a_resumed_session_is_counted_apart(tmp_path):
 
 # A damaged log ---------------------------------------------------------------------------------------
 
+def test_lines_that_only_parse_when_joined_are_still_damaged_lines(tmp_path):
+    """A healthy log is parsed in one call; these lines parse that way and not on their own."""
+    write_log(tmp_path, "d2", [*launch(0), request(1, tokens=9_000), '{"event": "request", "x": [1', "2]}",
+                               '{"event": "exit"}, {"event": "transform_error"}', "1, 2"])
+    out = session_stats(tmp_path, "d2")
+    assert out["log"] == {"missing": False, "lines": 7, "unreadable_lines": 4}
+    assert out["requests"]["model"] == 1 and out["faults"]["total"] == 0
+
+
 def test_a_damaged_log_is_read_as_far_as_it_goes(tmp_path):
     good = request(2, tokens=9_000)
     cut = json.dumps(request(3, tokens=99_000))[:120]  # a line a full disk cut short
@@ -460,7 +469,7 @@ def test_a_fault_nothing_else_warned_about_outlives_quiet(tmp_path):
                "its designed path. Details: contexto stats w1")
     assert exit_summary(tmp_path, "w1", "claude", 5.0, quiet=True) == [warning]
     loud = exit_summary(tmp_path, "w1", "claude", 5.0)
-    assert loud[0] == "contexto: session w1 ended after 5s" and loud[-1] == warning
+    assert loud[0] == "contexto: run of session w1 ended after 5s" and loud[-1] == warning
     assert ("  faults      3 events (mcp_tools_missing 1, retained_stale 1, transform_error 1); details: contexto "
             "stats w1") == loud[-2]
     # A run whose only faults the launcher's own warnings described adds no second warning.

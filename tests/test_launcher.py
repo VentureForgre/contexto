@@ -504,7 +504,7 @@ def test_start_warning_depends_on_bound_and_assumed_overhead(env, upstream, tmp_
     assert "run from 13,322 to 18,403" in codex and "28,000" not in codex
     assert assumed_overhead({}) == ASSUMED_OVERHEAD_DEFAULT
     assert assumed_overhead({"OPENRIG_SESSION_NAME": "x"}) == ASSUMED_OVERHEAD_OPENRIG
-    quiet = launch(env, "--upstream", upstream, "--session", "w1", "claude", cwd=tmp_path)
+    quiet = launch(env, "--quiet", "--upstream", upstream, "--session", "w1", "claude", cwd=tmp_path)  # D64: no summary
     _, err = quiet.communicate(timeout=30)
     assert err.count("contexto:") == 1  # only the session line
     noisy = launch(env, "--upstream", upstream, "--bound", "70000", "--session", "w2", "claude", cwd=tmp_path)

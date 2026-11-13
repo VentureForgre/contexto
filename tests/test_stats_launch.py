@@ -83,7 +83,7 @@ def test_a_run_ends_with_a_summary_and_the_resume_line_stays_last(env, upstream,
     done = run(env, "--upstream", upstream, "--session", "s1", "claude", "-p", "hello", cwd=tmp_path)
     assert done.returncode == 3, done.stderr  # the CLI's own code, summary or not
     lines = summary(done.stderr)
-    assert lines[0].startswith("contexto: session s1 ended after ") and lines[0].split()[-1].endswith("s")
+    assert lines[0].startswith("contexto: run of session s1 ended after ") and lines[0].split()[-1].endswith("s")
     # The stub upstream reports 5 input tokens: a measured number, shown against the bound.
     assert lines[1] == "  prompt      peak 5 of 150,000 tokens (measured); over the bound: 0 requests"
     assert "  cache       0% of input tokens read from cache (measured)" in lines
@@ -92,6 +92,8 @@ def test_a_run_ends_with_a_summary_and_the_resume_line_stays_last(env, upstream,
     assert not [line for line in lines if line.startswith(("  paged out", "  recall", "  faults"))]
     err = done.stderr
     assert err.index("claude-still-running") < err.index(lines[0])  # after the CLI released the terminal
+    # One line starts as the session line does, as before: scripts and tests read the id from it.
+    assert [line for line in err.splitlines() if line.startswith("contexto: session ")] == [err.splitlines()[0]]
     assert err.splitlines()[-1].startswith("contexto: resume this conversation through Contexto with: ")
     assert done.stdout == ""
 
@@ -122,7 +124,7 @@ def test_a_run_whose_cli_sent_no_model_request_says_so_in_one_line(env, upstream
     done = run(env, "--upstream", upstream, "--session", "n1", "claude", "-p", "hello", cwd=tmp_path)
     assert done.returncode == 4, done.stderr
     [line] = summary(done.stderr)
-    assert line.startswith("contexto: session n1 ended after ")
+    assert line.startswith("contexto: run of session n1 ended after ")
     assert "with no model request through Contexto (nothing reached the proxy)" in line
     assert "If you sent claude a prompt, it bypassed Contexto" in line and "docs/stats.md" in line
     assert "warning" not in done.stderr
@@ -137,7 +139,7 @@ def test_a_resumed_session_s_summary_covers_this_run_only(env, upstream, tmp_pat
     third = run(dict(env, FAKE_REQUEST="1"), "--upstream", upstream, "--session", "r1", "claude", "-p", "c",
                 cwd=tmp_path)
     lines = summary(third.stderr)
-    assert lines[0].endswith("(this run; `contexto stats r1` has all 3)") and "peak 5 of" in lines[1]
+    assert lines[0].endswith(" (`contexto stats r1` shows all 3 runs)") and "peak 5 of" in lines[1]
     whole = session_stats(Path(env["CONTEXTO_HOME"]), "r1")
     assert whole["runs"] == 3 and whole["requests"]["model"] == 2
 
@@ -472,7 +474,7 @@ def test_codex_ends_with_a_summary_too(tmp_path, monkeypatch, codex_bin, token_u
     code, err = codex_run(monkeypatch, token_upstream, "cx1", responses_request, "exec", "hi")
     assert code == 5
     lines = summary(err)
-    assert lines[0].startswith("contexto: session cx1 ended after ")
+    assert lines[0].startswith("contexto: run of session cx1 ended after ")
     tokens = TokenUpstream.received[0] // 4
     assert lines[1] == f"  prompt      peak {tokens:,} of 150,000 tokens (measured); over the bound: 0 requests"
     assert "  cache       50% of input tokens read from cache (measured)" in lines

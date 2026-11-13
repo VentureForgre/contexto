@@ -113,20 +113,22 @@ def log_lines(directory: Path) -> tuple[list[dict[str, Any]], int, bool]:
         data = read_regular(Path(directory) / "log.jsonl")
     except OSError:
         return [], 0, True
-    events, unreadable = [], 0
-    for line in data.split(b"\n"):
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except (ValueError, RecursionError):  # cut short by a full disk, not UTF-8, or nested too deep
-            unreadable += 1
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-        else:
-            unreadable += 1
-    return events, unreadable, False
+    lines = [line for line in data.split(b"\n") if line.strip()]
+    try:
+        # A healthy log parses in one call, about twice as fast as a call per line (docs/stats.md). Any
+        # damaged line fails it, or changes the number of values, and the log is then read line by line.
+        parsed = json.loads(b"[" + b",".join(lines) + b"]")
+    except (ValueError, RecursionError):
+        parsed = None
+    if parsed is None or len(parsed) != len(lines):
+        parsed = []
+        for line in lines:
+            try:
+                parsed.append(json.loads(line))
+            except (ValueError, RecursionError):  # cut short by a full disk, not UTF-8, or nested too deep
+                parsed.append(None)
+    events = [event for event in parsed if isinstance(event, dict)]
+    return events, len(parsed) - len(events), False
 
 
 def store_fault_cause(failure: dict[str, Any]) -> str:
@@ -709,14 +711,15 @@ def exit_summary(home: Path, session_id: str, cli: str, elapsed_s: float, *, qui
     any, then one warning line for the faults no earlier warning described (``NOTICED_EVENTS``).
     ``quiet`` drops the summary and keeps the warning."""
     out = session_stats(home, session_id, last_run=True)
-    head = f"contexto: session {session_id} ended after {duration_text(elapsed_s)}"
+    # Not "contexto: session ...": that is how the one line printed at start begins, and scripts read it.
+    head = f"contexto: run of session {session_id} ended after {duration_text(elapsed_s)}"
     requests = out["requests"]
     others = requests["other"] + requests["count_tokens"]
     lines: list[str] = []
     if quiet:
         pass
     elif requests["model"]:
-        more = f" (this run; `contexto stats {session_id}` has all {out['runs']})" if out["runs"] > 1 else ""
+        more = f" (`contexto stats {session_id}` shows all {out['runs']} runs)" if out["runs"] > 1 else ""
         lines += [head + more, *render(out, brief=True)]
         if log_incomplete:
             lines.append("  (the session log could not be written at times, so these numbers are low)")

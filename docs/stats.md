@@ -11,7 +11,7 @@ counted as a fault and why.
 ## The exit summary
 
 ```
-contexto: session 7f3a9c2e41d84b0c9a6f0e1d2c3b4a59 ended after 6h12m
+contexto: run of session 7f3a9c2e41d84b0c9a6f0e1d2c3b4a59 ended after 6h12m
   prompt      peak 148,210 of 150,000 tokens (measured); over the bound: 0 requests
   paged out   212 turns in 9 rotations; 215 pages on disk, about 1.9M tokens (an estimate made when each was paged)
   recall      14 recall, 31 search, 6 pin calls; about 85k tokens read back (an estimate); 2 obligations open
@@ -24,10 +24,13 @@ contexto: resume this conversation through Contexto with: contexto run --session
 
 - It is printed on stderr after the CLI has exited and given the terminal back, after any warning
   that was held while the CLI ran, and before the line that says how to resume.
+- Its first line starts `contexto: run of session`. Only the line printed at start begins
+  `contexto: session`, as before, so a script that reads the session id from that line still finds
+  one.
 - **It covers this run only.** A run is the log from one proxy start to the next, so the summary of a
   resumed session (`contexto run --session ID ...`, `claude --resume`, `claude --continue`) counts
-  what happened since this launch, and its header then ends with ``(this run; `contexto stats ID` has
-  all N)``. The two store numbers, pages on disk and open obligations, are the session's as it
+  what happened since this launch, and its header then ends with ``(`contexto stats ID` shows all N
+  runs)``. The two store numbers, pages on disk and open obligations, are the session's as it
   stands: a store has no runs. `contexto stats ID` shows the whole session and
   `contexto stats ID --last-run` shows what the summary showed.
 - A line appears only when the log holds its data. A run that paged nothing has no `paged out`
@@ -44,7 +47,7 @@ contexto: resume this conversation through Contexto with: contexto run --session
 ### No model request
 
 ```
-contexto: session 7f3a... ended after 41s with no model request through Contexto (nothing reached the proxy). If you sent claude a prompt, it bypassed Contexto and nothing was bounded or paged: see docs/stats.md, 'No model request'.
+contexto: run of session 7f3a... ended after 41s with no model request through Contexto (nothing reached the proxy). If you sent claude a prompt, it bypassed Contexto and nothing was bounded or paged: see docs/stats.md, 'No model request'.
 ```
 
 The CLI started and exited, and the log holds no `POST` to `/v1/messages` or `/responses` for this
