@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from contexto import cli
-from contexto.bench import charts, report
+from contexto.bench import charts, records, report
 from test_bench_records import ARMS, MODEL, SMALL_BOUND, make_run
 
 SVG = "{http://www.w3.org/2000/svg}"
@@ -316,8 +316,9 @@ def test_chart_mode_on_a_replay_file_says_there_is_no_accuracy_chart(tmp_path, c
 @pytest.mark.parametrize("content, words", [
     (None, "cannot read the file"),
     ("{", "not JSON"),
-    ('{"format": 1}', "not a bench results file"),
-    ('{"request_series": {}, "kind": "replay"}', "no request_series with points"),
+    ('{"format": 1, "kind": "live", "bound": 100}', "field 'request_series': missing: not a bench results file"),
+    ('{"format": 1, "request_series": {}, "kind": "replay", "bound": 100}', "no request_series with points"),
+    ('{"format": 2, "request_series": {}, "kind": "replay", "bound": 100}', "field 'format': this version reads"),
 ])
 def test_chart_mode_exits_1_for_a_file_it_cannot_draw(tmp_path, capsys, content, words):
     path = tmp_path / "results.json"
@@ -327,3 +328,122 @@ def test_chart_mode_exits_1_for_a_file_it_cannot_draw(tmp_path, capsys, content,
     captured = capsys.readouterr()
     assert captured.err.startswith("contexto bench: error: ") and words in captured.err
     assert not (tmp_path / "charts").exists()
+
+
+# A results file that is damaged: an error that names the file and the field, never a traceback
+
+
+def _set(path: str, value):
+    """A change to a results dict: set the value at a dotted path (a number is a list index)."""
+    def change(results: dict) -> None:
+        *parents, last = [int(part) if part.isdigit() else part for part in path.split(".")]
+        target = results
+        for part in parents:
+            target = target[part]
+        if value is _MISSING:
+            del target[last]
+        else:
+            target[last] = value
+    return change
+
+
+_MISSING = object()
+_POINTS = "request_series.contexto.points"
+DAMAGE = [
+    (_set(_POINTS, [[1, 2, 3]]), "request_series.contexto.points[0]", "expected a pair"),
+    (_set(_POINTS, [[1]]), "request_series.contexto.points[0]", "expected a pair"),
+    (_set(_POINTS, [["a", "b"]]), "request_series.contexto.points[0][0]", "expected a number"),
+    (_set(_POINTS, "abc"), "request_series.contexto.points", "expected a list"),
+    (_set(_POINTS, [[None, None]]), "request_series.contexto.points[0][0]", "expected a number"),
+    (_set(_POINTS, [{"h": 1}]), "request_series.contexto.points[0]", "expected a pair"),
+    (_set(_POINTS, [[True, 2]]), "request_series.contexto.points[0][0]", "expected a number"),
+    (_set(_POINTS, [[1, -2]]), "request_series.contexto.points[0][1]", "expected a number from 0 to"),
+    (_set(_POINTS, [[1, 10 ** 400]]), "request_series.contexto.points[0][1]", "expected a number from 0 to"),
+    (_set("request_series.contexto.basis", "guessed"), "request_series.contexto.basis", "expected one of"),
+    (_set("request_series.contexto.basis", _MISSING), "request_series.contexto.basis", "missing"),
+    (_set("request_series.contexto.label", 7), "request_series.contexto.label", "expected a string or null"),
+    (_set("request_series.contexto", "a line"), "request_series.contexto", "expected an object"),
+    (_set("request_series", [1]), "request_series", "expected an object"),
+    (_set("bound", 0), "bound", "expected 1 or more"),
+    (_set("bound", -5), "bound", "expected 1 or more"),
+    (_set("bound", True), "bound", "expected a whole number"),
+    (_set("bound", 1.5), "bound", "expected a whole number"),
+    (_set("bound", _MISSING), "bound", "missing"),
+    (_set("kind", "dream"), "kind", "expected one of"),
+    (_set("notes", "one note"), "notes", "expected a list"),
+    (_set("notes", [1]), "notes[0]", "expected a string"),
+    (_set("manifest", [1]), "manifest", "expected an object or null"),
+    (_set("manifest", {"seeds": 5}), "manifest.seeds", "expected a list"),
+    (_set("manifest", {"model": 5}), "manifest.model", "expected a string or null"),
+    (_set("manifest", {"label": "x" * 500}), "manifest.label", "expected 200 characters or fewer"),
+    (_set("arms.contexto", "an arm"), "arms.contexto", "expected an object"),
+    (_set("arms", [1]), "arms", "expected an object"),
+    (_set("arms.contexto.interval", None), "arms.contexto.interval", "expected a pair"),
+    (_set("arms.contexto.interval", [0.5]), "arms.contexto.interval", "expected a pair"),
+    (_set("arms.contexto.interval", [0.9, 0.5]), "arms.contexto.interval", "the lower end is above the upper"),
+    (_set("arms.contexto.accuracy", _MISSING), "arms.contexto.accuracy", "missing"),
+    (_set("arms.contexto.accuracy", "0.9"), "arms.contexto.accuracy", "expected a number"),
+    (_set("arms.contexto.accuracy", 1.7), "arms.contexto.accuracy", "expected a number from 0 to 1"),
+    (_set("arms.contexto.probes", "100"), "arms.contexto.probes", "expected a whole number"),
+    (_set("arms.contexto.correct", 101), "arms.contexto.correct", "expected 100 or less"),
+    (_set("arms.contexto.by_class", [1]), "arms.contexto.by_class", "expected an object"),
+    (_set("arms.contexto.by_class.chain.interval", [0.1]), "arms.contexto.by_class.chain.interval", "expected a pair"),
+    (_set("by_model", {"m": 5}), "by_model.m", "expected an object"),
+    (_set("by_model", {"m": {"arms": {"contexto": 1}}}), "by_model.m.arms.contexto", "expected an object"),
+]
+
+
+def damaged_results() -> dict:
+    return {**line_results(), "arms": accuracy_results()["arms"], "manifest": None, "by_model": None}
+
+
+def test_a_sound_results_file_is_read_as_it_is(tmp_path):
+    path = tmp_path / "results.json"
+    results = damaged_results()
+    results["arms"]["full"] = {"probes": 0, "correct": 0, "accuracy": None, "interval": None, "by_class": {}}
+    path.write_text(json.dumps(results), encoding="utf-8")
+    assert records.read_results(path) == results
+    live = report.build([make_run(tmp_path / "run")])
+    path.write_text(json.dumps(live), encoding="utf-8")
+    assert records.read_results(path) == live
+
+
+@pytest.mark.parametrize("change, field, problem", DAMAGE, ids=[f"{i}-{d[1]}" for i, d in enumerate(DAMAGE)])
+def test_chart_mode_names_the_field_of_a_damaged_results_file(tmp_path, capsys, change, field, problem):
+    results = damaged_results()
+    change(results)
+    path = tmp_path / "results.json"
+    path.write_text(json.dumps(results), encoding="utf-8")
+    with pytest.raises(records.RecordError) as exc:
+        records.read_results(path)
+    assert exc.value.field == field and problem in exc.value.problem
+    assert cli.main(["bench", "--chart", str(path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and "Traceback" not in captured.err
+    assert captured.err.startswith(f"contexto bench: error: {path}: field '{field}': ")
+    assert len(captured.err.splitlines()) == 1
+    assert not (tmp_path / "charts").exists()
+
+
+@pytest.mark.parametrize("text, field, problem", [
+    ('"points": [[NaN, Infinity]]', "request_series.contexto.points[0][0]", "expected a number"),
+    ('"points": [[1, 2]], "points": [[3, 4]]', "points", "the key appears twice"),
+    ('"points": [[1, 2]], "extra": [NaN]', "request_series.contexto.extra[0]", "not a finite number"),
+    ('"points": [[1, 2]], "extra": "\\ud800"', "request_series.contexto.extra", "not valid Unicode"),
+])
+def test_chart_mode_reads_the_results_file_strictly(tmp_path, capsys, text, field, problem):
+    path = tmp_path / "results.json"
+    path.write_text('{"format": 1, "kind": "live", "bound": 100, "notes": [], "request_series": {"contexto": '
+                    '{"basis": "measured", ' + text + '}}}', encoding="utf-8")
+    assert cli.main(["bench", "--chart", str(path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith(f"contexto bench: error: {path}: field '{field}': ") and problem in captured.err
+    assert "Traceback" not in captured.err and not (tmp_path / "charts").exists()
+
+
+def test_chart_mode_refuses_a_results_file_nested_too_deeply(tmp_path, capsys):
+    path = tmp_path / "results.json"
+    path.write_text('{"format": 1, "request_series": ' + "[" * 200_000, encoding="utf-8")
+    assert cli.main(["bench", "--chart", str(path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith(f"contexto bench: error: {path}: ") and len(captured.err.splitlines()) == 1

@@ -1,8 +1,9 @@
 """Readers and validators for the files of a ``contexto bench`` output directory.
 
-The files are ``manifest.json``, ``probes.jsonl``, ``requests.jsonl`` and ``reach.jsonl``. The live
-run and the replay write them; the report reads them through this module. A reader returns plain
-dicts, exactly as written, after checking every field this package relies on.
+The files are ``manifest.json``, ``probes.jsonl``, ``requests.jsonl``, ``reach.jsonl`` and
+``results.json``. The live run and the replay write them; the report and the charts read them
+through this module. A reader returns plain dicts, exactly as written, after checking every field
+this package relies on.
 
 Three rules:
 
@@ -126,6 +127,24 @@ def _label(value: Any, field: str) -> None:
         raise _Bad(field, f"expected one line of printable characters, got {_show(value)}")
 
 
+def _number(low: float, high: float) -> Check:
+    def check(value: Any, field: str) -> None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _Bad(field, f"expected a number, got {_show(value)}")
+        if not low <= value <= high:  # false for NaN too
+            raise _Bad(field, f"expected a number from {low:,} to {high:,}, got {_show(value)}")
+    return check
+
+
+def _pair_of(item: Check) -> Check:
+    def check(value: Any, field: str) -> None:
+        if not isinstance(value, list) or len(value) != 2:
+            raise _Bad(field, f"expected a pair of numbers, got {_show(value)}")
+        for i, element in enumerate(value):
+            item(element, f"{field}[{i}]")
+    return check
+
+
 def _list_of(item: Check) -> Check:
     def check(value: Any, field: str) -> None:
         if not isinstance(value, list):
@@ -216,6 +235,51 @@ _REACH: dict[str, Check] = {
     "plant_turns": _list_of(_integer(0)), "paged": _boolean, "query": _string(), "reachable": _boolean,
     "rank": _integer(1, nullable=True),
 }
+
+
+# results.json: what the charts read. The rest of the file is the report's own and is not checked here.
+
+_SHARE = _number(0, 1)
+_SERIES = _object({"basis": _choice(*BASES), "points": _list_of(_pair_of(_number(0, LARGEST)))},
+                  optional={"label": _string(nullable=True)})
+_RESULTS_MANIFEST = _object({}, nullable=True, optional={
+    "model": _string(nullable=True), "protocol": _string(nullable=True), "seed": _integer(0, nullable=True),
+    "seeds": _or_null(_list_of(_integer(0))), "contexto_version": _string(nullable=True),
+    "claude_code_version": _string(nullable=True), "label": _label})
+
+
+def _cell(nested: bool) -> Check:
+    """An accuracy cell: ``probes``, ``correct``, ``accuracy`` and ``interval``, the last two null
+    when no probe was asked. An arm's cell also holds ``by_class``, a cell per probe class."""
+    def check(value: Any, field: str) -> None:
+        if not isinstance(value, dict):
+            raise _Bad(field, f"expected an object, got {_show(value)}")
+        _fields(value, {"probes": _integer(0), "correct": _integer(0)}, f"{field}.")
+        if value["correct"] > value["probes"]:
+            raise _Bad(f"{field}.correct", f"expected {value['probes']} or less (the number of probes), got "
+                                           f"{value['correct']}")
+        if value["probes"] or value.get("accuracy") is not None or value.get("interval") is not None:
+            _fields(value, {"accuracy": _SHARE, "interval": _pair_of(_SHARE)}, f"{field}.")
+            if value["interval"][0] > value["interval"][1]:
+                raise _Bad(f"{field}.interval", f"the lower end is above the upper, got {_show(value['interval'])}")
+        if nested and value.get("by_class") is not None:
+            _map_of(_cell(nested=False))(value["by_class"], f"{field}.by_class")
+    return check
+
+
+_ARMS = _or_null(_map_of(_cell(nested=True)))
+_RESULTS: dict[str, Check] = {"format": _format, "kind": _choice(*KINDS), "bound": _integer(1)}
+_RESULTS_OPTIONAL: dict[str, Check] = {
+    "notes": _or_null(_list_of(_string())), "manifest": _RESULTS_MANIFEST, "arms": _ARMS,
+    "by_model": _or_null(_map_of(_object({}, optional={"arms": _ARMS, "request_series": _or_null(_map_of(_SERIES))}))),
+}
+
+
+def _check_results(data: dict[str, Any]) -> None:
+    if "request_series" not in data:
+        raise _Bad("request_series", "missing: not a bench results file")
+    _map_of(_SERIES)(data["request_series"], "request_series")
+    _fields(data, _RESULTS, optional=_RESULTS_OPTIONAL)
 
 
 def _check_request(record: dict[str, Any]) -> None:
@@ -327,6 +391,20 @@ def read_manifest(path: Path | str) -> dict[str, Any]:
     """Read and check ``manifest.json``, of a live run or of a replay."""
     path = Path(path)
     return _parse(path, _text(path), lambda data: _fields(data, _MANIFEST, optional=_MANIFEST_OPTIONAL))
+
+
+def read_results(path: Path | str) -> dict[str, Any]:
+    """Read ``results.json``, of a live run or of a replay, and check what the charts read from it.
+
+    Checked: ``format``, ``kind`` and ``bound`` (1 or more); ``request_series`` (each series'
+    ``basis``, its ``label`` when it has one, and ``points`` as pairs of numbers from 0 to
+    10^12); ``notes`` as a list of strings; the manifest fields a chart prints; and for a live
+    file each arm's accuracy cell, overall and by class, under ``arms`` and under ``by_model``:
+    whole numbers of probes, ``correct`` no larger than ``probes``, ``accuracy`` and both ends of
+    ``interval`` from 0 to 1. The rest of the file is returned as it is.
+    """
+    path = Path(path)
+    return _parse(path, _text(path), _check_results)
 
 
 def read_probes(path: Path | str) -> list[dict[str, Any]]:

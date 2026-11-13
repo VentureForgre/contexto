@@ -8,7 +8,6 @@ charts go into ``charts/`` beside it, or into ``OUT/charts/`` when ``--out`` is 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -23,20 +22,13 @@ def add_arguments(parser) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    from contexto.bench import charts
+    from contexto.bench import charts, records
 
     source = Path(args.chart)
     try:
-        results = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError) as exc:
-        print(f"contexto bench: error: {source}: cannot read the file: {exc}", file=sys.stderr)
-        return 1
-    except ValueError as exc:
-        print(f"contexto bench: error: {source}: not JSON ({exc})", file=sys.stderr)
-        return 1
-    if not isinstance(results, dict) or "request_series" not in results:
-        print(f"contexto bench: error: {source}: not a bench results file (it has no request_series)",
-              file=sys.stderr)
+        results = records.read_results(source)
+    except records.RecordError as exc:
+        print(f"contexto bench: error: {exc}", file=sys.stderr)
         return 1
     target = (Path(args.out) if args.out is not None else source.parent) / "charts"
     try:
