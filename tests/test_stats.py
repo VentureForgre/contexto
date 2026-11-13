@@ -572,8 +572,8 @@ def test_stats_of_a_six_hour_log_is_fast(tmp_path):
     assert out["requests"]["model"] == 4_000 and out["paging"]["rotations"] == 200 and out["span_seconds"] == 21_600
     assert out["paging"]["turns_paged"] == 1_200
     assert out["tools"]["recall"]["calls"] + out["tools"]["search"]["calls"] == 445
-    # Measured at 54 ms on a loaded laptop, 1.1 times a plain json.loads of the same lines (docs/stats.md);
-    # the limit only catches a change that makes it many times slower, on any CI machine.
+    # Measured at about 50 ms on a loaded laptop, half of it JSON parsing (docs/stats.md); the limit only
+    # catches a change that makes it many times slower, on any CI machine.
     assert elapsed < 2.0, f"{elapsed * 1000:.0f} ms"
 
 

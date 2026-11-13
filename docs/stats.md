@@ -374,10 +374,14 @@ Events that are **not** counted, because they happen in normal use:
 ## Speed
 
 `session_stats` reads the whole log once. On a synthetic log shaped like a 6-hour session (4,000
-model requests, 200 rotations, 445 tool calls; 4,449 lines, 2.9 MB) it took 54 ms, against 49 ms for
-`json.loads` on the same lines alone, on a development laptop that was running other test suites at
-the time (load average above 40), so both figures are high. The time is the JSON parsing; it grows
-with the log's size. A page file is read at its last 96 bytes only, where the token estimate is.
+model requests, 200 rotations, 445 tool calls; 4,449 lines, 2.9 MB) it took 46 ms for the log alone
+and 55 ms with the ledger and pages (best of 15 runs each), of which parsing the JSON was 24 ms.
+That was on a development laptop running several other test suites at the time (load average 23 to
+58), so the figures are high. The time grows with the log's size.
+
+A healthy log is parsed with one `json.loads` call (27 ms on that log, against 42 ms for one call
+per line). A damaged line fails that parse, and the log is then read line by line. A page file is
+read at its last 96 bytes only, where the token estimate is.
 
 ## Calling it from code
 
