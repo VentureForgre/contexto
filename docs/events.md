@@ -145,7 +145,9 @@ not in its counts.
    [`pruned_while_opening`](#pruned_while_opening)) and
    [`affinity_salt_unavailable`](#affinity_salt_unavailable), when there are any.
 2. [`proxy_start`](#proxy_start). Every run whose proxy started has one, and no line of the kinds
-   below comes before it, so split a log into runs at `proxy_start`, not at `launch`.
+   below comes before it, so find a run by its `proxy_start`, not by its `launch`. The lines of
+   step 1 come before it: a line between one run's `exit` and the next `proxy_start` belongs to the
+   next run, or to no run (the end of this section).
 3. [`engine_unavailable`](#engine_unavailable) and [`watchdog_unavailable`](#watchdog_unavailable),
    when they apply, then [`launch`](#launch), [`cli_version_check`](#cli_version_check) and
    [`window_budget_warning`](#window_budget_warning) when it applies.
@@ -158,10 +160,12 @@ A launch that fails after the proxy started writes `proxy_start`, `proxy_stop` a
 `launch` between them. `contexto run codex` does so when it cannot build Codex's configuration (no
 key helper, for example); it then removes a session that this launch created, log included, so
 those three lines are found only in a session that already existed. A launcher that is killed
-(SIGKILL) writes no `proxy_stop` and no `exit`, so a run can also end at the next `proxy_start` or
-at the end of the file. `contexto proxy`, which runs the proxy alone, writes `proxy_start` and
-`proxy_stop` and neither `launch` nor `exit`. A store line can also be written outside any run, by a
-`contexto` command that opens the session (`contexto recall`, for example).
+(SIGKILL) writes no `proxy_stop` and no `exit`, so a run can also end where the next run's lines
+begin (its step 1 lines, then its `proxy_start`) or at the end of the file. `contexto proxy`, which
+runs the proxy alone, writes neither `launch` nor `exit`: stopped with Ctrl+C it writes
+`proxy_start` and `proxy_stop`, and ended by SIGTERM it writes `proxy_start` alone. A store line can
+also be written outside any run, by a `contexto` command that opens the session (`contexto recall`,
+for example).
 
 **Credentials.** The value of any key named `authorization`, `x-api-key`, `cookie`, `set-cookie` or
 `proxy-authorization` (in any letter case, at any depth) is replaced by `[redacted]` before the line
@@ -216,7 +220,8 @@ The launcher starts a session:
 ```
 
 A request at a turn start that rotated. The engine paged 7 turns out (`page_out`), started epoch 2
-(`rotation`), and sent 24 of the CLI's 61 messages (its `request` event). The conversation was in
+(`rotation`), and sent 24 messages in place of the CLI's 61: the 23 it kept and one preamble message
+(its `request` event). The conversation was in
 epoch 1 with 9 turns paged already, so `estimate`, 126,480 tokens, is the size of what epoch 1 would
 have sent, not of the CLI's 492,310 bytes. Most `request` lines carry only that last nested event:
 
@@ -253,12 +258,14 @@ The model reads a paged turn back:
 - **Conversation**: one message history. The engine tells conversations apart by their first
   prompt. The **main conversation** is the one the user is in; subagents and the CLI's side requests
   (a title, for example) are other conversations in the same session. No line names its conversation.
-  The nested `request` event's `main` says whether a line belongs to the main one.
+  The nested `request` event's `main` says whether the engine took the line's conversation for the
+  main one when it sent the request.
 - **Turn**: a user prompt and everything up to the next one. A **turn start** is a request whose
-  newest turn has no assistant message yet. The engine pages only at turn starts.
+  newest turn has no assistant message yet. The engine pages at turn starts. The one exception is a
+  [`resync`](#resync) with `paged_changed`, which pages at whatever request finds the change.
 - **Tool loop**: the requests of a turn after its turn start. The model called a tool, and the CLI
-  sends the result back with the turn so far. The engine never pages inside a tool loop, so a turn
-  that grows there can pass the bound.
+  sends the result back with the turn so far. The engine does not page inside a tool loop to make
+  room, so a turn that grows there can pass the bound.
 - **Epoch**: the stretch between two rotations of one conversation. Within an epoch the prompt
   prefix does not change, so the prompt cache can be read. `epoch` counts from 0.
 - **`k`**: the index, in the CLI's message list, of the first message still sent. Messages before `k`
@@ -298,6 +305,11 @@ a separate state for each conversation, and each run starts a new engine. So:
   in the run has [`epoch_resumed`](#epoch_resumed). With [`epoch_not_resumed`](#epoch_not_resumed)
   the conversation starts again at epoch 0 with nothing counted as paged. Its next rotation pages it
   from its first turn again (`first_turn` 0) and reports those turns again.
+- Every other conversation starts again at epoch 0 in a new run: the record holds the main
+  conversation alone. Its first request has `epoch_not_resumed` only until the run has used the
+  record or found none. After that it has neither event, and its first rotation still has
+  `first_turn` 0. So the absence of `epoch_not_resumed` does not mean a conversation carried its
+  counters over.
 - A [`resync`](#resync) with `paged_changed` pages everything before the current turn again within
   one run, and counts those turns again in `turns_paged`.
 - The store keeps one page per page id, and a turn paged again with the same turn number and the
@@ -313,6 +325,11 @@ A tool that reads a log must not:
   `pages` in `contexto sessions show --json`, which counts the store.
 - compare `epoch` or `k` between two lines unless they are the same conversation in the same run.
 
+No total of turns or pages paged can be derived from the log alone, because no line names its
+conversation: a turn that is paged again after a restart or a resync cannot be matched to its
+earlier paging, and the lines of two conversations with `main: false` cannot be told apart. Only
+the main conversation can be followed, as the last point below says.
+
 It can rely on this:
 
 - Each `rotation` event is one rotation, and each [`page_out`](#page_out) belongs to the `rotation`
@@ -320,8 +337,13 @@ It can rely on this:
 - A `page_out`'s `first_turn + turns` is the `turns_paged` of its `rotation`.
 - Within one run (from a [`proxy_start`](#proxy_start) to the next), the lines whose nested
   `request` event has `main: true` belong to one conversation until a line with a
-  [`main_changed`](#main_changed) event, which is the first line of the new main conversation. On
-  the lines of one conversation in one run, `epoch` rises by one at each `rotation`.
+  [`main_changed`](#main_changed) or an [`epoch_resumed`](#epoch_resumed) event. That line is the
+  first on which the new conversation is main. With `main_changed` the conversation can have
+  earlier lines in the run, with `main: false`. The `epoch_resumed` case: after a restart a side
+  request often arrives before the main conversation's next prompt. Its line has `main: true` and
+  `epoch` 0, and the line with `epoch_resumed` that follows is the recorded main conversation at
+  its recorded epoch, with no `main_changed`. On the lines of one conversation in one run, `epoch`
+  rises by one at each `rotation`.
 
 ### Reading an entry
 
@@ -354,6 +376,9 @@ Some requests have no `request` line:
 - A request that ended in a [`proxy_error`](#proxy_error) with `fallback` `local_502` or `none`.
 - A request still in flight when the proxy stopped
   ([`proxy_stop_incomplete`](#proxy_stop_incomplete)).
+- A request with a method the proxy does not handle (`TRACE` or `CONNECT`; it handles `GET`, `POST`,
+  `PUT`, `PATCH`, `DELETE`, `HEAD` and `OPTIONS`). The HTTP server answers 501 and nothing is
+  logged.
 
 A request with malformed framing (a bad `Content-Length` or chunk size) is not forwarded either. Its
 `request` line has only `method`, `path`, `status` 400 and `error`.
@@ -371,7 +396,7 @@ What the proxy did with the request before sending it:
 | A model request the engine transformed: `POST` to `/v1/messages`, `/responses` or `/v1/responses` | yes | yes | yes |
 | `POST /v1/messages/count_tokens` | yes | yes | yes; `transform_events` holds only [`count_tokens`](#count_tokens) |
 | With `transform_skipped` | yes | no | no |
-| With `transform_error` set to a class name (the engine raised) | yes | yes | no; `over_bound` only when a `usage_events` item sets it |
+| With `transform_error` set to a class name (the engine raised) | yes | yes | no, except that a line with `usage_events` also has `over_bound`, true or false |
 | With `transform_error` set to `serialize: <class>` | yes | yes | yes |
 | With `fallback: true` | no | no | no |
 | Any other method or path, passed through (Claude Code's `HEAD /api/hello`, for example) | no | no | no |
@@ -389,7 +414,9 @@ How the exchange ended:
 first row of the first table and its two `transform_error` rows) and was answered with a 2xx status.
 A `count_tokens` line never has them, and its `usage` is null: that response holds a count and no
 usage object. A line with `fallback: true` has no `api`, so its response is read as a Messages API
-response: for Codex its `usage` is null and it has no end fields.
+response. For a Codex stream its `usage` is null and it has no end fields. A Codex response with a
+JSON body (an error, for example) can have `error_type`, and a `usage` with the four Messages API
+keys when the body holds a usage object.
 
 Every request:
 
@@ -456,8 +483,11 @@ Only when something unusual happened:
   decoded it and sent it on uncompressed.
 - `wire_request_bytes`: the compressed body's size as received.
 - `transform_skipped`: the request was forwarded without a transform, and why: its body is not JSON,
-  is not an object, nests deeper than 512 levels (then with a
-  [`request_too_deep`](#request_too_deep) line), or cannot be serialized.
+  is not an object, or nests deeper than 512 levels (then with a
+  [`request_too_deep`](#request_too_deep) line). The code has a fourth value,
+  `cannot serialize request: <class>`, for a transform that may change its input. Neither transform
+  Contexto ships is one, so it does not occur; if it did, the line would also have `model`, `stream`
+  and `original_message_count`.
 - `transform_error`: the engine raised, or produced a request that cannot be serialized
   (`serialize: <class>`). The CLI's own request was forwarded. A
   [`transform_error`](#transform_error) line is written too.
@@ -912,11 +942,11 @@ the `transform_events` of the same `request` line.
 
 | The event | Kind | What it means |
 | --- | --- | --- |
-| `estimate` with `in_tool_loop: true` and no `degraded` | notice | The allowed case (contract rule 5). The turn grew past the bound inside a tool loop, where the engine never rotates. The next turn start rotates. |
+| `estimate` with `in_tool_loop: true` and no `degraded` | notice | The allowed case (contract rule 5). The turn grew past the bound inside a tool loop, where the engine does not rotate to make room. The next turn start rotates. |
 | `estimate` with `degraded: true` | problem | A consequence of degraded mode, in which nothing is paged. The fault to look at is the [`store_error`](#store_error) or [`page_conflict`](#page_conflict) that started it. |
 | `estimate` with `in_tool_loop: false` and no `degraded` | problem | Over the bound at a turn start. A [`bound_too_small`](#bound_too_small) or [`pdf_allowance`](#pdf_allowance) on the same line says why. With neither, the rotation's sizing did not hold. |
 | `real`, with an `estimate` event on the same line | that event's kind | The real input confirms the estimate. |
-| `real`, with no `estimate` event on the same line | problem | The estimate was at or under the bound and the real input was over it, so the estimate was low. The log does not say whether the request was inside a tool loop. If the nested `request` event on the line has `degraded: true`, it is a consequence of degraded mode. |
+| `real`, with no `estimate` event on the same line | problem | The real input was over the bound and no estimate said so. Either the estimate was at or under the bound, so it was low, or there was none: `estimate` is null when the usage was not paired with a request, as after a `transform_error`. The log does not say whether the request was inside a tool loop. If the nested `request` event on the line has `degraded: true`, it is a consequence of degraded mode. |
 
 The acceptance harness is stricter than these kinds: it fails a run for any `real` event and for
 any `estimate` event without `in_tool_loop: true`.
@@ -1045,7 +1075,9 @@ Writer: engine. Where: `transform_events`. Kind: normal.
 
 A new engine on an existing session (a proxy restart, `contexto run --session`) continued the main
 conversation's recorded epoch, so the prompt stays as the previous process would have sent it and
-the cache still holds.
+the cache still holds. The resumed conversation is the main one from this line on. When another
+conversation was main before it in the run (a side request that arrived first), no
+[`main_changed`](#main_changed) says so: this event is the only sign.
 
 - `epoch`: the epoch resumed.
 - `k`: its first message still sent.
@@ -1063,12 +1095,12 @@ The kind depends on `reason`:
 
 | `reason` | Kind | What it means |
 | --- | --- | --- |
-| `no_record` | normal | The session has no epoch record. Expected on a new session's first request. The store also reports a record file it cannot read, or one of an unknown version or shape, as no record, so after a restart of a session that had rotated this can mean a damaged `epoch.json`. |
+| `no_record` | normal | The session has no epoch record. Expected on a new session's first request. The store also reports a record file it cannot open or parse, or one of an unknown version or with a field missing or of the wrong type, as no record. So a damaged `epoch.json` normally reads as `no_record`. Suspect that when `no_record` comes in a run that follows one whose main conversation had a turn start, where a record is normally written. |
 | `other_conversation` | normal | The record belongs to another conversation, as at a subagent's or a side request's first request after a restart. The record stays available for its own conversation. |
 | `dialect_changed`, `model_changed`, `settings_changed`, `head_changed` | notice | The session was resumed with the other CLI, another model, other engine settings (`--bound`, for example), or a changed system prompt or tool list. |
 | `preamble_changed` | notice | The recorded pinned state and page index no longer give the recorded preamble, as after an upgrade that changed how the preamble is written. |
 | `history_shorter`, `history_diverged` | notice | The CLI's history is not the recorded one: it is shorter, or differs before the recorded point (a rewind, a compaction, another conversation with the same first prompt). |
-| `unreadable` | problem | The store failed while reading the record, or the engine cannot use what it read (a field missing or of the wrong type). The record is damaged. |
+| `unreadable` | problem | The store raised an error it does not handle while reading the record (a file nested too deeply to parse, for example), or it passed the engine a record the engine cannot use. Rare with the session store, which reports almost every damaged record as `no_record`. |
 | `pages_missing` | problem | The store holds fewer pages than the record says were paged, or cannot list them. Page files were removed, lost or quarantined, so the recorded epoch's page index could not be served. |
 
 - `epoch`: 0.
@@ -1098,7 +1130,8 @@ successful write starts from epoch 0, which costs one rotation.
 
 Writer: engine. Where: `transform_events`. Kind: normal.
 
-Another conversation became the session's main one.
+Another conversation became the session's main one. A conversation that becomes main by resuming
+its recorded epoch has [`epoch_resumed`](#epoch_resumed) and not this event.
 
 - `reason`: `more_turn_starts` (it has more turn starts than the previous main), `new_cli_session`
   (a new Claude Code session id, as after `/clear`), `resumed_cli_session` (`/resume` of a
