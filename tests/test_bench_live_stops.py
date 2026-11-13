@@ -47,7 +47,8 @@ def test_the_first_401_stops_the_whole_run_and_the_same_command_resumes_it(env, 
     manifest = first.manifest
     assert [u["arm"] for u in manifest["units"]] == ["plain"] and manifest["finished"] is None
     unit = manifest["units"][0]
-    assert (unit["status"], unit["stop"], unit["turns_completed"], unit["probe_turns_completed"]) == ("stopped", "auth", 2, 0)
+    assert (unit["status"], unit["stop"]) == ("stopped", "auth")
+    assert (unit["turns_completed"], unit["probe_turns_completed"]) == (2, 0)
     assert "401" in unit["reason"] and unit["requests"] == 3
     assert not (first.out / "probes.jsonl").exists()  # a stopped unit writes no probe lines
     assert [r["status"] for r in first.lines("requests.jsonl")] == [200, 200, 401]  # its requests stay
@@ -135,7 +136,8 @@ def test_the_full_arm_retries_429_529_and_a_dropped_stream_and_nothing_else(env,
     again.fault(400, arm="full", nth=2)
     stopped = bench_stubs.run_bench(env, tmp_path / "b", [script], arms=("full",), bound=BOUND, stub=again)
     unit = stopped.unit("full")
-    assert stopped.code == 1 and (unit["status"], unit["stop"], unit["probe_turns_completed"]) == ("stopped", "api_error", 2)
+    assert stopped.code == 1
+    assert (unit["status"], unit["stop"], unit["probe_turns_completed"]) == ("stopped", "api_error", 2)
     assert "400 (invalid_request_error)" in unit["reason"] and len(again.messages_requests("full")) == 3
 
     forever = stub_for(script)
@@ -207,9 +209,11 @@ def test_a_cli_error_a_cli_exit_and_a_silent_turn_each_stop_one_unit(env, tmp_pa
 
     slow = stub_for(script, delay_s={"plain": 5.0})
     started = time.monotonic()
-    run = bench_stubs.run_bench(env, tmp_path / "b", [script], arms=("plain",), bound=BOUND, stub=slow, turn_timeout=0.5)
+    run = bench_stubs.run_bench(env, tmp_path / "b", [script], arms=("plain",), bound=BOUND, stub=slow,
+                                turn_timeout=0.5)
     plain = run.unit("plain")
-    assert (plain["status"], plain["stop"]) == ("stopped", "timeout") and "turn 1 had no result within" in plain["reason"]
+    assert (plain["status"], plain["stop"]) == ("stopped", "timeout")
+    assert "turn 1 had no result within" in plain["reason"]
     assert time.monotonic() - started < 4.5 and all(child.poll() is not None for child in run.children)
 
     exiting = tmp_path / "exiting"
@@ -253,3 +257,35 @@ def test_ctrl_c_stops_the_children_records_the_unit_and_exits_130(env, tmp_path,
     assert 2 <= len(run.lines("requests.jsonl")) < len(script.turns)
     assert all(child.poll() is not None for child in run.children)
     assert not stub.messages_requests("full")
+
+
+def test_an_environment_key_goes_out_as_x_api_key_only_in_every_arm(env, tmp_path, script):
+    from contexto.bench import credentials as bench_credentials
+
+    credentials = bench_credentials.resolve(None, None, {"ANTHROPIC_API_KEY": bench_stubs.FAKE_KEY})
+    run = bench_stubs.run_bench(env, tmp_path, [script], arms=("full", "plain"), bound=BOUND, credentials=credentials)
+    assert run.code == 0 and run.manifest["credential_source"] == "env"
+    assert {r["arm"] for r in run.stub.requests} == {"full", "plain"}
+    assert all(r["key_ok"] and r["x_api_key"] and not r["bearer"] for r in run.stub.requests)
+    for name in ("manifest.json", "requests.jsonl", "probes.jsonl"):
+        assert bench_stubs.FAKE_KEY not in (run.out / name).read_text(encoding="utf-8")
+    assert bench_stubs.FAKE_KEY not in run.printed and bench_stubs.FAKE_KEY not in str(run.commands)
+    settings = (run.work / "plain-3-0-0" / "claude-config" / "settings.json").read_text(encoding="utf-8")
+    assert "apiKeyHelper" not in settings and bench_stubs.FAKE_KEY not in settings
+
+
+def test_the_report_is_written_at_the_end_when_this_build_has_the_report_code(env, tmp_path, script, monkeypatch):
+    import sys
+    import types
+
+    without = bench_stubs.run_bench(env, tmp_path / "a", [script], arms=("full",), bound=BOUND)
+    assert "run 'contexto bench --report out'" in without.printed and without.printed.count("\n") == 2
+    called = []
+    report = types.ModuleType("contexto.bench.report")
+    report.write = called.append
+    monkeypatch.setitem(sys.modules, "contexto.bench.report", report)
+    import contexto.bench
+
+    monkeypatch.setattr(contexto.bench, "report", report, raising=False)
+    having = bench_stubs.run_bench(env, tmp_path / "b", [script], arms=("full",), bound=BOUND)
+    assert called == [having.out] and "--report" not in having.printed

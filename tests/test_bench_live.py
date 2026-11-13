@@ -164,7 +164,7 @@ def test_requests_have_the_shared_fields_and_one_record_per_billed_request(run, 
         assert len(mine) == len(seen) == run.unit(arm)["requests"]
         by_n = sorted(mine, key=lambda r: r["n"])
         assert [(r["uncached"], r["cache_write"], r["cache_read"]) for r in by_n] == [
-            (s["usage"]["input_tokens"], s["usage"]["cache_creation_input_tokens"], s["usage"]["cache_read_input_tokens"])
+            tuple(s["usage"][k] for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
             for s in seen]
         assert [r["turn"] for r in by_n] == [s["turn"] for s in seen]
         assert sum(r["cache_read"] for r in mine) > 0

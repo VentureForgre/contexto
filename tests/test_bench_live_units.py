@@ -1,0 +1,527 @@
+"""The parts of the live benchmark on their own: credentials, the meter, the plan, the full arm's
+requests, and the command line of the live run and ``--dry-run``. No Claude Code and no model."""
+
+from __future__ import annotations
+
+import http.client
+import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+from contexto.bench import credentials as bench_credentials
+from contexto.bench import meter as bench_meter
+from contexto.bench import plan as bench_plan
+from contexto.bench import runner
+from contexto.bench import script as bench_script
+from contexto.bench.arms import ARMS
+from contexto.bench.arms import full as full_arm
+from contexto.bench.arms import plain as plain_arm
+from contexto.cli import main
+
+KEY = "sk-ant-api03-UNIT-test-key-55aa"
+
+
+# -- credentials -------------------------------------------------------------------------------------
+
+
+def test_the_key_comes_from_the_environment_a_helper_or_a_settings_file(tmp_path):
+    env = bench_credentials.resolve(None, None, {"ANTHROPIC_API_KEY": f" {KEY}\n"})
+    assert (env.source, env.key(), env.headers()) == ("env", KEY, {"x-api-key": KEY})
+    assert env.child_env() == {"ANTHROPIC_API_KEY": KEY} and env.claude_settings() == {}
+
+    helper = bench_credentials.resolve(f"printf %s {KEY}", None, {"ANTHROPIC_API_KEY": "the-option-outranks-this"})
+    assert (helper.source, helper.key()) == ("helper", KEY)
+    assert helper.headers() == {"x-api-key": KEY, "authorization": f"Bearer {KEY}"}
+    assert helper.child_env() == {bench_credentials.HELPER_VAR: f"printf %s {KEY}"}
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"apiKeyHelper": f"echo {KEY}"}), encoding="utf-8")
+    from_file = bench_credentials.resolve(None, settings, {})
+    assert (from_file.source, from_file.key()) == ("settings", KEY)
+    assert from_file.child_env() == {bench_credentials.SETTINGS_VAR: str(settings.resolve())}
+    # The isolated Claude Code settings name the shim, never the command, the path or the key.
+    for source in (helper, from_file):
+        shim = source.claude_settings()["apiKeyHelper"]
+        assert shim.endswith("-m contexto.bench.credentials") and KEY not in shim and "settings.json" not in shim
+    assert KEY not in repr(env) and KEY not in repr(helper) and str(settings) not in repr(from_file)
+
+
+def test_a_credential_error_never_shows_the_helpers_output(tmp_path):
+    with pytest.raises(bench_credentials.CredentialError, match="no key"):
+        bench_credentials.resolve(None, None, {})
+    with pytest.raises(bench_credentials.CredentialError, match="not both"):
+        bench_credentials.resolve("true", tmp_path / "x.json", {})
+    with pytest.raises(bench_credentials.CredentialError, match="cannot be read"):
+        bench_credentials.resolve(None, tmp_path / "missing.json", {})
+    empty = tmp_path / "empty.json"
+    empty.write_text("{}", encoding="utf-8")
+    with pytest.raises(bench_credentials.CredentialError, match="no apiKeyHelper"):
+        bench_credentials.resolve(None, empty, {})
+    failing = bench_credentials.resolve(f"echo {KEY}; echo leaked-detail >&2; exit 7", None, {})
+    with pytest.raises(bench_credentials.CredentialError) as caught:
+        failing.key()
+    assert "exit 7" in str(caught.value) and KEY not in str(caught.value) and "leaked" not in str(caught.value)
+    with pytest.raises(bench_credentials.CredentialError, match="failed"):
+        bench_credentials.resolve("true", None, {}).key()  # printed nothing
+
+
+def test_the_shim_claude_code_runs_prints_the_users_helpers_key(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"apiKeyHelper": f"printf %s {KEY}"}), encoding="utf-8")
+    base = {k: v for k, v in os.environ.items() if not k.startswith("CONTEXTO_BENCH_")}
+    for extra in ({bench_credentials.HELPER_VAR: f"printf %s {KEY}"}, {bench_credentials.SETTINGS_VAR: str(settings)}):
+        shim = bench_credentials.Credentials("helper", _helper="unused").claude_settings()["apiKeyHelper"]
+        proc = subprocess.run(["/bin/sh", "-c", shim], env={**base, **extra}, capture_output=True, text=True,
+                              cwd=tmp_path)
+        assert (proc.returncode, proc.stdout.strip()) == (0, KEY), proc.stderr
+    proc = subprocess.run(["/bin/sh", "-c", shim], env=base, capture_output=True, text=True, cwd=tmp_path)
+    assert proc.returncode == 1 and proc.stdout == "" and "no key helper" in proc.stderr
+
+
+# -- the meter ---------------------------------------------------------------------------------------
+
+
+class Upstream(BaseHTTPRequestHandler):
+    """Records what it receives and answers what the test queued."""
+
+    protocol_version = "HTTP/1.1"
+    received: list[dict] = []
+    answer: dict = {}
+    gone = threading.Event()
+
+    def do_POST(self) -> None:  # noqa: N802
+        body = self.rfile.read(int(self.headers.get("content-length") or 0))
+        Upstream.received.append({"method": self.command, "path": self.path, "body": body,
+                                  "headers": {k.lower(): v for k, v in self.headers.items()}})
+        answer = Upstream.answer
+        self.send_response(answer.get("status", 200))
+        for name, value in answer.get("headers", {"content-type": "text/event-stream"}).items():
+            self.send_header(name, value)
+        chunks = answer.get("chunks", [])
+        if answer.get("length"):
+            self.send_header("content-length", str(sum(len(c) for c in chunks)))
+        else:
+            self.send_header("transfer-encoding", "chunked")
+        self.end_headers()
+        try:
+            for chunk in chunks:
+                self.wfile.write(chunk if answer.get("length") else b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                self.wfile.flush()
+                time.sleep(answer.get("pause", 0))
+            if answer.get("hang"):
+                while True:  # a stream that never ends: only the client leaving stops it
+                    self.wfile.write(b"5\r\n: hi\n\r\n")
+                    self.wfile.flush()
+                    time.sleep(0.02)
+            if not answer.get("length"):
+                self.wfile.write(b"0\r\n\r\n")
+        except OSError:
+            Upstream.gone.set()
+
+    do_GET = do_HEAD = do_POST  # noqa: N815
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+def sse(*events: dict) -> list[bytes]:
+    return [f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode() for e in events]
+
+
+USAGE_EVENTS = sse(
+    {"type": "message_start", "message": {"usage": {"input_tokens": 7, "cache_creation_input_tokens": 100,
+                                                    "cache_read_input_tokens": 900, "output_tokens": 1}}},
+    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "OK"}},
+    {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12}},
+    {"type": "message_stop"})
+
+
+@pytest.fixture
+def upstream():
+    Upstream.received, Upstream.answer = [], {"chunks": USAGE_EVENTS}
+    Upstream.gone = threading.Event()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+def metered(upstream: str, tmp_path: Path, budget: int | None = None, arm: str = "plain", **options):
+    ledger = bench_meter.Ledger(tmp_path / "requests.jsonl", budget)
+    meter = bench_meter.Meter(upstream, ledger, arm=arm, seed=5, repeat=1, model="m", history=[10, 20, 30],
+                              bound=500, attempt=2, **options)
+    meter.start()
+    return meter, ledger
+
+
+def post(meter, path: str, body: bytes, headers: dict | None = None) -> tuple[int, dict, bytes]:
+    conn = http.client.HTTPConnection("127.0.0.1", int(meter.url.rsplit(":", 1)[1]), timeout=10)
+    conn.request("POST", path, body=body, headers={"content-type": "application/json", **(headers or {})})
+    response = conn.getresponse()
+    data = response.read()
+    conn.close()
+    return response.status, {k.lower(): v for k, v in response.getheaders()}, data
+
+
+def test_the_meter_forwards_unchanged_and_records_counts_only(upstream, tmp_path):
+    meter, ledger = metered(upstream + "/base", tmp_path)
+    body = json.dumps({"model": "m", "max_tokens": 64, "tools": [{"name": "t"}],
+                       "messages": [{"role": "user", "content": "a SECRET sentence with unicode é"}]},
+                      ensure_ascii=False).encode("utf-8")
+    meter.turn = 1
+    status, headers, data = post(meter, "/v1/messages?beta=true", body, {
+        "x-api-key": KEY, "anthropic-beta": "one,two", "accept-encoding": "gzip, br", "x-custom": "kept",
+        "x-claude-code-request-class": "main", "x-claude-code-agent-type": "main",
+        "x-session-affinity": "contexto-abc"})
+    meter.stop()
+    assert status == 200 and data == b"".join(USAGE_EVENTS) and headers["content-type"] == "text/event-stream"
+    (got,) = Upstream.received
+    assert got["path"] == "/base/v1/messages?beta=true" and got["body"] == body  # byte for byte
+    sent = got["headers"]
+    assert sent["x-api-key"] == KEY and sent["anthropic-beta"] == "one,two" and sent["x-custom"] == "kept"
+    assert sent["host"] == upstream.split("//")[1]
+    assert sent["accept-encoding"] == "identity"  # the one change to a Messages request's own headers
+    # To an upstream that is not a vendor's: the affinity header stays, the hint headers stop here.
+    assert sent["x-session-affinity"] == "contexto-abc"
+    assert "x-claude-code-request-class" not in sent and "x-claude-code-agent-type" not in sent
+    record = {"arm": "plain", "seed": 5, "repeat": 1, "model": "m", "n": 0, "turn": 1, "main": True,
+              "history_tokens": 20, "uncached": 7, "cache_write": 100, "cache_read": 900, "output": 12, "status": 200,
+              "compaction": False, "basis": "measured", "attempt": 2}
+    assert meter.records == [record]
+    written = (tmp_path / "requests.jsonl").read_text(encoding="utf-8")
+    assert [json.loads(x) for x in written.splitlines()] == [record]
+    assert "SECRET" not in written and KEY not in written
+    assert ledger.spent == 1019 and ledger.reserved == 0
+    assert meter.summary() == {"requests": 1, "max_input": 1007, "over_bound": 1, "tokens": 1019}
+
+
+def test_the_meter_classifies_requests_from_claude_codes_headers_or_the_tool_list(upstream, tmp_path):
+    meter, _ = metered(upstream, tmp_path)
+    with_tools = json.dumps({"tools": [{"name": "t"}], "messages": []}).encode()
+    without = json.dumps({"messages": []}).encode()
+    post(meter, "/v1/messages", without, {"x-claude-code-request-class": "auxiliary"})
+    post(meter, "/v1/messages", with_tools,
+         {"x-claude-code-request-class": "compaction", "x-claude-code-compaction": "auto"})
+    post(meter, "/v1/messages", with_tools, {"x-claude-code-request-class": "subagent"})
+    assert meter.classes_seen
+    post(meter, "/v1/messages", with_tools)  # no class header: a tool list and no subagent id is a main request
+    post(meter, "/v1/messages", without)
+    post(meter, "/v1/messages", with_tools, {"x-claude-code-agent-id": "a1"})
+    meter.stop()
+    assert [(r["main"], r["compaction"]) for r in meter.records] == [
+        (False, False), (False, True), (False, False), (True, False), (False, False), (False, False)]
+    assert [r["n"] for r in meter.records] == [0, 1, 2, 3, 4, 5] and all(r["turn"] is None for r in meter.records)
+    assert all(r["history_tokens"] == 0 for r in meter.records)
+
+
+def test_count_tokens_and_other_paths_are_forwarded_and_not_recorded(upstream, tmp_path):
+    meter, ledger = metered(upstream, tmp_path)
+    as_json = {"content-type": "application/json"}
+    Upstream.answer = {"chunks": [b'{"input_tokens": 41}'], "length": True, "headers": as_json}
+    status, headers, data = post(meter, "/v1/messages/count_tokens", b'{"messages": []}', {"accept-encoding": "gzip"})
+    assert (status, data, headers["content-length"]) == (200, b'{"input_tokens": 41}', "20")
+    assert Upstream.received[-1]["headers"]["accept-encoding"] == "identity"
+    post(meter, "/api/other", b"{}", {"accept-encoding": "gzip"})
+    assert Upstream.received[-1]["headers"]["accept-encoding"] == "gzip"  # not a model path: untouched
+    # A response that is not a stream: usage from the JSON body.
+    usage = json.dumps({"usage": {"input_tokens": 5, "output_tokens": 2}}).encode()
+    Upstream.answer = {"chunks": [usage], "length": True, "headers": as_json}
+    post(meter, "/v1/messages/", b'{"messages": []}')
+    meter.stop()
+    assert [(r["uncached"], r["output"]) for r in meter.records] == [(5, 2)] and ledger.spent == 7
+
+
+def test_what_the_meter_forwards_depends_on_whose_host_the_upstream_is(tmp_path):
+    ledger = bench_meter.Ledger(None, None)
+
+    def flags(url: str, arm: str) -> tuple[bool, bool]:
+        meter = bench_meter.Meter(url, ledger, arm=arm, seed=1, repeat=0, model="m", history=[], bound=1)
+        return meter.forward_affinity, meter.forward_hints
+
+    # A vendor's host: no affinity header (Contexto would not have sent it), and the hint headers only
+    # from the plain arm, where Claude Code sends them to the vendor without being asked.
+    assert flags("https://api.anthropic.com", "contexto") == (False, False)
+    assert flags("https://api.anthropic.com", "plain") == (False, True)
+    for url in ("https://gateway.example.test/anthropic", "http://127.0.0.1:8317"):
+        assert flags(url, "contexto") == (True, False) and flags(url, "plain") == (True, False)
+    assert [bench_meter.upstream_kind(u) for u in (
+        "https://api.anthropic.com", "https://gateway.example.test/x", "http://127.0.0.1:1", "http://localhost:2",
+        "https://anthropic.com.evil.test")] == ["anthropic", "custom", "local", "local", "custom"]
+    with pytest.raises(ValueError):
+        bench_meter.Meter("ftp://x", ledger, arm="plain", seed=1, repeat=0, model="m", history=[], bound=1)
+
+
+def test_the_guard_refuses_the_request_that_could_pass_the_budget(upstream, tmp_path):
+    body = json.dumps({"max_tokens": 1_000, "messages": [{"role": "user", "content": "x" * 3_000}]}).encode()
+    reserve = -(-len(body) * 2 // 3) + 1_000  # the body at 1.5 bytes per token, plus max_tokens
+    meter, ledger = metered(upstream, tmp_path, budget=1_019 + reserve - 1)
+    assert post(meter, "/v1/messages", body)[0] == 200 and ledger.spent == 1_019 and ledger.stop is None
+    status, _, data = post(meter, "/v1/messages", body)  # what is spent plus this reservation is one token over
+    meter.stop()
+    assert status == 400 and b"stopped" in data and ledger.stop == "budget" and ledger.stopped.is_set()
+    assert len(Upstream.received) == 1 and len(meter.records) == 1 and meter.refused == 1
+    assert ledger.spent == 1_019 <= ledger.budget and ledger.remaining == reserve - 1
+    assert bench_meter.read_spent(tmp_path / "requests.jsonl") == 1_019
+    assert bench_meter.read_spent(tmp_path / "missing.jsonl") == 0
+
+
+def test_a_401_on_a_model_path_halts_the_run_and_other_statuses_are_only_recorded(upstream, tmp_path):
+    meter, ledger = metered(upstream, tmp_path)
+    Upstream.answer = {"status": 429, "chunks": [b'{"type":"error"}'], "length": True,
+                       "headers": {"content-type": "application/json", "retry-after": "3"}}
+    status, headers, _ = post(meter, "/v1/messages", b"{}")
+    assert (status, headers["retry-after"]) == (429, "3") and ledger.stop is None
+    Upstream.answer = {"status": 401, "chunks": [b'{"type":"error"}'], "length": True}
+    assert post(meter, "/api/hello", b"{}")[0] == 401 and ledger.stop is None  # not a model path
+    assert post(meter, "/v1/messages/count_tokens", b"{}")[0] == 401
+    meter.stop()
+    assert ledger.stop == "auth" and meter.auth_status == 401
+    assert [(r["status"], r["uncached"]) for r in meter.records] == [(429, 0)]
+
+
+def test_a_stream_is_relayed_as_it_arrives_and_a_client_that_leaves_ends_it_upstream(upstream, tmp_path):
+    meter, ledger = metered(upstream, tmp_path)
+    Upstream.answer = {"chunks": USAGE_EVENTS[:1], "hang": True}
+    sock = socket.create_connection(("127.0.0.1", int(meter.url.rsplit(":", 1)[1])), timeout=10)
+    sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}")
+    started = time.monotonic()
+    data = b""
+    while b"message_start" not in data:  # the first event arrives while the stream is still open
+        data += sock.recv(65536)
+    assert time.monotonic() - started < 5 and not Upstream.gone.is_set()
+    sock.close()
+    assert Upstream.gone.wait(5), "the upstream connection was not closed when the client left"
+    meter.stop()
+    assert [(r["status"], r["uncached"], r["cache_read"]) for r in meter.records] == [(200, 7, 900)]
+    assert ledger.spent == 1_008  # what had been reported before the stream was cut
+
+
+def test_an_unreachable_upstream_is_a_local_502_and_no_record(tmp_path):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    meter, ledger = metered(f"http://127.0.0.1:{free}", tmp_path)
+    status, _, data = post(meter, "/v1/messages", b"{}")
+    meter.stop()
+    assert status == 502 and b"upstream unreachable" in data
+    assert meter.records == [] and meter.unreachable == 1 and ledger.spent == 0 and ledger.reserved == 0
+
+
+def test_history_tokens_follow_the_scripts_own_estimate():
+    for protocol in ("v2", "d27"):
+        script = bench_script.build(3, protocol, bound=4_000, turn_bytes=2_000)
+        history = bench_meter.history_tokens(script)
+        assert len(history) == len(script.turns) and history == sorted(history)
+        assert history[-1] == bench_script.estimate(script)["tokens"]
+
+
+# -- the plan ----------------------------------------------------------------------------------------
+
+
+def test_units_run_seed_by_seed_with_the_arms_rotated():
+    units = bench_plan.units([7, 8, 9], 2, ARMS)
+    assert units == [
+        ("contexto", 7, 0), ("full", 7, 0), ("plain", 7, 0),
+        ("full", 7, 1), ("plain", 7, 1), ("contexto", 7, 1),
+        ("plain", 8, 0), ("contexto", 8, 0), ("full", 8, 0),
+        ("contexto", 9, 0), ("full", 9, 0), ("plain", 9, 0)]
+    firsts = [u[0] for u in bench_plan.units(list(range(6)), 1, ARMS)[::3]]
+    assert firsts == ["contexto", "full", "plain"] * 2  # no arm always runs first
+    assert bench_plan.units([1], 1, ("full",)) == [("full", 1, 0)]
+
+
+@pytest.fixture(scope="module")
+def d27():
+    return bench_script.build(protocol="d27")
+
+
+def test_the_plan_reproduces_the_recorded_runs_of_the_54_probe_session(d27):
+    """Run #3 and run #4 (docs/research/M2-usage-savings-run3.md, M2-acceptance-run4.md): the same
+    script, bound and seed. The plan's expected case must sit near what they measured."""
+    contexto = bench_plan.unit_estimate("contexto", d27, 150_000)
+    assert 44 <= contexto.requests_expected <= 48  # 44 and 45 measured
+    assert 3_422_988 * 0.9 <= contexto.expected_total <= 3_748_084 * 1.1  # run #4 and run #3
+    assert contexto.expected["cache_read"] > 3 * contexto.expected["cache_write"]  # run #4: 2,800,741 and 608,355
+    assert contexto.over_bound_expected == 0 and contexto.worst_total > 2 * contexto.expected_total
+    full = bench_plan.unit_estimate("full", d27, 150_000)
+    assert full.requests_expected == full.requests_worst == 6
+    assert 2_578_830 * 0.85 <= full.expected_total <= 2_578_830 * 1.1  # run #4's baseline, less Claude Code's head
+    plain = bench_plan.unit_estimate("plain", d27, 150_000)
+    assert plain.compactions_expected >= 2 and plain.expected_total > contexto.expected_total
+    for est in (contexto, full, plain):
+        assert est.requests_worst >= est.requests_expected and est.worst_total > est.expected_total
+        assert est.worst["cache_read"] == est.worst["uncached"] == 0  # the worst case reads no cache
+    with pytest.raises(ValueError):
+        bench_plan.unit_estimate("other", d27, 150_000)
+
+
+def test_the_plan_adds_up_per_arm_and_in_total(d27):
+    todo = bench_plan.units([20261016], 2, ARMS)
+    plan = bench_plan.estimate({20261016: d27}, todo, 150_000)
+    assert plan["units"] == 6 and plan["turns"] == 6 * len(d27.turns)
+    assert set(plan["arms"]) == set(ARMS) and all(row["units"] == 2 for row in plan["arms"].values())
+    for case in ("expected", "worst"):
+        for name in bench_plan.CLASSES:
+            assert getattr(plan["total"], case)[name] == sum(getattr(row["estimate"], case)[name]
+                                                              for row in plan["arms"].values())
+    one = bench_plan.unit_estimate("full", d27, 150_000)
+    assert plan["arms"]["full"]["estimate"].expected_total == 2 * one.expected_total
+    assert bench_plan.budget_to_pass(1) == 10_000 and bench_plan.budget_to_pass(30_540_856) == 30_550_000
+    table = bench_plan.table(plan, "worst")
+    assert table[0].startswith("| Arm | Units | Turns | Requests |") and table[-1].startswith("| total | 6 |")
+    assert f"{plan['total'].worst_total:,}" in table[-1]
+
+
+def test_the_plain_arms_window_is_the_bound_plus_the_reserve_where_claude_code_allows():
+    assert plain_arm.compaction_setting(150_000) == {
+        "variable": "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "value": 183_000, "intended_trigger": 150_000, "forced": True,
+        "note": plain_arm.compaction_setting(150_000)["note"]}
+    assert "not documented" in plain_arm.compaction_setting(150_000)["note"]
+    for bound in (67_000, 100_000, 967_000):
+        assert plain_arm.compaction_setting(bound)["value"] == bound + 33_000
+        assert plain_arm.compaction_setting(bound)["forced"] is True
+    low, high = plain_arm.compaction_setting(66_999), plain_arm.compaction_setting(967_001)
+    assert (low["value"], low["intended_trigger"], low["forced"]) == (100_000, 67_000, False)
+    assert (high["value"], high["intended_trigger"], high["forced"]) == (1_000_000, 967_000, False)
+    assert "cannot be forced" in low["note"] and "cannot be forced" in high["note"]
+
+
+# -- the full arm's requests -------------------------------------------------------------------------
+
+
+def test_the_full_arms_request_is_built_from_the_script_alone():
+    script = bench_script.build(3, "v2", bound=4_000, turn_bytes=2_000)
+    base = full_arm.history(script)
+    content = [i for i, k in enumerate(script.kinds) if k != "probe"]
+    assert len(base) == 2 * len(content) + 2 * len(script.reads)
+    assert [m["role"] for m in base[:2]] == ["user", "assistant"] and base[0]["content"][0]["text"] == script.turns[0]
+    replies = [m["content"][0]["text"] for m in base if m["role"] == "assistant" and m["content"][0]["type"] == "text"]
+    assert replies == [script.scripted_reply(i) for i in content]
+    calls = [b for m in base for b in m["content"] if b["type"] == "tool_use"]
+    results = [b for m in base for b in m["content"] if b["type"] == "tool_result"]
+    assert [c["input"]["path"] for c in calls] == list(script.reads)
+    assert [r["content"] for r in results] == [script.files[p] for p in script.reads]
+    assert [r["tool_use_id"] for r in results] == [c["id"] for c in calls]
+    marked = [b for m in base for b in m["content"] if "cache_control" in b]
+    assert marked == [base[-1]["content"][-1]] and marked[0]["cache_control"] == {"type": "ephemeral"}
+    assert full_arm.history(script, "1h")[-1]["content"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+    third = full_arm.request(script, "m", base, ["first answers", ""], 2)
+    assert third["tool_choice"] == {"type": "none"} and [t["name"] for t in third["tools"]] == ["read_file"]
+    assert third["system"] == [{"type": "text", "text": full_arm.SYSTEM}] and "thinking" not in third
+    tail = third["messages"][len(base):]
+    assert [m["role"] for m in tail] == ["user", "assistant", "user", "assistant", "user"]
+    assert [m["content"][0]["text"] for m in tail] == [
+        script.probe_texts[0], "first answers", script.probe_texts[1], "(no answer)", script.probe_texts[2]]
+
+    plain_script = bench_script.build(3, "d27", bound=4_000, turn_bytes=2_000)
+    first = full_arm.request(plain_script, "m", full_arm.history(plain_script), [], 0)
+    assert "tools" not in first and "tool_choice" not in first  # no tool-loop turn, no tool
+    assert full_arm.context_window("claude-opus-5-5") == 1_000_000 and full_arm.context_window("other") == 200_000
+    assert full_arm.context_window("other", 64_000) == 64_000
+
+
+# -- the command line --------------------------------------------------------------------------------
+
+
+def test_dry_run_prints_the_plan_and_the_budget_without_a_key_or_a_call(capsys, monkeypatch, tmp_path):
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: pytest.fail("a dry run opened a connection"))
+    assert main(["bench", "--dry-run", "--model", "claude-haiku-5-5", "--protocol", "d27", "--seeds", "2",
+                 "--repeats", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "No calls were made" in out and "12 units to run" in out
+    assert "2 seeds, 20261016 to 20261017, the first seed 3 times" in out
+    for arm in ARMS:
+        assert f"| {arm} | 4 | 96 |" in out
+    assert out.count("| total | 12 | 288 |") == 2  # the expected case and the worst case
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW=183000" in out and "M2-acceptance-run4.md" in out
+    scripts = {s: bench_script.build(s, "d27") for s in (20261016, 20261017)}
+    plan = bench_plan.estimate(scripts, bench_plan.units([20261016, 20261017], 3, ARMS), 150_000)
+    need = bench_plan.budget_to_pass(plan["total"].worst_total)
+    assert f"pass --budget-tokens {need} " in out and f"{plan['total'].expected_total:,} tokens" in out
+
+    assert main(["bench", "--dry-run", "--protocol", "d27", "--arms", "full", "--budget-tokens", "5"]) == 0
+    out = capsys.readouterr().out
+    assert "--budget-tokens 5 is below the worst case" in out and "| plain |" not in out and "(none given)" in out
+
+
+def test_the_live_run_refuses_to_start_without_what_it_needs(capsys, monkeypatch, tmp_path):
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(runner, "run", lambda *a, **k: pytest.fail("the run started"))
+    out = tmp_path / "out"
+    cases = [
+        (["bench", "--out", str(out)], "needs --model"),
+        (["bench", "--model", "m"], "needs --out"),
+        (["bench", "--model", "m", "--out", str(out)], "no key: set ANTHROPIC_API_KEY"),
+        (["bench", "--model", "m", "--out", str(out), "--key-helper", "true", "--settings", str(out)], "not both"),
+        (["bench", "--model", "m", "--out", str(Path(__file__).parent / "bench-out"), "--key-helper", "true"],
+         "inside a git work tree"),
+    ]
+    for argv, said in cases:
+        assert main(argv) == 2
+        err = capsys.readouterr().err
+        assert "contexto bench: refusing:" in err and said in err, err
+    assert not out.exists()
+    for bad in (["--arms", "contexto,other"], ["--arms", ""], ["--budget-tokens", "0"], ["--cache-ttl", "2h"]):
+        with pytest.raises(SystemExit):
+            main(["bench", "--model", "m", "--out", str(out), *bad])
+        capsys.readouterr()
+
+
+def test_the_live_run_gets_its_configuration_from_the_command_line(capsys, monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(runner, "run", lambda config: seen.setdefault("config", config) and 0)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example.test/v")
+    inside = Path(__file__).parent / "bench-out"
+    assert main(["bench", "--model", "claude-opus-5-5", "--seeds", "2", "--repeats", "2", "--bound", "100000",
+                 "--arms", "plain,contexto", "--budget-tokens", "1,000,000", "--out", str(inside), "--allow-git-out",
+                 "--cache-ttl", "1h", "--turn-timeout", "90", "--context-window", "500000"]) == 0
+    config = seen["config"]
+    assert (config.model, config.bound, config.seeds, config.repeats, config.budget) == (
+        "claude-opus-5-5", 100_000, [20261016, 20261017], 2, 1_000_000)
+    assert config.arms == ("contexto", "plain") and config.upstream == "https://gateway.example.test/v"
+    assert (config.cache_ttl, config.turn_timeout, config.context_window, config.out) == ("1h", 90.0, 500_000, inside)
+    assert config.credentials.source == "env" and config.work is None and not config.keep_work
+    assert KEY not in capsys.readouterr().err
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL")
+    seen.clear()
+    assert main(["bench", "--model", "m", "--budget-tokens", "9", "--out", str(tmp_path / "o"), "--upstream",
+                 "http://127.0.0.1:9", "--key-helper", "true"]) == 0
+    assert seen["config"].upstream == "http://127.0.0.1:9" and seen["config"].credentials.source == "helper"
+    assert seen["config"].arms == ARMS
+    seen.clear()
+    assert main(["bench", "--model", "m", "--budget-tokens", "9", "--out", str(tmp_path / "o")]) == 0
+    assert seen["config"].upstream == "https://api.anthropic.com"
+
+
+def test_an_output_or_work_directory_inside_a_git_work_tree_is_recognised(tmp_path):
+    assert runner.inside_git(Path(__file__).parent / "not" / "yet" / "there")
+    assert not runner.inside_git(tmp_path / "out")
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    assert runner.inside_git(tmp_path / "repo" / "deep" / "out")
+
+
+def test_starting_any_contexto_command_does_not_import_the_benchmarks_machinery():
+    code = ("import sys\nfrom contexto.cli import main\n"
+            "try:\n    main(['bench', '--help'])\nexcept SystemExit:\n    pass\n"
+            "heavy = [m for m in ('contexto.bench.runner', 'contexto.bench.meter', 'contexto.bench.plan', "
+            "'contexto.bench.credentials', 'contexto.bench.arms', 'contexto.bench.arms.cli', 'urllib.request') "
+            "if m in sys.modules]\nprint('HEAVY', heavy, file=sys.stderr)")
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert "HEAVY []" in proc.stderr, proc.stderr
+    assert "--budget-tokens" in proc.stdout and "--dry-run" in proc.stdout and "--key-helper" in proc.stdout
