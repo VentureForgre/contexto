@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import io
+import json
 import re
 import sys
 from pathlib import Path
@@ -20,7 +21,7 @@ for p in (ROOT / "spikes" / "m2", ROOT / "src"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from scale.proxy import fidelity, run, synth, worker  # noqa: E402
+from scale.proxy import cputime, fidelity, run, synth, worker  # noqa: E402
 
 from contexto import cliversions, launcher, mcp, rewrite, toolcheck  # noqa: E402
 from contexto import proxy as proxy_mod  # noqa: E402
@@ -124,6 +125,16 @@ def test_the_timed_engine_is_the_engine_to_the_proxy_and_the_launcher(tmp_path):
         assert launcher.build_engine.__module__ == "contexto.launcher", "the launcher's own function is back"
     finally:
         worker.stop_proxy(proxy)
+
+
+def test_cputime_handles_requests_on_this_checkout(capsys):
+    """cputime.py calls the handler's ``_transform`` and the engine without a server; a changed signature
+    fails here."""
+    assert cputime.child(str(ROOT / "src"), 2, 1) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert rows and rows[0]["t"] == 2 and rows[0]["j"] == 0
+    assert all(row["cpu_s"] >= row["transform_s"] >= 0 and 0 < row["upstream_tokens"] <= row["history_tokens"]
+               for row in rows)
 
 
 def test_the_engine_takes_the_synthetic_session_for_claude_code():

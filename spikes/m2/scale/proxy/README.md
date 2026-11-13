@@ -481,7 +481,7 @@ so the profile still means what the record measured.
 
 ### So it fails loudly next time
 
-`tests/test_scale_proxy_drift.py` (7 tests, about a second) fails when:
+`tests/test_scale_proxy_drift.py` (8 tests, about a second) fails when:
 
 - a name in `worker.INSTRUMENTED` is not an attribute of the class it is listed under (the store
   methods, `SessionStore._catalog`, the catalog's `entries` and `_read`, the handler's `_read_body`
@@ -497,7 +497,8 @@ so the profile still means what the record measured.
   or the timed engine hides `preserves_input`, `prime`, `tool_calls` or `tool_call_ids`;
 - the engine does not take the synthetic first request for Claude Code's: the session-start
   signature, the tested CLI version, the session id, and Contexto's tool names, each checked with
-  the package's own function.
+  the package's own function;
+- `cputime.py` can no longer drive the handler's `_transform` and the engine without a server.
 
 The short run below also fails on any `BREAK_EVENTS` event, so a signature the drift test does not
 name still stops the suite when the engine reports it.
@@ -518,9 +519,8 @@ from 100 threads at once. It needs neither `claude` nor `codex`. `tests/test_sca
 runs it once per test session and `tests/conftest.py` prints its numbers at the end of the pytest
 output whether the tests pass or fail, so every CI log has them.
 
-What the run found, the same in all 45 measured runs (39 on this machine, 6 in CI on Ubuntu and
-macOS): all 634 responses were 200; the
-largest upstream request was 117,423 tokens; no event of `run.BREAK_EVENTS` (which include
+What the run found, the same in every measured run on this machine and in CI (Ubuntu and macOS):
+all 634 responses were 200; the largest upstream request was 117,423 tokens; no event of `run.BREAK_EVENTS` (which include
 `over_bound`, `bound_too_small` and `transform_error`); 20 rotations, 267 pages, 19 `carried_paged`,
 3 `carried_over_budget` and the first request's one `estimate_error`.
 
@@ -529,8 +529,9 @@ The quantities with a budget, as `short.py` defines them:
 - **Added time per request** is the driver's time from sending a request to its last byte, less
   the time the fake upstream spent on it (`added_s`). It covers the body's way to the proxy, the
   proxy's read, parse, transform and store writes, its connection to the upstream, and the relay.
-  The clock starts after the TCP connection is open; in the 2026-10-17 files `e2e_s` included the
-  connect, about 0.1 ms on loopback.
+  The clock starts after the TCP connection is open. That change came after the first CI run and
+  the two loops of the flake check, whose times include the connect, as `e2e_s` does in the
+  2026-10-17 files.
 - **Growth with history** is the slope of added time against the history the CLI sent, over the
   434 tool-loop requests, as the median of the slopes between every pair of them (Theil-Sen).
 - **Startup** is from starting the proxy process to its `ready` line: the interpreter, the imports,
@@ -554,14 +555,17 @@ of the 18 cores, at loads of 25 to 84.
 | Added time per request, p95 | 28.2 to 41.9 ms | 41.5 and 109.8 ms | 50.3 to 388.2 ms | 800 ms | 7.3 |
 | Growth of added time per million tokens | 25.8 to 36.5 ms | 28.1 and 14.7 ms | 20.4 to 164.6 ms | 300 ms | 8.2 |
 | Startup, best of 3 | 77 to 101 ms | 113 and 423 ms | 133 to 1,049 ms | 3,000 ms | 7.1 |
-| Peak RSS | not read correctly in that run (see above) | 66.0 and 55.3 MB | 51.6 to 62.8 MB | 300 MB | 4.5 |
+| Peak RSS | 52.0 to 86.8 MB (second CI run; the first read it wrongly, see above) | 66.0 and 55.3 MB | 51.6 to 62.8 MB | 300 MB | 3.5 |
 | RSS growth per MB of body growth | 3.5 to 9.8 MB | 17.9 and 9.6 MB | 6.4 to 13.9 MB | 150 MB | 8.4 |
 | Live objects gained per turn | 7.43 to 8.91 | 7.27 and 8.91 | 7.11 to 7.59 | 40 | 4.5 |
 | Throughput, 100 concurrent | 148 to 226 req/s | 150 and 50 req/s | 15 to 125 req/s | floor of 5 req/s | 10 (below) |
 | Duration of the run | 14.5 to 21.0 s | 18.8 and 45.0 s | 25.7 to 102.8 s | none | |
 
-The second macOS runner was slow in every fixed cost and fast per byte: its growth per million
-tokens was the lowest of the six (14.7 ms) and its added time for the first request the highest
+The second CI run's four Ubuntu jobs: median 15.4 to 25.0 ms, p95 26.5 to 79.4 ms, growth 21.2 to
+36.7 ms per million tokens, startup 64 to 101 ms, 151 to 207 req/s, 12.9 to 24.0 s.
+
+The second macOS runner of the first run was slow in every fixed cost and fast per byte: its
+growth per million tokens was the lowest of the six (14.7 ms) and its added time for the first request the highest
 (18.1 ms over a direct send, against 3.8 to 5.7 ms on the other five). The proxy writes and
 fsyncs three or four small files per request (`set_retained`, `set_turn_room` twice, and
 `set_epoch` at a turn start), so [inference] that runner's disk was slow. The run took 45 s there
@@ -606,7 +610,7 @@ suites kept the 1-minute load between 25 and 84 on 18 cores.
 - One run with `yes > /dev/null` on each of the 18 cores, on top of a load of 48: passed in 50 s
   (median 43.5 ms, p95 187 ms, growth 65.5 ms per million tokens, startup 583 ms, 78 req/s).
 
-After the first loop the driver was changed to open its connection before starting the clock and
+After the second loop the driver was changed to open its connection before starting the clock and
 to retry a failed connect up to three times, because a machine this busy can run out of local
 ports for a moment; that is a guess at the two errors, not a diagnosis. A proxy process that exits
 now puts the end of its log in the error.
@@ -632,17 +636,45 @@ turns of 8,000, 5,000, 4,000 and 4,000 tokens, each with its own three starts an
 | Throughput at 100 concurrent | 768 requests a second | 232, 295, 377 and 382 requests a second | 200 or 300 copies of the 50,838-byte first request from 100 threads, 4 bursts |
 | Startup | 60 ms | 53.7, 58.0, 58.2 and 60.6 ms | process start to `ready`, best of 3, 4 runs |
 
-Growth and startup agree with the audit. Added time depends on the request: the audit's 2 ms lies
+Growth (12.9 to 16.9 ms against about 13) and startup (54 to 61 ms against 60) are close to the
+audit's. Added time depends on the request: the audit's 2 ms lies
 between the 0.64 ms of a 104-byte request and the 3.6 to 4.3 ms of a Claude Code-sized first
 request, of which about 1.4 ms is four store writes (`set_retained`, `set_turn_room` twice,
 `set_epoch`). Throughput here is half the audit's.
 What the audit sent is not recorded here; a 104-byte request was not timed in a burst at low
 load, so the two throughput numbers may not measure the same thing.
 
-Against the 2026-10-18 record ("Before and after", after the CPU fixes): growth was 8.5 ms per
-million tokens for a tool loop then and is 13 to 17 now. The record's number is from 0.5M to 30M
-and this one from 0 to 1.7M tokens, so the comparison is rough; the full run below was meant to
-settle it and could not (next section).
+Against the 2026-10-18 record ("Before and after", after the CPU fixes): a tool loop cost 8.5 ms
+more per million tokens of history then, and 13 to 17 ms here. The difference is this machine on
+this day, not the package. `cputime.py` runs the same requests through two source trees in turn,
+with no HTTP, and keeps each request's smallest CPU time over several repetitions, which a busy
+machine disturbs least:
+
+```
+mkdir /tmp/v029 && git archive 62b02a16 src | tar -x -C /tmp/v029      # the record's package, v0.2.9
+.venv/bin/python spikes/m2/scale/proxy/cputime.py --src /tmp/v029/src --src src
+```
+
+CPU milliseconds per request for the handler's `_transform` plus `observe_usage`, v0.2.9 against
+b0e2dbc. The first comparison used 5, 4 and 3 repetitions at the three sizes (loads of 32 to 51),
+the second 3 at each (load 34):
+
+| History | Tool loop, v0.2.9 | Tool loop, b0e2dbc | Rotating turn start, v0.2.9 | Rotating turn start, b0e2dbc |
+|---|---|---|---|---|
+| 0.55M, first comparison | 16.3 | 17.5 | 175 | 40 |
+| 0.55M, second | 19.7 | 21.5 | 222 | 51 |
+| 2.1M, first | 41.8 | 43.9 | 261 and 251 | 82 and 69 |
+| 2.1M, second | 49.8 | 32.1 | 299 and 310 | 47 and 55 |
+| 5.0M, first | 90.9 | 95.7 | 356 | 139 |
+| 5.0M, second | 89.7 | 100.4 | 353 | 149 |
+
+- v0.2.9 itself costs 16.6 and 15.6 ms more per million tokens on this machine today, and b0e2dbc
+  17.4 and 17.5. The record's 8.5 was the same v0.2.9 code at loads of 2 to 7.
+- Per tool loop, b0e2dbc was 5 to 8 percent slower than v0.2.9 in the first comparison, and from
+  36 percent faster to 12 percent slower in the second. A difference of that size is not
+  established in either direction.
+- A rotating turn start cost 2.4 to 6 times less CPU on b0e2dbc in every row. That is D34's page
+  catalog (next section).
 
 ### The full run at v0.5.24
 
@@ -678,15 +710,16 @@ The 30M peak RSS is from one process that handled 17 requests, once; it was not 
 
 One timing survives the load, because it fell so far. `index_text` per rotation at 30M (two
 calls, fast-forward, median of the last 60 turns) was 0.272 s in the record, of which 0.167 s
-was reading pages. In this run it was 0.045 s at a load of 35, with 0.027 s in the catalog's
+was reading pages. In this run it was 0.045 s at loads of 27 to 40, with 0.027 s in the catalog's
 `entries`: D34's catalog reads one to three page files per rotation where `_pages` read all 1,145
 twice. A proxy process started on an existing store reads every page once, at its first rotation
 (1,160 page reads in one request at 30M).
 
 ### Not measured
 
-- Timings of the full run at a load comparable with the record's, and so whether per-request
-  time at 30M has changed since 2026-10-18. One run exists, at loads of 26 to 42.
+- Wall-clock timings of the full run at a load comparable with the record's. One run exists, at
+  loads of 26 to 42. `cputime.py` compared CPU time with v0.2.9 up to 5M tokens; nothing was
+  compared at 10M or 30M.
 - The short run on a quiet machine in its final form. Every one of its 39 runs here was at a load
   of 25 or more; the CI runs (loads under 2.4) are the quiet ones.
 - Throughput with a 104-byte request at low load, and throughput with the clients in other

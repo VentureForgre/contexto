@@ -6,7 +6,8 @@ quantity is) serves every test here. No network beyond 127.0.0.1, no model calls
 
 The budgets (``short.BUDGETS``) next to what was measured on 2026-11-12, and the factor between them.
 "CI" is the slowest of the six runners in this branch's first CI run (Ubuntu with 4 CPUs and macOS with 3,
-Python 3.12 to 3.15, loads under 2.4), "fastest CI" the fastest. "Laptop" is an 18-core Apple M5 Pro on
+Python 3.12 to 3.15, loads under 2.4), "fastest CI" the fastest; peak RSS on Linux was read wrongly in that
+run, so that row also counts the second run's four Ubuntu jobs. "Laptop" is an 18-core Apple M5 Pro on
 which other test suites were running, over 39 runs at 1-minute loads of 25 to 84.
 
     quantity                                budget     CI      factor  fastest CI  laptop, 39 runs
@@ -14,7 +15,7 @@ which other test suites were running, over 39 runs at 1-minute loads of 25 to 84
     added time per request, p95             800 ms     109.8   7.3     28.2        50.3 to 388.2
     growth of added time, per M tokens      300 ms     36.5    8.2     14.7        20.4 to 164.6
     startup of the proxy, best of 3         3,000 ms   423     7.1     76.6        133 to 1,049
-    peak RSS of the proxy                   300 MB     66.0    4.5     55.3        51.6 to 62.8
+    peak RSS of the proxy                   300 MB     86.8    3.5     52.0        51.6 to 62.8
     RSS growth per MB the body grows        150 MB     17.9    8.4     3.5         6.4 to 13.9
     live objects gained per turn            40         8.91    4.5     7.27        7.11 to 7.59
     100 concurrent requests, floor          5 req/s    49.8    10      225.8       15.4 to 124.6
