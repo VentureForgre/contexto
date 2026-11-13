@@ -1,4 +1,5 @@
 #!/bin/sh
+{
 # Contexto installer. https://github.com/VentureForgre/contexto
 #
 #   curl -fsSL https://raw.githubusercontent.com/VentureForgre/contexto/main/install.sh | sh
@@ -9,15 +10,19 @@
 #   1. finds the latest release (or the one asked for with --version);
 #   2. downloads that release's SHA256SUMS and its wheel into a private temporary directory;
 #   3. checks the wheel's SHA-256 against SHA256SUMS, and with --attest its build attestation;
-#   4. removes an earlier Contexto install that would provide the same `contexto` command;
-#   5. installs the checked wheel file with `uv tool install` or `pipx install`.
+#   4. when an earlier Contexto is installed, runs the checked wheel once without installing it;
+#   5. removes an earlier Contexto install that would provide the same `contexto` command;
+#   6. installs the checked wheel file with `uv tool install` or `pipx install`.
 #
-# What it never does: install uv, pipx or Python; use sudo; edit a shell profile; read or write
-# session data (~/.contexto or $CONTEXTO_HOME). Until step 3 has passed, nothing is installed or
-# removed.
+# What it never does: install uv or pipx; use sudo; edit a shell profile; read or write session
+# data (~/.contexto or $CONTEXTO_HOME). It installs no Python itself, but uv may download a Python
+# it manages when the machine has none that is 3.12 or later. Until step 4 has passed, nothing is
+# installed or removed.
 #
-# The whole script is function definitions. The only call is the last line, and main refuses to
-# run without the marker that line passes, so a download cut short at any byte runs nothing.
+# The whole script is one { } group, so a shell reads all of it before it runs any of it: a
+# download cut short at any byte is a syntax error and runs nothing. Inside the group there are
+# only function definitions and, last, one call of main, which also refuses to run without the
+# marker that call passes.
 
 set -eu
 
@@ -31,9 +36,12 @@ Usage: sh install.sh [options]
 The script finds the latest release, downloads its wheel into a temporary
 directory, checks the wheel's SHA-256 against the release's SHA256SUMS, and
 installs the checked file with `uv tool install` or `pipx install`. Run it
-again to upgrade. It needs curl, sha256sum or shasum, uv or pipx, and
-Python 3.12 or later. It installs none of those, asks for no password, and
-edits no shell startup file.
+again to upgrade.
+
+It needs curl, sha256sum or shasum, and uv or pipx. It installs none of
+those, asks for no password, and edits no shell startup file. Contexto needs
+Python 3.12 or later. pipx must find one on the machine. With uv,
+uv may download a Python it manages when the machine has none.
 
 Options:
   --version X.Y.Z   Install that release, not the latest. vX.Y.Z works too.
@@ -54,10 +62,15 @@ Environment:
                               Default: https://github.com/VentureForgre/contexto
                               https only; http only for 127.0.0.1 or localhost.
 
+Exit status: 0 when Contexto is installed or already up to date, and after a
+dry run. 1 when the install could not be done. 2 when an option, a value or
+one of the two variables above is not valid.
+
 Upgrading: releases up to 0.5.24 are the distribution `contexto`, later ones
 `contexto-proxy`. Both provide the `contexto` command, so an install under the
-other name, or one made by the other tool, is removed once the new wheel has
-passed its checks and before it is installed.
+other name, or one made by the other tool, is removed before the new one is
+installed. That happens only after the new wheel has passed its checks and
+has run once with the tool that will install it.
 
 Session data in ~/.contexto (or $CONTEXTO_HOME) is never touched.
 
@@ -82,6 +95,7 @@ stop() {
     die "$* Nothing was installed."
 }
 
+# For input that is not valid: an option, a value, or one of the two environment variables.
 usage_error() {
     printf 'install.sh: %s\nRun it with --help for the options.\n' "$*" >&2
     exit 2
@@ -118,20 +132,28 @@ older_than() {
     return 1
 }
 
-# fetch URL FILE MAX_BYTES. https only, also across redirects; http only when the base URL is
-# this machine (see main).
-fetch() {
-    curl --proto "$proto" --proto-redir "$proto" --tlsv1.2 -fsSL --max-filesize "$3" -o "$2" "$1" </dev/null
+# download URL FILE MAX_BYTES [more curl options]: the one place that touches the network.
+# https only, also across redirects (http only when the base URL is this machine, see main).
+# Bounded in time and size: a server that does not answer, sends under 1024 bytes a second for
+# $stall_seconds, or sends more than MAX_BYTES ends the transfer with curl's own message.
+download() {
+    url=$1
+    file=$2
+    limit=$3
+    shift 3
+    curl --proto "$proto" --proto-redir "$proto" --tlsv1.2 -fsSL \
+        --connect-timeout "$connect_timeout" --speed-limit 1024 --speed-time "$stall_seconds" \
+        --max-time "$max_seconds" --max-filesize "$limit" -o "$file" "$@" "$url" </dev/null
 }
 
 # Sets tag to the latest release's tag, without the GitHub API: /releases/latest redirects to
-# /releases/tag/vX.Y.Z, and the tag is the end of the final URL.
+# /releases/tag/vX.Y.Z, and the tag is the end of the final URL. Only headers are read.
 find_latest() {
-    final=$(curl --proto "$proto" --proto-redir "$proto" --tlsv1.2 -fsSL -o /dev/null -w '%{url_effective}' \
-        "$base/releases/latest" </dev/null) || stop "Could not reach $base/releases/latest."
+    final=$(download "$base/releases/latest" /dev/null 1048576 -I -w '%{url_effective}') ||
+        stop "Could not read $base/releases/latest (curl's message is above)."
     case $final in
         "$base/releases/tag/v"*) tag=${final#"$base/releases/tag/"} ;;
-        *) stop "$base/releases/latest did not lead to a release." ;;
+        *) stop "$base/releases/latest did not lead to a release of this repository." ;;
     esac
     is_version "${tag#v}" || stop "$base/releases/latest led to a tag that is not vX.Y.Z."
 }
@@ -146,12 +168,27 @@ bad_sums() {
 # four file names a release of exactly this version can carry, compared as whole strings. So a
 # name can hold no path separator and nothing else of the file's choosing. Any other line, a
 # second wheel, or no wheel refuses the whole file. Its lines are never printed.
+#
+# A shell drops some bytes when it reads a line (a NUL, for one). So the lines that were read
+# are written to a second file, and the two files must have the same SHA-256: what was checked
+# is then, byte for byte, what the file holds.
 read_sums() {
     wheel=
     wheel_sha=
     sdists=0
     number=0
-    while IFS= read -r line || [ -n "$line" ]; do
+    ended=0
+    : >"$1.read"
+    while [ "$ended" = 0 ]; do
+        if IFS= read -r line; then
+            printf '%s\n' "$line" >>"$1.read"
+        else
+            ended=1
+            if [ -z "$line" ]; then
+                break
+            fi
+            printf '%s' "$line" >>"$1.read"
+        fi
         number=$((number + 1))
         digest=${line%%  *}
         name=${line#*  }
@@ -181,6 +218,11 @@ read_sums() {
     if [ -z "$wheel" ]; then
         stop "SHA256SUMS for v$2 lists no wheel for that version, so it was not used."
     fi
+    as_served=$(sha256_of "$1") || as_served=
+    as_read=$(sha256_of "$1.read") || as_read=
+    if [ -z "$as_served" ] || [ "$as_served" != "$as_read" ]; then
+        stop "SHA256SUMS for v$2 holds bytes that are not plain text, so it was not used."
+    fi
 }
 
 sha256_of() {
@@ -193,8 +235,9 @@ sha256_of() {
 }
 
 # names_in uv|pipx: which of the two distribution names that tool has installed, one per line.
-# Releases up to 0.5.24 are `contexto`, later ones `contexto-proxy`. For uv, a tool counts only
-# when it provides the `contexto` command.
+# Releases up to 0.5.24 are `contexto`, later ones `contexto-proxy`. A package counts only when
+# it provides the `contexto` command, so one that merely shares the name is left alone. An older
+# pipx cannot say where its environments are; there the name alone decides.
 names_in() {
     have "$1" || return 0
     case $1 in
@@ -204,8 +247,17 @@ names_in() {
                 { name = ($1 == "contexto" || $1 == "contexto-proxy") ? $1 : "" }'
             ;;
         pipx)
-            pipx list --short 2>/dev/null </dev/null | awk '
-                ($1 == "contexto" || $1 == "contexto-proxy") && !seen[$1]++ { print $1 }'
+            in_pipx=$(pipx list --short 2>/dev/null </dev/null | awk '
+                ($1 == "contexto" || $1 == "contexto-proxy") && !seen[$1]++ { print $1 }')
+            if [ -z "$in_pipx" ]; then
+                return 0
+            fi
+            venvs=$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null </dev/null) || venvs=
+            for name in $in_pipx; do
+                if [ -z "$venvs" ] || [ -e "$venvs/$name/bin/contexto" ]; then
+                    printf '%s\n' "$name"
+                fi
+            done
             ;;
     esac
 }
@@ -248,7 +300,8 @@ python_is_new_enough() {
 }
 
 # Sets pipx_python: empty when pipx's default Python is 3.12 or later, else the path of a newer
-# one on PATH for --python. uv needs no such check: it is given the requirement.
+# one on PATH for --python. uv needs no such check: it is given the requirement, and downloads
+# a Python it manages when the machine has none that meets it.
 choose_pipx_python() {
     pipx_python=
     default=$(pipx environment --value PIPX_DEFAULT_PYTHON 2>/dev/null </dev/null) || default=
@@ -262,7 +315,8 @@ choose_pipx_python() {
         fi
     done
     stop "Contexto needs Python 3.12 or later. pipx's default Python${default:+ ($default)} is older or" \
-        "unknown, and no python3.12 to python3.15 is on PATH. Install one, or install uv, which can fetch one."
+        "unknown, and no python3.15, python3.14, python3.13, python3.12 or python3 on PATH is new enough." \
+        "Install one, or install uv, which can download one."
 }
 
 # Prints the directory the installer puts commands in.
@@ -297,6 +351,32 @@ find_contexto() {
     fi
 }
 
+# Runs the checked wheel once, with the tool that will install it, without installing it. An
+# earlier install is removed only after this has printed the release's version, so a wheel or a
+# Python that does not work is found while the earlier install is still there. Measured with
+# uv 0.13.5 and pipx 1.18.4: neither leaves anything in its tool or bin directory.
+try_wheel() {
+    case $installer in
+        uv) set -- uv tool run --python '>=3.12' --from "$tmpdir/$wheel" contexto --version ;;
+        *)
+            set -- pipx run
+            if [ -n "$pipx_python" ]; then
+                set -- "$@" --python "$pipx_python"
+            fi
+            set -- "$@" --no-cache --spec "$tmpdir/$wheel" contexto --version
+            ;;
+    esac
+    if [ "$dry_run" = 1 ]; then
+        say "Would run: $*"
+        return 0
+    fi
+    if ! tried=$("$@" 2>"$tmpdir/tool.log" </dev/null) || [ "$tried" != "contexto $version" ]; then
+        cat "$tmpdir/tool.log" >&2
+        stop "The checked wheel did not run with $installer: \`$*\` should print \"contexto $version\"" \
+            "($installer's message is above). The earlier install was left as it was."
+    fi
+}
+
 # Removes every Contexto install except the one the new wheel will replace in place (same tool,
 # same distribution name). Measured with uv 0.13.5 and pipx 1.18.4: two installs that provide
 # `contexto` do not coexist. uv refuses the second ("Executable already exists"); pipx installs
@@ -323,7 +403,7 @@ remove_other_installs() {
             say "Removing the earlier install, which provides the same contexto command: $*"
             if ! "$@" >"$tmpdir/tool.log" 2>&1 </dev/null; then
                 cat "$tmpdir/tool.log" >&2
-                die "\`$*\` failed. The new release was not installed."
+                die "\`$*\` failed ($tool's message is above). The new release was not installed."
             fi
             removed=1
         done
@@ -359,17 +439,20 @@ install_wheel() {
     if ! "$@" >"$tmpdir/tool.log" 2>&1 </dev/null; then
         cat "$tmpdir/tool.log" >&2
         if [ "$removed" = 1 ]; then
-            die "\`$*\` failed after the earlier install was removed. Fix the problem above and run this" \
-                "script again."
+            die "\`$*\` failed ($installer's message is above). No contexto is installed now: the earlier" \
+                "install was removed first.${previous:+ To get $previous back: sh install.sh --version $previous}"
         fi
-        die "\`$*\` failed. If another contexto command is in the way, --force lets $installer overwrite it."
+        die "\`$*\` failed ($installer's message is above). If it says that a contexto executable" \
+            "already exists, --force lets $installer overwrite it."
     fi
 }
 
+# Removes the temporary directory, and only that: tmpdir is empty until mktemp has made the
+# directory, and the name must be one mktemp was asked for.
 cleanup() {
-    if [ -n "${tmpdir-}" ]; then
-        rm -rf "$tmpdir"
-    fi
+    case ${tmpdir-} in
+        */contexto-install.*) rm -rf "$tmpdir" ;;
+    esac
 }
 
 main() {
@@ -394,6 +477,10 @@ main() {
     repo=VentureForgre/contexto
     default_base=https://github.com/$repo
     oldest_with_sums=0.5.13
+    # Seconds: to connect, of a stalled transfer, and for one whole download.
+    connect_timeout=15
+    stall_seconds=30
+    max_seconds=600
     want=${CONTEXTO_VERSION-}
     want_from=CONTEXTO_VERSION
     with=
@@ -446,10 +533,10 @@ main() {
     base=${CONTEXTO_INSTALL_BASE_URL:-$default_base}
     base=${base%/}
     case $base in
-        *[@?#\\\ ]*) stop "CONTEXTO_INSTALL_BASE_URL must be a plain https URL, with no user name or query." ;;
+        *[@?#\\\ ]*) usage_error "CONTEXTO_INSTALL_BASE_URL must be a plain https URL, with no user name or query." ;;
         https://?*) proto='=https' ;;
         http://127.0.0.1 | http://127.0.0.1[:/]* | http://localhost | http://localhost[:/]*) proto='=http,https' ;;
-        *) stop "CONTEXTO_INSTALL_BASE_URL must start with https:// (http:// only for 127.0.0.1 or localhost)." ;;
+        *) usage_error "CONTEXTO_INSTALL_BASE_URL must start with https:// (http:// only for 127.0.0.1 or localhost)." ;;
     esac
 
     # Everything that can be checked without the network comes first.
@@ -487,8 +574,14 @@ main() {
     # Up to date: the command reports this release, and there is no second install to clear away.
     find_contexto
     case $installer in
-        uv) mine=$uv_names others=$pipx_names ;;
-        *) mine=$pipx_names others=$uv_names ;;
+        uv)
+            mine=$uv_names
+            others=$pipx_names
+            ;;
+        *)
+            mine=$pipx_names
+            others=$uv_names
+            ;;
     esac
     extra=0
     for name in $mine; do
@@ -498,18 +591,26 @@ main() {
         say "contexto $version is already installed ($contexto_cmd). Nothing to do; --force reinstalls it."
         exit 0
     fi
+    # The release that is installed now, when the command names one.
+    previous=${reported#contexto }
+    if [ "$previous" = "$reported" ] || ! is_version "$previous"; then
+        previous=
+    fi
+    if [ -n "$previous" ] && older_than "$version" "$previous"; then
+        say "Replacing contexto $previous with the older $version."
+    fi
 
     trap cleanup EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    tmpdir=${TMPDIR:-/tmp}
-    tmpdir=$(mktemp -d "${tmpdir%/}/contexto-install.XXXXXX") || stop "Could not create a temporary directory."
+    parent=${TMPDIR:-/tmp}
+    tmpdir=$(mktemp -d "${parent%/}/contexto-install.XXXXXX") || stop "Could not create a temporary directory."
 
     release=$base/releases/download/$tag
-    fetch "$release/SHA256SUMS" "$tmpdir/SHA256SUMS" 65536 ||
-        stop "Could not download $release/SHA256SUMS. Either $tag does not exist, or it has no SHA256SUMS:" \
-            "v$oldest_with_sums is the oldest release that has one."
+    download "$release/SHA256SUMS" "$tmpdir/SHA256SUMS" 65536 ||
+        stop "Could not download $release/SHA256SUMS (curl's message is above). If the answer was 404," \
+            "$tag does not exist or has no SHA256SUMS: v$oldest_with_sums is the oldest release that has one."
     read_sums "$tmpdir/SHA256SUMS" "$version"
     case $wheel in
         contexto_proxy-*) dist=contexto-proxy ;;
@@ -525,13 +626,17 @@ main() {
         if [ "$attest" = 1 ]; then
             say "Would run: gh attestation verify $tmpdir/$wheel --repo $repo"
         fi
+        if [ -n "$uv_names$pipx_names" ]; then
+            try_wheel
+        fi
         remove_other_installs
         install_wheel
         say "Session data in $data_home would not be touched."
         exit 0
     fi
 
-    fetch "$release/$wheel" "$tmpdir/$wheel" 104857600 || stop "Could not download $release/$wheel."
+    download "$release/$wheel" "$tmpdir/$wheel" 104857600 ||
+        stop "Could not download $release/$wheel (curl's message is above)."
     actual=$(sha256_of "$tmpdir/$wheel") || stop "Could not compute the SHA-256 of the download."
     if [ "$actual" != "$wheel_sha" ]; then
         stop "SHA-256 mismatch for $wheel: SHA256SUMS says $wheel_sha, the download has $actual."
@@ -540,15 +645,23 @@ main() {
     if [ "$attest" = 1 ]; then
         if ! gh attestation verify "$tmpdir/$wheel" --repo "$repo" >"$tmpdir/gh.log" 2>&1 </dev/null; then
             cat "$tmpdir/gh.log" >&2
-            stop "The attestation check failed (it needs gh auth login)."
+            stop "The attestation check failed (gh's message is above). If gh is not logged in, run" \
+                "gh auth login."
         fi
         say "Attestation verified: GitHub attests that a workflow in $repo built this wheel."
-    else
+    elif [ "$base" = "$default_base" ]; then
         say "Not checked: who built it. To check the build attestation (needs gh and gh auth login):"
         say "  gh release download $tag --repo $repo --pattern '$wheel' &&" \
             "gh attestation verify $wheel --repo $repo"
+    else
+        # A copy downloaded from GitHub would not be the file that came from this base URL.
+        say "Not checked: who built it. To check the build attestation of this file, run this script" \
+            "again with --attest (needs gh and gh auth login)."
     fi
 
+    if [ -n "$uv_names$pipx_names" ]; then
+        try_wheel
+    fi
     remove_other_installs
     install_wheel
 
@@ -557,9 +670,9 @@ main() {
         die "$installer reported success, but there is no contexto command on PATH or in $bin_dir."
     fi
     if [ "$reported" != "contexto $version" ]; then
-        die "$installer installed contexto $version, but $contexto_cmd reports \"$reported\". Another" \
-            "install comes first on PATH, or $installer did not replace it: remove it, or run this script" \
-            "again with --force. See https://github.com/$repo/blob/main/docs/install.md#troubleshooting"
+        die "$installer installed contexto $version, but $contexto_cmd reports \"$reported\". If another" \
+            "install comes first on PATH, remove it. If $installer did not replace that command, run this" \
+            "script again with --force. See https://github.com/$repo/blob/main/docs/install.md#troubleshooting"
     fi
     say "Installed with $installer. Session data in $data_home was not touched."
     if [ "$on_path" = 0 ]; then
@@ -570,3 +683,4 @@ main() {
 }
 
 main "$@" --end-of-script
+}
