@@ -395,6 +395,7 @@ TYPO_WEIGHT = 0.5  # a word matched through a typo weighs half
 TYPO_WORK = 500_000  # places checked for a typo per query, at most; past it the typo is not searched
 EXACT, FOLDED, TYPO = "exact", "folded", "typo"
 _TYPO_WORD = re.compile(r"[a-z]+")
+_DIGITS_APART = re.compile(r"\d[_.\-]+\d")  # as in 1.2 or 2026-11-05: deleting the separator makes another number
 _ANY_LETTER = "\x00"  # stands for one letter in a typo variant
 _WORD_BYTES = frozenset(b"0123456789abcdefghijklmnopqrstuvwxyz")  # a typo match is not next to one of these
 
@@ -412,12 +413,13 @@ class Plan(NamedTuple):
     def shaped(self, j: int) -> bool:
         """Whether word ``j`` is written as an identifier: it has ``_``, ``-`` or ``.`` inside, or a
         capital after its first letter beside small letters (``refreshToken``, ``HTTPTimeout``), and
-        without its separators it still has a letter and ``FOLD_MIN_CHARS`` characters. Only such a
-        word is compared without separators: a plain word is matched as typed, and so is a number, a
-        version or a date (``12`` never finds ``1.2``)."""
+        without its separators it still has a letter and ``FOLD_MIN_CHARS`` characters. A separator
+        between two digits rules it out. Only such a word is compared without separators: a plain
+        word is matched as typed, and so is a number, a version or a date (``12`` never finds
+        ``1.2``, nor ``v0.5.24`` ``v0.52.4``)."""
         word, bare = self.words[j], squeeze(self.words[j])
-        return ((bare != word or _mixed_case(self.typed[j]))
-                and len(bare) >= FOLD_MIN_CHARS and any(c.isalpha() for c in word))
+        return ((bare != word or _mixed_case(self.typed[j])) and len(bare) >= FOLD_MIN_CHARS
+                and any(c.isalpha() for c in word) and _DIGITS_APART.search(word) is None)
 
     def specific(self, j: int) -> bool:
         """Whether word ``j`` is an identifier, a number, a code or a path rather than a plain word: it

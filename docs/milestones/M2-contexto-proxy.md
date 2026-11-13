@@ -1204,8 +1204,8 @@ unknown page, never read. Tools:
      is never a stop word. A query with no other word has no approximate matches. At most 6 words
      are searched, the longest, so the pass costs what a strict miss of 6 words costs.
   2. Identifier styles. A word written as an identifier (it has `_`, `-` or `.` inside, or a
-     capital after its first letter beside small letters, and at least 4 other characters, one a
-     letter) is compared without `_`, `-` and `.`, on both sides: `refresh_token`, `refreshToken`,
+     capital after its first letter beside small letters, at least 4 other characters, one a
+     letter, and no separator between two digits) is compared without `_`, `-` and `.`, on both sides: `refresh_token`, `refreshToken`,
      `refresh-token` and `refresh.token` match each other. A plain word, a number, a version and a
      date are matched as typed, so `12` does not find `1.2`.
   3. Any word. A page need not hold every word. Each word weighs its inverse document frequency
@@ -1239,10 +1239,16 @@ unknown page, never read. Tools:
   nothing either, the reply is the no-hit reply as before. In-view matching is unchanged: a
   retained entry matches only when it holds every word. The `mcp_call` event gains `approximate`
   (true or false) and, when true, `approximate_steps`, a list among `stop_words`, `long_query`,
-  `fold`, `typo`, `any_word` and `punctuation`; it never holds a query word. Cost at 6,000
-  synthetic pages: one more pass over the store, about what a strict miss of the same words costs,
-  plus about half as much again when a word is written as an identifier, and two or three substring
-  scans per page when a typo is tried (D65 has the measured figures). Limits: no stemming, no
+  `fold`, `typo`, `any_word` and `punctuation`; it never holds a query word. Cost: one more pass
+  over the store that tests each searched word on each page, as a strict miss of up to 6 words
+  does; the separators are deleted from each page only when a word is written as an identifier; a
+  typo try adds two or three substring scans per page. Measured at 6,000 synthetic pages
+  (`spikes/m2/scale/store/scale_fallback.py`: CPU seconds on a busy machine, the least of 5 runs,
+  strict and fallback alternating; strict first, then what the fallback adds): one unknown word
+  0.46 and 0.88, of which the typo try is 0.42; an identifier in another style 0.43 and 0.65; one
+  typo, found, 0.48 and 1.14; three known words and one unknown 0.77 and 1.75; a 7-word question
+  with a typo 0.57 and 1.68; six unknown words 1.22 and 1.79. A strict hit costs what it did: it
+  runs the same code, and the fallback is not called. Limits: no stemming, no
   synonyms, no embeddings; a plain lower-case word does not match a separated form
   (`retrybudget` does not find `retry_budget`); a typo is found only in a plain word and only as a
   whole word (`databse` finds `database`, not `databases`); a second typo in the same query is not

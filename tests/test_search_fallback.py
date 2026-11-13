@@ -147,6 +147,9 @@ def test_only_a_word_written_as_an_identifier_is_folded():
     assert rank_approximate(pages, "database") == []
     assert found(rank_approximate(pages, "dataBase")) == [5]
     assert sorted(found(rank_approximate(pages, "sha-256"))) == [3, 4]
+    versions = entries("released v0.52.4 today", "nothing")
+    assert rank_approximate(versions, "v0.5.24") == []  # a separator between digits is never dropped
+    assert found(rank_approximate(versions, "v0.52.4")) == [0]
     six = S.plan_words("refresh_token refreshToken UserCache REFRESH Staging E4127")
     assert [six.shaped(j) for j in range(6)] == [True, True, True, False, False, False]
     assert [six.specific(j) for j in range(6)] == [True, True, True, False, False, True]

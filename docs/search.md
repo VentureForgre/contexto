@@ -88,8 +88,8 @@ pg_fda2a23e71e3ce0e (turn 1)
 
 A word counts as an identifier when it has `_`, `-` or `.` inside it, or a capital after its first
 letter next to small letters (`refreshToken`, `HTTPTimeout`), and has at least 4 other characters,
-one of them a letter. A plain word, a number, a version and a date are matched as typed, so `12`
-does not find `1.2`.
+one of them a letter, and no separator stands between two digits. A plain word, a number, a version
+and a date are matched as typed, so `12` does not find `1.2`.
 
 ### 3. A turn need not hold every word
 
@@ -202,9 +202,10 @@ case.
   common (search stops after checking 500,000 places and treats the word as not found).
 - The conversation still in view is matched strictly only: a line there counts when it holds every
   word.
-- Search adds one pass over the session's turns when it falls back. On 6,000 synthetic turns of
-  about 32 KB each, that is a fraction of a second; the first search of a session's MCP server
-  reads every turn once, as before.
+- Falling back costs one more pass over the session's turns. On 6,000 synthetic turns of about
+  32 KB each, a one-word query that finds nothing took 0.46 CPU seconds for the strict search and
+  0.88 more for the fallback, 0.42 of that for the typo try; a seven-word question took 0.57 and
+  1.68 more. A query that matches strictly costs what it did before.
 
 The exact rules are in the design contract,
 [docs/milestones/M2-contexto-proxy.md](milestones/M2-contexto-proxy.md), under `contexto_search`,
