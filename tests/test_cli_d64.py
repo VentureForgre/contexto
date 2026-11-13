@@ -365,7 +365,7 @@ def test_contexto_session_naming_no_session_on_a_fresh_install(home, capsys, mon
 INSTALL = {"claude": ("Install Claude Code: curl -fsSL https://claude.ai/install.sh | bash",
                       "https://code.claude.com/docs/en/setup"),
            "codex": ("Install Codex: curl -fsSL https://chatgpt.com/codex/install.sh | sh",
-                     "https://developers.openai.com/codex/cli")}
+                     "https://learn.chatgpt.com/docs/codex/cli")}
 
 
 @pytest.mark.parametrize("name", ["claude", "codex"])
@@ -427,8 +427,11 @@ def test_the_no_key_helper_error_gives_an_example_that_works(tmp_path):
     message = str(exc.value)
     assert message.startswith("no key helper: ") and "OPENAI_API_KEY" in message
     assert "--codex-key-helper" in message and codex.KEY_HELPER_ENV in message and "apiKeyHelper" in message
-    example = f"contexto run --codex-key-helper '{codex.KEY_HELPER_EXAMPLE}' codex"
-    assert example in message
+    # The whole command, with the upstream: without it the example fails with "no upstream" on a default
+    # setup, or sends the OpenAI key to whatever host Claude Code's base URL names (PR #257 review B).
+    assert codex.KEY_HELPER_COMMAND == ("contexto run --codex-upstream https://api.openai.com/v1 "
+                                        f"--codex-key-helper '{codex.KEY_HELPER_EXAMPLE}' codex")
+    assert f"`{codex.KEY_HELPER_COMMAND}`" in message
     # The example, taken through the code path: the config Codex reads, then the command Codex would run.
     launch = codex.plan_codex([], "http://127.0.0.1:43210", "S", env={}, cwd=tmp_path, home=empty,
                               upstream="https://u.invalid/v1", key_helper=codex.KEY_HELPER_EXAMPLE)
@@ -449,21 +452,74 @@ def test_the_example_parses_as_a_contexto_run_command(capsys):
     """The example's words, as a shell would split them, are a `run codex` command line."""
     import shlex
 
-    words = shlex.split(f"contexto run --codex-key-helper '{codex.KEY_HELPER_EXAMPLE}' codex")
+    words = shlex.split(codex.KEY_HELPER_COMMAND)
     args = cli.build_parser().parse_args(words[1:])
     assert args.cli == "codex" and args.codex_key_helper == codex.KEY_HELPER_EXAMPLE and args.cli_args == []
+    assert args.codex_upstream == "https://api.openai.com/v1"
 
 
-def test_run_codex_without_a_key_helper_prints_the_example(home, capsys, tmp_path, monkeypatch):
-    bare_env(tmp_path, monkeypatch)
+def codex_stub(tmp_path, monkeypatch):
+    """A `codex` that answers --version and exits 0, first on PATH; ``bare_env`` made its directory."""
     stub = tmp_path / "empty-bin" / "codex"
     stub.write_text('#!/bin/sh\n[ "$1" = --version ] && echo "codex-cli 0.166.0"\nexit 0\n')
     stub.chmod(0o755)
     monkeypatch.setenv("PATH", f"{stub.parent}{os.pathsep}{os.defpath}")
+
+
+def test_run_codex_without_a_key_helper_prints_the_example(home, capsys, tmp_path, monkeypatch):
+    bare_env(tmp_path, monkeypatch)
+    codex_stub(tmp_path, monkeypatch)
     code, out, err = run(capsys, "run", "--upstream", "http://127.0.0.1:9", "codex", "exec", "hi")
     assert code == 2 and out == ""
-    assert err.startswith("contexto: no key helper: ") and "printenv OPENAI_API_KEY" in err
+    assert err.startswith("contexto: no key helper: ") and f"`{codex.KEY_HELPER_COMMAND}`" in err
     assert sessions(home) == []
+
+
+@pytest.mark.parametrize("claude_base_url", [None, "https://gateway.invalid"])
+def test_the_example_typed_as_shown_launches_and_sends_the_key_only_to_openai(home, capsys, tmp_path, monkeypatch,
+                                                                             claude_base_url):
+    """PR #257 review B: on a default setup the example without an upstream ended in "no upstream"; with
+    Claude Code's base URL set to another host it started Codex with that host as the upstream, which then
+    got the OpenAI key. The stub codex sends nothing, so no request leaves the machine."""
+    import shlex
+
+    bare_env(tmp_path, monkeypatch)
+    codex_stub(tmp_path, monkeypatch)
+    if claude_base_url:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", claude_base_url)
+    code, _, err = run(capsys, *shlex.split(codex.KEY_HELPER_COMMAND)[1:])
+    assert code == 0 and "no upstream" not in err and "no key helper" not in err
+    assert "upstream codex-flag" in err  # the flag's URL, not Claude Code's upstream plus /v1
+    [session] = sessions(home)
+    log = (home / "sessions" / session / "log.jsonl").read_text()
+    [launch] = [e for e in map(json.loads, log.splitlines()) if e.get("event") == "launch"]
+    assert launch["upstream_source"] == "codex-flag"
+
+
+def test_the_untrusted_helper_form_of_the_error_gives_the_example_too(tmp_path):
+    """PR #257 review A: a project's apiKeyHelper skipped in an untrusted folder is the other way to reach
+    "no key helper", and it named neither the example nor OPENAI_API_KEY."""
+    repo, user_home = tmp_path / "repo", tmp_path / "user-home"
+    (repo / ".claude").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / ".claude" / "settings.json").write_text(json.dumps({"apiKeyHelper": "echo sk-from-the-project"}))
+    user_home.mkdir()
+    with pytest.raises(codex.CodexLaunchError) as exc:
+        codex.plan_codex([], "http://127.0.0.1:43210", "S", env={"CLAUDE_CONFIG_DIR": str(tmp_path / "cc")},
+                         cwd=repo, home=user_home, upstream="https://u.invalid/v1")
+    message = str(exc.value)
+    assert message.startswith("no key helper: ignored apiKeyHelper from .claude/settings.json")
+    assert f"`{codex.KEY_HELPER_COMMAND}`" in message and "$OPENAI_API_KEY" in message
+    assert "sk-from-the-project" not in message  # the skipped helper's command is never quoted
+
+
+def test_the_example_helper_prints_no_key_text_when_the_variable_is_empty():
+    """PR #257 review B: set but empty, `printenv` exits 0 with an empty line, so the helper hands Codex an
+    empty key (Codex 0.167.2 then refuses the token and sends no Authorization header). Pinned here so the
+    comment on KEY_HELPER_EXAMPLE stays true to what the command does."""
+    out = subprocess.run(["/bin/sh", "-c", codex.KEY_HELPER_EXAMPLE], capture_output=True, text=True, timeout=10,
+                         env={"PATH": os.defpath, "OPENAI_API_KEY": ""})
+    assert out.returncode == 0 and out.stdout == "\n"
 
 
 def test_the_key_helper_help_names_the_example(capsys):
@@ -567,3 +623,52 @@ def test_help_says_whether_a_session_id_may_be_a_prefix(capsys, argv, words):
     with pytest.raises(SystemExit):
         cli.main(argv)
     assert words in " ".join(capsys.readouterr().out.split())
+
+
+# Review follow-ups (PR #257)
+
+
+def test_a_sessions_path_that_is_a_file_is_not_a_fresh_install(home, capsys):
+    """Review A: with `sessions` a regular file, `contexto run` cannot create a session either, so the
+    first-run hint would send the user in a circle. Every reader names the file instead."""
+    home.mkdir()
+    (home / "sessions").write_text("not a directory")
+    for argv in (["state"], ["search", "hello"], ["recall", "pg_0001"], ["sessions"], ["sessions", "list", "--json"],
+                 ["sessions", "show", "abc"], ["state", "--json"]):
+        code, out, err = run(capsys, *argv)
+        assert code == 1 and out == "", argv
+        assert err == f"contexto: error: {home / 'sessions'} is not a directory (check $CONTEXTO_HOME)\n", argv
+        assert FIRST_RUN not in err, argv
+
+
+def test_a_session_id_that_cannot_be_printed_is_quoted_in_the_prefix_errors(home, capsys, monkeypatch):
+    """Review B: an id holding a newline forged a second `contexto: error:` line in the messages that name
+    the sessions a prefix starts (`mcp`, `run`, `prune`, and the readers' ambiguous-prefix error)."""
+    from contexto.store.sessions import named
+
+    forged = "zz\ncontexto: error: forged"
+    assert named([forged]) == f"session {forged!r}" and "\n" not in named([forged, "zz1"])
+    assert named(["abc"]) == "session abc" and named(["abc", "abd"]) == "2 sessions: abc, abd"  # unchanged
+    monkeypatch.setattr(mcp, "serve_stdio", lambda store: pytest.fail("served a session nobody named"))
+    (home / "sessions" / forged).mkdir(parents=True)
+    code, out, err = run(capsys, "mcp", "--session", "zz")
+    assert code == 1 and out == "" and err.count("\n") == 1 and repr(forged) in err
+
+
+def test_sessions_usage_shows_the_command_as_optional(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["sessions", "--help"])
+    usage = " ".join(capsys.readouterr().out.split())
+    assert "[list|show|prune]" in usage and "<list|show|prune>" not in usage
+
+
+def test_the_json_help_says_what_the_output_can_hold(capsys):
+    """Review A and B: a long line's `text` is an excerpt, and `pages` can be null."""
+    with pytest.raises(SystemExit):
+        cli.main(["search", "--help"])
+    assert "for a long line text is an excerpt and offset is where the excerpt starts" in " ".join(
+        capsys.readouterr().out.split())
+    with pytest.raises(SystemExit):
+        cli.main(["state", "--help"])
+    assert "null, with the error on stderr and exit 1, when they cannot be listed" in " ".join(
+        capsys.readouterr().out.split())

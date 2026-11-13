@@ -28,7 +28,8 @@ def register(subparsers) -> None:
                     "object: session, pinned (open_obligations, active_decisions and verified_facts, each a "
                     "list of records, newest first, with id, kind, body, created_at, owner, topic, stale and "
                     "conflict), conflicts (topic and record_ids), staleness_checked, and pages (the number "
-                    "of turns paged out). stale is null when staleness_checked is false.")
+                    "of turns paged out; null, with the error on stderr and exit 1, when they cannot be "
+                    "listed). stale is null when staleness_checked is false.")
     add_session_option(parser)
     form = parser.add_mutually_exclusive_group()
     form.add_argument("--raw", action="store_true",

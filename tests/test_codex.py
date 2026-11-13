@@ -856,7 +856,7 @@ def test_run_codex_without_codex_on_path_says_so_before_making_a_session(tmp_pat
     assert run_codex(parse("--upstream", "http://127.0.0.1:9", "codex"), stderr=err) == 127
     assert err.getvalue() == ("contexto: 'codex' not found on PATH. Install Codex: curl -fsSL "
                               "https://chatgpt.com/codex/install.sh | sh (other ways: "
-                              "https://developers.openai.com/codex/cli). If it is installed, add its directory to "
+                              "https://learn.chatgpt.com/docs/codex/cli). If it is installed, add its directory to "
                               "PATH.\n")
     assert session_names(tmp_path / "ctx") == []
 

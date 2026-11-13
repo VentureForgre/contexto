@@ -40,7 +40,9 @@ def register(subparsers) -> None:
                     "turn from there. Only paged-out turns are searched. With --json, one object: session, "
                     "query, total (every matching page) and hits (at most --limit), each with page_id, turn, "
                     "line (its index line), matches (the lines shown: offset, text, and match, false for a "
-                    "line of context), matching_lines (how many lines match in the whole turn) and "
+                    "line of context; for a long line text is an excerpt and offset is where the excerpt "
+                    "starts), "
+                    "matching_lines (how many lines match in the whole turn) and "
                     "first_match_offset (null when only the index line matches).")
     parser.add_argument("words", nargs="+", metavar="WORDS", help="words to find, in any order and case")
     add_session_option(parser)

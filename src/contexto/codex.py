@@ -261,8 +261,14 @@ KEY_HELPER_ENV = "CONTEXTO_CODEX_KEY_HELPER"
 # The helper the "no key helper" error and the option's help give as an example (D64): it prints the key
 # from the environment Codex runs it in, has nothing for a shell or an environment variable to expand or
 # quote, and fails with no output when the variable is unset, where `echo "$OPENAI_API_KEY"` would hand
-# Codex an empty key.
+# Codex an empty key. Set but empty it still prints an empty line; Codex 0.167.2 refuses that as a token
+# and sends no Authorization header (PR #257 review B).
 KEY_HELPER_EXAMPLE = "printenv OPENAI_API_KEY"
+# The whole command the error gives. It names the upstream: without --codex-upstream the requests, and so
+# the key, go to Claude Code's upstream plus /v1, which is no upstream at all on a default setup and
+# need not be OpenAI's on any other.
+KEY_HELPER_COMMAND = ("contexto run --codex-upstream https://api.openai.com/v1 "
+                      f"--codex-key-helper '{KEY_HELPER_EXAMPLE}' codex")
 UPSTREAM_ENV = "CONTEXTO_CODEX_UPSTREAM"
 CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
 ANTHROPIC_DOMAIN = "anthropic.com"
@@ -577,10 +583,10 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
             notes.append(untrusted_note("apiKeyHelper", found.ignored,
                                         f"Pass --codex-key-helper (or set {KEY_HELPER_ENV})", base_env))
     if not helper:
-        raise CodexLaunchError(f"no key helper: {notes[0]}" if notes else
-                               "no key helper: Codex gets its API key from a command that prints it. With the key "
-                               f"in $OPENAI_API_KEY, run `contexto run --codex-key-helper '{KEY_HELPER_EXAMPLE}' "
-                               f"codex`; or set {KEY_HELPER_ENV} to such a command, or configure apiKeyHelper in "
+        example = f"With an OpenAI key in $OPENAI_API_KEY, run `{KEY_HELPER_COMMAND}`"
+        raise CodexLaunchError(f"no key helper: {notes[0]}. {example}" if notes else
+                               "no key helper: Codex gets its API key from a command that prints it. "
+                               f"{example}; or set {KEY_HELPER_ENV} to such a command, or configure apiKeyHelper in "
                                "Claude Code settings")
     if codex_home_dir is not None:
         # Kept under the Contexto session directory so Codex's rollouts stay resumable; only the

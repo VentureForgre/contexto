@@ -129,10 +129,12 @@ AMBIGUOUS_SHOWN = 5  # matching ids an ambiguous-prefix error names
 
 
 def check_home(home: Path) -> None:
-    """SessionNotFoundError when the data directory exists but is not a directory: one message for every
-    reader (D57), rather than "no sessions under <file>/sessions" or a raw ``[Errno 20]``."""
-    if Path(home).exists() and not Path(home).is_dir():
-        raise SessionNotFoundError(f"{home} is not a directory (check $CONTEXTO_HOME)")
+    """SessionNotFoundError when the data directory, or its ``sessions`` entry, exists but is not a
+    directory: one message for every reader (D57), rather than "no sessions under <file>/sessions", a raw
+    ``[Errno 20]``, or the first-run hint where ``contexto run`` could not create a session either (D64)."""
+    for path in (Path(home), Path(home) / "sessions"):
+        if path.exists() and not path.is_dir():
+            raise SessionNotFoundError(f"{path} is not a directory (check $CONTEXTO_HOME)")
 
 
 FIRST_RUN_HINT = "run `contexto run claude` (or `contexto run codex`) first"
@@ -150,11 +152,13 @@ def starting_with(home: Path, prefix: str) -> list[str]:
 
 
 def named(ids: list[str]) -> str:
-    """``session <id>``, or ``<n> sessions: <id>, <id>, ...`` (at most ``AMBIGUOUS_SHOWN`` ids)."""
+    """``session <id>``, or ``<n> sessions: <id>, <id>, ...`` (at most ``AMBIGUOUS_SHOWN`` ids). An id
+    with a character that does not print (a directory name can hold a newline) is shown as its ``repr``,
+    so it cannot start a line of its own in an error message (D64)."""
+    shown = [i if i.isprintable() else repr(i) for i in ids[:AMBIGUOUS_SHOWN]]
     if len(ids) == 1:
-        return f"session {ids[0]}"
-    return (f"{len(ids)} sessions: " + ", ".join(ids[:AMBIGUOUS_SHOWN])
-            + (", ..." if len(ids) > AMBIGUOUS_SHOWN else ""))
+        return f"session {shown[0]}"
+    return f"{len(ids)} sessions: " + ", ".join(shown) + (", ..." if len(ids) > AMBIGUOUS_SHOWN else "")
 
 
 def resolve_session(home: Path, given: str, how: str | None = None) -> str:

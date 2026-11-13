@@ -66,7 +66,7 @@ def register(subparsers) -> None:
     # default over one given here and drop it without a word.
     parser.add_argument("--json", action="store_true", help="print JSON")
     parser.set_defaults(func=run_list)
-    sub = parser.add_subparsers(title="sessions commands", metavar="<list|show|prune>")
+    sub = parser.add_subparsers(title="sessions commands", metavar="[list|show|prune]")
     ls = sub.add_parser("list", help="list sessions, most recent activity first (the default)")
     ls.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     ls.set_defaults(func=run_list)

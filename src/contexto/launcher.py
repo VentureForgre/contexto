@@ -268,12 +268,13 @@ def check_mcp_values(session_id: str, home: Path, executable: str) -> None:
 
 
 # How to install each CLI (D64): its name, the first command its own documentation gives for macOS and
-# Linux, and that page (read 2026-11-12: Claude Code's "Advanced setup", Codex's "Codex CLI").
+# Linux, and that page (read 2026-11-12: Claude Code's "Advanced setup", Codex's "Codex CLI", at the
+# address developers.openai.com/codex/cli permanently redirects to).
 CLI_INSTALL = {
     "claude": ("Claude Code", "curl -fsSL https://claude.ai/install.sh | bash",
                "https://code.claude.com/docs/en/setup"),
     "codex": ("Codex", "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
-              "https://developers.openai.com/codex/cli"),
+              "https://learn.chatgpt.com/docs/codex/cli"),
 }
 
 
