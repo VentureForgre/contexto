@@ -431,7 +431,8 @@ items since the turn's prompt, in the upstream's tokens.
    the 120,000 and the 200,000 results, which may be stubbed on arrival.
 7. **Cache cost.** A loop has at most 2 prefix rewrites plus one for each 25,000 tokens (`bound / 6`)
    of its own items, and no request in a loop is a rewrite right after another rewrite unless the
-   previous forwarded request plus the items added since is over the bound. The re-sent share is
+   previous forwarded request plus the items added since is over 113,000 (`bound - headroom_floor -
+   min_turn_room`), where the room rule would fail without one. The re-sent share is
    reported per scenario and has no ceiling: in a short run such as `large` it is dominated by the
    number of requests.
 8. **Room.** Every main request in a loop publishes a room before the send and after the response,

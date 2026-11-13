@@ -89,9 +89,12 @@ def seen_first(run: Run) -> list[str]:
 
 def cache(run: Run) -> list[str]:
     """A loop has at most 2 prefix rewrites plus one per ``bound / 6`` tokens of its own items, and no
-    request in a loop is a rewrite right after another, unless it would be over the bound without one."""
+    request in a loop is a rewrite right after another, unless without one it would leave the turn less
+    than ``min_turn_room`` (the room rule's line, ``bound - headroom_floor - min_turn_room``)."""
     problems = []
-    batch = run.config.bound / REWRITE_BATCH
+    config = run.config
+    batch = config.bound / REWRITE_BATCH
+    line = config.bound - config.headroom_floor - config.min_turn_room  # over it, the room rule fails
     for (conversation, turn), sent in run.loops().items():
         rewrites = sum(1 for s in sent if s.in_loop and s.rewrite)
         allowed = 2 + sent[-1].loop_tokens / batch
@@ -101,10 +104,10 @@ def cache(run: Run) -> list[str]:
     for conversation in run.scenario.conversations:
         sent = [s for s in run.sent if s.conversation == conversation.name]
         twice = [b for a, b in zip(sent, sent[1:]) if a.rewrite and b.rewrite and b.in_loop
-                 and a.tokens + b.appended_tokens <= run.config.bound]
+                 and a.tokens + b.appended_tokens <= line]
         if twice:
             problems.append(f"{conversation.name}: {len(twice)} requests rewrote the prefix right after a rewrite, "
-                            "though the request would have been under the bound without it")
+                            "though the request would have kept min_turn_room without it")
     return problems
 
 

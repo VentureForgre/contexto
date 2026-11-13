@@ -329,13 +329,14 @@ def test_the_cache_rule_allows_two_rewrites_and_one_more_for_each_sixth_of_the_b
     assert targets.cache(run) == []
 
 
-def test_the_cache_rule_forbids_a_rewrite_right_after_a_rewrite_unless_the_bound_forces_it():
+def test_the_cache_rule_forbids_a_rewrite_right_after_a_rewrite_unless_the_room_forces_it():
     run = base()
     first, second = loop(run)[4:6]
     first.rewrite = second.rewrite = True
     assert targets.cache(run) == ["main: 1 requests rewrote the prefix right after a rewrite, though the request "
-                                  "would have been under the bound without it"]
-    first.tokens, second.appended_tokens = 149_000, 1_001  # one more result would not have fitted
+                                  "would have kept min_turn_room without it"]
+    # bound 150,000 less headroom_floor 25,000 less min_turn_room 12,000: one more result would have left less
+    first.tokens, second.appended_tokens = 112_000, 1_001
     assert targets.cache(run) == []
     second.appended_tokens = 1_000
     assert len(targets.cache(run)) == 1
