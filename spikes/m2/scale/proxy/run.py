@@ -56,7 +56,7 @@ REQUEST_FIELDS = ("label", "checkpoint_m", "phase", "round", "turn", "kind", "re
                   "pre_forward_s", "read_body_s", "proxy_transform_s", "engine_s", "observe_s", "index_text_s",
                   "index_text_n", "pages_read_s", "page_out_s", "set_retained_s", "set_epoch_s", "rotated",
                   "rotation_reason", "events", "proxy_maxrss_mb", "load1",
-                  "upstream_s", "added_s", "page_file_reads")
+                  "upstream_s", "added_s", "page_file_reads", "proxy_cpu_s")
 CHECKPOINT_FIELDS = ("label", "checkpoint_m", "turn", "history_tokens", "reached_by", "ff_turns", "ff_seconds",
                      "pages", "pages_mb", "store_mb", "log_mb", "proxy_idle_rss_mb", "proxy_maxrss_mb",
                      "max_upstream_tokens", "ff_turn_peak_max", "ff_turns_over_bound", "uptime", *(f"n_{e}" for e in COUNTED_EVENTS))
@@ -267,6 +267,7 @@ def merge_stats(rows: list[dict[str, Any]], records: list[dict[str, Any]], maxrs
                     "set_retained_s": round(rec.get("store_set_retained", 0), 4),
                     "set_epoch_s": round(rec.get("store_set_epoch", 0), 4),
                     "page_file_reads": rec.get("store_page_read_n", 0),
+                    "proxy_cpu_s": round(rec.get("cpu", 0), 6),
                     "rotated": int(bool(rotation)), "rotation_reason": rotation.get("reason", ""),
                     "events": " ".join(names), "proxy_maxrss_mb": round(maxrss, 1)})
 

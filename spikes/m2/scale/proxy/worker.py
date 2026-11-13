@@ -157,14 +157,15 @@ def instrument_handler() -> None:
 
     def _read_body(self, *args, **kwargs):
         METER.begin(self.headers.get("x-scale-id") or f"anon-{time.monotonic_ns()}")
-        t = time.perf_counter()
+        t, cpu = time.perf_counter(), time.thread_time()
         try:
             return read_body(self, *args, **kwargs)
         finally:
             METER.add("read_body", time.perf_counter() - t)
+            METER.add("cpu", time.thread_time() - cpu)
 
     def _transform(self, *args, **kwargs):
-        t = time.perf_counter()
+        t, cpu = time.perf_counter(), time.thread_time()
         try:
             profiler = PROFILE["p"]
             if profiler is not None:
@@ -172,6 +173,7 @@ def instrument_handler() -> None:
             return transform(self, *args, **kwargs)
         finally:
             METER.add("proxy_transform", time.perf_counter() - t)
+            METER.add("cpu", time.thread_time() - cpu)
 
     handler._read_body = _read_body
     handler._transform = _transform
@@ -181,7 +183,11 @@ class TimedEngine:
     """The engine with timers on its two entry points. Every other attribute is the engine's
     (``preserves_input``, ``prime``, ``tools_verdict``), so the proxy and the launcher take the same paths
     as with the bare engine. ``observe_usage`` passes its keywords through: the proxy gives a callback
-    ``tool_calls`` and ``tool_call_ids`` only when its signature takes them (D40)."""
+    ``tool_calls`` and ``tool_call_ids`` only when its signature takes them (D40).
+
+    The ``cpu`` key is the handler thread's CPU time (``time.thread_time``) in ``_read_body``,
+    ``_transform`` and ``observe_usage`` together: the proxy's own work on a request, without the time it
+    waits for a CPU, for the transform lock or for the upstream."""
 
     def __init__(self, engine) -> None:
         self.engine = engine
@@ -194,12 +200,13 @@ class TimedEngine:
         return out
 
     def observe_usage(self, endpoint, usage, request, **extra):
-        t = time.perf_counter()
+        t, cpu = time.perf_counter(), time.thread_time()
         profiler = PROFILE["p"]
         observe = self.engine.observe_usage
         events = (profiler.runcall(observe, endpoint, usage, request, **extra) if profiler is not None
                   else observe(endpoint, usage, request, **extra))
         METER.add("observe", time.perf_counter() - t)
+        METER.add("cpu", time.thread_time() - cpu)
         METER.events("usage_events", events)
         return events
 

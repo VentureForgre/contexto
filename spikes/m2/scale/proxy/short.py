@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import shutil
 import statistics
@@ -66,15 +67,16 @@ TINY_BODY = json.dumps({"model": "claude-haiku-5-5", "max_tokens": 16, "stream":
 SAMPLE_EVERY = 20  # turns between memory samples
 SEND_TIMEOUT_S = 120
 
-# What the test asserts. Provisional until the harness runs again; see README.md, "The short run".
+# What the test asserts: an upper limit for each quantity, and a floor for throughput. README.md, "The short
+# run", has each budget next to the values measured on 2026-11-12 and the factor between them.
 BUDGETS: dict[str, float] = {
     "added_median_ms": 100.0,
-    "added_p95_ms": 400.0,
-    "added_ms_per_mtok": 250.0,
-    "startup_ms": 5_000.0,
-    "peak_rss_mb": 1_000.0,
-    "rss_mb_per_body_mb": 200.0,
-    "objects_per_turn": 1_000.0,
+    "added_p95_ms": 300.0,
+    "added_ms_per_mtok": 120.0,
+    "startup_ms": 3_000.0,
+    "peak_rss_mb": 300.0,
+    "rss_mb_per_body_mb": 100.0,
+    "objects_per_turn": 40.0,
     "throughput_floor_rps": 10.0,
 }
 
@@ -154,6 +156,7 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
     upstream = FakeUpstream()
     upstream.upstream_port = upstream.start()
     began = time.monotonic()
+    load_before = run.load_avg()
     rows: list[dict[str, Any]] = []
     samples: list[dict[str, Any]] = []
     startup_s: list[float] = []
@@ -207,9 +210,11 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
         if made_home:
             shutil.rmtree(home, ignore_errors=True)
     added = [r["added_s"] * 1e3 for r in rows if r.get("added_s") is not None]
-    loops = [(r["history_tokens"] / 1e6, r["added_s"] * 1e3) for r in rows
-             if r["kind"] == "tool_loop" and r.get("added_s") is not None]
-    slope, intercept = theil_sen(loops)
+    loops = [r for r in rows if r["kind"] == "tool_loop" and r.get("added_s") is not None]
+    slope, intercept = theil_sen([(r["history_tokens"] / 1e6, r["added_s"] * 1e3) for r in loops])
+    cpu = [r["proxy_cpu_s"] * 1e3 for r in rows if r.get("proxy_cpu_s") is not None]
+    cpu_slope, cpu_intercept = theil_sen([(r["history_tokens"] / 1e6, r["proxy_cpu_s"] * 1e3) for r in loops
+                                          if r.get("proxy_cpu_s") is not None])
     first_sample, last_sample = (samples[0], samples[-1]) if samples else ({}, {})
     body_growth = (last_sample.get("body_mb") or 0) - (first_sample.get("body_mb") or 0)
     rss_known = bool(samples) and all(s["rss_mb"] is not None for s in samples)
@@ -217,6 +222,7 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
     return {
         "python": platform.python_version(), "platform": sys.platform, "turns": turns, "reminders": reminders,
         "requests": len(rows), "seconds": round(time.monotonic() - began, 1),
+        "load1": [load_before, run.load_avg()], "cpus": os.cpu_count(),
         "history_tokens": rows[-1]["history_tokens"] if rows else 0, "body_mb": rows[-1]["body_mb"] if rows else 0,
         "bound": args.bound, "max_upstream_tokens": max([max_logged, *(r.get("upstream_tokens") or 0 for r in rows)]),
         "unseen_upstream": sum(1 for r in rows if not r.get("upstream_tokens")),
@@ -226,6 +232,9 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
         "added_p95_ms": round(p95(added), 3) if added else None,
         "added_max_ms": round(max(added), 3) if added else None,
         "added_ms_per_mtok": round(slope, 3), "added_intercept_ms": round(intercept, 3),
+        "cpu_median_ms": round(statistics.median(cpu), 3) if cpu else None,
+        "cpu_p95_ms": round(p95(cpu), 3) if cpu else None,
+        "cpu_ms_per_mtok": round(cpu_slope, 3), "cpu_intercept_ms": round(cpu_intercept, 3),
         "first_request_bytes": len(first_body),
         "first_request_added_ms": round(statistics.median(small), 3) if small else None,
         "first_request_direct_ms": round(statistics.median(direct), 3) if direct else None,
@@ -263,7 +272,8 @@ def report(result: dict[str, Any]) -> str:
     """The run as lines of text: the bound, then each budgeted quantity with its budget and the factor."""
     lines = [f"short scale run: {result['turns']} turns, {result['requests']} requests, "
              f"{result['history_tokens']:,} tokens of history ({result['body_mb']} MB body) in {result['seconds']} s; "
-             f"Python {result['python']} on {result['platform']}",
+             f"Python {result['python']} on {result['platform']}, {result['cpus']} CPUs, 1-minute load "
+             f"{result['load1'][0]} before and {result['load1'][1]} after",
              f"  largest upstream request {result['max_upstream_tokens']:,} tokens (bound {result['bound']:,}); "
              f"{result['pages']} pages; broken: {result['broken'] or 'nothing'}; events {result['events']}"]
     for key, limit in BUDGETS.items():
@@ -285,6 +295,25 @@ def report(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+SPREAD_KEYS = ("added_median_ms", "added_p95_ms", "added_intercept_ms", "first_request_added_ms",
+               "first_request_over_direct_ms", "added_ms_per_mtok", "cpu_median_ms", "cpu_p95_ms", "cpu_intercept_ms",
+               "cpu_ms_per_mtok", "startup_ms", "peak_rss_mb", "rss_mb_per_body_mb",
+               "objects_per_turn", "throughput_rps", "max_upstream_tokens", "seconds")
+
+
+def spread(results: list[dict[str, Any]]) -> str:
+    """Smallest, median and largest of each quantity over ``results``, and how many runs met every budget."""
+    met = sum(1 for r in results if not r["broken"] and not over_budget(r))
+    loads = sorted(load for r in results for load in r.get("load1", []))
+    lines = [f"spread over {len(results)} runs (smallest, median, largest); {met} met every budget; "
+             f"1-minute load {loads[0]} to {loads[-1]}" if loads else f"spread over {len(results)} runs"]
+    for key in SPREAD_KEYS:
+        values = sorted(r[key] for r in results if r.get(key) is not None)
+        if values:
+            lines.append(f"  {key}: {values[0]}, {round(statistics.median(values), 3)}, {values[-1]}")
+    return "\n".join(lines)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--turns", type=int, default=TURNS)
@@ -294,7 +323,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--burst", choices=("first", "tiny"), default="first",
                         help="what the burst sends: the session's first request, or a 100-byte request")
     parser.add_argument("--json", help="append each run's measurements (without the rows) to this file, one per line")
+    parser.add_argument("--spread", metavar="FILE", help="run nothing: print the spread of the runs recorded in "
+                        "FILE (written by --json, or by pytest with CONTEXTO_SCALE_SHORT_OUT=FILE)")
     args = parser.parse_args(argv)
+    if args.spread:
+        with open(args.spread) as f:
+            print(spread([json.loads(line) for line in f if line.strip()]))
+        return 0
     results = []
     failed = False
     for _ in range(args.repeat):
@@ -309,13 +344,7 @@ def main(argv: list[str]) -> int:
             with open(args.json, "a") as f:
                 f.write(json.dumps({k: v for k, v in result.items() if k != "rows"}) + "\n")
     if len(results) > 1:
-        print(f"spread over {len(results)} runs (smallest, median, largest):")
-        for key in ("added_median_ms", "added_p95_ms", "added_intercept_ms", "first_request_added_ms",
-                    "first_request_over_direct_ms", "added_ms_per_mtok", "startup_ms", "peak_rss_mb",
-                    "rss_mb_per_body_mb", "objects_per_turn", "throughput_rps", "seconds"):
-            values = sorted(r[key] for r in results if r.get(key) is not None)
-            if values:
-                print(f"  {key}: {values[0]}, {statistics.median(values)}, {values[-1]}")
+        print(spread(results))
     return 1 if failed else 0
 
 

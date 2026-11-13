@@ -10,6 +10,10 @@ agents benchmarking on the same machine. 1-minute load averages were 3.1 to 7.4 
 runs (`load1` in `results/requests_*.csv`; the `uptime` line for each checkpoint is in
 `results/checkpoints_*.csv`). Every number below is measured unless it is marked as an inference.
 
+The harness was repaired on 2026-11-12 and a 200-turn version of it now runs in the test suite: see
+"2026-11-12: repaired at v0.5.24" at the end. Everything between here and that section is the
+2026-10-17 record and is left as it was written, apart from two notes that say so.
+
 ## Short answer
 
 - **With a context block on the first message only and one session-start system message (the `first`
@@ -52,6 +56,10 @@ python3 -m venv .venv && .venv/bin/pip install -q -e . pytest
 .venv/bin/python spikes/m2/scale/proxy/run.py --label first-1        # about 7 min; 0.5M..30M
 .venv/bin/python spikes/m2/scale/proxy/summarize.py first-1 first-2 first-3   # the table below
 ```
+
+[Note added 2026-11-12] A label names the output files, and the labels used in this document
+(`first-1`, `mixed-1`, `perf-1` and so on) name the committed 2026-10-17 files, so running these
+commands as written overwrites that record. Use a new label, as in the 2026-11-12 section.
 
 Other entry points:
 
@@ -396,4 +404,5 @@ of the first; `carried_content` could be cached per epoch.
 - `results/profile_first-{1,2,3}_10M.txt`, `results/fidelity_*_120.json`, `results/leak_*.csv`.
 - `results/*_base-{1,2,3}.*` and `results/*_perf-{1,2,3}.*`: the before and after runs of the CPU fixes.
 - `tests/test_scale_proxy_harness.py`: fast checks of the helpers (7 tests, under a second, collected
-  by the default `pytest`). The scale run itself is not in the suite.
+  by the default `pytest`). The scale run itself is not in the suite. [Note added 2026-11-12] A
+  200-turn run is in the suite now, with two more test files; see the next section.
