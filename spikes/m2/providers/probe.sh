@@ -6,10 +6,11 @@
 # CONTEXTO_HOME, and a fake key, so nothing reaches a model or a provider. macOS only (sandbox-exec).
 # Claude Code retries the 401 until a 25-second alarm stops it, so most cases exit 143; that is expected.
 # Usage: probe.sh <contexto-binary> <claude-binary>      ONLY="case case" limits the cases run.
+# The plain-* cases at the end run `claude -p` without Contexto, in the same sandbox (see run_plain).
 set -u
 CONTEXTO="$1"; CLAUDE_BIN="$2"
 S="$(cd "$(dirname "$0")" && pwd)"
-T="$(cd "$(mktemp -d /tmp/cx-providers.XXXXXX)" && pwd -P)"
+T="$(cd "$(mktemp -d)" && pwd -P)"  # private (0700): a fixed path under /tmp can be replaced by another process
 mkdir -p "$T/bin"; ln -s "$CLAUDE_BIN" "$T/bin/claude"
 port() { python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])"; }
 A=$(port); B=$(port)
@@ -68,4 +69,38 @@ run_case anthropic-aws-env "" CLAUDE_CODE_USE_ANTHROPIC_AWS=1 ANTHROPIC_AWS_BASE
 run_case anthropic-aws-settings "{\"env\":{\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"1\",\"ANTHROPIC_AWS_BASE_URL\":\"$U\",\"CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH\":\"1\",\"AWS_REGION\":\"us-east-1\"}}"
 run_case google-cloud-env "" CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD=1 ANTHROPIC_GOOGLE_CLOUD_BASE_URL="$U" CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH=1
 run_case google-cloud-settings "{\"env\":{\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"1\",\"ANTHROPIC_GOOGLE_CLOUD_BASE_URL\":\"$U\",\"CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH\":\"1\"}}"
+# Cases added after review (PR #258), first measured on 2.1.322.
+BOM=$'\xef\xbb\xbf'  # a UTF-8 byte order mark at the start of the settings file
+run_case bom-settings "$BOM{\"env\":{\"CLAUDE_CODE_USE_BEDROCK\":\"1\",\"ANTHROPIC_BEDROCK_BASE_URL\":\"$U\",\"CLAUDE_CODE_SKIP_BEDROCK_AUTH\":\"1\",\"AWS_REGION\":\"us-east-1\"}}"
+# CLAUDE_CODE_USE_GATEWAY with the two variables it needs. The environment's base URL is stub B, so a
+# gateway that used it, and not the proxy's from the launcher's --settings file, would show up at B.
+run_case gateway-env "" CLAUDE_CODE_USE_GATEWAY=1 ANTHROPIC_BASE_URL="$U" ANTHROPIC_AUTH_TOKEN=fake-not-a-token
+run_case gateway-settings "{\"env\":{\"CLAUDE_CODE_USE_GATEWAY\":\"1\",\"ANTHROPIC_AUTH_TOKEN\":\"fake-not-a-token\"}}" ANTHROPIC_BASE_URL="$U"
+# CLAUDE_CODE_IGNORE_PERSISTED_TRUST with the variable in the project file only (D52: -p then drops a
+# project file's env but a short list). The provider's own variables are in the environment, so the
+# case shows whether the variable itself is dropped.
+run_case ignore-trust-settings "{\"env\":{\"CLAUDE_CODE_USE_BEDROCK\":\"1\"}}" CLAUDE_CODE_IGNORE_PERSISTED_TRUST=1 ANTHROPIC_BEDROCK_BASE_URL="$U" CLAUDE_CODE_SKIP_BEDROCK_AUTH=1 AWS_REGION=us-east-1
+
+# Plain `claude -p`, without Contexto: does Claude Code read a settings file that starts with a byte
+# order mark for the two settings contexto.upstream reads? The environment's base URL is stub A and
+# the file's is stub B; the helper only creates a marker file and prints a fake key.
+run_plain() {  # name, settings-json, extra env assignments...
+  local name="$1" settings="$2"; shift 2
+  if [ -n "${ONLY:-}" ] && ! echo " $ONLY " | grep -q " $name "; then return; fi
+  local dir="$T/$name"; mkdir -p "$dir/home" "$dir/config" "$dir/cwd/.claude"
+  printf '%s' "${settings//MARKER/$dir/helper-ran}" > "$dir/cwd/.claude/settings.json"
+  : > "$T/a.log"; : > "$T/b.log"
+  ( cd "$dir/cwd" && env -i HOME="$dir/home" PATH="$T/bin:/usr/bin:/bin" TERM=dumb CLAUDE_CONFIG_DIR="$dir/config" \
+      ANTHROPIC_BASE_URL="http://127.0.0.1:$A" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+      DISABLE_TELEMETRY=1 DISABLE_AUTOUPDATER=1 "$@" \
+      sandbox-exec -f "$T/sandbox.sb" perl -e 'alarm 25; exec @ARGV' \
+      "$T/bin/claude" -p "synthetic probe" < /dev/null > "$dir/out.log" 2> "$dir/err.log" ) 2> /dev/null
+  printf '%-28s exit=%-3s envA /v1/messages=%s fileB /v1/messages=%s helper_ran=%s\n' "$name" "$?" \
+    "$(grep -c "^POST /v1/messages$" "$T/a.log")" "$(grep -c "^POST /v1/messages$" "$T/b.log")" \
+    "$([ -e "$dir/helper-ran" ] && echo 1 || echo 0)"
+}
+run_plain plain-base-url "{\"env\":{\"ANTHROPIC_BASE_URL\":\"$U\"}}" ANTHROPIC_API_KEY=sk-ant-fake-not-a-key
+run_plain plain-bom-base-url "$BOM{\"env\":{\"ANTHROPIC_BASE_URL\":\"$U\"}}" ANTHROPIC_API_KEY=sk-ant-fake-not-a-key
+run_plain plain-key-helper "{\"apiKeyHelper\":\": > MARKER; echo sk-ant-fake-not-a-key\"}"
+run_plain plain-bom-key-helper "$BOM{\"apiKeyHelper\":\": > MARKER; echo sk-ant-fake-not-a-key\"}"
 echo "runs kept under $T"

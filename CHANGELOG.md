@@ -11,7 +11,19 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
-Nothing yet.
+- New command: `contexto doctor` checks what `contexto run` needs from the directory you run it
+  in, and prints one line per check with the next step under a warning or a failure. It checks
+  Python, the `claude` and `codex` CLIs and their versions, the Claude Code settings files, the
+  upstream and what sets it, whether a key or key helper is configured, the store home, the MCP
+  server, and the variables below. `--json` prints the same results for scripts. It makes no
+  network request, runs no key helper and prints no key. Details: [docs/doctor.md](docs/doctor.md).
+- `contexto run claude` warns when a variable sends Claude Code's model requests to another
+  provider (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and four more), in the environment
+  or in a settings file's `env` block. Claude Code then does not use the proxy, so the session is
+  not kept under the bound. The launch still starts, and the session log records `provider_bypass`.
+- A Claude Code settings file that starts with a UTF-8 byte order mark is read. Claude Code reads
+  such a file, and Contexto treated it as absent, so `contexto run` missed an
+  `ANTHROPIC_BASE_URL` or `apiKeyHelper` set there and used another upstream than Claude Code's own.
 
 ## 0.5.24 (2026-11-06)
 
