@@ -356,8 +356,9 @@ def test_only_one_word_per_query_is_tried_as_a_typo_and_work_is_bounded(monkeypa
 def test_odd_queries_return_a_list_and_never_raise(store, query):
     hits = store.search_approximate(query)
     assert isinstance(hits, list) and store.search_approximate(query) == hits
-    text = call(store, query)[0] if query.strip() else None
-    assert text is None or isinstance(text, str)
+    if query.strip():  # an empty query is a tool error, as before
+        text = call(store, query)[0]
+        assert text == mcp.NO_HIT or text.startswith((mcp.SEARCH_APPROX_HEADER, mcp.SEARCH_BEST_HEADER)), text[:80]
 
 
 def test_unicode_words_match_as_typed(store):
