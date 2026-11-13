@@ -2778,7 +2778,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     prompt): 7 model requests, classed `main`, `subagent`, `main`, `main`, `compaction`,
     `compaction`, `main`; the last carried `context_compacted: manual` and logged `main_changed:
     compacted`; the subagent's request was not main; 0 gated headers on the 7 upstream requests; no
-    `hint_mismatch`, so on 2.1.322 each signature still agrees with its header.
+    `hint_mismatch`, so on 2.1.322 each signature still agrees with its header. The same three
+    tests pass with the 2.1.318 and 2.1.319 binaries first on PATH.
   - **Cloud-provider guard: the problem.** With `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
     `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE` or `CLAUDE_CODE_USE_ANTHROPIC_AWS` set to
     `1`, every request went to the provider's stub and 0 to `ANTHROPIC_BASE_URL`, not even
@@ -2805,7 +2806,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     a subagent's own compaction or side requests were not provoked, so whether a workflow agent
     carries an agent id is not known; its class keeps it out either way. A drifted summary was
     tested by altering the captured text, since no Claude Code release has another one. Claude Code
-    2.1.302 to 2.1.319 were not run with the hints on; the docs say 2.1.273 and later send them, and
+    2.1.302 to 2.1.314 were not run with the hints on; the docs say 2.1.273 and later send them, and
     an older one falls back to the signatures. Sessions signed in with a claude.ai account, the
     interactive TUI through `contexto run`, and Linux were not run. Organization-managed settings
     are not read, so a switch or a hint setting there is not seen, and
