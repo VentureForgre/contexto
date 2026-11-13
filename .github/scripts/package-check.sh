@@ -3,8 +3,8 @@
 #
 # Builds the sdist and the wheel and checks what PyPI would get: `twine check --strict`, the name,
 # metadata (every classifier is one PyPI knows) and contents of both artifacts, a wheel built again
-# from the unpacked sdist, and a render
-# of the long description with readme_renderer, the renderer PyPI uses.
+# from the unpacked sdist, and a render of the long description with readme_renderer, the renderer
+# PyPI uses.
 #
 #   bash .github/scripts/package-check.sh
 #

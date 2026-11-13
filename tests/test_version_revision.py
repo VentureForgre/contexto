@@ -56,7 +56,7 @@ def test_a_tag_install_names_the_tag_and_the_commit(installed):
     assert wanted == ["contexto-proxy"]
 
 
-@pytest.mark.parametrize("revision", ["main", "claude/pypi-packaging", "release_1.2+fix", "x" * 64])
+@pytest.mark.parametrize("revision", ["main", "claude/pypi-packaging", "release_1.2+fix", "Release/V2", "x" * 64])
 def test_a_branch_install_names_the_branch(installed, revision):
     installed(vcs(requested_revision=revision, commit_id=COMMIT))
     assert contexto.version_line() == f"{PLAIN} (git {revision}, commit d38e87d2)"
@@ -92,10 +92,32 @@ def test_an_uppercase_commit_id_is_printed_in_lowercase(installed):
     assert contexto.version_line() == f"{PLAIN} (git main, commit d38e87d2)"
 
 
-def test_a_direct_url_json_past_the_size_limit_is_not_parsed(installed):
-    padded = json.dumps({**vcs(requested_revision="v0.5.24", commit_id=COMMIT), "pad": "x" * 70_000})
-    installed(raw=padded.encode())
-    assert contexto.version_line() == PLAIN
+def test_an_uppercase_commit_id_alone_is_printed_in_lowercase(installed):
+    installed(vcs(commit_id=COMMIT.upper()))
+    assert contexto.version_line() == f"{PLAIN} (git commit d38e87d2)"
+
+
+@pytest.mark.parametrize("fill,over,expected", [
+    ("x", 0, f"{PLAIN} (git v0.5.24, commit d38e87d2)"),  # exactly the limit: parsed
+    ("x", 1, PLAIN),  # one character over: not parsed
+    ("é", 0, f"{PLAIN} (git v0.5.24, commit d38e87d2)"),  # the limit counts characters, not bytes
+])
+def test_the_size_limit_of_direct_url_json_is_65536_characters(installed, fill, over, expected):
+    empty = json.dumps({**vcs(requested_revision="v0.5.24", commit_id=COMMIT), "pad": ""}, ensure_ascii=False)
+    text = empty.replace('"pad": ""', '"pad": "' + fill * (65_536 + over - len(empty)) + '"')
+    assert len(text) == 65_536 + over
+    installed(raw=text.encode())
+    assert contexto.version_line() == expected
+
+
+def test_version_goes_to_stderr_when_stdout_is_closed(installed, capsys, monkeypatch):
+    installed(vcs(commit_id=COMMIT))
+    monkeypatch.setattr(sys, "stdout", None)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    monkeypatch.undo()
+    assert exc.value.code == 0
+    assert capsys.readouterr().err == f"{PLAIN} (git commit d38e87d2)\n"
 
 
 def test_a_sha256_commit_id_is_cut_to_eight_characters(installed):

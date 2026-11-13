@@ -21,7 +21,8 @@ class _Version(argparse.Action):
                          help=help or "show program's version number and exit")
 
     def __call__(self, parser, namespace, values, option_string=None):
-        print(version_line())
+        # With stdout closed argparse's own action fell back to stderr; keep that.
+        print(version_line(), file=sys.stdout or sys.stderr)
         parser.exit()
 
 

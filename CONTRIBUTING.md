@@ -72,9 +72,10 @@ pytest -q
 `pip uninstall contexto-proxy` removes it.
 
 A virtual environment made before the rename still holds the old `contexto` distribution. With uv,
-run `uv sync` once to remove it. In a plain virtual environment run `pip uninstall contexto` and
-then `pip install -e .` again; until then `contexto --version` prints `0.0.0+unknown` and two
-packaging tests fail.
+run `uv sync --reinstall-package contexto-proxy` once: it removes the old distribution and puts back
+the `contexto` command, which the old one owned. In a plain virtual environment run
+`pip uninstall contexto` and then `pip install -e .` again; until then `contexto --version` prints
+`0.0.0+unknown` and two packaging tests fail.
 
 The suite runs on macOS and Linux. Windows is not supported (see [Platforms](docs/install.md#platforms)).
 
@@ -92,9 +93,9 @@ The suite runs on macOS and Linux. Windows is not supported (see [Platforms](doc
   second empty environment and checks that it holds the same package.
 - `package`: `.github/scripts/package-check.sh`, once. It runs `twine check --strict` on the sdist
   and wheel, checks their name, metadata (every classifier is one PyPI knows) and contents, builds
-  a wheel again from the unpacked sdist,
-  and renders the PyPI description ([docs/pypi-description.md](docs/pypi-description.md)) with
-  `readme_renderer`, the renderer PyPI uses. It uploads nothing.
+  a wheel again from the unpacked sdist, and renders the PyPI description
+  ([docs/pypi-description.md](docs/pypi-description.md)) with `readme_renderer`, the renderer PyPI
+  uses. It uploads nothing.
 - `ci`: passes only when lint, package and every test and install job pass. It is the one required
   check.
 

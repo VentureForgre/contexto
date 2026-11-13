@@ -81,8 +81,12 @@ def check_metadata(metadata: bytes, pkg_info: bytes) -> str:
     classifiers = message.get_all("Classifier") or []
     check(not [c for c in classifiers if c.startswith("License ::")],
           "a License classifier is combined with the SPDX license expression")
-    unknown = sorted(c for c in classifiers if c not in known_classifiers or c in deprecated_classifiers)
-    check(not unknown, f"classifiers PyPI would refuse (not in trove-classifiers, or deprecated): {unknown}")
+    deprecated = sorted(c for c in classifiers if c in deprecated_classifiers)
+    check(not deprecated, f"deprecated classifiers, which PyPI refuses: {deprecated}")
+    unknown = sorted(c for c in classifiers if c not in known_classifiers)
+    check(not unknown, f"classifiers that are not in the pinned trove-classifiers: {unknown}. PyPI refuses a "
+                       "classifier it does not list. If https://pypi.org/classifiers/ lists it, move the "
+                       "TROVE_CLASSIFIERS pin in package-check.sh")
     check(len(classifiers) == len(set(classifiers)), f"a classifier is listed twice: {classifiers}")
     print(f"ok: Name: {message['Name']}, Version: {message['Version']}, Requires-Python: "
           f"{message['Requires-Python']}, no runtime dependencies, {len(classifiers)} classifiers PyPI knows")

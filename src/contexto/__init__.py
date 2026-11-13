@@ -17,7 +17,9 @@ except PackageNotFoundError:  # a source tree that was never installed
 # values are checked: a revision is a tag or branch name of ordinary characters, a commit id is hex.
 _REVISION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/+-]{0,63}")
 _COMMIT = re.compile(r"[0-9a-fA-F]{8,64}")
-_MAX_DIRECT_URL = 65_536  # characters; the real file is a few hundred. A longer one is not parsed.
+# Characters; the real file is a few hundred. A longer one is not parsed. It is still read whole:
+# importlib.metadata has no bounded read, and the file is only read for --version.
+_MAX_DIRECT_URL = 65_536
 
 
 def _names_commit(revision: str, commit: str) -> bool:

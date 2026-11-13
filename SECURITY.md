@@ -8,10 +8,10 @@ advisory visible only to you and the maintainers). Do not open a public issue or
 security problem.
 
 Include the Contexto version (`contexto --version`; if it reports `0.0.0+checkout` with no commit
-after it, the commit from `git rev-parse --short HEAD` in the checkout), the operating system and Python
-version, the CLI and its version (Claude Code or Codex), and the steps that show the problem. Leave
-real session data, API keys, and conversation text out of the report; a synthetic reproduction is
-enough.
+after it, the commit from `git rev-parse --short HEAD` in the checkout), the operating system and
+Python version, the CLI and its version (Claude Code or Codex), and the steps that show the
+problem. Leave real session data, API keys, and conversation text out of the report; a synthetic
+reproduction is enough.
 
 Fixes ship as a new release; the advisory names the first fixed version. Only the latest release
 gets fixes.

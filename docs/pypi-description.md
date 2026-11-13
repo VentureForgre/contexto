@@ -38,8 +38,9 @@ contexto run codex
 Contexto options go before the CLI's name, and everything after it is passed to the CLI unchanged:
 `contexto run --bound 120000 claude --model claude-haiku-5-5`. Codex needs a command that prints its
 API key, for example `contexto run --codex-key-helper 'my-key-command' codex`. The
-[README](https://github.com/VentureForgre/contexto/blob/main/README.md) covers the rest: how it
-works, the Codex setup, every option, inspecting sessions and troubleshooting.
+[README](https://github.com/VentureForgre/contexto/blob/main/README.md) and the guides it links to
+cover the rest: how it works, the Codex setup, every option, inspecting sessions and
+troubleshooting.
 
 ## Requirements
 
