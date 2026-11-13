@@ -2,16 +2,22 @@
 
 Everything is synthetic: fake ``claude`` and ``codex`` scripts that only answer ``--version``, settings
 files and a store home under ``tmp_path``, and a temporary ``HOME``. The MCP check starts the real
-server from this checkout. Nothing here contacts a model or an upstream; two tests assert that.
+server from this checkout. Nothing here contacts a model or an upstream; the last test asserts that,
+with an audit hook in this process and in the MCP server doctor starts.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import pwd
+import shlex
+import signal
 import socket
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -24,8 +30,8 @@ from contexto.cliversions import TESTED_VERSIONS
 from contexto.commands import doctor
 from contexto.mcp import TOOLS
 
-CHECK_IDS = ["python", "claude", "codex", "claude-upstream", "codex-upstream", "claude-key", "codex-key",
-             "store", "mcp", "provider"]
+CHECK_IDS = ["python", "claude", "codex", "settings", "claude-upstream", "codex-upstream", "claude-key",
+             "codex-key", "store", "mcp", "provider"]
 TESTED_CLAUDE = TESTED_VERSIONS["claude"][-1]
 TESTED_CODEX = TESTED_VERSIONS["codex"][-1]
 SECRET = "sk-doctor-SECRET-0123456789abcdefghijklmnopqrstuvwxyz"  # 53 characters
@@ -128,7 +134,7 @@ def test_everything_in_place_passes_every_check_and_exits_0(both, capsys, monkey
     marked = [line for line in lines if line.startswith("[")]
     assert len(marked) == len(CHECK_IDS) and all(line.startswith("[ok]") for line in marked), out
     assert not any(line.lstrip().startswith("->") for line in lines)  # nothing to do
-    assert lines[-1] == "Ready: 10 passed."
+    assert lines[-1] == "Ready: 11 passed."
     assert f"Claude Code {TESTED_CLAUDE}" in out and f"Codex {TESTED_CODEX}" in out
     assert "https://api.anthropic.com" in out and "https://api.openai.com" in out
     assert "listed its 5 tools" in out and str(both.store) in out
@@ -203,7 +209,51 @@ def test_ctrl_c_exits_130_without_a_traceback(both, capsys, monkeypatch):
 
     monkeypatch.setattr(doctor, "check_mcp", interrupted)
     code, out, err = run(capsys)
+    assert code == 130 and err.strip() == "contexto: interrupted"
+    # The lines of the checks that finished are out already; there is no MCP line and no verdict.
+    assert line_of(out, "Store home").startswith("[ok]") and "MCP server" not in out and "eady: " not in out
+    code, out, err = run(capsys, "--json")  # JSON is one object or nothing
     assert code == 130 and out == "" and err.strip() == "contexto: interrupted"
+
+
+def test_each_line_is_printed_when_its_check_is_done_and_json_only_at_the_end(both, capsys, monkeypatch):
+    """Reviewer B, PR #258: nothing was printed until every check was done, 16 s of silence when both
+    ``--version`` calls and the MCP server hang."""
+    printed: list[str] = []
+
+    def slow_mcp(*args, **kwargs):
+        printed.append(capsys.readouterr().out)  # what is on stdout when the MCP check starts
+        return doctor.Check("mcp", doctor.PASS, "MCP server started and listed its 5 tools")
+
+    monkeypatch.setattr(doctor, "check_mcp", slow_mcp)
+    code, out, _ = run(capsys)
+    before = printed.pop()
+    assert before.startswith("contexto doctor (contexto ") and before.endswith("\n")
+    assert [line.split()[0] for line in before.splitlines() if line.startswith("[")].count("[ok]") >= 4
+    assert "Store home" in before and "MCP server" not in before and "eady: " not in before
+    assert out.startswith("[ok]   MCP server") and out.splitlines()[-1].startswith("Ready: ")
+    code, out, _ = run(capsys, "--json")
+    assert printed == [""] and json.loads(out)["ok"] is True
+
+
+def test_an_unusable_claude_waits_for_codex_and_a_usable_one_is_printed_at_once(world, capsys, monkeypatch):
+    """With neither CLI usable both lines are failures, so claude's is held until codex is known."""
+    printed: list[str] = []
+    real = doctor.check_cli
+
+    def watched(cli, env):
+        printed.append(capsys.readouterr().out)
+        return real(cli, env)
+
+    monkeypatch.setattr(doctor, "check_cli", watched)
+    monkeypatch.setattr(doctor, "check_mcp", lambda *a, **k: doctor.Check("mcp", doctor.PASS, "MCP server ok"))
+    code, out, _ = run(capsys)
+    assert code == 1 and "Claude Code" not in printed[1]  # held: it became a failure
+    assert line_of(out, "Claude Code:").startswith("[FAIL]") and line_of(out, "Codex:").startswith("[FAIL]")
+    printed.clear()
+    fake_cli(world, "claude", f"{TESTED_CLAUDE} (Claude Code)")
+    code, out, _ = run(capsys)
+    assert code == 0 and "[ok]   Claude Code " in printed[1]  # final as soon as it is known to be usable
 
 
 # Python ---------------------------------------------------------------------------------------------
@@ -354,6 +404,38 @@ def test_codex_ignores_a_project_base_url_in_an_untrusted_folder_and_says_so(bot
     assert codex["details"]["ignored"] == ["project"]
 
 
+def test_a_host_that_does_not_print_is_escaped_in_the_text_form(both, capsys, fast_mcp):
+    """Reviewer A, PR #258: a host from a project's settings file reached the terminal as written, so
+    backspaces on an ``[ok]`` line could show another host than the one in the file."""
+    write_settings(both.cwd / ".claude" / "settings.json",
+                   {"env": {"ANTHROPIC_BASE_URL": "https://evil.example\x08\x08\x08\x08\x07good.example"}})
+    code, out, _ = run(capsys)
+    line = line_of(out, "Claude Code upstream")
+    assert line.startswith("[ok]") and "https://evil.example\\x08\\x08\\x08\\x08\\x07good.example " in line
+    assert not any(ord(c) < 32 and c != "\n" for c in out)
+    _, json_out, _ = run(capsys, "--json")
+    assert not any(ord(c) < 32 and c != "\n" for c in json_out)
+
+
+@pytest.mark.parametrize("host,shown", [("\u0430pple.com", "xn--pple-43d.com"),  # a Cyrillic a
+                                        ("b\u00fccher.example", "xn--bcher-kva.example"),
+                                        ("exa\u202emple.com", "exa\\u202emple.com")])  # no name may hold it
+def test_a_host_that_is_not_ascii_is_shown_as_it_goes_on_the_wire(both, capsys, fast_mcp, monkeypatch, host, shown):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", f"https://{host}:8443/path")
+    code, out, _ = run(capsys)
+    line = line_of(out, "Claude Code upstream")
+    assert f"https://{shown}:8443 " in line and host not in out
+    _, found = checks(capsys)
+    assert found["claude-upstream"]["details"]["origin"] == f"https://{shown}:8443"
+
+
+def test_printable_escapes_what_a_terminal_would_act_on():
+    assert doctor.printable("plain caf\u00e9 /tmp/x") == "plain caf\u00e9 /tmp/x"
+    assert doctor.printable("a\x1b[2Kb\rc\x7f") == "a\\x1b[2Kb\\rc\\x7f"
+    assert doctor.printable("left\u202eright\u200b") == "left\\u202eright\\u200b"
+    assert doctor.printable("bytes\udcff") == "bytes\\udcff"  # a path that is not UTF-8
+
+
 # Keys -----------------------------------------------------------------------------------------------
 
 
@@ -389,16 +471,34 @@ def test_an_empty_key_variable_is_not_a_key(both, capsys, fast_mcp, monkeypatch)
     assert found["claude-key"]["status"] == "warn"
 
 
+def helper_leaving(marker: Path) -> str:
+    """A key helper that creates ``marker`` and prints a key. It can run in these tests' environment,
+    whose PATH holds only the fake CLIs: the shell by its full path, and a redirect, which needs no
+    program. The first version used ``sh`` and ``touch``, which that PATH does not have, so no marker
+    could appear even if doctor had run the helper (reviewer B, PR #258)."""
+    return f"/bin/sh -c ': > {marker}; echo {HELPER_SECRET}'"
+
+
+def run_as_a_cli_would(helper: str, marker: Path) -> None:
+    """The control for the "never run" assertions: run through a shell (as Codex and Claude Code run a
+    helper) and as a plain command line, the helper does leave its marker and print its key here."""
+    for command, shell in ((helper, True), (shlex.split(helper), False)):
+        done = subprocess.run(command, shell=shell, capture_output=True, text=True, timeout=60)
+        assert done.stdout.strip() == HELPER_SECRET and marker.exists(), done.stderr
+        marker.unlink()
+
+
 def test_a_key_helper_is_reported_and_never_run_or_shown(both, capsys, fast_mcp):
     marker = both.tmp / "HELPER-RAN"
-    helper = f"sh -c 'touch {marker}; echo {HELPER_SECRET}'"
+    helper = helper_leaving(marker)
+    run_as_a_cli_would(helper, marker)
     write_settings(both.home / ".claude" / "settings.json", {"apiKeyHelper": helper})
     code, out, _ = run(capsys)
     _, json_out, _ = run(capsys, "--json")
     found = {c["id"]: c for c in json.loads(json_out)["checks"]}
     assert not marker.exists()  # doctor never runs a helper
-    for text in (out, json_out):
-        assert HELPER_SECRET not in text and "touch" not in text  # nor prints the command, which can hold a key
+    for text in (out, json_out):  # nor prints its command, which can hold a key, nor its output
+        assert HELPER_SECRET not in text and "/bin/sh -c" not in text and marker.name not in text
     assert found["claude-key"]["details"] == {"found": [{"name": "apiKeyHelper", "source": "settings:user"}]}
     assert found["codex-key"]["status"] == "pass"
     assert found["codex-key"]["details"] == {"name": "apiKeyHelper", "source": "settings:user"}
@@ -407,11 +507,39 @@ def test_a_key_helper_is_reported_and_never_run_or_shown(both, capsys, fast_mcp)
 
 def test_codex_key_helper_from_its_own_variable(both, capsys, fast_mcp, monkeypatch):
     marker = both.tmp / "HELPER-RAN"
-    monkeypatch.setenv("CONTEXTO_CODEX_KEY_HELPER", f"touch {marker}; echo {HELPER_SECRET}")
+    helper = helper_leaving(marker)
+    run_as_a_cli_would(helper, marker)
+    monkeypatch.setenv("CONTEXTO_CODEX_KEY_HELPER", helper)
     code, out, _ = run(capsys, "--json")
     found = {c["id"]: c for c in json.loads(out)["checks"]}
-    assert found["codex-key"]["status"] == "pass" and not marker.exists() and HELPER_SECRET not in out
+    assert found["codex-key"]["status"] == "pass" and not marker.exists()
+    assert HELPER_SECRET not in out and "/bin/sh -c" not in out and marker.name not in out
     assert found["codex-key"]["details"] == {"name": "CONTEXTO_CODEX_KEY_HELPER", "source": "env"}
+
+
+def launch(world, *argv: str, **env: str) -> subprocess.CompletedProcess:
+    """``contexto run ...`` in the world, with the fake CLIs: what the launcher does where doctor looked."""
+    return subprocess.run([sys.executable, "-m", "contexto", "run", *argv], cwd=world.cwd, capture_output=True,
+                          text=True, timeout=120, env={**os.environ, **env})
+
+
+@pytest.mark.parametrize("value", [" ", "\t \n"])
+def test_a_blank_codex_key_helper_variable_is_what_the_launcher_refuses(both, capsys, fast_mcp, monkeypatch, value):
+    """The launcher takes any value that is not empty as the helper and then refuses a blank one. Doctor
+    stripped it, read on, and reported an ``apiKeyHelper`` the launch never reaches."""
+    write_settings(both.home / ".claude" / "settings.json", {"apiKeyHelper": f"echo {HELPER_SECRET}"})
+    monkeypatch.setenv("CONTEXTO_CODEX_KEY_HELPER", value)
+    monkeypatch.setenv("CONTEXTO_CODEX_UPSTREAM", "http://127.0.0.1:9/v1")
+    code, found = checks(capsys)
+    key = found["codex-key"]
+    assert code == 0 and key["status"] == "warn" and "blank" in key["summary"], key
+    assert "CONTEXTO_CODEX_KEY_HELPER" in key["action"] and "--codex-key-helper" in key["action"]
+    assert key["details"] == {"name": "CONTEXTO_CODEX_KEY_HELPER", "source": "env", "error": "blank"}
+    refused = launch(both, "codex", "exec", "hi")
+    assert refused.returncode == 2 and "the key helper command is empty" in refused.stderr
+    monkeypatch.setenv("CONTEXTO_CODEX_KEY_HELPER", "")  # empty is unset, for the launcher too
+    _, found = checks(capsys)
+    assert found["codex-key"]["details"] == {"name": "apiKeyHelper", "source": "settings:user"}
 
 
 def test_a_project_key_helper_counts_for_codex_only_in_a_trusted_folder(both, capsys, fast_mcp):
@@ -467,24 +595,197 @@ def test_a_home_that_is_a_file_fails(both, capsys, fast_mcp):
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
-@pytest.mark.parametrize("where", ["home", "sessions", "parent"])
+@pytest.mark.parametrize("where", ["home", "parent"])
 def test_a_home_that_cannot_be_written_fails_and_is_left_as_it_was(both, capsys, fast_mcp, monkeypatch, where):
-    locked = {"home": both.store, "sessions": both.store / "sessions", "parent": both.tmp / "locked"}[where]
+    locked = {"home": both.store, "parent": both.tmp / "locked"}[where]
+    locked.mkdir()
     if where == "parent":
-        locked.mkdir()
         monkeypatch.setenv("CONTEXTO_HOME", str(locked / "deep" / "store"))
-    elif where == "sessions":
-        (both.store / "sessions").mkdir(parents=True)
-    else:
-        both.store.mkdir()
     locked.chmod(0o500)
     try:
         code, found = checks(capsys)
         assert code == 1 and found["store"]["status"] == "fail", found["store"]
         assert found["store"]["action"]
         assert stat.S_IMODE(locked.stat().st_mode) == 0o500 and list(locked.iterdir()) == []
+        assert launch(both, "claude", "-p", "hi").returncode != 0  # and the launcher cannot start either
     finally:
         locked.chmod(0o700)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+@pytest.mark.parametrize("home_mode,status", [(0o700, "pass"), (0o500, "warn")])
+def test_a_read_only_sessions_directory_of_the_user_s_own_is_no_obstacle(both, capsys, fast_mcp, home_mode, status):
+    """Reviewers A and B, PR #258: the store sets ``sessions`` to 0700 itself, so ``contexto run claude``
+    works where doctor's required check failed. Doctor says so and changes no mode."""
+    sessions = both.store / "sessions"
+    sessions.mkdir(parents=True)
+    sessions.chmod(0o500)
+    both.store.chmod(home_mode)
+    try:
+        code, found = checks(capsys)
+        store = found["store"]
+        assert code == 0 and store["status"] == status, store
+        assert "sets it to mode 0700" in store["summary"]
+        assert (store["action"] is not None) == (status == "warn")
+        assert stat.S_IMODE(sessions.stat().st_mode) == 0o500 and list(sessions.iterdir()) == []
+        assert stat.S_IMODE(both.store.stat().st_mode) == home_mode and snapshot(both.store)[1] == ["sessions"]
+        started = launch(both, "claude", "-p", "hi")  # the launcher agrees, and it is the one that changes the mode
+        assert started.returncode == 0, started.stderr
+        assert stat.S_IMODE(sessions.stat().st_mode) == 0o700
+    finally:
+        both.store.chmod(0o700)
+        sessions.chmod(0o700)
+
+
+def test_a_sessions_directory_of_another_user_fails(both, capsys, fast_mcp, monkeypatch):
+    # The launcher's chmod of it fails then, whatever its mode. Another user is simulated: ours is not its owner.
+    (both.store / "sessions").mkdir(parents=True)
+    monkeypatch.setattr(doctor.os, "geteuid", lambda: (both.store / "sessions").stat().st_uid + 1)
+    code, found = checks(capsys)
+    assert code == 1 and found["store"]["status"] == "fail" and "another user" in found["store"]["summary"]
+    (both.store / "sessions").rmdir()
+    (both.store / "sessions").write_text("a file")
+    code, found = checks(capsys)
+    assert code == 1 and "not a directory" in found["store"]["summary"]
+
+
+def test_a_home_with_dollar_brace_fails_as_run_claude_refuses_it(both, capsys, fast_mcp, monkeypatch):
+    """Reviewers A and B, PR #258: doctor said the home could be created and "Ready"; ``contexto run
+    claude`` exits 2 (``launcher.check_mcp_values``, which doctor now asks)."""
+    home = both.tmp / "a${b}"
+    monkeypatch.setenv("CONTEXTO_HOME", str(home))
+    code, found = checks(capsys)
+    store = found["store"]
+    assert code == 1 and store["status"] == "fail" and "${" in store["summary"] and "${" in store["action"], store
+    refused = launch(both, "claude", "-p", "hi")
+    assert refused.returncode == 2 and "contains '${'" in refused.stderr
+    assert not home.exists()
+
+
+def test_a_home_with_dollar_brace_is_fine_for_codex_alone(world, capsys, fast_mcp, monkeypatch):
+    # `contexto run codex` writes no MCP config that Claude Code expands, and takes such a home.
+    fake_cli(world, "codex", f"codex-cli {TESTED_CODEX}")
+    monkeypatch.setenv("CONTEXTO_HOME", str(world.tmp / "a${b}"))
+    code, found = checks(capsys)
+    assert code == 0 and found["store"]["status"] == "pass"
+    started = launch(world, "codex", "exec", "hi", CONTEXTO_CODEX_KEY_HELPER="echo k",
+                     CONTEXTO_CODEX_UPSTREAM="http://127.0.0.1:9/v1")
+    assert started.returncode == 0, started.stderr
+
+
+# Faults in the environment --------------------------------------------------------------------------
+
+
+def test_a_deleted_working_directory_is_a_failed_line_that_says_so(both, capsys, monkeypatch):
+    """Reviewer B, PR #258: ``Path.cwd()`` ran outside the guard, so this was a traceback."""
+    gone = both.tmp / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    code, found = checks(capsys)
+    assert code == 1
+    for check_id in ("settings", "claude-upstream", "codex-upstream", "claude-key", "codex-key", "mcp", "provider"):
+        check = found[check_id]
+        assert check["status"] == "fail" and check["details"] == {"error": "no_working_directory"}, check
+        assert "working directory" in check["summary"] and check["action"].startswith("cd ")
+        assert "issues" not in check["action"]  # a fault in the setup, not a bug to report
+    assert found["python"]["status"] == found["store"]["status"] == "pass"
+
+
+def test_no_home_directory_is_a_failed_line_that_says_so(both, capsys, fast_mcp, monkeypatch):
+    def no_entry(uid):
+        raise KeyError(uid)
+
+    monkeypatch.delenv("HOME")
+    monkeypatch.setattr(pwd, "getpwuid", no_entry)
+    code, found = checks(capsys)
+    assert code == 1
+    assert found["claude-upstream"]["details"] == {"error": "no_home_directory"}
+    assert "HOME" in found["claude-upstream"]["summary"] and "Set HOME" in found["claude-upstream"]["action"]
+    assert found["store"]["status"] == "pass"  # CONTEXTO_HOME names it
+    monkeypatch.delenv("CONTEXTO_HOME")
+    _, found = checks(capsys)
+    store = found["store"]
+    assert store["status"] == "fail" and store["details"] == {"error": "no_store_home"}, store
+    assert "CONTEXTO_HOME is not set" in store["summary"] and "Set CONTEXTO_HOME" in store["action"]
+    assert "issues" not in store["action"]
+
+
+def test_no_temporary_directory_is_named_with_what_to_set(both, capsys, monkeypatch):
+    def none_usable(*args, **kwargs):
+        raise FileNotFoundError(errno.ENOENT, "No usable temporary directory found")
+
+    monkeypatch.setattr(doctor.tempfile, "mkdtemp", none_usable)
+    code, found = checks(capsys)
+    mcp = found["mcp"]
+    assert code == 1 and mcp["status"] == "fail" and mcp["details"] == {"error": "no_temp_directory"}, mcp
+    assert "temporary directory" in mcp["summary"] and "TMPDIR" in mcp["action"] and "issues" not in mcp["action"]
+
+
+# Settings files -------------------------------------------------------------------------------------
+
+
+def settings_line(capsys) -> tuple[int, dict, str]:
+    code, out, _ = run(capsys)
+    _, found = checks(capsys)
+    return code, found["settings"], line_of(out, "Claude Code settings")
+
+
+def test_settings_files_that_are_read_are_named_by_scope(both, capsys, fast_mcp):
+    code, check, line = settings_line(capsys)
+    assert check["status"] == "pass" and "no settings file" in line
+    assert check["details"] == {"files": [{"kind": kind, "state": "absent"} for kind in ("local", "project", "user")]}
+    write_settings(both.home / ".claude" / "settings.json", {})
+    (both.cwd / ".claude").mkdir()
+    (both.cwd / ".claude" / "settings.json").write_bytes(b"\xef\xbb\xbf{}")  # a byte order mark is fine
+    code, check, line = settings_line(capsys)
+    assert check["status"] == "pass" and line.endswith("read .claude/settings.json and ~/.claude/settings.json")
+    assert [f["state"] for f in check["details"]["files"]] == ["absent", "read", "read"]
+    assert str(both.home) not in line and str(both.cwd) not in line
+
+
+@pytest.mark.parametrize("fault,problem", [
+    ("not-json", "cannot be read as JSON"), ("not-utf8", "cannot be read as JSON"), ("list", "is not a JSON object"),
+    ("env-list", "env block"), ("directory", "is a directory"), ("mode-000", "Permission denied")])
+@pytest.mark.parametrize("scope", ["user", "project"])
+def test_an_unusable_settings_file_is_a_warning_that_names_it_and_what_is_wrong(both, capsys, fast_mcp, scope,
+                                                                                 fault, problem):
+    """Reviewer B, PR #258: with a broken file that sets a base URL, doctor said "nothing sets
+    ANTHROPIC_BASE_URL" and nothing more. That is what the launcher does with the file, so the other
+    checks stay as they are, and this one names the file."""
+    if fault == "mode-000" and os.geteuid() == 0:
+        pytest.skip("root can read anything")
+    path = (both.home if scope == "user" else both.cwd) / ".claude" / "settings.json"
+    name = "~/.claude/settings.json" if scope == "user" else ".claude/settings.json"
+    usable = json.dumps({"env": {"ANTHROPIC_BASE_URL": f"https://broken.example/{URL_SECRET}"}})
+    path.parent.mkdir(parents=True)
+    if fault == "directory":
+        path.mkdir()
+    else:
+        path.write_bytes({"not-json": (usable + ",").encode(), "not-utf8": b"\xff\xfe" + usable.encode(),
+                          "list": b"[]", "env-list": b'{"env": []}', "mode-000": usable.encode()}[fault])
+    if fault == "mode-000":
+        path.chmod(0)
+    try:
+        code, check, line = settings_line(capsys)
+        _, found = checks(capsys)
+    finally:
+        path.chmod(0o700)
+    assert code == 0 and check["status"] == "warn" and line.startswith("[warn]"), line
+    assert f"{name} " in line and problem in line and str(path.parent.parent) not in line
+    assert "Fix or remove it" in check["action"] and URL_SECRET not in json.dumps(check)
+    assert {"kind": scope, "state": "unusable", "problem": check["details"]["files"][-1 if scope == "user" else 1]
+            ["problem"]} in check["details"]["files"]
+    assert found["claude-upstream"]["details"]["source"] == "default"  # as the launcher reads it
+
+
+def test_a_fifo_in_place_of_a_settings_file_is_named_without_being_opened(both):
+    path = both.cwd / ".claude" / "settings.json"
+    path.parent.mkdir()
+    os.mkfifo(path)
+    started = time.monotonic()
+    assert "FIFO" in doctor.settings_problem(path)  # opening it would block until something writes to it
+    assert time.monotonic() - started < 5
 
 
 # The MCP server -------------------------------------------------------------------------------------
@@ -566,6 +867,98 @@ def test_a_server_that_never_answers_is_stopped_at_the_timeout(world, monkeypatc
     assert len(children) == 1 and children[0].returncode == -9  # killed and reaped, not left running
 
 
+HOLDING = r'''
+import subprocess, sys, time
+held = subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({HOLD})"], start_new_session=NEW_SESSION)
+with open(PIDFILE + ".tmp", "w") as f:
+    f.write(str(held.pid))
+import os
+os.replace(PIDFILE + ".tmp", PIDFILE)
+time.sleep(120)
+'''
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def gone_within(pid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not alive(pid)
+
+
+@pytest.mark.parametrize("new_session", [False, True])
+def test_the_bound_holds_when_the_server_leaves_a_child_holding_its_pipes(world, new_session):
+    """Reviewer B, PR #258: after the kill, ``communicate`` waited for the pipes' end of file, which the
+    server's own child put off: 8.1 s against a 1 s timeout. A child in the server's process group is
+    killed with it; one that left the group is not waited for."""
+    hold, timeout = 45, 5.0
+    pidfile = world.tmp / "held.pid"
+    body = (f"HOLD = {hold}\nNEW_SESSION = {new_session}\nPIDFILE = {str(pidfile)!r}\n{HOLDING}")
+    started = time.monotonic()
+    check = mcp_check(world, fake_server(world.tmp, body), timeout=timeout)
+    elapsed = time.monotonic() - started
+    held = int(pidfile.read_text())
+    try:
+        assert check.status == doctor.FAIL and "did not answer within 5 s" in check.summary
+        assert elapsed < timeout + 20, elapsed  # not the child's 45 s
+        if new_session:  # it left the group, so the kill did not reach it, and nothing waited for it
+            assert not gone_within(held, 0.5)
+        else:  # in the server's group: killed with it
+            assert gone_within(held, 10)
+    finally:
+        if alive(held):
+            os.kill(held, signal.SIGKILL)
+
+
+HANGING_SERVER = '''
+import os, time
+if "contexto-doctor-" in os.environ.get("CONTEXTO_HOME", ""):  # the MCP server doctor starts, and only it
+    with open(os.environ["HANG_MARKER"] + ".tmp", "w") as f:
+        f.write(str(os.getpid()))
+    os.replace(os.environ["HANG_MARKER"] + ".tmp", os.environ["HANG_MARKER"])
+    time.sleep(120)
+'''
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT])
+def test_a_terminating_signal_during_the_mcp_check_leaves_nothing_behind(both, signum):
+    """Reviewers A and B, PR #258: SIGTERM or SIGHUP (a closed terminal) while the MCP server ran left
+    the ``contexto-doctor-*`` home in the temporary directory and a hung server running. Here the server
+    hangs (a ``sitecustomize`` on its path sleeps), doctor gets the signal, and both must be gone."""
+    planted, scratch, marker = both.tmp / "planted", both.tmp / "scratch", both.tmp / "server.pid"
+    planted.mkdir()
+    scratch.mkdir()
+    (planted / "sitecustomize.py").write_text(HANGING_SERVER)
+    env = {**os.environ, "TMPDIR": str(scratch), "HANG_MARKER": str(marker),
+           "PYTHONPATH": os.pathsep.join(filter(None, [str(planted), os.environ.get("PYTHONPATH")]))}
+    proc = subprocess.Popen([sys.executable, "-m", "contexto", "doctor"], cwd=both.cwd, env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 60
+        while not marker.exists():
+            assert time.monotonic() < deadline and proc.poll() is None, "the MCP server never started"
+            time.sleep(0.05)
+        server = int(marker.read_text())
+        assert [p.name for p in scratch.iterdir() if p.name.startswith("contexto-doctor-")]  # its home is there
+        proc.send_signal(signum)
+        out, err = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode == 128 + signum, (proc.returncode, err)
+    assert "Traceback" not in err and "Store home" in out and "MCP server" not in out and "eady: " not in out
+    assert [p.name for p in scratch.iterdir()] == []  # the temporary home is gone
+    assert gone_within(server, 10)  # and the server was killed, not orphaned
+    assert not both.store.exists()
+
+
 def test_a_server_that_cannot_be_started_or_talks_nonsense_fails(world):
     missing = mcp_check(world, [str(world.tmp / "no-such-python")])
     assert missing.status == doctor.FAIL and "cannot be started" in missing.summary
@@ -623,12 +1016,73 @@ def test_a_provider_variable_in_a_settings_env_block_names_the_file(both, capsys
     assert provider["details"]["variables"] == [{"variable": "CLAUDE_CODE_USE_BEDROCK", "source": "settings:local"}]
 
 
+def test_a_project_variable_under_ignored_trust_is_a_warning_that_says_may(both, capsys, fast_mcp, monkeypatch):
+    """Reviewer B, PR #258: with CLAUDE_CODE_IGNORE_PERSISTED_TRUST set, a project file that turns a
+    provider variable on got no warning. Claude Code -p drops it; interactively it may apply (D52)."""
+    monkeypatch.setenv("CLAUDE_CODE_IGNORE_PERSISTED_TRUST", "1")
+    write_settings(both.cwd / ".claude" / "settings.json", {"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}})
+    code, found = checks(capsys)
+    provider = found["provider"]
+    assert code == 0 and provider["status"] == "warn"
+    assert "CLAUDE_CODE_USE_BEDROCK is set in the env block of .claude/settings.json" in provider["summary"]
+    assert "may apply it once its trust dialog is accepted" in provider["summary"]
+    assert provider["details"] == {"provider": "Amazon Bedrock", "variables": [
+        {"variable": "CLAUDE_CODE_USE_BEDROCK", "source": "settings:project", "after_trust_dialog": True}]}
+
+
 # No network -----------------------------------------------------------------------------------------
 
+# Every socket event in this process while WATCHING is a list: sockets made, names resolved (also by
+# gethostbyname, which the first version's patches of socket.socket and getaddrinfo did not see;
+# reviewer A, PR #258), connections, datagrams. An audit hook cannot be removed, so it is added once.
+WATCHING: list[tuple[str, str]] | None = None
 
-def test_doctor_connects_to_nothing_and_never_contacts_the_upstream(both, capsys, monkeypatch):
+
+def _watch_sockets(event: str, args: tuple) -> None:
+    if WATCHING is not None and event.startswith("socket."):
+        WATCHING.append((event, repr(args)[:80]))
+
+
+sys.addaudithook(_watch_sockets)
+
+# The same hook for the Python processes doctor starts (the MCP server), through a sitecustomize on
+# their path: each event is appended to the file SOCKET_AUDIT names.
+CHILD_AUDIT = '''
+import os, sys
+
+
+def _watch(event, args, path=os.environ.get("SOCKET_AUDIT")):
+    if path and event.startswith("socket."):
+        with open(path, "a") as f:
+            f.write(f"{os.getpid()} {event} {args!r}"[:200] + "\\n")
+
+
+sys.addaudithook(_watch)
+'''
+
+
+def test_the_socket_watch_sees_a_name_lookup_and_a_connection():
+    """The control for the test below: both ways the first version missed or caught are recorded."""
+    global WATCHING
+    WATCHING = []
+    try:
+        socket.gethostbyname("127.0.0.1")
+        try:
+            socket.create_connection(("127.0.0.1", 9), timeout=0.2).close()
+        except OSError:
+            pass
+        seen = {event for event, _ in WATCHING}
+    finally:
+        WATCHING = None
+    assert {"socket.gethostbyname", "socket.getaddrinfo", "socket.connect"} <= seen
+
+
+def test_doctor_connects_to_nothing_resolves_no_name_and_never_contacts_the_upstream(both, capsys, monkeypatch):
     """The upstream it reports is a listening socket here: nothing may connect to it, from doctor or from
-    the MCP server it starts. In this process, every way a socket connects is made to fail the test."""
+    the MCP server it starts. In this process and in that server, every socket event is recorded: a
+    connection, a datagram, and a name lookup by any route (the upstreams are host names, which only a
+    lookup would turn into addresses)."""
+    global WATCHING
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(8)
@@ -646,35 +1100,29 @@ def test_doctor_connects_to_nothing_and_never_contacts_the_upstream(both, capsys
 
     thread = threading.Thread(target=accept, daemon=True)
     thread.start()
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://127.0.0.1:{port}")
-    monkeypatch.setenv("CONTEXTO_CODEX_UPSTREAM", f"http://127.0.0.1:{port}/v1")
+    planted, audit = both.tmp / "planted", both.tmp / "child-sockets.log"
+    planted.mkdir()
+    (planted / "sitecustomize.py").write_text(CHILD_AUDIT)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(planted), os.environ.get("PYTHONPATH")])))
+    monkeypatch.setenv("SOCKET_AUDIT", str(audit))
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://localhost:{port}")
+    monkeypatch.setenv("CONTEXTO_CODEX_UPSTREAM", f"http://localhost:{port}/v1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET)
-    connects: list[object] = []
-
-    class Watched(socket.socket):
-        def connect(self, address):
-            connects.append(address)
-            raise AssertionError(f"doctor connected to {address!r}")
-
-        def connect_ex(self, address):
-            connects.append(address)
-            raise AssertionError(f"doctor connected to {address!r}")
-
-    def refuse(*args, **kwargs):
-        connects.append(args)
-        raise AssertionError(f"doctor resolved or connected: {args!r}")
-
-    monkeypatch.setattr(socket, "socket", Watched)
-    monkeypatch.setattr(socket, "create_connection", refuse)
-    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    write_settings(both.cwd / ".claude" / "settings.json", {"env": {"ANTHROPIC_BASE_URL": f"http://localhost:{port}"}})
+    WATCHING = []
     try:
         for argv in ((), ("--json",)):
             code, out, _ = run(capsys, *argv)
             assert code == 0, out
-            assert f"http://127.0.0.1:{port}" in out  # reported, not contacted
+            assert f"http://localhost:{port}" in out  # reported, not contacted
+            assert "MCP server started and listed its 5 tools" in out  # the real server ran, under the hook
         time.sleep(0.2)
+        seen = list(WATCHING)
     finally:
+        WATCHING = None
         stop.set()
         thread.join(timeout=2)
         listener.close()
-    assert connects == [] and accepted == []
+    assert seen == [] and accepted == []
+    assert audit.exists() is False or audit.read_text() == ""  # nor did the MCP server touch a socket

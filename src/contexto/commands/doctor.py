@@ -1,22 +1,27 @@
 """``contexto doctor [--json]``: check that ``contexto run`` can work from this directory (D64).
 
-One line per check, marked ``[ok]``, ``[warn]``, ``[FAIL]`` or ``[skip]``; a warning or a failure is
-followed by one line saying what to do. The checks, in order:
+One line per check, marked ``[ok]``, ``[warn]``, ``[FAIL]`` or ``[skip]``, printed when that check is
+done; a warning or a failure is followed by one line saying what to do. The checks, in order:
 
 - ``python``: this interpreter is 3.12 or later.
 - ``claude``, ``codex``: the CLI is on PATH, its ``--version`` (read as ``contexto run`` reads it,
   ``contexto.cliversions.installed_version``), and whether that version is in ``TESTED_VERSIONS``.
+- ``settings``: the Claude Code settings files ``contexto run`` reads from this directory. One that is
+  there and cannot be used (not JSON, unreadable, a directory) is named by its scope with what is
+  wrong: the launcher and the checks below read it as absent.
 - ``claude-upstream``, ``codex-upstream``: the upstream ``contexto run`` would use from this directory
   and what set it (``contexto.upstream.resolve_upstream``; for Codex
   ``contexto.codex.codex_upstream_with_source`` in API-key mode, its default). Only the URL's origin is
   shown: scheme, host and port, never user info, a path or a query, any of which can hold a credential.
+  The host is shown in ASCII, as it goes on the wire.
 - ``claude-key``, ``codex-key``: whether a key or key helper is configured, by name and place. For
   Claude Code, which sends its own credential through the proxy, that is ``ANTHROPIC_API_KEY``,
   ``ANTHROPIC_AUTH_TOKEN`` or ``CLAUDE_CODE_OAUTH_TOKEN`` (environment or a settings ``env`` block) or
   an ``apiKeyHelper``; a login Claude Code holds is not looked for, so none found is a warning. For
   Codex it is the helper ``contexto run codex`` would hand it: ``CONTEXTO_CODEX_KEY_HELPER``, else
   Claude Code's ``apiKeyHelper``, a project's only in a folder Claude Code trusts (D52).
-- ``store``: the store home can be written, or created.
+- ``store``: the store home is one ``contexto run`` can use: it can be written or created, sessions can
+  be made in it, and ``contexto run claude`` does not refuse its path (``check_store``).
 - ``mcp``: the MCP server starts as the launcher starts it and lists Contexto's tools.
 - ``provider``: no variable sends Claude Code's model requests to another provider, past the proxy
   (``contexto.providers``).
@@ -34,17 +39,23 @@ What doctor never does:
   (``tempfile.TemporaryFile``), a missing one is not created, and no mode is changed. The MCP check
   uses a temporary home, removed afterwards, so the user's store gets no session from it.
 
-Exit code 0 when no check failed, warnings or not; 1 when one did. These fail: Python below 3.12,
-neither CLI usable, an upstream that is not an http(s) URL (``contexto run`` refuses to start with
-it), a store home that cannot be written or created, and an MCP server that does not start and list
-exactly Contexto's tools. Everything else is a warning: an untested or unreadable CLI version, one of
-the two CLIs missing, no key found (a login the CLI holds also works), no upstream or key helper for
-Codex (a flag to ``contexto run`` can supply either), a setting skipped as untrusted, and a provider
-variable. A check that does not apply because its CLI is missing is skipped.
+Exit code 0 when no check failed, warnings or not; 1 when one did; 130 on Ctrl+C, and 128 plus the
+signal's number on SIGTERM or SIGHUP, after the same cleanup. These fail: Python below 3.12, neither
+CLI usable, an upstream that is not an http(s) URL (``contexto run`` refuses to start with it), a store
+home ``contexto run`` cannot use, an MCP server that does not start and list exactly Contexto's tools,
+and a check that cannot be made at all (no working directory, no home directory, no temporary
+directory: ``Fault``). Everything else is a warning: an untested or unreadable CLI version, one of the
+two CLIs missing, a settings file that cannot be used, no key found (a login the CLI holds also works),
+no upstream or key helper for Codex (a flag to ``contexto run`` can supply either), a setting skipped
+as untrusted, a store home that is read-only while its ``sessions`` directory can be used, and a
+provider variable. A check that does not apply because its CLI is missing is skipped.
+
+The text form escapes every character that does not print (``printable``): a host or a path can come
+from a project's files, and must not be able to rewrite the terminal's lines.
 
 ``--json`` prints ``{"schema": 1, "contexto": <version>, "ok": <bool>, "summary": {"pass", "warn",
-"fail", "skip"}, "checks": [{"id", "status", "summary", "action", "details"}]}``; docs/doctor.md
-lists each check's ``details``.
+"fail", "skip"}, "checks": [{"id", "status", "summary", "action", "details"}]}`` once every check is
+done, and nothing when the run is stopped first; docs/doctor.md lists each check's ``details``.
 """
 
 from __future__ import annotations
@@ -53,11 +64,14 @@ import argparse
 import json
 import os
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -65,14 +79,22 @@ from urllib.parse import urlsplit
 
 from contexto import __version__, providers
 from contexto.cliversions import CLI_NAMES, REPORT_URL, TESTED_VERSIONS, installed_version, is_tested, tested_list
+from contexto.cliversions import _kill_group as kill_group
 from contexto.codex import API_KEY_MODE, KEY_HELPER_ENV, UPSTREAM_ENV, CodexLaunchError, codex_upstream_with_source
 from contexto.codex import _start_failure as cannot_start
-from contexto.launcher import LaunchError, check_upstream, cli_not_found, mcp_payload
+from contexto.launcher import LaunchError, Terminated, check_mcp_values, check_upstream, cli_not_found, mcp_payload
 from contexto.mcp import LEGACY_VERSIONS as MCP_PROTOCOL_VERSIONS
 from contexto.mcp import SERVER_NAME, TOOLS
 from contexto.paths import contexto_home
 from contexto.store import SessionStore
-from contexto.upstream import BASE_URL_KEY, KEY_HELPER_KEY, claude_key_helper, resolve_upstream, untrusted_note
+from contexto.upstream import (
+    BASE_URL_KEY,
+    KEY_HELPER_KEY,
+    claude_key_helper,
+    claude_settings_order,
+    resolve_upstream,
+    untrusted_note,
+)
 
 SCHEMA = 1
 PASS, WARN, FAIL, SKIP = "pass", "warn", "fail", "skip"
@@ -96,13 +118,46 @@ class Check:
     details: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+class Fault(Exception):
+    """Something a check cannot work without and the user can put right (no working directory, no home
+    directory, nowhere to make a temporary directory), as opposed to a bug in the check. ``guarded``
+    reports it with its own summary and next step; any other exception is reported by its type, with
+    the issue tracker as the next step."""
+
+    def __init__(self, error: str, summary: str, action: str) -> None:
+        super().__init__(summary)
+        self.error, self.summary, self.action = error, summary, action
+
+
 class Context:
     """What the checks read: the environment, the working directory and the home directory of the
-    ``contexto run`` being diagnosed."""
-    env: Mapping[str, str]
-    cwd: Path
-    home: Path
+    ``contexto run`` being diagnosed. The two directories are looked up when a check first asks, inside
+    that check's guard: a working directory that was deleted, or a user with no home directory, is then
+    a failed line that names the fault, not a traceback."""
+
+    def __init__(self, env: Mapping[str, str], cwd: Path | None = None, home: Path | None = None) -> None:
+        self.env, self._cwd, self._home = env, cwd, home
+
+    @property
+    def cwd(self) -> Path:
+        if self._cwd is None:
+            try:
+                self._cwd = Path.cwd()
+            except OSError as exc:
+                raise Fault("no_working_directory", "the working directory cannot be read (it may have been deleted)",
+                            "cd to your project directory and run contexto doctor again") from exc
+        return self._cwd
+
+    @property
+    def home(self) -> Path:
+        if self._home is None:
+            try:
+                self._home = Path.home()
+            except RuntimeError as exc:
+                raise Fault("no_home_directory", "the home directory cannot be found (HOME is not set and this "
+                            "user has no entry in the password database)",
+                            "Set HOME to your home directory and run contexto doctor again") from exc
+        return self._home
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -119,27 +174,80 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    """Text: each check's line is printed when the check is done, so a slow one (a ``--version`` that
+    hangs for its 3 s, an MCP server for its 10 s) is not 16 s of silence. JSON: one object, after the
+    last check, and none when the run is stopped."""
+    checks: list[Check] = []
     try:
-        checks = run_checks()
+        with termination_raises():
+            if not args.json:
+                print(f"{header()}\n", flush=True)
+            for check in iter_checks():
+                checks.append(check)
+                if not args.json:
+                    print(render_check(check), flush=True)
+            print(json.dumps(report(checks), indent=2) if args.json else f"\n{verdict(checks)}")
     except KeyboardInterrupt:  # each check stops what it started on the way out
         print("contexto: interrupted", file=sys.stderr)
         return EXIT_INTERRUPTED
-    print(json.dumps(report(checks), indent=2) if args.json else render(checks))
+    except Terminated as stop:  # SIGTERM or SIGHUP: the same cleanup, and the shell's code for the signal
+        return 128 + stop.signum
     return EXIT_FAILED if any(c.status == FAIL for c in checks) else EXIT_OK
 
 
+@contextmanager
+def termination_raises() -> Iterator[None]:
+    """While the checks run, SIGTERM and SIGHUP (a closed terminal) raise ``launcher.Terminated``, so a
+    check's ``finally`` kills the process it started and removes its temporary home, as Ctrl+C already
+    did; before, the ``contexto-doctor-*`` directory stayed and a hung MCP server was orphaned. The first
+    signal makes both ignored until the handlers are put back, so a second one cannot cut the cleanup
+    short. A signal that is ignored already (``nohup``) stays ignored. What the standard library cannot
+    cover: SIGKILL, and a caller that is not in the main thread, where no handler can be set."""
+    def stop(signum: int, frame: Any) -> None:
+        for other in previous:
+            signal.signal(other, signal.SIG_IGN)
+        raise Terminated(signum)
+
+    previous: dict[int, Any] = {}
+    try:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            if signal.getsignal(signum) is not signal.SIG_IGN:
+                previous[signum] = signal.signal(signum, stop)
+    except ValueError:  # not the main thread
+        pass
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
 def run_checks(context: Context | None = None) -> list[Check]:
-    """Every check, in the documented order. A check that raises is reported as failed, by the error's
-    type only (its text could hold a URL or a path): doctor must not die of the fault it is there to
-    find."""
-    ctx = context or Context(os.environ, Path.cwd(), Path.home())
-    checks = [guarded("python", "Python", check_python)]
-    clis = [guarded(cli, CLI_NAMES[cli], lambda cli=cli: check_cli(cli, ctx.env)) for cli in ("claude", "codex")]
-    require_one_cli(clis)
-    checks += clis
-    usable = {c.id: bool(c.details.get("usable")) for c in clis}
-    for check in clis:
-        check.details.pop("usable", None)
+    """Every check, in the documented order (``iter_checks``)."""
+    return list(iter_checks(context))
+
+
+def iter_checks(context: Context | None = None) -> Iterator[Check]:
+    """Each check as it finishes, in the documented order. A check that raises is reported as failed
+    (``guarded``): doctor must not die of the fault it is there to find. A CLI's line is held back only
+    while it could still change: with neither CLI usable both fail, so an unusable ``claude`` waits for
+    ``codex``."""
+    ctx = context or Context(os.environ)
+    yield guarded("python", "Python", check_python)
+    clis: list[Check] = []
+    usable: dict[str, bool] = {}
+    shown = 0
+    for cli in ("claude", "codex"):
+        check = guarded(cli, CLI_NAMES[cli], lambda cli=cli: check_cli(cli, ctx.env))
+        usable[cli] = bool(check.details.pop("usable", False))
+        clis.append(check)
+        if any(usable.values()):  # one CLI is enough, so no line changes from here on
+            yield from clis[shown:]
+            shown = len(clis)
+    if not any(usable.values()):
+        require_one_cli(clis)
+    yield from clis[shown:]
+    yield guarded("settings", "Claude Code settings", lambda: check_settings(ctx))
     per_cli: list[tuple[str, str, str, Callable[[], Check]]] = [
         ("claude-upstream", "claude", "Claude Code upstream", lambda: check_claude_upstream(ctx)),
         ("codex-upstream", "codex", "Codex upstream", lambda: check_codex_upstream(ctx)),
@@ -147,17 +255,20 @@ def run_checks(context: Context | None = None) -> list[Check]:
         ("codex-key", "codex", "Codex key helper", lambda: check_codex_key(ctx)),
     ]
     for check_id, cli, label, check in per_cli:
-        checks.append(guarded(check_id, label, check) if usable[cli] else skipped(check_id, label, cli))
-    checks.append(guarded("store", "Store home", lambda: check_store(ctx.env)))
-    checks.append(guarded("mcp", "MCP server", lambda: check_mcp(ctx.env, ctx.cwd)))
-    checks.append(guarded("provider", "Provider variables", lambda: check_provider(ctx)) if usable["claude"]
-                  else skipped("provider", "Provider variables", "claude"))
-    return checks
+        yield guarded(check_id, label, check) if usable[cli] else skipped(check_id, label, cli)
+    yield guarded("store", "Store home", lambda: check_store(ctx.env, claude=usable["claude"]))
+    yield guarded("mcp", "MCP server", lambda: check_mcp(ctx.env, ctx.cwd))
+    yield (guarded("provider", "Provider variables", lambda: check_provider(ctx)) if usable["claude"]
+           else skipped("provider", "Provider variables", "claude"))
 
 
 def guarded(check_id: str, label: str, check: Callable[[], Check]) -> Check:
+    """``check()``, or a failed line when it raises: a ``Fault`` by what it says, anything else by the
+    error's type only (its text could hold a URL or a path) and as a bug to report."""
     try:
         return check()
+    except Fault as fault:
+        return Check(check_id, FAIL, f"{label}: {fault.summary}", fault.action, {"error": fault.error})
     except Exception as exc:
         return Check(check_id, FAIL, f"{label}: the check itself failed ({type(exc).__name__})",
                      f"Report it at {REPORT_URL}", {"error": type(exc).__name__})
@@ -175,13 +286,27 @@ def report(checks: list[Check]) -> dict[str, Any]:
                         "details": c.details} for c in checks]}
 
 
+def header() -> str:
+    return f"contexto doctor (contexto {__version__})"
+
+
+def printable(text: str) -> str:
+    """``text`` with every character that does not print written as a backslash escape: control
+    characters (a backspace or an escape sequence in a host name from a project's settings file would
+    otherwise rewrite the line on the terminal), the bidirectional overrides and other format
+    characters, and the surrogates of a path that is not UTF-8. ``--json`` escapes them by itself."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode("ascii") for c in text)
+
+
+def render_check(check: Check) -> str:
+    """One check as the text form prints it: its line, and the next step under it when there is one."""
+    line = f"{MARKS[check.status]:<{MARK_WIDTH}}{printable(check.summary)}"
+    return line if not check.action else f"{line}\n{'':<{MARK_WIDTH}}-> {printable(check.action)}"
+
+
 def render(checks: list[Check]) -> str:
-    lines = [f"contexto doctor (contexto {__version__})", ""]
-    for check in checks:
-        lines.append(f"{MARKS[check.status]:<{MARK_WIDTH}}{check.summary}")
-        if check.action:
-            lines.append(f"{'':<{MARK_WIDTH}}-> {check.action}")
-    return "\n".join([*lines, "", verdict(checks)])
+    """The whole text form, as ``run`` prints it piece by piece."""
+    return "\n".join([header(), "", *(render_check(check) for check in checks), "", verdict(checks)])
 
 
 def verdict(checks: list[Check]) -> str:
@@ -209,7 +334,7 @@ def check_python(version: tuple[int, ...] | None = None) -> Check:
 
 def check_cli(cli: str, env: Mapping[str, str]) -> Check:
     """One CLI: found on PATH, its version, and whether Contexto was tested with it. ``details["usable"]``
-    (removed by ``run_checks``) says whether it can be started at all; a missing or unstartable CLI is a
+    (removed by ``iter_checks``) says whether it can be started at all; a missing or unstartable CLI is a
     warning here, and ``require_one_cli`` makes it a failure when the other one is unusable too."""
     name = CLI_NAMES[cli]
     details: dict[str, Any] = {"cli": cli, "path": None, "version": None, "tested": None,
@@ -238,21 +363,90 @@ def check_cli(cli: str, env: Mapping[str, str]) -> Check:
 
 
 def require_one_cli(clis: list[Check]) -> None:
-    """Contexto needs one of the two CLIs: with neither usable, both checks fail."""
-    if any(c.details.get("usable") for c in clis):
-        return
+    """Contexto needs one of the two CLIs: called with neither usable, it makes both checks fail."""
     for check in clis:
         if check.status == WARN:
             check.status = FAIL
             check.action = "Install Claude Code or Codex and put it on PATH: Contexto needs at least one of them"
 
 
+# Settings files ---------------------------------------------------------------------------------------
+
+
+def settings_problem(path: Path) -> str | None:
+    """What is wrong with a settings file that is there and cannot be used, in a few words; None when it
+    is absent or usable. The readers (``contexto.upstream``, ``contexto.providers``) treat such a file as
+    absent, which is what ``contexto run`` does with it, and then nothing says that the file which sets
+    the upstream is the broken one. A file that is not a regular file is not opened: a FIFO would block."""
+    try:
+        mode = path.stat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        return f"cannot be read ({exc.strerror or type(exc).__name__})"
+    if stat.S_ISDIR(mode):
+        return "is a directory, not a file"
+    if stat.S_ISFIFO(mode):
+        return "is a FIFO (a named pipe), and reading it does not finish, here or in `contexto run`"
+    if not stat.S_ISREG(mode):
+        return "is not a regular file"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except OSError as exc:
+        return f"cannot be read ({exc.strerror or type(exc).__name__})"
+    except (ValueError, RecursionError):  # not UTF-8, not JSON, or nested too deep to read
+        return "cannot be read as JSON"
+    if not isinstance(data, dict):
+        return "is not a JSON object"
+    if "env" in data and not isinstance(data["env"], dict):
+        return "has an env block that is not a JSON object"
+    return None
+
+
+def check_settings(ctx: Context) -> Check:
+    """Each settings file ``contexto run`` reads from this directory (``claude_settings_order``): read,
+    absent, or there and unusable. An unusable one is a warning that names it by scope and says what is
+    wrong, because every check below reads it as absent, exactly as ``contexto run`` does."""
+    files: list[dict[str, str]] = []
+    wrong: list[str] = []
+    read: list[str] = []
+    for kind, path in claude_settings_order(ctx.cwd, ctx.home, ctx.env):
+        name = providers.settings_file(kind, ctx.env)
+        problem = settings_problem(path)
+        if problem:
+            files.append({"kind": kind, "state": "unusable", "problem": problem})
+            wrong.append(f"{name} {problem}")
+        elif os.path.lexists(path):
+            files.append({"kind": kind, "state": "read"})
+            read.append(name)
+        else:
+            files.append({"kind": kind, "state": "absent"})
+    details = {"files": files}
+    if wrong:
+        return Check("settings", WARN, f"Claude Code settings: {'; '.join(wrong)}",
+                     "Fix or remove it: Contexto reads nothing from a settings file it cannot use, so an upstream, a "
+                     "key helper or a provider variable set there is missing from the checks below", details)
+    if read:
+        return Check("settings", PASS, f"Claude Code settings: read {' and '.join(read)}", details=details)
+    return Check("settings", PASS, "Claude Code settings: no settings file here or for this user", details=details)
+
+
 # Upstreams --------------------------------------------------------------------------------------------
+
+
+def host_text(host: str) -> str:
+    """A host as it goes on the wire: its IDNA form, so a name with a look-alike letter from another
+    alphabet shows as ``xn--...`` and not as the name it imitates. A host the codec refuses (an
+    over-long label, a character no name may hold) is shown with what is not ASCII escaped."""
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host.encode("ascii", "backslashreplace").decode("ascii")
 
 
 def url_origin(url: str) -> str | None:
     """``scheme://host[:port]`` of an http(s) URL, or None when it is not one. User info, the path and the
-    query are left out: each can hold a credential."""
+    query are left out: each can hold a credential. The host is in ASCII (``host_text``)."""
     try:
         parts = urlsplit(url)
         host, port = parts.hostname, parts.port
@@ -260,6 +454,7 @@ def url_origin(url: str) -> str | None:
         return None
     if parts.scheme not in ("http", "https") or not host:
         return None
+    host = host_text(host)
     host = f"[{host}]" if ":" in host else host
     return f"{parts.scheme}://{host}" + ("" if port is None else f":{port}")
 
@@ -358,10 +553,17 @@ def check_claude_key(ctx: Context) -> Check:
 def check_codex_key(ctx: Context) -> Check:
     """The key helper ``contexto run codex`` would hand Codex in API-key mode, in ``codex.plan_codex``'s
     order after ``--codex-key-helper``. Named by where it is configured; never run, and its command is
-    not shown."""
-    if (ctx.env.get(KEY_HELPER_ENV) or "").strip():
-        return Check("codex-key", PASS, f"Codex key helper: {KEY_HELPER_ENV} in the environment (not run)",
-                     details={"name": KEY_HELPER_ENV, "source": "env"})
+    not shown. The variable is read as the launcher reads it: any value that is not empty is the helper,
+    and one that is only spaces is then refused ("the key helper command is empty"), where reading on
+    to ``apiKeyHelper`` would report a helper the launch never uses."""
+    if ctx.env.get(KEY_HELPER_ENV):
+        details = {"name": KEY_HELPER_ENV, "source": "env"}
+        if ctx.env[KEY_HELPER_ENV].strip():
+            return Check("codex-key", PASS, f"Codex key helper: {KEY_HELPER_ENV} in the environment (not run)",
+                         details=details)
+        return Check("codex-key", WARN, f"Codex key helper: {KEY_HELPER_ENV} is set and blank, and `contexto run "
+                     "codex` refuses a blank helper", f"Unset {KEY_HELPER_ENV} or set it to a command, or pass "
+                     "--codex-key-helper to contexto run", {**details, "error": "blank"})
     helper = claude_key_helper(ctx.cwd, ctx.home, ctx.env)  # a project's only from a trusted folder (D52)
     if helper.value:
         place = providers.settings_file(helper.source or "", ctx.env)
@@ -393,18 +595,46 @@ def write_problem(directory: Path) -> str | None:
         return exc.strerror or type(exc).__name__
 
 
-def check_store(env: Mapping[str, str]) -> Check:
-    """The store home ``contexto run`` would use: writable when it exists (and its ``sessions``
-    directory, where sessions are made), else creatable. A home that does not exist is judged by
-    permission on its nearest existing parent and is not created: ``contexto run`` makes it, 0700."""
-    home = contexto_home(env)
+def check_store(env: Mapping[str, str], *, claude: bool = True) -> Check:
+    """The store home ``contexto run`` would use, judged as the launcher treats it, with nothing created
+    and no mode changed:
+
+    - A home that does not exist is judged by permission on its nearest existing parent: ``contexto run``
+      makes it, 0700.
+    - ``contexto run claude`` refuses a home whose path holds ``${`` (``launcher.check_mcp_values``, the
+      launcher's own check, asked here when ``claude`` is usable; ``contexto run codex`` takes such a home).
+    - Sessions are made in ``sessions``. The store sets that directory to 0700 itself, which its owner
+      can always do, so a read-only one the user owns is no obstacle and is not probed; one that
+      belongs to another user stops the launch whatever its mode. Without it the home must be writable.
+    - A home that cannot be written, with a ``sessions`` that can be used, is a warning: the launch
+      works, and Contexto cannot make its lock and salt files there."""
+    try:
+        home = contexto_home(env)
+    except (RuntimeError, OSError) as exc:
+        if isinstance(exc, OSError):
+            why = "CONTEXTO_HOME is a relative path and the working directory cannot be read"
+        elif env.get("CONTEXTO_HOME"):
+            why = "CONTEXTO_HOME starts with ~ and names a user whose home directory cannot be found"
+        else:
+            why = "CONTEXTO_HOME is not set and the home directory cannot be found (HOME is not set)"
+        raise Fault("no_store_home", f"it cannot be located: {why}",
+                    "Set CONTEXTO_HOME to the full path of a directory you can write") from exc
     exists = os.path.lexists(home)
     details = {"path": str(home), "exists": exists}
     fix = "Make it a directory you can write, or set CONTEXTO_HOME to one"
 
-    def failed(problem: str) -> Check:
-        return Check("store", FAIL, f"Store home {home} {problem}", fix, details)
+    def failed(problem: str, action: str = fix) -> Check:
+        return Check("store", FAIL, f"Store home {home} {problem}", action, details)
 
+    if exists and not home.is_dir():
+        return failed("is not a directory")
+    if claude:
+        try:
+            check_mcp_values(MCP_SESSION, home, "")
+        except LaunchError:  # its message is the launcher's usage error; the same fact in doctor's two lines
+            return failed("is refused by `contexto run claude`: its path contains '${', which Claude Code would "
+                          "expand in the MCP config", "Set CONTEXTO_HOME to a path without '${' (`contexto run "
+                          "codex` accepts this one)")
     if not exists:
         parent = next(p for p in home.parents if os.path.lexists(p))
         if not parent.is_dir():
@@ -412,16 +642,33 @@ def check_store(env: Mapping[str, str]) -> Check:
         if not os.access(parent, os.W_OK | os.X_OK):
             return failed(f"cannot be created: {parent} is not writable")
         return Check("store", PASS, f"Store home {home} does not exist yet and can be created", details=details)
-    if not home.is_dir():
-        return failed("is not a directory")
-    for directory in (home, home / "sessions"):
-        if directory != home and not os.path.lexists(directory):
-            continue
-        problem = "Not a directory" if not directory.is_dir() else write_problem(directory)
-        if problem:
-            where = "" if directory == home else " in its sessions directory"
-            return failed(f"cannot be written{where} ({problem})")
-    return Check("store", PASS, f"Store home {home} is writable", details=details)
+    home_problem = write_problem(home)
+    sessions = home / "sessions"
+    if not os.path.lexists(sessions):
+        if home_problem:
+            return failed(f"cannot be written ({home_problem})")
+        return Check("store", PASS, f"Store home {home} is writable", details=details)
+    note = ""
+    try:
+        if not sessions.is_dir():
+            return failed("cannot be used: its sessions entry is not a directory")
+        if sessions.stat().st_uid != os.geteuid() and os.geteuid() != 0:
+            return failed("cannot be used: its sessions directory belongs to another user, so `contexto run` cannot "
+                          "set its mode")
+        if os.access(sessions, os.W_OK | os.X_OK):
+            problem = write_problem(sessions)
+            if problem:
+                return failed(f"cannot be written in its sessions directory ({problem})")
+        else:
+            note = " (its sessions directory is read-only now; `contexto run` sets it to mode 0700)"
+    except OSError as exc:
+        return failed(f"cannot be used: its sessions directory cannot be read ({exc.strerror or type(exc).__name__})")
+    if home_problem:
+        return Check("store", WARN, f"Store home {home} cannot be written ({home_problem}); `contexto run` still "
+                     f"starts, because its sessions directory can be used{note}",
+                     "Make the home writable to you: Contexto keeps a lock file and a salt file there, and goes "
+                     "without them when it cannot create them", details)
+    return Check("store", PASS, f"Store home {home} is writable{note}", details=details)
 
 
 # The MCP server ---------------------------------------------------------------------------------------
@@ -463,7 +710,10 @@ def check_mcp(env: Mapping[str, str], cwd: Path, *, command: list[str] | None = 
     ``tools/list`` on stdin, and compare the listed tools with Contexto's. It runs against a temporary
     home with one empty session, removed afterwards. The requests are written, stdin is closed (the
     server's shutdown signal) and the answers read, all within ``timeout``; a server still running then
-    is killed. ``command`` replaces the server's command line (tests)."""
+    is killed. The server leads its own process group, so the kill reaches a child it started, and its
+    pipes are closed, not read to the end, so a process that outlives the kill and holds a pipe cannot
+    keep the check past ``timeout``. The cleanup runs on any way out, Ctrl+C and ``Terminated`` (SIGTERM,
+    SIGHUP) included. ``command`` replaces the server's command line (tests)."""
     expected = sorted(tool["name"] for tool in TOOLS)
     fix = (f"Check that `{sys.executable} -P -m contexto --version` works: the CLIs start the server that way, so "
            "Contexto must be installed in this Python (a source directory on the path is not enough)")
@@ -474,7 +724,11 @@ def check_mcp(env: Mapping[str, str], cwd: Path, *, command: list[str] | None = 
         details["seconds"] = round(time.monotonic() - started, 3)
         return Check("mcp", FAIL, f"MCP server {problem}", fix, details)
 
-    tmp = Path(tempfile.mkdtemp(prefix="contexto-doctor-"))
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="contexto-doctor-"))
+    except OSError as exc:  # FileNotFoundError when Python finds no usable temporary directory at all
+        raise Fault("no_temp_directory", "the check needs a temporary directory and none can be made "
+                    f"({exc.strerror or type(exc).__name__})", "Set TMPDIR to a directory you can write") from exc
     store = child = None
     try:
         store = SessionStore(tmp, MCP_SESSION)  # `contexto mcp` serves an existing session only (D57)
@@ -482,7 +736,7 @@ def check_mcp(env: Mapping[str, str], cwd: Path, *, command: list[str] | None = 
         argv = command or [server["command"], *server["args"]]
         try:
             child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     env={**env, **server["env"]}, cwd=cwd)
+                                     env={**env, **server["env"]}, cwd=cwd, start_new_session=True)
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             return failed(f"cannot be started ({getattr(exc, 'strerror', None) or type(exc).__name__})")
         try:
@@ -505,12 +759,25 @@ def check_mcp(env: Mapping[str, str], cwd: Path, *, command: list[str] | None = 
         details["seconds"] = round(time.monotonic() - started, 3)
         return Check("mcp", PASS, f"MCP server started and listed its {len(expected)} tools", details=details)
     finally:
-        if child is not None and child.poll() is None:
-            child.kill()
-            child.communicate()  # reap it and close its pipes
+        if child is not None:
+            stop_server(child)
         if store is not None:
             store.release()  # the session's live lock, before its directory goes
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def stop_server(child: subprocess.Popen) -> None:
+    """Kill the server's process group, reap the server, and close this end of its pipes. Nothing is read
+    here: ``communicate`` after the kill waited for end of file, which a process that had left the group
+    with a pipe still open put off for as long as it lived (8 s against a 1 s timeout, reviewer B, PR
+    #258)."""
+    kill_group(child)  # kills the group, reaps the child (waiting 1 s at most), closes stdout
+    for pipe in (child.stdin, child.stderr):
+        try:
+            if pipe is not None:
+                pipe.close()
+        except OSError:  # stdin's unwritten requests, flushed into a pipe nobody reads any more
+            pass
 
 
 # Provider variables -----------------------------------------------------------------------------------
@@ -518,11 +785,9 @@ def check_mcp(env: Mapping[str, str], cwd: Path, *, command: list[str] | None = 
 
 def check_provider(ctx: Context) -> Check:
     found = providers.provider_overrides(ctx.cwd, ctx.home, ctx.env)
-    variables = [{"variable": o.variable, "source": o.source} for o in found]
+    variables = [providers.override_record(o) for o in found]
     if not found:
         return Check("provider", PASS, "No provider variable (CLAUDE_CODE_USE_BEDROCK and the like) sends Claude "
                      "Code's requests past the proxy", details={"variables": variables})
-    provider = found[0].provider
-    return Check("provider", WARN, f"{providers.bypass_places(found, ctx.env)}: Claude Code sends model requests to "
-                 f"{provider}, not through Contexto", providers.bypass_remedy(found),
-                 {"provider": provider, "variables": variables})
+    return Check("provider", WARN, providers.bypass_summary(found, ctx.env), providers.bypass_remedy(found),
+                 {"provider": found[0].provider, "variables": variables})
