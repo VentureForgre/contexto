@@ -630,6 +630,169 @@ words in 3 or more texts are no longer pushed down. The other 8 latency queries 
 renders every page it shows (`get_page` for the 3 detailed and the 50 listed), with no cap on their size; D39's budget
 bounds the text held between searches, not these reads. `index_text` does not rank and is unchanged.
 
+## D65: fallback probes (2026-11-12)
+
+D65 adds a fallback to `contexto_search` that runs only when strict search (every word of the query
+on the page) finds nothing. This section is the measurement for it, built without sight of that
+code: a probe set, a script anyone can run, and the numbers on `main` before the change. Nothing in
+`src/` changes here. The after numbers are added by the D65 pull request.
+
+### Commands
+
+```
+# before: on main. The store is kept under --store-home and later runs find it again.
+uv run python spikes/m2/scale/store/fallback_bench.py --store-home /tmp/d65-store
+# after: on the branch with the fallback. --baseline-src is the src directory of a checkout of main.
+uv run python spikes/m2/scale/store/fallback_bench.py --store-home /tmp/d65-store --label after \
+    --baseline-src ../contexto-main/src
+# both side by side, as one table
+uv run python spikes/m2/scale/store/fallback_bench.py --compare \
+    spikes/m2/scale/store/results/d65/before spikes/m2/scale/store/results/d65/after
+# a quick check at 60 pages
+uv run python spikes/m2/scale/store/fallback_bench.py --sizes 60 --out /tmp/d65-quick
+```
+
+`--quality-only` and `--latency-only` run one part and keep the other part's files. Without
+`--store-home` the store is written under a temporary `CONTEXTO_HOME` and deleted at the end.
+`~/.contexto` is never used, and there is no model call. A 6,000-page build takes about 20 seconds on
+an idle machine. Results go to `results/d65/<label>/`: `quality.csv` (one row per probe: where the
+answer came from, the rank of each expected page), `latency.csv` (every call), `env.json`, and
+`summary.md`.
+
+### The corpus
+
+The store is the 6,000-page store of this spike (seed 7, floor 0) with six more plants,
+`fallback_probes.EXTRA_FACTS`. The plants of `scale_probes` write identifiers in snake_case and
+UPPER_SNAKE, plus two PascalCase names and two kebab-case keys. No page holds a camelCase or a
+dotted identifier, so the identifier class could not cover those styles. The six plants add them:
+`refreshToken`, `maxConnections`, `fetch.max.wait.ms`, `tls.min.version`, `x-request-id` and
+`drain-grace-period`, each on one page and nowhere else.
+
+They are planted only when a build passes `extra=EXTRA_FACTS` (`scale_synth.session_turn`,
+`scale_bench.build_store`). Without it the corpus is the one D34, D39 and D41 were measured on,
+byte for byte: `test_fallback_probes.py` compares a digest of the default turns with the value
+recorded on `main` before `extra` existed. The D65 run uses the extended corpus. 6 of its 6,000
+pages differ from the default corpus, and none of them holds a `scale_probes` plant.
+
+### The probes (`fallback_probes.py`)
+
+154 queries in eight classes.
+
+| class | probes | the query | example |
+|---|---:|---|---|
+| `exact` | 15 | words of the page itself; strict search finds it. The control. | `Redis eviction policy` |
+| `identifier` | 23 | the page's identifier in another style (snake_case, camelCase, kebab-case, dotted); case alone does not count | `refresh_token` for `refreshToken` |
+| `paraphrase` | 30 | the fact in other words, one per fact; at least one word is not on the page | `ingestion batch size` for "Ingest batch size set to 1200." |
+| `question` | 30 | a question, one per fact; 10 are the fact's own `question`, 20 are new | `Which eviction policy is Redis using now?` |
+| `typo` | 15 | exact probe i with one single-character typo in a word of 6 or more characters | `Redis eviction polciy` |
+| `extra_word` | 15 | exact probe i plus one word the page does not hold | `Redis eviction policy production` |
+| `two_page` | 10 | two facts that sit on different pages; both pages are expected | `staging DB port Redis eviction policy` |
+| `none` | 16 | nothing to find: 8 of words that are on no page, 8 of an absent topic with a common word | `Kafka consumer rebalance`, `kubernetes liveness probe timeout` |
+
+The typos are 4 deletions, 4 swaps of adjacent characters, 4 substitutions and 3 insertions. The
+identifier probes go from snake_case on the page to camelCase (8), dotted (3) and kebab-case (3) in
+the query, and from camelCase, kebab-case and dotted on the page to the other styles (9); 6 of the
+23 are on the added pages. For a fact whose value changes, the expected page is the last plant.
+
+I wrote every query on 2026-11-12 from the fact's `question` and the text of its plant, as a model
+would type it, before I ran any query through search. I have not changed a query after seeing its
+result. Two things were looked up first, one word at a time: how many pages hold a candidate word
+of a `none` probe (`kubernetes` 0, `timeout` 831, `import` 6,000), and the same for 9 of the 15 added
+words of `extra_word`. I did not see the fallback's code, and nothing is tuned to it.
+
+Each class is split in two by alternating its probes: the first goes to `tune`, the second to
+`held_out`. Parameters of the fallback are chosen on `tune` and reported on `held_out`. Typo and
+extra-word probe i come from exact probe i, so the three share a half.
+
+### Method (`fallback_bench.py`)
+
+- Quality, in process. The ranked pages of a probe are `store.search(query)`. If that is empty and
+  the store has `search_approximate` (`main` has none), they are the ids of
+  `store.search_approximate(query)`, best first. A probe counts at 3 (at 10) when every expected page
+  is in the top 3 (top 10). For `two_page` the table also counts probes with either page. For `none`,
+  a false hit is a probe for which any page comes back. The quality pass holds all page text in
+  memory, which changes its speed and no result (D39).
+- A cross-check through the tool. Each probe also goes through `contexto.mcp.Server` in process,
+  after a retained window and a turn room are published. The reply is read for its detailed page
+  lines and its listed page lines only, so lines a fallback adds do not confuse it.
+- Probe checks. The summary counts exact probes strict search misses, altered probes strict search
+  answers with the expected page, and `none` probes with an absent word on some page. All three
+  must be 0 for the classes to mean what they say.
+- Latency, through a real `python -m contexto mcp --session S` child over stdio with the default
+  64 MB search budget: the first search of the process, then the median of 5 calls per query, in 3
+  passes. The queries are the nine of `scale_probes.LATENCY_QUERIES` (strict hits) and the first
+  three probes strict search finds nothing for in each of `identifier`, `question`, `typo`,
+  `extra_word` and `none`. With `--baseline-src` a second child runs the other checkout's code on
+  the same store. Every call is made against both children in turn, and the child that goes first
+  alternates, so both see the same load. The 1-minute load average is recorded at each pass.
+
+### Before: `main` (`results/d65/before`)
+
+`main` has no fallback, so every answer below is strict search's. The run is this branch's first
+commit, 835dadc, whose `src/` is `main`'s (b0e2dbc, v0.5.24); Python 3.13.14, macOS 26.6.1, Apple M5
+Pro.
+
+Recall: probes with every expected page in the top 3 and in the top 10.
+
+| class | probes | top 3: tune | held-out | all | top 10: tune | held-out | all | answered by strict / fallback / nothing |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| exact | 15 | 8/8 | 7/7 | 15/15 (100%) | 8/8 | 7/7 | 15/15 (100%) | 15 / 0 / 0 |
+| identifier | 23 | 0/12 | 0/11 | 0/23 (0%) | 0/12 | 0/11 | 0/23 (0%) | 0 / 0 / 23 |
+| paraphrase | 30 | 0/15 | 0/15 | 0/30 (0%) | 0/15 | 0/15 | 0/30 (0%) | 1 / 0 / 29 |
+| question | 30 | 0/15 | 0/15 | 0/30 (0%) | 0/15 | 0/15 | 0/30 (0%) | 0 / 0 / 30 |
+| typo | 15 | 0/8 | 0/7 | 0/15 (0%) | 0/8 | 0/7 | 0/15 (0%) | 0 / 0 / 15 |
+| extra_word | 15 | 0/8 | 0/7 | 0/15 (0%) | 0/8 | 0/7 | 0/15 (0%) | 0 / 0 / 15 |
+| two_page | 10 | 0/5 | 0/5 | 0/10 (0%) | 0/5 | 0/5 | 0/10 (0%) | 0 / 0 / 10 |
+| two_page, either page | 10 | 0/5 | 0/5 | 0/10 (0%) | 0/5 | 0/5 | 0/10 (0%) | |
+
+False hits on `none`: probes for which any page comes back.
+
+| sub-kind | probes | false hits: tune | held-out | all | median pages returned |
+|---|---:|---:|---:|---:|---:|
+| absent | 8 | 0/4 | 0/4 | 0/8 (0%) | 0 |
+| mixed | 8 | 0/4 | 0/4 | 0/8 (0%) | 0 |
+| all | 16 | 0/8 | 0/8 | 0/16 (0%) | 0 |
+
+- Strict search is all or nothing. It finds every exact probe: 14 at rank 1 and one at rank 2
+  (`staging DB port`, 18 matching pages). Change one word, by a typo, another identifier style, or
+  one added word, and it returns no page. Of the 123 probes that are not exact and have a page to
+  find, 122 get an empty reply.
+- The other one is `staging database port`. Strict search answers it with 25 pages that hold the
+  three words, and the planted page is not among them (it says "DB", not "database"). A fallback
+  that runs only when strict search finds nothing cannot reach this probe.
+- The tool agrees with the store on every probe: the reply details the expected page for the 15
+  exact probes and shows no page for any other (`summary.md`, "Through the tool").
+- The probe checks pass at 6,000 pages: strict search finds all 15 exact pages, returns an
+  expected page for 0 of the 63 typo, identifier, extra-word and two-page probes, and no absent word
+  of a `none` probe is on any page.
+
+Latency (stdio, seconds). The before run timed `main` against itself (`--baseline-src src`), so the
+last column is the noise of the paired method, not a change.
+
+| kind | queries | main, s | main again, s | ratio |
+|---|---:|---:|---:|---:|
+| first search of a process | 1 | 10.983 | 9.391 | 1.17 |
+| rare (strict hit) | 3 | 0.755 | 0.661 | 1.14 |
+| common (strict hit) | 3 | 0.608 | 0.590 | 1.03 |
+| multi-word (strict hit) | 3 | 0.886 | 0.869 | 1.02 |
+| strict miss: identifier | 3 | 0.613 | 0.650 | 0.94 |
+| strict miss: question | 3 | 1.096 | 0.985 | 1.11 |
+| strict miss: typo | 3 | 0.963 | 1.021 | 0.94 |
+| strict miss: extra word | 3 | 1.847 | 2.341 | 0.79 |
+| strict miss: none | 3 | 1.741 | 1.599 | 1.09 |
+
+- Load. Other agents were using all 18 cores: the 1-minute load average was 28.6, 19.2 and 43.3 at
+  the start of the three passes. The absolute times are 2 to 4 times those of an idle run (D41 at
+  6,000 pages: rare 0.240, common 0.222, multi 0.372, first search 1.49) and say little by
+  themselves.
+- Noise. The same code against itself differs by up to 21 percent in this table, and by up to 67
+  percent for one kind in one pass (the first search, which is one call). So an after run on a
+  machine this busy shows a change of the fallback only when its ratio is well outside 0.8 to 1.2.
+- What to watch after D65. A strict miss costs 0.6 to 1.8 s here and a strict hit 0.6 to 0.9 s.
+  The fallback adds its work to the strict misses only, so the five strict-miss rows are where its
+  cost shows. The four strict-hit rows should not move.
+- Peak RSS of the MCP child: 125 MB.
+
 ## Files
 
 - `scale_bench.py`: the harness (store build, stdio and in-process timing, quality, profile, summary).
@@ -645,10 +808,16 @@ bounds the text held between searches, not these reads. `index_text` does not ra
   a key, built from this repository's own text (D41).
 - `scale_grid.py`: the D41 grid table from `scale_length.py --grid` and `scale_dumps.py` outputs.
 - `test_scale_store.py`: fast checks of the helpers (about 0.5 s, part of the default suite).
+- `fallback_probes.py`: the 154 probes of D65, the six added identifier plants, and the split.
+- `fallback_bench.py`: D65's store build, quality pass, tool cross-check, latency, summary and
+  `--compare`.
+- `test_fallback_probes.py`: fast checks of the probe set, the default corpus, and the bench at 40
+  pages (part of the default suite).
 - `results/`: `stores.csv`, `latency.csv` (every call), `quality.csv` (every probe query), `df.csv`,
   `profile_3000.txt`, `env.json`, `summary.md`, `fts_*`, and `floor_0.002/`; `d34_before/` and
   `d34_after/` (with `d34_after/floor_0.002/` and `long_query.txt`) are the same outputs from the D34 runs;
   `d39/` holds the D39 runs at 6,000 pages (`before`, `after_64`, `after_64_uncompressed`, `unlimited`,
   `zero`, `long_query.txt`); `d41/` holds `length/` (with `floor_0.002/`) from `scale_length.py`,
   `grid/` from `scale_dumps.py`, `scale_length.py --grid` and `--grid-full`, and `scale_grid.py`, and the D41
-  before and after runs of `scale_bench.py` for each page-size model.
+  before and after runs of `scale_bench.py` for each page-size model; `d65/before/` holds the D65 run on `main`
+  (`quality.csv`, `latency.csv`, `env.json`, `summary.md`).

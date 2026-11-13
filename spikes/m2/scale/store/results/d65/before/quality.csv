@@ -1,0 +1,155 @@
+n,id,class,sub_kind,split,query,expected,source,strict_pages,returned,ranks,top3,top10,any3,any10,altered,altered_pages,tool_detailed,tool_listed,tool_pages
+6000,exact-01,exact,,tune,staging DB port,s01:0,strict,18,18,2,True,True,True,True,,,1,0,18
+6000,exact-02,exact,,held_out,Redis eviction policy,s08:0,strict,1,1,1,True,True,True,True,,,1,0,1
+6000,exact-03,exact,,tune,webhook signing secret,s11:0,strict,1,1,1,True,True,True,True,,,1,0,1
+6000,exact-04,exact,,held_out,public API rate limit,s05:0,strict,5,5,1,True,True,True,True,,,1,0,5
+6000,exact-05,exact,,tune,feature flag streaming path,s07:0,strict,1,1,1,True,True,True,True,,,1,0,1
+6000,exact-06,exact,,held_out,release branch cut,s09:0,strict,1,1,1,True,True,True,True,,,1,0,1
+6000,exact-07,exact,,tune,owns payments service,s13:0,strict,1,1,1,True,True,True,True,,,1,0,1
+6000,exact-08,exact,,held_out,regression first bad commit,s16:0,strict,1,1,1,True,True,True,True,,,1,0,1
+6000,exact-09,exact,,tune,nightly backups cron,s12:0,strict,1,1,1,True,True,True,True,,,1,0,1
+6000,exact-10,exact,,held_out,max upload size,s10:0,strict,6,6,1,True,True,True,True,,,1,0,6
+6000,exact-11,exact,,tune,CSV export bug ticket,s06:0,strict,1,1,1,True,True,True,True,,,1,0,1
+6000,exact-12,exact,,held_out,Renamed parse_header,r01:0,strict,1,1,1,True,True,True,True,,,1,0,1
+6000,exact-13,exact,,tune,HTTP client timeout,c01:2,strict,3,3,1,True,True,True,True,,,1,0,3
+6000,exact-14,exact,,held_out,worker pool size,c02:2,strict,27,27,1,True,True,True,True,,,1,0,27
+6000,exact-15,exact,,tune,deploy region,c05:2,strict,25,25,1,True,True,True,True,,,1,0,25
+6000,identifier-01,identifier,snake>camel,tune,streamChunkedV3,s07:0,none,0,0,-,False,False,False,False,streamChunkedV3,0,0,0,0
+6000,identifier-02,identifier,snake>camel,held_out,decodeFrameHeader,r01:0,none,0,0,-,False,False,False,False,decodeFrameHeader,0,0,0,0
+6000,identifier-03,identifier,camel>snake,tune,refresh_token,x01:0,none,0,0,-,False,False,False,False,refresh_token,0,0,0,0
+6000,identifier-04,identifier,snake>camel,held_out,replaced fetchRows,r03:0,none,0,0,-,False,False,False,False,fetchRows,0,0,0,0
+6000,identifier-05,identifier,snake>camel,tune,ttlSeconds,c07:2,none,0,0,-,False,False,False,False,ttlSeconds,0,0,0,0
+6000,identifier-06,identifier,camel>kebab,held_out,max-connections,x02:0,none,0,0,-,False,False,False,False,max-connections,0,0,0,0
+6000,identifier-07,identifier,snake>camel,tune,cidrBlock,s18:0,none,0,0,-,False,False,False,False,cidrBlock,0,0,0,0
+6000,identifier-08,identifier,snake>dotted,held_out,retry.backoff.ms,r04:0,none,0,0,-,False,False,False,False,retry.backoff.ms,0,0,0,0
+6000,identifier-09,identifier,dotted>camel,tune,fetchMaxWaitMs,x03:0,none,0,0,-,False,False,False,False,fetchMaxWaitMs,0,0,0,0
+6000,identifier-10,identifier,snake>camel,held_out,maxUploadBytes,s10:0,none,0,0,-,False,False,False,False,maxUploadBytes,0,0,0,0
+6000,identifier-11,identifier,snake>kebab,tune,webhook-hmac-key,s11:0,none,0,0,-,False,False,False,False,webhook-hmac-key,0,0,0,0
+6000,identifier-12,identifier,dotted>snake,held_out,tls_min_version,x04:0,none,0,0,-,False,False,False,False,tls_min_version,0,0,0,0
+6000,identifier-13,identifier,snake>camel,tune,maxRetries uploader,c08:2,none,0,0,-,False,False,False,False,maxRetries,0,0,0,0
+6000,identifier-14,identifier,snake>kebab,held_out,deploy-region,c05:2,none,0,0,-,False,False,False,False,deploy-region,0,0,0,0
+6000,identifier-15,identifier,kebab>camel,tune,xRequestId,x05:0,none,0,0,-,False,False,False,False,xRequestId,0,0,0,0
+6000,identifier-16,identifier,snake>dotted,held_out,log.level,c06:2,none,0,0,-,False,False,False,False,log.level,0,0,0,0
+6000,identifier-17,identifier,snake>dotted,tune,staging.db.port,s01:0,none,0,0,-,False,False,False,False,staging.db.port,0,0,0,0
+6000,identifier-18,identifier,kebab>dotted,held_out,drain.grace.period,x06:0,none,0,0,-,False,False,False,False,drain.grace.period,0,0,0,0
+6000,identifier-19,identifier,snake>camel,tune,artifactsBucket,s03:0,none,0,0,-,False,False,False,False,artifactsBucket,0,0,0,0
+6000,identifier-20,identifier,snake>kebab,held_out,batch-size,c04:2,none,0,0,-,False,False,False,False,batch-size,0,0,0,0
+6000,identifier-21,identifier,kebab>snake,tune,maxmemory_policy,s08:0,none,0,0,-,False,False,False,False,maxmemory_policy,0,0,0,0
+6000,identifier-22,identifier,kebab>snake,held_out,requires_python,s15:0,none,0,0,-,False,False,False,False,requires_python,0,0,0,0
+6000,identifier-23,identifier,camel>snake,tune,user_cache old name,r02:0,none,0,0,-,False,False,False,False,user_cache,0,0,0,0
+6000,paraphrase-01,paraphrase,,tune,staging database port,s01:0,strict,25,25,-,False,False,False,False,,,0,0,25
+6000,paraphrase-02,paraphrase,,held_out,intermittently failing test,s02:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-03,paraphrase,,tune,build artifacts S3 bucket,s03:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-04,paraphrase,,held_out,password hash algorithm,s04:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-05,paraphrase,,tune,API throttle requests per minute,s05:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-06,paraphrase,,held_out,customer ticket CSV export issue,s06:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-07,paraphrase,,tune,streaming path feature toggle,s07:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-08,paraphrase,,held_out,Redis maxmemory eviction setting,s08:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-09,paraphrase,,tune,release branch cutoff day,s09:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-10,paraphrase,,held_out,maximum upload file size,s10:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-11,paraphrase,,tune,webhook HMAC secret environment variable,s11:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-12,paraphrase,,held_out,nightly backup schedule,s12:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-13,paraphrase,,tune,payments service maintainer,s13:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-14,paraphrase,,held_out,E4127 error meaning,s14:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-15,paraphrase,,tune,minimum supported Python version,s15:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-16,paraphrase,,held_out,regression culprit commit,s16:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-17,paraphrase,,tune,canary failure on-call channel,s17:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-18,paraphrase,,held_out,VPC address range,s18:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-19,paraphrase,,tune,parse_header replacement function,r01:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-20,paraphrase,,held_out,UserCache class renamed,r02:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-21,paraphrase,,tune,fetch_rows streaming replacement,r03:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-22,paraphrase,,held_out,retry_backoff_ms deprecated config key,r04:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-23,paraphrase,,tune,HTTP request timeout seconds,c01:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-24,paraphrase,,held_out,worker pool concurrency,c02:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-25,paraphrase,,tune,locked upstream API version,c03:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-26,paraphrase,,held_out,ingestion batch size,c04:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-27,paraphrase,,tune,deployment region,c05:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-28,paraphrase,,held_out,root logger verbosity level,c06:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-29,paraphrase,,tune,cache expiry seconds,c07:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,paraphrase-30,paraphrase,,held_out,uploader retry count,c08:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-01,question,fact_question,tune,What port is the staging database on?,s01:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-02,question,new,held_out,Which test in the ledger suite fails intermittently?,s02:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-03,question,new,tune,What is the name of the bucket the artifacts go to?,s03:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-04,question,fact_question,held_out,Which password hashing algorithm did we decide on?,s04:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-05,question,new,tune,How many requests per minute does the public API allow per key?,s05:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-06,question,new,held_out,Which ticket did the customer open for the CSV export bug?,s06:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-07,question,fact_question,tune,What is the feature flag for the new streaming path?,s07:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-08,question,new,held_out,Which eviction policy is Redis using now?,s08:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-09,question,new,tune,What day and time does the release branch get cut?,s09:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-10,question,fact_question,held_out,What is the max upload size?,s10:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-11,question,new,tune,Which environment variable holds the webhook signing secret?,s11:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-12,question,new,held_out,What time do the nightly backups run from cron?,s12:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-13,question,fact_question,tune,Who owns the payments service?,s13:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-14,question,new,held_out,Why does the router report E4127?,s14:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-15,question,new,tune,Which Python versions do we still support?,s15:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-16,question,fact_question,held_out,Which commit introduced the regression?,s16:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-17,question,new,tune,Where should I post if the canary fails?,s17:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-18,question,new,held_out,What is the CIDR range of the VPC?,s18:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-19,question,fact_question,tune,What did we rename parse_header to?,r01:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-20,question,new,held_out,What was UserCache renamed to?,r02:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-21,question,new,tune,What replaced fetch_rows in the export?,r03:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-22,question,fact_question,held_out,What is the retry_backoff_ms setting called now?,r04:0,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-23,question,new,tune,How many seconds is the HTTP client timeout set to?,c01:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-24,question,new,held_out,How many workers does the worker pool have now?,c02:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-25,question,fact_question,tune,Which upstream API version is pinned?,c03:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-26,question,new,held_out,How large is the ingest batch now?,c04:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-27,question,new,tune,Which region are we deploying to now?,c05:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-28,question,fact_question,held_out,What is the root log level?,c06:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-29,question,new,tune,How long is the cache TTL in seconds?,c07:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,question-30,question,new,held_out,How many retries does the uploader make?,c08:2,none,0,0,-,False,False,False,False,,,0,0,0
+6000,typo-01,typo,deletion,tune,stagng DB port,s01:0,none,0,0,-,False,False,False,False,stagng,0,0,0,0
+6000,typo-02,typo,swap,held_out,Redis eviction polciy,s08:0,none,0,0,-,False,False,False,False,polciy,0,0,0,0
+6000,typo-03,typo,insertion,tune,webhook signing seccret,s11:0,none,0,0,-,False,False,False,False,seccret,0,0,0,0
+6000,typo-04,typo,substitution,held_out,publoc API rate limit,s05:0,none,0,0,-,False,False,False,False,publoc,0,0,0,0
+6000,typo-05,typo,swap,tune,feature flag straeming path,s07:0,none,0,0,-,False,False,False,False,straeming,0,0,0,0
+6000,typo-06,typo,deletion,held_out,relase branch cut,s09:0,none,0,0,-,False,False,False,False,relase,0,0,0,0
+6000,typo-07,typo,substitution,tune,owns payments servise,s13:0,none,0,0,-,False,False,False,False,servise,0,0,0,0
+6000,typo-08,typo,insertion,held_out,regresssion first bad commit,s16:0,none,0,0,-,False,False,False,False,regresssion,0,0,0,0
+6000,typo-09,typo,deletion,tune,nightly bakups cron,s12:0,none,0,0,-,False,False,False,False,bakups,0,0,0,0
+6000,typo-10,typo,swap,held_out,max uplaod size,s10:0,none,0,0,-,False,False,False,False,uplaod,0,0,0,0
+6000,typo-11,typo,insertion,tune,CSV export bug tickett,s06:0,none,0,0,-,False,False,False,False,tickett,0,0,0,0
+6000,typo-12,typo,substitution,held_out,Renamed parse_heador,r01:0,none,0,0,-,False,False,False,False,parse_heador,0,0,0,0
+6000,typo-13,typo,swap,tune,HTTP client timeuot,c01:2,none,0,0,-,False,False,False,False,timeuot,0,0,0,0
+6000,typo-14,typo,deletion,held_out,woker pool size,c02:2,none,0,0,-,False,False,False,False,woker,0,0,0,0
+6000,typo-15,typo,substitution,tune,deploy regiom,c05:2,none,0,0,-,False,False,False,False,regiom,0,0,0,0
+6000,extra_word-01,extra_word,,tune,staging DB port number,s01:0,none,0,0,-,False,False,False,False,number,0,0,0,0
+6000,extra_word-02,extra_word,,held_out,Redis eviction policy production,s08:0,none,0,0,-,False,False,False,False,production,0,0,0,0
+6000,extra_word-03,extra_word,,tune,webhook signing secret location,s11:0,none,0,0,-,False,False,False,False,location,0,0,0,0
+6000,extra_word-04,extra_word,,held_out,public API rate limit quota,s05:0,none,0,0,-,False,False,False,False,quota,0,0,0,0
+6000,extra_word-05,extra_word,,tune,feature flag streaming path rollout,s07:0,none,0,0,-,False,False,False,False,rollout,0,0,0,0
+6000,extra_word-06,extra_word,,held_out,release branch cut schedule,s09:0,none,0,0,-,False,False,False,False,schedule,0,0,0,0
+6000,extra_word-07,extra_word,,tune,owns payments service team,s13:0,none,0,0,-,False,False,False,False,team,0,0,0,0
+6000,extra_word-08,extra_word,,held_out,regression first bad commit bisect,s16:0,none,0,0,-,False,False,False,False,bisect,5,0,0,0
+6000,extra_word-09,extra_word,,tune,nightly backups cron job,s12:0,none,0,0,-,False,False,False,False,job,72,0,0,0
+6000,extra_word-10,extra_word,,held_out,max upload size setting,s10:0,none,0,0,-,False,False,False,False,setting,0,0,0,0
+6000,extra_word-11,extra_word,,tune,CSV export bug ticket Jira,s06:0,none,0,0,-,False,False,False,False,Jira,0,0,0,0
+6000,extra_word-12,extra_word,,held_out,Renamed parse_header function,r01:0,none,0,0,-,False,False,False,False,function,0,0,0,0
+6000,extra_word-13,extra_word,,tune,current HTTP client timeout,c01:2,none,0,0,-,False,False,False,False,current,0,0,0,0
+6000,extra_word-14,extra_word,,held_out,worker pool size config,c02:2,none,0,0,-,False,False,False,False,config,9,0,0,0
+6000,extra_word-15,extra_word,,tune,latest deploy region,c05:2,none,0,0,-,False,False,False,False,latest,0,0,0,0
+6000,two_page-01,two_page,,tune,staging DB port Redis eviction policy,s01:0;s08:0,none,0,0,-;-,False,False,False,False,,,0,0,0
+6000,two_page-02,two_page,,held_out,webhook signing secret and API rate limit,s11:0;s05:0,none,0,0,-;-,False,False,False,False,,,0,0,0
+6000,two_page-03,two_page,,tune,feature flag streaming path max upload size,s07:0;s10:0,none,0,0,-;-,False,False,False,False,,,0,0,0
+6000,two_page-04,two_page,,held_out,HTTP client timeout and max retries,c01:2;c08:2,none,0,0,-;-,False,False,False,False,,,0,0,0
+6000,two_page-05,two_page,,tune,worker pool size ingest batch size,c02:2;c04:2,none,0,0,-;-,False,False,False,False,,,0,0,0
+6000,two_page-06,two_page,,held_out,release branch cut nightly backups,s09:0;s12:0,none,0,0,-;-,False,False,False,False,,,0,0,0
+6000,two_page-07,two_page,,tune,Renamed parse_header replaced fetch_rows,r01:0;r03:0,none,0,0,-;-,False,False,False,False,,,0,0,0
+6000,two_page-08,two_page,,held_out,deploy region VPC cidr_block,c05:2;s18:0,none,0,0,-;-,False,False,False,False,,,0,0,0
+6000,two_page-09,two_page,,tune,payments service and password hashing,s13:0;s04:0,none,0,0,-;-,False,False,False,False,,,0,0,0
+6000,two_page-10,two_page,,held_out,E4127 shard map first bad commit,s14:0;s16:0,none,0,0,-;-,False,False,False,False,,,0,0,0
+6000,none-01,none,absent,tune,kubernetes ingress annotations,,none,0,0,,,,,,,0,0,0,0
+6000,none-02,none,absent,held_out,GraphQL resolver dataloader,,none,0,0,,,,,,,0,0,0,0
+6000,none-03,none,mixed,tune,kubernetes liveness probe timeout,,none,0,0,,,,,,,0,0,0,0
+6000,none-04,none,mixed,held_out,GraphQL subscription flag,,none,0,0,,,,,,,0,0,0,0
+6000,none-05,none,absent,tune,OAuth redirect callback,,none,0,0,,,,,,,0,0,0,0
+6000,none-06,none,absent,held_out,Kafka consumer rebalance,,none,0,0,,,,,,,0,0,0,0
+6000,none-07,none,mixed,tune,Stripe invoice owner,,none,0,0,,,,,,,0,0,0,0
+6000,none-08,none,mixed,held_out,Postgres replication region,,none,0,0,,,,,,,0,0,0,0
+6000,none-09,none,absent,tune,docker multistage image,,none,0,0,,,,,,,0,0,0,0
+6000,none-10,none,absent,held_out,Postgres autovacuum bloat,,none,0,0,,,,,,,0,0,0,0
+6000,none-11,none,mixed,tune,websocket reconnect retries,,none,0,0,,,,,,,0,0,0,0
+6000,none-12,none,mixed,held_out,Prometheus alertmanager regression,,none,0,0,,,,,,,0,0,0,0
+6000,none-13,none,absent,tune,websocket heartbeat reconnect,,none,0,0,,,,,,,0,0,0,0
+6000,none-14,none,absent,held_out,Stripe invoice proration,,none,0,0,,,,,,,0,0,0,0
+6000,none-15,none,mixed,tune,numpy import error,,none,0,0,,,,,,,0,0,0,0
+6000,none-16,none,mixed,held_out,OAuth session token,,none,0,0,,,,,,,0,0,0,0

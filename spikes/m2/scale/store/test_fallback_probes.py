@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import re
+import shutil
 from collections import Counter
 from pathlib import Path
 
+import fallback_bench
 import fallback_probes
 import pytest
 import scale_bench
@@ -18,7 +21,7 @@ from scale_probes import FACTS, planted_turn
 from contexto.store import SessionStore
 from contexto.store.search import fold
 
-SMALL = 60
+SMALL = 40  # pages of the one store these tests build through the bench
 # sha256 over the JSON of every turn of the default corpus (seed 7, floor 0), recorded on main at
 # b0e2dbc before scale_synth took ``extra``. Python 3.12 to 3.15 give the same value.
 DEFAULT_CORPUS_60 = "2647552be3c73245eb87d787a97ff86490883a1599c3e1141389abbb8ec56771"  # all 60 turns
@@ -63,11 +66,21 @@ def turns_digest(n: int, turns: list[int] | None = None, **kwargs) -> str:
 
 
 @pytest.fixture(scope="module")
-def small(tmp_path_factory) -> tuple[Path, SessionStore, list[str]]:
-    home = tmp_path_factory.mktemp("d65-small")
-    built = scale_bench.build_store(home, "s", SMALL, dialect="messages", floor=0.0, seed=7, extra=EXTRA_FACTS)
-    assert built["markers_ok"]
-    return home, SessionStore(home, "s"), built["ids"]
+def run(tmp_path_factory) -> tuple[Path, Path]:
+    """One quality run of the bench at ``SMALL`` pages: (the result folder, the store home it built)."""
+    root = tmp_path_factory.mktemp("d65-bench")
+    home, out = root / "home", root / "results"
+    assert fallback_bench.main(["--sizes", str(SMALL), "--quality-only", "--label", "before", "--out", str(out),
+                                "--store-home", str(home)]) == 0
+    return out / "before", home
+
+
+@pytest.fixture(scope="module")
+def small(run) -> tuple[Path, SessionStore, list[str]]:
+    """The store of that run (the extended corpus) and its page ids, one per turn."""
+    _, home = run
+    ids = json.loads((home / f"d65-{SMALL}.json").read_text(encoding="utf-8"))["ids"]
+    return home, SessionStore(home, f"d65-{SMALL}"), ids
 
 
 # The probe set
@@ -304,3 +317,204 @@ def test_extra_markers_are_on_their_planted_page_only(small):
     for fact in EXTRA_FACTS:
         (plant,) = fact.plants
         assert store.search(plant.marker) == [ids[planted_turn(plant.at, SMALL)]], fact.id
+
+
+# The bench
+
+
+def rows_of(folder: Path, name: str = "quality") -> list[dict]:
+    with (folder / f"{name}.csv").open(newline="") as f:
+        return list(csv.DictReader(f))
+
+
+class Hit:
+    def __init__(self, page_id: str) -> None:
+        self.id = page_id
+
+
+class FakeStore:
+    def __init__(self, strict: list[str], approximate: list[str] | None) -> None:
+        self.strict = strict
+        if approximate is not None:
+            self.search_approximate = lambda query: [Hit(i) for i in approximate]
+
+    def search(self, query: str) -> list[str]:
+        return self.strict
+
+
+class FakeChild:
+    """Stands in for an MCP child: every call takes ``seconds`` and is recorded."""
+
+    def __init__(self, seconds: float, calls: list) -> None:
+        self.seconds, self.calls, self.startup_s = seconds, calls, 0.5
+
+    def call(self, name: str, arguments: dict) -> tuple[float, str]:
+        self.calls.append((self.seconds, name, arguments["query"]))
+        return self.seconds, "no pages"
+
+    def close(self) -> int:
+        return 40_000_000
+
+
+def test_ranked_ids_come_from_strict_search_and_from_the_fallback_only_when_strict_is_empty():
+    assert fallback_bench.ranked(FakeStore(["pg_a"], ["pg_b"]), "q") == (["pg_a"], "strict")
+    assert fallback_bench.ranked(FakeStore([], ["pg_b", "pg_c"]), "q") == (["pg_b", "pg_c"], "fallback")
+    assert fallback_bench.ranked(FakeStore([], []), "q") == ([], "none")
+    assert fallback_bench.ranked(FakeStore([], None), "q") == ([], "none")  # main: no search_approximate
+
+
+def test_score_counts_a_probe_at_k_only_when_every_expected_page_is_in_the_top_k():
+    ranked = [f"pg_{i}" for i in range(12)]
+    assert fallback_bench.score(["pg_2"], ranked) == {"ranks": "3", "top3": True, "top10": True, "any3": True,
+                                                      "any10": True}
+    assert fallback_bench.score(["pg_1", "pg_7"], ranked) == {"ranks": "2;8", "top3": False, "top10": True,
+                                                              "any3": True, "any10": True}
+    assert fallback_bench.score(["pg_11", "pg_x"], ranked) == {"ranks": "12;-", "top3": False, "top10": False,
+                                                               "any3": False, "any10": False}
+    assert fallback_bench.score([], ranked) == {"ranks": "", "top3": "", "top10": "", "any3": "", "any10": ""}
+
+
+def test_tool_pages_reads_detailed_and_listed_lines_and_ignores_the_rest():
+    text = "\n".join(["[approximate matches: no page holds every word]", "pg_00000000000000aa (turn 9)",
+                      "> 12: a line", "  pg_00000000000000ee (turn 3)", "pg_00000000000000bb (turn 4)",
+                      "[more matching pages, newest first; recall one at its offset:]",
+                      "pg_00000000000000cc (turn 2) @40", "[approximate] pg_00000000000000dd (turn 1) @0",
+                      "[7 more matching pages not shown; use a longer or more specific query]"])
+    assert fallback_bench.tool_pages(text) == (["pg_00000000000000aa", "pg_00000000000000bb"],
+                                               ["pg_00000000000000cc"])
+    assert fallback_bench.tool_pages("No pages match.") == ([], [])
+
+
+def test_quality_run_writes_one_row_per_probe_and_the_tables(run):
+    folder, _ = run
+    rows = rows_of(folder)
+    assert [r["id"] for r in rows] == [p.id for p in PROBES]
+    assert set(rows[0]) == set(fallback_bench.QUALITY_FIELDS)
+    by_id = {r["id"]: r for r in rows}
+    for p in PROBES:
+        r = by_id[p.id]
+        assert (r["class"], r["query"], r["split"]) == (p.cls, p.query, fallback_probes.split_of(p))
+        assert r["source"] in ("strict", "fallback", "none")
+        assert (r["source"] == "strict") == (int(r["strict_pages"]) > 0)
+    exact = [r for r in rows if r["class"] == "exact"]
+    assert all(r["source"] == "strict" and r["top10"] == "True" for r in exact)  # the control
+    assert all(r["tool_detailed"] == "1" for r in exact if r["top3"] == "True")  # the tool shows the top 3
+    assert all(r["altered_pages"] == "0" and r["strict_pages"] == "0" for r in rows if r["class"] == "none")
+    summary = (folder / "summary.md").read_text(encoding="utf-8")
+    for heading in (f"## Recall at {SMALL} pages", "## Nothing to find", "## Through the tool", "## Probe checks"):
+        assert heading in summary, heading
+    assert "| exact | 15 | " in summary and "| two_page, either page | 10 | " in summary
+    assert "- exact probes whose page strict search returns: 15 of 15." in summary
+    assert "returns an expected page: 0 of 63 (0 is right)." in summary
+    assert "absent word on some page: 0 of 16 (0 is right)." in summary
+    assert "## Latency" not in summary  # --quality-only
+    env = json.loads((folder / "env.json").read_text(encoding="utf-8"))
+    assert {"commit", "python", "os", "cpu", "label", "sizes", "probes"} <= set(env)
+    text = json.dumps(env)
+    assert str(Path.home()) not in text and "hostname" not in text  # numbers and versions only
+
+
+def test_summary_counts_recall_per_class_and_split_and_the_false_hit_rate(tmp_path: Path):
+    def row(i: int, cls: str, split: str, **kw) -> dict:
+        base = dict.fromkeys(fallback_bench.QUALITY_FIELDS, "")
+        base.update({"n": 60, "id": f"{cls}-{i}", "class": cls, "split": split, "source": "none", "strict_pages": 0,
+                     "returned": 0, "tool_detailed": 0, "tool_listed": 0, "tool_pages": 0, "top3": False,
+                     "top10": False, "any3": False, "any10": False})
+        base.update(kw)
+        return base
+
+    rows = [row(0, "typo", "tune", source="fallback", returned=4, top3=True, top10=True, any3=True, any10=True),
+            row(1, "typo", "held_out", source="fallback", returned=20, top10=True, any10=True),
+            row(2, "typo", "tune"),
+            row(0, "two_page", "tune", source="fallback", returned=9, any3=True, any10=True),
+            row(0, "none", "tune", sub_kind="absent", altered_pages=0),
+            row(1, "none", "held_out", sub_kind="absent", altered_pages=0),
+            row(2, "none", "tune", sub_kind="mixed", source="fallback", returned=7, tool_pages=3, altered_pages=0),
+            row(3, "none", "held_out", sub_kind="mixed", altered_pages=0)]
+    with (tmp_path / "quality.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fallback_bench.QUALITY_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    summary = fallback_bench.summarize(tmp_path)
+    assert "| typo | 3 | 1/2 | 0/1 | 1/3 (33%) | 1/2 | 1/1 | 2/3 (67%) | 0 / 2 / 1 |" in summary
+    assert "| two_page | 1 | 0/1 | 0/0 | 0/1 (0%) | 0/1 | 0/0 | 0/1 (0%) | 0 / 1 / 0 |" in summary
+    assert "| two_page, either page | 1 | 1/1 | 0/0 | 1/1 (100%) | 1/1 | 0/0 | 1/1 (100%) | |" in summary
+    assert "| absent | 2 | 0/1 | 0/1 | 0/2 (0%) | 0 | 0 |" in summary
+    assert "| mixed | 2 | 1/1 | 0/1 | 1/2 (50%) | 3.5 | 1 |" in summary
+    assert "| all | 4 | 1/2 | 0/2 | 1/4 (25%) | 0 | 1 |" in summary
+
+
+def test_a_later_run_reuses_the_store(run, small, capsys):
+    _, home = run
+    _, _, ids = small
+    manifest = home / f"d65-{SMALL}.json"
+    written = manifest.stat().st_mtime_ns
+    capsys.readouterr()
+    assert fallback_bench.open_store(home, SMALL) == ids and len(ids) == SMALL
+    assert "reusing" in capsys.readouterr().out and manifest.stat().st_mtime_ns == written
+
+
+def test_compare_prints_two_result_folders_as_one_table(run, tmp_path: Path, capsys):
+    folder, _ = run
+    after = tmp_path / "after"
+    shutil.copytree(folder, after)
+    env = json.loads((after / "env.json").read_text(encoding="utf-8"))
+    (after / "env.json").write_text(json.dumps({**env, "label": "after"}), encoding="utf-8")
+    capsys.readouterr()
+    assert fallback_bench.main(["--compare", str(folder), str(after)]) == 0
+    table = capsys.readouterr().out
+    lines = [line for line in table.splitlines() if line.startswith("|")]
+    assert lines[0] == "| measure | before | after |" and len(lines) == len(table.strip().splitlines())
+    assert any(line.startswith("| exact, all (15): top 3 / top 10 |") for line in lines)
+    assert any(line.startswith("| none, all (16): probes with a page |") for line in lines)
+
+
+def test_a_store_that_is_not_whole_is_built_again(tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    first = fallback_bench.open_store(home, 20)
+    store = SessionStore(home, "d65-20")
+    (store.pages_dir / f"{first[3]}.json").unlink()  # a build that was cut short
+    capsys.readouterr()
+    assert fallback_bench.open_store(home, 20) != [] and "building" in capsys.readouterr().out
+    assert len(SessionStore(home, "d65-20").page_ids()) == 20
+    with pytest.raises(SystemExit):
+        fallback_bench.main(["--sizes", "20", "--store-home", str(Path.home() / ".contexto")])
+
+
+def test_latency_queries_are_the_nine_strict_hits_and_three_strict_misses_of_five_classes(run):
+    _, home = run
+    store = SessionStore(home, f"d65-{SMALL}")
+    queries = fallback_bench.latency_queries(store)
+    kinds = Counter(kind for kind, _ in queries)
+    assert kinds == {"rare": 3, "common": 3, "multi": 3, "miss_identifier": 3, "miss_question": 3, "miss_typo": 3,
+                     "miss_extra_word": 3, "miss_none": 3}
+    by_query = {p.query: p for p in PROBES}
+    for kind, query in queries:
+        if kind.startswith("miss_"):
+            assert store.search(query) == [] and by_query[query].cls == kind.removeprefix("miss_"), query
+
+
+def test_latency_pass_times_both_sides_alternately_and_the_summary_shows_them(run, tmp_path: Path):
+    _, home = run
+    calls: list = []
+    sides = {"tree": lambda h, s: FakeChild(0.02, calls), "baseline": lambda h, s: FakeChild(0.01, calls)}
+    queries = [("rare", "E4127"), ("miss_typo", "stagng DB port")]
+    with (tmp_path / "latency.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fallback_bench.LATENCY_FIELDS)
+        writer.writeheader()
+        for pass_no in (1, 2):
+            fallback_bench.latency_pass(home, SMALL, pass_no, 2, queries, writer, sides)
+    rows = rows_of(tmp_path, "latency")
+    timed = [r for r in rows if r["kind"] in ("rare", "miss_typo")]
+    assert len(timed) == 2 * 2 * 2 * 2  # passes, queries, reps, sides
+    assert Counter(r["side"] for r in timed) == {"tree": 8, "baseline": 8}
+    order = {p: [r["side"] for r in timed if r["pass"] == p and r["query"] == "E4127"] for p in ("1", "2")}
+    assert order == {"1": ["tree", "baseline", "baseline", "tree"],  # neither side always goes first
+                     "2": ["baseline", "tree", "tree", "baseline"]}
+    assert {(r["side"], r["kind"]) for r in rows if r["kind"] in ("first", "startup", "peak_rss")} == {
+        (side, kind) for side in sides for kind in ("first", "startup", "peak_rss")}
+    assert all(float(r["load1"]) >= 0 for r in rows)
+    assert len(calls) == len(timed) + 4  # the first search of each child in each pass
+    summary = fallback_bench.summarize(tmp_path)
+    assert f"## Latency at {SMALL} pages" in summary
+    assert "| miss_typo | 1 | 0.020 | 0.010 | 2.00 |" in summary and "| first | 1 | 0.020 | 0.010 | 2.00 |" in summary
