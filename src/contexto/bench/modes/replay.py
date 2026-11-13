@@ -107,8 +107,8 @@ def run(args: argparse.Namespace) -> int:
         else:
             with tempfile.TemporaryDirectory(prefix="contexto-bench-replay-") as scratch:
                 measured = session.replay(script, Path(scratch))
-    except LaunchError as exc:
-        _error(str(exc))
+    except LaunchError as exc:  # the launcher's own check of the bound, in the words `contexto run` uses
+        _error(f"the proxy does not start with this bound: {exc}")
         return exc.code
     except (session.ReplayError, OSError) as exc:
         _error(f"the replay stopped: {exc}")
@@ -119,7 +119,7 @@ def run(args: argparse.Namespace) -> int:
     failed = output.failures(script, measured, differences)
     manifest = output.manifest(script, turns, measured, __version__, pinned, started, finished)
     rows = output.request_rows(script, measured)
-    data = output.results(script, manifest, rows, measured, pinned, differences, failed)
+    data = output.results(script, manifest, rows, measured, pinned, differences, failed, recording)
     print("\n".join(output.summary(script, data)))
     try:
         if args.out is not None:

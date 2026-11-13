@@ -88,7 +88,7 @@ def notes(script: Script, pinned: bool) -> list[str]:
 
 
 def results(script: Script, manifest_data: dict[str, Any], rows: list[dict[str, Any]], measured: Any, pinned: bool,
-            differences: list[str], failed: list[str]) -> dict[str, Any]:
+            differences: list[str], failed: list[str], recording: bool = False) -> dict[str, Any]:
     series = {}
     for arm in ("contexto", "full", "plain"):
         part = [r for r in rows if r["arm"] == arm and r["main"]]
@@ -109,6 +109,7 @@ def results(script: Script, manifest_data: dict[str, Any], rows: list[dict[str, 
             "over_bound_proxy": measured.over_bound_proxy, "pages": measured.pages, "events": dict(measured.events),
             "history_tokens": sizes["tokens"], "content_history_tokens": sizes["history_tokens"],
             "head_tokens": measured.head_tokens, "seconds": measured.seconds, "pinned": pinned,
+            "recording": recording,
             "differences": list(differences), "problems": list(measured.problems),
             "notices": list(measured.notices), "passed": not failed, "failures": list(failed),
             "modelled": {"full_max": max((r["uncached"] for r in rows if r["arm"] == "full"), default=0),
@@ -164,13 +165,17 @@ def summary(script: Script, data: dict[str, Any]) -> list[str]:
                       "replay.")
     out = [
         f"contexto bench --replay: seed {script.seed}, protocol {script.protocol}, bound {script.bound:,} tokens"
-        + (" (the pinned trace)" if block["pinned"] else " (NOT the pinned trace)"),
+        + (" (the pinned trace)" if block["pinned"] else " (recording a trace)" if block["recording"]
+           else " (NOT the pinned trace)"),
         "",
         "A replay sends a generated session through the real Contexto proxy to a fake upstream on 127.0.0.1.",
         "No model is called and nothing leaves this machine. The replies are scripted.",
         f"Sizes are estimates, not token counts: {RATES_TEXT}.",
     ]
-    if not block["pinned"]:
+    if block["recording"]:
+        out.append("This run records a trace, so nothing was checked against recorded hashes or expected "
+                   "measurements.")
+    elif not block["pinned"]:
         out.append("This is not the pinned trace, so nothing was checked against recorded hashes or expected "
                    "measurements.")
     out += [
