@@ -2,7 +2,8 @@
 
 A `contexto run` prints one line when it starts and, since D64, a short summary when the CLI exits.
 `contexto stats` prints the same numbers for any session, at any time, with more detail. Both read
-the session's `log.jsonl` and its store on this machine. Nothing is written and nothing is sent
+the session's `log.jsonl` and its store on this machine. Nothing is written or created, nothing is
+waited for (a process that holds the ledger's lock does not hold a reader up), and nothing is sent
 anywhere.
 
 This page defines every number, says which are measured and which are estimates, and lists what is
@@ -42,11 +43,18 @@ contexto: resume this conversation through Contexto with: contexto run --session
   refused, or was still in flight when the proxy stopped.
 - `contexto run --quiet claude ...` or `CONTEXTO_QUIET=1` (any value but empty, `0`, `false` or
   `no`) drops the summary. Warnings are never dropped: the held warnings, and the warning for faults
-  that no other warning described (below), are printed either way.
-- Building the summary never changes the exit code. If it fails, nothing is printed.
+  that no other warning described (below), are printed either way. One line is added under
+  `--quiet` when a store failure was warned about and paging then resumed, because that warning
+  was written while the store was failing:
+  `contexto: paging resumed before claude exited; meanwhile 2 requests went out unpaged.`
+- Building the summary never changes the exit code. If it fails, nothing is printed. That holds
+  for Ctrl+C while it is being built: the summary is dropped, and the exit code and the resume
+  line are kept.
 - No summary is printed when the CLI was only asked for its version or help (`--version`, `-v`,
   `-V`, `--help`, `-h`), or when the launch ended before the CLI started (a usage error, Ctrl+C
   during the version check).
+- The summary reads only the latest run's part of the log, so it does not slow down as a resumed
+  session's log grows (see Speed).
 
 ### No model request
 
@@ -67,7 +75,9 @@ Known causes:
 - Codex: none has been measured. In ChatGPT login mode some Codex calls (rate limits, usage) go to
   chatgpt.com directly by design; those are not model requests.
 
-This line is part of the summary, so `--quiet` drops it.
+This line is part of the summary, so `--quiet` drops it. It is not printed when the CLI could not
+be started (the launcher has said `cannot start`, exit code 127, and nothing reached the proxy) or
+when `--help`, `-h` or `--version` is anywhere in the CLI's arguments (`codex exec --help`).
 
 ## `contexto stats`
 
@@ -135,12 +145,12 @@ number says otherwise.
 | `scope` | `session` (the whole log) or `last_run` (`--last-run`, and the exit summary). |
 | `runs` | Proxy starts in the whole log: one per `contexto run` or `contexto proxy`. A run is the log from the lines its launch wrote while opening the session, through its proxy start, to its `exit` line (to the next proxy start for a run that was killed, and for `contexto proxy`, which writes no `exit`). |
 | `cli` | `claude` or `codex`, from the latest `launch` line; `null` when the log has none. |
-| `bound` | The bound in tokens: the latest `launch` line's, else one carried by an `over_bound` or `bound_too_small` event, else `null`. A session resumed with another `--bound` shows the latest. |
+| `bound` | The bound in tokens: the latest `launch` line's, else one carried by an `over_bound` or `bound_too_small` event in scope, else `null`. A session resumed with another `--bound` shows the latest. |
 | `started`, `ended` | The first and last timestamp in scope, as logged (UTC). A `ts` that is not a time is not used. |
 | `span_seconds` | `ended` minus `started`. It is the span of the log, not time spent working: two 5-second runs three days apart span 72 hours. |
 | `run_seconds` | The time in runs: each run's first line to its last, added up. `null` when the log has no proxy start. For the last run it equals `span_seconds`. |
 | `log.missing` | `true` when the session has no readable `log.jsonl` (absent, or not a regular file). |
-| `log.lines` | Non-empty lines in the log. |
+| `log.lines` | Non-empty lines read: the whole log, or for the last run its own lines (the lines before it are searched for run starts, not parsed). `log.unreadable_lines` and `log.ignored_values` cover the same lines. |
 | `log.unreadable_lines` | Lines that are not a JSON object: a line cut short by a full disk, or damage. They are skipped, so the numbers may be low; the text output says so. |
 | `log.ignored_values` | Values in readable lines that cannot be what their field holds: a string or a negative number where a count belongs (bytes, tokens, a status, a page count), a `ts` that is not a time, an event or tool name that is not text. Each is left out of its number and counted here; the text output says so. |
 
@@ -325,7 +335,7 @@ line: no event in the log shows a Codex compaction, so nothing is claimed.
 | `faults.events` | The count of each. |
 | `faults.degraded` | Degraded mode, in which paging is stopped (below). |
 | `faults.degraded.entered`, `faults.degraded.left` | Times paging stopped and resumed. |
-| `faults.degraded.now` | Whether paging is stopped at the end of the scope, for the main conversation (for any conversation when the scope has no main request). A new run always starts paging. |
+| `faults.degraded.now` | Whether paging is stopped at the end of the scope, for the main conversation (for any conversation when the scope has no main request). The `degraded_enter` and `degraded_leave` events decide it; a request's own `degraded` flag is used only for a line that holds neither. A store that fails after a request was built, and again at each later turn, is stopped at the end even though every request went out paged. A new run always starts paging. |
 | `faults.degraded.since` | When it stopped, if it is stopped now. |
 | `faults.degraded.unpaged_requests` | Model requests sent while paging was stopped. |
 | `faults.degraded.largest_unpaged_request_bytes` | The largest body among them. |
@@ -359,8 +369,20 @@ It is now said in three places:
    ```
 
 2. **In `contexto stats`**, under `faults`, with the same advice and whether paging has resumed.
+   A failure that is over is told as past (`the disk ... was full ..., so paging stopped ... Paging
+   has resumed; meanwhile 2 requests went out unpaged, the largest 244.5 KiB.`). The warning on
+   stderr is written when the failure happens, so it is in the present; the summary's `faults` line
+   says whether paging resumed, and under `--quiet` one line says so (above).
 3. **In `contexto state`**, for the latest run only: `Warning:` when paging is stopped now, `Note:`
    when it stopped and resumed. `contexto state --raw` is the model's text and is unchanged.
+
+`contexto stats` also says what each fault event means, under the `faults` line:
+
+```
+  faults      3 events (retained_stale 2, transform_error 1)
+    retained_stale x2: the snapshot of the conversation in view could not be written
+    transform_error x1: a Contexto bug: a request was forwarded as the CLI sent it
+```
 
 The advice depends on the cause, which is read from the `store_error` event's `errno` (added in D64;
 before it the event held only the exception class, so a full disk looked like a permission problem):
@@ -428,12 +450,13 @@ and `affinity_salt_unavailable` are logged just before a run's proxy start. They
 that run.
 
 The launcher already warns on stderr, in its own words, about `store_error`, `page_conflict` (and so
-`degraded_enter`), `mcp_tools_missing`, `mcp_tools_denied` and `bound_too_small`, and the store about
-`pruned_while_opening`. For a run that
-logged any other fault, `contexto run` ends with one more warning, which `--quiet` does not drop:
+`degraded_enter`, and `page_quarantined`: the page-conflict warning says the file will be moved to
+quarantine), `mcp_tools_missing`, `mcp_tools_denied` and `bound_too_small`, and the store about
+`pruned_while_opening`. For a run that logged any other fault, `contexto run` ends with one more
+warning, which `--quiet` does not drop:
 
 ```
-contexto: warning: this run logged 2 events (retained_stale 1, transform_error 1) that Contexto left its designed path. Details: contexto stats 7f3a...
+contexto: warning: this run logged 2 events that mean Contexto left its designed path (retained_stale 1, transform_error 1). Details: contexto stats 7f3a...
 ```
 
 Events that are **not** counted, because they happen in normal use:
@@ -513,8 +536,17 @@ to 60), so wall-clock times vary and the CPU time is the steadier figure. The lo
 | | wall clock, one call | 13.6 s | 5.1 to 9.0 s |
 | | peak resident memory | 1,551 MB | 73 to 88 MB |
 
-The interpreter alone is 27 MB of each memory figure. The time still grows with the log's size:
-every call reads all of it.
+The interpreter alone is 27 MB of each memory figure. For the whole session the time still grows
+with the log's size: every call parses all of it.
+
+**The last run** (`--last-run`, the exit summary, `contexto state`) parses only that run's lines.
+The lines before it are read once and searched for run starts, which costs about 1.4 ms of CPU for
+each megabyte. On the 203 MB log above, cut into 69 runs of 4,000 requests each:
+
+| | Before | Now |
+|---|---|---|
+| CPU, one call | 4.1 s | 0.34 s |
+| peak resident memory | 1,524 MB | 80 MB |
 
 The store adds to that. For the small log with a ledger and 1,200 pages a call took 122 to 133 ms
 of CPU, and 51 to 52 ms with `page_tokens=False`, which counts the pages without opening them.

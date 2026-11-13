@@ -24,7 +24,10 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   so once per cause when the CLI exits, in `contexto stats`, and in `contexto state`, with what
   to do. The `store_error` log entry names the errno (`ENOSPC`, `EACCES`).
 - A full disk no longer replaces the CLI's exit code. A session log that cannot be written is
-  reported, and the CLI's own exit code is kept.
+  reported, and the CLI's own exit code is kept. Ctrl+C while the summary is being built keeps the
+  exit code and the resume line too.
+- `contexto stats` and `contexto state` never wait for another process that holds a session's
+  ledger lock, and reading a session with them creates nothing in it.
 - `contexto run codex` holds its warnings until Codex exits, as `contexto run claude` does, so a
   warning no longer lands in Codex's screen mid-run.
 - A number is shown only when the log supports it. The pages a run added come from the store's
