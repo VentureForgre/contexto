@@ -84,6 +84,16 @@ def test_a_403_in_the_full_arm_stops_the_whole_run_too(env, tmp_path, script):
         assert not stub.messages_requests("plain") and not (run.out / "probes.jsonl").exists()
 
 
+def test_without_claude_on_path_only_the_full_arm_can_run(env, tmp_path, script):
+    env.setenv("PATH", "/usr/bin:/bin")
+    refused = bench_stubs.run_bench(env, tmp_path / "a", [script], arms=("full", "plain"), bound=BOUND)
+    assert refused.code == 127 and "'claude' was not found on PATH" in refused.printed
+    assert not refused.out.exists() and not refused.stub.requests
+    alone = bench_stubs.run_bench(env, tmp_path / "b", [script], arms=("full",), bound=BOUND)
+    assert alone.code == 0 and alone.manifest["claude_code_version"] is None and alone.manifest["cache_ttl"] is None
+    assert alone.manifest["plain_compaction"] is None and alone.manifest["request_classes"] is None
+
+
 def test_an_existing_output_directory_fixes_the_run(env, tmp_path, script):
     done = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND)
     assert done.code == 0
