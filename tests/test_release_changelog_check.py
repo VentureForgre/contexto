@@ -89,7 +89,7 @@ def test_another_version_that_only_contains_the_digits_is_not_a_near_miss():
     text = "# Changelog\n\n## 10.7.0 (2026-11-13)\n\n- Something.\n"
     message = guard.problem(text, "0.7.0")
     assert message is not None
-    assert "line 3" not in message
+    assert "is not in the form" not in message
 
 
 def test_a_mention_in_the_text_is_not_a_heading():
@@ -102,6 +102,107 @@ def test_an_empty_section_fails():
     message = guard.problem(text, "0.7.0")
     assert message is not None
     assert "empty" in message
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "### Fixed\n",
+        "### Added\n\n### Fixed\n",
+        "Nothing yet.\n",
+        "<!-- to be written -->\n",
+        "<!--\nto be written\n- over several lines\n-->\n",
+        "### Fixed\n\n<!-- nothing -->\n\n_Nothing yet._\n",
+    ],
+)
+def test_a_section_with_no_entry_is_empty(body):
+    text = f"# Changelog\n\n## 0.7.0 (2026-11-13)\n\n{body}\n## 0.6.0 (2026-11-06)\n\n- Older.\n"
+    message = guard.problem(text, "0.7.0")
+    assert message is not None
+    assert "empty" in message
+
+
+def test_one_entry_under_a_subheading_is_enough():
+    text = "# Changelog\n\n## 0.7.0 (2026-11-13)\n\n### Fixed\n\n<!-- note -->\n- One fix.\n"
+    assert guard.problem(text, "0.7.0") is None
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~", "````markdown"])
+def test_a_heading_inside_a_code_block_is_not_a_section(fence):
+    close = fence.rstrip("markdown")
+    example = f"{fence}\n## 0.7.0 (2026-11-13)\n\n- An example.\n{close}\n"
+    text = f"# Changelog\n\nEach heading looks like this:\n\n{example}\n## 0.6.0 (2026-11-06)\n\n- Older.\n"
+    message = guard.problem(text, "0.7.0")
+    assert message is not None and "no section for 0.7.0" in message
+    assert guard.problem(text, "0.6.0") is None
+
+
+@pytest.mark.parametrize("date", ["2026-99-99", "2026-02-30", "2026-13-01", "0000-01-01", "2026-00-10"])
+def test_an_impossible_date_fails(date):
+    text = f"# Changelog\n\n## 0.7.0 ({date})\n\n- Something.\n"
+    message = guard.problem(text, "0.7.0")
+    assert message is not None
+    assert date in message and "not a date" in message and "line 3" in message
+
+
+def test_an_impossible_date_on_an_older_section_does_not_block_a_release():
+    text = "# Changelog\n\n## 0.7.0 (2026-11-13)\n\n- New.\n\n## 0.6.0 (2026-99-99)\n\n- Older.\n"
+    assert guard.problem(text, "0.7.0") is None
+
+
+@pytest.mark.parametrize("marker", ["<!-- version list -->", "<!--version list-->", "  <!-- Version List -->  "])
+def test_the_semantic_release_marker_is_refused(marker):
+    text = GOOD.replace("## Unreleased\n", f"## Unreleased\n\n{marker}\n")
+    message = guard.problem(text, "0.6.0")
+    assert message is not None
+    assert "<!-- version list -->" in message and "line 5" in message
+    assert "semantic-release" in message
+
+
+def test_the_marker_is_refused_inside_a_code_block_too():
+    # semantic-release looks for the text, not for Markdown.
+    text = GOOD + "\n```\n<!-- version list -->\n```\n"
+    assert "<!-- version list -->" in guard.problem(text, "0.6.0")
+
+
+BUMP_GREW = "# Changelog\n\n## Unreleased\n\n## 0.6.1 (2026-11-13)\n\n- A fix.\n\n## 0.6.0 (2026-11-06)\n\n- Older.\n"
+
+
+def test_a_section_written_before_the_bump_grew_is_to_be_renamed():
+    message = guard.problem(BUMP_GREW, "0.7.0", last_released="v0.6.0")
+    assert message is not None
+    assert "no section for 0.7.0" in message
+    assert 'change its heading to "## 0.7.0 (YYYY-MM-DD)"' in message
+    assert "0.6.1" in message and "line 5" in message
+    assert "feat:" in message
+    assert "Add the section" not in message
+
+
+def test_with_the_last_release_on_top_the_advice_is_to_add_a_section():
+    message = guard.problem(BUMP_GREW, "0.7.0", last_released="v0.6.1")
+    assert message is not None
+    assert "Add the section" in message
+    assert "change its heading" not in message
+
+
+def test_a_changelog_behind_the_last_release_gets_the_advice_to_add_a_section():
+    message = guard.problem(BUMP_GREW, "0.7.0", last_released="v0.6.5")
+    assert "Add the section" in message and "change its heading" not in message
+
+
+def test_without_the_last_release_both_ways_out_are_named():
+    message = guard.problem(BUMP_GREW, "0.7.0")
+    assert message is not None
+    assert 'change its heading to "## 0.7.0 (YYYY-MM-DD)"' in message
+    assert "already released" in message and "Add the section" in message
+
+
+def test_the_real_changelog_passes_for_its_newest_version():
+    changelog = SCRIPT.parent.parent.parent / "CHANGELOG.md"
+    text = changelog.read_text(encoding="utf-8")
+    newest = next(guard.HEADING.fullmatch(line).group(1) for line in text.splitlines() if guard.HEADING.fullmatch(line))
+    assert guard.problem(text, newest) is None
+    assert guard.unreleased_entries(text) == [] or all(entry.strip() for entry in guard.unreleased_entries(text))
 
 
 def test_an_empty_last_section_fails():
@@ -165,6 +266,34 @@ def test_command_fails_without_a_section(tmp_path):
     assert result.returncode == 1
     assert "::error" in result.stdout
     assert "## 0.7.0 (YYYY-MM-DD)" in result.stdout
+
+
+def test_command_passes_with_a_warning_when_unreleased_has_entries(tmp_path):
+    text = GOOD.replace("## Unreleased\n", "## Unreleased\n\n- Not yet moved.\n- Another.\n")
+    (tmp_path / "CHANGELOG.md").write_text(text, encoding="utf-8")
+    result = _run("v0.6.0", cwd=tmp_path)
+    assert result.returncode == 0, result.stdout
+    assert "::warning::" in result.stdout and "2 line(s)" in result.stdout
+    assert "::error" not in result.stdout
+
+
+def test_command_has_no_warning_for_a_placeholder_under_unreleased(tmp_path):
+    (tmp_path / "CHANGELOG.md").write_text(GOOD.replace("## Unreleased\n", "## Unreleased\n\nNothing yet.\n"), "utf-8")
+    result = _run("v0.6.0", cwd=tmp_path)
+    assert result.returncode == 0
+    assert "::warning::" not in result.stdout
+
+
+def test_command_takes_the_last_released_tag(tmp_path):
+    (tmp_path / "CHANGELOG.md").write_text(BUMP_GREW, encoding="utf-8")
+    renamed = _run("v0.7.0", "--last-released", "v0.6.0", cwd=tmp_path)
+    assert renamed.returncode == 1
+    assert "change its heading" in renamed.stdout
+    added = _run("v0.7.0", "--last-released", "v0.6.1", cwd=tmp_path)
+    assert added.returncode == 1
+    assert "change its heading" not in added.stdout and "Add the section" in added.stdout
+    assert _run("v0.7.0", "--last-released", "", cwd=tmp_path).returncode == 1
+    assert _run("v0.7.0", "--last-released", "main", cwd=tmp_path).returncode == 2
 
 
 def test_command_fails_without_the_file(tmp_path):

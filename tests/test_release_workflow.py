@@ -131,28 +131,95 @@ def test_the_release_never_commits_and_attests_before_it_uploads():
     reattach = JOBS["reattach"]
     assert reattach.index("actions/attest-build-provenance") < reattach.index("gh release upload")
     assert "bash .github/scripts/reattach-verify.sh" in reattach
+    # semantic-release's changelog command may have rewritten CHANGELOG.md in the work tree.
+    assert 'git checkout --quiet --force --detach "refs/tags/$TAG"' in reattach
 
 
 # --- the PyPI job ----------------------------------------------------------------------------------
 
 
+# The whole condition, not parts of it: one `||` for an `&&` turns a switch into a suggestion.
+PUBLISHES = (
+    "(inputs.action == 'publish'"
+    " || (inputs.action == 'release' && needs.release.result == 'success'"
+    " && needs.release.outputs.released == 'true'))"
+)
+PYPI_IF = (
+    "!cancelled() && vars.RELEASES_ENABLED == 'true' && vars.PYPI_PUBLISH_ENABLED == 'true'"
+    f" && needs.request.result == 'success' && {PUBLISHES}"
+)
+PYPI_DISABLED_IF = (
+    "!cancelled() && vars.RELEASES_ENABLED == 'true' && vars.PYPI_PUBLISH_ENABLED != 'true'"
+    f" && needs.request.result == 'success' && {PUBLISHES}"
+)
+TAG_EXPRESSION = "${{ inputs.action == 'publish' && inputs.tag || needs.release.outputs.tag }}"
+
+
+def _expression(text):
+    """An expression with its line breaks and the spaces inside parentheses taken out."""
+    return re.sub(r"\s+", " ", text).replace("( ", "(").replace(" )", ")").strip()
+
+
+def _steps(job):
+    body = JOBS[job]
+    return body[body.index("\n    steps:\n") :]
+
+
 def test_the_pypi_job_is_off_unless_the_variable_is_exactly_true():
-    condition = _if("pypi")
-    assert "vars.PYPI_PUBLISH_ENABLED == 'true'" in condition
-    assert "vars.RELEASES_ENABLED == 'true'" in condition
+    assert _expression(_if("pypi")) == PYPI_IF
     assert "PYPI_PUBLISH_ENABLED" not in JOBS["release"] + JOBS["reattach"] + JOBS["ci"]
+
+
+def test_the_two_pypi_conditions_differ_only_in_the_switch():
+    assert _expression(_if("pypi-disabled")) == PYPI_DISABLED_IF
+    assert PYPI_IF.replace("PYPI_PUBLISH_ENABLED == 'true'", "PYPI_PUBLISH_ENABLED != 'true'") == PYPI_DISABLED_IF
+
+
+def test_the_other_conditions_are_the_whole_expected_expression():
+    assert _if("disabled") == "vars.RELEASES_ENABLED != 'true'"
+    assert _if("request") == "vars.RELEASES_ENABLED == 'true'"
+    assert _if("ci") == "inputs.action == 'release' && vars.RELEASES_ENABLED == 'true'"
+    assert _if("release") == "inputs.action == 'release' && vars.RELEASES_ENABLED == 'true'"
+    assert _if("reattach") == "inputs.action == 'reattach' && vars.RELEASES_ENABLED == 'true'"
+
+
+def test_the_published_tag_is_the_release_jobs_tag_or_the_input_on_publish():
+    for job in ("pypi", "pypi-disabled"):
+        assert re.findall(r"^\s+TAG: (.*)$", JOBS[job], flags=re.MULTILINE) == [TAG_EXPRESSION], job
+    assert re.findall(r"^\s+TAG: (.*)$", JOBS["reattach"], flags=re.MULTILINE) == ["${{ inputs.tag }}"]
+    release_tags = re.findall(r"^\s+TAG: (.*)$", JOBS["release"], flags=re.MULTILINE)
+    assert release_tags and set(release_tags) == {"${{ steps.plan.outputs.tag }}"}
+    outputs = JOBS["release"][JOBS["release"].index("    outputs:") : JOBS["release"].index("    steps:")]
+    assert "      released: ${{ steps.plan.outputs.released }}" in outputs
+    assert "      tag: ${{ steps.plan.outputs.tag }}" in outputs
+
+
+def test_no_step_may_fail_and_let_the_job_go_on():
+    assert "continue-on-error" not in TEXT
+    assert "set +e" not in CODE
+    # The one tolerated failure: no release yet, so there is no last released tag to print.
+    tolerated = [line.strip() for line in _steps("release").splitlines() if "||" in line]
+    assert tolerated == ["last=$($PSR version --print-last-released-tag || true)"]
+    for job in ("request", "reattach", "pypi"):
+        assert "||" not in _steps(job), job
+    # A step's own condition never widens what runs: no status function below the job level.
+    for job in ("request", "release", "reattach", "pypi"):
+        for function in ("always()", "failure()", "cancelled()"):
+            assert function not in _steps(job), (job, function)
+    step_conditions = set(re.findall(r"^        if: (.*)$", _steps("release") + _steps("pypi"), flags=re.MULTILINE))
+    assert step_conditions == {
+        "steps.plan.outputs.released == 'true'",
+        "steps.plan.outputs.released == 'true' && hashFiles('dist/SHA256SUMS') != ''",
+        "steps.plan.outputs.upload_count != '0'",
+    }
 
 
 def test_the_pypi_job_runs_after_the_release_job_and_never_after_a_cancel():
     pypi = JOBS["pypi"]
     assert re.search(r"^    needs: \[request, release\]$", pypi, flags=re.MULTILINE)
-    condition = _if("pypi")
-    assert condition.startswith("!cancelled()")
+    condition = _expression(_if("pypi"))
+    assert condition.startswith("!cancelled() && ")
     assert "always()" not in condition
-    assert "needs.request.result == 'success'" in condition
-    assert "needs.release.result == 'success'" in condition
-    assert "needs.release.outputs.released == 'true'" in condition
-    assert "inputs.action == 'publish'" in condition
     # Nothing on the GitHub side waits for PyPI.
     for job in ("ci", "release", "reattach", "request", "disabled"):
         assert "pypi" not in re.findall(r"^    needs: (.*)$", JOBS[job], flags=re.MULTILINE).__str__(), job
@@ -170,12 +237,28 @@ def test_the_pypi_job_names_the_pypi_environment():
             assert "environment:" not in body, job
 
 
+def _permissions(job):
+    """A job's `permissions:` block as a dict."""
+    lines = JOBS[job].splitlines()
+    start = lines.index("    permissions:")
+    granted = {}
+    for line in lines[start + 1 :]:
+        if not line.strip():
+            continue  # a comment line, already stripped
+        if not line.startswith("      "):
+            break
+        name, value = line.strip().split(": ")
+        granted[name] = value
+    return granted
+
+
 def test_the_pypi_job_has_the_oidc_permission_and_only_read_access_besides():
-    pypi = JOBS["pypi"]
-    block = re.search(r"^    permissions:\n((?:      \S.*\n)+)", pypi + "\n", flags=re.MULTILINE).group(1)
-    permissions = dict(line.strip().split(": ") for line in block.splitlines())
-    assert permissions == {"contents": "read", "id-token": "write"}
+    assert _permissions("pypi") == {"contents": "read", "id-token": "write", "attestations": "read"}
     assert _section(CODE, "permissions").strip() == "contents: read"
+    for job in ("release", "reattach"):
+        assert _permissions(job) == {"contents": "write", "id-token": "write", "attestations": "write"}, job
+    for job in ("disabled", "request", "ci", "pypi-disabled"):
+        assert "permissions:" not in JOBS[job], job
 
 
 def test_no_job_but_those_that_sign_gets_an_oidc_token():
@@ -220,18 +303,48 @@ def test_the_pypi_job_publishes_the_release_assets_and_checks_them_first():
     positions = [pypi.index(step) for step in order]
     assert positions == sorted(positions)
     assert "uv build" not in pypi and "release-build.sh" not in pypi
-    assert "--signer-workflow" in pypi
     assert pypi.count("--project contexto-proxy") + pypi.count('--project "$PROJECT"') == 3
+    assert pypi.count('--tag "$TAG"') == 3
+    assert pypi.count('--dist "$RUNNER_TEMP/pypi-dist"') == 3
+
+
+def test_the_attestation_must_come_from_release_yml_on_main_on_a_hosted_runner():
+    pypi = _steps("pypi")
+    assert pypi.count("gh attestation verify") == 1
+    step = pypi[pypi.index("gh attestation verify") :].split("\n\n")[0]
+    command = _expression(step[: step.index("\n          done")].replace("\\\n", " "))
+    assert command == (
+        'gh attestation verify "$file" --repo "$GITHUB_REPOSITORY"'
+        ' --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"'
+        " --source-ref refs/heads/main --deny-self-hosted-runners"
+    )
+    # Both files, each on its own: a failure for either stops the job.
+    loop = pypi[: pypi.index("gh attestation verify")].rstrip().splitlines()[-1].strip()
+    assert loop == 'for file in "$RUNNER_TEMP"/pypi-dist/*.whl "$RUNNER_TEMP"/pypi-dist/*.tar.gz; do'
 
 
 def test_the_upload_is_by_trusted_publishing_to_pypi_only():
     pypi = JOBS["pypi"]
-    upload = pypi[pypi.index("uv publish") :].split("\n\n")[0]
-    assert "--trusted-publishing always" in upload
-    assert "--publish-url https://upload.pypi.org/legacy/" in upload
     assert "test.pypi.org" not in TEXT
     assert pypi.count("uv publish") == 1
-    assert "steps.plan.outputs.upload_count != '0'" in pypi
+    # Exactly the files the plan wrote: read into an array, no glob, nothing else on the line.
+    step = pypi[pypi.rindex("      - name:", 0, pypi.index("uv publish")) :].split("\n\n")[0]
+    lines = [line.strip() for line in step.splitlines()]
+    assert lines == [
+        "- name: Upload to PyPI by trusted publishing",
+        "if: steps.plan.outputs.upload_count != '0'",
+        "run: |",
+        'mapfile -t files < "$RUNNER_TEMP/pypi-upload.txt"',
+        "uv publish \\",
+        "--trusted-publishing always \\",
+        "--publish-url https://upload.pypi.org/legacy/ \\",
+        "--check-url https://pypi.org/simple/ \\",
+        "--no-attestations \\",
+        '"${files[@]}"',
+    ]
+    plan = pypi[pypi.index("id: plan") : pypi.index("uv publish")]
+    assert '--output "$RUNNER_TEMP/pypi-upload.txt"' in plan
+    assert pypi.count("pypi-upload.txt") == 2
 
 
 def test_a_run_with_publishing_off_says_so():
@@ -283,14 +396,28 @@ def test_the_owner_steps_name_what_the_workflow_uses():
         assert f"| {field} | `{value}` |" in doc, field
     assert "gh variable set PYPI_PUBLISH_ENABLED --body true" in doc
     assert "-f action=publish -f tag=" in doc
+    # The owner checks the environment and its branch rule before registering the publisher.
+    check = doc.index("gh api repos/VentureForgre/contexto/environments/pypi/deployment-branch-policies")
+    assert doc.index("gh api repos/VentureForgre/contexto/environments/pypi ") < check
+    assert check < doc.index("Add a new pending publisher") < doc.index("gh variable set PYPI_PUBLISH_ENABLED")
+
+
+def test_the_repositorys_changelog_has_no_semantic_release_marker():
+    # semantic-release's changelog command, which the reattach job runs, inserts its own text at
+    # this line and leaves a file without it untouched.
+    changelog = ROOT / "CHANGELOG.md"
+    assert changelog.is_file()
+    assert not re.search(r"<!--\s*version list\s*-->", changelog.read_text(encoding="utf-8"), flags=re.IGNORECASE)
 
 
 def test_releasing_md_describes_every_script_and_switch():
     doc = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
-    scripts = sorted(path for path in (ROOT / ".github" / "scripts").iterdir() if path.suffix in (".py", ".sh"))
-    assert len(scripts) == 6
-    for script in scripts:
-        assert f"`.github/scripts/{script.name}`" in doc, script.name
+    # The release's scripts by name. Other scripts may live in the same directory.
+    for name in ("release-request.sh", "changelog-check.py", "release-build.sh", "reattach-verify.sh",
+                 "pypi-publish.py", "ensure-gh.sh"):
+        assert (ROOT / ".github" / "scripts" / name).is_file(), name
+        assert f"`.github/scripts/{name}`" in doc, name
+        assert f".github/scripts/{name}" in TEXT, name
     for word in ("RELEASES_ENABLED", "PYPI_PUBLISH_ENABLED", "-f action=release", "-f action=reattach",
                  "-f action=publish", "docs/pypi-publishing.md"):
         assert word in doc, word
@@ -337,14 +464,13 @@ def test_recovery_needs_a_release_tag(action):
         assert "::error::" in result.stdout
 
 
-def test_reattach_may_be_dispatched_from_another_ref_as_before():
-    assert _request("reattach", "v0.5.24", "refs/heads/claude/some-branch").returncode == 0
-
-
-def test_publish_is_refused_from_anywhere_but_main():
-    result = _request("publish", "v0.6.0", "refs/heads/claude/some-branch")
+@pytest.mark.parametrize("action", ["reattach", "publish"])
+@pytest.mark.parametrize("ref", ["refs/heads/claude/some-branch", "refs/tags/v0.6.0", "refs/heads/main2", ""])
+def test_recovery_is_refused_from_anywhere_but_main(action, ref):
+    result = _request(action, "v0.6.0", ref)
     assert result.returncode == 1
-    assert "main" in result.stdout
+    assert "::error::" in result.stdout
+    assert f"--ref main -f action={action} -f tag=v0.6.0" in result.stdout
 
 
 def test_an_unknown_action_is_refused():
@@ -367,7 +493,11 @@ def test_the_workflow_parses_as_yaml():
     assert list(workflow["jobs"]) == list(JOBS)
     pypi = workflow["jobs"]["pypi"]
     assert pypi["environment"] == {"name": "pypi", "url": "https://pypi.org/project/contexto-proxy/"}
-    assert pypi["permissions"] == {"contents": "read", "id-token": "write"}
+    assert pypi["permissions"] == {"contents": "read", "id-token": "write", "attestations": "read"}
+    assert _expression(pypi["if"]) == PYPI_IF
+    assert _expression(workflow["jobs"]["pypi-disabled"]["if"]) == PYPI_DISABLED_IF
+    assert pypi["env"] == {"PROJECT": "contexto-proxy", "TAG": TAG_EXPRESSION}
+    assert all("continue-on-error" not in step for job in workflow["jobs"].values() for step in job.get("steps", []))
     assert pypi["needs"] == ["request", "release"]
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {"group": "release", "cancel-in-progress": False}
