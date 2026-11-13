@@ -210,8 +210,8 @@ def run(unit: Unit) -> UnitResult:
             result.probe_turns_completed += 1
             result.turns_completed += 1
     except Stop as stop:
-        nothing_sent = not unit.meter.records
-        if nothing_sent and (stop.code in ("too_large", "budget", "http_400", "http_413")):
+        # Nothing was answered yet and the request did not fit, or the upstream refused it outright.
+        if not answers and stop.code in ("too_large", "budget", "http_400", "http_413"):
             result.status, result.stop, result.reason = "not_run", None, stop.reason
             return result
         if stop.code == "budget":

@@ -23,9 +23,11 @@ import json
 import math
 import os
 import random
+import re
 import stat
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -99,6 +101,7 @@ class StubModel:
     usage_scale: dict[str, float] = field(default_factory=dict)  # arm -> factor on the reported input tokens
     wrong_decisions: set[int] = field(default_factory=set)  # turn indexes whose decision reply is wrong (CLI arms)
     count_tokens: dict[str, int] = field(default_factory=dict)  # arm -> the count_tokens answer, instead of the model
+    delay_s: dict[str, float] = field(default_factory=dict)  # arm -> seconds to wait before answering a request
     read_paths: str = "relative"  # "relative", or "absolute": join the working directory named in the system prompt
     requests: list[dict[str, Any]] = field(default_factory=list)
     answered: dict[tuple[str, int, str], str] = field(default_factory=dict)  # (arm, seed, probe id) -> answer given
@@ -197,9 +200,12 @@ class StubModel:
         lines = []
         for probe in asked:
             parts = [x.strip() for x in probe.answer.split(",")] if probe.kind == "set" else [probe.answer]
-            knows = all(part in seen for part in parts)
-            given = probe.answer if knows and not wrong(arm, script.seed, probe.id, self.error_rates.get(arm, 0.0)) \
-                else "unknown"
+            recalled = probe.answer if all(part in seen for part in parts) else "unknown"
+            label = next((d.label for d in script.decisions if d.probe == probe.id), None)
+            if label is not None:  # what the assistant replied then, right or wrong, if that reply is in sight
+                replies = [v for v in re.findall(rf"DECISION {re.escape(label)}: (\S+)", seen) if v != "<name>"]
+                recalled = replies[-1] if replies else "unknown"
+            given = "unknown" if wrong(arm, script.seed, probe.id, self.error_rates.get(arm, 0.0)) else recalled
             with self.lock:
                 self.answered[(arm, script.seed, probe.id)] = given
             lines.append(f"{probe.id}: {given}")
@@ -279,6 +285,8 @@ class StubModel:
                 if path != "/v1/messages":
                     self._json({"type": "error", "error": {"type": "not_found_error", "message": "stub"}}, 404)
                     return
+                if stub.delay_s.get(arm):
+                    time.sleep(stub.delay_s[arm])
                 conversation = self.headers.get("x-claude-code-session-id") or ""
                 usage = stub.usage(arm, conversation, body)
                 record["usage"] = usage
@@ -376,3 +384,92 @@ def install_stub_claude(directory: Path) -> Path:
     path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{STUB_CLAUDE}" "$@"\n', encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return directory
+
+
+# -- running the benchmark against the stubs -------------------------------------------------------
+
+FAKE_KEY = "sk-ant-api03-PLANTED-bench-key-7f3a91c2"
+HOME_NAME = "home-of-planted-user"
+
+
+@dataclass
+class BenchRun:
+    code: int
+    out: Path
+    work: Path
+    stub: StubModel
+    printed: str
+    commands: list[list[str]]  # the command line of every child process the test process started
+    children: list[Any] = field(default_factory=list)  # those processes
+
+    @property
+    def manifest(self) -> dict[str, Any]:
+        return json.loads((self.out / "manifest.json").read_text(encoding="utf-8"))
+
+    def lines(self, name: str) -> list[dict[str, Any]]:
+        path = self.out / name
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def unit(self, arm: str, seed: int | None = None, repeat: int = 0) -> dict[str, Any]:
+        return next(u for u in self.manifest["units"]
+                    if u["arm"] == arm and u["repeat"] == repeat and (seed is None or u["seed"] == seed))
+
+
+def bench_environment(monkeypatch: Any, tmp: Path, *, real_claude: bool = False) -> Path:
+    """A temp HOME, no inherited credential or base URL, and (unless ``real_claude``) the stub
+    ``claude`` first on PATH. Returns the home directory."""
+    home = tmp / HOME_NAME
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    for name in list(os.environ):
+        if name.startswith("ANTHROPIC_"):
+            monkeypatch.delenv(name)
+    if not real_claude:
+        monkeypatch.setenv("PATH", str(install_stub_claude(tmp / "bin")) + os.pathsep + os.environ["PATH"])
+    return home
+
+
+def run_bench(monkeypatch: Any, tmp: Path, scripts: list[Script], *, arms: tuple[str, ...], bound: int,
+              stub: StubModel | None = None, credentials: Any = None, budget: int | None = 2_000_000_000,
+              upstream: str | None = None, out: Path | None = None, **overrides: Any) -> BenchRun:
+    """One ``runner.run`` against a ``StubModel`` (started here unless ``upstream`` names a running
+    one), with everything it prints and every child command line captured."""
+    import io
+    import subprocess
+
+    from contexto.bench import credentials as bench_credentials
+    from contexto.bench import runner
+
+    own = stub is None or upstream is None
+    stub = stub or StubModel(scripts, key=FAKE_KEY)
+    url = upstream or stub.start()
+    commands: list[list[str]] = []
+    children: list[Any] = []
+    real_popen = subprocess.Popen
+
+    class Recording(real_popen):  # type: ignore[misc,valid-type]
+        def __init__(self, args: Any, *a: Any, **kw: Any) -> None:
+            commands.append([str(x) for x in args] if isinstance(args, (list, tuple)) else [str(args)])
+            super().__init__(args, *a, **kw)
+            children.append(self)
+
+    monkeypatch.setattr(subprocess, "Popen", Recording)
+    credentials = credentials or bench_credentials.resolve(f"printf %s {FAKE_KEY}", None)
+    first = scripts[0]
+    config = runner.Config(
+        model="claude-haiku-5-5", bound=bound, protocol=first.protocol, turn_kbytes=first.turn_size // 1_000,
+        seed=first.seed, seeds=[s.seed for s in scripts], repeats=1, arms=arms, budget=budget,
+        out=out or tmp / "out", upstream=url, credentials=credentials, work=tmp / "work", keep_work=True,
+        turn_timeout=120.0)
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    printed_out, printed_err = io.StringIO(), io.StringIO()
+    try:
+        code = runner.run(config, {s.seed: s for s in scripts}, stdout=printed_out, stderr=printed_err)
+    finally:
+        monkeypatch.setattr(subprocess, "Popen", real_popen)
+        if own:
+            stub.stop()
+    return BenchRun(code, config.out, config.work, stub, printed_out.getvalue() + printed_err.getvalue(), commands,
+                    children)

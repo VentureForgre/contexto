@@ -48,6 +48,7 @@ import select
 import socket
 import ssl
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,7 @@ COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 RESERVE_BYTES_PER_TOKEN = 1.5
 DEFAULT_MAX_TOKENS = 32_000  # reserved for a request whose body names no max_tokens
 UPSTREAM_TIMEOUT_S = 900
+STOP_DRAIN_S = 2.0
 CLASS_HEADER = "x-claude-code-request-class"
 COMPACTION_HEADER = "x-claude-code-compaction"
 AGENT_HEADER = "x-claude-code-agent-id"
@@ -318,6 +320,8 @@ class Meter:
         self.auth_status: int | None = None
         self._count = 0
         self._lock = threading.Lock()
+        self._in_flight = 0
+        self._idle = threading.Condition()
         self._server: _Server | None = None
 
     @property
@@ -338,10 +342,16 @@ class Meter:
         return self.url
 
     def stop(self) -> None:
+        """Stop accepting requests, then wait up to ``STOP_DRAIN_S`` for those in flight to end and be
+        recorded: their clients are gone by now, so their upstream connections are being closed."""
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
             self._server = None
+            deadline = time.monotonic() + STOP_DRAIN_S
+            with self._idle:
+                while self._in_flight and (left := deadline - time.monotonic()) > 0:
+                    self._idle.wait(left)
 
     def connection(self) -> http.client.HTTPConnection:
         if self.scheme == "https":
@@ -378,10 +388,17 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def do_GET(self) -> None:  # noqa: N802
+        owner = self.owner
+        with owner._idle:
+            owner._in_flight += 1
         try:
             self._handle()
         except (ConnectionResetError, BrokenPipeError):
             self.close_connection = True
+        finally:
+            with owner._idle:
+                owner._in_flight -= 1
+                owner._idle.notify_all()
 
     do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = do_GET
 
