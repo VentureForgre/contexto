@@ -67,9 +67,9 @@ def run(script, tmp_path_factory):
                           "settings path": str(settings), "host": HOST, "home": str(home),
                           "user": bench_stubs.HOME_NAME}
         result.argv_log = [json.loads(x) for x in argv_log.read_text(encoding="utf-8").splitlines()]
-        yield result
     finally:
-        monkeypatch.undo()
+        monkeypatch.undo()  # before the tests read the result: nothing stays patched while they run
+    return result
 
 
 def test_every_unit_completes_and_the_manifest_has_the_shared_fields(run, script):

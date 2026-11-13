@@ -183,6 +183,30 @@ def write_scripts(out: Path, scripts: dict[int, Script]) -> None:
             script.write(path)
 
 
+def drop_unrecorded_probes(out: Path, manifest: dict[str, Any]) -> int:
+    """Remove ``probes.jsonl`` lines of units the manifest does not record ``complete``, and return how
+    many. There are some only when an earlier run was killed between writing a unit's probe lines and
+    its manifest entry; that unit runs again, and its lines must not be there twice."""
+    path = out / "probes.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return 0
+    complete = {unit_key(u) for u in manifest["units"] if u.get("status") == "complete"}
+    kept = []
+    for line in lines:
+        try:
+            if unit_key(json.loads(line)) in complete:
+                kept.append(line)
+        except (ValueError, KeyError, TypeError):
+            continue  # not a probe line
+    if len(kept) != len(lines):
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
+        os.replace(tmp, path)
+    return len(lines) - len(kept)
+
+
 def probe_lines(unit: dict[str, Any], model: str, script: Script, answers: dict[int, str]) -> list[dict[str, Any]]:
     """The ``probes.jsonl`` lines of a complete unit: one per probe, in the order asked."""
     by_id = {p.id: p for p in script.probes}
@@ -342,6 +366,7 @@ def run(config: Config, scripts: dict[int, Script] | None = None, *, stdout: Tex
     manifest, todo, all_scripts = ready["manifest"], ready["todo"], ready["scripts"]
     ledger = bench_meter.Ledger(config.out / "requests.jsonl", config.budget, ready["spent"])
     manifest["spent_tokens"] = ledger.spent
+    drop_unrecorded_probes(config.out, manifest)
     write_json_atomic(config.out / "manifest.json", manifest)
     if ready["resumed"]:
         say(f"resuming: {ready['skipped']} units are complete, {len(todo)} to run")
@@ -426,8 +451,12 @@ def report(out: Path, stream: TextIO) -> None:
     except ImportError:
         bench_report = None
     write = getattr(bench_report, "write", None)
-    if callable(write):
-        write(out)
-    else:
+    if not callable(write):
         print(f"contexto bench: this build has no report code; run 'contexto bench --report {out.name}' with a "
               "build that has it to get results.json and results.md", file=stream)
+        return
+    try:
+        write(out)
+    except Exception as exc:  # noqa: BLE001 - the run's own files are written; the report can be made again
+        print(f"contexto bench: the report could not be written ({type(exc).__name__}); the run's files are "
+              f"complete, and 'contexto bench --report {out.name}' makes it again", file=stream)

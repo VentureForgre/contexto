@@ -161,11 +161,18 @@ class Session:
         """Send turn ``index`` and wait for its ``result``. Raises ``Stop``."""
         assert self.proc.stdin
         message = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
-        try:
-            self.proc.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
-            self.proc.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass  # the child is gone: the loop below says why
+        line = (json.dumps(message) + "\n").encode("utf-8")
+
+        def write() -> None:
+            try:
+                self.proc.stdin.write(line)
+                self.proc.stdin.flush()
+            except (OSError, ValueError):
+                pass  # the child is gone, or the session was closed: the loop below says why
+
+        # In a thread: a turn is larger than a pipe's buffer, and a child that has stopped reading must
+        # not hold the run past the turn's timeout.
+        threading.Thread(target=write, name="contexto-bench-stdin", daemon=True).start()
         turn = Turn()
         deadline = time.monotonic() + unit.turn_timeout
         ledger = unit.meter.ledger

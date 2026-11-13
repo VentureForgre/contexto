@@ -129,6 +129,7 @@ class StubModel:
     def start(self) -> str:
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
+        self._server.handle_error = lambda *args: None  # a client that left mid-answer is not worth a traceback
         threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
         return f"http://127.0.0.1:{self._server.server_address[1]}"
 

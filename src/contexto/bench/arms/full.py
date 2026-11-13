@@ -118,7 +118,9 @@ def _post(unit: Unit, path: str, body: dict[str, Any]) -> Any:
                **unit.credentials.headers()}
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(unit.upstream.rstrip("/") + path, data=data, headers=headers, method="POST")
-    return urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S)  # noqa: S310 - the unit's meter on 127.0.0.1
+    # The unit's meter on 127.0.0.1: never through a proxy from the environment or the system settings.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(req, timeout=REQUEST_TIMEOUT_S)
 
 
 def _parse_stream(response: Any) -> tuple[str, str | None]:

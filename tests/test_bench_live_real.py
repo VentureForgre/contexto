@@ -47,9 +47,9 @@ def run(script, tmp_path_factory):
                                        upstream=stub.start(), turn_timeout=300.0)
         stub.stop()
         result.version = version.split()[0]
-        yield result
     finally:
         monkeypatch.undo()
+    return result
 
 
 def test_both_arms_finish_the_session_with_the_real_claude(run, script):

@@ -229,14 +229,15 @@ def test_a_cli_error_a_cli_exit_and_a_silent_turn_each_stop_one_unit(env, tmp_pa
     assert (plain["status"], plain["stop"], plain["turns_completed"]) == ("stopped", "cli_error", 1)
     assert "turn 2" in plain["reason"] and run.unit("full")["status"] == "complete"
 
-    slow = stub_for(script, delay_s={"plain": 5.0})
+    slow = stub_for(script, delay_s={"plain": 30.0})
     started = time.monotonic()
     run = bench_stubs.run_bench(env, tmp_path / "b", [script], arms=("plain",), bound=BOUND, stub=slow,
                                 turn_timeout=0.5)
     plain = run.unit("plain")
     assert (plain["status"], plain["stop"]) == ("stopped", "timeout")
     assert "turn 1 had no result within" in plain["reason"]
-    assert time.monotonic() - started < 4.5 and all(child.poll() is not None for child in run.children)
+    # The unit ended on the timeout, long before the upstream's answer, and left no process behind.
+    assert time.monotonic() - started < 20 and all(child.poll() is not None for child in run.children)
 
     exiting = tmp_path / "exiting"
     exiting.mkdir()
@@ -311,3 +312,26 @@ def test_the_report_is_written_at_the_end_when_this_build_has_the_report_code(en
     monkeypatch.setattr(contexto.bench, "report", report, raising=False)
     having = bench_stubs.run_bench(env, tmp_path / "b", [script], arms=("full",), bound=BOUND)
     assert called == [having.out] and "--report" not in having.printed
+
+    def broken(out):
+        raise KeyError("a private detail")
+
+    report.write = broken
+    failing = bench_stubs.run_bench(env, tmp_path / "c", [script], arms=("full",), bound=BOUND)
+    assert failing.code == 0 and "the report could not be written (KeyError)" in failing.printed
+    assert "private detail" not in failing.printed and "contexto bench --report out" in failing.printed
+
+
+def test_probe_lines_of_a_unit_the_manifest_does_not_record_are_dropped_on_resume(env, tmp_path, script):
+    """A run killed between a unit's probe lines and its manifest entry: the unit runs again, once."""
+    import json
+
+    first = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND)
+    manifest = first.manifest
+    manifest["units"], manifest["finished"] = [], None
+    (first.out / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    again = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND)
+    assert again.code == 0 and again.unit("full")["attempt"] == 0
+    probes = again.lines("probes.jsonl")
+    assert len(probes) == len(script.probes) == len({p["id"] for p in probes})
+    assert len(again.lines("requests.jsonl")) == 16  # both attempts' requests stay: they were billed

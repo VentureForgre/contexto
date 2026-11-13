@@ -159,7 +159,7 @@ class Session:
             req = urllib.request.Request(self.base + "/v1/messages", data=body, headers=self.headers(request_class),
                                          method="POST")
             try:
-                with urllib.request.urlopen(req, timeout=120) as response:
+                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=120) as response:
                     return parse_sse(response)
             except urllib.error.HTTPError as exc:
                 exc.read()
