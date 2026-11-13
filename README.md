@@ -65,71 +65,84 @@ requests, not run end to end ([M2-usage-savings-run3.md](docs/research/M2-usage-
 
 ## Install
 
-Contexto needs Python 3.12 or later, macOS or Linux, and has no runtime dependencies. Install the
-wheel from the latest release, [v0.5.24](https://github.com/VentureForgre/contexto/releases/tag/v0.5.24).
-It is not on PyPI: the PyPI package named `contexto` is an unrelated project, so
-`pip install contexto` installs the wrong thing. Use the release URL or the downloaded wheel.
-
-Straight from the release URL, with no GitHub login:
+Contexto needs Python 3.12 or later on macOS or Linux, and has no runtime dependencies. You also
+need `claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
 
 ```sh
-pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.24/contexto-0.5.24-py3-none-any.whl
-contexto --version                                    # contexto 0.5.24
+curl -fsSL https://raw.githubusercontent.com/VentureForgre/contexto/main/install.sh | sh
 ```
 
-`pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment. To check
-the download before installing, follow [Checking the download](#checking-the-download) instead.
+The script finds the latest release, checks its wheel against the release's checksums, and installs
+it with `uv tool install` or `pipx install`, whichever you have. It installs neither of those, uses
+no `sudo`, and edits no shell profile. You can [read it first](install.sh), or add
+`-s -- --dry-run` after `sh` to see what it would do. Its options, and every other way to install,
+are in [docs/install.md](docs/install.md).
 
-Or download it first with the GitHub CLI:
+To run Contexto without installing it, give `uvx` the wheel of a release:
 
 ```sh
-gh release download v0.5.24 --repo VentureForgre/contexto --pattern 'contexto-0.5.24-py3-none-any.whl'
-uv tool install ./contexto-0.5.24-py3-none-any.whl   # or: pipx install ./contexto-0.5.24-py3-none-any.whl
+uvx --from https://github.com/VentureForgre/contexto/releases/download/v0.5.24/contexto-0.5.24-py3-none-any.whl contexto --version
 ```
 
-`pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`.
+That line names one release. The [Releases page](https://github.com/VentureForgre/contexto/releases)
+has the newest.
 
-You also need `claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
+On PyPI the package is `contexto-proxy`. The command is still `contexto`:
+
+```sh
+uv tool install contexto-proxy                 # or: pipx install contexto-proxy
+uvx --from contexto-proxy contexto --version   # run it without installing
+```
+
+If [pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/) does not exist yet,
+no release has been published to PyPI: use the script. The PyPI project named `contexto` is an
+unrelated library, so `pip install contexto` and `uvx contexto` get the wrong thing.
+
+### Upgrade
+
+Run the install script again. It installs the latest release over the one you have, and does
+nothing when you already have it. For an install from PyPI, `uv tool upgrade contexto-proxy` or
+`pipx upgrade contexto-proxy` does the same.
+
+Earlier releases were distributed as `contexto`, later ones as `contexto-proxy`. Both provide the
+`contexto` command, so only one can be installed. If `uv tool list` or `pipx list` shows
+`contexto`, you have the earlier name. The script removes that install once the new wheel has passed
+its check. By hand, uninstall `contexto` first, then install `contexto-proxy`.
+
+An upgrade keeps your session data in `~/.contexto`. Contexto makes no network calls of its own and
+never checks for a new version, so nothing tells you when one is out. The
+[changelog](https://github.com/VentureForgre/contexto/blob/main/CHANGELOG.md) lists what changed.
+Each install method's upgrade is in [docs/install.md](docs/install.md#upgrading).
 
 ### Checking the download
 
-Contexto sees every prompt and every auth header your CLI sends, so check that the wheel came from
-this repository's release workflow before you install it. Releases from v0.5.13 on carry a
-`SHA256SUMS` asset and a GitHub build provenance attestation. Download the wheel, check it, then
-install from the file:
+Contexto sees every prompt and every auth header your CLI sends, so check where the wheel came from.
+Releases from v0.5.13 on carry a `SHA256SUMS` asset and a GitHub build provenance attestation.
 
-```sh
-gh release download v0.5.24 --repo VentureForgre/contexto \
-  --pattern 'contexto-0.5.24-py3-none-any.whl' --pattern SHA256SUMS
-shasum -a 256 -c SHA256SUMS --ignore-missing          # Linux: sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify contexto-0.5.24-py3-none-any.whl --repo VentureForgre/contexto   # needs gh auth login
-pipx install ./contexto-0.5.24-py3-none-any.whl
-```
+The install script always checks the wheel against `SHA256SUMS`. That shows the download is intact.
+`SHA256SUMS` comes from the same release as the wheel, so it does not show who built the wheel. The
+attestation does. Add `-s -- --attest` after `sh` to make the script require it (this needs `gh` and
+`gh auth login`), or run the `gh attestation verify` command the script prints.
 
-For v0.5.12 and earlier, compare `shasum -a 256 contexto-<version>-py3-none-any.whl` with the digest
-GitHub records for the asset:
-`gh release view v<version> --repo VentureForgre/contexto --json assets --jq '.assets[] | .name + " " + .digest'`.
-
-The build is reproducible: rebuilding the wheel from the release tag with the same uv version gives
-the same bytes. [RELEASING.md](RELEASING.md#verifying-a-release) has the commands.
-
-### From a checkout
-
-`uv tool install .` in the repository root installs the checkout. It reports its version as
-`0.0.0+checkout`, because only release builds carry a real version; include the commit
-(`git rev-parse --short HEAD`) when you report a problem.
+The build is reproducible. The commands for checking a wheel by hand are in
+[docs/install.md](docs/install.md#verifying-a-download).
 
 ### Uninstall
 
-`pipx uninstall contexto`, `uv tool uninstall contexto`, or `pip uninstall contexto`, matching how
-you installed it. Your session data stays in `~/.contexto` (or `$CONTEXTO_HOME`). Delete that
-directory to remove every stored conversation; see [What is stored and where](#what-is-stored-and-where).
+`uv tool uninstall contexto-proxy` or `pipx uninstall contexto-proxy`, matching how you installed
+it. For a release under the earlier name it is `uv tool uninstall contexto` or
+`pipx uninstall contexto`. `uv tool list` and `pipx list` show which you have.
+
+Your session data stays in `~/.contexto` (or `$CONTEXTO_HOME`). Delete that directory to remove
+every stored conversation; see [What is stored and where](#what-is-stored-and-where). More in
+[docs/install.md](docs/install.md#uninstalling).
 
 ### Platforms
 
 CI tests Python 3.12 to 3.15 on Linux, and 3.12 and 3.15 on macOS. Windows is not supported: the
 store locks files with `fcntl`, the launcher forwards POSIX signals (`SIGHUP`), and the store relies
-on POSIX file modes (0700 directories, 0600 files).
+on POSIX file modes (0700 directories, 0600 files). WSL is untested. More in
+[docs/install.md](docs/install.md#platforms).
 
 ## Quickstart
 
