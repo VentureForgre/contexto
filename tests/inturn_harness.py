@@ -43,7 +43,7 @@ class Sent:
     """One forwarded request."""
 
     def __init__(self, forwarded: list[dict], digests: list[bytes], estimate: int, real: int, events: list[dict],
-                 room: int, thinking: int) -> None:
+                 room: int, thinking: int, history_thinking: int = 0) -> None:
         self.forwarded = forwarded  # the message list as forwarded
         self.digests = digests  # one per message, cache_control dropped, thinking included
         self.estimate = estimate  # the engine's pre-send estimate of what it forwarded
@@ -52,6 +52,7 @@ class Sent:
         self.names = [e["event"] for e in events]
         self.room = room  # the recall room the request publishes
         self.thinking = thinking  # thinking blocks forwarded
+        self.history_thinking = history_thinking  # thinking blocks in the CLI's own history at that request
         self._messages: list[dict] | None = None
 
     @property
@@ -133,6 +134,9 @@ class Upstream:
 
     def __init__(self) -> None:
         self.replies = 0
+        # False after the scripted CLI itself edits an earlier message: that edit, not the engine, is then
+        # what a kept thinking block's prefix differs by, so the binding is no longer checked.
+        self.strict = True
         self._seen: dict[int, Measured] = {}
         self._heads: dict[int, tuple[Any, bytes, int]] = {}
 
@@ -175,7 +179,7 @@ class Upstream:
             for block in blocks(message):
                 if isinstance(block, dict) and block.get("type") in THINKING:
                     signed = block.get("signature") if block["type"] == "thinking" else block.get("data")
-                    if signed != "sig-" + chain[j]:
+                    if self.strict and signed != "sig-" + chain[j]:
                         raise Refused(f"400: the thinking block in message {j} is bound to a different conversation")
         return chain[-1]
 
@@ -261,7 +265,9 @@ class Cli:
         reply = self.upstream.respond(upstream, calls)  # refuses a thinking block whose prefix changed
         real = self.upstream.tokens(upstream)
         sent = Sent(forwarded, digests, estimate, real, events,
-                    self.config.bound - estimate - self.config.headroom_floor, sum(m.thinking for m in measured))
+                    self.config.bound - estimate - self.config.headroom_floor, sum(m.thinking for m in measured),
+                    sum(1 for m in self.history for b in blocks(m)
+                        if isinstance(b, dict) and b.get("type") in THINKING))
         self.sent.append(sent)
         ids = tuple(b["id"] for b in reply["content"] if b.get("type") == "tool_use")
         self.usage_events += self.engine.observe_usage(MESSAGES, {"input_tokens": real, "output_tokens": 200}, request,

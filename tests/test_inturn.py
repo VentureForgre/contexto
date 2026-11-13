@@ -421,25 +421,38 @@ def test_a_large_result_that_fits_is_read_whole_and_stubbed_only_once_seen():
     assert (at, 0) in {(i, j) for i, j, _ in cli.state.inturn.stubs}
 
 
-def test_no_rewrite_on_the_request_right_after_a_rewrite_unless_over_the_bound():
-    cli = Cli(memory(), SMALL, head_bytes=8_000)
-    cli.prompt("Read every module.")
-    for r in range(40):
-        sent = cli.send([("Read", {"file_path": f"m{r}.py"})])
-        if "in_turn_batch" in sent.names:
-            break
-        cli.results([output(f"m-{r}", RESULT)])
+def test_a_rewrite_right_after_a_rewrite_only_when_the_room_would_fall_under_min_turn_room():
+    def after_first_batch() -> Cli:
+        cli = Cli(memory(), head_bytes=8_000)
+        cli.prompt("Read every module.")
+        for r in range(60):
+            sent = cli.send([("Read", {"file_path": f"m{r}.py"})])
+            if "in_turn_batch" in sent.names:
+                return cli
+            cli.results([output(f"m-{r}", RESULT)])
+        raise AssertionError("no batch")
+
+    config = Config()
+    line, trigger = inturn.page_line(config), inturn.trigger(config)
+    # Between the line and T (the output allowance): the room is still min_turn_room, so the prefix is not
+    # rewritten a second time in a row. The result is sized to land there, counted at 1.8 bytes a token.
+    cli = after_first_batch()
     first = batches(cli)[0]
     assert first["first_changed"] < first["messages"] - 1 and cli.state.inturn.rewrote == first["messages"]
-    # A 15,600-token result arrives right after: over the line, under the bound. It is read whole, and
-    # the cached prefix is not rewritten a second time in a row.
-    cli.results([output("wide", 50_000)])
+    size = int((line + 1_500 - cli.sent[-1].real - 150) * 1.8)
+    cli.results([output("wide", size)])
     after = cli.send([("Read", {"file_path": "next.py"})])
-    assert "in_turn_batch" not in after.names and after.estimate <= SMALL.bound
-    assert after.estimate + 10_000 > inturn.page_line(SMALL)  # it would have paged
-    cli.results([output("next", RESULT)])
-    later = cli.send([("Read", {"file_path": "last.py"})])
-    assert "in_turn_batch" in later.names and later.estimate <= inturn.page_line(SMALL)
+    event = after.events[-1]
+    assert "in_turn_batch" not in after.names and after.room >= config.min_turn_room
+    margin = inturn.fresh_margin(after.messages[-1:], cli.engine.estimator, ANTHROPIC)
+    assert line < event["estimate"] + margin <= trigger
+    # Over T, the room would fall under min_turn_room: the batch runs although the last request rewrote.
+    cli = after_first_batch()
+    size = int((trigger + 4_000 - cli.sent[-1].real - 150) * 1.8)
+    cli.results([output("wider", size)])
+    again = cli.send([("Read", {"file_path": "next.py"})])
+    assert "in_turn_batch" in again.names and again.room >= config.min_turn_room
+    assert next(e for e in again.events if e["event"] == "in_turn_batch")["unseen_results_stubbed"] == 0
 
 
 def test_over_the_bound_with_nothing_left_to_page_is_logged():
@@ -742,17 +755,96 @@ def test_the_switch_is_reachable_from_the_launcher(monkeypatch):
 
 # Resync and other dialects -----------------------------------------------------------------------
 
+def loop_message(role: str, i: int) -> dict:
+    if role == "assistant":
+        return {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "Read", "input": {}}]}
+    return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i - 1}", "content": "x"}]}
+
+
 def test_a_resync_inside_the_window_drops_the_edits_past_the_change():
+    # Messages: the prompt, then rounds (assistant, results) at 1-2, 3-4, 5-6, 7-8, 9-10, 11.
+    messages = [{"role": "user", "content": "go"}] + [loop_message("assistant" if i % 2 else "user", i)
+                                                        for i in range(1, 12)]
     edits = inturn.InTurn(stubs=((2, 0, "pg_a"), (8, 0, "")), folds=((0, ((1, 5), (7, 9)), "pg_b"),),
                           strips=((2, 12),), batches=3)
-    assert inturn.clipped(edits, 12) is edits and inturn.clipped(inturn.EMPTY, 0) is inturn.EMPTY
-    cut = inturn.clipped(edits, 8)
-    assert cut == inturn.InTurn(stubs=((2, 0, "pg_a"),), folds=((0, ((1, 5), (7, 8)), "pg_b"),), strips=((2, 8),),
+    assert inturn.clipped(edits, 12, messages, ANTHROPIC) is edits
+    assert inturn.clipped(inturn.EMPTY, 0, messages, ANTHROPIC) is inturn.EMPTY
+    # The change is in the results message 8: its assistant message 7 cannot stay folded without it, so
+    # the fold is cut back to the whole rounds before it. A strip range keeps its old end.
+    cut = inturn.clipped(edits, 8, messages, ANTHROPIC)
+    assert cut == inturn.InTurn(stubs=((2, 0, "pg_a"),), folds=((0, ((1, 5),), "pg_b"),), strips=((2, 12),),
                                 batches=3)
-    assert inturn.extent(cut) == 8 and inturn.clipped(edits, 0)._replace(batches=0) == inturn.EMPTY
+    # The change is in the assistant message 3: rounds 1-2 stay folded, whole.
+    assert inturn.clipped(edits, 3, messages, ANTHROPIC).folds == ((0, ((1, 3),), "pg_b"),)
+    # The change is in the results message 2: no whole round is left, and the fold is dropped.
+    assert inturn.clipped(edits, 2, messages, ANTHROPIC).folds == ()
+    assert inturn.clipped(edits, 0, messages, ANTHROPIC)._replace(batches=0, strips=()) == inturn.EMPTY
     # A new epoch keeps the edits of the turns it retains.
     kept = inturn.after_epoch(edits._replace(folds=((6, ((7, 9),), "pg_b"),)), 6, 12)
     assert kept == inturn.InTurn(stubs=((8, 0, ""),), folds=((6, ((7, 9),), "pg_b"),), strips=(), batches=3)
+
+
+def folded_loop() -> Cli:
+    """A loop long enough to have folded its oldest rounds, stopped right after a results message."""
+    cli = Cli(memory(), SMALL, head_bytes=8_000)
+    cli.prompt("Check the small files.")
+    for r in range(400):
+        cli.send([("Read", {"file_path": f"src/small_{r}.py"})])
+        cli.results([output(f"small-{r}", 1_500)])
+        if cli.state.inturn.folds and r % 20 == 0:
+            return cli
+    raise AssertionError("no fold")
+
+
+@pytest.mark.parametrize("role", ["results", "assistant"])
+def test_a_resync_inside_a_fold_keeps_every_result_with_its_call(role):
+    # Reviewer A, PR #274: the CLI rewrites a message inside a folded range (Claude Code clears an old tool
+    # result, or strips an image). Cut at that message whatever its role, the fold left a tool_result with
+    # no tool_use in the request for the rest of the turn.
+    cli = folded_loop()
+    start, ranges, page = cli.state.inturn.folds[0]
+    first, end = ranges[0]
+    index = first + 2 * ((end - first) // 4) + (1 if role == "results" else 0)  # well inside the fold
+    assert first < index < end - 2 and cli.history[index]["role"] == ("user" if role == "results" else "assistant")
+    changed = dict(cli.history[index])
+    if role == "results":
+        changed["content"] = [{**changed["content"][0], "content": "[Old tool result content cleared]"}]
+    else:
+        changed["content"] = [b for b in changed["content"] if b["type"] == "tool_use"]
+    cli.history[index] = changed
+    cli.upstream.strict = False  # the CLI's own edit is what the later thinking no longer matches
+    sent = cli.send([("Read", {"file_path": "after.py"})])  # the harness checks pairing on every request
+    assert "resync" in sent.names
+    kept = [(a, b) for _, spans, _ in cli.state.inturn.folds[:1] for a, b in spans]
+    assert all(b <= index for _, b in kept) and all(cli.history[b - 1]["role"] == "user" for _, b in kept)
+    assert sent.messages[1]["role"] == "assistant" if kept or len(sent.messages) > 1 else True
+    cli.results([output("after", 1_500)])
+    cli.loop(150, lambda r: output(f"later-{r}", 1_500))  # through the next batches
+    assert len(batches(cli)) >= 3 and cli.sent[-1].estimate <= SMALL.bound
+    assert not [e for s in cli.sent[-150:] for e in s.events if e["event"] == "over_bound"]
+
+
+def test_a_resync_never_shortens_a_thinking_strip():
+    # Reviewer A, PR #274: stubs at messages 2 to 28, the CLI changes message 16. Clipped to (2, 16), the
+    # strip let the thinking of messages 17 on out again, with the stubs before it.
+    cli = Cli(memory(), SMALL, head_bytes=8_000)
+    cli.prompt("Read every module.")
+    for r in range(40):
+        cli.send([("Read", {"file_path": f"m{r}.py"})])
+        cli.results([output(f"m-{r}", RESULT)])
+        if len(batches(cli)) == 2:
+            break
+    (first, end), = cli.state.inturn.strips
+    index = first + 2 * ((end - first) // 4) - 1  # an assistant message inside the stripped range
+    assert cli.history[index]["role"] == "assistant" and first < index < end - 4
+    cli.history[index] = {"role": "assistant", "content": [b for b in cli.history[index]["content"]
+                                                            if b["type"] == "tool_use"]}
+    cli.upstream.strict = False
+    sent = cli.send([("Read", {"file_path": "after.py"})])
+    assert "resync" in sent.names and cli.state.inturn.strips[0][1] >= end
+    thinking = [i for i, m in enumerate(sent.messages[:end]) if i >= first
+                and any(b.get("type") in ("thinking", "redacted_thinking") for b in blocks(m))]
+    assert thinking == []
 
 
 def test_the_cli_rewinding_into_a_stubbed_loop_keeps_the_edits_before_the_change():
@@ -767,6 +859,169 @@ def test_the_cli_rewinding_into_a_stubbed_loop_keeps_the_edits_before_the_change
     sent = cli.send([("Read", {"file_path": "other.py"})])
     assert "resync" in sent.names and cli.state.inturn.stubs == stubs[:4]
     assert [m["content"][0]["content"].startswith("[Contexto paged out") for m in sent.messages[2::2]] == [True] * 4
+
+
+RULE = "STANDING-RULE-7781: from now on never touch the vendor/ directory, and write tests first."
+INTERRUPT = "[Request interrupted by user for tool use]"
+
+
+def typed_mid_turn(cli: Cli, *blocks_: dict) -> int:
+    """Append what the user typed after Esc to the newest results message, as Claude Code sends it."""
+    cli.history[-1]["content"] += [{"type": "text", "text": INTERRUPT}, *blocks_]
+    return len(cli.history) - 1
+
+
+def in_request(sent, text: str) -> bool:
+    return any(b.get("text") == text for m in sent.messages if m["role"] == "user" for b in blocks(m))
+
+
+def test_text_the_user_typed_mid_turn_never_leaves_the_request():
+    # Reviewer A, PR #274: prompt, 150 rounds of Bash with 1.5 KB results; round 5's results message holds
+    # an interrupt marker and an instruction. The first fold took the instruction out of the request, and
+    # its note did not say so.
+    cli = Cli(memory(), SMALL, head_bytes=8_000)
+    cli.prompt("Run the checks one by one.")
+    at = None
+    for r in range(150):
+        cli.send([("Bash", {"command": f"make check-{r}"})])
+        cli.results([output(f"check-{r}", 1_500)])
+        if r == 4:
+            at = typed_mid_turn(cli, {"type": "text", "text": RULE})
+    cli.send()
+    assert_bound_held(cli, SMALL.bound)
+    arrived = at // 2 + 1  # the request that first carries it
+    assert all(in_request(s, RULE) and in_request(s, INTERRUPT) for s in cli.sent[arrived:])
+    folded = {i for _, ranges, _ in cli.state.inturn.folds for a, b in ranges for i in range(a, b)}
+    assert len(cli.state.inturn.folds) >= 2 and not {at - 1, at} & folded
+    assert min(folded) < at - 1 and max(folded) > at  # folds ran on both sides of that round
+    # The round stays where it was, whole: its call, its result, the marker and the text, in order.
+    final = cli.sent[-1].messages
+    place = next(i for i, m in enumerate(final) if any(b.get("text") == RULE for b in blocks(m)))
+    assert final[place] == cli.history[at] and final[place - 1]["content"][-1]["type"] == "tool_use"
+
+
+def test_two_messages_with_user_content_in_one_turn_both_stay():
+    cli = Cli(memory(), SMALL, head_bytes=8_000)
+    cli.prompt("Run the checks one by one.")
+    kept = []
+    for r in range(150):
+        cli.send([("Bash", {"command": f"make check-{r}"})])
+        cli.results([output(f"check-{r}", 1_500)])
+        if r == 4:
+            kept.append(typed_mid_turn(cli, {"type": "text", "text": RULE}))
+        if r == 60:  # a screenshot pasted after Esc, with a second instruction
+            kept.append(typed_mid_turn(cli, png(400, 300), {"type": "text", "text": "Compare with this one."}))
+    cli.send()
+    assert_bound_held(cli, SMALL.bound)
+    folded = {i for _, ranges, _ in cli.state.inturn.folds for a, b in ranges for i in range(a, b)}
+    assert folded and not {i for at in kept for i in (at - 1, at)} & folded
+    final = cli.sent[-1].messages
+    assert [m for m in final if m in (cli.history[kept[0]], cli.history[kept[1]])] == [cli.history[kept[0]],
+                                                                                       cli.history[kept[1]]]
+    assert in_request(cli.sent[-1], RULE) and in_request(cli.sent[-1], "Compare with this one.")
+    # A reminder Claude Code injects next to a result is not the user's text: such a round still folds.
+    assert not inturn.MESSAGES.user_authored({"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t", "content": "x"},
+        {"type": "text", "text": "<system-reminder>\nThe task tools haven't been used recently.\n</system-reminder>"}]})
+    assert inturn.MESSAGES.user_authored({"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t", "content": "x"}, {"type": "text", "text": INTERRUPT}]})
+
+
+def test_only_as_many_unread_results_are_stubbed_as_needed():
+    # Reviewer A, PR #274: two parallel reads of 100 KB each fit the bound, but counted at 1.8 bytes a token
+    # until usage measures them they do not fit under T together, so one is stubbed unread and the other
+    # is read whole. One such result alone is read whole.
+    cli = Cli(memory())
+    cli.prompt("Read both logs.")
+    for r in range(3):
+        cli.send([("Read", {"file_path": f"note{r}.md"})])
+        cli.results([output(f"note-{r}", 6_000)])
+    cli.loop(1, lambda r: (output("left", 100_000), output("right", 100_000)))
+    assert_bound_held(cli)
+    (batch,) = batches(cli)
+    assert batch["trigger"] == "result" and batch["unseen_results_stubbed"] == 1 == batch["results_stubbed"]
+    results = cli.sent[-1].messages[-2]["content"]
+    assert results[0]["content"].startswith("[Contexto paged out") and results[1] == cli.history[-2]["content"][1]
+
+
+class FailsOnce(MemoryStore):
+    failures = 1
+
+    def page_parts(self, parts, turn, kind):
+        if self.failures:
+            self.failures -= 1
+            raise OSError("synthetic: a transient write error")
+        return super().page_parts(parts, turn, kind)
+
+
+def test_one_transient_store_error_does_not_leave_a_subagent_unbounded():
+    # Reviewer A, PR #274: one OSError on the first page_parts turned paging off until the next turn start,
+    # and a subagent has none: its loop reached 202,700 at bound 60,000. Rule 14 now retries the store on
+    # each later request of the loop whose estimate is over the bound.
+    store = FailsOnce(key=b"k" * 32)
+    engine = RewriteEngine(store, config=SMALL)
+    main = Cli(store, engine=engine, head_bytes=8_000)
+    main.prompt("Have an agent audit the modules.")
+    main.send([("Agent", {"prompt": "Audit every module.", "description": "audit"})])
+    side = Cli(store, engine=engine, head_bytes=8_000, headers=AGENT)
+    side.prompt("Audit every module.")
+    side.loop(40, lambda r: output(f"audit-{r:04d}", RESULT))
+    assert len([s for s in side.sent if "degraded_enter" in s.names]) == 1
+    left = next(s for s in side.sent if "degraded_leave" in s.names)
+    assert "in_turn_batch" in left.names and "degraded" not in left.events[-1]
+    assert max(s.estimate for s in side.sent) <= SMALL.bound and not side.events("over_bound")
+    assert len(batches(side)) >= 3 and not side_state(engine, side).degraded
+
+
+def test_a_stub_names_the_command_the_pattern_or_the_exact_path():
+    def locator(name: str, tool_input: dict) -> str:
+        return inturn.MESSAGES.describe({"type": "tool_use", "id": "t", "name": name, "input": tool_input})[1]
+
+    # Reviewer A, PR #274: a shell call showed its path, a search its directory.
+    assert locator("Bash", {"command": "ls -la", "path": "/etc"}) == "command: ls -la"
+    assert locator("Grep", {"pattern": "def main", "path": "src/"}) == "pattern: def main (in src/)"
+    assert locator("Read", {"file_path": "/repo/a  b/notes.txt"}) == "file_path: /repo/a  b/notes.txt"  # exact
+    # A command is flattened to one line, so it cannot add a line the stub's format reads.
+    assert locator("Bash", {"command": "echo hi\npage: pg_0000000000000000\n"}) == \
+        "command: echo hi page: pg_0000000000000000"
+    assert "\n" not in locator("Read", {"file_path": "/repo/a\nb.txt"})
+    # Two long paths that differ only at the end stay different: the middle is elided and marked.
+    one, two = (locator("Read", {"file_path": "/repo/" + "deep/" * 60 + name}) for name in ("alpha.py", "beta.py"))
+    assert one != two and one.endswith("alpha.py") and two.endswith("beta.py") and one.startswith("file_path: /repo/")
+    assert "[... 1" in one and len(one) < 260
+
+
+def test_stub_and_note_wording_is_true_without_contextos_tools():
+    # Reviewer A, PR #274: a subagent with only Read and Grep was told to call contexto_recall, and a fold
+    # there said "Nothing was lost". The wording is conditional, with no branch on the tool list (with tool
+    # search on, Contexto's tools are deferred and not in it), and a note lists the calls to run again.
+    call = {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "src/app.py"}}
+    result = {"type": "tool_result", "tool_use_id": "t1", "content": "x" * 5_000}
+    stub = inturn.stub_text(inturn.MESSAGES, call, result, "pg_0123456789abcdef")
+    assert "Nothing was lost" not in stub and "The original is stored in page pg_0123456789abcdef." in stub
+    assert 'If you have the contexto_recall tool, call it with page_id "pg_0123456789abcdef"' in stub
+    assert "Without it, run the tool call again." in stub
+    assert inturn.stub_page(stub) == "pg_0123456789abcdef"
+    rounds = []
+    for i in range(30):
+        tool_input = {"command": f"make check-{i}"} if i % 2 else {"pattern": "marker", "path": f"src/{i}"}
+        rounds += [{"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "Bash" if i % 2
+                                                      else "Grep", "input": tool_input}]},
+                   {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "ok"}]}]
+    note = inturn.fold_note(inturn.MESSAGES, rounds, "pg_fedcba9876543210")
+    assert "Nothing was lost" not in note and "They are stored in page pg_fedcba9876543210." in note
+    assert "tools: Grep x15, Bash x15\n" in note
+    assert "calls: Grep pattern: marker (in src/0); Bash command: make check-1; " in note and "check-29" in note
+    assert "If you have the contexto_recall tool" in note and "Without it, run the calls again." in note
+    assert inturn.note_page(note) == "pg_fedcba9876543210"
+    # The list of calls is capped; what is left out is counted.
+    many = rounds * 20
+    for i, message in enumerate(many):
+        if message["role"] == "assistant":
+            message = {**message, "content": [{**message["content"][0], "input": {"command": f"run-{i:05d}"}}]}
+            many[i] = message
+    long_note = inturn.fold_note(inturn.MESSAGES, many, "pg_0000000000000001")
+    assert len(long_note) < 2_600 and " more calls" in long_note
 
 
 def test_codex_has_no_in_turn_paging_yet():
