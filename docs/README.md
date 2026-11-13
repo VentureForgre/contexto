@@ -5,8 +5,9 @@ install it and how to start it.
 
 ## Guides
 
-- [install.md](install.md): other ways to install, checking the download, installing from a
-  checkout, uninstalling, and the supported platforms.
+- [install.md](install.md): the install script and its options, other ways to install, upgrading,
+  checking the download, installing from a checkout, uninstalling, the supported platforms, and
+  install troubleshooting.
 - [claude-code.md](claude-code.md): resuming a Claude Code conversation through Contexto, and
   `/clear`, `/resume` and `/compact`.
 - [codex.md](codex.md): `contexto run codex` in API-key mode: the key helper, the Codex upstream,

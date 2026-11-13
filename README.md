@@ -65,8 +65,8 @@ requests, not run end to end ([M2-usage-savings-run3.md](docs/research/M2-usage-
 
 ## Install
 
-Contexto needs Python 3.12 or later on macOS or Linux, and has no runtime dependencies. You also
-need `claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
+Contexto needs Python 3.12 or later, macOS or Linux, and has no runtime dependencies. You also need
+`claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/VentureForgre/contexto/main/install.sh | sh
@@ -74,8 +74,7 @@ curl -fsSL https://raw.githubusercontent.com/VentureForgre/contexto/main/install
 
 The script finds the latest release, checks its wheel against the release's checksums, and installs
 it with `uv tool install` or `pipx install`, whichever you have. You can
-[read it first](install.sh). Its options, and every other way to install, are in
-[docs/install.md](docs/install.md).
+[read it first](install.sh).
 
 To run Contexto without installing it, give `uvx` the wheel of a release:
 
@@ -90,8 +89,8 @@ On PyPI the package is `contexto-proxy`, and the command is still `contexto`:
 `uv tool install contexto-proxy`, `pipx install contexto-proxy`, or
 `uvx --from contexto-proxy contexto`. If
 [pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/) does not exist yet, no
-release has been published there: use the script. The PyPI project named `contexto` is an unrelated
-library, so `pip install contexto` and `uvx contexto` get the wrong thing.
+release has been published there: use the script. The PyPI package named `contexto` is an unrelated
+project, so `pip install contexto` and `uvx contexto` install the wrong thing.
 
 ### Upgrade
 
@@ -104,27 +103,11 @@ the `contexto` command. The script replaces one with the other. By hand, uninsta
 first.
 
 Contexto makes no network calls of its own and never checks for a new version, so nothing tells
-you when one is out. The [changelog](CHANGELOG.md) lists what changed. Upgrading each kind of
-install: [docs/install.md](docs/install.md#upgrade).
+you when one is out. The [changelog](CHANGELOG.md) lists what changed.
 
-### Checking the download
-
-The script checks the wheel's SHA-256 against the release's `SHA256SUMS`, which shows that the
-download is intact. Add `-s -- --attest` after `sh` to also require the build attestation, which
-shows that this repository's release workflow built the wheel (it needs `gh` and `gh auth login`).
-What each check proves, and how to check by hand:
-[docs/install.md](docs/install.md#checking-the-download).
-
-### Uninstall
-
-`uv tool uninstall contexto-proxy` or `pipx uninstall contexto-proxy`. For a release under the
-earlier name, put `contexto` in place of `contexto-proxy`. Your session data stays in
-`~/.contexto`: [docs/install.md](docs/install.md#uninstall).
-
-### Platforms
-
-macOS and Linux. Windows is not supported, because Contexto uses `fcntl` locks, POSIX signals and
-POSIX file modes. WSL is untested. More in [docs/install.md](docs/install.md#platforms).
+The script's options, checking the download before you install, other ways to install, upgrading
+each of them, installing from a checkout, uninstalling, and the supported platforms:
+[docs/install.md](docs/install.md).
 
 ## Quickstart
 

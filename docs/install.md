@@ -121,6 +121,8 @@ contexto --version
 `pip install "$url"` works too, inside an active Python 3.12+ virtual environment. None of these
 checks the download; to check it first, see [Checking the download](#checking-the-download).
 
+`pipx` installs with its default Python. If that is older than 3.12, add `--python python3.12`.
+
 ### Run without installing
 
 ```sh
@@ -154,15 +156,10 @@ uv tool install ./"$wheel"                       # or: pipx install ./"$wheel"
 
 ### From a checkout
 
-```sh
-git clone https://github.com/VentureForgre/contexto.git
-cd contexto
-uv tool install .             # or: uv run contexto --help, which runs the checkout without installing
-```
-
-A checkout reports its version as `0.0.0+checkout`, because only release builds carry a real
-version. Include the commit (`git rev-parse --short HEAD`) when you report a problem.
-[CONTRIBUTING.md](../CONTRIBUTING.md) has the development setup.
+`uv tool install .` in the repository root installs the checkout. It reports its version as
+`0.0.0+checkout`, because only release builds carry a real version; include the commit
+(`git rev-parse --short HEAD`) when you report a problem. `uv run contexto --help` runs the checkout
+without installing it. [CONTRIBUTING.md](../CONTRIBUTING.md) has the development setup.
 
 ### From git
 
@@ -175,9 +172,10 @@ A git install builds from source, so it has the same limitation as a checkout: t
 is the placeholder `0.0.0+checkout`, whatever tag you asked for. What `contexto --version` prints
 depends on the code you installed:
 
-- Code after 0.5.24 names the revision. It prints `contexto 0.0.0+checkout (git v0.6.0, commit
-  1a2b3c4d)` when the installer recorded the revision you asked for (here the tag `v0.6.0`), and
-  `contexto 0.0.0+checkout (git commit 1a2b3c4d)` when it recorded only the commit.
+- Code after 0.5.24 names the revision, on one line, with the commit in lowercase. It prints
+  `contexto 0.0.0+checkout (git v0.6.0, commit 1a2b3c4d)` when the installer recorded the revision
+  you asked for (here the tag `v0.6.0`), and `contexto 0.0.0+checkout (git commit 1a2b3c4d)` when
+  it recorded only the commit, or when the revision you asked for is itself a commit.
 - The tag v0.5.24 and anything earlier prints plain `contexto 0.0.0+checkout`.
 
 `pip list`, `pipx list` and `uv tool list` show `0.0.0+checkout` in every case. When the version
@@ -239,13 +237,17 @@ and pipx 1.18.4 do when it is not followed:
 Under one name, an upgrade replaces the install in place: `uv tool install` of a newer wheel does it
 directly, and `pipx install` does it with `--force`.
 
+pip in a virtual environment has the same trap. `pip install` of a `contexto-proxy` wheel next to
+`contexto` succeeds and `pip list` shows both. `pip uninstall contexto` afterwards deletes the
+package and the `contexto` command, while `contexto-proxy` stays listed and no longer works. So run
+`pip uninstall contexto` first, then install.
+
 ## Checking the download
 
-Contexto sees every prompt and every auth header your CLI sends, so it is worth checking that a
-wheel is the one this repository's release workflow built.
-
-Releases from v0.5.13 on carry a `SHA256SUMS` asset and a GitHub build provenance attestation.
-v0.5.12 and earlier have neither.
+Contexto sees every prompt and every auth header your CLI sends, so check that the wheel came from
+this repository's release workflow before you install it. Releases from v0.5.13 on carry a
+`SHA256SUMS` asset and a GitHub build provenance attestation. Releases v0.5.0 to v0.5.12 have
+neither.
 
 **Checksums.** `SHA256SUMS` lists the SHA-256 of the wheel and the sdist:
 
@@ -268,11 +270,11 @@ gh attestation verify "$wheel" --repo VentureForgre/contexto     # needs gh auth
 
 The script makes this check with `--attest`. Without it, the script prints the command.
 
-**Rebuild.** The build is reproducible: building the wheel from the release tag with the same uv
+**Rebuild.** The build is reproducible: rebuilding the wheel from the release tag with the same uv
 version gives the same bytes. [RELEASING.md](../RELEASING.md#verifying-a-release) has the commands.
 
-For v0.5.12 and earlier, compare `shasum -a 256` of the wheel with the digest GitHub records for
-the asset:
+For v0.5.12 and earlier, compare `shasum -a 256 contexto-<version>-py3-none-any.whl` with the digest
+GitHub records for the asset:
 
 ```sh
 gh release view "v$v" --repo VentureForgre/contexto --json assets --jq '.assets[] | .name + " " + .digest'
@@ -288,18 +290,17 @@ pip uninstall contexto-proxy          # an install made with pip in a virtual en
 
 `uv tool list` and `pipx list` show which name you have, and which tool has it.
 
-Uninstalling leaves your session data in `~/.contexto` (or `$CONTEXTO_HOME`). Delete that directory
-to remove every stored conversation.
-[What is stored and where](sessions.md#what-is-stored-and-where) says what is in it.
+Your session data stays in `~/.contexto` (or `$CONTEXTO_HOME`). Delete that directory to remove
+every stored conversation; see [What is stored and where](sessions.md#what-is-stored-and-where).
 
 ## Platforms
 
-- **Python.** 3.12 or later. CI tests 3.12, 3.13, 3.14 and 3.15 on Linux, and 3.12 and 3.15 on
-  macOS. Installers refuse the wheel on Python 3.11 and earlier.
-- **macOS and Linux.** Supported.
-- **Windows.** Not supported. The store locks files with `fcntl`, the launcher forwards POSIX
-  signals (`SIGHUP`), and the store relies on POSIX file modes (0700 directories, 0600 files).
-- **WSL.** Untested. Nobody has run Contexto or its test suite there.
+CI tests Python 3.12 to 3.15 on Linux, and 3.12 and 3.15 on macOS. Windows is not supported: the
+store locks files with `fcntl`, the launcher forwards POSIX signals (`SIGHUP`), and the store relies
+on POSIX file modes (0700 directories, 0600 files).
+
+WSL is untested: nobody has run Contexto or its test suite there. Installers refuse the wheel on
+Python 3.11 and earlier.
 
 ## Troubleshooting
 

@@ -1024,8 +1024,8 @@ def test_readme_names_the_release_version_in_exactly_one_line():
 
 def test_readme_install_section_keeps_its_headings_and_its_links_resolve():
     section = install_section()
-    for heading in ("Upgrade", "Checking the download", "Uninstall", "Platforms"):
-        assert f"\n### {heading}\n" in section, heading
+    assert "\n### Upgrade\n" in section
+    assert "(CHANGELOG.md)" in section
     assert re.findall(r"\]\(([^)\s]+)\)", section), "the section links to the script and the full page"
     assert broken_links(ROOT, ["README.md", "docs/install.md"]) == []
 
@@ -1033,9 +1033,10 @@ def test_readme_install_section_keeps_its_headings_and_its_links_resolve():
 def test_links_into_the_install_page_resolve():
     """The anchors other pages and the script's own messages point at."""
     offered = anchors((ROOT / "docs" / "install.md").read_text())
-    wanted = set(re.findall(r"docs/install\.md#([a-z0-9-]+)", SCRIPT.read_text() + README.read_text()))
-    assert wanted, "the script and the README link into docs/install.md"
-    assert wanted | {"checking-the-download", "from-a-checkout", "uninstall", "platforms", "upgrade"} <= offered
+    wanted = set(re.findall(r"docs/install\.md#([a-z0-9-]+)", SCRIPT.read_text()))
+    assert wanted, "the script's messages link into docs/install.md"
+    kept = {"other-ways-to-install", "checking-the-download", "from-a-checkout", "uninstall", "platforms"}
+    assert wanted | kept | {"upgrade", "troubleshooting"} <= offered
 
 
 def test_readme_install_section_has_the_one_line_install():
