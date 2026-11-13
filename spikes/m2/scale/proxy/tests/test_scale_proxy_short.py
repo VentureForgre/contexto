@@ -1,8 +1,33 @@
-"""The short scale run: about 200 turns through the real proxy, with latency and memory budgets.
+"""The short scale run: 200 turns through the real proxy, with latency and memory budgets.
 
 One run of ``short.measure`` (the ``short_run`` fixture in conftest.py; see ``short.py`` for what each
 quantity is) serves every test here. No network beyond 127.0.0.1, no model calls, and no ``claude`` or
-``codex``.
+``codex``. The run's numbers are printed at the end of the pytest output, pass or fail.
+
+The budgets (``short.BUDGETS``) next to what was measured on 2026-11-12, and the factor between them.
+"CI" is the slowest of the six runners in this branch's first CI run (Ubuntu with 4 CPUs and macOS with 3,
+Python 3.12 to 3.15, loads under 2.4), "fastest CI" the fastest. "Laptop" is an 18-core Apple M5 Pro on
+which other test suites were running, over 39 runs at 1-minute loads of 25 to 84.
+
+    quantity                                budget     CI      factor  fastest CI  laptop, 39 runs
+    added time per request, median          200 ms     50.9    3.9     17.1        31.7 to 79.2
+    added time per request, p95             800 ms     109.8   7.3     28.2        50.3 to 388.2
+    growth of added time, per M tokens      300 ms     36.5    8.2     14.7        20.4 to 164.6
+    startup of the proxy, best of 3         3,000 ms   423     7.1     76.6        133 to 1,049
+    peak RSS of the proxy                   300 MB     66.0    4.5     55.3        51.6 to 62.8
+    RSS growth per MB the body grows        150 MB     17.9    8.4     3.5         6.4 to 13.9
+    live objects gained per turn            40         8.91    4.5     7.27        7.11 to 7.59
+    100 concurrent requests, floor          5 req/s    49.8    10      225.8       15.4 to 124.6
+
+The latency budgets are loose because one macOS runner and the loaded laptop were several times slower than
+the rest; a budget that fails on a slow runner would be worse than a loose one. What they still catch: the
+session ends at 1,269 messages, so a pass over every pair of messages is 1.6 million steps per request by
+then. At 1 microsecond a step that is 1.6 s per request, eight times the median budget; at 20 nanoseconds
+a step (a membership test in C) it is 32 ms and passes. The memory budgets depend little on the machine:
+a proxy that kept each request's parsed messages would gain thousands of objects per turn, and one that
+kept each request's bytes would add about 0.9 MB of RSS per request, more than 500 MB by the end.
+Throughput is only a floor: it spread from 15 to 226 requests a second across these runs, and the 100
+clients share one Python process with the fake upstream, so it says little about the proxy alone.
 """
 
 from __future__ import annotations

@@ -51,6 +51,7 @@ COUNTED_EVENTS = ("rotation", "rotation_noop", "page_out", "window_minimal", "bo
                   "page_unreadable", "proxy_stop_incomplete", "session_start_unrecognised",
                   "unclassified_system_message", "cli_version_untested", "mcp_tools_missing", "toolcheck_error",
                   "cli_version_error", "cli_version", "epoch_not_resumed", "epoch_resumed")
+CONNECT_TRIES = 4
 REQUEST_FIELDS = ("label", "checkpoint_m", "phase", "round", "turn", "kind", "req_in_turn", "history_tokens",
                   "body_mb", "upstream_bytes", "upstream_tokens", "upstream_messages", "status", "e2e_s", "ttfb_s",
                   "pre_forward_s", "read_body_s", "proxy_transform_s", "engine_s", "observe_s", "index_text_s",
@@ -126,6 +127,7 @@ class Worker:
         if engine_pkl.exists():
             cmd += ["--engine-in", str(engine_pkl)]
         self.engine_pkl = engine_pkl
+        self.log_path = getattr(err, "name", None)
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, text=True,
                                      env={**os.environ, "CONTEXTO_HOME": str(home)})
         ready = self._read()
@@ -134,8 +136,16 @@ class Worker:
     def _read(self) -> dict[str, Any]:
         line = self.proc.stdout.readline()
         if not line:
-            raise RuntimeError(f"proxy worker exited (code {self.proc.poll()}); see the worker log")
+            raise RuntimeError(f"proxy worker exited (code {self.proc.poll()}); the end of its log:\n{self._log_tail()}")
         return json.loads(line)
+
+    def _log_tail(self, limit: int = 3000) -> str:
+        """The end of the worker's stderr, so a failure in CI says why (tracebacks name code, not content)."""
+        try:
+            with open(self.log_path, errors="replace") as f:
+                return f.read()[-limit:] or "(empty)"
+        except (OSError, TypeError):
+            return "(no worker log)"
 
     def call(self, cmd: dict[str, Any]) -> dict[str, Any]:
         self.proc.stdin.write(json.dumps(cmd) + "\n")
@@ -209,6 +219,14 @@ def send(port: int, body: bytes, request_id: str, reply: str, timeout: float = 9
                "X-Claude-Code-Session-Id": synth.CLAUDE_CODE_SESSION,
                "x-scale-id": request_id, "x-scale-reply": reply}
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    for attempt in range(CONNECT_TRIES):
+        try:
+            conn.connect()  # before the clock starts: the CLI keeps its connection open between requests
+            break
+        except OSError:  # a busy machine can run out of local ports for a moment (EADDRNOTAVAIL)
+            if attempt == CONNECT_TRIES - 1:
+                raise
+            time.sleep(0.25)
     t0 = time.monotonic()
     try:
         conn.request("POST", "/v1/messages", body=body, headers=headers)

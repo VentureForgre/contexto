@@ -21,7 +21,7 @@ What it measures, and what ``tests/test_scale_proxy_short.py`` holds to ``BUDGET
   every pair of requests, so a few slow requests do not move it).
 - **Startup**: from starting the proxy process to its ``ready`` line (the interpreter, the imports, opening
   the session, building the engine, binding the port), the smallest of ``STARTUPS`` starts.
-- **Memory**: the proxy's peak RSS (``ru_maxrss`` of the process itself), how much its RSS grows per MB the
+- **Memory**: the proxy's peak RSS (``worker.maxrss_mb``, read by the process itself), how much its RSS grows per MB the
   request body grows, and how many live Python objects it gains per turn (after ``gc.collect()``).
 - **Throughput**: ``CLIENTS`` threads each sending the session's first request ``PER_CLIENT`` times at
   once (``--burst tiny``: a 100-byte request with no tools instead), in requests a second. The clients, the
@@ -61,7 +61,7 @@ REMINDERS = "mixed"
 STARTUPS = 3
 CLIENTS = 100
 PER_CLIENT = 2
-SMALL_SENDS = 30
+SMALL_SENDS = 20
 TINY_BODY = json.dumps({"model": "claude-haiku-5-5", "max_tokens": 16, "stream": True,
                         "messages": [{"role": "user", "content": "ping"}]}, separators=(",", ":")).encode()
 SAMPLE_EVERY = 20  # turns between memory samples
@@ -70,14 +70,14 @@ SEND_TIMEOUT_S = 120
 # What the test asserts: an upper limit for each quantity, and a floor for throughput. README.md, "The short
 # run", has each budget next to the values measured on 2026-11-12 and the factor between them.
 BUDGETS: dict[str, float] = {
-    "added_median_ms": 100.0,
-    "added_p95_ms": 300.0,
-    "added_ms_per_mtok": 120.0,
+    "added_median_ms": 200.0,
+    "added_p95_ms": 800.0,
+    "added_ms_per_mtok": 300.0,
     "startup_ms": 3_000.0,
     "peak_rss_mb": 300.0,
-    "rss_mb_per_body_mb": 100.0,
+    "rss_mb_per_body_mb": 150.0,
     "objects_per_turn": 40.0,
-    "throughput_floor_rps": 10.0,
+    "throughput_floor_rps": 5.0,
 }
 
 

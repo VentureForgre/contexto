@@ -261,6 +261,17 @@ def save_engine(engine, path: str) -> None:
 
 
 def maxrss_mb() -> float:
+    """This process's peak RSS in MB. On Linux it is ``VmHWM`` from ``/proc/self/status``, not
+    ``ru_maxrss``: the kernel carries ``ru_maxrss`` across exec, so a new process starts at the peak of
+    the one that started it. Under pytest that was the test process's own 1,600 MB (the first CI run of
+    the short test, 2026-11-12), whatever the proxy used."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) / 1e3  # KiB
+    except (OSError, ValueError, IndexError):
+        pass
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return rss / 1e6 if sys.platform == "darwin" else rss / 1e3  # bytes on macOS, KiB on Linux
 
