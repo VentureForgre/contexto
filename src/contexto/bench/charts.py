@@ -14,8 +14,16 @@ The same results file gives the same bytes, so a committed chart can be regenera
 
 Reading without colour: each arm has its own marker shape, and its own dash pattern in the line
 chart, and the legend shows both. The background is drawn explicitly, so the chart looks the same
-on a light and on a dark page. The colours are the first three of a categorical palette checked
-for separation under the common colour-vision deficiencies.
+on a light and on a dark page. Every series colour has a contrast of 3 to 1 or more against that
+background, and the three known arms differ in lightness as well as hue. An arm this module does
+not know gets a marker, a dash pattern and a colour of its own from a second list (``_styles``),
+by the order of the names, so it looks the same in both charts.
+
+Text. A manifest ``label`` is added to the title of every chart. A title or subtitle too long for
+one line is wrapped; a legend entry or a row label too long for its place is cut with three dots
+and keeps its full text as a tooltip (``<title>``). Widths are estimated (``text_width``): there
+are no font metrics here. A character XML 1.0 does not allow is replaced by U+FFFD, so the file is
+always well-formed.
 
 Geometry, for anyone checking a plotted point. Both charts are ``WIDTH`` wide. In the request-size
 chart a point ``(history, size)`` is drawn at ``x = LINE_LEFT + history / x_top * LINE_PLOT_WIDTH``
@@ -29,6 +37,7 @@ from __future__ import annotations
 import math
 import re
 import textwrap
+import unicodedata
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -47,9 +56,13 @@ FONT = "system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
 STYLES = {
     "contexto": ("#2a78d6", "circle", ""),
     "full": ("#eb6834", "square", "7 4"),
-    "plain": ("#1baf7a", "triangle", "2 4"),
+    "plain": ("#0a6b47", "triangle", "2 4"),
 }
-OTHER_STYLE = ("#52514e", "diamond", "10 3 2 3")
+# For arms outside the three: the k-th such name, in sorted order, takes the k-th of each list.
+# The lists have 4, 4 and 5 entries, so 20 arms get 20 different pairs of marker and dash.
+OTHER_COLOURS = ("#8250c4", "#a8326e", "#6b5a12", "#3d6a78")
+OTHER_SHAPES = ("diamond", "pentagon", "plus", "hexagon")
+OTHER_DASHES = ("10 3 2 3", "12 4", "4 2", "1 3 6 3", "14 3 2 3 2 3")
 BASIS_WORDS = {"measured": "measured", "estimated": "estimated", "modelled": "modelled"}
 LABELS = {"contexto": "Contexto", "full": "Full context", "plain": "Plain Claude Code"}
 
@@ -64,6 +77,11 @@ ACC_ROW_PAD = 14
 MAX_MARKERS = 40
 NOTE_WRAP = 118
 CHAR_WIDTH = 6.7  # an estimate for 12px text; there are no font metrics here
+TITLE_SIZE = 16
+CUT = "..."
+REPLACEMENT = "\ufffd"
+# What XML 1.0 allows in a document: tab, line feed, carriage return and the ranges below.
+_NOT_XML = re.compile("[^\t\n\r\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
 ACCURACY = "accuracy"
 REQUEST_SIZE = "request-size"
@@ -81,16 +99,52 @@ def _n(value: float) -> str:
     return f"{value:.1f}"
 
 
+def _clean(text: Any) -> str:
+    """The text with every character XML 1.0 does not allow replaced by U+FFFD."""
+    return _NOT_XML.sub(REPLACEMENT, str(text))
+
+
 def _el(tag: str, text: str | None = None, children: Sequence[str] = (), **attrs: Any) -> str:
-    parts = "".join(f" {name.rstrip('_').replace('_', '-')}={quoteattr(str(value))}" for name, value in attrs.items())
+    """One element. ``children`` are finished elements and come before the text, so that a
+    ``<title>`` is the first child. The text and every attribute value are cleaned and escaped."""
+    parts = "".join(f" {name.rstrip('_').replace('_', '-')}={quoteattr(_clean(value))}"
+                    for name, value in attrs.items())
     if text is None and not children:
         return f"<{tag}{parts}/>"
-    return f"<{tag}{parts}>{escape(text) if text is not None else ''}{''.join(children)}</{tag}>"
+    return f"<{tag}{parts}>{''.join(children)}{escape(_clean(text)) if text is not None else ''}</{tag}>"
+
+
+def text_width(text: str, size: int = 12) -> float:
+    """An estimate of the width of ``text`` in pixels at a font size: ``CHAR_WIDTH`` per character
+    at 12px, in proportion at other sizes, and twice that for a wide (East Asian) character."""
+    units = sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+    return units * CHAR_WIDTH * size / 12
+
+
+def _shorten(text: str, size: int, limit: float) -> str:
+    """``text`` if it is no wider than ``limit`` pixels, else its start followed by three dots."""
+    if text_width(text, size) <= limit:
+        return text
+    kept = text
+    while kept and text_width(kept.rstrip() + CUT, size) > limit:
+        kept = kept[:-1]
+    return kept.rstrip() + CUT
+
+
+def _wrap(text: str, size: int, limit: float) -> list[str]:
+    """``text`` broken into lines no wider than ``limit`` pixels, a long word broken where it must be."""
+    widest = max((text_width(ch, size) for ch in text), default=text_width("x", size))
+    return textwrap.wrap(text, max(1, int(limit / widest))) or [""]
 
 
 def _text(x: float, y: float, text: str, size: int = 12, fill: str = INK_SECONDARY, anchor: str = "start",
-          **attrs: Any) -> str:
-    return _el("text", text, x=_n(x), y=_n(y), font_size=size, fill=fill, text_anchor=anchor, **attrs)
+          limit: float | None = None, **attrs: Any) -> str:
+    """A line of text. With ``limit`` (pixels) a text too wide is cut with three dots and carries
+    its full text as a tooltip."""
+    text = _clean(text)
+    drawn = text if limit is None else _shorten(text, size, limit)
+    children = [_el("title", text)] if drawn != text else []
+    return _el("text", drawn, children, x=_n(x), y=_n(y), font_size=size, fill=fill, text_anchor=anchor, **attrs)
 
 
 def _marker(shape: str, x: float, y: float, colour: str, title: str | None = None, r: float = 4.0) -> str:
@@ -104,15 +158,31 @@ def _marker(shape: str, x: float, y: float, colour: str, title: str | None = Non
         return _el("rect", children=children, x=_n(x - side / 2), y=_n(y - side / 2), width=_n(side),
                    height=_n(side), **common)
     if shape == "triangle":
-        points = f"{_n(x)},{_n(y - r - 0.6)} {_n(x + r + 0.4)},{_n(y + r - 0.4)} {_n(x - r - 0.4)},{_n(y + r - 0.4)}"
-    else:  # diamond
+        corners = [(x, y - r - 0.6), (x + r + 0.4, y + r - 0.4), (x - r - 0.4, y + r - 0.4)]
+    elif shape == "plus":
+        arm, half = r + 0.6, 0.4 * r
+        corners = [(x - half, y - arm), (x + half, y - arm), (x + half, y - half), (x + arm, y - half),
+                   (x + arm, y + half), (x + half, y + half), (x + half, y + arm), (x - half, y + arm),
+                   (x - half, y + half), (x - arm, y + half), (x - arm, y - half), (x - half, y - half)]
+    else:  # a regular polygon with one corner at the top: diamond, pentagon, hexagon
+        sides = {"diamond": 4, "pentagon": 5, "hexagon": 6}[shape]
         d = r + 0.8
-        points = f"{_n(x)},{_n(y - d)} {_n(x + d)},{_n(y)} {_n(x)},{_n(y + d)} {_n(x - d)},{_n(y)}"
-    return _el("polygon", children=children, points=points, **common)
+        corners = [(x + d * math.sin(2 * math.pi * i / sides), y - d * math.cos(2 * math.pi * i / sides))
+                   for i in range(sides)]
+    return _el("polygon", children=children, points=" ".join(f"{_n(px)},{_n(py)}" for px, py in corners), **common)
 
 
-def _style(name: str) -> tuple[str, str, str]:
-    return STYLES.get(name, OTHER_STYLE)
+def _styles(results: Mapping[str, Any]) -> dict[str, tuple[str, str, str]]:
+    """The colour, marker shape and dash pattern of every arm and series of a results file. A
+    known arm has its own (``STYLES``); the others take theirs from the second lists by the sorted
+    order of their names, so an arm looks the same in both charts."""
+    names = [*(results.get("arms") or {}), *(results.get("request_series") or {})]
+    others = sorted({name for name in names if name not in STYLES})
+    styles = dict(STYLES)
+    for k, name in enumerate(others):
+        styles[name] = (OTHER_COLOURS[k % len(OTHER_COLOURS)], OTHER_SHAPES[k % len(OTHER_SHAPES)],
+                        OTHER_DASHES[k % len(OTHER_DASHES)])
+    return styles
 
 
 def _document(height: float, title: str, description: str, body: Sequence[str]) -> str:
@@ -123,15 +193,17 @@ def _document(height: float, title: str, description: str, body: Sequence[str]) 
     return "\n".join(lines) + "\n"
 
 
-def _legend(entries: Sequence[tuple[str, str, bool]], y: float) -> tuple[list[str], float]:
-    """A row of legend entries ``(series name, words, with line)``, wrapped to the width. Returns
-    the elements and the y below the last row."""
+def _legend(entries: Sequence[tuple[str, str, bool]], y: float,
+            styles: Mapping[str, tuple[str, str, str]]) -> tuple[list[str], float]:
+    """A row of legend entries ``(series name, words, with line)``, wrapped to the width; an entry
+    wider than the chart is cut. Returns the elements and the y below the last row."""
     out: list[str] = []
     x = float(MARGIN)
     for name, words, with_line in entries:
-        colour, shape, dash = _style(name)
+        colour, shape, dash = styles[name]
         key = 34 if with_line else 14
-        width = key + 6 + len(words) * CHAR_WIDTH + 22
+        room = WIDTH - 2 * MARGIN - key - 6
+        width = key + 6 + min(text_width(_clean(words)), room) + 22
         if x > MARGIN and x + width > WIDTH - MARGIN:
             x, y = float(MARGIN), y + 20
         if with_line:
@@ -141,9 +213,32 @@ def _legend(entries: Sequence[tuple[str, str, bool]], y: float) -> tuple[list[st
                 line["stroke_dasharray"] = dash
             out.append(_el("line", **line))
         out.append(_marker(shape, x + key / 2, y - 4, colour))
-        out.append(_text(x + key + 6, y, words, fill=INK, data_legend=name))
+        out.append(_text(x + key + 6, y, words, fill=INK, limit=room, data_legend=name))
         x += width
     return out, y + 12
+
+
+def _labelled(title: str, results: Mapping[str, Any]) -> str:
+    """The title with the manifest's ``label`` after it, when the run has one."""
+    label = (results.get("manifest") or {}).get("label")
+    return f"{title}: {label}" if label else title
+
+
+def _head(title: str, subtitle: str) -> tuple[list[str], float]:
+    """The title and the subtitle, each wrapped to the width. Returns the elements and the y of
+    the legend row below them. A one-line title puts the subtitle at y = 48."""
+    room = WIDTH - 2 * MARGIN
+    out = []
+    y = 28.0
+    for line in _wrap(_clean(title), TITLE_SIZE, room):
+        out.append(_text(MARGIN, y, line, size=TITLE_SIZE, fill=INK, font_weight=600, data_head="title"))
+        y += 20
+    if subtitle:
+        for line in _wrap(_clean(subtitle), 12, room):
+            out.append(_text(MARGIN, y, line, data_head="subtitle"))
+            y += 16
+        y += 8
+    return out, y
 
 
 def _footnotes(notes: Sequence[str], y: float) -> tuple[list[str], float]:
@@ -213,18 +308,14 @@ def request_size_svg(results: Mapping[str, Any]) -> str:
     series = _series_of(results)
     bound = results["bound"]
     replay = results.get("kind") == "replay"
-    title = TITLES[REQUEST_SIZE] + (": synthetic session, no model" if replay else "")
+    title = _labelled(TITLES[REQUEST_SIZE] + (": synthetic session, no model" if replay else ""), results)
+    styles = _styles(results)
     x_top, x_step = axis_top(max(p[0] for s in series.values() for p in s["points"]))
     y_top, y_step = axis_top(max(bound, max(p[1] for s in series.values() for p in s["points"])))
-    body = [_text(MARGIN, 28, title, size=16, fill=INK, font_weight=600)]
-    subtitle = _subtitle(results, seed=True)
-    y = 48.0
-    if subtitle:
-        body.append(_text(MARGIN, y, subtitle))
-        y += 24
+    body, y = _head(title, _subtitle(results, seed=True))
     entries = [(name, f"{s.get('label') or LABELS.get(name, name)} ({BASIS_WORDS.get(s.get('basis'), s.get('basis'))})",
                 True) for name, s in series.items()]
-    legend, y = _legend(entries, y)
+    legend, y = _legend(entries, y, styles)
     body += legend
     top = y + 14
     bottom = top + LINE_PLOT_HEIGHT
@@ -251,7 +342,7 @@ def request_size_svg(results: Mapping[str, Any]) -> str:
     body.append(_el("line", x1=_n(LINE_LEFT), y1=_n(py(bound)), x2=_n(LINE_LEFT + LINE_PLOT_WIDTH), y2=_n(py(bound)),
                     stroke=INK, stroke_width=1, stroke_dasharray="1 3", data_bound=bound))
     for name, s in series.items():
-        colour, shape, dash = _style(name)
+        colour, shape, dash = styles[name]
         points = s["points"]
         words = f"{s.get('label') or LABELS.get(name, name)} ({BASIS_WORDS.get(s.get('basis'), s.get('basis'))})"
         line = {"points": " ".join(f"{_n(px(h))},{_n(py(size))}" for h, size in points), "fill": "none",
@@ -312,14 +403,10 @@ def accuracy_svg(results: Mapping[str, Any]) -> str:
     classes = list(dict.fromkeys(cls for arm in arms.values() for cls in arm.get("by_class", {})))
     rows: list[tuple[str, str | None]] = [("All probes", None), *((cls, cls) for cls in classes)]
     low, step = _accuracy_low(arms, rows)
-    title = "Accuracy by arm, with Wilson 95% intervals"
-    body = [_text(MARGIN, 28, title, size=16, fill=INK, font_weight=600)]
-    subtitle = _subtitle(results, seed=False)
-    y = 48.0
-    if subtitle:
-        body.append(_text(MARGIN, y, subtitle))
-        y += 24
-    legend, y = _legend([(name, LABELS.get(name, name), False) for name in arms], y)
+    title = _labelled("Accuracy by arm, with Wilson 95% intervals", results)
+    styles = _styles(results)
+    body, y = _head(title, _subtitle(results, seed=False))
+    legend, y = _legend([(name, LABELS.get(name, name), False) for name in arms], y, styles)
     body += legend
     top = y + 10
     row_height = len(arms) * ACC_SLOT + ACC_ROW_PAD
@@ -343,14 +430,16 @@ def accuracy_svg(results: Mapping[str, Any]) -> str:
         counts = [cell["probes"] if cell else 0 for cell in cells.values()]
         n = f"n = {counts[0]:,}" if len(set(counts)) == 1 else "n = " + " / ".join(f"{c:,}" for c in counts)
         centre = row_top + row_height / 2
-        body.append(_text(MARGIN, centre - 2, name, fill=INK, data_row=name,
+        room = ACC_LEFT - MARGIN - 8  # a row label stops short of the plot
+        body.append(_text(MARGIN, centre - 2, name, fill=INK, limit=room, data_row=name,
                           **({"font_weight": 600} if cls is None else {})))
-        body.append(_text(MARGIN, centre + 13, n, size=11, data_n=name))
+        body.append(_text(MARGIN, centre + 13, n, size=11, limit=room, data_n=name))
         for slot, (arm, cell) in enumerate(cells.items()):
-            colour, shape, _ = _style(arm)
+            colour, shape, _ = styles[arm]
             cy = row_top + ACC_ROW_PAD / 2 + slot * ACC_SLOT + ACC_SLOT / 2
             if not cell or not cell.get("probes"):
-                body.append(_text(ACC_LEFT + 6, cy + 4, f"{LABELS.get(arm, arm)}: not run", size=11))
+                body.append(_text(ACC_LEFT + 6, cy + 4, f"{LABELS.get(arm, arm)}: not run", size=11,
+                                  limit=ACC_PLOT_WIDTH - 6))
                 continue
             lo, hi = cell["interval"]
             words = (f"{LABELS.get(arm, arm)}, {name}: {100 * cell['accuracy']:.1f}% ({cell['correct']:,} of "
@@ -387,44 +476,61 @@ def _slug(model: str) -> str:
 def views(results: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
     """What to draw from a results file: the file itself, or one view per model when it merges
     several models (``by_model`` is filled and the top-level ``arms`` is null). Each view comes
-    with the suffix of its file names."""
+    with the suffix of its file names: the model's name with every character outside
+    ``[A-Za-z0-9._-]`` as a hyphen, and ``-2``, ``-3`` and so on after it when an earlier model
+    gave the same."""
     by_model = results.get("by_model")
-    if isinstance(by_model, dict) and by_model and results.get("arms") is None and results.get("kind") != "replay":
-        return [(f"-{_slug(model)}", {**results, **block, "chart_model": model}) for model, block in by_model.items()]
-    return [("", results)]
+    if not (isinstance(by_model, dict) and by_model and results.get("arms") is None
+            and results.get("kind") != "replay"):
+        return [("", results)]
+    out: list[tuple[str, Mapping[str, Any]]] = []
+    taken: set[str] = set()
+    for model, block in by_model.items():
+        suffix, number = f"-{_slug(model)}", 1
+        while suffix in taken:
+            number += 1
+            suffix = f"-{_slug(model)}-{number}"
+        taken.add(suffix)
+        out.append((suffix, {**results, **block, "chart_model": model}))
+    return out
 
 
-def _drawn(results: Mapping[str, Any]) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
-    """The charts that can be drawn, as ``(file name, title, svg)``, and those that cannot, as
-    ``(file name, reason)``."""
-    drawn, skipped = [], []
+Drawn = list[tuple[str, str, str]]  # file name, title, SVG text
+
+
+def render(results: Mapping[str, Any]) -> tuple[Drawn, list[tuple[str, str]]]:
+    """Draw every chart once. Returns the charts that can be drawn, as ``(file name, title, svg)``,
+    and those that cannot, as ``(file name, reason)``. Nothing is written."""
+    drawn, left_out = [], []
     for suffix, view in views(results):
         model = f", {view['chart_model']}" if view.get("chart_model") else ""
         for kind, draw in ((ACCURACY, accuracy_svg), (REQUEST_SIZE, request_size_svg)):
             name = f"{kind}{suffix}.svg"
             try:
-                drawn.append((name, TITLES[kind] + model, draw(view)))
+                drawn.append((name, _clean(_labelled(TITLES[kind] + model, view)), draw(view)))
             except ChartError as exc:
-                skipped.append((name, str(exc)))
-    return drawn, skipped
+                left_out.append((name, str(exc)))
+    return drawn, left_out
 
 
 def planned(results: Mapping[str, Any]) -> list[tuple[str, str]]:
     """The file names and titles of the charts ``write`` would make from these results."""
-    return [(name, title) for name, title, _ in _drawn(results)[0]]
+    return [(name, title) for name, title, _ in render(results)[0]]
 
 
 def skipped(results: Mapping[str, Any]) -> list[tuple[str, str]]:
     """The charts ``write`` would not make from these results, each with the reason."""
-    return _drawn(results)[1]
+    return render(results)[1]
 
 
-def write(results: Mapping[str, Any], charts_dir: Path | str) -> list[Path]:
+def write(results: Mapping[str, Any] | None, charts_dir: Path | str, drawn: Drawn | None = None) -> list[Path]:
     """Write every chart the results allow into ``charts_dir`` and return the paths. A chart the
-    file cannot give (``skipped``) is left out; with nothing to draw it raises ``ChartError``."""
-    drawn, left_out = _drawn(results)
-    if not drawn:
-        raise ChartError("; ".join(reason for _, reason in left_out) or "the results file has nothing to draw")
+    file cannot give (``skipped``) is left out; with nothing to draw it raises ``ChartError``.
+    ``drawn`` is the first value of an earlier ``render(results)``, to write without drawing again."""
+    if drawn is None:
+        drawn, left_out = render(results or {})
+        if not drawn:
+            raise ChartError("; ".join(reason for _, reason in left_out) or "the results file has nothing to draw")
     charts_dir = Path(charts_dir)
     charts_dir.mkdir(parents=True, exist_ok=True)
     paths = []

@@ -447,3 +447,194 @@ def test_chart_mode_refuses_a_results_file_nested_too_deeply(tmp_path, capsys):
     assert cli.main(["bench", "--chart", str(path)]) == 1
     captured = capsys.readouterr()
     assert captured.err.startswith(f"contexto bench: error: {path}: ") and len(captured.err.splitlines()) == 1
+
+
+# Text that is not plain: markup, control characters, long strings
+
+
+HOSTILE = '<script>alert(1)</script> & "double" \'single\' ]]> <!-- x --> </text></svg>'
+
+
+def shown(element: ET.Element) -> str:
+    """The text an element draws: its own, without the tooltip of a shortened label."""
+    return "".join(part for child in [element] for part in ([child.text or ""] + [c.tail or "" for c in child]))
+
+
+def hostile_results() -> dict:
+    results = {**line_results(notes=[HOSTILE, HOSTILE]), "arms": {
+        "contexto": cell(90, 100, [0.8, 0.95], by_class={HOSTILE: cell(45, 50, [0.75, 0.97])}),
+        HOSTILE: cell(60, 100, [0.5, 0.7], by_class={HOSTILE: cell(27, 45, [0.55, 0.72])})}}
+    results["request_series"][HOSTILE] = {"basis": "measured", "label": HOSTILE, "points": [[0, 0], [900, 90]]}
+    results["manifest"] = {"model": HOSTILE, "protocol": HOSTILE, "seed": 1, "seeds": [1],
+                           "contexto_version": HOSTILE, "claude_code_version": HOSTILE, "label": HOSTILE}
+    return results
+
+
+def test_markup_in_any_text_is_drawn_as_text(tmp_path):
+    for draw in (charts.request_size_svg, charts.accuracy_svg):
+        svg = draw(hostile_results())
+        root = parse(svg)  # well-formed
+        assert "<script" not in svg and "]]>" not in svg and "<!--" not in svg
+        assert {child.tag.removeprefix(SVG) for child in root.iter()} <= {
+            "svg", "title", "desc", "rect", "text", "line", "polyline", "polygon", "circle", "g"}
+        literal = " ".join("".join(t.itertext()) for t in root.iter(f"{SVG}text"))
+        assert "<script>alert(1)</script> & \"double\" 'single'" in literal
+        assert HOSTILE in root.find(f"{SVG}title").text and HOSTILE in root.find(f"{SVG}desc").text
+    root = parse(charts.request_size_svg(hostile_results()))
+    line = next(p for p in root.iter(f"{SVG}polyline") if p.get("data-series") == HOSTILE)
+    assert line.get("data-series") == HOSTILE and HOSTILE in line.find(f"{SVG}title").text  # attributes too
+
+
+@pytest.mark.parametrize("bad", ["\x00", "\x07", "\x1b", "\x0b", "\ud800", "\ufffe", "\uffff"])
+def test_a_character_xml_does_not_allow_never_reaches_the_file(tmp_path, bad):
+    results = hostile_results()
+    text = f"before{bad}after"
+    results["notes"] = [text]
+    results["request_series"]["contexto"]["label"] = text
+    results["manifest"] = {"model": text, "label": text}
+    results["arms"][text] = results["arms"].pop(HOSTILE)
+    for draw in (charts.request_size_svg, charts.accuracy_svg):
+        svg = draw(results)
+        svg.encode("utf-8")  # writable
+        root = parse(svg)  # well-formed: a browser draws it
+        assert bad not in svg
+        assert "before\ufffdafter" in " ".join("".join(t.itertext()) for t in root.iter(f"{SVG}text"))
+    paths = charts.write(results, tmp_path / "charts")
+    assert all(parse(p.read_text(encoding="utf-8")) is not None for p in paths)
+
+
+def right_edge(element: ET.Element) -> float:
+    size = int(element.get("font-size"))
+    return float(element.get("x")) + charts.text_width(shown(element), size)
+
+
+def test_long_text_is_wrapped_or_shortened_and_never_leaves_the_canvas_or_enters_the_plot():
+    long_label = "A series label that goes on and on " * 6
+    long_model = "a-model-id-" * 30
+    long_class = "a_probe_class_name_much_longer_than_the_room_left_of_the_plot"
+    results = {**line_results(), "arms": {
+        "contexto": cell(90, 100, [0.8, 0.95], by_class={long_class: cell(45, 50, [0.75, 0.97])}),
+        "plain": cell(60, 100, [0.5, 0.7], by_class={long_class: cell(27, 45, [0.55, 0.72])}),
+        long_label.strip(): {"probes": 0, "correct": 0, "accuracy": None, "interval": None, "by_class": {}}}}
+    results["request_series"]["contexto"]["label"] = long_label.strip()
+    results["manifest"] = {"model": long_model, "protocol": "v2", "seed": 1, "seeds": [1],
+                           "label": "Figures invented by a test generator; no model was run. " * 3}
+    for draw in (charts.request_size_svg, charts.accuracy_svg):
+        root = parse(draw(results))
+        for element in root.iter(f"{SVG}text"):
+            if element.get("text-anchor") == "start" and not element.get("transform"):
+                assert right_edge(element) <= charts.WIDTH - charts.MARGIN + 0.5, shown(element)
+        ys = [float(e.get("y")) for e in root.iter(f"{SVG}text") if e.get("data-head")]
+        assert len(ys) >= 4 and ys == sorted(set(ys))  # the title and subtitle lines, one below another
+        head = " ".join(shown(e) for e in root.iter(f"{SVG}text") if e.get("data-head"))
+        assert "no model was run" in head and long_model[:40] in head.replace(" ", "")
+    root = parse(charts.request_size_svg(results))
+    legend = next(e for e in root.iter(f"{SVG}text") if e.get("data-legend") == "contexto")
+    assert shown(legend).endswith("...") and legend.find(f"{SVG}title").text == f"{long_label.strip()} (measured)"
+    root = parse(charts.accuracy_svg(results))
+    row = next(e for e in root.iter(f"{SVG}text") if e.get("data-row") == long_class)
+    assert shown(row).endswith("...") and row.find(f"{SVG}title").text == long_class
+    assert right_edge(row) <= charts.ACC_LEFT - 4
+    for element in root.iter(f"{SVG}text"):
+        if element.get("data-row") or element.get("data-n"):
+            assert right_edge(element) <= charts.ACC_LEFT - 4, shown(element)
+    # A label that fits is drawn whole, with no tooltip.
+    short = parse(charts.accuracy_svg(accuracy_results()))
+    assert texts(short, data_row="chain") == ["chain"]
+    assert next(e for e in short.iter(f"{SVG}text") if e.get("data-row") == "chain").find(f"{SVG}title") is None
+
+
+def test_text_width_counts_wide_characters_twice():
+    assert charts.text_width("abcd", 12) == pytest.approx(4 * charts.CHAR_WIDTH)
+    assert charts.text_width("abcd", 16) > charts.text_width("abcd", 12)
+    assert charts.text_width("\u6f22\u5b57", 12) == pytest.approx(charts.text_width("abcd", 12))
+
+
+# Telling the series apart
+
+
+def _luminance(colour: str) -> float:
+    channels = [int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(a: str, b: str) -> float:
+    high, low = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_every_series_colour_has_three_to_one_contrast_against_the_background():
+    colours = [style[0] for style in charts.STYLES.values()] + list(charts.OTHER_COLOURS)
+    assert len(colours) == len(set(colours))
+    for colour in colours:
+        assert _contrast(colour, charts.SURFACE) >= 3, (colour, _contrast(colour, charts.SURFACE))
+    # Without colour the three arms still differ in lightness, by a fifth or more.
+    known = sorted(_luminance(style[0]) for style in charts.STYLES.values())
+    assert all((b + 0.05) / (a + 0.05) >= 1.2 for a, b in zip(known, known[1:]))
+
+
+def test_arms_the_charts_do_not_know_are_told_apart_by_marker_and_dash():
+    results = line_results()
+    arms = accuracy_results()["arms"]
+    for name in ("zeta", "alpha", "mid", "omega"):
+        results["request_series"][name] = {"basis": "measured", "label": name, "points": [[0, 0], [900, 90]]}
+        arms[name] = cell(70, 100, [0.6, 0.78], by_class={})
+    results["arms"] = arms
+    root = parse(charts.request_size_svg(results))
+    lines = {p.get("data-series"): p for p in root.iter(f"{SVG}polyline")}
+    assert len(lines) == 6
+    assert len({p.get("stroke-dasharray") for p in lines.values()}) == 6
+    assert len({p.get("stroke") for p in lines.values()}) == 6
+    def shape(group: ET.Element) -> str:
+        mark = next(child for child in group if child.tag != f"{SVG}title" and child.tag != f"{SVG}line")
+        return mark.tag.removeprefix(SVG) + ":" + str(len((mark.get("points") or "").split()))
+    markers = {g.get("data-markers"): shape(g) for g in root.iter(f"{SVG}g") if g.get("data-markers")}
+    assert len(set(markers.values())) == 6, markers
+    # The same arm has the same marker in the accuracy chart, whatever order the arms come in.
+    accuracy = parse(charts.accuracy_svg(results))
+    in_accuracy = {g.get("data-arm"): shape(g) for g in accuracy.iter(f"{SVG}g")
+                   if g.get("data-arm") and g.get("data-row") == "All probes"}
+    assert len(set(in_accuracy.values())) == 6
+    assert all(in_accuracy[name] == markers[name] for name in ("contexto", "zeta", "alpha", "mid", "omega"))
+
+
+# The manifest's label
+
+
+def test_a_label_in_the_manifest_is_in_the_title_of_every_chart(tmp_path):
+    label = "Figures invented by a test generator: no model was run"
+    plain = report.build([make_run(tmp_path / "plain", repeats=1, seeds=(11,))])
+    results = report.build([make_run(tmp_path / "run", repeats=1, seeds=(11,), label=label)])
+    for draw in (charts.request_size_svg, charts.accuracy_svg):
+        root = parse(draw(results))
+        assert root.find(f"{SVG}title").text.endswith(f": {label}")
+        head = " ".join(shown(e) for e in root.iter(f"{SVG}text") if e.get("data-head") == "title")
+        assert head == root.find(f"{SVG}title").text
+        assert label in root.find(f"{SVG}desc").text
+        assert label not in draw(plain) and "invented" not in draw(plain)
+    assert charts.planned(results) == [("accuracy.svg", f"Accuracy by arm: {label}"),
+                                       ("request-size.svg", f"Request size against history length: {label}")]
+
+
+# File names
+
+
+def test_models_whose_names_differ_only_in_other_characters_get_different_files():
+    results = line_results()
+    block = {"arms": accuracy_results()["arms"], "request_series": results["request_series"]}
+    results.update(arms=None, by_model={"vendor/model a": block, "vendor model:a": block, "vendor-model-a": block})
+    names = [name for name, _ in charts.planned(results)]
+    assert len(names) == len(set(names)) == 6
+    assert names[:2] == ["accuracy-vendor-model-a.svg", "request-size-vendor-model-a.svg"]
+    assert names[2:4] == ["accuracy-vendor-model-a-2.svg", "request-size-vendor-model-a-2.svg"]
+
+
+def test_render_draws_each_chart_once_and_gives_what_was_left_out(monkeypatch):
+    calls = []
+    real = charts.request_size_svg
+    monkeypatch.setattr(charts, "request_size_svg", lambda results: calls.append(1) or real(results))
+    drawn, left_out = charts.render(line_results(kind="replay"))
+    assert [(name, title) for name, title, _ in drawn] == [("request-size.svg",
+                                                             "Request size against history length")]
+    assert [name for name, _ in left_out] == ["accuracy.svg"] and len(calls) == 1

@@ -433,7 +433,7 @@ def _write_lines(path: Path, rows: list[dict], **dumps) -> None:
     path.write_text("".join(json.dumps(r, **dumps) + "\n" for r in rows), encoding="utf-8")
 
 
-@pytest.mark.parametrize("separator", [" ", " ", "\u0085", "\x0b", "\x0c", "\x1c"])
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\u0085", "\x0b", "\x0c", "\x1c"])
 def test_a_line_separator_character_inside_a_string_is_data_not_a_line_end(tmp_path, separator):
     probes, _ = _good_rows()
     probes[4] = {**probes[4], "given": f"first{separator}second"}

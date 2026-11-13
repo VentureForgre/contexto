@@ -31,16 +31,18 @@ def run(args: argparse.Namespace) -> int:
         print(f"contexto bench: error: {exc}", file=sys.stderr)
         return 1
     target = (Path(args.out) if args.out is not None else source.parent) / "charts"
-    try:
-        written = charts.write(results, target)
-    except charts.ChartError as exc:
-        print(f"contexto bench: error: {source}: {exc}", file=sys.stderr)
+    drawn, left_out = charts.render(results)  # every chart is drawn before one is written
+    if not drawn:
+        reasons = "; ".join(reason for _, reason in left_out) or "the results file has nothing to draw"
+        print(f"contexto bench: error: {source}: {reasons}", file=sys.stderr)
         return 1
+    try:
+        written = charts.write(None, target, drawn)
     except OSError as exc:
         print(f"contexto bench: error: cannot write the charts into {target}: {exc}", file=sys.stderr)
         return 1
     for path in written:
         print(f"written: {path}")
-    for name, reason in charts.skipped(results):
+    for name, reason in left_out:
         print(f"not written: {name}: {reason}")
     return 0
