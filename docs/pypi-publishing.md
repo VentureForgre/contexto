@@ -2,14 +2,56 @@
 
 Contexto's release workflow can publish each release to PyPI as `contexto-proxy` (D67). The
 command and the import name stay `contexto`. Publishing is off until the repository owner does the
-steps on this page. Nothing here can be done by an agent or by the workflow: the first three steps
-need the owner's PyPI account and the repository's settings.
+steps on this page. Step 2 needs the owner's PyPI account. Steps 3 and 4 change the repository's
+settings, which is the owner's decision.
 
 How the workflow publishes, and what it checks first, is in [RELEASING.md](../RELEASING.md#pypi).
 There is no API token to create, store or rotate. PyPI trusts the `pypi` job of this repository's
 `release.yml` directly ([trusted publishing](https://docs.pypi.org/trusted-publishers/)).
 
-## 1. Register the pending publisher on PyPI
+## 1. Check the `pypi` environment and its `main` branch rule
+
+The GitHub environment `pypi` already exists. It was created on 2026-11-13 with deployment limited
+to the branch `main` ("Selected branches and tags", one branch rule `main`), no required reviewer
+and no wait timer (D67). Check that this is still so before you register anything on PyPI.
+
+In the repository: Settings > Environments > `pypi`. Under "Deployment branches and tags" it must
+say "Selected branches and tags" with one rule, the branch `main`.
+
+Or from a shell:
+
+```sh
+gh api repos/VentureForgre/contexto/environments/pypi --jq '{name, protection_rules: [.protection_rules[].type], deployment_branch_policy}'
+gh api repos/VentureForgre/contexto/environments/pypi/deployment-branch-policies --jq '[.branch_policies[] | {name, type}]'
+```
+
+The expected output:
+
+```
+{"deployment_branch_policy":{"custom_branch_policies":true,"protected_branches":false},"name":"pypi","protection_rules":["branch_policy"]}
+[{"name":"main","type":"branch"}]
+```
+
+If the first command answers 404, or the second lists anything but the one branch `main`, put it
+right first: Settings > Environments > New environment, named `pypi`; Deployment branches and tags
+> "Selected branches and tags" > Add deployment branch or tag rule > branch `main`.
+
+Why this comes first. PyPI checks three things in the job's token: the repository, the workflow's
+file name and the environment name. It does not check the branch. A run started from a branch
+executes that branch's copy of `release.yml`, so the checks and the switch in `main`'s copy do not
+apply to it. With an environment that any ref may use, anyone who can push a branch to this
+repository could put their own `release.yml` on it, with a job in the `pypi` environment, start it
+from that branch, and publish any files as `contexto-proxy`, from the moment the publisher is
+registered. PyPI's security-model page says the same: by default "anybody who can unconditionally
+commit to your repository can also modify your publishing workflow", and it recommends a dedicated
+environment. The branch rule is a repository setting, outside the workflow file, and GitHub refuses
+the environment to a run from any ref but `main`.
+
+**Never delete the `pypi` environment or its branch rule while the publisher is registered on
+PyPI.** A workflow run that names a missing environment creates it again with no rules at all. If
+either has to go, remove the publisher on PyPI first.
+
+## 2. Register the pending publisher on PyPI
 
 The project does not exist on PyPI yet, so the publisher is registered on the account, as a
 "pending" publisher. PyPI creates the project when the publisher is first used.
@@ -34,33 +76,33 @@ Fill in the environment name, although the form marks it optional. With it, PyPI
 token only from a job that runs in the GitHub environment `pypi`. The workflow's `release` and
 `reattach` jobs also hold an OIDC token (they sign the build attestation), and they run a tool
 fetched from PyPI at run time. Without the environment name on PyPI, a token from one of those jobs
-could publish. With it, only the `pypi` job can.
+could publish, and so could a run from any branch, because the branch rule of step 1 guards only
+jobs that name the environment. With it, only the `pypi` job can.
 
 "Workflow name" is the file name only, not a path. The workflow must stay
 `.github/workflows/release.yml`, and the publishing job must stay in that file: PyPI does not accept
 a reusable workflow as the trusted workflow.
 
-## 2. Protect the `pypi` environment on GitHub (optional, recommended)
+## 3. Add a required reviewer (optional)
 
-In the repository: Settings > Environments > New environment, named `pypi`. Then:
+In the repository: Settings > Environments > `pypi` > Required reviewers. Add yourself. Every run of
+the `pypi` job then waits until a reviewer approves it (Actions > the run > Review deployments). One
+approval is enough. Leave "Prevent self-review" off if you are the only reviewer and you start the
+runs. Only a repository admin can change an environment's rules.
 
-- **Required reviewers:** add yourself. Every run of the `pypi` job then waits until a reviewer
-  approves it (Actions > the run > Review deployments). One approval is enough. Leave "Prevent
-  self-review" off if you are the only reviewer and you start the runs.
-- **Deployment branches and tags:** choose "Selected branches and tags" and add a branch rule for
-  `main`. A run started from any other ref then cannot use the environment.
+- **Without a reviewer** (the state today), the `pypi` job runs as soon as the release job has
+  finished. What gets published is then decided by who can start the workflow on `main` and by the
+  workflow's own checks.
+- **With a reviewer,** nothing reaches PyPI until you approve. The workflow runs one at a time
+  (`concurrency: release`). While a `pypi` job waits for approval its run stays open, a second
+  Release run waits behind it, and a third run started meanwhile replaces the waiting second one,
+  which is cancelled. So approve or reject promptly.
 
-What happens either way:
+A reviewer is also the only thing that would stop a tag pushed by hand. Tags must not be pushed by
+hand: a `vX.Y.Z` tag on a commit of `main` could be reattached and published, and with no required
+reviewer nothing stops it. A version on PyPI can never be taken back.
 
-- **If you skip this step,** the first run of the `pypi` job creates the environment itself, with no
-  protection rules. The job runs without waiting. The environment name still matches the one on
-  PyPI, so publishing works.
-- **If you add a required reviewer,** nothing reaches PyPI until you approve. While the job waits,
-  the run stays open and the next Release run waits behind it, so approve or reject promptly.
-
-Only a repository admin can change an environment's rules.
-
-## 3. Turn the switch on
+## 4. Turn the switch on
 
 ```sh
 gh variable set PYPI_PUBLISH_ENABLED --body true --repo VentureForgre/contexto
@@ -69,7 +111,7 @@ gh variable set PYPI_PUBLISH_ENABLED --body true --repo VentureForgre/contexto
 or in the repository: Settings > Secrets and variables > Actions > Variables > New repository
 variable, name `PYPI_PUBLISH_ENABLED`, value `true`.
 
-## 4. Publish
+## 5. Publish
 
 Either cut the next release ([RELEASING.md](../RELEASING.md#cutting-a-release)), which publishes
 when it finishes, or publish a release that already exists:
@@ -80,11 +122,12 @@ gh workflow run release.yml --repo VentureForgre/contexto --ref main -f action=p
 
 Only a release whose files are named `contexto_proxy-<v>-py3-none-any.whl` and
 `contexto_proxy-<v>.tar.gz` can be published. v0.5.24 and earlier are named `contexto-<v>...`, and
-their metadata says `Name: contexto`; the job refuses them and says why.
+their metadata says `Name: contexto`; the job refuses them and says why. It also refuses files that
+`release.yml` on `main` did not build and attest.
 
-Publish soon after step 1. A pending publisher does not reserve the name (see below).
+Publish soon after step 2. A pending publisher does not reserve the name (see below).
 
-## 5. Check that it worked
+## 6. Check that it worked
 
 - The run's `pypi` job is green, and its last step says PyPI lists both files with the release's
   checksums.
@@ -98,9 +141,8 @@ Publish soon after step 1. A pending publisher does not reserve the name (see be
   ```
 
 If the upload step fails with `invalid-publisher`, PyPI received a valid token that matches no
-publisher. Compare the five fields in step 1 with the table, letter by letter, and check that the
-job ran in the `pypi` environment. Then run `action=publish` for the same tag. The GitHub release is
-not affected by a failed PyPI job.
+publisher. Compare the five fields in step 2 with the table, letter by letter. Then run
+`action=publish` for the same tag. The GitHub release is not affected by a failed PyPI job.
 
 ## What to know
 
@@ -125,10 +167,18 @@ documentation does not say how similarity is measured, so only the first upload 
 
 If PyPI refuses the name, the failure is in the upload step, where the project would be created.
 The GitHub release is unaffected, but its files are named for `contexto-proxy` and cannot be
-published under another name. Using a fallback takes: the `name` in `pyproject.toml`; `PROJECT` and
-the environment `url` in `.github/workflows/release.yml`; the project name in the tests
-(`tests/test_release_workflow.py`) and in the documents; a new pending publisher for the new name;
-and a new release.
+published under another name. Using a fallback means changing the name in every place
+`git grep -n 'contexto-proxy\|contexto_proxy'` finds. The ones that matter:
+
+- `name` in `pyproject.toml`, and `uv.lock`;
+- the `DISTRIBUTION` lookup in `src/contexto/__init__.py`. If it is missed, `contexto --version`
+  reports a wrong version;
+- `PROJECT` and the environment `url` in `.github/workflows/release.yml`;
+- the package-check and install-check scripts in `.github/scripts/`;
+- `tests/test_packaging.py` and `tests/test_release_workflow.py`;
+- `docs/pypi-description.md` and the other documents.
+
+Then register a new pending publisher for the new name and cut a new release.
 
 **A version is permanent.** PyPI never accepts a file name twice: "PyPI does not allow for a
 filename to be reused, even once a project has been deleted and recreated." A file name is the
@@ -147,5 +197,6 @@ whole releases, not single files.
 gh variable delete PYPI_PUBLISH_ENABLED --repo VentureForgre/contexto
 ```
 
-Releases then go to GitHub only, and each release run says so in a notice. To also withdraw PyPI's
-trust, remove the publisher on the project's Publishing page.
+Releases then go to GitHub only, and each release run says so in a notice. The variable is read by
+`main`'s copy of the workflow, so it is a switch, not a lock. To withdraw PyPI's trust, remove the
+publisher on the project's Publishing page.
