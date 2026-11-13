@@ -595,9 +595,9 @@ having changed.
 
 #### Flake check
 
-The test ran 40 times on this machine with `uv run --with pytest==9.1.1 pytest
-spikes/m2/scale/proxy/tests/test_scale_proxy_short.py`, in two loops of 20, while other agents' test
-suites kept the 1-minute load between 25 and 84 on 18 cores.
+The test ran 60 times on this machine with `uv run --with pytest==9.1.1 pytest
+spikes/m2/scale/proxy/tests/test_scale_proxy_short.py`, in three loops of 20, while other agents'
+test suites kept the 1-minute load between 20 and 84 on 18 cores.
 
 - First loop, with tighter latency budgets (median 100 ms, p95 300 ms, growth 120 ms per million
   tokens): 16 passed. 2 failed on latency while the load passed 80 (p95 388 and 356 ms, growth 165
@@ -610,12 +610,17 @@ suites kept the 1-minute load between 25 and 84 on 18 cores.
 - One run with `yes > /dev/null` on each of the 18 cores, on top of a load of 48: passed in 50 s
   (median 43.5 ms, p95 187 ms, growth 65.5 ms per million tokens, startup 583 ms, 78 req/s).
 
-After the second loop the driver was changed to open its connection before starting the clock and
-to retry a failed connect up to three times, because a machine this busy can run out of local
-ports for a moment; that is a guess at the two errors, not a diagnosis. A proxy process that exits
-now puts the end of its log in the error.
+- Third loop, on the final code, with this branch's whole test suite running beside it: 20 of 20
+  passed, at loads of 20 to 68 (median 36.1 to 57.4 ms, p95 92.7 to 196.8 ms, growth 53.7 to 90.5
+  ms per million tokens, startup 94 to 553 ms, peak RSS 50.9 to 59.9 MB, 54 to 179 req/s, 31 to
+  53 s).
 
-The spread of the 39 measured runs (smallest, median, largest), from `short.py --spread`:
+Between the second loop and the third, the driver was changed to open its connection before
+starting the clock and to retry a failed connect up to three times, because a machine this busy
+can run out of local ports for a moment; that is a guess at the two errors, not a diagnosis. A
+proxy process that exits now puts the end of its log in the error.
+
+The spread of the first 39 measured runs (smallest, median, largest), from `short.py --spread`:
 added time median 31.7, 43.3, 79.2 ms; p95 50.3, 127.3, 388.2 ms; growth 20.4, 55.5, 164.6 ms per
 million tokens; startup 133, 336, 1,049 ms; peak RSS 51.6, 55.5, 62.8 MB; RSS growth 6.4, 9.9,
 13.9 MB per MB; objects per turn 7.11, 7.43, 7.59; throughput 15, 82, 125 req/s; duration 25.7,
@@ -720,8 +725,8 @@ twice. A proxy process started on an existing store reads every page once, at it
 - Wall-clock timings of the full run at a load comparable with the record's. One run exists, at
   loads of 26 to 42. `cputime.py` compared CPU time with v0.2.9 up to 5M tokens; nothing was
   compared at 10M or 30M.
-- The short run on a quiet machine in its final form. Every one of its 39 runs here was at a load
-  of 25 or more; the CI runs (loads under 2.4) are the quiet ones.
+- The short run on a quiet machine in its final form. Every one of its runs here was at a load
+  of 20 or more; the CI runs (loads under 2.4) are the quiet ones.
 - Throughput with a 104-byte request at low load, and throughput with the clients in other
   processes than the fake upstream.
 - `leak.py` at 5M or 30M, and `fidelity.py` at 120 turns, at this commit. Both were run only at
