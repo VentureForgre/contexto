@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from contexto.upstream import DEFAULT_UPSTREAM, claude_settings_order, main_checkout, resolve_upstream
+from contexto.upstream import (
+    DEFAULT_UPSTREAM,
+    claude_key_helper,
+    claude_settings_order,
+    main_checkout,
+    resolve_upstream,
+)
 
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid", "GIT_COMMITTER_NAME": "t",
            "GIT_COMMITTER_EMAIL": "t@example.invalid", "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -263,3 +269,24 @@ def test_an_unreadable_user_settings_file_is_skipped(tmp_path, home, make):
     from contexto.codex import claude_api_key_helper
 
     assert claude_api_key_helper(tmp_path, home, env) is None
+
+
+BOM = b"\xef\xbb\xbf"
+
+
+@pytest.mark.parametrize("where", ["project", "user"])
+def test_a_settings_file_that_starts_with_a_byte_order_mark_is_read(tmp_path, home, where):
+    """Claude Code reads such a file (measured on 2.1.322 with plain ``claude -p`` and the project's
+    file, spikes/m2/providers: every request went to the file's base URL, and the file's
+    ``apiKeyHelper`` ran; the user's file goes through the same reader here). Read as plain UTF-8
+    it was not JSON and counted as absent, so the proxy forwarded to another upstream than Claude Code's
+    own, and ``contexto run codex`` did not find the helper."""
+    path = (tmp_path if where == "project" else home) / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(BOM + json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://marked.invalid"},
+                                       "apiKeyHelper": "print-a-key"}).encode())
+    up = resolve_upstream(env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tmp_path, home=home)
+    assert (up.url, up.source) == ("http://marked.invalid", f"settings:{where}")
+    helper = claude_key_helper(tmp_path, home, {}, trusted_only=False)
+    assert (helper.value, helper.source) == ("print-a-key", where)
+

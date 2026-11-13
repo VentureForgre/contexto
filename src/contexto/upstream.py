@@ -266,8 +266,12 @@ def untrusted_note(what: str, kinds: tuple[str, ...], remedy: str, env: Mapping[
 
 
 def _settings_string(path: Path, pick: Callable[[dict], object]) -> str | None:
+    """A string setting from one settings file. ``utf-8-sig``: Claude Code reads a file that starts with
+    a UTF-8 byte order mark like any other (measured on 2.1.322 with plain ``claude -p`` and the
+    project's file, spikes/m2/providers: its base URL got every request and its ``apiKeyHelper`` ran), so reading
+    it as not JSON would send the proxy to another upstream than Claude Code's own."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, RecursionError):  # unreadable or not JSON: as if the file were absent
         return None
     value = pick(data) if isinstance(data, dict) else None
