@@ -7,6 +7,8 @@ generated scripts, invented answers and request records. No arm is run.
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +27,7 @@ from test_bench_records import (
     write_run,
 )
 
+FIXTURES = Path(__file__).with_name("fixtures")
 LIMITS = (
     "The sessions are synthetic",
     "Scoring is exact match",
@@ -669,3 +672,32 @@ def test_fixture_helpers_write_what_the_readers_accept(tmp_path):
     s = small_script(1)
     write_jsonl(tmp_path / "requests.jsonl", request_rows(s, "plain", 0)[0])
     assert records.read_requests(tmp_path / "requests.jsonl")
+
+
+def test_requests_sent_to_another_model_are_counted_and_the_cost_note_says_so(tmp_path):
+    s = small_script(1)
+    requests = request_rows(s, "contexto", 0)[0]
+    requests[0] = {**requests[0], "model": "claude-haiku-5-5-small", "main": False}
+    requests[1] = {**requests[1], "model": None}
+    out = write_run(tmp_path / "run", [unit("contexto", 1)], probe_rows(s, "contexto", 0, set()), requests)
+    results = report.build([out])
+    assert results["arms"]["contexto"]["other_model_requests"] == 1
+    assert "1 request went to a model other than the run's own" in report.render(results)
+    assert results["pairs"] == {} and "Fewer than two arms were run" in report.render(results)
+
+
+# The committed sample
+
+
+def test_the_committed_sample_report_and_charts_regenerate_byte_for_byte(tmp_path):
+    """tests/fixtures/bench_report/ is what the fixture run reports. If this fails after a deliberate
+    change to the report or a chart, run tests/fixtures/make_bench_report.py and commit the result."""
+    sys.path.insert(0, str(FIXTURES))
+    try:
+        import make_bench_report
+    finally:
+        sys.path.remove(str(FIXTURES))
+    run = make_bench_report.build(tmp_path)
+    for name in make_bench_report.FILES:
+        committed = (FIXTURES / "bench_report" / name).read_bytes()
+        assert (run / name).read_bytes() == committed, f"{name} differs from tests/fixtures/bench_report/{name}"

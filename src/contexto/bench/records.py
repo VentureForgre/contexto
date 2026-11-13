@@ -265,8 +265,10 @@ def read_run(out_dir: Path | str) -> Run:
 
     Beyond the per-file checks: no unit is listed twice in the manifest, every probe and request
     record belongs to a unit the manifest lists, probe records exist only for units that are
-    ``complete``, and no probe is answered twice in one unit. A replay directory is refused: its
-    results are written by ``contexto bench --replay``, not recomputed from records.
+    ``complete`` and name the manifest's model, and no probe is answered twice in one unit. A
+    request record may name another model: a CLI sends some side requests to a smaller one. A
+    replay directory is refused: its results are written by ``contexto bench --replay``, not
+    recomputed from records.
     """
     out_dir = Path(out_dir)
     manifest_path = out_dir / "manifest.json"
@@ -291,6 +293,9 @@ def read_run(out_dir: Path | str) -> Run:
         if status[key] != "complete":
             raise RecordError(probes_path, f"the unit {_unit_words(key)} is {status[key]!r} in manifest.json; "
                                            "probe records are written only for complete units", line=number)
+        if row["model"] != manifest["model"]:
+            raise RecordError(probes_path, f"the record is of model {row['model']!r} but manifest.json says the run "
+                                           f"used {manifest['model']!r}", line=number, field="model")
         if (key, row["id"]) in seen:
             raise RecordError(probes_path, f"the probe {row['id']!r} appears twice for the unit {_unit_words(key)}",
                               line=number, field="id")

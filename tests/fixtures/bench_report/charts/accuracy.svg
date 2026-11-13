@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 788" width="800" height="788" role="img" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>Accuracy by arm, with Wilson 95% intervals</title>
+<desc>Accuracy by arm, with Wilson 95% intervals. Contexto 94.9% of 432 probes; Full context 90.0% of 432 probes; Plain Claude Code 73.4% of 432 probes.</desc>
+<rect x="0" y="0" width="800" height="788" fill="#fcfcfb"/>
+<text x="24.0" y="28.0" font-size="16" fill="#0b0b0b" text-anchor="start" font-weight="600">Accuracy by arm, with Wilson 95% intervals</text>
+<text x="24.0" y="48.0" font-size="12" fill="#52514e" text-anchor="start">claude-haiku-5-5, protocol v2, 6 seeds, Contexto 0.5.24, Claude Code 2.1.322</text>
+<circle cx="31.0" cy="68.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/>
+<text x="44.0" y="72.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-legend="contexto">Contexto</text>
+<rect x="122.9" y="64.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/>
+<text x="139.6" y="72.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-legend="full">Full context</text>
+<polygon points="249.0,63.4 253.4,71.6 244.6,71.6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"/>
+<text x="262.0" y="72.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-legend="plain">Plain Claude Code</text>
+<line x1="200.0" y1="94.0" x2="200.0" y2="652.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="200.0" y="670.0" font-size="11" fill="#52514e" text-anchor="middle" data-tick="x">50%</text>
+<line x1="307.2" y1="94.0" x2="307.2" y2="652.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="307.2" y="670.0" font-size="11" fill="#52514e" text-anchor="middle" data-tick="x">60%</text>
+<line x1="414.4" y1="94.0" x2="414.4" y2="652.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="414.4" y="670.0" font-size="11" fill="#52514e" text-anchor="middle" data-tick="x">70%</text>
+<line x1="521.6" y1="94.0" x2="521.6" y2="652.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="521.6" y="670.0" font-size="11" fill="#52514e" text-anchor="middle" data-tick="x">80%</text>
+<line x1="628.8" y1="94.0" x2="628.8" y2="652.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="628.8" y="670.0" font-size="11" fill="#52514e" text-anchor="middle" data-tick="x">90%</text>
+<line x1="736.0" y1="94.0" x2="736.0" y2="652.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="736.0" y="670.0" font-size="11" fill="#52514e" text-anchor="middle" data-tick="x">100%</text>
+<text x="468.0" y="692.0" font-size="12" fill="#52514e" text-anchor="middle" data-axis="x">Probes answered correctly (the axis starts at 50%, not at 0)</text>
+<text x="24.0" y="123.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-row="All probes" font-weight="600">All probes</text>
+<text x="24.0" y="138.0" font-size="11" fill="#52514e" text-anchor="start" data-n="All probes">n = 432</text>
+<g data-arm="contexto" data-row="All probes"><title>Contexto, All probes: 94.9% (410 of 432), 95% interval 92.4% to 96.6%</title><line x1="654.6" y1="109.0" x2="699.7" y2="109.0" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/><circle cx="681.4" cy="109.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<text x="707.7" y="113.0" font-size="11" fill="#0b0b0b" text-anchor="start" data-value="contexto">94.9%</text>
+<g data-arm="full" data-row="All probes"><title>Full context, All probes: 90.0% (389 of 432), 95% interval 86.9% to 92.5%</title><line x1="595.1" y1="125.0" x2="655.9" y2="125.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/><rect x="625.6" y="121.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<text x="663.9" y="129.0" font-size="11" fill="#0b0b0b" text-anchor="start" data-value="full">90.0%</text>
+<g data-arm="plain" data-row="All probes"><title>Plain Claude Code, All probes: 73.4% (317 of 432), 95% interval 69.0% to 77.3%</title><line x1="403.9" y1="141.0" x2="493.0" y2="141.0" stroke="#1baf7a" stroke-width="2" stroke-linecap="round"/><polygon points="450.6,136.4 455.0,144.6 446.2,144.6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<text x="501.0" y="145.0" font-size="11" fill="#0b0b0b" text-anchor="start" data-value="plain">73.4%</text>
+<line x1="24.0" y1="156.0" x2="776.0" y2="156.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="24.0" y="185.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-row="paged_only">paged_only</text>
+<text x="24.0" y="200.0" font-size="11" fill="#52514e" text-anchor="start" data-n="paged_only">n = 24</text>
+<g data-arm="contexto" data-row="paged_only"><title>Contexto, paged_only: 91.7% (22 of 24), 95% interval 74.2% to 97.7%</title><line x1="458.9" y1="171.0" x2="711.2" y2="171.0" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/><circle cx="646.7" cy="171.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="full" data-row="paged_only"><title>Full context, paged_only: 95.8% (23 of 24), 95% interval 79.8% to 99.3%</title><line x1="519.0" y1="187.0" x2="728.1" y2="187.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/><rect x="687.6" y="183.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="plain" data-row="paged_only"><title>Plain Claude Code, paged_only: 75.0% (18 of 24), 95% interval 55.1% to 88.0%</title><line x1="254.7" y1="203.0" x2="607.4" y2="203.0" stroke="#1baf7a" stroke-width="2" stroke-linecap="round"/><polygon points="468.0,198.4 472.4,206.6 463.6,206.6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<line x1="24.0" y1="218.0" x2="776.0" y2="218.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="24.0" y="247.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-row="multihop">multihop</text>
+<text x="24.0" y="262.0" font-size="11" fill="#52514e" text-anchor="start" data-n="multihop">n = 48</text>
+<g data-arm="contexto" data-row="multihop"><title>Contexto, multihop: 95.8% (46 of 48), 95% interval 86.0% to 98.8%</title><line x1="586.2" y1="233.0" x2="723.7" y2="233.0" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/><circle cx="691.3" cy="233.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="full" data-row="multihop"><title>Full context, multihop: 87.5% (42 of 48), 95% interval 75.3% to 94.1%</title><line x1="471.2" y1="249.0" x2="673.2" y2="249.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/><rect x="598.3" y="245.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="plain" data-row="multihop"><title>Plain Claude Code, multihop: 75.0% (36 of 48), 95% interval 61.2% to 85.1%</title><line x1="320.2" y1="265.0" x2="576.1" y2="265.0" stroke="#1baf7a" stroke-width="2" stroke-linecap="round"/><polygon points="468.0,260.4 472.4,268.6 463.6,268.6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<line x1="24.0" y1="280.0" x2="776.0" y2="280.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="24.0" y="309.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-row="chain">chain</text>
+<text x="24.0" y="324.0" font-size="11" fill="#52514e" text-anchor="start" data-n="chain">n = 180</text>
+<g data-arm="contexto" data-row="chain"><title>Contexto, chain: 95.0% (171 of 180), 95% interval 90.8% to 97.3%</title><line x1="637.1" y1="295.0" x2="707.6" y2="295.0" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/><circle cx="682.4" cy="295.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="full" data-row="chain"><title>Full context, chain: 89.4% (161 of 180), 95% interval 84.1% to 93.1%</title><line x1="565.6" y1="311.0" x2="662.4" y2="311.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/><rect x="619.1" y="307.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="plain" data-row="chain"><title>Plain Claude Code, chain: 66.7% (120 of 180), 95% interval 59.5% to 73.1%</title><line x1="301.8" y1="327.0" x2="448.1" y2="327.0" stroke="#1baf7a" stroke-width="2" stroke-linecap="round"/><polygon points="378.7,322.4 383.1,330.6 374.3,330.6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<line x1="24.0" y1="342.0" x2="776.0" y2="342.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="24.0" y="371.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-row="obligations">obligations</text>
+<text x="24.0" y="386.0" font-size="11" fill="#52514e" text-anchor="start" data-n="obligations">n = 36</text>
+<g data-arm="contexto" data-row="obligations"><title>Contexto, obligations: 97.2% (35 of 36), 95% interval 85.8% to 99.5%</title><line x1="584.1" y1="357.0" x2="730.7" y2="357.0" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/><circle cx="706.2" cy="357.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="full" data-row="obligations"><title>Full context, obligations: 83.3% (30 of 36), 95% interval 68.1% to 92.1%</title><line x1="394.1" y1="373.0" x2="651.6" y2="373.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/><rect x="553.6" y="369.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="plain" data-row="obligations"><title>Plain Claude Code, obligations: 75.0% (27 of 36), 95% interval 58.9% to 86.2%</title><line x1="295.7" y1="389.0" x2="588.6" y2="389.0" stroke="#1baf7a" stroke-width="2" stroke-linecap="round"/><polygon points="468.0,384.4 472.4,392.6 463.6,392.6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<line x1="24.0" y1="404.0" x2="776.0" y2="404.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="24.0" y="433.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-row="distractor">distractor</text>
+<text x="24.0" y="448.0" font-size="11" fill="#52514e" text-anchor="start" data-n="distractor">n = 36</text>
+<g data-arm="contexto" data-row="distractor"><title>Contexto, distractor: 100.0% (36 of 36), 95% interval 90.4% to 100.0%</title><line x1="632.6" y1="419.0" x2="736.0" y2="419.0" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/><circle cx="736.0" cy="419.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="full" data-row="distractor"><title>Full context, distractor: 91.7% (33 of 36), 95% interval 78.2% to 97.1%</title><line x1="502.0" y1="435.0" x2="705.2" y2="435.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/><rect x="643.0" y="431.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="plain" data-row="distractor"><title>Plain Claude Code, distractor: 83.3% (30 of 36), 95% interval 68.1% to 92.1%</title><line x1="394.1" y1="451.0" x2="651.6" y2="451.0" stroke="#1baf7a" stroke-width="2" stroke-linecap="round"/><polygon points="557.3,446.4 561.7,454.6 552.9,454.6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<line x1="24.0" y1="466.0" x2="776.0" y2="466.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="24.0" y="495.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-row="paraphrase">paraphrase</text>
+<text x="24.0" y="510.0" font-size="11" fill="#52514e" text-anchor="start" data-n="paraphrase">n = 36</text>
+<g data-arm="contexto" data-row="paraphrase"><title>Contexto, paraphrase: 94.4% (34 of 36), 95% interval 81.9% to 98.5%</title><line x1="541.5" y1="481.0" x2="719.5" y2="481.0" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/><circle cx="676.4" cy="481.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="full" data-row="paraphrase"><title>Full context, paraphrase: 86.1% (31 of 36), 95% interval 71.3% to 93.9%</title><line x1="428.8" y1="497.0" x2="670.8" y2="497.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/><rect x="583.4" y="493.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="plain" data-row="paraphrase"><title>Plain Claude Code, paraphrase: 86.1% (31 of 36), 95% interval 71.3% to 93.9%</title><line x1="428.8" y1="513.0" x2="670.8" y2="513.0" stroke="#1baf7a" stroke-width="2" stroke-linecap="round"/><polygon points="587.1,508.4 591.5,516.6 582.7,516.6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<line x1="24.0" y1="528.0" x2="776.0" y2="528.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="24.0" y="557.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-row="concluded">concluded</text>
+<text x="24.0" y="572.0" font-size="11" fill="#52514e" text-anchor="start" data-n="concluded">n = 36</text>
+<g data-arm="contexto" data-row="concluded"><title>Contexto, concluded: 88.9% (32 of 36), 95% interval 74.7% to 95.6%</title><line x1="464.6" y1="543.0" x2="688.8" y2="543.0" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/><circle cx="616.9" cy="543.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="full" data-row="concluded"><title>Full context, concluded: 94.4% (34 of 36), 95% interval 81.9% to 98.5%</title><line x1="541.5" y1="559.0" x2="719.5" y2="559.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/><rect x="672.7" y="555.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="plain" data-row="concluded"><title>Plain Claude Code, concluded: 72.2% (26 of 36), 95% interval 56.0% to 84.2%</title><line x1="264.4" y1="575.0" x2="566.1" y2="575.0" stroke="#1baf7a" stroke-width="2" stroke-linecap="round"/><polygon points="438.2,570.4 442.6,578.6 433.8,578.6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<line x1="24.0" y1="590.0" x2="776.0" y2="590.0" stroke="#e4e3de" stroke-width="1"/>
+<text x="24.0" y="619.0" font-size="12" fill="#0b0b0b" text-anchor="start" data-row="toolloop">toolloop</text>
+<text x="24.0" y="634.0" font-size="11" fill="#52514e" text-anchor="start" data-n="toolloop">n = 36</text>
+<g data-arm="contexto" data-row="toolloop"><title>Contexto, toolloop: 94.4% (34 of 36), 95% interval 81.9% to 98.5%</title><line x1="541.5" y1="605.0" x2="719.5" y2="605.0" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/><circle cx="676.4" cy="605.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="full" data-row="toolloop"><title>Full context, toolloop: 97.2% (35 of 36), 95% interval 85.8% to 99.5%</title><line x1="584.1" y1="621.0" x2="730.7" y2="621.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/><rect x="702.5" y="617.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<g data-arm="plain" data-row="toolloop"><title>Plain Claude Code, toolloop: 80.6% (29 of 36), 95% interval 65.0% to 90.2%</title><line x1="360.5" y1="637.0" x2="631.4" y2="637.0" stroke="#1baf7a" stroke-width="2" stroke-linecap="round"/><polygon points="527.6,632.4 532.0,640.6 523.2,640.6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"/></g>
+<text x="24.0" y="718.0" font-size="11" fill="#52514e" text-anchor="start" data-note="start">Each point is the share of probes answered correctly and the line through it is the Wilson 95% interval; n is the</text>
+<text x="24.0" y="733.0" font-size="11" fill="#52514e" text-anchor="start">number of probes (one figure per arm when the arms differ). Scoring is exact match on synthetic sessions.</text>
+<text x="24.0" y="751.0" font-size="11" fill="#52514e" text-anchor="start" data-note="start">The figures use repeat 0 of each seed. Intervals that overlap do not by themselves show that two arms are equal; the</text>
+<text x="24.0" y="766.0" font-size="11" fill="#52514e" text-anchor="start">paired comparison is in results.md.</text>
+</svg>

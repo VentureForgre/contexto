@@ -411,3 +411,16 @@ def test_read_run_says_when_the_directory_is_a_replay(tmp_path):
     out = write_run(tmp_path, [], [], [], kind="replay", model=None)
     with pytest.raises(records.RecordError, match="replay"):
         records.read_run(out)
+
+
+def test_read_run_refuses_a_probe_record_of_another_model_and_accepts_such_a_request(tmp_path):
+    s = small_script(1)
+    rows = probe_rows(s, "contexto", 0, set())
+    side = {**request_rows(s, "contexto", 0)[0][0], "model": "claude-haiku-5-5-small", "main": False}
+    out = write_run(tmp_path, [unit("contexto", 1)], rows, [side])
+    assert records.read_run(out).requests[0]["model"] == "claude-haiku-5-5-small"
+    rows[3] = {**rows[3], "model": "claude-opus-5-5"}
+    out = write_run(tmp_path, [unit("contexto", 1)], rows, [side])
+    with pytest.raises(records.RecordError) as exc:
+        records.read_run(out)
+    assert (exc.value.line, exc.value.field) == (4, "model") and "'claude-opus-5-5'" in str(exc.value)

@@ -237,6 +237,7 @@ def _arm(group: _Group, arm: str, bound: int, table: Mapping[str, Any]) -> dict[
         "max_input": max(sizes, default=0),
         "over_bound": sum(1 for size in sizes if size > bound),
         "http_errors": sum(1 for r in requests if not 200 <= r["status"] < 300),
+        "other_model_requests": sum(1 for r in requests if r["model"] not in (None, group.model)),
         "compactions": None if any(c is None for c in compactions) or not keys else sum(compactions),
         "cost": cost,
         "cost_per_unit": {model: usd / len(keys) for model, usd in cost.items()} if keys else {},
@@ -760,6 +761,11 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str) 
         entry = table["models"][model]
         if len(entry["rows"]) > 1 and entry.get("note"):
             lines.append(f"- {model}: {entry['note']}")
+    other = sum(a["other_model_requests"] for a in arms.values())
+    if other:
+        lines.append(f"- {_plural(other, 'request')} went to a model other than the run's own (a CLI sends some "
+                     "side requests to a smaller model). Every row prices them at that row's model, so the first "
+                     "row is close to the bill, not equal to it.")
     if not prices["run_model_priced"]:
         own = results["manifest"].get("models") or [results["manifest"]["model"]]
         for model in own:
@@ -863,6 +869,6 @@ def write(out_dir: Path | str, sources: Iterable[Path | str] | None = None,
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "results.json").write_text(json.dumps(results, indent=1) + "\n", encoding="utf-8")
     (out_dir / "results.md").write_text(render(results), encoding="utf-8")
-    if chart_module is not None:
+    if chart_module is not None and results["charts"]:
         chart_module.write(results, out_dir / "charts")
     return results
