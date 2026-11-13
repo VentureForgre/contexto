@@ -38,8 +38,9 @@ def test_bench_without_a_mode_says_which_modes_this_build_has(capsys):
     assert cli.main(["bench"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.strip() == ("contexto bench: error: this build has no live run; the modes it has are "
-                                    "--script-only")
+    listed = captured.err.strip().removeprefix("contexto bench: error: this build has no live run; the modes it has "
+                                               "are ")
+    assert listed != captured.err.strip() and "--script-only" in listed.split(", ")  # other builders add modes
 
 
 def test_bench_is_listed_and_documents_its_options(capsys):
@@ -192,7 +193,8 @@ def test_a_mode_is_added_by_adding_a_module(tmp_path, monkeypatch, capsys):
     _mode(tmp_path, monkeypatch, "t_hello", FLAG_MODE)
     (tmp_path / "_private.py").write_text("raise RuntimeError('never imported')\n", encoding="utf-8")
     (tmp_path / "t_notes.py").write_text("NOT_A_MODE = True\n", encoding="utf-8")  # no FLAG: skipped
-    assert [bench.mode_name(m) for m in bench.discover()] == ["script-only", "t-hello"]
+    found = [bench.mode_name(m) for m in bench.discover()]
+    assert found == sorted(found) and {"script-only", "t-hello"} <= set(found) and "t-notes" not in found
     assert cli.main(["bench", "--t-hello", "you", "--seed", "5"]) == 7
     assert capsys.readouterr().out == "hello you 5 v2\n"
     with pytest.raises(SystemExit):
