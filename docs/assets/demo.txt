@@ -1,0 +1,46 @@
+# Synthetic session: a stub CLI and a fake upstream on 127.0.0.1. No model.
+[fake upstream] listening on 127.0.0.1:8399, counting 1 token per 3.5 bytes received
+$ contexto run --bound 60000 --headroom-floor 5000 --no-version-check \
+    --upstream http://127.0.0.1:8399 claude
+contexto: session 8b1504c5be9148d685a82cd9e033d444 (bound 60,000, upstream flag)
+[stub claude] turn  1: history 13,222 tokens -> [fake upstream] received 13,222 tokens
+[stub claude] turn  2 ends with: "The staging deploy token is named amber-kestrel-17."
+[stub claude] turn  2: history 25,557 tokens -> [fake upstream] received 25,557 tokens
+[stub claude] turn  3: history 37,876 tokens -> [fake upstream] received 37,876 tokens
+[stub claude] turn  4: history 50,196 tokens -> [fake upstream] received 13,812 tokens
+[stub claude] turn  5: history 62,516 tokens -> [fake upstream] received 26,131 tokens
+[stub claude] turn  6: history 74,836 tokens -> [fake upstream] received 38,451 tokens
+[stub claude] turn  7: history 87,155 tokens -> [fake upstream] received 14,008 tokens
+[stub claude] turn  8: history 99,475 tokens -> [fake upstream] received 26,328 tokens
+[stub claude] runs: contexto sessions show 8b1504c5be9148d685a82cd9e033d444 | cut -c1-80
+Session: 8b1504c5be9148d685a82cd9e033d444
+Created: 2026-11-13T02:00:38Z
+Last activity: 2026-11-13T02:00:46Z
+Pages: 6
+Ledger records: 0
+Active records: 0
+Open obligations: 0
+Log events: 11
+Over-bound turns: 0
+Upstream 4xx: 0 (0 on model requests)
+Last epoch: 2
+Ledger: intact
+Pages, newest first:
+  pg_8a6a8deb22e00afe turn 5: Turn 6: here is the build log for step 6. Keep it 
+  pg_de57b2c694d8e8c1 turn 4: Turn 5: here is the build log for step 5. Keep it 
+  pg_2b49078a86e3a7e3 turn 3: Turn 4: here is the build log for step 4. Keep it 
+  pg_f74fbc5215bad524 turn 2: Turn 3: here is the build log for step 3. Keep it 
+  pg_c651a4e4df366074 turn 1: Turn 2: here is the build log for step 2. Keep it 
+  pg_8faebce203a18200 turn 0: Turn 1: here is the build log for step 1. Keep it 
+[stub claude] turn  9 asks: "What is the staging deploy token named?"
+[stub claude] turn  9: history 99,519 tokens -> [fake upstream] received 26,372 tokens
+[fake upstream] scripted reply: call contexto_search {"query": "staging deploy token"}
+[stub claude] ran contexto_search on the contexto MCP server, which returns:
+[best matching pages by relevance, shown newest first:]
+pg_c651a4e4df366074 (turn 1)
+  42070: build 02.0904 tested module mod_195 in 154 ms
+> 42116: The staging deploy token is named amber-kestrel-17.
+  42168: [turn 1] assistant:
+[Paged hits come only from paged-out turns; the conversation in view is newer than any of them.]
+[stub claude] turn  9: history 99,698 tokens -> [fake upstream] received 26,551 tokens
+[stub claude] scripted reply: "The search result names it: amber-kestrel-17."

@@ -1,0 +1,140 @@
+{
+ "version": 1,
+ "cols": 90,
+ "rows": 30,
+ "note": "Chunks of terminal output from spikes/readme/record_demo.py: [seconds, text].",
+ "events": [
+  [
+   0.002,
+   "# Synthetic session: a stub CLI and a fake upstream on 127.0.0.1. No model.\n"
+  ],
+  [
+   0.088,
+   "[fake upstream] listening on 127.0.0.1:8399, counting 1 token per 3.5 bytes received\n"
+  ],
+  [
+   1.863,
+   "$ contexto run --bound 60000 --headroom-floor 5000 --no-version-check \\\n    --upstream http://127.0.0.1:8399 claude\n"
+  ],
+  [
+   3.894,
+   "contexto: session 8b1504c5be9148d685a82cd9e033d444 (bound 60,000, upstream flag)\n"
+  ],
+  [
+   5.378,
+   "[stub claude] turn  1: history 13,222 tokens -> "
+  ],
+  [
+   5.47,
+   "[fake upstream] received 13,222 tokens\n"
+  ],
+  [
+   6.313,
+   "[stub claude] turn  2 ends with: \"The staging deploy token is named amber-kestrel-17.\"\n"
+  ],
+  [
+   6.371,
+   "[stub claude] turn  2: history 25,557 tokens -> "
+  ],
+  [
+   6.48,
+   "[fake upstream] received 25,557 tokens\n"
+  ],
+  [
+   7.337,
+   "[stub claude] turn  3: history 37,876 tokens -> "
+  ],
+  [
+   7.386,
+   "[fake upstream] received 37,876 tokens\n"
+  ],
+  [
+   8.197,
+   "[stub claude] turn  4: history 50,196 tokens -> "
+  ],
+  [
+   8.24,
+   "[fake upstream] received 13,812 tokens\n"
+  ],
+  [
+   9.054,
+   "[stub claude] turn  5: history 62,516 tokens -> "
+  ],
+  [
+   9.085,
+   "[fake upstream] received 26,131 tokens\n"
+  ],
+  [
+   9.902,
+   "[stub claude] turn  6: history 74,836 tokens -> "
+  ],
+  [
+   9.928,
+   "[fake upstream] received 38,451 tokens\n"
+  ],
+  [
+   10.741,
+   "[stub claude] turn  7: history 87,155 tokens -> "
+  ],
+  [
+   10.809,
+   "[fake upstream] received 14,008 tokens\n"
+  ],
+  [
+   11.628,
+   "[stub claude] turn  8: history 99,475 tokens -> "
+  ],
+  [
+   11.678,
+   "[fake upstream] received 26,328 tokens\n"
+  ],
+  [
+   13.289,
+   "[stub claude] runs: contexto sessions show 8b1504c5be9148d685a82cd9e033d444 | cut -c1-80\n"
+  ],
+  [
+   13.429,
+   "Session: 8b1504c5be9148d685a82cd9e033d444\nCreated: 2026-11-13T02:00:38Z\nLast activity: 2026-11-13T02:00:46Z\nPages: 6\nLedger records: 0\nActive records: 0\nOpen obligations: 0\nLog events: 11\nOver-bound turns: 0\nUpstream 4xx: 0 (0 on model requests)\nLast epoch: 2\nLedger: intact\nPages, newest first:\n  pg_8a6a8deb22e00afe turn 5: Turn 6: here is the build log for step 6. Keep it \n"
+  ],
+  [
+   13.43,
+   "  pg_de57b2c694d8e8c1 turn 4: Turn 5: here is the build log for step 5. Keep it \n  pg_2b49078a86e3a7e3 turn 3: Turn 4: here is the build log for step 4. Keep it \n  pg_f74fbc5215bad524 turn 2: Turn 3: here is the build log for step 3. Keep it \n  pg_c651a4e4df366074 turn 1: Turn 2: here is the build log for step 2. Keep it \n  pg_8faebce203a18200 turn 0: Turn 1: here is the build log for step 1. Keep it \n"
+  ],
+  [
+   17.469,
+   "[stub claude] turn  9 asks: \"What is the staging deploy token named?\"\n"
+  ],
+  [
+   18.683,
+   "[stub claude] turn  9: history 99,519 tokens -> "
+  ],
+  [
+   18.802,
+   "[fake upstream] received 26,372 tokens\n"
+  ],
+  [
+   18.804,
+   "[fake upstream] scripted reply: call contexto_search {\"query\": \"staging deploy token\"}\n"
+  ],
+  [
+   20.113,
+   "[stub claude] ran contexto_search on the contexto MCP server, which returns:\n"
+  ],
+  [
+   20.114,
+   "[best matching pages by relevance, shown newest first:]\npg_c651a4e4df366074 (turn 1)\n  42070: build 02.0904 tested module mod_195 in 154 ms\n> 42116: The staging deploy token is named amber-kestrel-17.\n  42168: [turn 1] assistant:\n[Paged hits come only from paged-out turns; the conversation in view is newer than any of them.]\n"
+  ],
+  [
+   23.332,
+   "[stub claude] turn  9: history 99,698 tokens -> "
+  ],
+  [
+   23.442,
+   "[fake upstream] received 26,551 tokens\n"
+  ],
+  [
+   23.451,
+   "[stub claude] scripted reply: \"The search result names it: amber-kestrel-17.\"\n"
+  ]
+ ]
+}
