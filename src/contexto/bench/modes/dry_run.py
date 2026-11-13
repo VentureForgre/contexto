@@ -20,7 +20,8 @@ def add_arguments(parser) -> None:
     parser.add_argument(FLAG, action="store_true",
                         help="print the live run's plan and token estimate, per arm and in total, and the "
                              "--budget-tokens figure to pass; make no calls")
-    _live_options.add(parser)
+    # The options a plan depends on (--model, --arms, --budget-tokens and the rest) are the live run's own
+    # and are listed under it: contexto.bench.modes.live adds them.
 
 
 def run(args: argparse.Namespace) -> int:
