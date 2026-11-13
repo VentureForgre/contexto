@@ -71,6 +71,78 @@ proxy (Anthropic Messages API)        mcp server (stdio, JSON-RPC)
                                         contexto_search
 ```
 
+Standing service (D70). `contexto serve` runs the same proxy and engine for clients the launcher
+does not start (IDE extensions, the desktop app, the Agent SDK, `claude -p` in CI), which accept
+`ANTHROPIC_BASE_URL`:
+
+```
+contexto serve               (service, until SIGINT, SIGTERM or SIGHUP)
+  |-- listens on 127.0.0.1:7837 (--port), never another interface
+  |-- every request: Host and Origin checks, then /<token>/ as the first path segment, else 403
+  |-- POST /v1/messages, /v1/messages/count_tokens: routed by Claude Code's session id to
+  |     one session store and one engine per id (its own lock and session log)
+  |-- any request without a usable session id: forwarded unchanged, logged in serve.log
+  `-- /contexto/health, /contexto/resolve: answered locally, never forwarded
+
+client (started by anything)           mcp server (contexto mcp --serve, started by the client)
+  ANTHROPIC_BASE_URL =                   asks /contexto/resolve which session a tool call is in
+    http://127.0.0.1:7837/<token>
+```
+
+- Token. `serve` requires a token on every request: `secrets.token_urlsafe(32)` in
+  `$CONTEXTO_HOME/serve.token`, 0600 from its first byte, created on first use, never read through
+  a symlink; the service refuses to start when the file is not a regular file of the user with no
+  group or other permission bit (`contexto serve --rotate-token` replaces it). The raw first path
+  segment of the request target is compared with `hmac.compare_digest`, with no percent-decoding
+  and no path normalisation, after the Host and Origin checks; any other request gets the proxy's
+  one 403 body, after its body is read and dropped. The prefix is then removed: the path forwarded
+  upstream, every log entry and every error is the path without the token, and the token is never
+  logged, printed, put on a command line, or put in an error message. A refused request is logged
+  by reason only, at most once a second with a count of the rest. Measured on Claude Code 2.1.322
+  (`docs/research/D70-serve-probes.md`): it keeps a base URL's path prefix on every request, sends
+  `Host: 127.0.0.1:<port>` or `localhost:<port>`, and never `Origin`.
+- Routing. The id is the `X-Claude-Code-Session-Id` header (a plain id, at most 128 characters),
+  else `session_id` in `metadata.user_id`. A request with no id, an id that is not a plain id, or a
+  header and body that differ (`session_id_mismatch`) is forwarded unchanged through the identity
+  transform and never reaches a store. A request whose `metadata.user_id` names a valid
+  `parent_session_id` (an agent-team teammate in its own process, D50) is routed to the parent's
+  session, and the pair is remembered so the teammate's `count_tokens` (header only) follows. At
+  the first request of an id the service reuses the Contexto session that last served that Claude
+  Code session (its `cli_sessions` record, D55; sessions made by `contexto run claude` included),
+  else creates one named `uuid4().hex`: a client-supplied string never names a directory. Only a
+  `POST /v1/messages` creates a session; a `count_tokens` for an id no session served is forwarded
+  unchanged. The id is recorded in the session's metadata as the launcher records it. A session
+  the service creates records no working directory.
+- Sessions. Each open session has its own engine, transform lock and session log; the rewrite
+  engine's rules apply to it unchanged, and degraded mode, the stream hold and fail-open are the launcher path's
+  code. At most `--max-sessions` (64) are open; one idle for `--idle-minutes` (60) is closed, and
+  the least recently used is closed to make room. Closing flushes the recorded ids, runs the
+  missing-tools report, logs, and releases the store; the next request reopens the session and the
+  engine resumes from its epoch record (rule 16). A session with a request in flight is never
+  closed; when every open session has one, a request of another id is forwarded unchanged and
+  logged (`session_cap`). The engine options (`--bound`, `--allow-large-bound`,
+  `--window-fraction`, `--headroom-floor`, `--observe-thinking`) are validated as for `contexto
+  run` and apply to every session.
+- Local endpoints, under the token prefix, JSON, bodies at most 64 KiB: `GET /contexto/health`
+  gives `{"ok": true, "version", "port", "sessions"}`; `POST /contexto/resolve` with
+  `{"tool_use_id"}` gives `{"session": <Contexto session id>}`, 404 `{"error":
+  "unknown_tool_use"}`, or 400. The service keeps the newest 8,192 ids of client tool calls, taken
+  from each response in the usage callback, which the stream hold (PR #74) runs before it releases
+  a tool call: an id resolves before the client receives the event that completes the call.
+  Claude Code 2.1.322 gives an MCP server the `tool_use` id of each call
+  (`_meta["claudecode/toolUseId"]`) and nothing else that names the session.
+- Files under `$CONTEXTO_HOME`, 0600: `serve.token`; `serve.json` (`{"port", "pid"}`, written once
+  listening, removed on a clean shutdown); `serve.log` (content-free JSON lines, renamed once to
+  `serve.log.1` at 5 MB).
+- Guards. A taken port is one line and exit 1, naming a `contexto serve` that already runs there.
+  An upstream that is a loopback address on the service's own port, or that carries the service's
+  token, is refused with a pointer to `--upstream`; the service never falls back to another
+  upstream. The service warns at start when its own environment sets a cloud-provider switch
+  (`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_MANTLE`, `_ANTHROPIC_AWS`): Claude Code then
+  sends nothing to `ANTHROPIC_BASE_URL` (measured on 2.1.322).
+- Out of scope: listening off loopback, more than one user, and any request path but Claude Code's
+  Messages API (Codex, Chat Completions, Bedrock and Vertex paths are forwarded unchanged).
+
 Upstream resolution: the launcher computes the base URL Claude Code would otherwise use, in this
 order (measured in M0, PR #16 findings 1 and 1a: a settings-file `env.ANTHROPIC_BASE_URL`
 overrides the process environment, and in a git worktree the main checkout's
@@ -1302,7 +1374,8 @@ checked. The routine for testing a new version is `docs/cli-updates.md`.
 ## CLI
 
 `contexto run claude [args]`, `contexto run codex [args]` (lane A step 2), `contexto proxy` (run
-the proxy alone, for tests), `contexto mcp`, `contexto sessions list|show <id>`,
+the proxy alone, for tests), `contexto serve` (the standing service, D70; also `--print-settings`,
+`--print-mcp-config`, `--rotate-token`, `--status`), `contexto mcp`, `contexto sessions list|show <id>`,
 `contexto sessions prune`, `contexto recall <page id>`, `contexto search <words>`, `contexto state`.
 Exit codes and `--help` documented in README.
 

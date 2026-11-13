@@ -26,6 +26,24 @@ In scope:
   and must never store or log them. Reports of the proxy binding to another interface, leaking
   auth headers or conversation text into its logs, or sending requests anywhere other than the
   configured upstream are in scope.
+- **The local service** (`contexto serve`). It listens on `127.0.0.1` only, on a fixed port (7837
+  unless `--port N`), and has no option to listen anywhere else. It requires a token on every
+  request: 32 random bytes in `$CONTEXTO_HOME/serve.token`, created with mode 0600, carried as the
+  first path segment of the base URL a client is given (`http://127.0.0.1:<port>/<token>`). The
+  token protects the port: without it a request is not forwarded upstream, does not reach a session
+  store, and is not answered by the service's own endpoints (`/contexto/health`,
+  `/contexto/resolve`). The raw first path segment is compared in constant time, after the same
+  `Host` and `Origin` checks as the proxy; every refusal gets the same 403. The service removes the
+  token before it forwards or logs a request, and refuses to start if the token file is a symlink,
+  is not a regular file, or has a group or other permission bit set. `contexto serve
+  --rotate-token` replaces the token. `serve.log` holds event names, reasons, counts, request paths
+  without the token, and status codes, never header values, bodies, the token, or the upstream
+  URL; a refused request is logged by its reason only, at most once a second. A client-supplied
+  session id selects a store only through the ids recorded in the stores and never names a
+  directory. Reports of the service answering without the token, the token reaching a log, stderr,
+  an error message or the upstream, a request reaching another session's store, or the service
+  listening off loopback are in scope. The token is as private as the file or environment it is
+  copied into: a settings file that holds the base URL holds the token.
 - **The session store** under `$CONTEXTO_HOME` (default `~/.contexto`). Every directory Contexto
   creates there is mode 0700 and every file 0600, whatever the umask; an existing
   `$CONTEXTO_HOME` keeps its own mode, and `sessions/` is narrowed to 0700. The temporary
@@ -49,7 +67,11 @@ In scope:
 
 Out of scope: the upstream model API and any proxy in front of it, Claude Code and Codex
 themselves, other local processes running as the same user (they can already read that user's
-files), and Windows, which is not supported.
+files, the `serve` token included), and Windows, which is not supported. For `contexto serve`
+also: a token the user copied into a file, environment or command line that others can read; a
+process that takes the service's port while the service is not running (a client that still has
+the URL then sends it the token and its requests); and use by more than one user or from another
+machine, which the service is not built for.
 
 ## What the session store holds
 
@@ -80,7 +102,10 @@ These hold no conversation text:
 
 `$CONTEXTO_HOME` itself holds `affinity.salt`, a random value that the `X-Session-Affinity` header
 is hashed with, so the header does not reveal the session id, and `choose.lock`, an empty lock file
-that lets one launch at a time pick a session automatically.
+that lets one launch at a time pick a session automatically. `contexto serve` adds `serve.token`
+(the token), `serve.json` (the running service's port and process id, removed on a clean shutdown)
+and `serve.log` with one rotated copy, `serve.log.1` (at most 5 MB each); all are mode 0600 and
+none holds conversation text.
 
 Treat `$CONTEXTO_HOME` like your shell history or the CLI's own transcripts. File modes protect it
 from other users on the machine, not from processes running as you, backups, or disk images.

@@ -957,7 +957,9 @@ class _ServeHandler(_Handler):
         """``"token"`` unless the request target starts with ``/<token>/``; else None, with the prefix
         removed from ``self.path``. The target is read from the request line as it was sent:
         ``http.server`` has already collapsed leading slashes in ``self.path``, and nothing here
-        percent-decodes or normalises it. The first segment is compared in constant time."""
+        percent-decodes or normalises it. The first segment is compared in constant time. A target
+        that holds the token again after the prefix is refused too, so the token is never part of a
+        path or query sent upstream."""
         words = self.requestline.split()
         target = words[1] if len(words) >= 2 else ""
         segment, slash, rest = target[1:].partition("/")
@@ -967,6 +969,8 @@ class _ServeHandler(_Handler):
             given = b""
         matches = hmac.compare_digest(given, self.service.token_bytes)
         if not (matches and slash and target.startswith("/")):
+            return "token"
+        if self.service.token in rest:  # a doubled prefix, or the token in the query: it would be forwarded
             return "token"
         path = "/" + rest
         if path.startswith("//"):  # as http.server does for a request without a prefix
@@ -1123,7 +1127,8 @@ class _ServeHandler(_Handler):
 class _StopSignals:
     """SIGINT, SIGTERM and SIGHUP for the command. The first one ends ``wait``; a later one only sets
     ``again``, which ends the shutdown's wait for requests in flight. The handler raises only while
-    ``wait`` is sleeping, so nothing else is ever interrupted part-way."""
+    ``wait`` is sleeping, so nothing else is ever interrupted part-way. A SIGHUP that was ignored when
+    the command started (``nohup``) stays ignored."""
 
     class _Wake(BaseException):
         pass
@@ -1137,6 +1142,8 @@ class _StopSignals:
     def install(self) -> None:
         for signum in STOP_SIGNALS:
             try:
+                if signum == signal.SIGHUP and signal.getsignal(signum) is signal.SIG_IGN:
+                    continue  # started under nohup: a hangup stays ignored
                 self._previous[signum] = signal.signal(signum, self._handle)
             except ValueError:  # not the main thread
                 break
@@ -1241,6 +1248,15 @@ def status(home: Path, stdout) -> int:
 
 
 def serve(args: Any, home: Path, stderr) -> int:
+    signals = _StopSignals()
+    signals.install()
+    try:
+        return _serve(args, home, stderr, signals)
+    finally:
+        signals.restore()
+
+
+def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
     options = LaunchOptions(bound=args.bound, upstream=args.upstream, observe_thinking=args.observe_thinking,
                             allow_large_bound=args.allow_large_bound, window_fraction=args.window_fraction,
                             headroom_floor=args.headroom_floor)
@@ -1260,43 +1276,36 @@ def serve(args: Any, home: Path, stderr) -> int:
                                idle_s=args.idle_minutes * 60, stderr=stderr)
     except ValueError as exc:
         raise ServeError(f"invalid upstream (from {upstream.source}): {exc}", EXIT_USAGE) from None
-    signals = _StopSignals()
-    signals.install()
     try:
-        try:
-            port = service.start(port)
-        except OSError as exc:
-            if exc.errno != errno.EADDRINUSE:
-                raise ServeError(f"cannot start on {LISTEN_HOST}:{port}: {exc.strerror or type(exc).__name__}") \
-                    from None
-            state = running_state(home)
-            if state is not None and state["port"] == port and state["pid"] != os.getpid():
-                raise ServeError(f"contexto serve is already running on {LISTEN_HOST}:{port} "
-                                 f"(pid {state['pid']})") from None
-            raise ServeError(f"port {port} on {LISTEN_HOST} is in use; stop what holds it, or pass --port N") \
-                from None
-        try:
-            check_upstream_loop(upstream, port, token)  # a port the system picked (--port 0)
-            print(f"contexto serve: listening on {LISTEN_HOST}:{port} (bound {options.bound:,}, upstream "
-                  f"{upstream.source})", file=stderr, flush=True)
-            if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: no project base URL (D52)
-                note = untrusted_note("env.ANTHROPIC_BASE_URL", upstream.ignored, "Pass --upstream", os.environ)
-                print(f"contexto serve: {note}", file=stderr, flush=True)
-            names = cloud_provider_variables()
-            if names:
-                print(f"contexto serve: {cloud_provider_warning(names, 'the environment of this service')}",
-                      file=stderr, flush=True)
-            warning = start_warning(options.bound, options.headroom_floor, assumed_overhead())
-            if warning:
-                print(f"contexto serve: {warning}", file=stderr, flush=True)
-            received = signals.wait()
-        except BaseException:
-            service.stop()
-            raise
-        service.stop(hurry=lambda: signals.again, signal_name=signal.Signals(received).name)
-        return 0
-    finally:
-        signals.restore()
+        port = service.start(port)
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE:
+            raise ServeError(f"cannot start on {LISTEN_HOST}:{port}: {exc.strerror or type(exc).__name__}") from None
+        state = running_state(home)
+        if state is not None and state["port"] == port and state["pid"] != os.getpid():
+            raise ServeError(f"contexto serve is already running on {LISTEN_HOST}:{port} "
+                             f"(pid {state['pid']})") from None
+        raise ServeError(f"port {port} on {LISTEN_HOST} is in use; stop what holds it, or pass --port N") from None
+    try:
+        check_upstream_loop(upstream, port, token)  # a port the system picked (--port 0)
+        print(f"contexto serve: listening on {LISTEN_HOST}:{port} (bound {options.bound:,}, upstream "
+              f"{upstream.source})", file=stderr, flush=True)
+        if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: no project base URL (D52)
+            note = untrusted_note("env.ANTHROPIC_BASE_URL", upstream.ignored, "Pass --upstream", os.environ)
+            print(f"contexto serve: {note}", file=stderr, flush=True)
+        names = cloud_provider_variables()
+        if names:
+            print(f"contexto serve: {cloud_provider_warning(names, 'the environment of this service')}",
+                  file=stderr, flush=True)
+        warning = start_warning(options.bound, options.headroom_floor, assumed_overhead())
+        if warning:
+            print(f"contexto serve: {warning}", file=stderr, flush=True)
+        received = signals.wait()
+    except BaseException:
+        service.stop()
+        raise
+    service.stop(hurry=lambda: signals.again, signal_name=signal.Signals(received).name)
+    return 0
 
 
 def run(args: Any, *, stdout=None, stderr=None) -> int:

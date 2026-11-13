@@ -191,6 +191,8 @@ def wrong_targets(token: str) -> dict[str, str]:
         "empty": "/",
         "absolute form": f"http://127.0.0.1/{token}/v1/messages",
         "upper case": f"/{token.swapcase()}/v1/messages",
+        "doubled": f"/{token}/{token}/v1/messages",  # the second one would be forwarded upstream
+        "again in the query": f"/{token}/v1/messages?key={token}",
     }
 
 
@@ -326,6 +328,44 @@ def test_an_id_that_is_not_a_plain_id_never_names_a_session(make_service, home, 
     response, _ = call(service, "POST", "/v1/messages", body(None), headers(**{"X-Claude-Code-Session-Id": value}))
     assert response.status == 200 and sessions(home) == []
     assert not (home / "etc").exists()
+
+
+def test_a_routed_body_is_parsed_once(make_service, home, monkeypatch):
+    """The service reads the body to route it; the proxy's transform then takes that parse."""
+    import contexto.proxy as proxy_module
+
+    data = body(A)
+    parsed: list[str] = []
+
+    def counting(module):
+        original = module.loads_bounded
+
+        def loads(value):
+            if value == data:
+                parsed.append(module.__name__)
+            return original(value)
+        monkeypatch.setattr(module, "loads_bounded", loads)
+
+    counting(proxy_module)
+    counting(serve)
+    service = make_service()
+    assert call(service, "POST", "/v1/messages", data, headers(A))[0].status == 200
+    assert call(service, "POST", "/v1/messages", data, headers())[0].status == 200  # routed by the body's id
+    assert parsed == ["contexto.serve", "contexto.serve"]
+    assert len([e for e in session_log(home, served(home)[A]) if e["event"] == "request"]) == 2
+
+
+def test_a_compressed_body_is_routed_like_any_other(make_service, home):
+    import gzip
+
+    service = make_service()
+    response, _ = call(service, "POST", "/v1/messages", gzip.compress(body(A)),
+                       {**headers(A), "Content-Encoding": "gzip"})
+    assert response.status == 200 and set(served(home)) == {A}
+    assert StubUpstream.received[0][3] == body(A)  # forwarded decoded (rule 15)
+    # A body that cannot be decoded gets the proxy's own 415 and makes no session.
+    response, _ = call(service, "POST", "/v1/messages", b"not gzip", {**headers(B), "Content-Encoding": "gzip"})
+    assert response.status == 415 and set(served(home)) == {A}
 
 
 def test_the_body_id_routes_when_the_header_is_absent(make_service, home):

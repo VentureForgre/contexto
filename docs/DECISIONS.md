@@ -2705,6 +2705,106 @@ the owner's delegation. Open decisions are listed at the end with the options an
   outside the repository. Old commits, pull request diffs and pull request comments still hold the
   hostname (D42).
 
+## D70. `contexto serve`, gateway hint headers, and a cloud-provider guard
+
+- **`contexto serve`: the engine as a standing local service for clients Contexto does not
+  launch.** Claude, 2026-11-12, under D0; contract change (Architecture, "Standing service"). The
+  engine ran only under `contexto run claude|codex`, which starts one proxy for the one process it
+  launches. The VS Code and JetBrains extensions, the desktop app, the Agent SDK, the GitHub Action
+  and `claude -p` in CI are started by something else and had no way in, though each accepts
+  `ANTHROPIC_BASE_URL`. `contexto serve` listens on `127.0.0.1:7837` until stopped and gives each
+  Claude Code session its own store and engine. Use is in `docs/serve.md`; the measured facts it
+  relies on are in `docs/research/D70-serve-probes.md` (Claude Code 2.1.322, zero spend).
+  - **Token.** `serve` requires a token on every request: `secrets.token_urlsafe(32)` in
+    `$CONTEXTO_HOME/serve.token` (0600, never read through a symlink, refused when another mode or
+    not a regular file), carried as the first path segment of the base URL. Claude Code keeps a
+    base URL's path prefix on every request it sends (all 4 request kinds, in 34 runs; the same
+    whether the URL comes from the environment, a `--settings` file or the config directory's
+    settings). The raw first segment is compared in constant time, with no decoding and no path
+    normalisation, after the Host and Origin checks of D53, and the prefix is removed before
+    anything is forwarded or logged. A refused request is logged by reason only, at most once a
+    second.
+  - **Routing.** By Claude Code's session id: the `X-Claude-Code-Session-Id` header (on every POST),
+    else `metadata.user_id`'s `session_id` (on `/v1/messages` only). A request with no usable id, or
+    whose header and body disagree, is forwarded unchanged and never reaches a store. A teammate
+    with `parent_session_id` goes to the lead's session (D50), as it does under the launcher, where
+    one engine sees every request. Each session has its own unstarted `ContextoProxy` as the
+    handler's owner for the request, so the engine, its lock, the stream hold, degraded mode and
+    fail-open are the launcher path's code, and a long rewrite in one session does not hold
+    another. `proxy.py` changed by 13 lines: the refusal message became a constant and the body
+    parse a method, so the service parses a body once for routing and for the transform.
+  - **Which store.** The Contexto session that last served the Claude Code session
+    (`cli_sessions`, D55), else a new one named `uuid4().hex`. A conversation therefore keeps its
+    pages and pins between `contexto run claude --resume <id>` and a `serve` client. The service
+    opens a session that another process holds open, where the launcher's automatic choice opens a
+    new one: for the service that other process is normally the session's own MCP server,
+    and a new store there would lose the conversation's pages.
+  - **Bounded.** At most `--max-sessions` (64) sessions open, closed after `--idle-minutes` (60)
+    idle or to make room, never with a request in flight; a reopened session resumes from its
+    epoch record (rule 16). When every open session is busy a request of another session is
+    forwarded unchanged and logged, since queueing it behind a stranger's request would stall a
+    client for as long as that request runs.
+  - **Tool calls.** Claude Code gives an MCP server the model's `tool_use` id with each call
+    (`_meta["claudecode/toolUseId"]`, every call in every run) and nothing else that names the
+    session; `CLAUDE_CODE_SESSION_ID` in the server's environment is set once at spawn and is
+    stale after `/clear`. So the service keeps the newest 8,192 tool-use ids with their sessions
+    and answers `POST /contexto/resolve`. The ids are registered in the usage callback, which the
+    stream hold runs before it releases a tool call, so an id resolves before the client receives
+    the event that completes the call (tested against a gated upstream).
+  - **No working directory** is recorded for a session the service creates: the service does not
+    run in the client's directory. Pinned file sources of such a session are not checked for
+    staleness and `--continue` does not find it by directory; `--resume <id>` does. A session the
+    launcher created keeps its directory.
+  - **A new session id is a new store.** `/clear` starts a new id (D50), so under `serve` what was
+    paged out or pinned before it stays in the earlier store. Under the launcher one store serves
+    the whole launch. Nothing in a request links the new id to the old one.
+  - **Guards.** An upstream that is the service itself (a loopback address on its own port, or a
+    URL carrying its token) is refused: a user who set a client up has that URL as
+    `ANTHROPIC_BASE_URL`, which is also where the default upstream is read from. The service warns
+    when its own environment sets a cloud-provider switch, since such a client sends nothing to
+    `ANTHROPIC_BASE_URL` (0 requests in 5 runs, one per provider). `--status` asks the health
+    endpoint only on the port `serve.json` records for a process that still runs, so the token is
+    not sent to a port the service did not record.
+  - **Rejected: a custom header as the token carrier.** Every client would need a second setting
+    besides the base URL, and each client's support for one, on every request including `HEAD
+    /api/hello` and `GET /v1/models`, was not measured. The path prefix was measured on all four
+    request kinds and needs only the one setting every client has. A query string on the base URL
+    is no carrier either: Claude Code 2.1.322 appends the path after it (`HEAD
+    /tok?beta=true/api/hello`).
+  - **Rejected: the Claude Code session id as the store's directory name.** A string a client sent
+    would name a directory, and a client could attach to a session a user named with `--session`
+    by sending that name as its id. A conversation the launcher served is already in a store named
+    otherwise, so reuse needs the lookup through the recorded ids in any case, and a teammate's id
+    must reach its lead's store, not one of its own.
+  - **Rejected: an HTTP MCP endpoint on the service.** Over HTTP the Claude Code session id is in
+    no header and no body, before or after `/clear`; `${CLAUDE_CODE_SESSION_ID}` is not expanded in
+    a server's `headers`, and a `headersHelper` runs once per process without it (measured). An
+    HTTP endpoint would need the same tool-use lookup, a second protocol on the service's socket,
+    and a copy of the token in each MCP config, which can be a project file. A settings file
+    cannot declare an MCP server either (measured: ignored). The stdio server reads the token file
+    itself and makes one small local request.
+  - **Measured** (2026-11-12, macOS arm64, Python 3.13, a stub upstream on 127.0.0.1, zero spend).
+    With the real client: `claude -p` (2.1.322, temporary `HOME` and `CLAUDE_CONFIG_DIR`, a stub
+    key, outbound network denied except localhost) given the settings `--print-settings` prints
+    sent 2 requests per run through the service, `HEAD /api/hello` and `POST
+    /v1/messages?beta=true`, both arriving at the stub without the token; two runs with two
+    session ids made two stores, each holding only its own request, and the two `HEAD` requests
+    are in `serve.log` and in no store (`tests/test_serve_real_client.py`). Latency
+    (`spikes/m2/serve/bench_serve.py`): the same 63,119-byte Messages request, 1,000 times through
+    a plain `ContextoProxy` started as the launcher starts it and 1,000 times through `serve`,
+    alternating, the engine and a session store on both sides: median 15.34 ms against 15.06 ms
+    (p90 40.81 and 38.69), and 15.46 against 15.06 over 400 in an earlier run. The difference of
+    the medians, -0.28 and -0.40 ms, is inside the noise: the machine was running several other
+    test suites (load average 41 to 57 on 18 cores), so these runs bound what `serve` adds at well
+    under a millisecond and say no more. Throughput: 20 sessions sending 50 requests each at once
+    completed 68 and 86 requests a second in the two runs, against 44 and 59 for one session
+    sending alone under the same load.
+  - **Not confirmed.** No IDE extension, desktop app, Agent SDK program or GitHub Action was run
+    against the service; only `claude -p` was. A claude.ai (OAuth) login was not run. `contexto
+    mcp --serve`, the client of `/contexto/resolve`, is a separate change, so the endpoint is
+    tested with plain HTTP only. Linux was not run locally (CI runs the suite there, without
+    `claude`).
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.
