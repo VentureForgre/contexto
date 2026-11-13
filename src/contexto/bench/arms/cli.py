@@ -197,14 +197,15 @@ class Session:
                 turn.reads += sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_use"
                                   and b.get("name") == READ_TOOL) if isinstance(content, list) else 0
             elif kind == "result":
-                if event.get("is_error"):
+                text = str(event.get("result") or "")
+                if event.get("is_error") or THRASHING in text:
                     if (stop := ledger_stop(unit)) is not None:
                         raise stop
-                    if self.thrashing:
+                    if self.thrashing or THRASHING in text:
                         raise Stop("thrashing", f"Claude Code stopped on turn {number}: auto-compaction was thrashing")
                     subtype = event.get("subtype") if isinstance(event.get("subtype"), str) else "error"
                     raise Stop("cli_error", f"Claude Code reported an error on turn {number} ({subtype[:40]})")
-                turn.text = str(event.get("result") or "")
+                turn.text = text
                 return turn
 
     def _wait(self, timeout: float) -> int | None:
@@ -228,15 +229,15 @@ class Session:
         return code
 
     def kill(self) -> int | None:
-        """Stop the child and everything it started: SIGTERM to the group, then SIGKILL."""
+        """Stop the child and everything it started: SIGTERM to its process group, then SIGKILL if
+        the child has not exited. The group is signalled only while the child has not been reaped,
+        so its id cannot have passed to another process."""
         for signum in (signal.SIGTERM, signal.SIGKILL):
             if self.proc.poll() is not None:
                 break
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(self.proc.pid, signum)
             self._wait(KILL_TIMEOUT_S)
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(self.proc.pid, signal.SIGKILL)  # what the child left behind in its group
         return self.proc.poll()
 
 

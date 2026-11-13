@@ -215,6 +215,7 @@ def new_manifest(config: Config, claude_version: str | None) -> dict[str, Any]:
         "budget_tokens": config.budget, "spent_tokens": 0,
         "credential_source": config.credentials.source,
         "cli_environment": {**cli.ENV, "CLAUDE_CODE_PROMPT_CACHE_TTL": config.cache_ttl,
+                            **{name: os.environ[name] for name in sorted(cli.KEPT_NAMES) if name in os.environ},
                             "settings": {"permissions": {"allow": [cli.READ_TOOL]}}},
         "arm_differences": list(ARM_DIFFERENCES), "metering": list(METERING),
         "request_classes": None,  # "header" when Claude Code named each request's class, else "inferred"
@@ -374,9 +375,12 @@ def run(config: Config, scripts: dict[int, Script] | None = None, *, stdout: Tex
                     result = bench_arms.UnitResult().stopped(
                         "error", f"the benchmark itself failed in this unit ({type(exc).__name__})")
                 finally:
-                    meter.stop()
-                    if not config.keep_work:
-                        shutil.rmtree(directory, ignore_errors=True)
+                    try:
+                        meter.stop()
+                        if not config.keep_work:
+                            shutil.rmtree(directory, ignore_errors=True)
+                    except KeyboardInterrupt:  # a second Ctrl+C: the unit is still recorded below
+                        interrupted = True
                 if result.status == "complete" and ledger.stop is not None:
                     result.stopped(ledger.stop, "the run was stopped while this unit was finishing")
                 entry = unit_entry(arm, seed, repeat, attempt, result, meter, script)
@@ -395,6 +399,8 @@ def run(config: Config, scripts: dict[int, Script] | None = None, *, stdout: Tex
                     f"({entry['requests']} requests, {entry['tokens']:,} tokens; {ledger.spent:,}{budget} spent)")
                 if interrupted or ledger.stop is not None:
                     break
+    except KeyboardInterrupt:  # outside an arm: while a unit's record was being written
+        interrupted = True
     finally:
         if not config.keep_work and config.work is None:
             shutil.rmtree(work, ignore_errors=True)

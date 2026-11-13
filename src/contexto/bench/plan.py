@@ -24,11 +24,19 @@ and at worst three (the Opus run in run #4's comparison table: 44 requests for 1
 tool-loop turn takes one round per file, each adding that file to the input, and the loop never
 rotates [assumed: no recorded run; one round per half file at worst].
 
-``plain`` arm [assumed throughout]. Claude Code's whole history is resent each request and grows
-until the last usage reaches the trigger (the bound); then one summary request reads the whole
-context and the history restarts at the head plus the summary (``SUMMARY_TOKENS_EXPECTED``, or at
-worst the 20,000-token summary reserve plus 50,000 tokens of files Claude Code re-attaches). A probe
-turn takes one request, at worst the Contexto arm's worst rounds.
+``plain`` arm [assumed, except where a stub run is cited]. Claude Code resends its whole history
+each request. Before a request it compares the last response's usage, plus its own estimate of the
+text added since, with the trigger (the bound); at or over it, a summary request reads the whole
+context and the history restarts at the head, the summary and the files Claude Code re-attaches. Two
+things were seen with Claude Code 2.1.322 against a stub upstream that reports modelled usage (the
+full-size v2 script, bound 150,000, 2026-11-12), and the expected case uses them: Claude Code sizes
+text it has not sent yet at about 3 bytes per token, where this log text is 1.8 (``PENDING_FACTOR``),
+so a session passes the bound by up to a turn before it compacts (158,168 input tokens at the
+largest); and after each of four compactions the next request was about 25,000 tokens larger than
+the head and the new turn (``RESTORED_TOKENS_EXPECTED``, for a script with files). A probe turn takes
+one request. The worst case takes the Contexto arm's worst rounds, two summary requests per
+compaction (the stub run had two; the stub's summary is not in the form Claude Code asks for, so the
+second may be a retry) and 70,000 tokens of summary and re-attached files.
 
 ``full`` arm. One request per probe turn carrying the whole script: the history estimate, the probe
 turns so far and this arm's earlier answers. Run #4's baseline measured 426,266 to 429,087 input
@@ -80,6 +88,8 @@ CONTENT_ROUND_TOKENS = 500  # [assumed] a pin call and its result
 OUTPUT_PER_REQUEST = 400  # run #3: 22,693 output tokens over 44 requests; run #4: 13,802 over 45
 FULL_OUTPUT_EXPECTED = 2_000  # run #4's baseline: 12,023 output tokens over 6 requests
 SUMMARY_TOKENS_EXPECTED = 3_000  # [assumed] a compaction summary
+RESTORED_TOKENS_EXPECTED = 25_000  # files re-attached after a compaction: about 24,900 in the stub run
+PENDING_FACTOR = 0.6  # Claude Code's size for unsent log text (3 bytes per token) over its modelled size (1.8)
 SUMMARY_TOKENS_WORST = 20_000  # Claude Code's summary output reserve (research: min(max output, 20,000))
 RESTORED_TOKENS_WORST = 50_000  # [assumed] files Claude Code re-attaches after a compaction
 COMPACTION_RESERVE = 33_000  # Claude Code compacts at its window minus this (read in the 2.1.322 bundle)
@@ -95,9 +105,11 @@ NOTES = (
     "live runs (docs/research/M2-usage-savings-run3.md and M2-acceptance-run4.md): a probe turn takes 3.3 rounds of "
     "2,100 tokens expected and 5 of 8,200 at worst; a content turn takes one request in 9 of 10 cases and three at "
     "worst; the tool-loop turn takes one round per file [assumed].",
-    "- plain [assumed: no plain run has been recorded]: the whole history every request; when the last usage "
-    "reaches the trigger, one summary request and a restart from the head plus a 3,000-token summary (at worst "
-    "70,000 tokens of summary and re-attached files).",
+    "- plain [assumed: no live plain run has been recorded; two figures come from Claude Code 2.1.322 against a "
+    "stub upstream]: the whole history every request; when the last usage plus Claude Code's estimate of the new "
+    "text reaches the trigger, one summary request and a restart from the head, a 3,000-token summary and 25,000 "
+    "tokens of re-attached files; a probe turn takes one request. At worst: the Contexto arm's worst rounds, two "
+    "summary requests per compaction, 70,000 tokens of summary and files.",
     "- full: one request per probe turn carrying the whole script (run #4's baseline: 426,266 to 429,087 input "
     "tokens a request).",
     "- Cache, expected case: a request reads what the previous request sent and writes the rest; the first request "
@@ -173,13 +185,15 @@ def _spread(total: int, slots: int) -> list[int]:
     return [base + (1 if k < extra else 0) for k in range(slots)]
 
 
-def turn_specs(script: Script, worst: bool) -> list[tuple[int, list[int], int]]:
+def turn_specs(script: Script, worst: bool, recall: bool = True) -> list[tuple[int, list[int], int]]:
     """Per turn: the user message's tokens, the input each tool round adds, and the last reply's
-    expected output. Shared by the two Claude Code arms."""
+    expected output. Shared by the two Claude Code arms; ``recall`` is False for the arm with no
+    recall tools, whose probe turns are expected to take one request."""
     probe_turns = [i for i, k in enumerate(script.kinds) if k == "probe"]
     content = [i for i, k in enumerate(script.kinds) if k != "probe"]
+    expected_rounds = round(PROBE_ROUNDS_EXPECTED * len(probe_turns)) if recall else 0
     probe_rounds = ([PROBE_ROUNDS_WORST] * len(probe_turns) if worst
-                    else _spread(round(PROBE_ROUNDS_EXPECTED * len(probe_turns)), len(probe_turns)))
+                    else _spread(expected_rounds, len(probe_turns)))
     extra = set(content[:round(CONTENT_EXTRA_EXPECTED * len(content))])
     specs = []
     for index, kind in enumerate(script.kinds):
@@ -272,19 +286,22 @@ def simulate_plain(script: Script, bound: int, params: Params, worst: bool) -> t
     from contexto.bench.arms.plain import compaction_setting
 
     trigger = int(compaction_setting(bound)["intended_trigger"])
-    summary = SUMMARY_TOKENS_WORST + RESTORED_TOKENS_WORST if worst else SUMMARY_TOKENS_EXPECTED
+    restored = RESTORED_TOKENS_EXPECTED if script.files else 0
+    summary = SUMMARY_TOKENS_WORST if worst else SUMMARY_TOKENS_EXPECTED
+    kept = summary + (RESTORED_TOKENS_WORST if worst else restored)
+    pending = 1.0 if worst else PENDING_FACTOR  # the worst case compacts as early as it can
     requests: list[Request] = []
     context = params.head_plain  # what the next request re-sends
     last_usage = 0
     fresh = True
     compactions = 0
-    for user, rounds, last_output in turn_specs(script, worst):
+    for user, rounds, last_output in turn_specs(script, worst, recall=False):
         added = user
         for n in range(len(rounds) + 1):
-            if last_usage + added >= trigger and context > params.head_plain:
-                requests.append(Request(context + 1_000, summary, False, side=True))
+            if last_usage + int(added * pending) >= trigger and context > params.head_plain + kept:
+                requests += [Request(context + 1_000, summary, False, side=True)] * (2 if worst else 1)
                 compactions += 1
-                context = params.head_plain + summary
+                context = params.head_plain + kept
                 fresh = True
             last = n == len(rounds)
             output = last_output if last else OUTPUT_PER_REQUEST // 2

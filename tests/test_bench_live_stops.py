@@ -72,6 +72,18 @@ def test_the_first_401_stops_the_whole_run_and_the_same_command_resumes_it(env, 
     assert third.lines("requests.jsonl") == requests and not third.stub.requests
 
 
+def test_a_403_in_the_full_arm_stops_the_whole_run_too(env, tmp_path, script):
+    for path in ("/v1/messages/count_tokens", "/v1/messages"):
+        stub = stub_for(script)
+        stub.fault(403, arm="full", nth=1, path=path)
+        run = bench_stubs.run_bench(env, tmp_path / path.rsplit("/", 1)[1], [script], arms=("full", "plain"),
+                                    bound=BOUND, stub=stub)
+        (unit,) = run.manifest["units"]
+        assert run.code == 1 and (unit["arm"], unit["status"], unit["stop"]) == ("full", "stopped", "auth")
+        assert "403" in unit["reason"] and unit["probe_turns_completed"] == 1
+        assert not stub.messages_requests("plain") and not (run.out / "probes.jsonl").exists()
+
+
 def test_an_existing_output_directory_fixes_the_run(env, tmp_path, script):
     done = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND)
     assert done.code == 0

@@ -357,12 +357,24 @@ def test_the_plan_reproduces_the_recorded_runs_of_the_54_probe_session(d27):
     assert full.requests_expected == full.requests_worst == 6
     assert 2_578_830 * 0.85 <= full.expected_total <= 2_578_830 * 1.1  # run #4's baseline, less Claude Code's head
     plain = bench_plan.unit_estimate("plain", d27, 150_000)
-    assert plain.compactions_expected >= 2 and plain.expected_total > contexto.expected_total
+    # One request a turn, one summary request a compaction, and the two content turns that take a second request.
+    assert plain.compactions_expected >= 2
+    assert plain.requests_expected == len(d27.turns) + plain.compactions_expected + 2
+    assert plain.requests_worst > 3 * plain.requests_expected
     for est in (contexto, full, plain):
         assert est.requests_worst >= est.requests_expected and est.worst_total > est.expected_total
         assert est.worst["cache_read"] == est.worst["uncached"] == 0  # the worst case reads no cache
     with pytest.raises(ValueError):
         bench_plan.unit_estimate("other", d27, 150_000)
+
+
+def test_the_plain_plan_is_near_what_the_real_claude_did_against_the_stub():
+    """Claude Code 2.1.322 against the stub upstream, the v2 script of seed 3 at the defaults, bound
+    150,000 (2026-11-12): 52 requests (44 main, 8 summary requests for 4 compactions) and 5,386,722
+    modelled tokens. The plan's expected case is fitted to that run's two findings."""
+    plain = bench_plan.unit_estimate("plain", bench_script.build(3), 150_000)
+    assert 46 <= plain.requests_expected <= 56 and 4 <= plain.compactions_expected <= 5
+    assert 5_386_722 * 0.9 <= plain.expected_total <= 5_386_722 * 1.1
 
 
 def test_the_plan_adds_up_per_arm_and_in_total(d27):
