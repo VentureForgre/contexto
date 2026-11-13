@@ -43,7 +43,14 @@ uvx --quiet --with "$README_RENDERER" "$TWINE" check --strict "$wheel" "$sdist"
 echo "== Build a wheel from the unpacked sdist"
 mkdir unpacked rebuilt
 tar -xzf "$sdist" -C unpacked
-(cd unpacked/contexto_proxy-* && uv build --quiet --wheel --out-dir "$work/rebuilt")
+shopt -s nullglob
+roots=("$work"/unpacked/*/)
+shopt -u nullglob
+if [ "${#roots[@]}" -ne 1 ]; then
+  echo "package-check: expected one directory in the sdist, found: $(ls unpacked)" >&2
+  exit 1
+fi
+(cd "${roots[0]}" && uv build --quiet --wheel --out-dir "$work/rebuilt")
 shopt -s nullglob
 rebuilt=("$work"/rebuilt/*.whl)
 shopt -u nullglob
