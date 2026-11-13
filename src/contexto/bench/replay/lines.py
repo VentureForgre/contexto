@@ -38,7 +38,8 @@ from contexto.bench.model import Script
 SUMMARY_TOKENS = 7_920
 SUMMARY_SOURCE = ("docs/research/M0-proxy-measurements.md, finding 6: the mean output of three measured compaction "
                   "summary calls (5,510, 8,908 and 9,342 tokens)")
-SURVIVES = "the head, the summary and the turn being served; nothing else is kept or re-attached (an assumption)"
+SURVIVES = ("assumed, not measured: the head, the summary and the turn being served; nothing else is kept or "
+            "re-attached")
 
 
 def turn_estimates(script: Script) -> list[int]:

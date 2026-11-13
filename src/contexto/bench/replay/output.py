@@ -322,7 +322,7 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
         "tokens.",
         f"- Plain Claude Code compacting at the bound: {modelled['plain_compactions']} compactions; largest request "
         f"{modelled['plain_max']:,} tokens. Summary size {lines.SUMMARY_TOKENS:,} tokens, from "
-        f"{lines.SUMMARY_SOURCE}. What survives a compaction is assumed: {lines.SURVIVES}.",
+        f"{lines.SUMMARY_SOURCE}. What survives a compaction is {lines.SURVIVES}.",
         "",
         "These two lines are a model of what the clients would send, on the script's own estimate. They are not a "
         "run of Claude Code or of the API.",

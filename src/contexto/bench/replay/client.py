@@ -9,11 +9,13 @@ round, and the client answers every tool call itself.
 Text. The system prompt, the context block and the tool descriptions are filler generated here from
 a fixed word list (``filler``), and each says so in its first sentence. They are not Claude Code's
 system prompt or tool descriptions, which are not ours to ship. Their sizes are chosen so that the
-head is as large as a real one: about 64,000 bytes, which the fake upstream prices at about 21,000
-tokens. docs/DECISIONS.md D55 records 18,641 to 27,925 tokens measured for Claude Code 2.1.314 with
-tool search on. Contexto's own five MCP tools are in the tool list with their real names,
-descriptions and schemas (``contexto.mcp.TOOLS``), named as Claude Code names an MCP tool, because
-the proxy checks that the main conversation has them.
+head is as large as a real one: about 64,000 bytes, which the fake upstream prices at 21,277
+tokens. The fixed overhead measured for Claude Code 2.1.314 with tool search on was 18,641 to 27,925
+tokens (docs/DECISIONS.md, D55; ``contexto.launcher.ASSUMED_OVERHEAD_DEFAULT``).
+
+Contexto's own five MCP tools are in the tool list with their real names, descriptions and schemas
+(``contexto.mcp.TOOLS``), named as Claude Code names an MCP tool, because the proxy checks that the
+main conversation has them.
 
 Tools the client runs:
 

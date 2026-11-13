@@ -15,7 +15,9 @@ What is measured, and from where:
 - every request's size, from the fake upstream's records (its modelled count of the request the
   proxy sent it), with the proxy's own estimate of the same request beside it;
 - requests over the bound, counted twice: by the fake upstream's count, and by the proxy's own log
-  (a request entry flagged ``over_bound``, or a usage event that says so);
+  (a request entry flagged ``over_bound``, or carrying an ``over_bound`` event). The second count is
+  stricter than the acceptance harness, which reports the engine's pre-send estimate inside a tool
+  loop without failing on it: here any such record fails the replay;
 - rotations, every engine event by name, and the failure events, from the session log
   (``FAILURE_EVENTS`` is the acceptance harness's list, ``spikes/m2/acceptance/detectors.py``);
 - compaction markers in any request, from the fake upstream (``upstream.compaction_markers``).

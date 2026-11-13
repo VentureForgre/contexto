@@ -533,7 +533,7 @@ def test_the_summary_size_is_the_one_measured_in_the_research_notes():
     for measured in ("| 139,320 | 139,318 | 0 | 5,510 |", "| 78,469 | 52,131 | 26,336 | 8,908 |",
                      "| 86,968 | 60,630 | 26,336 | 9,342 |"):
         assert measured in note
-    assert "M0-proxy-measurements.md" in lines.SUMMARY_SOURCE and "assumption" in lines.SURVIVES
+    assert "M0-proxy-measurements.md" in lines.SUMMARY_SOURCE and lines.SURVIVES.startswith("assumed, not measured")
 
 
 # The trace
