@@ -73,6 +73,31 @@ def test_a_requested_revision_that_is_the_commit_is_not_printed_twice(installed,
     assert contexto.version_line() == f"{PLAIN} (git commit d38e87d2)"
 
 
+def test_a_revision_shorter_than_gits_shortest_abbreviation_is_a_name(installed):
+    """Seven characters is git's shortest default abbreviation: a 7-character prefix of the commit is the
+    commit, a 6-character one is printed as the name it may be (a branch can be called ``d38e87``)."""
+    installed(vcs(requested_revision=COMMIT[:7], commit_id=COMMIT))
+    assert contexto.version_line() == f"{PLAIN} (git commit d38e87d2)"
+    assert contexto._names_commit(COMMIT[:7], COMMIT) is True
+    assert contexto._names_commit(COMMIT[:6], COMMIT) is False
+
+
+def test_a_six_character_prefix_of_the_commit_is_printed_as_a_revision(installed):
+    installed(vcs(requested_revision=COMMIT[:6], commit_id=COMMIT))
+    assert contexto.version_line() == f"{PLAIN} (git d38e87, commit d38e87d2)"
+
+
+def test_an_uppercase_commit_id_is_printed_in_lowercase(installed):
+    installed(vcs(requested_revision="main", commit_id=COMMIT.upper()))
+    assert contexto.version_line() == f"{PLAIN} (git main, commit d38e87d2)"
+
+
+def test_a_direct_url_json_past_the_size_limit_is_not_parsed(installed):
+    padded = json.dumps({**vcs(requested_revision="v0.5.24", commit_id=COMMIT), "pad": "x" * 70_000})
+    installed(raw=padded.encode())
+    assert contexto.version_line() == PLAIN
+
+
 def test_a_sha256_commit_id_is_cut_to_eight_characters(installed):
     installed(vcs(requested_revision="main", commit_id="0123456789abcdef" * 4))
     assert contexto.version_line() == f"{PLAIN} (git main, commit 01234567)"
@@ -190,6 +215,34 @@ def test_version_flag_prints_the_revision(installed, capsys, monkeypatch):
     assert capsys.readouterr().out == f"{PLAIN} (git v0.5.24, commit d38e87d2)\n"
 
 
+@pytest.mark.parametrize("columns", ["20", "54", None])
+def test_the_version_line_is_never_wrapped(installed, capsys, monkeypatch, columns):
+    """argparse's own version action fills its text to the terminal width (80 when piped), which cut a
+    git install's line in two, once inside a branch name."""
+    if columns is None:
+        monkeypatch.delenv("COLUMNS", raising=False)
+    else:
+        monkeypatch.setenv("COLUMNS", columns)
+    revision = "claude/" + "a-long-branch-name-" * 3
+    assert len(revision) == 64
+    installed(vcs(requested_revision=revision, commit_id=COMMIT))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == f"{PLAIN} (git {revision}, commit d38e87d2)\n"
+
+
+def test_the_metadata_is_read_only_when_the_version_is_asked_for(installed, capsys):
+    wanted = installed(vcs(requested_revision="v0.5.24", commit_id=COMMIT))
+    parser = cli.build_parser()
+    assert "--version" in parser.format_help()
+    assert wanted == []
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--version"])
+    assert wanted == ["contexto-proxy"]
+    capsys.readouterr()
+
+
 def test_version_flag_without_a_git_install_is_unchanged(installed, capsys):
     installed({"url": "file:///src/contexto", "dir_info": {"editable": True}})
     with pytest.raises(SystemExit):
@@ -197,19 +250,30 @@ def test_version_flag_without_a_git_install_is_unchanged(installed, capsys):
     assert capsys.readouterr().out == f"{PLAIN}\n"
 
 
-def run_version(tmp_path, direct_url, version):
+def run_version(tmp_path, direct_url, version, columns="80"):
     """``python -m contexto --version`` in a new process that finds a fabricated dist-info first. The
     ``contexto`` package itself is still the one under test: the fabricated directory holds metadata only."""
     site = tmp_path / "site"
     dist_info(site, direct_url, version=version)
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(site), os.environ.get("PYTHONPATH")])),
-           "COLUMNS": "80"}
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(site), os.environ.get("PYTHONPATH")]))}
+    env.pop("COLUMNS", None)
+    if columns is not None:
+        env["COLUMNS"] = columns
     return subprocess.run([sys.executable, "-m", "contexto", "--version"], capture_output=True, text=True, env=env)
 
 
 def test_a_new_process_reads_the_revision_from_installed_metadata(tmp_path):
     out = run_version(tmp_path, vcs(requested_revision="v9.9.9", commit_id=COMMIT), "9.9.9")
     assert (out.returncode, out.stdout, out.stderr) == (0, "contexto 9.9.9 (git v9.9.9, commit d38e87d2)\n", "")
+
+
+@pytest.mark.parametrize("columns", ["20", None])
+def test_a_new_process_prints_a_long_revision_on_one_line(tmp_path, columns):
+    """Piped, with COLUMNS unset, is how a script or a CI step reads the version."""
+    revision = "x" * 64
+    out = run_version(tmp_path, vcs(requested_revision=revision, commit_id=COMMIT), "9.9.9", columns=columns)
+    assert (out.returncode, out.stdout, out.stderr) == (
+        0, f"contexto 9.9.9 (git {revision}, commit d38e87d2)\n", "")
 
 
 def test_a_new_process_with_a_local_directory_install_prints_the_version_alone(tmp_path):

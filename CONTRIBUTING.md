@@ -71,6 +71,11 @@ pytest -q
 `pip install -e .` installs the checkout as before. `pip list` shows it as `contexto-proxy`, and
 `pip uninstall contexto-proxy` removes it.
 
+A virtual environment made before the rename still holds the old `contexto` distribution. With uv,
+run `uv sync` once to remove it. In a plain virtual environment run `pip uninstall contexto` and
+then `pip install -e .` again; until then `contexto --version` prints `0.0.0+unknown` and two
+packaging tests fail.
+
 The suite runs on macOS and Linux. Windows is not supported (see the README's Platforms note).
 
 ## What CI runs
@@ -86,14 +91,16 @@ The suite runs on macOS and Linux. Windows is not supported (see the README's Pl
   and `contexto sessions list` against an empty `CONTEXTO_HOME`. Then it installs the sdist into a
   second empty environment and checks that it holds the same package.
 - `package`: `.github/scripts/package-check.sh`, once. It runs `twine check --strict` on the sdist
-  and wheel, checks their name, metadata and contents, builds a wheel again from the unpacked sdist,
+  and wheel, checks their name, metadata (every classifier is one PyPI knows) and contents, builds
+  a wheel again from the unpacked sdist,
   and renders the PyPI description ([docs/pypi-description.md](docs/pypi-description.md)) with
   `readme_renderer`, the renderer PyPI uses. It uploads nothing.
 - `ci`: passes only when lint, package and every test and install job pass. It is the one required
   check.
 
-uv, Ruff, pytest, twine, readme-renderer and the actions are pinned, so a new release of any of them
-cannot fail CI on code that did not change. Workflow runs on pull requests from forks wait for a maintainer to approve them.
+uv, Ruff, pytest, twine, readme-renderer, trove-classifiers and the actions are pinned, so a new
+release of any of them cannot fail CI on code that did not change. Workflow runs on pull requests
+from forks wait for a maintainer to approve them.
 
 ## Pull requests
 

@@ -4,7 +4,8 @@
 
 WHEEL and SDIST are what ``uv build`` made from the checkout REPO. REBUILT_WHEEL is a wheel built from
 the unpacked SDIST. Needs readme-renderer with its ``md`` extra, the renderer PyPI uses for the long
-description. Exits non-zero, with the reason on stderr, on the first check that fails.
+description, and trove-classifiers, PyPI's list of classifiers. Exits non-zero, with the reason on
+stderr, on the first check that fails.
 """
 
 import configparser
@@ -17,6 +18,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from readme_renderer.markdown import render
+from trove_classifiers import classifiers as known_classifiers
+from trove_classifiers import deprecated_classifiers
 
 NAME = "contexto-proxy"
 PREFIX = "contexto_proxy-"  # of the artifact names and the dist-info directory
@@ -78,8 +81,11 @@ def check_metadata(metadata: bytes, pkg_info: bytes) -> str:
     classifiers = message.get_all("Classifier") or []
     check(not [c for c in classifiers if c.startswith("License ::")],
           "a License classifier is combined with the SPDX license expression")
+    unknown = sorted(c for c in classifiers if c not in known_classifiers or c in deprecated_classifiers)
+    check(not unknown, f"classifiers PyPI would refuse (not in trove-classifiers, or deprecated): {unknown}")
+    check(len(classifiers) == len(set(classifiers)), f"a classifier is listed twice: {classifiers}")
     print(f"ok: Name: {message['Name']}, Version: {message['Version']}, Requires-Python: "
-          f"{message['Requires-Python']}, no runtime dependencies")
+          f"{message['Requires-Python']}, no runtime dependencies, {len(classifiers)} classifiers PyPI knows")
     return message.get_payload()
 
 

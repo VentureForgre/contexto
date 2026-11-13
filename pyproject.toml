@@ -44,7 +44,7 @@ classifiers = [
     "Topic :: Software Development",
 ]
 
-# Labels PyPI shows an icon for, except Security, which has none.
+# Labels PyPI shows an icon for.
 [project.urls]
 Homepage = "https://github.com/VentureForgre/contexto"
 Repository = "https://github.com/VentureForgre/contexto"

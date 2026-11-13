@@ -150,5 +150,8 @@ def test_ci_installs_the_built_wheel_on_every_leg_the_tests_run_on():
     # The one required check waits for the new jobs too.
     needs = re.search(r"^  ci:\n.*?^    needs: \[([^\]]*)\]", workflow, flags=re.M | re.S)
     assert needs and {n.strip() for n in needs.group(1).split(",")} == {"lint", "test", "install", "package"}
-    for result in ("needs.install.result", "needs.package.result"):
-        assert result in workflow
+    gate = workflow[workflow.index("\n  ci:\n"):]
+    for job in ("lint", "test", "install", "package"):
+        name = job.upper()
+        assert f"{name}: ${{{{ needs.{job}.result }}}}" in gate, job
+        assert re.search(rf'^\s+test "\${name}" = success$', gate, flags=re.M), job

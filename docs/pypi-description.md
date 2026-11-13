@@ -51,9 +51,9 @@ works, the Codex setup, every option, inspecting sessions and troubleshooting.
 ## Check what you install
 
 Contexto sees every prompt and every auth header your CLI sends. Check that what you install was
-built by this project's release workflow. Each GitHub release carries its sdist and wheel, a
-`SHA256SUMS` file and a build provenance attestation, and the build is reproducible from the release
-tag. The commands are in
+built by this project's release workflow. Every version on PyPI is also a GitHub release, which
+carries the same sdist and wheel, a `SHA256SUMS` file and a build provenance attestation, and the
+build is reproducible from the release tag. The commands are in
 [Verifying a release](https://github.com/VentureForgre/contexto/blob/main/RELEASING.md#verifying-a-release).
 
 Session data stays on your machine, under `~/.contexto`.

@@ -4,7 +4,9 @@
 # Builds the sdist and the wheel, installs the built wheel into an empty virtual environment, and runs
 # the installed command from a directory outside the checkout, so what runs is the installed package
 # and not the source tree. Then installs the sdist into a second empty environment and compares the
-# two, so a file missing from the sdist is caught.
+# two, so an sdist that does not build, or builds another package than the wheel, is caught. (uv
+# builds the wheel from the sdist, so a file missing from both is not seen here: package-check.sh
+# compares the wheel with src/contexto.)
 #
 #   bash .github/scripts/install-check.sh [PYTHON]
 #
@@ -38,7 +40,7 @@ esac
 # Nothing from the caller's environment may put the checkout, or another Contexto, in front of the
 # installed one.
 unset PYTHONPATH PYTHONHOME PYTHONSTARTUP VIRTUAL_ENV CONTEXTO_HOME
-export COLUMNS=200  # argparse wraps --version and --help to the terminal width
+export COLUMNS=200  # argparse wraps --help to the terminal width
 
 fail() {
   echo "install-check: $*" >&2
@@ -55,16 +57,12 @@ expect_output() {
 }
 
 # new_env NAME ARTIFACT: an empty virtual environment under $work with only ARTIFACT installed.
-# --no-index: Contexto has no runtime dependencies, so nothing may be fetched for it. A build of the
-# sdist still gets its build backend (uv has uv_build built in for the range pyproject.toml allows).
+# --no-index: Contexto has no runtime dependencies, so nothing may be fetched for it, and the sdist
+# builds without an index too (uv has uv_build built in for the range pyproject.toml allows).
 new_env() {
   local env="$work/$1" artifact="$2" installed
   uv venv --quiet --no-project "$env"
-  if [ "${artifact%.whl}" != "$artifact" ]; then
-    uv pip install --quiet --no-cache --no-index --python "$env/bin/python" "$artifact"
-  else
-    uv pip install --quiet --no-cache --python "$env/bin/python" "$artifact"
-  fi
+  uv pip install --quiet --no-cache --no-index --python "$env/bin/python" "$artifact"
   installed="$(uv pip freeze --quiet --python "$env/bin/python")"
   case "$installed" in
     "contexto-proxy @ file://"*) ;;

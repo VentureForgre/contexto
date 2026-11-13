@@ -2,7 +2,8 @@
 # CI's `package` job, and the same check on a developer's macOS or Linux machine.
 #
 # Builds the sdist and the wheel and checks what PyPI would get: `twine check --strict`, the name,
-# metadata and contents of both artifacts, a wheel built again from the unpacked sdist, and a render
+# metadata (every classifier is one PyPI knows) and contents of both artifacts, a wheel built again
+# from the unpacked sdist, and a render
 # of the long description with readme_renderer, the renderer PyPI uses.
 #
 #   bash .github/scripts/package-check.sh
@@ -14,6 +15,9 @@ set -euo pipefail
 # Pinned like Ruff and pytest in ci.yml, so a new release cannot fail CI on code that did not change.
 TWINE="twine@7.0.0"
 README_RENDERER="readme-renderer[md]==46.0"
+# PyPI's list of classifiers. An upload with a classifier that is not on it is refused, and by then
+# the tag and the GitHub release exist. A classifier newer than this pin needs the pin moved.
+TROVE_CLASSIFIERS="trove-classifiers==2026.9.21.13"
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/contexto-package-check.XXXXXX")"
@@ -60,7 +64,7 @@ if [ "${#rebuilt[@]}" -ne 1 ]; then
 fi
 
 echo "== Metadata, contents and the rendered long description"
-uv run --quiet --no-project --with "$README_RENDERER" \
+uv run --quiet --no-project --with "$README_RENDERER" --with "$TROVE_CLASSIFIERS" \
   python "$repo/.github/scripts/package-check.py" "$wheel" "$sdist" "${rebuilt[0]}" "$repo"
 
 echo "package-check passed"

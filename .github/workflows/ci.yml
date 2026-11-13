@@ -3,8 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
-  # Test main itself after every merge. Release (release.yml) calls this workflow when a release is
-  # dispatched.
+  # Test main itself after every merge. Release (release.yml) also calls this workflow, before it
+  # cuts a release.
   push:
     branches: [main]
   workflow_call:
