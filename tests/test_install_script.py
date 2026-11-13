@@ -13,6 +13,8 @@ import re
 import shutil
 import subprocess
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -44,6 +46,11 @@ case "${1-} ${2-}" in
         echo "- contexto"
     done ;;
 "tool dir") echo "$bin" ;;
+"tool run")
+    # uv tool run --python X --from WHEEL contexto --version: runs the wheel, installs nothing.
+    [ -z "${STUB_TRIAL_FAIL-}" ] || { echo "error: stub trial failure" >&2; exit 2; }
+    name=$(basename "$6"); v=${name#contexto_proxy-}; v=${v#contexto-}
+    echo "contexto ${v%%-*}" ;;
 "tool uninstall")
     [ -e "$STUB_STATE/uv/$3" ] || { echo "error: \`$3\` is not installed" >&2; exit 2; }
     rm "$STUB_STATE/uv/$3"
@@ -92,11 +99,19 @@ environment)
     case "${3-}" in
         PIPX_DEFAULT_PYTHON) echo "$STUB_PIPX_PYTHON" ;;
         PIPX_BIN_DIR) echo "$bin" ;;
+        PIPX_LOCAL_VENVS) echo "$STUB_STATE/pipx-venvs" ;;
         *) exit 2 ;;
     esac ;;
+run)
+    # pipx run [--python X] --no-cache --spec WHEEL contexto --version: installs nothing.
+    [ -z "${STUB_TRIAL_FAIL-}" ] || { echo "stub trial failure" >&2; exit 1; }
+    while [ "$1" != --spec ]; do shift; done
+    name=$(basename "$2"); v=${name#contexto_proxy-}; v=${v#contexto-}
+    echo "contexto ${v%%-*}" ;;
 uninstall)
     [ -e "$STUB_STATE/pipx/$2" ] || { echo "Nothing to uninstall for $2" >&2; exit 1; }
     rm "$STUB_STATE/pipx/$2"
+    rm -rf "$STUB_STATE/pipx-venvs/$2"
     # Measured with pipx 1.18.4: uninstall leaves a link that another install owns.
     if [ "$(cat "$STUB_STATE/owner" 2>/dev/null || true)" = "pipx:$2" ]; then
         rm -f "$bin/contexto" "$STUB_STATE/owner"
@@ -123,6 +138,8 @@ install)
     fi
     cp "$wheel" "$STUB_STATE/installed.whl"
     echo "$v" > "$STUB_STATE/pipx/$dist"
+    mkdir -p "$STUB_STATE/pipx-venvs/$dist/bin"
+    : > "$STUB_STATE/pipx-venvs/$dist/bin/contexto"
     owner=$(cat "$STUB_STATE/owner" 2>/dev/null || true)
     if [ -e "$bin/contexto" ] && [ "$owner" != "pipx:$dist" ] && [ "$force" = 0 ]; then
         echo "- contexto (symlink missing or pointing to unexpected location)"
@@ -153,6 +170,7 @@ STUBS = {
     "contexto": CONTEXTO_STUB,
     "python-new": "#!/bin/sh\nexit 0\n",  # answers the script's version check: 3.12 or later
     "python-old": "#!/bin/sh\nexit 1\n",
+    "rm-recorder": '#!/bin/sh\necho "$*" >> "$STUB_STATE/rm.log"\n',  # records, and removes nothing
 }
 
 
@@ -172,9 +190,6 @@ class Hub:
     """A server on 127.0.0.1 that answers like github.com does for one repository's releases."""
 
     def __init__(self):
-        self.releases: dict[str, dict[str, bytes]] = {}
-        self.latest: str | None = None
-        self.requests: list[str] = []
         hub = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -183,29 +198,65 @@ class Hub:
 
             def do_GET(self):
                 hub.requests.append(self.path)
+                if any(part in self.path for part in hub.stall):  # accept, then never answer
+                    hub.released.wait(30)
+                    return
                 status, headers, body = hub.answer(self.path, "http://" + self.headers["Host"])
+                slow = any(part in self.path for part in hub.drip)
+                endless = any(part in self.path for part in hub.endless)
                 self.send_response(status)
                 for key, value in headers.items():
                     self.send_header(key, value)
-                self.send_header("Content-Length", str(len(body)))
+                if not endless:
+                    self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                if self.command != "HEAD":
-                    self.wfile.write(body)
+                if self.command == "HEAD":
+                    return
+                try:
+                    if slow:  # a byte every fifth of a second
+                        for index in range(len(body)):
+                            self.wfile.write(body[index:index + 1])
+                            self.wfile.flush()
+                            if hub.released.wait(0.2):
+                                return
+                    elif endless:  # no Content-Length, and far more than any limit
+                        for _ in range(128):
+                            self.wfile.write(b"a" * 65536)
+                    else:
+                        self.wfile.write(body)
+                except OSError:
+                    pass  # the client gave up, which is the point
 
             do_HEAD = do_GET
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.root = f"http://127.0.0.1:{self.server.server_address[1]}"
         self.url = self.root + "/owner/repo"
+        self.released = threading.Event()
+        self.reset()
         threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+
+    def reset(self):
+        """Forget every release and request, and let go of any connection a test left stalled."""
+        self.released.set()
+        self.released = threading.Event()
+        self.releases: dict[str, dict[str, bytes]] = {}
+        self.latest: str | None = None
+        self.latest_target: str | None = None  # where /releases/latest redirects, when not to `latest`
+        self.requests: list[str] = []
+        self.stall: set[str] = set()
+        self.drip: set[str] = set()
+        self.endless: set[str] = set()
 
     def answer(self, path: str, origin: str):
         base = "/owner/repo"
         if path == base + "/releases/latest":
             # GitHub answers 302 to the tag page, or to the release list when there is no release.
             target = f"{origin}{base}/releases/tag/{self.latest}" if self.latest else f"{origin}{base}/releases"
+            if self.latest_target:
+                target = self.latest_target.format(origin=origin, base=origin + base)
             return 302, {"Location": target}, b""
-        if path == base + "/releases" or path.startswith(base + "/releases/tag/"):
+        if path == base + "/releases" or "/releases/tag/" in path:
             return 200, {"Content-Type": "text/html"}, b"<html>release page</html>"
         download = re.fullmatch(re.escape(base) + r"/releases/download/([^/]+)/([^/]+)", path)
         if download and download[2] in self.releases.get(download[1], {}):
@@ -235,6 +286,7 @@ class Hub:
                 path.endswith(suffix)]
 
     def close(self):
+        self.released.set()
         self.server.shutdown()
         self.server.server_close()
 
@@ -296,12 +348,29 @@ class Box:
             link.symlink_to(self.stub_files["contexto"])
         (self.bin / "contexto.version").write_text(version + "\n")
 
-    def preinstall(self, tool: str, dist: str, version: str):
-        """The state a real `uv tool install` or `pipx install` of that release leaves behind."""
+    def preinstall(self, tool: str, dist: str, version: str, command: str = "contexto"):
+        """The state a real `uv tool install` or `pipx install` of that release leaves behind.
+
+        With another `command`, the package only shares the name: it provides no `contexto`."""
         (self.state / tool).mkdir(exist_ok=True)
         (self.state / tool / dist).write_text(version + "\n")
-        self.command(version)
-        (self.state / "owner").write_text(f"{tool}:{dist}\n")
+        if tool == "pipx":
+            venv_bin = self.state / "pipx-venvs" / dist / "bin"
+            venv_bin.mkdir(parents=True)
+            (venv_bin / command).write_text("")
+        if command == "contexto":
+            self.command(version)
+            (self.state / "owner").write_text(f"{tool}:{dist}\n")
+
+    def edited_script(self, *edits: tuple[str, str]) -> Path:
+        """A copy of install.sh with each (old, new) applied exactly once."""
+        text = SCRIPT.read_text()
+        for old, new in edits:
+            assert text.count(old) == 1, old
+            text = text.replace(old, new)
+        copy = self.state / "install-edited.sh"
+        copy.write_text(text)
+        return copy
 
     def run(self, *args: str, shell: str = SH, how: str = "path", script: Path = SCRIPT, **env: str):
         full_env = {**self.env, **env}
@@ -353,11 +422,19 @@ class Box:
         assert sorted(path.name for path in self.home.iterdir()) == [".contexto"]
 
 
-@pytest.fixture
-def hub():
+@pytest.fixture(scope="module")
+def shared_hub():
     server = Hub()
     yield server
     server.close()
+
+
+@pytest.fixture
+def hub(shared_hub):
+    """One server for the whole file, empty at the start of each test."""
+    shared_hub.reset()
+    yield shared_hub
+    shared_hub.released.set()
 
 
 @pytest.fixture(scope="session")
@@ -460,7 +537,7 @@ def test_with_forces_the_installer(box, with_tool):
 def test_with_a_tool_that_is_missing_or_unknown_fails(make_box):
     box = make_box(tools=("uv",))
     box.hub.add("1.2.3")
-    failed(box.run("--with", "pipx"), "pipx is not on PATH")
+    assert failed(box.run("--with", "pipx"), "pipx is not on PATH").returncode == 1
     assert failed(box.run("--with", "pip"), "--with takes uv or pipx").returncode == 2
     box.assert_untouched()
 
@@ -525,9 +602,10 @@ def test_old_and_new_wheel_names_both_install(box, dist):
 
 
 def test_checksum_mismatch_aborts_before_any_install_command(box):
+    # The bad release is under the new name, so removing the old install too early would show.
     box.preinstall("uv", "contexto", "1.2.2")
-    box.hub.add("1.2.3")
-    name = wheel_name("1.2.3")
+    box.hub.add("1.2.3", "contexto-proxy")
+    name = wheel_name("1.2.3", "contexto-proxy")
     box.hub.releases["v1.2.3"][name] = b"not the bytes the checksum was made from"
     failed(box.run(), "SHA-256 mismatch", "Nothing was installed")
     box.assert_untouched()
@@ -561,6 +639,11 @@ HOSTILE_SUMS = {
     "html": "<html><body>Sign in</body></html>\n",
     "shell metacharacters": f"{GOOD}  $(touch pwned)\n",
     "glob": f"{GOOD}  *\n",
+    "NUL after the name": f"{GOOD}  contexto-1.2.3-py3-none-any.whl\x00\n",
+    "NUL inside the name": f"{GOOD}  contexto-1.2.3-py3\x00-none-any.whl\n",
+    "NUL on its own line": f"{GOOD}  contexto-1.2.3-py3-none-any.whl\n\x00\n",
+    "a byte that is not ASCII": f"{GOOD}  contexto-1.2.3-py3-none-any.whl\n\u00e9\n",
+    "escape sequence": f"{GOOD}  contexto-1.2.3-py3-none-any.whl\n\x1b[31m\n",
 }
 
 
@@ -628,7 +711,7 @@ def test_dry_run_prints_the_plan_and_changes_nothing(box, shell):
     assert f"{box.hub.url}/releases/download/v1.2.3/contexto_proxy-1.2.3-py3-none-any.whl" in out
     assert "Would run: uv tool uninstall contexto" in out
     assert "Would run: uv tool install" in out
-    assert out.index("uv tool uninstall contexto") < out.index("uv tool install")
+    assert out.index("Would run: uv tool run") < out.index("uv tool uninstall contexto") < out.index("uv tool install")
     assert box.installed() == {"uv:contexto": "1.2.2"}
     assert box.command_version() == "contexto 1.2.2"
 
@@ -669,18 +752,22 @@ def test_attest_without_gh_stops_before_any_download(make_box):
     assert box.hub.requests == []
 
 
-def test_without_attest_the_command_to_check_the_attestation_is_printed(box):
+def test_without_attest_the_way_to_check_the_attestation_is_printed(box):
     box.hub.add("1.2.3")
     result = ok(box.run())
     assert not [call for call in box.calls() if call.startswith("gh ")]
-    assert ("gh attestation verify contexto-1.2.3-py3-none-any.whl --repo VentureForgre/contexto"
-            in result.stdout)
+    # Every test sets a base URL, and with one set the hint must check the file that was installed:
+    # the script again with --attest, not a second download from GitHub.
+    assert "run this script again with --attest" in result.stdout
+    assert "gh release download" not in result.stdout
+    assert "gh release download $tag --repo $repo" in SCRIPT.read_text(), "the hint for the default base"
 
 
 def test_help_documents_every_option_and_variable_and_runs_nothing(box):
     result = ok(box.run("--help"))
     for word in ("--version", "--with", "--attest", "--force", "--dry-run", "--help", "CONTEXTO_VERSION",
-                 "CONTEXTO_INSTALL_BASE_URL", "CONTEXTO_HOME", "uv", "pipx", "SHA256SUMS", "3.12"):
+                 "CONTEXTO_INSTALL_BASE_URL", "CONTEXTO_HOME", "uv", "pipx", "SHA256SUMS", "3.12",
+                 "uv may download a Python"):
         assert word in result.stdout, word
     assert box.calls() == [] and box.hub.requests == []
     assert ok(box.run("-h")).stdout == result.stdout
@@ -896,7 +983,7 @@ def test_a_base_url_override_is_announced(box):
 ])
 def test_plain_http_is_refused_except_for_this_machine(box, url):
     box.hub.add("1.2.3")
-    failed(box.run(CONTEXTO_INSTALL_BASE_URL=url), "CONTEXTO_INSTALL_BASE_URL")
+    assert failed(box.run(CONTEXTO_INSTALL_BASE_URL=url), "CONTEXTO_INSTALL_BASE_URL").returncode == 2
     box.assert_untouched()
     assert box.hub.requests == []
 
@@ -912,6 +999,176 @@ def test_the_default_base_url_is_github_over_https():
     assert "https://github.com/VentureForgre/contexto" in text
     assert "--proto" in text and "--tlsv1.2" in text
     assert "http://github.com" not in text
+
+
+# --- A server that misbehaves ---
+
+
+HOSTILE_REDIRECTS = {
+    "another repository": "{origin}/other/repo/releases/tag/v1.2.3",
+    "another path on the same base": "{base}/tags/v1.2.3",
+    "encoded path traversal": "{base}/releases/tag/v1.2.3%2F..%2Fx",
+    "a pre-release tag": "{base}/releases/tag/v1.2.3-rc1",
+    "a tag without the v": "{base}/releases/tag/1.2.3",
+    "a later path segment": "{base}/releases/tag/v1.2.3/extra",
+    "a tag that is not a version": "{base}/releases/tag/vNEXT",
+    "a fourth number": "{base}/releases/tag/v1.2.3.4",
+    "a query": "{base}/releases/tag/v1.2.3?x=1",
+}
+
+
+@pytest.mark.parametrize("case", sorted(HOSTILE_REDIRECTS))
+def test_a_hostile_latest_redirect_is_refused(box, case):
+    box.preinstall("uv", "contexto", "1.2.2")
+    box.hub.add("1.2.3")
+    box.hub.latest_target = HOSTILE_REDIRECTS[case]
+    failed(box.run(), "releases/latest", "Nothing was installed")
+    box.assert_untouched()
+    assert not [path for path in box.hub.requests if "/releases/download/" in path]
+    assert box.installed() == {"uv:contexto": "1.2.2"}
+
+
+def test_a_server_that_stalls_or_drips_ends_the_run_with_a_message(box):
+    """Three runs at once: /releases/latest never answers, SHA256SUMS drips, the wheel never comes.
+
+    The copy of the script has its waits cut from 15 and 30 seconds to 1 or 2, by editing the two
+    numbers; the script has no option or variable for them."""
+    fast = box.edited_script(("connect_timeout=15\n", "connect_timeout=2\n"),
+                             ("stall_seconds=30\n", "stall_seconds=1\n"))
+    box.hub.add("1.0.1", latest=False)
+    box.hub.add("1.0.2", latest=False)
+    box.hub.add("1.2.3")
+    box.hub.stall = {"/releases/latest", "/blob/v1.0.2/contexto-1.0.2-py3"}
+    box.hub.drip = {"/blob/v1.0.1/SHA256SUMS"}
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(lambda arguments: box.run(*arguments, script=fast),
+                                [(), ("--version", "1.0.1"), ("--version", "1.0.2")]))
+    assert time.monotonic() - started < 20
+    for result, what in zip(results, ("releases/latest", "SHA256SUMS", "contexto-1.0.2-py3-none-any.whl")):
+        failed(result, "Could not", what, "Nothing was installed", "curl:")
+    box.assert_untouched()
+
+
+def test_an_endless_checksum_file_is_refused(box):
+    fast = box.edited_script(("max_seconds=600\n", "max_seconds=10\n"))
+    box.hub.add("1.2.3")
+    box.hub.endless = {"/blob/v1.2.3/SHA256SUMS"}
+    started = time.monotonic()
+    failed(box.run(script=fast), "SHA256SUMS", "Nothing was installed")
+    assert time.monotonic() - started < 20
+    box.assert_untouched()
+    assert box.hub.downloads(".whl") == []
+
+
+def test_every_download_has_a_time_limit_and_a_size_limit():
+    code = SCRIPT.read_text().replace("\\\n", " ")
+    calls = [line for line in code.splitlines() if re.match(r"\s*curl --", line)]
+    assert len(calls) == 1, "every download goes through one curl call"
+    for call in calls:
+        for option in ("--connect-timeout", "--speed-limit", "--speed-time", "--max-time", "--max-filesize",
+                       "--proto", "--proto-redir", "--tlsv1.2"):
+            assert option in call, f"{option} missing from: {call.strip()}"
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_signal_before_the_temporary_directory_exists_removes_nothing(box, shell):
+    """The exit trap is set before mktemp runs. Until mktemp has answered, it must have no path."""
+    canary = box.tmpdir / "someone-elses-file"
+    canary.write_text("kept")
+    first = box.state / "first"
+    first.mkdir()
+    (first / "rm").symlink_to(box.stub_files["rm-recorder"])
+    path = os.pathsep.join((str(first), box.env["PATH"]))
+    box.hub.add("1.2.3")
+    line = "    parent=${TMPDIR:-/tmp}\n"
+    result = box.run(shell=shell, script=box.edited_script((line, line + "    kill -TERM $$\n")), PATH=path)
+    assert result.returncode == 143, result.stderr
+    assert not (box.state / "rm.log").exists(), "cleanup ran rm with: " + (box.state / "rm.log").read_text()
+    assert canary.read_text() == "kept"
+    assert box.changes() == []
+
+
+def test_cleanup_removes_only_the_directory_this_run_made(box):
+    first = box.state / "first"
+    first.mkdir()
+    (first / "rm").symlink_to(box.stub_files["rm-recorder"])
+    path = os.pathsep.join((str(first), box.env["PATH"]))
+    box.hub.add("1.2.3")
+    line = "    release=$base/releases/download/$tag\n"
+    result = box.run(script=box.edited_script((line, "    kill -TERM $$\n" + line)), PATH=path)
+    assert result.returncode == 143, result.stderr
+    removed = (box.state / "rm.log").read_text().splitlines()
+    assert len(removed) == 1 and removed[0].startswith(f"-rf {box.tmpdir}/contexto-install.")
+    made = [entry.name for entry in box.tmpdir.iterdir()]
+    assert removed[0] == f"-rf {box.tmpdir}/{made[0]}" and len(made) == 1
+
+
+# --- The wheel is tried before an earlier install is removed ---
+
+
+@pytest.mark.parametrize("tool", ["uv", "pipx"])
+def test_the_wheel_is_run_once_before_the_earlier_install_is_removed(make_box, tool):
+    box = make_box(tools=(tool,))
+    box.preinstall(tool, "contexto", "1.2.2")
+    box.hub.add("2.0.0", "contexto-proxy")
+    ok(box.run())
+    calls = [call for call in box.calls() if " run " in call or "install" in call]
+    trial = "uv tool run --python >=3.12 --from" if tool == "uv" else "pipx run --no-cache --spec"
+    assert calls[0].startswith(trial) and calls[0].endswith("/contexto_proxy-2.0.0-py3-none-any.whl contexto --version")
+    assert "uninstall contexto" in calls[1] and "install" in calls[2] and len(calls) == 3
+    assert box.installed() == {f"{tool}:contexto-proxy": "2.0.0"}
+
+
+@pytest.mark.parametrize("tool", ["uv", "pipx"])
+def test_a_wheel_that_does_not_run_stops_the_upgrade_with_nothing_removed(make_box, tool):
+    box = make_box(tools=(tool,))
+    box.preinstall(tool, "contexto", "1.2.2")
+    box.hub.add("2.0.0", "contexto-proxy")
+    failed(box.run(STUB_TRIAL_FAIL="1"), "stub trial failure", "Nothing was installed")
+    box.assert_untouched()
+    assert box.installed() == {f"{tool}:contexto": "1.2.2"}
+    assert box.command_version() == "contexto 1.2.2"
+
+
+def test_a_first_install_is_not_tried_first(box):
+    box.hub.add("1.2.3")
+    ok(box.run())
+    assert not [call for call in box.calls() if " run " in call]
+
+
+@pytest.mark.parametrize("tool", ["uv", "pipx"])
+def test_an_install_that_fails_after_the_removal_says_how_to_get_the_old_release_back(make_box, tool):
+    box = make_box(tools=(tool,))
+    box.preinstall(tool, "contexto", "1.2.2")
+    box.hub.add("2.0.0", "contexto-proxy")
+    result = failed(box.run(STUB_INSTALL_FAIL="1"), "stub install failure", "No contexto is installed now",
+                    "sh install.sh --version 1.2.2")
+    assert "Nothing was installed" not in result.stderr
+    assert box.installed() == {}
+    assert list(box.tmpdir.iterdir()) == []
+
+
+def test_a_pipx_package_that_only_shares_the_name_is_left_alone(box):
+    """A package named contexto with some other command is not Contexto, and does not pick pipx."""
+    box.preinstall("pipx", "contexto", "9.0.0", command="otherthing")
+    box.hub.add("1.2.3")
+    result = ok(box.run())
+    assert box.changes() == [call for call in box.calls() if call.startswith("uv tool install")]
+    assert len(box.changes()) == 1
+    assert box.installed() == {"pipx:contexto": "9.0.0", "uv:contexto": "1.2.3"}
+    assert (box.state / "pipx-venvs" / "contexto" / "bin" / "otherthing").exists()
+    assert "uninstall" not in result.stdout
+
+
+def test_replacing_a_newer_release_with_an_older_one_is_said(box):
+    box.preinstall("uv", "contexto", "1.2.4")
+    box.hub.add("1.2.3")
+    result = ok(box.run())
+    assert "Replacing contexto 1.2.4 with the older 1.2.3." in result.stdout
+    assert box.installed() == {"uv:contexto": "1.2.3"}
+    box.hub.add("1.2.5")
+    assert "with the older" not in ok(box.run()).stdout
 
 
 # --- Piped, truncated, and static checks ---
@@ -933,22 +1190,35 @@ def test_options_reach_a_piped_script(box, how):
     box.assert_untouched()
 
 
+FIRST_LINE = b"#!/bin/sh\n"
+LAST_LINES = b'\nmain "$@" --end-of-script\n}\n'
+
+
 def cut_points(text: bytes) -> list[int]:
-    """Every byte of the last two lines, and a spread of line starts and other bytes before them."""
+    """Every byte of the last three lines, and a spread of line starts and other bytes before them.
+
+    Cuts inside the first line are left out: a shell given nothing, or part of the `#!` comment,
+    has nothing to run and exits 0, which no script can change."""
     starts = [index + 1 for index, byte in enumerate(text) if byte == 0x0A]
-    tail = starts[-3]
-    return sorted({*starts[:-1:12], *range(1, tail, 997), *range(tail, len(text) - 1)})
+    tail = starts[-4]
+    first = len(FIRST_LINE) + 1
+    return sorted({*starts[1:-1:12], *range(first, tail, 997), *range(tail, len(text) - 1)})
+
+
+def test_the_whole_script_is_one_group():
+    """So a shell reads to the closing brace before it runs anything."""
+    text = SCRIPT.read_bytes()
+    assert text.startswith(FIRST_LINE + b"{\n") and text.endswith(LAST_LINES)
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_a_truncated_script_does_nothing(box, shell, tmp_path):
-    """A download cut short at any byte runs no command, even with the cut inside the last line."""
+def test_a_truncated_script_does_nothing_and_fails(box, shell, tmp_path):
+    """A download cut short at any byte is a syntax error: no command runs, and the exit is not 0."""
     box.hub.add("1.2.3")
     text = SCRIPT.read_bytes()
-    assert text.endswith(b'\nmain "$@" --end-of-script\n')
     points = cut_points(text)
-    if shell != SH:  # the other shells get the last line and a thinner spread
-        tail = len(text) - len(b'main "$@" --end-of-script\n')
+    if shell != SH:  # the other shells get the last lines and a thinner spread
+        tail = len(text) - len(LAST_LINES)
         points = [point for index, point in enumerate(points) if point >= tail or index % 6 == 0]
     part = tmp_path / "part.sh"
     for point in points:
@@ -956,21 +1226,19 @@ def test_a_truncated_script_does_nothing(box, shell, tmp_path):
         # --dry-run is the argument a cut must not drop: without it the script would install.
         result = box.run("--dry-run", shell=shell, how="stdin", script=part)
         where = f"cut at byte {point} of {len(text)}: {text[max(0, point - 30):point]!r}"
+        assert result.returncode != 0, where
         assert box.calls() == [], where
         assert box.hub.requests == [], where
-        assert "Would run" not in result.stdout, where
+        assert result.stdout == "", where
     box.assert_untouched()
 
 
 def test_the_end_marker_is_required(box, tmp_path):
-    """`main "$@"` alone, which is what a cut inside the last line can leave, refuses to run."""
+    """`main "$@"` without the marker, or with its arguments gone, refuses to run."""
     box.hub.add("1.2.3")
-    text = SCRIPT.read_text()
-    part = tmp_path / "part.sh"
-    part.write_text(text.replace('main "$@" --end-of-script\n', 'main "$@"\n'))
-    failed(box.run(script=part), "incomplete")
-    part.write_text(text.replace('main "$@" --end-of-script\n', "main\n"))
-    failed(box.run("--dry-run", how="stdin", script=part), "incomplete")
+    failed(box.run(script=box.edited_script(('main "$@" --end-of-script\n', 'main "$@"\n'))), "incomplete")
+    failed(box.run("--dry-run", how="stdin", script=box.edited_script(('main "$@" --end-of-script\n', "main\n"))),
+           "incomplete")
     box.assert_untouched()
     assert box.hub.requests == []
 
