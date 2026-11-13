@@ -95,7 +95,8 @@ def output(tag: str, size: int) -> str:
 
 def png(width: int, height: int) -> dict:
     """An image block whose PNG header says ``width`` by ``height`` (the estimator reads only the header)."""
-    header = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height) + b"\x08\x06\0\0\0"
+    header = (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height)
+              + b"\x08\x06\0\0\0")
     data = base64.b64encode(header + b"synthetic pixels " * 40).decode("ascii")
     return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}
 

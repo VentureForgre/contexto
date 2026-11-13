@@ -25,7 +25,9 @@ headroom_floor - min_turn_room``, the point where the recall room the request pu
    go to result pages; the results of Contexto's own search, recall and state calls are copies of
    pages, so they get a stub and no page.
 2. If the estimate is still over the escalation line: the whole earlier turns of the window are paged
-   through the rotation machinery (``new_epoch`` at the current turn's start).
+   through the rotation machinery (``new_epoch`` at the current turn's start). While the head is still
+   unmeasured at ``k == 0`` (rule 4 measures it only there) this waits until step 3 has left the request
+   over the bound itself.
 3. If still over it: the oldest complete tool rounds of the running turn are folded into one page and
    removed from the request, with a note in the turn-start message.
 4. If the request is still over the bound itself: unseen results are stubbed, largest first.
@@ -54,6 +56,7 @@ from __future__ import annotations
 import bisect
 import math
 import sys
+import threading
 from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import replace
@@ -322,6 +325,7 @@ def _listed(names: list[str]) -> str:
 
 
 _NOTES: OrderedDict[tuple[str, int], str] = OrderedDict()
+_NOTES_LOCK = threading.Lock()  # engines of several sessions can share a process
 
 
 def fold_note(hooks: Any, removed: list[dict], page_id: str) -> str:
@@ -329,10 +333,11 @@ def fold_note(hooks: Any, removed: list[dict], page_id: str) -> str:
     size, and the page. ``removed`` is what the page holds (a stubbed result stays a stub there). Kept
     per page id, which names its content, so the messages are measured once per process."""
     key = (page_id, len(removed))
-    note = _NOTES.get(key)
-    if note is not None:
-        _NOTES.move_to_end(key)
-        return note
+    with _NOTES_LOCK:
+        note = _NOTES.get(key)
+        if note is not None:
+            _NOTES.move_to_end(key)
+            return note
     rounds, tools, paths = hooks.note_facts(removed)
     size = sum(len(canonical_bytes(m)) for m in removed)
     note = (f"[Contexto folded {rounds:,} earlier tool round{'s' if rounds != 1 else ''} of this turn into page "
@@ -342,9 +347,10 @@ def fold_note(hooks: Any, removed: list[dict], page_id: str) -> str:
             f"was: {size:,} bytes\n"
             f'To read them, call contexto_recall with page_id "{page_id}" (pass the next offset to continue; the '
             "page is long). contexto_search finds lines in it.]")
-    _NOTES[key] = note
-    while len(_NOTES) > _NOTE_CACHE_SIZE:
-        _NOTES.popitem(last=False)
+    with _NOTES_LOCK:
+        _NOTES[key] = note
+        while len(_NOTES) > _NOTE_CACHE_SIZE:
+            _NOTES.popitem(last=False)
     return note
 
 
@@ -551,9 +557,12 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
     # What the whole ladder could free, and so what cannot be paged.
     rounds = [r for r in hooks.rounds(sent, start, n)[:-1] if r.foldable and r.removed]
     in_rounds = {i for r in rounds for i in r.removed}
-    earlier = tokens(rw.window_items(sent[:start], state.k)) if start > state.k else 0
+    # Rule 4 measures the head only at k == 0, from the first usage. A new epoch before that would leave
+    # it unmeasured for the rest of the session, so step 2 waits for it; the other steps keep k.
+    may_page_turns = start > state.k and not (state.head_tokens is None and state.k == 0)
+    earlier = tokens(rw.window_items(sent[:start], state.k)) if may_page_turns else 0
     freeable = (earlier + sum(tokens([sent[i] for i in r.removed]) for r in rounds)
-                + sum(c.saving for c in seen if c.i >= start and c.i not in in_rounds))
+                + sum(c.saving for c in seen if c.i not in in_rounds and (c.i >= start or not may_page_turns)))
     floor = estimate - freeable
     target = floor + math.ceil(config.window_fraction * max(0, line_t - floor))
     escalate = max(target, line_t - config.min_turn_room)
@@ -615,8 +624,8 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
             left -= c.saving
         if chosen:
             stubbed(chosen, False)
-    # Step 2: the earlier turns of the window, through the rotation machinery.
-    if cur > escalate and start > state.k:
+    def page_turns() -> None:
+        nonlocal state, cur, first_changed
         paged: list[dict] = []
         state = rw.new_epoch(view(messages, state, dialect), request, state, store, config, estimator, start, n,
                              paged, ROTATION_REASON)
@@ -625,6 +634,10 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
         counts["pages"] += sum(e.get("pages", 0) for e in paged if e["event"] == "page_out")
         cur = measured(state)
         first_changed = min(first_changed, start)
+
+    # Step 2: the earlier turns of the window, through the rotation machinery.
+    if cur > escalate and may_page_turns:
+        page_turns()
     # Step 3: the oldest complete rounds of the running turn, into one page.
     if cur > escalate:
         sent = view(messages, state, dialect)
@@ -647,6 +660,9 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
             first_changed = min(first_changed, start)
             counts["rounds"] += len(folded)
             counts["pages"] += 1
+    # The bound comes before the head's measurement: still over it, the earlier turns are paged after all.
+    if cur > config.bound and start > state.k:
+        page_turns()
     # Step 4: over the bound itself: results the model has not seen, largest first.
     if cur > config.bound and unseen:
         chosen, left = [], cur
