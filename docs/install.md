@@ -67,6 +67,9 @@ Until step 5 has passed, nothing is installed or removed. A failed check stops t
 message and a non-zero exit status. If step 7 fails after step 6 removed an install, no `contexto`
 is installed, and the message gives the command that brings the earlier release back.
 
+Step 5 takes a second or two. It leaves nothing in the tool's install or command directories. uv
+and pipx each keep that run's environment in their own cache.
+
 When the release it is about to install is older than the one installed, the script says so in one
 line and goes on.
 
