@@ -568,12 +568,16 @@ class ServeService:
         self._server = None
         self._reaper_stop.set()
         deadline = time.monotonic() + STOP_DRAIN_S
+        hurried = False
         with self._idle:
             try:
-                while self._in_flight and (left := deadline - time.monotonic()) > 0 and not (hurry and hurry()):
+                while self._in_flight and (left := deadline - time.monotonic()) > 0:
+                    if hurry is not None and hurry():
+                        hurried = True
+                        break
                     self._idle.wait(min(left, 0.05))
             except KeyboardInterrupt:
-                pass  # a second Ctrl+C ends the wait early, with no traceback
+                hurried = True  # a second Ctrl+C ends the wait early, with no traceback
             in_flight = self._in_flight
         with self._lock:
             self._stopping = True
@@ -588,6 +592,8 @@ class ServeService:
         event: dict[str, Any] = {"event": "serve_stop", "in_flight": in_flight, "sessions_closed": len(sessions)}
         if signal_name:
             event["signal"] = signal_name
+        if hurried:
+            event["hurried"] = True  # the wait for requests in flight was cut short
         if not_logged:
             event["refusals_not_logged"] = not_logged
         self.log.log(event)

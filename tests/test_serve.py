@@ -909,12 +909,14 @@ def run_cli(home: Path, *args: str, env: dict | None = None, cwd: Path | None = 
 class Running:
     """``contexto serve`` in a child process, started on a free port."""
 
-    def __init__(self, home: Path, *args: str, env: dict | None = None) -> None:
+    def __init__(self, home: Path, *args: str, env: dict | None = None, hangup=signal.SIG_DFL) -> None:
         full = child_env(home, env)
         self.home = home
+        # A suite started under nohup hands every child an ignored SIGHUP: give the service the
+        # disposition the test means it to have.
         self.process = subprocess.Popen([sys.executable, "-m", "contexto", "serve", "--port", "0", *args],
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=full,
-                                        cwd=home.parent)
+                                        cwd=home.parent, preexec_fn=lambda: signal.signal(signal.SIGHUP, hangup))
         self.stderr_lines: list[str] = []
         self.listening = threading.Event()
         threading.Thread(target=self._read, daemon=True).start()
@@ -1023,7 +1025,7 @@ def test_a_second_signal_ends_the_wait_for_requests_in_flight(home, running):
         time.sleep(0.3)
         service.process.send_signal(signal.SIGTERM)
         assert service.process.wait(timeout=30) == 0
-        assert time.monotonic() - started < 1.9  # not the whole drain (2 s)
+        waited = time.monotonic() - started
         client.close()
     finally:
         stalled.shutdown()
@@ -1032,6 +1034,18 @@ def test_a_second_signal_ends_the_wait_for_requests_in_flight(home, running):
     assert not (home / serve.STATE_FILE).exists()
     stopped = serve_log(home)[-1]
     assert stopped["event"] == "serve_stop" and stopped["in_flight"] == 1
+    assert stopped.get("hurried") is True, f"the whole drain was waited out ({waited:.2f} s)"
+
+
+def test_a_hangup_ignored_at_start_stays_ignored(home, running):
+    """``nohup contexto serve &`` must outlive its terminal."""
+    service = running(hangup=signal.SIG_IGN)
+    service.process.send_signal(signal.SIGHUP)
+    time.sleep(0.5)
+    assert service.process.poll() is None
+    assert raw_call(service.port, "GET", f"/{service.token}/contexto/health")[0].status == 200
+    assert service.stop(signal.SIGTERM) == 0
+    assert serve_log(home)[-1]["signal"] == "SIGTERM"
 
 
 def test_a_taken_port_is_one_clean_line(home, running, upstream):

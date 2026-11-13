@@ -23,7 +23,8 @@ contexto serve: listening on 127.0.0.1:7837 (bound 150,000, upstream flag)
 
 It serves until it gets SIGINT (Ctrl+C), SIGTERM or SIGHUP. On any of them it stops accepting
 connections, waits up to 2 seconds for requests in flight, closes every session and exits 0. A
-second signal ends that wait.
+second signal ends that wait. Started under `nohup`, it keeps ignoring SIGHUP, so it outlives its
+terminal.
 
 Options:
 
