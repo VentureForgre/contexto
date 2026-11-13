@@ -629,6 +629,129 @@ def test_l8_a_large_log_is_read_in_blocks_and_gives_the_same_numbers(tmp_path, m
     assert out["requests"]["model"] == 2
 
 
+# Reviewer A's findings (PR #263) -------------------------------------------------------------------
+
+def test_a_store_still_failing_at_exit_is_not_reported_as_recovered(tmp_path):
+    """A disk that stays full while the session is under the bound: the publish after the request was
+    built fails, so the engine's ``request`` event has no ``degraded`` flag, and the next turn start
+    leaves degraded mode and enters it again. The enter and leave events decide the state."""
+    from contexto.stats import exit_summary
+
+    failed = (store_error("set_turn_room"), ENTER)
+    write_log(tmp_path, "sf", [*launch(0), request(1), request(2, events=failed),
+                               request(3, events=(LEAVE, *failed)), *stop(9)])
+    degraded = session_stats(tmp_path, "sf")["faults"]["degraded"]
+    assert (degraded["entered"], degraded["left"], degraded["now"], degraded["since"]) == (2, 1, True, ts(3))
+    summary = "\n".join(exit_summary(tmp_path, "sf", "claude", 5.0))
+    assert "paging had not resumed at exit" in summary and "resumed before exit" not in summary
+    assert "has not resumed" in session_faults(tmp_path, "sf")["messages"][-1]
+    # The request event's own flag still decides when the line has neither event (a lost enter line).
+    write_log(tmp_path, "sg", [*launch(0), request(1, degraded=True), request(2, degraded=True)])
+    assert session_stats(tmp_path, "sg")["faults"]["degraded"]["now"] is True
+    write_log(tmp_path, "sh", [*launch(0), request(1, degraded=True, events=(store_error(), ENTER)), request(2)])
+    assert session_stats(tmp_path, "sh")["faults"]["degraded"]["now"] is False
+
+
+def test_reading_pins_never_waits_for_the_ledger_lock_and_creates_nothing(tmp_path):
+    import fcntl
+    import threading
+
+    store = SessionStore(tmp_path, "lk")
+    store.pin("obligation", "synthetic standing rule")
+    store.pin("decision", "synthetic decision")
+    write_log(tmp_path, "lk", [*launch(0), request(1)])
+    lock = store.dir / "ledger.lock"
+    holder = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(holder, fcntl.LOCK_EX)  # a stuck writer: an MCP server on a hung filesystem
+        found: dict = {}
+        reader = threading.Thread(target=lambda: found.update(session_stats(tmp_path, "lk")["pins"]), daemon=True)
+        reader.start()
+        reader.join(15)
+        waiting = reader.is_alive()
+    finally:
+        os.close(holder)
+    assert not waiting, "session_stats waited for the ledger's lock"
+    assert found == {"readable": True, "active_records": 2, "open_obligations": 1}
+    # A session inspected by stats is not changed: no lock file is made, and its mode is left alone.
+    lock.unlink()
+    store.dir.chmod(0o755)
+    before = sorted(path.name for path in store.dir.iterdir())
+    assert session_stats(tmp_path, "lk")["pins"]["active_records"] == 2
+    assert sorted(path.name for path in store.dir.iterdir()) == before
+    assert store.dir.stat().st_mode & 0o777 == 0o755
+
+
+def run_lines(start: int, requests: int, pages: int = 0) -> list[dict]:
+    return [*launch(start, pages=pages), *[request(start + 1 + i, tokens=1_000 + i) for i in range(requests)],
+            *stop(start + 50, pages=pages)]
+
+
+def test_the_last_run_is_read_from_the_end_of_the_log(tmp_path, monkeypatch):
+    """Reviewer A's L1: the exit summary and `contexto state` parsed every line of a resumed session's
+    log. Only the latest run's lines are parsed now; the rest of the file is searched for run starts."""
+    lines = [line for start in range(0, 40_000, 100) for line in run_lines(start, 40)]
+    lines += [{"event": "ledger_repaired", "quarantine": "x", "ts": ts(50_000)}, *run_lines(50_001, 3, pages=2)]
+    directory = write_log(tmp_path, "lr", lines)
+    size = (directory / "log.jsonl").stat().st_size
+    parsed: list[int] = []
+    loads = json.loads
+
+    def spy(data, *args, **kwargs):
+        parsed.append(len(data))
+        return loads(data, *args, **kwargs)
+
+    monkeypatch.setattr(stats.json, "loads", spy)
+    last = session_stats(tmp_path, "lr", last_run=True)
+    monkeypatch.undo()
+    assert size > 5_000_000 and sum(parsed) < size / 20  # the run's lines, and one line per run start
+    assert last["runs"] == 401 and last["requests"]["model"] == 3 and last["started"] == ts(50_000)
+    assert last["faults"]["events"] == {"ledger_repaired": 1} and last["cli"] == "claude"
+    # Its launch's line, the proxy's two, the launcher's two and three requests: the lines in scope.
+    assert last["log"] == {"missing": False, "lines": 8, "unreadable_lines": 0, "ignored_values": 0}
+    assert session_stats(tmp_path, "lr")["requests"]["model"] == 16_003
+
+
+def test_the_last_run_read_from_the_end_is_the_one_a_full_read_finds(tmp_path, monkeypatch):
+    import random
+
+    rng = random.Random(64)
+    pieces = {
+        "run": lambda at: run_lines(at, rng.randrange(0, 4)),
+        "killed": lambda at: run_lines(at, 2)[:-2],  # no proxy_stop, no exit
+        "bare proxy": lambda at: [x for x in run_lines(at, 1) if x["event"] not in ("launch", "exit")],
+        "opening": lambda at: [{"event": name, "ts": ts(at)} for name in ("ledger_repaired", "stale_temp_removed")],
+        "many": lambda at: [{"event": "stale_temp_removed", "ts": ts(at)}] * 70,  # more than a launch writes
+        "cut": lambda at: ['{"event": "request", "cut short', "[1, 2]"],
+        "exit": lambda at: [{"event": "exit", "code": 0, "ts": ts(at)}],
+        "blank": lambda at: ["", "   "],
+    }
+    for case in range(120):
+        lines = []
+        for step in range(rng.randrange(0, 9)):
+            lines += pieces[rng.choice(list(pieces))](case * 1_000 + step * 60)
+        write_log(tmp_path, f"q{case}", lines)
+        monkeypatch.setattr(stats, "LOG_BLOCK_BYTES", rng.choice([256, 4_096, 4 << 20]))
+        fast = session_stats(tmp_path, f"q{case}", last_run=True)
+        with monkeypatch.context() as whole:
+            whole.setattr(stats, "_last_run_tail", lambda directory: (0, 0, None))  # read every line
+            slow = session_stats(tmp_path, f"q{case}", last_run=True)
+        fast_log, slow_log = fast.pop("log"), slow.pop("log")
+        assert fast == slow, (case, lines)
+        assert fast_log["lines"] <= slow_log["lines"] and fast_log["ignored_values"] == slow_log["ignored_values"]
+
+
+def test_a_fault_that_is_not_a_store_error_is_explained_in_stats(tmp_path):
+    write_log(tmp_path, "ex", [*launch(0), request(1, events=({"event": "retained_stale", "error": "OSError"},)),
+                               request(2, events=({"event": "retained_stale", "error": "OSError"},)),
+                               {"event": "transform_error", "error": "KeyError", "ts": ts(3)}])
+    text = render(session_stats(tmp_path, "ex"))
+    at = text.index("  faults      3 events (retained_stale 2, transform_error 1)")
+    assert text[at + 1:at + 3] == [
+        "    retained_stale x2: the snapshot of the conversation in view could not be written",
+        "    transform_error x1: a Contexto bug: a request was forwarded as the CLI sent it"]
+
+
 # A damaged log ---------------------------------------------------------------------------------------
 
 def test_lines_that_only_parse_when_joined_are_still_damaged_lines(tmp_path):
@@ -757,6 +880,7 @@ def test_a_full_disk_is_named_with_what_to_do(tmp_path):
     assert "disk" in message and "full" in message and "ENOSPC" in message and "page_out" in message
     assert "Free space" in message and "retries at each turn start" in message
     assert "unpaged" in message and "exceed the bound" in message and "has not resumed" in message
+    assert "is full" in message and "so paging has stopped" in message  # still failing: the present tense
     assert session_faults(tmp_path, "f1") == faults  # what `contexto state` shows, as the same dict
     text = "\n".join(render(session_stats(tmp_path, "f1")))
     assert "3 requests went out unpaged" in text and "largest 345.7 KiB" in text and "Free space" in text
@@ -784,6 +908,10 @@ def test_a_store_that_recovers_says_so_and_other_causes_get_their_own_advice(tmp
     assert "quarantine" in text and "pg_00aa" in text
     assert "LedgerCorruptError" in text and "contexto sessions show" in text
     assert "has resumed" in text and "has not resumed" not in text
+    assert "Paging has resumed; meanwhile 3 requests went out unpaged, the largest " in text
+    # It is over, so it is told as past: nothing says paging "has stopped" or that the store "cannot" be used.
+    assert "has stopped" not in text and "cannot" not in text and "could not read or write its store" in text
+    assert "so paging stopped: requests went out unpaged and could exceed the bound" in text
 
 
 def test_a_new_run_starts_out_of_degraded_mode_and_state_shows_only_the_latest_run(tmp_path):
@@ -865,17 +993,23 @@ def test_a_fault_nothing_else_warned_about_outlives_quiet(tmp_path):
     write_log(tmp_path, "w1", [*launch(0), {"event": "transform_error", "level": "error", "error": "KeyError"},
                                request(1, events=({"event": "mcp_tools_missing", "at": "request"},)),
                                request(2, events=({"event": "retained_stale", "error": "OSError"},))])
-    warning = ("contexto: warning: this run logged 2 events (retained_stale 1, transform_error 1) that Contexto left "
-               "its designed path. Details: contexto stats w1")
+    warning = ("contexto: warning: this run logged 2 events that mean Contexto left its designed path "
+               "(retained_stale 1, transform_error 1). Details: contexto stats w1")
     assert exit_summary(tmp_path, "w1", "claude", 5.0, quiet=True) == [warning]
     loud = exit_summary(tmp_path, "w1", "claude", 5.0)
     assert loud[0] == "contexto: run of session w1 ended after 5s" and loud[-1] == warning
     assert ("  faults      3 events (mcp_tools_missing 1, retained_stale 1, transform_error 1); details: contexto "
             "stats w1") == loud[-2]
     # A run whose only faults the launcher's own warnings described adds no second warning.
+    denied = ({"event": "mcp_tools_denied"}, {"event": "bound_too_small"})
     write_log(tmp_path, "w2", [*launch(0), request(1, degraded=True, events=(store_error(), ENTER)),
-                               request(2, events=({"event": "mcp_tools_denied"}, {"event": "bound_too_small"}))])
+                               request(2, degraded=True, events=denied),
+                               {"event": "page_quarantined", "page_id": "pg_00aa", "ts": ts(3)}])
     assert exit_summary(tmp_path, "w2", "claude", 5.0, quiet=True) == []
+    write_log(tmp_path, "w3", [*launch(0), request(1), {"event": "proxy_error", "ts": ts(2)}])
+    assert exit_summary(tmp_path, "w3", "claude", 5.0, quiet=True) == [
+        "contexto: warning: this run logged 1 event that means Contexto left its designed path (proxy_error 1). "
+        "Details: contexto stats w3"]
     assert NOTICED_EVENTS < set(FAULT_EVENTS)
 
 
@@ -1062,6 +1196,6 @@ def test_state_shows_a_store_that_stopped_paging_and_how_to_fix_it(tmp_path):
     warning = done.stdout[done.stdout.index("Warning:"):]
     assert "full" in warning and "Free space" in warning and "has not resumed" in warning
     # --raw is what the model gets from the MCP tool: unchanged.
-    assert "Warning:" not in contexto(tmp_path, "state", "--session", "st1", "--raw").stdout
+    assert contexto(tmp_path, "state", "--session", "st1", "--raw").stdout == store.state_text() + "\n"
     write_log(tmp_path, "st1", [*launch(0), request(1)])
     assert "Warning:" not in contexto(tmp_path, "state", "--session", "st1").stdout

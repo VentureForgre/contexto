@@ -1173,7 +1173,7 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         except OSError:  # D64: a full disk, already said by the NoticeLog; claude's exit code stands
             pass
         print_exit_summary(store, "claude", started, cli_args=options.claude_args, quiet=options.quiet,
-                           log_incomplete="log_unwritable" in notices.shown, stderr=stderr)
+                           log_incomplete="log_unwritable" in notices.shown, stderr=stderr, code=code)
         after_exit(options, home, session_id, recorder, choice, stderr)
 
 

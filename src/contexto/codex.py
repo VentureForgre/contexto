@@ -757,14 +757,16 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             plan.cleanup()
         proxy.stop()
         launcher.report_missing_tools(proxy)  # Codex reports no MCP server that fails to start
-        if hasattr(notices, "release"):
-            notices.release()
         try:
-            (notices if hasattr(notices, "log") else store).log({"event": "exit", "code": code})
-        except OSError:  # D64: a full disk, already said by the NoticeLog; codex's exit code stands
-            pass
-        print_exit_summary(store, "codex", ran, cli_args=codex_args, quiet=options.quiet,
-                           log_incomplete="log_unwritable" in getattr(notices, "shown", ()), stderr=stderr)
+            if hasattr(notices, "release"):
+                notices.release()
+        finally:  # a held notice that cannot be printed (stderr a broken pipe) still leaves the exit line
+            try:
+                (notices if hasattr(notices, "log") else store).log({"event": "exit", "code": code})
+            except OSError:  # D64: a full disk, already said by the NoticeLog; codex's exit code stands
+                pass
+        print_exit_summary(store, "codex", ran, cli_args=codex_args, quiet=options.quiet, stderr=stderr, code=code,
+                           log_incomplete="log_unwritable" in getattr(notices, "shown", ()))
         if not started:
             _remove_session(created)
 

@@ -39,7 +39,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from contexto.canonical import canonical_bytes
-from contexto.private import NotRegularFileError, open_private, private_dir, read_regular, write_all
+from contexto.private import (
+    NotRegularFileError,
+    open_private,
+    open_regular,
+    private_dir,
+    read_regular,
+    write_all,
+)
 from contexto.store.model import (
     GENESIS_PREV,
     Record,
@@ -225,12 +232,36 @@ class Ledger:
             if not exists:
                 return []
             lines = self._lines()
+        return self._records(lines)
+
+    @staticmethod
+    def _records(lines: list[_Line]) -> list[Record]:
         out = []
         for line in _intact(lines):
             if line.record is None:
                 raise LedgerCorruptError(line.problem)
             out.append(line.record)
         return out
+
+    def peek(self) -> list[Record]:
+        """``records()`` for a reader that must neither wait nor change the session: ``contexto.stats``,
+        which the launcher calls in its cleanup, where SIGTERM and SIGHUP are ignored (D64).
+
+        The shared lock is taken only if the lock file is there and free. Nothing is created and the
+        directory's mode is left alone. When a writer holds the lock, the ledger is read without it: a
+        record being appended is then a truncated tail, which is left out exactly as after a crash, so
+        a writer that is stuck (a hung filesystem, a suspended process) cannot hold this reader up."""
+        fd = None
+        try:
+            fd = open_regular(self.lock_path)
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:  # no lock file yet, not a regular file, or held by a writer
+            pass
+        try:
+            return self._records(self._lines())
+        finally:
+            if fd is not None:
+                os.close(fd)  # closing the descriptor releases the flock
 
     def head(self) -> str:
         """Return the SHA-256 of the last intact line, or GENESIS_PREV when there is none."""

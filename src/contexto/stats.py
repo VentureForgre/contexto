@@ -8,8 +8,11 @@ line can call after every assistant message. docs/stats.md defines every number.
 
 Rules this module keeps:
 
-- It only reads: ``log.jsonl``, the ledger, and ``pages/``. Nothing is created, and no network call is
-  made. A page file is read at its first and last bytes only (the id is the second key of a page's
+- It only reads: ``log.jsonl``, the ledger, and ``pages/``. Nothing is created or changed (the ledger
+  is read with ``Ledger.peek``, which makes no lock file), nothing is waited for (a writer that holds
+  the ledger's lock does not hold a reader up: the launcher calls this at exit, with signals ignored),
+  and no network call is made.
+- A page file is read at its first and last bytes only (the id is the second key of a page's
   canonical JSON and the token estimate the last but one), so a store of thousands of pages costs two
   small reads each, and counting the pages opens none.
 - A damaged log is read as far as it goes. A line cut short by a full disk, a line that is not a JSON
@@ -116,6 +119,7 @@ NOT_FAULT_EVENTS = frozenset({
 DISK_FULL = frozenset({"ENOSPC", "EDQUOT"})
 NO_ACCESS = frozenset({"EACCES", "EPERM", "EROFS"})
 UNPAGED = "requests go out unpaged and can exceed the bound"
+UNPAGED_PAST = "requests went out unpaged and could exceed the bound"
 HOME_HINT = "$CONTEXTO_HOME (default ~/.contexto)"
 
 # The two ends of a page file: canonical JSON sorts a page's keys, so ``bytes`` and ``id`` come first
@@ -188,39 +192,147 @@ def _blocks(fd: int) -> Iterator[bytes]:
             return
 
 
-def log_values(directory: Path) -> Iterator[Any]:
-    """The JSON value of each non-empty line of the session's log, in order; None for a line that
-    cannot be read. The file is opened as ``open_regular`` opens it (a FIFO, directory or symlink in its
-    place is never waited on or followed) and OSError is raised, before the first value, when there is
-    no readable log.
+def _whole_lines(fd: int, start: int = 0) -> Iterator[tuple[int, bytes | None]]:
+    """(file offset, bytes) for each stretch of whole lines from ``start`` on, about a block at a time;
+    the last may lack its newline. A line longer than ``LOG_BLOCK_BYTES`` is not a log line (they are
+    content-free and about 1 KB) and is unreadable wherever the blocks' edges fall: one that no block
+    ends gives ``(offset, None)`` once and is never kept in memory, and the readers drop one that a
+    stretch still holds (``_too_long``)."""
+    if start:
+        os.lseek(fd, start, os.SEEK_SET)
+    rest, skipping, at = b"", False, start  # ``at`` is the file offset of ``rest``, or of the next block
+    for block in _blocks(fd):
+        if skipping:  # inside a line longer than a block, already reported
+            end = block.find(b"\n")
+            if end < 0:
+                at += len(block)
+                continue
+            at += end + 1
+            block, skipping = block[end + 1:], False
+        data = rest + block if rest else block
+        cut = data.rfind(b"\n")
+        if cut < 0:
+            if len(data) > LOG_BLOCK_BYTES:
+                yield at, None
+                at += len(data)
+                rest, skipping = b"", True
+            else:
+                rest = data
+            continue
+        rest = data[cut + 1:]
+        yield at, data[:cut]
+        at += cut + 1
+    if rest.strip():
+        yield at, rest
+
+
+def _too_long(line: bytes) -> bool:
+    return len(line) > LOG_BLOCK_BYTES
+
+
+def log_values(directory: Path, start: int = 0) -> Iterator[Any]:
+    """The JSON value of each non-empty line of the session's log from byte ``start`` on, in order;
+    None for a line that cannot be read. The file is opened as ``open_regular`` opens it (a FIFO,
+    directory or symlink in its place is never waited on or followed) and OSError is raised, before the
+    first value, when there is no readable log.
 
     Each block's whole lines are parsed together, so the memory in use is a few blocks' worth however
-    large the log is. A line longer than a block is not a log line (they are content-free and about
-    1 KB): it is counted unreadable without being kept."""
+    large the log is."""
     fd = open_regular(Path(directory) / "log.jsonl")
     try:
-        rest, skipping = b"", False
-        for block in _blocks(fd):
-            if skipping:  # inside a line longer than a block, already counted
-                end = block.find(b"\n")
-                if end < 0:
-                    continue
-                block, skipping = block[end + 1:], False
-            data = rest + block if rest else block
-            cut = data.rfind(b"\n")
-            if cut < 0:
-                if len(data) > LOG_BLOCK_BYTES:
-                    rest, skipping = b"", True
-                    yield None
-                else:
-                    rest = data
+        for _, data in _whole_lines(fd, start):
+            if data is None:
+                yield None
                 continue
-            rest = data[cut + 1:]
-            lines = [line for line in data[:cut].split(b"\n") if line.strip()]
-            del data, block
-            yield from _parse_lines(lines)
-        if rest.strip():
-            yield from _parse_lines([rest])
+            lines = [b"\0" if _too_long(line) else line for line in data.split(b"\n") if line.strip()]
+            del data
+            yield from _parse_lines(lines)  # a NUL is not JSON: the line is read as unreadable
+    finally:
+        os.close(fd)
+
+
+HELD_LINES = 64  # lines kept between one run's exit and the next proxy start; a launch writes a few
+_RUN_MARK = re.compile(rb'"event":\s*"(?:proxy_start|launch)"')
+_LOOK_BACK_BYTES = 1 << 16
+
+
+def _line_value(line: bytes) -> Any:
+    try:
+        return json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+
+
+def _run_begins(fd: int, start_line: int) -> int:
+    """The offset of the first line of the run whose proxy start line is at ``start_line``: the lines
+    written since the last ``exit`` before it, which are its launch's (see ``session_stats``). The run
+    begins at its proxy start when the lines before it follow another proxy start (a run that was
+    killed), or are more than ``HELD_LINES``: those are not a launch's."""
+    begin, held, pos, tail = start_line, 0, start_line, b""
+    while pos > 0:
+        size = min(pos, _LOOK_BACK_BYTES)
+        data = os.pread(fd, size, pos - size) + tail
+        pos -= size
+        first = 0 if pos == 0 else data.find(b"\n") + 1  # the first line that starts in this piece
+        if pos and not first:  # no line starts here: it is part of a longer one
+            if len(data) > LOG_BLOCK_BYTES:
+                return start_line
+            tail = data
+            continue
+        tail = data[:first]
+        lines, at = [], pos + first
+        for line in data[first:].split(b"\n"):
+            lines.append((at, line))
+            at += len(line) + 1
+        for at, line in reversed(lines):
+            if not line.strip():
+                continue
+            value = None if _too_long(line) else _line_value(line)
+            if isinstance(value, dict):
+                if value.get("event") == "exit":
+                    return begin
+                held += 1
+                if value.get("event") == "proxy_start" or held > HELD_LINES:
+                    return start_line
+            begin = at
+    return begin
+
+
+def _last_run_tail(directory: Path) -> tuple[int, int, dict[str, Any] | None]:
+    """Where the latest run begins in the session's log, found without parsing the runs before it:
+    (the byte offset of its first line, the proxy starts before it, the last ``launch`` line before it).
+    ``(0, 0, None)`` for a log with no proxy start, and for one that cannot be read.
+
+    A resumed session's log holds every run, and the exit summary and ``contexto state`` want the
+    latest. The file is still read once, but only searched: a line is parsed when it holds a proxy
+    start's or a launch's name, which is two lines a run."""
+    try:
+        fd = open_regular(Path(directory) / "log.jsonl")
+    except OSError:
+        return 0, 0, None
+    try:
+        runs, last, launch, carried = 0, None, None, None
+        for base, data in _whole_lines(fd):
+            if data is None:
+                continue
+            done = 0
+            for mark in _RUN_MARK.finditer(data):
+                if mark.start() < done:
+                    continue  # a second name on a line already read
+                begin = data.rfind(b"\n", 0, mark.start()) + 1
+                end = data.find(b"\n", mark.end())
+                done = len(data) if end < 0 else end
+                value = None if done - begin > LOG_BLOCK_BYTES else _line_value(data[begin:done])
+                name = value.get("event") if isinstance(value, dict) else None
+                if name == "proxy_start":
+                    runs, last, carried = runs + 1, base + begin, launch
+                elif name == "launch":
+                    launch = value
+        if last is None:
+            return 0, 0, None
+        return _run_begins(fd, last), runs - 1, carried
+    except OSError:
+        return 0, 0, None
     finally:
         os.close(fd)
 
@@ -236,29 +348,36 @@ def store_fault_cause(failure: dict[str, Any]) -> str:
     return "no_access" if code in NO_ACCESS else "store"
 
 
-def store_fault_message(failure: dict[str, Any], session_id: str | None = None) -> str:
+def store_fault_message(failure: dict[str, Any], session_id: str | None = None, *, past: bool = False) -> str:
     """One paragraph for a store failure: what happened, what it costs, and what to do next. Built only
-    from the event's content-free fields (an errno name, an operation, an exception class, a page id)."""
+    from the event's content-free fields (an errno name, an operation, an exception class, a page id).
+    ``past`` tells it as over, for a reader that knows paging resumed or that the run has ended; the
+    warning raised when the failure happens cannot know, and says it in the present."""
     cause = store_fault_cause(failure)
     operation = failure.get("operation") if isinstance(failure.get("operation"), str) else "a store call"
     error = failure.get("error") if isinstance(failure.get("error"), str) else "an error"
     code = failure.get("errno") if isinstance(failure.get("errno"), str) else None
     detail = f"{code} during {operation}" if code else f"{error} during {operation}"
+    stopped = (f"so paging stopped: {UNPAGED_PAST}" if past else f"so paging has stopped: {UNPAGED}")
     retry = "Contexto retries at each turn start and pages again once the store works; turns already paged are kept."
+
+    def advice(text: str) -> str:
+        return f"If it happens again, {text[0].lower()}{text[1:]}" if past else f"{text} {retry}"
+
     if cause == "disk_full":
-        return (f"the disk that holds Contexto's store is full ({detail}), so paging has stopped: {UNPAGED}. "
-                f"Free space on the disk that holds {HOME_HINT}. {retry}")
-    if cause == "no_access":
-        return (f"Contexto cannot write its store ({detail}), so paging has stopped: {UNPAGED}. Check the owner "
-                f"and permissions of the session directory under {HOME_HINT}, and that its filesystem is not "
-                f"read-only. {retry}")
+        return (f"the disk that holds Contexto's store {'was' if past else 'is'} full ({detail}), {stopped}. "
+                + advice(f"Free space on the disk that holds {HOME_HINT}."))
+    if cause == "no_access":  # a read can fail this way as well as a write (EACCES during pinned_text)
+        return (f"Contexto {'could not' if past else 'cannot'} read or write its store ({detail}), {stopped}. "
+                + advice(f"Check the owner and permissions of the session directory under {HOME_HINT}, and that "
+                         f"its filesystem is not read-only."))
     if cause == "page_conflict":
         page = failure.get("page_id") if isinstance(failure.get("page_id"), str) else "a page"
-        return (f"a stored page ({page}) does not match the turn it should hold, so paging has stopped: {UNPAGED}. "
+        return (f"a stored page ({page}) {'did' if past else 'does'} not match the turn it should hold, {stopped}. "
                 f"At the next turn start Contexto moves that file to the session's quarantine folder (nothing is "
                 f"deleted) and pages the turn again. If it happens again, check the disk under {HOME_HINT}.")
     show = f"contexto sessions show {session_id}" if session_id else "contexto sessions show ID"
-    return (f"Contexto's store failed ({detail}), so paging has stopped: {UNPAGED}. {retry} Run `{show}` to check "
+    return (f"Contexto's store failed ({detail}), {stopped}. {'' if past else retry + ' '}Run `{show}` to check "
             f"the session's ledger and pages.")
 
 
@@ -504,12 +623,10 @@ class _Tally:
                 if engine.get("cli_session") is not True:  # absent in a log from before the engine wrote it
                     self.undetectable.add("no_session_id")
         usage_events = list(_events(event.get("usage_events")))
+        moved = False  # this line holds a degraded_enter or degraded_leave
         for inner in [*nested, *usage_events]:
             kind = inner.get("event")
-            if kind == "request":  # the engine's own word on this request, should an enter or leave line be lost
-                self.degraded[main] = inner.get("degraded") is True
-                if main:
-                    self.since = (self.since or when) if self.degraded[main] else None
+            if kind == "request":
                 continue
             if kind == "over_bound":
                 flagged = True
@@ -529,18 +646,25 @@ class _Tally:
                     self.cli_versions.append(inner["version"])
             elif kind == "degraded_enter":
                 self.entered += 1
-                self.degraded[main] = True
+                self.degraded[main], moved = True, True
                 if main:
                     self.since = self.since or when
             elif kind == "degraded_leave":
                 self.left += 1
-                self.degraded[main] = False
+                self.degraded[main], moved = False, True
                 if main:
                     self.since = None
             if self.bound is None and kind in ("over_bound", "bound_too_small"):
                 self.bound = self._number(inner.get("bound"))  # a log without its launch line still knows the bound
             if isinstance(kind, str) and kind in FAULT_EVENTS:
                 self._fault(inner, kind, when)
+        if engine and not moved:
+            # The engine's own word on this request, should an enter or leave line be lost. Only then: a
+            # store that fails after the request was built (the publish of its recall room) enters
+            # degraded mode on a line whose request event has no flag, and that entry stands.
+            self.degraded[main] = engine.get("degraded") is True
+            if main:
+                self.since = (self.since or when) if self.degraded[main] else None
         self.seen_main = self.seen_main or (main and bool(engine))
         self.requests["main" if main else "side"] += 1
 
@@ -690,12 +814,13 @@ def page_totals(pages_dir: Path, *, tokens: bool = True) -> dict[str, Any]:
 
 
 def _pins(directory: Path) -> dict[str, Any]:
-    """Active ledger records and open obligations; ``readable`` is False for a damaged ledger."""
+    """Active ledger records and open obligations; ``readable`` is False for a damaged ledger. Never
+    waits for the ledger's lock and creates nothing (``Ledger.peek``)."""
     from contexto.store.ledger import Ledger, LedgerError  # lazily: the store is not needed to read a log
     from contexto.store.state import derive
 
     try:
-        state = derive(Ledger(directory).records())
+        state = derive(Ledger(directory).peek())
     except (LedgerError, OSError, ValueError):
         return {"readable": False, "active_records": None, "open_obligations": None}
     return {"readable": True, "active_records": len(state.active), "open_obligations": len(state.open_obligations)}
@@ -704,7 +829,7 @@ def _pins(directory: Path) -> dict[str, Any]:
 def _fault_report(tally: _Tally, session_id: str, earlier_run: bool) -> dict[str, Any]:
     now = tally.degraded_now()
     store_errors = [{k: v for k, v in entry.items() if k != "page_id"} for entry in tally.store_errors.values()]
-    messages = [store_fault_message(entry, session_id) for entry in tally.store_errors.values()]
+    messages = [store_fault_message(entry, session_id, past=not now) for entry in tally.store_errors.values()]
     if messages or tally.entered:
         count = f"{tally.unpaged:,} request{'' if tally.unpaged == 1 else 's'} went out unpaged"
         if tally.largest_unpaged:
@@ -714,7 +839,7 @@ def _fault_report(tally: _Tally, session_id: str, earlier_run: bool) -> dict[str
         elif earlier_run:
             status = f"That was in an earlier run, which ended with paging stopped ({count}); a new run pages again."
         else:
-            status = f"Paging has resumed; {count} meanwhile."
+            status = f"Paging has resumed; meanwhile {count}."
         messages = [*messages[:-1], f"{messages[-1]} {status}"] if messages else [status]
     return {
         "total": sum(tally.fault_events.values()),
@@ -726,17 +851,15 @@ def _fault_report(tally: _Tally, session_id: str, earlier_run: bool) -> dict[str
     }
 
 
-HELD_LINES = 64  # lines kept between one run's exit and the next proxy start; a launch writes a few
-
-
 def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_tokens: bool = True,
                   store: bool = True) -> dict[str, Any]:
     """One session's numbers as a plain dict of JSON values (the ``contexto stats --json`` shape,
     ``STATS_VERSION``; docs/stats.md defines each key).
 
     ``last_run`` counts only the log of the most recent run (one ``contexto run``): from the lines its
-    launch wrote while opening the session, through its proxy start, to the end. The pages and pins are
-    the store's as it stands either way. ``page_tokens=False`` counts the page files without opening
+    launch wrote while opening the session, through its proxy start, to the end. Only that part of the
+    log is parsed (``_last_run_tail``), so the cost does not grow with the runs before it. The pages and
+    pins are the store's as it stands either way. ``page_tokens=False`` counts the page files without opening
     them, and ``store=False`` skips the ledger and the pages altogether, for a caller that wants only
     the log's numbers. Raises ``SessionNotFoundError`` when the session directory does not exist;
     nothing else is raised for a damaged session."""
@@ -745,15 +868,20 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
         from contexto.store import SessionNotFoundError
 
         raise SessionNotFoundError(f"no session {session_id!r} under {Path(home) / 'sessions'}")
-    tally, runs, lines, unreadable, missing = _Tally(), 0, 0, 0, False
+    tally, lines, unreadable, missing = _Tally(), 0, 0, False
+    start, runs, launch = _last_run_tail(directory) if last_run else (0, 0, None)
     cli, bound = None, None
+    if launch is not None:  # the launch a run without its own line (a bare proxy) inherits from
+        config = launch.get("config")
+        cli = launch.get("cli") if isinstance(launch.get("cli"), str) else None
+        bound = _nat(config.get("bound")) if isinstance(config, dict) else None
     # A launch opens the session before it starts the proxy, and what that finds (a ledger repaired, a
     # session pruned meanwhile) is logged then. So the lines after a run's ``exit`` are held: they
     # belong to the next run if one starts, and to no run otherwise.
     held: list[dict[str, Any]] = []
     between = True
     try:
-        for event in log_values(directory):
+        for event in log_values(directory, start):
             lines += 1
             if not isinstance(event, dict):
                 unreadable += 1
@@ -771,10 +899,12 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
                 tally.line(event)
             elif between:
                 held.append(event)
-                if len(held) > HELD_LINES:  # not a launch's few lines: they stay where they are
+                if name == "exit" or len(held) > HELD_LINES:
+                    # Not a launch's few lines (an exit with no proxy start before it, or too many): they
+                    # stay with what came before. After an exit, the lines that follow are held again.
                     for earlier in held:
                         tally.line(earlier)
-                    held, between = [], False
+                    held, between = [], name == "exit"
             else:
                 tally.line(event)
                 between = name == "exit"
@@ -1050,27 +1180,38 @@ def render(out: dict[str, Any], *, brief: bool = False) -> list[str]:
     return lines
 
 
+def _by_count(events: dict[str, int]) -> list[tuple[str, int]]:
+    return sorted(events.items(), key=lambda item: (-item[1], item[0]))
+
+
 def fault_summary(faults: dict[str, Any]) -> str:
     """``3 events (store_error 2, degraded_enter 1)``, the most frequent first."""
-    names = sorted(faults["events"].items(), key=lambda item: (-item[1], item[0]))
-    return f"{_n(faults['total'], 'event')} ({', '.join(f'{name} {count}' for name, count in names)})"
+    names = ", ".join(f"{name} {count}" for name, count in _by_count(faults["events"]))
+    return f"{_n(faults['total'], 'event')} ({names})"
 
 
 def fault_lines(out: dict[str, Any]) -> list[str]:
+    """The faults, what each event means (the exit warning points here for details, and an event's name
+    alone is not one), and for a store failure what to do."""
     faults = out["faults"]
     if not faults["total"]:
         return ["  faults      none"]
-    return [f"  faults      {fault_summary(faults)}", *(f"    {message}" for message in faults["messages"])]
+    meanings = [f"    {name} x{count}: {FAULT_EVENTS.get(name, 'an event this release does not know')}"
+                for name, count in _by_count(faults["events"])]
+    return [f"  faults      {fault_summary(faults)}", *meanings, *(f"    {message}" for message in faults["messages"])]
 
 
 # The exit summary of ``contexto run`` ---------------------------------------------------------------
 
 INFO_ARGS = (["--version"], ["-v"], ["-V"], ["--help"], ["-h"])  # the CLI prints and exits: no summary
 # The fault events already put on stderr in their own words, by the launcher's NoticeLog (a store
-# failure is said with ``degraded_enter``'s cause) or by the store when it opens a session that was
-# pruned meanwhile, so the exit summary does not warn about them a second time.
-NOTICED_EVENTS = frozenset({"store_error", "page_conflict", "degraded_enter", "mcp_tools_missing",
-                            "mcp_tools_denied", "bound_too_small", "pruned_while_opening"})
+# failure is said with ``degraded_enter``'s cause, and the page-conflict warning says the page will be
+# moved to quarantine) or by the store when it opens a session that was pruned meanwhile, so the exit
+# summary does not warn about them a second time.
+NOTICED_EVENTS = frozenset({"store_error", "page_conflict", "degraded_enter", "page_quarantined",
+                            "mcp_tools_missing", "mcp_tools_denied", "bound_too_small", "pruned_while_opening"})
+HELP_ARGS = frozenset({"--help", "-h", "--version"})  # anywhere in the CLI's arguments: it printed and exited
+CLI_NOT_STARTED = 127  # the launcher's EXIT_NOT_FOUND: it has already said that the CLI cannot be started
 QUIET_ENV = "CONTEXTO_QUIET"
 
 
@@ -1082,19 +1223,28 @@ def quiet_from_env(env: Any = None) -> bool:
 
 
 def exit_summary(home: Path, session_id: str, cli: str, elapsed_s: float, *, quiet: bool = False,
-                 log_incomplete: bool = False) -> list[str]:
+                 log_incomplete: bool = False, cli_args: Any = (), exit_code: int | None = None) -> list[str]:
     """The lines ``contexto run`` prints on stderr once the CLI has exited: what this run did (the log
     from its proxy start on, not the whole of a resumed session), with a ``faults`` line when it logged
     any, then one warning line for the faults no earlier warning described (``NOTICED_EVENTS``).
-    ``quiet`` drops the summary and keeps the warning."""
+    ``quiet`` drops the summary and keeps the warning. A run with no model request gets one line that
+    says so, unless the CLI could not be started (``exit_code``; the launcher has said that) or was
+    asked for help (``cli_args``)."""
     out = session_stats(home, session_id, last_run=True)
     # Not "contexto: session ...": that is how the one line printed at start begins, and scripts read it.
     head = f"contexto: run of session {session_id} ended after {duration_text(elapsed_s)}"
     requests = out["requests"]
     others = requests["other"] + requests["count_tokens"]
+    faults = out["faults"]
+    degraded = faults["degraded"]
     lines: list[str] = []
     if quiet:
-        pass
+        if degraded["entered"] and not degraded["now"]:
+            # The store warning was raised while the store was failing and held until now, so it reads
+            # as if paging were still stopped. The summary's faults line says it resumed; without the
+            # summary this line does.
+            lines.append(f"contexto: paging resumed before {cli} exited; meanwhile "
+                         f"{_n(degraded['unpaged_requests'], 'request')} went out unpaged.")
     elif requests["model"]:
         more = f" (`contexto stats {session_id}` shows all {out['runs']} runs)" if out["runs"] > 1 else ""
         lines += [head + more, *render(out, brief=True)]
@@ -1102,14 +1252,14 @@ def exit_summary(home: Path, session_id: str, cli: str, elapsed_s: float, *, qui
             lines.append("  (the session log could not be written at times, so these numbers are low)")
     elif log_incomplete:  # no line of a request does not show that there was none
         lines.append(f"{head}; its log could not be written, so this run has no numbers")
+    elif (exit_code == CLI_NOT_STARTED and not others) or any(arg in HELP_ARGS for arg in cli_args):
+        pass  # nothing ran that could have sent a prompt
     else:
         reached = (f"the CLI reached the proxy for {_n(others, 'other request')}" if others
                    else "nothing reached the proxy")
         lines.append(f"{head} with no model request through Contexto ({reached}). If you sent {cli} a prompt, it "
                      f"bypassed Contexto and nothing was bounded or paged: see docs/stats.md, 'No model request'.")
-    faults = out["faults"]
-    if faults["total"] and lines and requests["model"]:
-        degraded = faults["degraded"]
+    if faults["total"] and lines and requests["model"] and not quiet:
         state = ""
         if degraded["entered"] or degraded["unpaged_requests"]:
             state = (f": {_n(degraded['unpaged_requests'], 'request')} went out unpaged, and paging "
@@ -1117,23 +1267,26 @@ def exit_summary(home: Path, session_id: str, cli: str, elapsed_s: float, *, qui
         lines.append(f"  faults      {fault_summary(faults)}{state}; details: contexto stats {session_id}")
     unsaid = {name: count for name, count in faults["events"].items() if name not in NOTICED_EVENTS}
     if unsaid:
-        counted = fault_summary({"total": sum(unsaid.values()), "events": unsaid})
-        lines.append(f"contexto: warning: this run logged {counted} that Contexto left its designed path. "
-                     f"Details: contexto stats {session_id}")
+        total = sum(unsaid.values())
+        names = ", ".join(f"{name} {count}" for name, count in _by_count(unsaid))
+        lines.append(f"contexto: warning: this run logged {_n(total, 'event')} that mean{'s' if total == 1 else ''} "
+                     f"Contexto left its designed path ({names}). Details: contexto stats {session_id}")
     return lines
 
 
 def print_exit_summary(store: Any, cli: str, started: float | None, *, cli_args: Any = (), quiet: bool = False,
-                       log_incomplete: bool = False, stderr: Any = None) -> None:
+                       log_incomplete: bool = False, stderr: Any = None, code: int | None = None) -> None:
     """Print ``exit_summary`` for the session ``store`` holds; ``started`` is ``time.monotonic()`` when
-    the CLI was started. It runs in the launcher's cleanup, after the CLI has released the terminal, so
-    it never raises and never changes the exit code: any failure prints nothing. Nothing is printed
-    when the CLI never started (``started`` is None) or was only asked for its version or help."""
+    the CLI was started and ``code`` its exit code. It runs in the launcher's cleanup, after the CLI has
+    released the terminal, so it never raises and never changes the exit code: any failure prints
+    nothing. That includes Ctrl+C: SIGINT has its default handler again by then, and pressing it more
+    than once is how people leave Claude Code. Nothing is printed when the CLI never started
+    (``started`` is None) or was only asked for its version or help."""
     try:
         if started is None or list(cli_args) in INFO_ARGS:
             return
         for line in exit_summary(store.home, store.session_id, cli, time.monotonic() - started, quiet=quiet,
-                                 log_incomplete=log_incomplete):
+                                 log_incomplete=log_incomplete, cli_args=list(cli_args), exit_code=code):
             print(line, file=stderr, flush=True)
-    except Exception:  # a summary is a courtesy; the CLI's exit code and the resume line come first
+    except (Exception, KeyboardInterrupt):  # a courtesy; the CLI's exit code and the resume line come first
         pass

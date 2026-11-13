@@ -207,6 +207,55 @@ def test_a_summary_that_cannot_be_built_never_changes_the_exit_code(monkeypatch,
     assert out.getvalue() == ""
 
 
+def test_ctrl_c_while_the_summary_is_built_keeps_the_exit_code_and_the_resume_line(monkeypatch, env, tmp_path):
+    """Reviewer A's M1: pressing Ctrl+C more than once is how people leave Claude Code, and the summary
+    is built in the launcher's cleanup, where SIGINT has its default handler again."""
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    after: list[str] = []
+    monkeypatch.setattr(stats, "session_stats", interrupted)
+    monkeypatch.setattr(launcher, "after_exit", lambda *args: after.append("the resume line"))
+    code, err = in_process(monkeypatch, env, tmp_path, lambda argv, env=None, **kw: 7)
+    assert code == 7 and after == ["the resume line"]
+    assert "ended after" not in err and "Traceback" not in err
+
+
+def test_a_cli_that_cannot_be_started_gets_no_line_about_a_bypassed_proxy(env, upstream, tmp_path):
+    """Reviewer A's L5: the launcher has said "cannot start"; "it bypassed Contexto" would be wrong."""
+    broken = tmp_path / "bin" / "claude"
+    script = broken.read_text().split("\n", 1)[1]
+    version = tmp_path / "bin" / "real-claude"
+    version.write_text(f"#!{sys.executable}\n{script}")
+    version.chmod(0o755)
+    broken.write_text("#!/nonexistent/interpreter\n")
+    done = run(env, "--upstream", upstream, "--session", "b1", "--no-version-check", "claude", "-p", "hi",
+               cwd=tmp_path)
+    assert done.returncode == launcher.EXIT_NOT_FOUND == stats.CLI_NOT_STARTED, done.stderr
+    assert "cannot start" in done.stderr and "ended after" not in done.stderr and "bypassed" not in done.stderr
+    # A subcommand's help reaches no model either, and is not a bypass.
+    SessionStore(tmp_path / "contexto", "b2").log({"event": "proxy_start", "port": 1})
+    for args in (["mcp", "--help"], ["config", "-h"]):
+        assert stats.exit_summary(tmp_path / "contexto", "b2", "claude", 1.0, cli_args=args) == [], args
+    [line] = stats.exit_summary(tmp_path / "contexto", "b2", "claude", 1.0, cli_args=["-p", "hi"], exit_code=1)
+    assert "with no model request through Contexto" in line  # still said when a prompt could have been sent
+
+
+def test_only_the_exit_line_failing_is_still_said(monkeypatch, env, tmp_path):
+    """Reviewer A's L7: the exit line goes through the NoticeLog, so a log that fails only then is said."""
+    log = SessionStore.log
+
+    def full_at_exit(self, event):
+        if event.get("event") == "exit":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        log(self, event)
+
+    monkeypatch.setattr(SessionStore, "log", full_at_exit)
+    code, err = in_process(monkeypatch, env, tmp_path, lambda argv, env=None, **kw: 6)
+    assert code == 6
+    assert len([line for line in err.splitlines() if "session log could not be written (ENOSPC)" in line]) == 1
+
+
 def test_a_log_that_cannot_be_written_at_exit_keeps_the_cli_s_exit_code_and_is_said(monkeypatch, env, tmp_path):
     log = Path(env["CONTEXTO_HOME"]) / "sessions" / "x1" / "log.jsonl"
 
@@ -514,11 +563,39 @@ def test_a_full_disk_is_seen_at_exit_in_stats_and_in_state(tmp_path, token_upstr
     assert "Free space" in warnings[0] and "retries at each turn start" in warnings[0]
     assert str(home) not in err.getvalue()  # the exception's text, with its path, is never shown or logged
     assert str(home) not in (home / "sessions" / "disk1" / "log.jsonl").read_text()
-    lines = stats.exit_summary(home, "disk1", "claude", 12.0, quiet=True)
-    assert lines == []  # --quiet: the warning above said it, and nothing else is printed
+    # --quiet: the warning above was held from when the disk was full, so one line says it is over.
+    assert stats.exit_summary(home, "disk1", "claude", 12.0, quiet=True) == [
+        "contexto: paging resumed before claude exited; meanwhile 2 requests went out unpaged."]
     lines = stats.exit_summary(home, "disk1", "claude", 12.0)
     assert lines[-1] == ("  faults      3 events (store_error 2, degraded_enter 1): 2 requests went out unpaged, and "
                          "paging resumed before exit; details: contexto stats disk1")
+
+
+def test_a_store_that_keeps_failing_under_the_bound_is_stopped_at_exit(tmp_path, token_upstream):
+    """Reviewer A's M2, through the real engine: the recall room cannot be published from the second
+    request on (a disk that stays full) and the session is under the bound, so nothing is paged. Each
+    later turn start leaves degraded mode and enters it again, after the request was built."""
+    home = tmp_path / "contexto"
+    store = SessionStore(home, "tr1")
+    proxy, _ = launcher.start_proxy(store, token_upstream, "flag", SMALL, False, stderr=io.StringIO(), cli="claude")
+    try:
+        post(proxy, conversation(1))
+
+        def full_disk(*args, **kwargs):
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        store.set_turn_room = full_disk
+        post(proxy, conversation(2))
+        post(proxy, conversation(3))
+    finally:
+        proxy.stop()
+    kinds = [[inner["event"] for inner in e["transform_events"]] for e in log_events(home, "tr1")
+             if e["event"] == "request"]
+    assert kinds[1][-3:] == ["store_error", "degraded_enter", "request"]
+    assert kinds[2][-3:] == ["store_error", "degraded_enter", "request"] and "degraded_leave" in kinds[2]
+    degraded = session_stats(home, "tr1")["faults"]["degraded"]
+    assert (degraded["entered"], degraded["left"], degraded["now"]) == (2, 1, True)
+    assert "paging had not resumed at exit" in "\n".join(stats.exit_summary(home, "tr1", "claude", 3.0))
 
 
 # Codex -----------------------------------------------------------------------------------------------
@@ -609,3 +686,52 @@ def test_codex_holds_a_store_fault_until_it_exits(tmp_path, monkeypatch, codex_b
     [warning] = [line for line in err.splitlines() if "full" in line]
     assert warning.startswith("contexto: warning: the disk that holds Contexto's store is full")
     assert err.index(warning) < err.index("ended after")
+
+
+def test_codex_keeps_its_exit_code_when_the_log_cannot_be_written(tmp_path, monkeypatch, codex_bin, token_upstream):
+    """Reviewer A's L7: the guard on Codex's ``exit`` write had no test."""
+    def child(proxy, stderr) -> int:
+        log = tmp_path / "ctx" / "sessions" / "cw1" / "log.jsonl"
+        log.unlink()
+        log.mkdir()  # every later write to the session log fails, as on a full disk
+        return 6
+
+    code, err = codex_run(monkeypatch, token_upstream, "cw1", child, "exec", "hi")
+    assert code == 6, err
+    assert len([line for line in err.splitlines() if "session log could not be written" in line]) == 1
+
+
+def test_codex_logs_its_exit_when_a_held_notice_cannot_be_printed(tmp_path, monkeypatch, codex_bin, token_upstream):
+    """Reviewer A's L6: with a notice held and stderr a broken pipe, releasing it raised before the
+    ``exit`` line was written."""
+    class Pipe(io.StringIO):
+        broken = False
+
+        def write(self, text):
+            if self.broken:
+                raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+            return super().write(text)
+
+    def child(proxy, stderr) -> int:
+        proxy.log({"event": "request", "transform_events": [failure()]})  # held until Codex exits
+        stderr.broken = True
+        return 0
+
+    seen: dict = {}
+    start_proxy = launcher.start_proxy
+
+    def spy(*args, **kwargs):
+        seen["proxy"], name = start_proxy(*args, **kwargs)
+        return seen["proxy"], name
+
+    monkeypatch.setattr(launcher, "start_proxy", spy)
+    err = Pipe()
+    monkeypatch.setattr(launcher, "run_child", lambda argv, env=None, *, stderr=None: child(seen["proxy"], err))
+    args = parse("--session", "cp1", "--codex-upstream", token_upstream + "/v1", "--codex-key-helper", "echo k",
+                 "codex", "exec", "hi")
+    args.no_version_check, args.quiet = True, False
+    with pytest.raises(BrokenPipeError):
+        run_codex(args, stderr=err)
+    events = [json.loads(line)["event"] for line in
+              (tmp_path / "ctx" / "sessions" / "cp1" / "log.jsonl").read_text().splitlines()]
+    assert events[-1] == "exit"
