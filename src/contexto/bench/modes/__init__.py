@@ -20,6 +20,10 @@ both with ``add_option`` below, which keeps the first definition, because argpar
 definition of an option and that error would break every ``contexto`` command.
 
 To add a mode, add a module here. Nothing else changes: no edit to ``contexto.commands.bench``.
+
+Every mode module is imported when any ``contexto`` command starts, because the command line is
+built from all of them. So a mode imports only what ``add_arguments`` needs at the top of its file
+and imports the rest (the proxy, an HTTP client) inside ``run``.
 """
 
 from __future__ import annotations

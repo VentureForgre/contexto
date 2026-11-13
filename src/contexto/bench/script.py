@@ -180,8 +180,8 @@ def _extend(base: Script, pools: d27.Pools, rng: random.Random) -> Script:
     def fact(pid: str, cls: str, tier: str, service: str, attribute: tuple[str, str], source: str) -> Probe:
         name, clause = attribute
         key, answer = f"{service}.{name}", value()
-        question = f"From the {source} earlier in this conversation: {clause.format(svc=_plain(service))} " \
-                   "Answer with the value only."
+        question = (f"From the {source} earlier in this conversation: {clause.format(svc=_plain(service))} "
+                    "Answer with the value only.")
         return probe(pid, cls, tier, question, answer, (key, service, name), (f"cfg {key}={answer}",))
 
     services = rng.sample(sorted(pools.services), 2 * PER_CLASS)  # the services d27 left unused
