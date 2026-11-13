@@ -299,6 +299,19 @@ def test_stubbed_results_are_stored_exactly_and_recall_and_search_reach_them(loo
     assert store.search(needle)[0] == page
 
 
+def test_the_retained_snapshot_holds_the_window_as_sent(loop120):
+    # Search's "in view" lines come from this snapshot: a stubbed result is in view as its stub, and its
+    # text is found in its page instead.
+    cli, store = loop120
+    result, call, page, sent = stubbed_blocks(cli)[5]
+    _, _, _, entries = store.retained()
+    texts = [e["text"] for e in entries if e["role"] == "tool_result"]
+    assert any(page in text and text.startswith("tool_result:\n[Contexto paged out") for text in texts)
+    assert not any(result["content"][:200] in text for text in texts)
+    kept = cli.history[-2]["content"][0]["content"]  # the newest result is still in view, whole
+    assert any(kept[:200] in text for text in texts)
+
+
 def test_a_stub_keeps_the_blocks_keys_and_says_how_to_read_the_result_back():
     call = {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "pytest -q " + "x" * 400}}
     result = {"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True,
@@ -410,9 +423,11 @@ def test_the_event_is_content_free_and_complete():
     event = batches(cli)[0]
     assert set(event) == {"event", "epoch", "trigger", "results_stubbed", "own_results_stubbed",
                           "unseen_results_stubbed", "rounds_folded", "turns_paged", "pages", "estimate_before",
-                          "estimate_after", "first_changed", "resent_tokens", "messages"}
+                          "estimate_after", "margin", "first_changed", "resent_tokens", "messages"}
     assert all(isinstance(v, (int, str)) for v in event.values())
-    assert event["estimate_before"] > inturn.trigger(SMALL) >= event["estimate_after"]
+    # The trigger counts the result that just arrived at the tool-output seed until usage measures it.
+    assert event["estimate_before"] + event["margin"] > inturn.trigger(SMALL) >= event["estimate_after"]
+    assert 0 < event["margin"] < 9_000 and event["estimate_before"] <= inturn.trigger(SMALL)
     sent = cli.sent[first_batch(cli)]
     assert sent.events[-1]["sent_estimate"] == event["estimate_after"] == sent.estimate
     assert 0 < event["resent_tokens"] < event["estimate_after"]

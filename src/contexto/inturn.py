@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import re
 import sys
 import threading
 from collections import OrderedDict
@@ -64,6 +65,7 @@ from typing import Any, NamedTuple
 
 from contexto.canonical import canonical_bytes, canonical_json, utf8
 from contexto.store.render import OWN_TOOL_PREFIX, own_call_ids
+from contexto.tokens import TokenEstimator
 
 STUB_MIN_BYTES = 2_048  # a result is stubbed only when its content is at least this many bytes
 STUB_MIN_RATIO = 2  # and at least this many times its stub
@@ -306,6 +308,26 @@ def stub_text(hooks: Any, call: dict | None, result: dict, page_id: str) -> str:
             "page). contexto_search finds lines in it. You can also run the tool call again.]")
 
 
+_STUB_PAGE = re.compile(r"\npage: (pg_[0-9a-f]{16})\n")
+_NOTE_PAGE = re.compile(r" of this turn into page (pg_[0-9a-f]{16}) to keep the request under its bound\.")
+
+
+def stub_page(content: Any) -> str | None:
+    """The page id a result stub names, or None when ``content`` is not one (``stub_text``'s form)."""
+    if not isinstance(content, str) or not content.startswith("[Contexto paged out this tool result "):
+        return None
+    found = _STUB_PAGE.search(content)
+    return found.group(1) if found else None
+
+
+def note_page(text: Any) -> str | None:
+    """The page id a fold note names, or None when ``text`` is not one (``fold_note``'s form)."""
+    if not isinstance(text, str) or not text.startswith("[Contexto folded "):
+        return None
+    found = _NOTE_PAGE.search(text)
+    return found.group(1) if found else None
+
+
 def _counted(names: list[str]) -> str:
     counts: OrderedDict[str, int] = OrderedDict()
     for name in names:
@@ -493,34 +515,59 @@ class _Candidate(NamedTuple):
     i: int
     j: int
     own: bool  # one of Contexto's search, recall or state results: no page
-    saving: int  # estimated tokens a stub frees
+    saving: int  # estimated tokens a stub frees, a fresh result counted with its margin
+    plain: int  # the same at the session's ratio alone
     call: dict | None
     result: dict
 
 
-def page(request: dict, messages: list[dict], estimate: int, state: Any, store: Any, config: Any,
-         estimator: Any, events: list[dict]) -> tuple[Any, int | None]:
-    """Rule 5 for one request inside a tool loop: run a batch when one is due. Returns the state and
-    the estimate of what is now sent, or the state unchanged and None when no batch ran.
+_SEED = TokenEstimator()  # never observes usage: the contract's seed ratios (tool output at 1.5 bytes a token)
+
+
+def fresh_margin(items: list[dict], estimator: Any, dialect: Any) -> int:
+    """What the estimate of tool results that arrived with this request may be short by. The session's
+    ratio is a blend, and one large result can be much denser than it (measured in the replay harness:
+    a 60,000-token result estimated 17,195 low). Until a response's usage has measured it, a fresh result
+    counts at the tool-output seed for in-turn decisions; this is the difference, never negative."""
+    hooks = dialect.in_turn
+    extra = 0
+    for item in items:
+        if item is not FOLDED and hooks.results(item):
+            extra += max(0, dialect.estimate_items(_SEED, [item]) - dialect.estimate_items(estimator, [item]))
+    return extra
+
+
+def page(request: dict, messages: list[dict], previous_n: int, estimate: int, state: Any, store: Any,
+         config: Any, estimator: Any, events: list[dict]) -> tuple[Any, int | None]:
+    """Rule 5 for one request inside a tool loop: run a batch when one is due. ``previous_n`` is how many
+    of the messages the previous request had. Returns the state and the estimate of what is now sent, or
+    the state unchanged and None when no batch ran.
 
     Rule 14: a store failure keeps the state from before the attempt and enters degraded mode; the
     request is sent unpaged. Pages a failed batch already wrote are rewritten identically by the next."""
     rw = _rw()
-    hooks = rw._dialect().in_turn
-    if (hooks is None or not config.in_turn_paging or state.degraded or estimate <= trigger(config)
+    dialect = rw._dialect()
+    hooks = dialect.in_turn
+    if (hooks is None or not config.in_turn_paging or state.degraded
             or not callable(getattr(store, "page_parts", None))):
+        return state, None
+    margin = fresh_margin(view(messages, state, dialect)[previous_n:], estimator, dialect)
+    if estimate + margin <= trigger(config):
         return state, None
     calls, attempt = rw.StoreCalls(store), []
     try:
-        new, after = _batch(request, messages, estimate, state, calls, config, estimator, attempt, hooks)
+        new, after = _batch(request, messages, previous_n, estimate, margin, state, calls, config, estimator,
+                            attempt, hooks)
     except rw.STORE_FAILURES as error:
         return rw.enter_degraded(state, rw.store_failure(error, calls, state), events), None
     events.extend(attempt)
     return new, after
 
 
-def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store: Any, config: Any,
-           estimator: Any, events: list[dict], hooks: Any) -> tuple[Any, int | None]:
+def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, margin: int, state: Any,
+           store: Any, config: Any, estimator: Any, events: list[dict], hooks: Any) -> tuple[Any, int | None]:
+    """One batch. Every decision is made on the estimate plus the fresh results' margin; what is logged
+    and returned is the estimate itself."""
     rw = _rw()
     dialect = rw._dialect()
     n = len(messages)
@@ -531,6 +578,10 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
 
     def tokens(items: list[dict]) -> int:
         return rw.estimate_items(estimator, [m for m in items if m is not FOLDED])
+
+    def counted(i: int, item: dict) -> int:
+        """A sent item's tokens for a decision: a fresh tool result with its margin."""
+        return tokens([item]) + (fresh_margin([item], estimator, dialect) if i >= previous_n else 0)
 
     # What a stub would free, for every result not yet a stub, oldest first.
     own = own_call_ids(messages[state.k:])
@@ -550,9 +601,11 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
             size = hooks.content_bytes(result)
             if size < STUB_MIN_BYTES or size < STUB_MIN_RATIO * len(utf8(text)):
                 continue  # a byte rule, so the choice never depends on the measured ratio
-            saving = tokens([sent[i]]) - tokens([hooks.with_stubs(sent[i], {j: text})])
-            if saving > 0:
-                (seen if i < last_assistant else unseen).append(_Candidate(i, j, is_own, saving, call, result))
+            stubbed_item = hooks.with_stubs(sent[i], {j: text})
+            plain = tokens([sent[i]]) - tokens([stubbed_item])
+            saving = counted(i, sent[i]) - counted(i, stubbed_item)
+            if plain > 0:
+                (seen if i < last_assistant else unseen).append(_Candidate(i, j, is_own, saving, plain, call, result))
 
     # What the whole ladder could free, and so what cannot be paged.
     rounds = [r for r in hooks.rounds(sent, start, n)[:-1] if r.foldable and r.removed]
@@ -561,15 +614,18 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
     # it unmeasured for the rest of the session, so step 2 waits for it; the other steps keep k.
     may_page_turns = start > state.k and not (state.head_tokens is None and state.k == 0)
     earlier = tokens(rw.window_items(sent[:start], state.k)) if may_page_turns else 0
-    freeable = (earlier + sum(tokens([sent[i] for i in r.removed]) for r in rounds)
+    freeable = (earlier + sum(counted(i, sent[i]) for r in rounds for i in r.removed)
                 + sum(c.saving for c in seen if c.i not in in_rounds and (c.i >= start or not may_page_turns)))
-    floor = estimate - freeable
+    pressure = estimate + margin
+    floor = pressure - freeable
     target = floor + math.ceil(config.window_fraction * max(0, line_t - floor))
     escalate = max(target, line_t - config.min_turn_room)
-    over_bound = estimate > config.bound
-    # Step 0: a result that cannot fit under T whatever else is paged.
+    over_bound = pressure > config.bound
+    # Step 0: a result that cannot fit under T whatever else is paged, or that with its margin would
+    # leave no recall room at all.
     kept_floor = floor - sum(c.saving for c in unseen)
-    huge = [c for c in unseen if kept_floor + c.saving > line_t]
+    no_room = config.bound - config.headroom_floor
+    huge = [c for c in unseen if kept_floor + c.plain > line_t or kept_floor + c.saving > no_room]
     if not (over_bound or huge or freeable >= config.min_turn_room):
         return state, None  # nothing meaningful to page: no batch on every request (no thrash)
 
@@ -580,6 +636,10 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
         """The anchored estimate of the request under ``new``: the pre-send estimate less what the
         edits took out of the messages, both sides counted by the estimator at one ratio."""
         return estimate - (base - tokens(rw.transform_messages(messages, new)))
+
+    def pressed(new: Any) -> int:
+        """``measured`` plus the margin of the fresh results still in the request."""
+        return measured(new) + fresh_margin(view(messages, new, dialect)[previous_n:], estimator, dialect)
 
     def stub(chosen: list[_Candidate], current: Any) -> Any:
         by_turn: dict[int, list[_Candidate]] = {}
@@ -598,18 +658,29 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
 
     counts = {"results": 0, "own_results": 0, "unseen_results": 0, "rounds": 0, "turns": 0, "pages": 0}
     first_changed = n
-    cur = estimate
+    cur = pressure
 
     def stubbed(chosen: list[_Candidate], unseen_step: bool) -> None:
         nonlocal state, cur, first_changed
         state = stub(chosen, state)
-        cur = measured(state)
+        cur = pressed(state)
         first_changed = min(first_changed, min(c.i for c in chosen))
         counts["results"] += len(chosen)
         counts["own_results"] += sum(1 for c in chosen if c.own)
         counts["pages"] += sum(1 for c in chosen if not c.own)
         if unseen_step:
             counts["unseen_results"] += len(chosen)
+
+    def page_turns() -> None:
+        nonlocal state, cur, first_changed
+        paged: list[dict] = []
+        state = rw.new_epoch(view(messages, state, dialect), request, state, store, config, estimator, start, n,
+                             paged, ROTATION_REASON)
+        events.extend(paged)
+        counts["turns"] += sum(e.get("turns", 0) for e in paged if e["event"] == "page_out")
+        counts["pages"] += sum(e.get("pages", 0) for e in paged if e["event"] == "page_out")
+        cur = pressed(state)
+        first_changed = min(first_changed, start)
 
     if huge:
         stubbed(huge, True)
@@ -624,17 +695,6 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
             left -= c.saving
         if chosen:
             stubbed(chosen, False)
-    def page_turns() -> None:
-        nonlocal state, cur, first_changed
-        paged: list[dict] = []
-        state = rw.new_epoch(view(messages, state, dialect), request, state, store, config, estimator, start, n,
-                             paged, ROTATION_REASON)
-        events.extend(paged)
-        counts["turns"] += sum(e.get("turns", 0) for e in paged if e["event"] == "page_out")
-        counts["pages"] += sum(e.get("pages", 0) for e in paged if e["event"] == "page_out")
-        cur = measured(state)
-        first_changed = min(first_changed, start)
-
     # Step 2: the earlier turns of the window, through the rotation machinery.
     if cur > escalate and may_page_turns:
         page_turns()
@@ -647,7 +707,7 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
             if left <= target:
                 break
             folded.append(r)
-            left -= tokens([rw.strip_thinking(sent[i]) for i in r.removed])
+            left -= sum(counted(i, rw.strip_thinking(sent[i])) for i in r.removed)
         if folded:
             removed = [i for r in folded for i in r.removed]
             page_id = store.page_parts([[sent[i] for i in removed]], _turn_of(messages, state, dialect, start),
@@ -656,7 +716,7 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
             state = replace(state, inturn=edits._replace(
                 folds=(*edits.folds, (start, _spans(removed), page_id)),
                 strips=_merged([*edits.strips, (start, n)])))
-            cur = measured(state)
+            cur = pressed(state)
             first_changed = min(first_changed, start)
             counts["rounds"] += len(folded)
             counts["pages"] += 1
@@ -674,11 +734,12 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
         if chosen:
             stubbed(chosen, True)
     if state is before:
-        if over_bound:
+        if estimate > config.bound:
             events.append({"event": "in_turn_exhausted", "epoch": state.epoch, "estimate": estimate,
                            "bound": config.bound})
         return state, None
     state = replace(state, inturn=state.inturn._replace(batches=state.inturn.batches + 1))
+    after = measured(state)
     if first_changed <= state.k:  # the first retained message changed: everything sent is new
         resent = tokens(rw.transform_messages(messages, state))
     else:
@@ -690,11 +751,12 @@ def _batch(request: dict, messages: list[dict], estimate: int, state: Any, store
                    "results_stubbed": counts["results"], "own_results_stubbed": counts["own_results"],
                    "unseen_results_stubbed": counts["unseen_results"], "rounds_folded": counts["rounds"],
                    "turns_paged": counts["turns"], "pages": counts["pages"], "estimate_before": estimate,
-                   "estimate_after": cur, "first_changed": first_changed, "resent_tokens": resent,
-                   "messages": n})
-    if cur > config.bound:
-        events.append({"event": "in_turn_exhausted", "epoch": state.epoch, "estimate": cur, "bound": config.bound})
-    return state, cur
+                   "estimate_after": after, "margin": margin, "first_changed": first_changed,
+                   "resent_tokens": resent, "messages": n})
+    if after > config.bound:
+        events.append({"event": "in_turn_exhausted", "epoch": state.epoch, "estimate": after,
+                       "bound": config.bound})
+    return state, after
 
 
 def _turn_of(messages: list[dict], state: Any, dialect: Any, index: int) -> int:

@@ -94,8 +94,12 @@ def measure(name: str, paging: bool) -> dict:
         sent = cli.sent
         batches = cli.events("in_turn_batch")
         head = cli.upstream.head(cli.request())[1] / 3.2
-        resent = [b["resent_tokens"] for b in batches]
-        rewritten = [b["estimate_after"] - head for b in batches]  # every message, when no cache entry is in reach
+        resent = [b["resent_tokens"] for b in batches]  # from the first changed message on
+        # Every message, when the cache holds no entry in reach of the first changed message: the API looks
+        # back about 20 blocks from a breakpoint and Claude Code marks the tail. A batch that only changed the
+        # last message (a result stubbed unread) keeps the entry the previous request wrote.
+        rewritten = [b["resent_tokens"] if b["messages"] - b["first_changed"] <= 2 else b["estimate_after"] - head
+                     for b in batches]
         total = sum(s.real for s in sent)
         first = next((i for i, s in enumerate(sent) if "in_turn_batch" in s.names), None)
         stripped = sum(1 for a, b in zip(sent, sent[1:]) if b.thinking < a.thinking)
@@ -111,7 +115,11 @@ def measure(name: str, paging: bool) -> dict:
             "resent_mean": round(sum(resent) / len(resent)) if resent else 0,
             "resent_largest": max(resent, default=0),
             "resent_share": round(sum(resent) / total, 4),
+            "triggers": sorted({b["trigger"] for b in batches}),
+            "turns_paged": sum(b["turns_paged"] for b in batches),
+            "unseen_stubbed": sum(b["unseen_results_stubbed"] for b in batches),
             "rewritten_mean": round(sum(rewritten) / len(rewritten)) if rewritten else 0,
+            "rewritten_largest": round(max(rewritten, default=0)),
             "rewritten_share": round(sum(rewritten) / total, 4),
             "tokens_sent": total,
             "thinking_stripped_requests": stripped,

@@ -1617,7 +1617,8 @@ a no-replayed-thinking baseline.
    it. Either is retrieval of paged-out content; with search returning matching lines (B15),
    answering from the hit is the intended path.
 4. **Cache:** within an epoch, requests read the head and window prefix from cache, except
-   misses explained by the route (report the rate).
+   misses explained by the route (report the rate), and except the request of an in-turn batch
+   (rule 5), which reads the head and at most the prefix before its first changed message.
 5. **Tests:** unit tests for every rewrite rule, the store, and the MCP server; CI green.
 6. Intake runs the acceptance on integrated `main` and records the numbers in `STATUS.md`. Then
    intake cuts v0.1.0 (O5).

@@ -1705,7 +1705,8 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
         state = guarded_rotation(request, sent_view, n, estimate, state, store, config, estimator, events)
     elif n > previous_n and in_tool_loop:
         # Rule 5 (D63): inside a tool loop, a batch of in-turn paging when the estimate passes its trigger.
-        state, paged = inturn.page(request, messages, estimate, state, store, config, estimator, events)
+        state, paged = inturn.page(request, messages, previous_n, estimate, state, store, config, estimator,
+                                   events)
     rotated = any(e["event"] == "rotation" for e in events)
     # The estimate observe_usage compares with real usage must describe what is actually sent: after a
     # rotation that is the transformed request, not the history that triggered it (A2b review); after an
