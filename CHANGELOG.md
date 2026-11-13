@@ -11,7 +11,30 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
-Nothing yet.
+- `contexto run claude` and `contexto run codex` print a short summary on stderr when the CLI
+  exits: the largest prompt against the bound, the pages this run added and the pages the session
+  has on disk, the recall and search calls, the share of input read from cache, and whether Claude
+  Code compacted. `--quiet` or `CONTEXTO_QUIET=1` drops it; warnings are still printed. It is not
+  printed for `--version` or `--help`.
+- `contexto stats [SESSION] [--last-run] [--json]` prints the same numbers for any session, with
+  the requests, the bytes sent against the bytes forwarded, and every fault. docs/stats.md defines
+  each number and says which are measured, which are estimates, and which the log cannot show.
+- A store that cannot be written (a full disk, a permission problem, a damaged page) is no longer
+  silent. Contexto stops paging when that happens, so requests can exceed the bound. It now says
+  so once per cause when the CLI exits, in `contexto stats`, and in `contexto state`, with what
+  to do. The `store_error` log entry names the errno (`ENOSPC`, `EACCES`).
+- A full disk no longer replaces the CLI's exit code. A session log that cannot be written is
+  reported, and the CLI's own exit code is kept.
+- `contexto run codex` holds its warnings until Codex exits, as `contexto run claude` does, so a
+  warning no longer lands in Codex's screen mid-run.
+- A number is shown only when the log supports it. The pages a run added come from the store's
+  own count, so a launch that pages the history again (after an edited CLAUDE.md, a CLI update or
+  another `--model`) does not count it twice. The cache share covers only responses that reported
+  one. "Claude Code did not compact" is said only for requests from a Claude Code version the
+  check was measured on.
+- The session log has two new fields: `pages` on `proxy_start` and `proxy_stop` (the page files in
+  the store), and `cli_session` on a Messages request's entry (whether it carried Claude Code's
+  session id).
 
 ## 0.5.24 (2026-11-06)
 
