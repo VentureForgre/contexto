@@ -27,10 +27,26 @@ Measured with zero spend on Claude Code 2.1.318 in ``-p`` mode (spikes/m2/provid
 loopback stubs): each of the six variables, set in the environment or in the project's
 ``.claude/settings.json`` ``env`` block, sent every model request to the provider's endpoint and none
 to the proxy; ``1``, ``TRUE`` and a JSON ``true`` were on, ``0``, an empty value and ``enabled`` off;
-and ``"0"`` or ``""`` in the settings file turned off a ``1`` in the environment.
+and ``"0"`` or ``""`` in the settings file turned off a ``1`` in the environment. On 2.1.322 (the same
+spike, review of PR #258): a settings file that starts with a UTF-8 byte order mark is read like any
+other, so ``settings_env`` reads through the mark.
 
-Limits: organization-managed settings are not read (as in ``contexto.upstream``). Claude Code also
-has a "gateway" provider chosen by a login it holds, not by a variable; that is not looked for.
+``CLAUDE_CODE_IGNORE_PERSISTED_TRUST``: in ``-p`` mode Claude Code then drops a project file's ``env``
+(D52), this variable included (measured on 2.1.322: every request went through the proxy), so only the
+user's file and the environment decide. Interactively it shows its trust dialog and applies the
+project's ``env`` once the dialog is accepted (D52, measured for ``ANTHROPIC_BASE_URL``; not measured
+for a provider variable). So a provider variable that only a project file turns on is still reported,
+marked ``after_trust``, and the warning says it may apply, not that it does.
+
+Not a bypass: ``CLAUDE_CODE_USE_GATEWAY``, a seventh ``CLAUDE_CODE_USE_`` variable in the 2.1.322
+program, which needs ``ANTHROPIC_BASE_URL`` and ``ANTHROPIC_AUTH_TOKEN``. Measured on 2.1.322 in ``-p``
+mode with both set, the variable in the environment and then in the project's ``env`` block: every model
+request went through the proxy and none to the environment's own base URL. It is not in
+``PROVIDER_VARIABLES``.
+
+Limits: organization-managed settings are not read (as in ``contexto.upstream``). Claude Code can also
+be set up for a gateway by a login it holds ("because you are signed in to one", in the 2.1.322
+program); that is not looked for, and what it does to the proxy's base URL was not measured.
 """
 
 from __future__ import annotations
@@ -41,8 +57,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from contexto.cliversions import REPORT_URL
 from contexto.upstream import (
     CONFIG_DIR_KEY,
+    IGNORE_TRUST_KEY,
     JS_WHITESPACE,
     KIND_FILES,
     PROJECT_KINDS,
@@ -67,6 +85,9 @@ class ProviderOverride:
     variable: str
     provider: str
     source: str  # "env", or "settings:<kind>" as ``contexto.upstream.Upstream.source`` names a file
+    # Set by a project file while CLAUDE_CODE_IGNORE_PERSISTED_TRUST is on: Claude Code -p drops it, and
+    # interactive Claude Code applies it once its trust dialog is accepted (the module docstring).
+    after_trust: bool = False
 
 
 def is_on(value: str) -> bool:
@@ -84,29 +105,47 @@ def _as_string(value: Any) -> str | None:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
-        return f"{value:g}"
+        try:
+            return f"{value:g}"
+        except OverflowError:  # an integer past a float's range, which JavaScript reads as Infinity
+            return "Infinity"
     return None
+
+
+def _json_int(text: str) -> int | float:
+    """A JSON integer. Python refuses to convert more digits than ``sys.get_int_max_str_digits()``
+    (4,300), and ``json.loads`` would then reject the whole file, hiding every variable in it;
+    JavaScript reads such a number as Infinity, so this does too."""
+    try:
+        return int(text)
+    except ValueError:
+        return float("-inf" if text.startswith("-") else "inf")
 
 
 def settings_env(path: Path) -> dict[str, Any]:
     """The ``env`` block of a settings file; empty when the file is absent, unreadable, not JSON, or has
-    no such block (as ``contexto.upstream`` reads a file it cannot use: as if it were absent)."""
+    no such block (as ``contexto.upstream`` reads a file it cannot use: as if it were absent). A UTF-8
+    byte order mark at the start is skipped, as Claude Code skips it (the module docstring): read as
+    plain UTF-8 the file was not JSON, and a variable it turned on went unreported."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"), parse_int=_json_int)
     except (OSError, ValueError, RecursionError):
         return {}
     block = data.get("env") if isinstance(data, dict) else None
     return block if isinstance(block, dict) else {}
 
 
-def claude_env(names: Iterable[str], cwd: Path, home: Path, env: Mapping[str, str]) -> dict[str, tuple[str, str]]:
+def claude_env(names: Iterable[str], cwd: Path, home: Path, env: Mapping[str, str], *,
+               after_trust: bool = False) -> dict[str, tuple[str, str]]:
     """``{name: (value, source)}`` for each of ``names`` a Claude Code started in ``cwd`` would have set:
     the highest settings file whose ``env`` block holds it (``settings:<kind>``), else the environment
     (``env``). No project file counts while ``env`` sets ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST``, as for
-    the upstream (D52). A value may be empty: a file that sets a variable to nothing unsets it."""
+    the upstream (D52), unless ``after_trust``: then the project files count as they do once Claude
+    Code's trust dialog is accepted. A value may be empty: a file that sets a variable to nothing unsets
+    it."""
     names = list(names)
     decided: dict[str, tuple[str, str]] = {}
-    no_trust = ignores_persisted_trust(env)
+    no_trust = ignores_persisted_trust(env) and not after_trust
     for kind, path in claude_settings_order(cwd, home, env):
         if kind in PROJECT_KINDS and no_trust:
             continue
@@ -123,11 +162,21 @@ def claude_env(names: Iterable[str], cwd: Path, home: Path, env: Mapping[str, st
 
 def provider_overrides(cwd: Path, home: Path, env: Mapping[str, str]) -> list[ProviderOverride]:
     """Every provider variable that is on for a Claude Code started in ``cwd``, in Claude Code's order
-    (the first is the provider it uses), each with where its deciding value is set."""
-    decided = claude_env(PROVIDER_VARIABLES, cwd, home, env)
-    return [ProviderOverride(variable, provider, decided[variable][1])
-            for variable, provider in PROVIDER_VARIABLES.items()
-            if variable in decided and is_on(decided[variable][0])]
+    (the first is the provider it uses), each with where its deciding value is set. While ``env`` sets
+    ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST``, the variables that only a project file turns on follow,
+    marked ``after_trust`` (the module docstring): leaving them out would say nothing about a bypass
+    that interactive Claude Code may make."""
+    def on(decided: dict[str, tuple[str, str]], after_trust: bool = False) -> list[ProviderOverride]:
+        return [ProviderOverride(variable, provider, decided[variable][1], after_trust)
+                for variable, provider in PROVIDER_VARIABLES.items()
+                if variable in decided and is_on(decided[variable][0])]
+
+    found = on(claude_env(PROVIDER_VARIABLES, cwd, home, env))
+    if ignores_persisted_trust(env):
+        now = {o.variable for o in found}
+        later = on(claude_env(PROVIDER_VARIABLES, cwd, home, env, after_trust=True), after_trust=True)
+        found += [o for o in later if o.variable not in now]  # on only because a project file says so
+    return found
 
 
 def settings_file(kind: str, env: Mapping[str, str] | None = None) -> str:
@@ -149,17 +198,33 @@ def source_text(source: str, env: Mapping[str, str] | None = None) -> str:
 
 
 def bypass_places(overrides: list[ProviderOverride], env: Mapping[str, str] | None = None) -> str:
-    """``A is set in <place> and B is set in <place>`` for a non-empty ``provider_overrides`` result."""
+    """``A is set in <place> and B is set in <place>`` for a non-empty list of overrides."""
     return " and ".join(f"{o.variable} is set in {source_text(o.source, env)}" for o in overrides)
 
 
 def bypass_warning(overrides: list[ProviderOverride], env: Mapping[str, str] | None = None) -> str:
-    """One line for ``contexto run claude`` and ``contexto doctor`` (without the ``contexto: `` prefix):
-    which variables are on and where, the provider Claude Code then uses, what that costs, and what to
-    do. ``overrides`` is a non-empty ``provider_overrides`` result."""
-    return (f"warning: {bypass_places(overrides, env)}, so Claude Code sends model requests to "
-            f"{overrides[0].provider} and not through Contexto: the proxy sees none of them and this session is "
-            f"not kept under the bound. {bypass_remedy(overrides)}")
+    """One line for ``contexto run claude`` (without the ``contexto: `` prefix): which variables are on
+    and where, the provider Claude Code then uses, what that costs, and what to do. ``overrides`` is a
+    non-empty ``provider_overrides`` result."""
+    return f"warning: {bypass_summary(overrides, env)}. {bypass_remedy(overrides)}"
+
+
+def bypass_summary(overrides: list[ProviderOverride], env: Mapping[str, str] | None = None) -> str:
+    """What ``overrides`` mean, without the remedy: a fact for the variables Claude Code reads now, and
+    "may" for those a project file sets while ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is on."""
+    now = [o for o in overrides if not o.after_trust]
+    later = [o for o in overrides if o.after_trust]
+    cost = "the proxy sees none of them and this session is not kept under the bound"
+    parts = []
+    if now:
+        parts.append(f"{bypass_places(now, env)}, so Claude Code sends model requests to {now[0].provider} and not "
+                     f"through Contexto: {cost}")
+    if later:
+        parts.append(f"{bypass_places(later, env)}. {IGNORE_TRUST_KEY} is set, so Claude Code -p ignores that env "
+                     "block, but interactive Claude Code may apply it once its trust dialog is accepted"
+                     + ("" if now else f", and then send model requests to {later[0].provider} and not through "
+                                       f"Contexto: {cost}"))
+    return ". Also, ".join(parts)
 
 
 def bypass_remedy(overrides: list[ProviderOverride]) -> str:
@@ -176,6 +241,30 @@ def bypass_remedy(overrides: list[ProviderOverride]) -> str:
 
 
 def bypass_event(overrides: list[ProviderOverride]) -> dict[str, Any]:
-    """The session log's record of the same fact: names and source labels, no values and no paths."""
+    """The session log's record of the same fact: names and source labels, no values and no paths. A
+    variable that may apply only after the trust dialog carries ``after_trust_dialog``."""
     return {"event": "provider_bypass", "provider": overrides[0].provider,
-            "variables": [{"variable": o.variable, "source": o.source} for o in overrides]}
+            "variables": [override_record(o) for o in overrides]}
+
+
+def override_record(override: ProviderOverride) -> dict[str, Any]:
+    record: dict[str, Any] = {"variable": override.variable, "source": override.source}
+    if override.after_trust:
+        record["after_trust_dialog"] = True
+    return record
+
+
+def launch_check(env: Mapping[str, str]) -> tuple[str | None, dict[str, Any] | None]:
+    """For ``contexto run claude``, from the working directory: the warning line and the session log
+    event, or ``(None, None)`` when no provider variable is on. It never raises: this is a diagnostic,
+    and a settings value must not be able to stop a launch (a 400-digit JSON integer once did, with an
+    ``OverflowError``; reviewers A and B, PR #258). When the lookup itself fails the line says so, by the
+    error's type only (its text can hold a path): saying nothing would hide a bypass that is really there."""
+    try:
+        found = provider_overrides(Path.cwd(), Path.home(), env)
+        return (bypass_warning(found, env), bypass_event(found)) if found else (None, None)
+    except Exception as exc:
+        name = type(exc).__name__
+        return (f"warning: could not check whether a provider variable ({next(iter(PROVIDER_VARIABLES))} and the "
+                f"like) sends Claude Code's requests past the proxy ({name}). The launch continues. Report it at "
+                f"{REPORT_URL}", {"event": "provider_bypass_check_failed", "error": name})
