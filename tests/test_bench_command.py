@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 
@@ -24,6 +25,16 @@ def _mode(tmp_path, monkeypatch, name: str, source: str) -> None:
     monkeypatch.delitem(sys.modules, f"contexto.bench.modes.{name}", raising=False)
 
 
+def _only_script_only(tmp_path, monkeypatch) -> None:
+    """A build whose only mode is ``--script-only``, whichever modes this checkout has: the modes package
+    is searched in a directory that holds that one module. The tests of discovery itself start from it,
+    so they say the same thing as more modes are added to the package."""
+    installed = tmp_path / "installed-modes"
+    installed.mkdir()
+    shutil.copy(script_only.__file__, installed / "script_only.py")
+    monkeypatch.setattr(modes, "__path__", [str(installed)])
+
+
 @pytest.fixture(autouse=True)
 def _forget_test_modes():
     yield
@@ -34,7 +45,8 @@ def _forget_test_modes():
 # Without a mode
 
 
-def test_bench_without_a_mode_says_which_modes_this_build_has(capsys):
+def test_bench_without_a_mode_says_which_modes_this_build_has(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     assert cli.main(["bench"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -189,6 +201,7 @@ DEFAULT_MODE = (
 
 
 def test_a_mode_is_added_by_adding_a_module(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_hello", FLAG_MODE)
     (tmp_path / "_private.py").write_text("raise RuntimeError('never imported')\n", encoding="utf-8")
     (tmp_path / "t_notes.py").write_text("NOT_A_MODE = True\n", encoding="utf-8")  # no FLAG: skipped
@@ -203,6 +216,7 @@ def test_a_mode_is_added_by_adding_a_module(tmp_path, monkeypatch, capsys):
 
 
 def test_the_default_mode_runs_when_no_mode_flag_is_given(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_live", DEFAULT_MODE)
     assert cli.main(["bench", "--bound", "9000"]) == 0
     assert capsys.readouterr().out == "live m-1 9000\n"
@@ -212,6 +226,7 @@ def test_the_default_mode_runs_when_no_mode_flag_is_given(tmp_path, monkeypatch,
 
 
 def test_exactly_one_mode_runs(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_hello", FLAG_MODE)
     assert cli.main(["bench", "--script-only", "--t-hello", "you", "--out", str(tmp_path / "out")]) == 2
     captured = capsys.readouterr()
@@ -220,6 +235,7 @@ def test_exactly_one_mode_runs(tmp_path, monkeypatch, capsys):
 
 
 def test_two_default_modes_are_refused(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_live", DEFAULT_MODE)
     (tmp_path / "t_other.py").write_text(DEFAULT_MODE, encoding="utf-8")
     assert cli.main(["bench"]) == 2

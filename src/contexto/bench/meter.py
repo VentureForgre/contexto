@@ -7,7 +7,8 @@ arms' counts come from one piece of code reading the same field of the same kind
 
 What it forwards. Every request goes to the real upstream with its method, path, query, headers and
 body as received, and the response comes back with its status, headers and body as received, each
-chunk written to the client as soon as it is read, so a stream keeps its timing. When the client
+chunk written to the client as soon as it is read, so a stream keeps its timing; only the bytes that
+end a response wait until its record is written, which takes microseconds. When the client
 closes its connection the upstream connection is closed at once. Nothing is retried. It changes four
 things, and nothing else:
 
@@ -284,6 +285,9 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 128
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        pass  # socketserver prints a traceback, with file paths, to stderr: nothing of a run is printed that way
+
     def server_bind(self) -> None:  # HTTPServer.server_bind does a reverse lookup that can take seconds
         socket.socket.setsockopt(self.socket, socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind(self.server_address)
@@ -467,9 +471,9 @@ class _Handler(BaseHTTPRequestHandler):
                       "uncached": 0, "cache_write": 0, "cache_read": 0, "output": 0, "status": 0,
                       "compaction": COMPACTION_HEADER in received or request_class == "compaction",
                       "basis": "measured", "attempt": owner.attempt}
-        reached = False
+        reached, tail = False, b""
         try:
-            reached = self._relay(body, headers, record)
+            reached, tail = self._relay(body, headers, record)
         finally:
             if billed:
                 if reached and record is not None:
@@ -479,9 +483,19 @@ class _Handler(BaseHTTPRequestHandler):
                     with owner._lock:
                         owner.unreachable += 1
                 owner.ledger.settle(reserved, record if reached else None)
+        # The client sees the response complete only now, after its record is counted and written:
+        # Claude Code sends its next request at once, and the guard must already know this one's cost.
+        if tail:
+            try:
+                self.wfile.write(tail)
+                self.wfile.flush()
+            except OSError:
+                self.close_connection = True
 
-    def _relay(self, body: bytes, headers: dict[str, str], record: dict[str, Any] | None) -> bool:
-        """Forward one request and relay its response. True when the upstream answered."""
+    def _relay(self, body: bytes, headers: dict[str, str], record: dict[str, Any] | None) -> tuple[bool, bytes]:
+        """Forward one request and relay its response, except its last bytes: the chunk terminator, or
+        the last chunk of a response with a Content-Length. Returns whether the upstream answered, and
+        those bytes for the caller to write (empty when the relay failed)."""
         owner = self.owner
         watch = _ClientWatch(self.connection)
         conn = owner.connection()
@@ -501,7 +515,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if not watch.gone:
                     self._local_error(502, f"contexto bench meter: upstream unreachable ({type(exc).__name__})")
                 self.close_connection = True
-                return False
+                return False, b""
             model_path = self.command == "POST" and self.path.split("?", 1)[0].rstrip("/") in (
                 MESSAGES_PATH, COUNT_TOKENS_PATH)
             if model_path and response.status in (401, 403):
@@ -512,6 +526,7 @@ class _Handler(BaseHTTPRequestHandler):
                 record["status"] = response.status
             length = response.getheader("Content-Length")
             chunked = length is None and self.command != "HEAD"
+            tail, held = b"", b""
             try:
                 self.send_response_only(response.status, response.reason)
                 for name, value in response.getheaders():
@@ -525,11 +540,13 @@ class _Handler(BaseHTTPRequestHandler):
                 while chunk := response.read1(65536):
                     if reader is not None:
                         reader.feed(chunk)
-                    self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk) if chunked else chunk)
+                    if chunked:
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                    else:
+                        self.wfile.write(held)
+                        held = chunk
                     self.wfile.flush()
-                if chunked:
-                    self.wfile.write(b"0\r\n\r\n")
-                    self.wfile.flush()
+                tail = b"0\r\n\r\n" if chunked else held
             except (OSError, http.client.HTTPException):
                 # The upstream ended early or the client left: the client gets no terminator, and the
                 # record keeps whatever usage had arrived.
@@ -538,7 +555,7 @@ class _Handler(BaseHTTPRequestHandler):
                 reader.finish()
                 for name, field in USAGE_FIELDS.items():
                     record[name] = int(reader.usage.get(field) or 0)
-            return True
+            return True, tail
         finally:
             watch.close()
             conn.close()
