@@ -6,8 +6,9 @@ Pages holding every word, best first (the same ranking as the tool, D34). Each h
 conversation still in the CLI's view is not in the store.
 
 When no page holds every word, the command prints approximate matches instead, as the tool does
-(D65, ``contexto.store.search.rank_approximate``): a note on stderr says so, and under each page's
-index line a line names the words the page matched and the ones it did not.
+(D65, ``contexto.store.search.rank_approximate``): a note on stderr says so, followed by the words that
+were searched when some were dropped, and under each page's index line a line names the words the
+page matched and the ones it did not.
 """
 
 from __future__ import annotations
@@ -81,6 +82,8 @@ def run(args: argparse.Namespace) -> int:
             print()
         elif approximate:
             print(f"{nothing}; approximate matches, best first:", file=sys.stderr)
+            if plan is not None and plan.searched():  # which words were searched, as the tool's reply says
+                print(plan.searched(), file=sys.stderr)
         print("\n".join(hit_lines(page_id, page, query, session_id,
                                   (approximate[page_id], plan) if approximate else None)))
         shown += 1

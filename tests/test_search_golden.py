@@ -82,6 +82,6 @@ def test_only_a_query_with_no_strict_hit_gets_approximate_matches_and_they_are_t
 
 def test_the_fallback_changes_some_recorded_misses_and_leaves_others():
     changed = {name: sum(bool(row["ids"]) for row in rows) for name, rows in FALLBACK.items()}
-    assert changed == {"scale17": 4, "acceptance": 54, "small": 11, "many": 1}
+    assert changed == {"scale17": 9, "acceptance": 54, "small": 13, "many": 1}
     assert {name: len(rows) for name, rows in FALLBACK.items()} == {"scale17": 14, "acceptance": 54, "small": 17,
                                                                     "many": 2}

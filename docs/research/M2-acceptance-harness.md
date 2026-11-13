@@ -369,8 +369,8 @@ dry run #5): 47,600 + ceil(84 / 3.0) = 47,628. D51 grew them to 2,985 bytes and 
 instructions, which Claude Code puts in its system prompt, from 426 to 741: 47,600 + ceil(242 / 3.0)
 + ceil(315 / 3.0) = 47,786, and the preamble's fixed lines (`Params.preamble_base`)
 follow the engine's opening lines by its estimator (300 before, 380 with D51). D65 (search falls back
-to approximate matches) grew the definitions to 3,068 bytes and the instructions to 747: 47,600 +
-ceil(325 / 3.0) + ceil(321 / 3.0) = 47,816 (`budget.HEAD`). A test fails when the
+to approximate matches) grew the definitions to 3,070 bytes and the instructions to 747: 47,600 +
+ceil(327 / 3.0) + ceil(321 / 3.0) = 47,816 (`budget.HEAD`). A test fails when the
 definitions or the instructions change without updating it. The engine's own estimate of `F` rose about 85 at the dry runs'
 rotations, because it counts tool JSON more conservatively; the gate follows the measured bytes.
 

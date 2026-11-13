@@ -76,7 +76,7 @@ import bisect
 import json
 import math
 import re
-from collections import Counter
+import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -375,19 +375,18 @@ what's where's who's how's it's that's there's don't doesn't didn't isn't aren't
 """.split())
 STRIP_LEFT = "\"'`(["  # punctuation dropped from the ends of a query word before the fallback
 STRIP_RIGHT = "\"'`)]?!.,;:"
-APPROX_WORDS = 6  # the fallback searches at most this many words, the longest; EAGER_WORDS, for the same cost
+# The fallback searches at most this many words: the specific ones first (``Plan.specific``), then the
+# longest. EAGER_WORDS, for the same cost.
+APPROX_WORDS = 6
 FOLD_CHARS = "_-."  # deleted from a word and from the page, so identifier styles compare equal
 FOLD_BYTES = FOLD_CHARS.encode()
 FOLD_MIN_CHARS = 4  # a word shorter than this without its separators is matched as typed
-# A page is returned when it holds at least this share of the query's weight (the sum of the inverse
-# document frequencies of the words some page holds). When the store lacks a word of the query
-# entirely, the page must also hold more words than the store lacks, and what it holds (its words, and
-# the pairs of them it has one after the other as the query does) must not be on more than half the
-# pages together; or it must hold a word that is an identifier, a number or a path
-# (``Plan.specific``) and that at most half the pages hold. "Half the pages" applies in a store of
-# ``COMMON_FROM_PAGES`` pages or more: in a smaller one it is 1 to 4 pages.
+SPECIFIC_MIN_CHARS = 3  # a shorter word (``5``, ``v2``) is too short to stand for a page on its own
+# The floor: a page is returned when it holds at least this share of the query's weight. A word weighs
+# its inverse document frequency; a word that no page holds counts in the total too, at the weight of
+# a word on no page. One exception: a page that holds a specific word of the query (an identifier, a
+# number, a path) is returned whatever its share, unless more than half the pages hold that word.
 APPROX_FLOOR = 0.3
-COMMON_FROM_PAGES = 10
 APPROX_LIMIT = 50  # hits returned, best first; ``Approximate.total`` counts every page over the floor
 TYPO_MIN_CHARS = 6  # a shorter word is never matched with a letter changed
 TYPO_MAX_CHARS = 40  # nor a longer one: the pattern of its variants grows with the square of its length
@@ -396,13 +395,26 @@ TYPO_WORK = 500_000  # places checked for a typo per query, at most; past it the
 EXACT, FOLDED, TYPO = "exact", "folded", "typo"
 _TYPO_WORD = re.compile(r"[a-z]+")
 _DIGITS_APART = re.compile(r"\d[_.\-]+\d")  # as in 1.2 or 2026-11-05: deleting the separator makes another number
+_DIGIT_PAIR = re.compile(r"\d\d")
 _ANY_LETTER = "\x00"  # stands for one letter in a typo variant
 _WORD_BYTES = frozenset(b"0123456789abcdefghijklmnopqrstuvwxyz")  # a typo match is not next to one of these
 
 
+def _mixed_case(typed: str) -> bool:
+    return any(c.isupper() for c in typed[1:]) and any(c.islower() for c in typed)
+
+
+def _specific(word: str, typed: str) -> bool:
+    """Whether a query word is an identifier, a number, a code or a path rather than a plain word: it
+    has ``SPECIFIC_MIN_CHARS`` characters or more, and one of them is not a letter (an apostrophe and a
+    combining accent count as letters), or it is in camelCase."""
+    return len(word) >= SPECIFIC_MIN_CHARS and (_mixed_case(typed) or any(
+        not (c.isalpha() or c == "'" or unicodedata.combining(c)) for c in word))
+
+
 class Plan(NamedTuple):
     """The words the fallback searches for: folded, in query order, at most ``APPROX_WORDS``; each as it
-    was typed; the stop words dropped; and how many further words were left out as the shortest."""
+    was typed; the stop words dropped; and how many further words were left out by the cut."""
 
     words: tuple[str, ...]
     typed: tuple[str, ...]
@@ -411,26 +423,32 @@ class Plan(NamedTuple):
     pairs: tuple[tuple[int, int], ...] = ()  # words that follow each other in the query, as indexes
 
     def shaped(self, j: int) -> bool:
-        """Whether word ``j`` is written as an identifier: it has ``_``, ``-`` or ``.`` inside, or a
-        capital after its first letter beside small letters (``refreshToken``, ``HTTPTimeout``), and
-        without its separators it still has a letter and ``FOLD_MIN_CHARS`` characters. A separator
-        between two digits rules it out. Only such a word is compared without separators: a plain
-        word is matched as typed, and so is a number, a version or a date (``12`` never finds
-        ``1.2``, nor ``v0.5.24`` ``v0.52.4``)."""
-        word, bare = self.words[j], squeeze(self.words[j])
-        return ((bare != word or _mixed_case(self.typed[j])) and len(bare) >= FOLD_MIN_CHARS
+        """Whether word ``j`` is written as an identifier: it has ``_``, ``-`` or ``.`` inside (one at
+        its start or its end does not count: ``--force``, ``__init__``), or a capital after its first
+        letter beside small letters (``refreshToken``, ``HTTPTimeout``), and without its separators it
+        still has a letter and ``FOLD_MIN_CHARS`` characters. A separator between two digits rules it
+        out. Only such a word is compared without separators: a plain word is matched as typed, and
+        so is a number, a version or a date (``12`` never finds ``1.2``, nor ``v0.5.24`` ``v0.52.4``)."""
+        word = self.words[j]
+        inside = word.strip(FOLD_CHARS)
+        bare = squeeze(inside)
+        return ((bare != inside or _mixed_case(self.typed[j])) and len(bare) >= FOLD_MIN_CHARS
                 and any(c.isalpha() for c in word) and _DIGITS_APART.search(word) is None)
 
     def specific(self, j: int) -> bool:
-        """Whether word ``j`` is an identifier, a number, a code or a path rather than a plain word: it
-        has a character that is not a letter, or it is in camelCase."""
-        return any(not (c.isalpha() or c == "'") for c in self.words[j]) or _mixed_case(self.typed[j])
+        """Whether word ``j`` is an identifier, a number, a code or a path (``_specific``)."""
+        return _specific(self.words[j], self.typed[j])
 
     def plain(self, j: int) -> bool:
         """Whether word ``j`` can have a typo looked for: small letters only as folded, not camelCase,
         ``TYPO_MIN_CHARS`` to ``TYPO_MAX_CHARS`` of them."""
         return (TYPO_MIN_CHARS <= len(self.words[j]) <= TYPO_MAX_CHARS
                 and _TYPO_WORD.fullmatch(self.words[j]) is not None and not self.specific(j))
+
+    def searched(self) -> str | None:
+        """The line a reply shows when the fallback did not search every word of the query (stop words
+        dropped, or more than ``APPROX_WORDS`` words): ``[searched for: port, staging, database]``."""
+        return f"[searched for: {', '.join(self.typed)}]" if self.dropped or self.cut else None
 
 
 class WordMatch(NamedTuple):
@@ -456,10 +474,6 @@ class Approximate(list):
     plan: Plan | None = None
 
 
-def _mixed_case(typed: str) -> bool:
-    return any(c.isupper() for c in typed[1:]) and any(c.islower() for c in typed)
-
-
 def plan_words(query: object) -> Plan | None:
     """The words of ``query`` the fallback searches for, or None when there are none: the query has no
     words, or only stop words (strict search has already looked for exactly those)."""
@@ -476,9 +490,9 @@ def plan_words(query: object) -> Plan | None:
     if not kept:
         return None
     cut = max(0, len(kept) - APPROX_WORDS)
-    if cut:  # the longest words, which are the most specific; ties go to the earlier word
-        longest = sorted(range(len(kept)), key=lambda i: (-len(kept[i]), i))[:APPROX_WORDS]
-        kept = [kept[i] for i in sorted(longest)]
+    if cut:  # identifiers, numbers and paths first, then the longest words; ties go to the earlier word
+        best = sorted(range(len(kept)), key=lambda i: (not _specific(kept[i], typed[kept[i]]), -len(kept[i]), i))
+        kept = [kept[i] for i in sorted(best[:APPROX_WORDS])]
     at = {w: j for j, w in enumerate(kept)}
     pairs = dict.fromkeys((at[a], at[b]) for a, b in zip(order, order[1:]) if a in at and b in at and a != b)
     return Plan(tuple(kept), tuple(typed[w] for w in kept), tuple(w for w in typed if w in STOP_WORDS), cut,
@@ -492,6 +506,34 @@ def squeeze(word: str) -> str:
 
 
 _SQUEEZE = str.maketrans("", "", FOLD_CHARS)
+
+
+def _folded_form(squeezed: str) -> re.Pattern[bytes]:
+    """``squeezed`` as a page may write it: with any run of separators between two of its characters,
+    except between two digits, where a separator would make another number (``sha256`` is found as
+    ``sha-256`` and ``sha_256``, never as ``sha-2.56``)."""
+    separators = b"[" + re.escape(FOLD_BYTES) + b"]*"
+    parts = []
+    for a, b in zip(squeezed, squeezed[1:]):
+        parts.append(re.escape(search_key(a)))
+        if not (a.isdecimal() and b.isdecimal()):
+            parts.append(separators)
+    return re.compile(b"".join(parts) + re.escape(search_key(squeezed[-1:])))
+
+
+def _form_frequency(text: bytes, form: re.Pattern[bytes]) -> int:
+    """As ``term_frequency``, for a term given as a pattern: the number of the page's texts in which
+    ``form`` occurs, at most ``PAGE_CAP``. (Each text counts once, as with ``TEXT_CAP`` 1.)"""
+    found, match = 0, form.search(text)
+    while match is not None:
+        found += 1
+        if PAGE_CAP is not None and found >= PAGE_CAP:
+            return PAGE_CAP
+        end = text.find(TEXT_SEP, match.end())
+        if end == -1:
+            break
+        match = form.search(text, end + 1)
+    return found
 
 
 def _typo_pattern(word: str) -> re.Pattern[bytes]:
@@ -541,22 +583,29 @@ class _TypoFinder:
 
     def find(self, text: bytes) -> bytes | None:
         """A whole word of ``text`` one letter away, or None. The same word for the same text."""
-        match, inside, limit = self.match, _WORD_BYTES, TYPO_WORK
-        for piece, offsets in self.pieces:
-            pos = text.find(piece)
-            while pos != -1:
-                self.work += 1
-                if self.work > limit:
-                    self.spent = True
-                    return None
-                for offset in offsets:
-                    start = pos + offset
-                    if start >= 0 and (start == 0 or text[start - 1] not in inside):
+        match, inside, limit, work, find = self.match, _WORD_BYTES, TYPO_WORK, self.work, text.find
+        try:
+            for piece, offsets in self.pieces:
+                pos = find(piece)
+                while pos != -1:
+                    work += 1
+                    if work > limit:
+                        self.spent = True
+                        return None
+                    for offset in offsets:
+                        start = pos + offset
+                        if start > 0:
+                            if text[start - 1] in inside:  # inside a longer word
+                                continue
+                        elif start < 0:
+                            continue
                         found = match(text, start)
                         if found is not None:
                             return found.group()
-                pos = text.find(piece, pos + 1)
-        return None
+                    pos = find(piece, pos + 1)
+            return None
+        finally:
+            self.work = work
 
 
 def _read(entries: Sequence[SearchEntry], fetch: Callable[[int], SearchEntry | None] | None,
@@ -589,15 +638,15 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
     The steps, each looser than strict matching:
 
     1. Punctuation at the ends of a word and stop words are dropped (``plan_words``); at most
-       ``APPROX_WORDS`` words are searched.
+       ``APPROX_WORDS`` words are searched, identifiers, numbers and paths first, then the longest.
     2. A word written as an identifier is compared without ``_``, ``-`` and ``.``, in the query and on
-       the page, so identifier styles match each other (``Plan.shaped``).
+       the page, so identifier styles match each other (``Plan.shaped``). A separator between two
+       digits is never dropped, on either side.
     3. A page need not hold every word. Each word weighs its inverse document frequency over the whole
-       store. A page is returned when it holds at least ``APPROX_FLOOR`` of the weight of the words
-       that some page holds. When no page holds some word of the query, it must also hold more
-       words than the number of those, and what it holds must not be on more than half the pages
-       together; or it must hold a word that is an identifier, a number or a path
-       (``Plan.specific``) that at most half the pages hold.
+       store, and a word that no page holds weighs as much as a word can. A page is returned when it
+       holds at least ``APPROX_FLOOR`` of the weight of the query, or when it holds a specific word
+       of the query (an identifier, a number or a path, ``Plan.specific``) that no more than half
+       the pages hold.
     4. One plain word that no page holds, of ``TYPO_MIN_CHARS`` to ``TYPO_MAX_CHARS`` letters, is
        looked for with one letter changed, as a whole word (``_TypoFinder``); it weighs
        ``TYPO_WEIGHT``. Only the longest such word of the query is tried.
@@ -606,14 +655,20 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
     holding more of the weight, then pages that hold more pairs of words as the query has them, one
     after the other (as ``rank`` puts pages holding the whole query first). Pages equal in all that
     rank as in ``rank``: a word counts once per text, at most ``PAGE_CAP``, saturated by ``K1``, times
-    the recency prior. The newest turn page that
-    holds every word takes one of the ``SHOWN_IN_DETAIL`` places. At most ``APPROX_LIMIT`` hits are
+    the recency prior. Two pages are then given a place among the first ``SHOWN_IN_DETAIL``, the
+    last of them, if they rank lower. When some page holds every word, it is the newest turn page
+    that does, as in ``rank``. When none does, the query may hold two facts that sit on two pages,
+    and the first page then crowds out the second with pages that share its words; so it is the best
+    page for the words the first page lacks (``_second_page``). At most ``APPROX_LIMIT`` hits are
     returned, each with the words it matched, how, and the form found on the page.
 
-    Cost: one pass over the store that tests each word once on each page, as a strict miss does. The
-    separators are deleted from each page only when a word is written as an identifier. A typo adds
-    two or three substring scans per page to that pass, or one more pass when the longest word that
-    could have a typo turns out to be on a page and a shorter one is on none."""
+    Cost: one pass over the store. Each word is looked for once on each page (strict search stops at
+    a page's first missing word unless the page was just read from its file), and each pair of
+    neighbouring words once on a page that holds both. The separators are deleted from each page only
+    when a word is written as an identifier. A typo adds two or three substring scans per page. The
+    word tried is the longest plain word no page holds, which is known only at the end: the longest
+    not found so far is looked for, and when a page turns out to hold it, the next one is looked for
+    from that page on and the pages before it are read once more for that word alone."""
     out = Approximate()
     plan = out.plan = plan_words(query)
     if plan is None or not entries:
@@ -623,17 +678,19 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
     squeezed = [search_key(squeeze(w)) for w in plan.words]
     shaped = [plan.shaped(j) for j in range(count)]
     specific = [plan.specific(j) for j in range(count)]
+    # A folded match of a word with two digits side by side is confirmed on the page as it is: the
+    # page without its separators would also show ``port8.0`` for ``port-80``.
+    confirm = [_folded_form(squeeze(w)) if shaped[j] and _DIGIT_PAIR.search(squeeze(w)) else None
+               for j, w in enumerate(plan.words)]
     fold_pages = any(shaped)
     df = [0] * count
     n = 0
     rows: dict[int, tuple[SearchEntry, list[tuple[str, int] | None]]] = {}
     together: dict[int, int] = {}  # per page, the pairs of words it holds one after the other, as a bit set
-    # A typo is tried for the longest word that can have one, if no page holds it. That is known only
-    # after the pass, so the longest such word is looked for on each page while no page has held it:
-    # when none does, its typo matches are complete at the end of this pass and no page is read twice.
     can_typo = sorted((j for j in range(count) if plan.plain(j)), key=lambda j: (-len(plan.words[j]), j))
-    early = can_typo[0] if can_typo else None
-    finder = _TypoFinder(plan.words[early]) if early is not None else None
+    typo = can_typo[0] if can_typo else None  # the longest plain word no page has held so far
+    finder = _TypoFinder(plan.words[typo]) if typo is not None else None
+    since = 0  # the index of the first page ``finder`` was run on
     forms: dict[int, tuple[SearchEntry, bytes, int]] = {}  # per page: its entry, the word found, its pairs
     for i, entry, text in _read(entries, fetch):
         n += 1
@@ -646,7 +703,14 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
                 if not frequency:
                     continue
                 as_typed = term_frequency(text, raw[j])
-                held = (EXACT, as_typed) if as_typed else (FOLDED, frequency)
+                if as_typed:
+                    held = (EXACT, as_typed)
+                else:
+                    if confirm[j] is not None:
+                        frequency = _form_frequency(text, confirm[j])
+                        if not frequency:
+                            continue
+                    held = (FOLDED, frequency)
             else:
                 frequency = term_frequency(text, raw[j])  # 0 when the page does not hold the word
                 if not frequency:
@@ -662,21 +726,23 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
                        if row[j] is not None and row[k] is not None and raw[j] + b" " + raw[k] in text)
             if bits:
                 together[i] = bits
-        if finder is not None and not df[early] and not finder.spent:
+        if typo is not None and df[typo]:  # this page holds the word: look for the next one from here on
+            typo = next((j for j in can_typo if not df[j]), None)
+            finder = _TypoFinder(plan.words[typo]) if typo is not None else None
+            since, forms = i, {}
+        if finder is not None and not finder.spent:
             form = finder.find(text)
-            if form is not None:
-                forms[i] = (entry._replace(text=None), form, _beside(plan.pairs, early, form, raw, text))
-    typo = next((j for j in can_typo if not df[j]), None)
-    if typo is not None and typo != early:  # the longest word is on a page: one more pass, for the next
-        finder, forms = _TypoFinder(plan.words[typo]), {}
-        for i, entry, text in _read(entries, fetch):
-            form = finder.find(text)
-            if finder.spent:
-                break
             if form is not None:
                 forms[i] = (entry._replace(text=None), form, _beside(plan.pairs, typo, form, raw, text))
-    if typo is None or finder.spent:
-        typo, forms = None, {}
+    if finder is not None and since:  # the pages before the one the word was first looked for on
+        for i, entry, text in _read(entries[:since], fetch):
+            if finder.spent:
+                break
+            form = finder.find(text)
+            if form is not None:
+                forms[i] = (entry._replace(text=None), form, _beside(plan.pairs, typo, form, raw, text))
+    if finder is None or finder.spent or not forms:
+        typo, forms = None, {}  # no word is matched through a typo
     for i, (entry, _, bits) in forms.items():
         if i not in rows:
             rows[i] = (entry, [None] * count)
@@ -684,33 +750,27 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
         df[typo] += 1
         if bits:
             together[i] = together.get(i, 0) | bits
-    held_somewhere = [j for j in range(count) if df[j]]
-    if not held_somewhere:
+    if not any(df):
         return out
-    lacking = count - len(held_somewhere)
-    weight = [math.log(1 + (n - df[j] + 0.5) / (df[j] + 0.5)) * (TYPO_WEIGHT if j == typo else 1.0) if df[j] else 0.0
+    # A word no page holds weighs what a word with no page weighs, so the pages are measured against
+    # the whole query, not only against the part of it that the store knows.
+    weight = [math.log(1 + (n - df[j] + 0.5) / (df[j] + 0.5)) * (TYPO_WEIGHT if j == typo else 1.0)
               for j in range(count)]
-    whole = sum(weight[j] for j in held_somewhere)
-    # What each page holds, as a bit set: its words, then its pairs. ``holding`` counts the pages that
-    # hold at least a given set, so a page whose words most pages hold together is told from one whose
-    # words are rare together.
-    held = {i: sum(1 << j for j in range(count) if row[j] is not None) | together.get(i, 0) << count
-            for i, (_, row) in rows.items()}
-    sets = Counter(held.values())
-    holding = {a: sum(pages for b, pages in sets.items() if a & b == a) for a in sets} if lacking else {}
-    few = n < COMMON_FROM_PAGES
+    whole = sum(weight)
+    telling = [specific[j] and 0 < df[j] and 2 * df[j] <= n + 1 for j in range(count)]
+
+    def enough(held: list[int], of: float) -> bool:
+        """The floor: the words ``held`` weigh ``APPROX_FLOOR`` of ``of``, or one of them is specific."""
+        return sum(weight[j] for j in held) >= APPROX_FLOOR * of or any(telling[j] for j in held)
+
     passed = []  # (holds every word, a turn page, weight held, pairs together, relevance, turn, id, index)
     for i, (entry, row) in rows.items():
         on = [j for j in range(count) if row[j] is not None]
-        share = sum(weight[j] for j in on)
-        if share < APPROX_FLOOR * whole:
-            continue
-        if lacking and not (len(on) > lacking and (few or 2 * holding[held[i]] <= n)) and not any(
-                specific[j] and row[j][0] != TYPO and (few or 2 * df[j] <= n) for j in on):
+        if not enough(on, whole):
             continue
         relevance = sum(weight[j] * _saturated(row[j][1]) for j in on)
-        passed.append((len(on) == count, not entry.context, share, together.get(i, 0).bit_count(), relevance,
-                       entry.turn, entry.id, i))
+        passed.append((len(on) == count, not entry.context, sum(weight[j] for j in on),
+                       together.get(i, 0).bit_count(), relevance, entry.turn, entry.id, i))
     scored = []
     for every in (True, False):  # the recency prior is a page's place among the pages of its own group
         group = sorted((p for p in passed if p[0] is every), key=lambda p: (p[5], p[6]))
@@ -718,13 +778,18 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
             newer = place / (len(group) - 1) if len(group) > 1 else 1.0
             scored.append((every, real, share, beside, relevance * (1 + RECENCY_WEIGHT * newer), turn, page_id, i))
     scored.sort(reverse=True)
-    complete = [s for s in scored if s[0]]
-    if complete:  # as in ``rank``: the newest turn page holding every word is shown in detail (D28)
-        newest = max([s for s in complete if s[1]] or complete, key=lambda s: (s[5], s[6]))
-        if scored.index(newest) >= SHOWN_IN_DETAIL:
-            scored.remove(newest)
-            scored.insert(SHOWN_IN_DETAIL - 1, newest)
+    if scored and scored[0][0]:  # as in ``rank``: the newest turn page holding every word is shown in detail (D28)
+        complete = [s for s in scored if s[0]]
+        placed = max([s for s in complete if s[1]] or complete, key=lambda s: (s[5], s[6]))
+    elif scored:
+        placed = _second_page(scored[0][7], rows, together, weight, math.log(1 + (n + 0.5) / 0.5), enough)
+    else:
+        placed = None
+    if placed is not None and placed[7] not in [s[7] for s in scored[:SHOWN_IN_DETAIL]]:
+        scored = [s for s in scored if s[7] != placed[7]]
+        scored.insert(SHOWN_IN_DETAIL - 1, placed)
     out.total = len(scored)
+    labels: dict[int, re.Pattern[bytes]] = {}
     for *_, turn, page_id, i in scored[:APPROX_LIMIT]:
         row = rows[i][1]
         text = None
@@ -739,7 +804,9 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
                 if text is None:
                     again = entries[i] if entries[i].text is not None else (fetch(i) if fetch is not None else None)
                     text = again.text if again is not None and again.text is not None else b""
-                found = _folded_form(squeeze(plan.words[j])).search(text)
+                if j not in labels:
+                    labels[j] = confirm[j] or _folded_form(squeeze(plan.words[j]))
+                found = labels[j].search(text)
                 form = found.group().decode("utf-8", "surrogatepass") if found else squeeze(plan.words[j])
             matched.append(WordMatch(plan.words[j], row[j][0], form))
         out.append(ApproxHit(page_id, turn, tuple(matched),
@@ -747,10 +814,31 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
     return out
 
 
-def _folded_form(squeezed: str) -> re.Pattern[bytes]:
-    """``squeezed`` with any run of separators between its characters, as a page may write it."""
-    separators = b"[" + re.escape(FOLD_BYTES) + b"]*"
-    return re.compile(separators.join(re.escape(search_key(c)) for c in squeezed))
+def _second_page(first: int, rows: dict[int, tuple[SearchEntry, list[tuple[str, int] | None]]],
+                 together: dict[int, int], weight: list[float], nowhere: float,
+                 enough: Callable[[list[int], float], bool]) -> tuple | None:
+    """The best page for the words that page ``first``, the best page of the query, does not hold: the
+    second fact of a query whose two facts sit on two pages (D65). None when no page qualifies.
+
+    Among the words ``first`` lacks, a page must pass the floor (``enough``) twice: against those
+    words, so it is about them, and against ``nowhere``, the weight of a word that no page holds, so
+    that what it adds is not a leftover common word. The best such page holds the most of their
+    weight; then, as in the main order, a turn page before a context block, more pairs of words side
+    by side, a word in more texts, the newer page. It is returned as a row of the main order."""
+    lacks = [j for j in range(len(weight)) if rows[first][1][j] is None]
+    rest = sum(weight[j] for j in lacks)
+    best = None
+    for i, (entry, row) in rows.items():
+        held = [j for j in lacks if row[j] is not None]
+        if i == first or not held or not (enough(held, rest) and enough(held, nowhere)):
+            continue
+        share = sum(weight[j] for j in held)
+        relevance = sum(weight[j] * _saturated(row[j][1]) for j in held)
+        key = (not entry.context, share, together.get(i, 0).bit_count(), relevance, entry.turn, entry.id)
+        if best is None or key > best[0]:
+            best = (key, (False, not entry.context, sum(weight[j] for j in range(len(weight)) if row[j] is not None),
+                          together.get(i, 0).bit_count(), relevance, entry.turn, entry.id, i))
+    return best[1] if best is not None else None
 
 
 def hit_view(hit: ApproxHit, text: str, plan: Plan | None = None) -> tuple[str, Query | None]:

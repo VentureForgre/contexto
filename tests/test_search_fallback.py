@@ -117,6 +117,20 @@ def test_at_most_six_words_are_searched_the_longest_in_query_order():
     assert len(S.plan_words(long_query).words) == 6 and S.plan_words(long_query).cut == 114
 
 
+def test_the_cut_keeps_identifiers_numbers_and_paths_before_the_longest_words(store):
+    query = "what is the staging database port 6543 for deploys tuesday nightly backups server"
+    plan = S.plan_words(query)
+    # 6543 is the shortest word and the most specific: it is kept, and "backups" is cut in its place.
+    assert plan.words == ("staging", "database", "6543", "deploys", "tuesday", "nightly") and plan.cut == 3
+    assert plan.searched() == "[searched for: staging, database, 6543, deploys, tuesday, nightly]"
+    hits = store.search_approximate(query)
+    assert hits[0].id == ids(store)[3] and [m.word for m in hits[0].matched] == ["staging", "database", "6543"]
+    many = S.plan_words("a1 b2 c3 d4 e5 f6 g7 h8 longword")
+    assert many.words == ("a1", "b2", "c3", "d4", "e5", "longword")  # two characters are not specific: by length
+    paths = S.plan_words("compare src/a.py src/b.py E4127 retry_budget v1.2 refreshToken with the nightly backups")
+    assert paths.words == ("src/a.py", "src/b.py", "e4127", "retry_budget", "v1.2", "refreshtoken")
+
+
 # Identifier styles
 
 
@@ -150,11 +164,39 @@ def test_only_a_word_written_as_an_identifier_is_folded():
     versions = entries("released v0.52.4 today", "nothing")
     assert rank_approximate(versions, "v0.5.24") == []  # a separator between digits is never dropped
     assert found(rank_approximate(versions, "v0.52.4")) == [0]
+    # A separator between two digits is not dropped on the page either (reviewer B on PR #267).
+    for typed, on_page in (("port-80", "port8.0"), ("rev-12", "rev1.2"), ("garnet-4821", "garnet-48.21"),
+                           ("error-404", "error_40.4"), ("log-20261105", "log-2026-11-05")):
+        assert rank_approximate(entries(f"the {on_page} here", "nothing"), typed) == [], typed
+    both = rank_approximate(entries("sha-2.56 and sha_256", "nothing"), "sha.256")
+    assert how(both[0]) == {"sha.256": ("folded", "sha_256")}  # the form that is the same number
+    kept = rank_approximate(entries("see build_20.26 and build-2026", "nothing"), "build.2026")
+    assert how(kept[0]) == {"build.2026": ("folded", "build-2026")}
     six = S.plan_words("refresh_token refreshToken UserCache REFRESH Staging E4127")
     assert [six.shaped(j) for j in range(6)] == [True, True, True, False, False, False]
     assert [six.specific(j) for j in range(6)] == [True, True, True, False, False, True]
     assert [six.plain(j) for j in range(6)] == [False, False, False, True, True, False]
     assert S.plan_words("HTTPTimeout").shaped(0) and not S.plan_words("HTTP").shaped(0)
+
+
+def test_a_separator_at_the_start_or_the_end_of_a_word_does_not_make_it_an_identifier():
+    for typed, on_page in (("--force", "we enforce the rule"), ("__init__", "initialize the pool"),
+                           ("--limit", "the rate limit moved"), (".gitignore", "the gitignore docs"),
+                           ("retry_", "a retry here")):
+        plan = S.plan_words(typed)
+        assert not plan.shaped(0), typed
+        assert rank_approximate(entries(on_page, "nothing"), typed) == [], typed
+    assert found(rank_approximate(entries("run it with --force", "we enforce the rule"), "--force zzqq")) == [0]
+    assert found(rank_approximate(entries("def __init__(self):", "initialize the pool"), "__init__ zzqq")) == [0]
+    # a separator inside still folds, whatever stands at the ends
+    hits = rank_approximate(entries("the dryRun flag", "nothing"), "--dry-run")
+    assert how(hits[0]) == {"--dry-run": ("folded", "dryrun")}
+
+
+def test_a_specific_word_has_three_characters_or_more_and_an_accent_is_a_letter():
+    plan = S.plan_words("5 42 v2 E41 6543 a.b caf\u00e9 cafe\u0301 it's")
+    assert [w for j, w in enumerate(plan.words) if plan.specific(j)] == ["e41", "6543", "a.b"]
+    assert S.SPECIFIC_MIN_CHARS == 3
 
 
 def test_a_folded_match_is_found_through_the_store(store):
@@ -224,13 +266,50 @@ def test_the_floor_keeps_out_a_page_with_one_common_word_of_five():
     assert rank_approximate(pages, "build zzqqxx yyqqxx") == []  # 1 word held, 2 found nowhere
 
 
-def test_a_page_must_hold_more_words_than_the_store_lacks(store):
-    assert store.search_approximate("nightly zzqqxx") == []  # 1 held, 1 on no page
+def test_a_word_that_no_page_holds_counts_against_every_page(store):
+    by_turn = ids(store)
+    # 7 pages. A word on 1 page weighs ln(1 + 6.5 / 1.5) = 1.67; a word on no page ln(1 + 7.5 / 0.5) = 2.77.
+    known, unknown = math.log(1 + 6.5 / 1.5), math.log(1 + 7.5 / 0.5)
+    assert known / (known + unknown) > S.APPROX_FLOOR > known / (known + 2 * unknown)  # 38 and 23 percent
+    hits = store.search_approximate("nightly zzqqxx")
+    assert [h.id for h in hits] == [by_turn[0]] and hits[0].missing == ("zzqqxx",)
+    assert store.search_approximate("nightly zzqqxx yyqqxx") == []
     assert store.search_approximate("kubernetes ingress certificate") == []
     assert store.search_approximate("which engineer approved the kubernetes ingress") == []
-    assert store.search_approximate("which engineer approved the nightly backups") == []  # 2 held, 2 on no page
-    hits = store.search_approximate("nightly backups zzqqxx")  # 2 held, 1 on no page
-    assert [h.id for h in hits] == [ids(store)[0]] and hits[0].missing == ("zzqqxx",)
+    hits = store.search_approximate("which engineer approved the nightly backups")  # 2 of 4: 38 percent
+    assert [h.id for h in hits] == [by_turn[0]] and hits[0].missing == ("engineer", "approved")
+    assert store.search_approximate("which engineer approved and signed the nightly backups") == []  # 2 of 5: 29
+    hits = store.search_approximate("nightly backups zzqqxx")
+    assert [h.id for h in hits] == [by_turn[0]] and hits[0].missing == ("zzqqxx",)
+
+
+def test_the_floor_is_one_share_with_no_rule_that_depends_on_the_number_of_pages():
+    # The cases of reviewer B on PR #267, which the earlier floor answered differently.
+    hundred = [f"page {i} ran the build" for i in range(100)]
+    hundred[40] += " on kubernetes ingress"
+    hundred[41] += " with kube_proxy"
+    pages = entries(*hundred)
+    assert found(rank_approximate(pages, "kubernetes zzqqxx")) == [40]  # a plain word and an identifier alike
+    assert found(rank_approximate(pages, "kube_proxy zzqqxx")) == [41]
+    assert found(rank_approximate(pages, "kubernetes ingress zzqqxx yyqqxx")) == [40]  # 2 rare words of 4
+    assert rank_approximate(pages, "kubernetes zzqqxx yyqqxx") == []  # 1 of 3: 28 percent
+    for size in (9, 10, 11):  # no cliff: a word on every page weighs next to nothing in a store of any size
+        assert rank_approximate(entries(*hundred[:size]), "ran build zzqqxx") == [], size
+    assert rank_approximate(entries(*seven_pages()), "5 zzqqxx") == []  # a digit is not a specific word
+    assert found(rank_approximate(entries(*seven_pages()), "6543 zzqqxx")) == [3]
+
+
+def seven_pages():
+    return [turn[1]["content"][0]["text"] for turn in TURNS]
+
+
+def test_a_typo_that_is_not_found_does_not_make_its_word_weigh_less():
+    # "payment" is on 1 page of 100; "invoice" and "overdue" on none. "invoice" is tried as a typo and not
+    # found, so it still counts in full: 4.21 of 4.21 + 2 * 5.31 is 28 percent, under the floor.
+    texts = [f"page {i} ran the build" for i in range(100)]
+    texts[7] += " and took the payment"
+    assert rank_approximate(entries(*texts), "invoice payment overdue") == []
+    assert found(rank_approximate(entries(*texts), "payment overdue")) == [7]  # 44 percent
 
 
 def test_an_identifier_a_number_or_a_path_is_enough_on_its_own(store):
@@ -246,23 +325,20 @@ def test_an_identifier_a_number_or_a_path_is_enough_on_its_own(store):
     assert [h.id for h in hits] == [by_turn[1]] and hits[0].matched[0].how == "folded"
 
 
-def test_words_that_most_pages_hold_together_are_not_evidence_when_another_word_is_unknown():
+def test_words_that_most_pages_hold_do_not_carry_a_query_whose_other_word_is_unknown():
     texts = [f"page {i}: the function will return a value" for i in range(20)] + ["the staging port value moved"]
-    texts[7] += "; check the return value"
     pages = entries(*texts)
-    # "foo" is on no page. 20 of 21 pages hold "return" and "value": too common together to mean anything.
-    # Page 7 holds them one after the other, as the query does, and no other page does.
-    assert found(rank_approximate(pages, "what is the return value of foo")) == [7]
+    # "foo" is on no page and weighs 3.78. "return" (20 of 21 pages) weighs 0.07, "value" (21 of 21) 0.02.
+    assert rank_approximate(pages, "what is the return value of foo") == []
     assert rank_approximate(pages, "what does foo return as a value") == []
-    assert found(rank_approximate(pages, "what is the staging value of foo")) == [20]  # 1 page holds both
+    assert found(rank_approximate(pages, "what is the staging value of foo")) == [20]  # "staging" is on 1 page
     assert len(rank_approximate(pages, "what is the return value")) == 20  # no word unknown: every word held
-    assert S.COMMON_FROM_PAGES == 10  # in a store of fewer pages every word counts
-    assert found(rank_approximate(entries(*texts[:5]), "what is the return value of foo")) == [4, 3, 2, 1, 0]
+    assert rank_approximate(entries(*texts[:5]), "what is the return value of foo") == []  # the same in a small store
 
 
 def test_words_that_follow_each_other_in_the_query_rank_first_when_the_page_has_them_so():
     texts = [["the db is up", "the port is open"], "the DB port is 6543", ["db", "port", "db and port", "port and db"],
-             ["db checked", "port checked"]]
+             ["db checked", "port checked"], *[f"filler {i}" for i in range(8)]]
     pages = entries(*texts)
     assert rank(pages, "DB port")[0] == pages[1].id  # strict: the page holding the whole query comes first
     assert rank(pages, "what is the DB port?") == []
@@ -337,7 +413,7 @@ def test_a_typo_combines_with_the_other_words(store):
 
 
 def test_only_one_word_per_query_is_tried_as_a_typo_and_work_is_bounded(monkeypatch):
-    pages = entries("the staging database listens on port 6543")
+    pages = entries("the staging database listens on port 6543", *[f"filler {i}" for i in range(5)])
     hits = rank_approximate(pages, "stagign databse port")  # two typos: the longer word is tried
     assert how(hits[0]) == {"port": ("exact", "port"), "stagign": ("typo", "staging")}
     assert hits[0].missing == ("databse",)
@@ -345,6 +421,135 @@ def test_only_one_word_per_query_is_tried_as_a_typo_and_work_is_bounded(monkeypa
     monkeypatch.setattr(S, "TYPO_WORK", 3)
     many = entries(*["data data data data database"] * 5)
     assert rank_approximate(many, "databse") == []  # more candidate positions than the bound: the typo is not searched
+
+
+def test_the_next_typo_word_is_looked_for_from_the_page_that_held_the_longer_one():
+    # "kubernetes" is the longest plain word, so it is looked for first; page 3 holds it. From there on
+    # "databse" is looked for, and only pages 0 to 2 are read again (reviewer B on PR #267).
+    texts = ["the database is up", "filler one", "the staging database", "kubernetes runs it", "filler two",
+             "a staging database again", "filler three", "filler four"]
+    held = entries(*texts)
+    reads: list[int] = []
+
+    def fetch(i):
+        reads.append(i)
+        return held[i]
+
+    unheld = [e._replace(text=None) for e in held]
+    hits = rank_approximate(unheld, "kubernetes databse staging", fetch)
+    assert sorted(reads) == [0, 0, 1, 1, 2, 2, 3, 4, 5, 6, 7]  # the three pages before the switch are read twice
+    typo_pages = sorted(int(h.id[3:], 16) for h in hits if "databse" in how(h))
+    # page 2 is before the switch and page 5 after it; page 0 holds the typo's word alone, under the floor
+    assert typo_pages == [2, 5] and all(how(h)["databse"] == ("typo", "database") for h in hits if "databse" in how(h))
+    assert hits == rank_approximate(held, "kubernetes databse staging")  # the same with every page held
+    # the longest word is on the first page: nothing is read twice
+    reads.clear()
+    rank_approximate(unheld, "database kubernetse", fetch)
+    assert sorted(reads) == list(range(8))
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_the_typo_word_and_its_pages_do_not_depend_on_where_the_longer_words_sit(seed):
+    import random
+
+    rng = random.Random(seed)
+    vocabulary = ["database", "kubernetes", "staging", "replica", "backups", "nightly", "rollout", "canary"]
+    texts = [" ".join(rng.choice(vocabulary) for _ in range(rng.randrange(1, 4))) for _ in range(12)]
+    query = " ".join(rng.sample(["databse", "kubernetse", "stagign", "replcia", "bakcups", "database", "kubernetes",
+                                 "nightly", "zzqqxx"], 3))
+    held = entries(*texts)
+    plan = S.plan_words(query)
+    absent = [w for w in sorted(plan.words, key=lambda w: (-len(w), plan.words.index(w)))
+              if plan.plain(plan.words.index(w)) and not any(w in t for t in texts)]
+    expected = {}
+    if absent:  # the reference: the longest plain word no page holds, looked for on every page in order
+        finder = S._TypoFinder(absent[0])
+        for i, text in enumerate(texts):
+            form = finder.find(S.search_key(text))
+            if form is not None:
+                expected[i] = (absent[0], form.decode())
+    hits = rank_approximate(held, query)
+    got = {int(h.id[3:], 16): (m.word, m.form) for h in hits for m in h.matched if m.how == "typo"}
+    assert got.items() <= expected.items()
+    assert hits == rank_approximate([e._replace(text=None) for e in held], query, lambda i: held[i])
+    solo = rank_approximate(held, absent[0]) if absent else []  # alone, every page with the form passes the floor
+    assert {int(h.id[3:], 16): (m.word, m.form) for h in solo for m in h.matched} == (
+        expected if absent and not any(absent[0] in t for t in texts) else {})
+
+
+# Two facts on two pages
+
+
+def two_fact_pages():
+    """40 pages. Fact A (page 5): "redis" is on that page only, "eviction policy" on 3 more. Fact B (page
+    30): each of its three words is on 10 pages, so the page weighs less than a page that shares two
+    words with fact A."""
+    texts = [f"page {i} ran the build" for i in range(40)]
+    texts[5] += "; the redis eviction policy is allkeys-lru"
+    texts[30] += "; the staging gateway port is 6543"
+    for i in (8, 12, 16, 20, 24, 28, 32, 36, 38):
+        texts[i] += "; the gateway port was checked"
+    for i in (2, 6, 10, 14, 18, 22, 26, 34, 37):
+        texts[i] += "; staging was fine"
+    for i in (9, 13, 17):
+        texts[i] += "; the eviction policy was discussed"
+    return texts
+
+
+def test_the_second_fact_of_a_query_takes_the_third_detailed_place():
+    pages = entries(*two_fact_pages())
+    query = "staging gateway port redis eviction policy"
+    assert rank(pages, query) == []
+    hits = rank_approximate(pages, query)
+    order = found(hits)
+    # Page 5 holds the three rarest words. The 3 pages that share "eviction policy" with it come next (4.42
+    # of the weight each), and page 30, which holds the other fact (4.09), would be fifth: it takes the
+    # third place.
+    assert order[0] == 5 and order[2] == 30 and set(order[1:2]) <= {9, 13, 17} and order.index(30) == 2
+    S_second = S._second_page
+    try:
+        S._second_page = lambda *args: None
+        assert found(rank_approximate(pages, query)).index(30) == 4  # without the place
+    finally:
+        S._second_page = S_second
+    assert [m.word for m in hits[2].matched] == ["staging", "gateway", "port"]
+    assert hits[2].missing == ("redis", "eviction", "policy")
+    assert S.SHOWN_IN_DETAIL == 3 and hits.total == len(hits) == len(set(order))
+
+
+def test_the_second_page_is_added_even_when_it_is_under_the_floor():
+    pages = entries(*two_fact_pages())
+    # "gateway" and "port" are on 10 pages each: 2.72 of the query's 10.45, which is 26 percent, under the
+    # floor. They are what page 5 lacks, and they are not common words (a word on no page weighs 4.4), so
+    # the best page for them is shown third: the newest of the 10 that hold both.
+    hits = rank_approximate(pages, "gateway port redis eviction policy")
+    assert found(hits) == [5, 17, 38, 13, 9] and hits.total == 5
+    assert [m.word for m in hits[2].matched] == ["gateway", "port"]
+    assert hits[2].missing == ("redis", "eviction", "policy")
+
+
+def test_no_second_page_when_the_best_page_holds_every_word_or_only_a_common_word_is_left():
+    texts = two_fact_pages()
+    pages = entries(*texts)
+    full = rank_approximate(pages, "what is the redis eviction policy")  # page 5 holds every word
+    assert found(full)[0] == 5 and all("build" not in how(h) for h in full)
+    assert set(found(full)) == {5, 9, 13, 17}
+    # "build" is on every page: it is what page 5 lacks of this query, and no page is shown for it
+    left = rank_approximate(pages, "redis eviction policy zzqqxx build")
+    assert found(left)[0] == 5 and set(found(left)) <= {5, 9, 13, 17}
+    # a word on a third of the pages is a leftover too: it weighs 0.7 against 4.4 for a word on no page
+    for i in range(0, 40, 3):
+        texts[i] += " in region west"
+    left = rank_approximate(entries(*texts), "redis eviction policy region")
+    assert found(left)[0] == 5 and all("redis" in how(h) or "eviction" in how(h) for h in left)
+
+
+def test_a_single_fact_keeps_its_page_among_the_first_three():
+    pages = entries(*two_fact_pages())
+    for query, page_no in (("what is the redis eviction policy?", 5), ("redis eviction zzqqxx", 5),
+                           ("staging gateway port zzqqxx", 30), ("which port is the staging gateway on", 30),
+                           ("staging gatewya port", 30), ("allkeys-lru policy for the cache", 5)):
+        assert page_no in found(rank_approximate(pages, query))[:3], query
 
 
 # Safety
@@ -421,7 +626,7 @@ def test_an_exact_strict_reply_has_no_approximate_text(store):
 
 
 def test_nothing_approximate_is_no_hit_as_before(store):
-    for query in ("zzqqxx", "nightly zzqqxx", "what is the", "kubernetes ingress"):
+    for query in ("zzqqxx", "nightly zzqqxx yyqqxx", "what is the", "kubernetes ingress"):
         text, coverage = call(store, query)
         assert text == mcp.NO_HIT and coverage == mcp.SEARCH_COVERAGE_UNCHECKED
         event = last_event(store)
@@ -430,8 +635,8 @@ def test_nothing_approximate_is_no_hit_as_before(store):
 
 def test_at_most_three_detailed_pages_and_ten_listed(tmp_path):
     store = MemoryStore("s1")
-    store.page_out([page(f"build number {i} passed") for i in range(40)], 0)
-    store.page_out([page(f"deploy number {i} finished in region r{i % 5}") for i in range(40)], 40)
+    store.page_out([page(f"build number {i} passed") for i in range(400)], 0)  # so that the 40 are 1 page in 11
+    store.page_out([page(f"deploy number {i} finished in region r{i % 5}") for i in range(40)], 400)
     text, _ = call(store, "what deploy finished zzqqxx")
     assert len(DETAILED.findall(text)) == 3 and len(LISTED.findall(text)) == mcp.APPROX_MORE_LIMIT == 10
     assert "[more approximate matches, recall one at its offset:]" in text
@@ -440,7 +645,7 @@ def test_at_most_three_detailed_pages_and_ten_listed(tmp_path):
     assert all(re.fullmatch(r"pg_[0-9a-f]{16} \(turn \d+\) @\d+ \[matched: deploy, finished; not matched: zzqqxx\]",
                             line) for line in listed), listed[:2]
     turns = [int(t) for _, t in DETAILED.findall(text)]
-    assert turns == sorted(turns, reverse=True) and 79 in turns  # the newest page holding the words is detailed
+    assert turns == sorted(turns, reverse=True) and 439 in turns  # the newest page holding the words is detailed
     event = last_event(store)
     assert event["hits"] == 13 and event["total_matches"] == 40 and event["approximate"] is True
 
@@ -454,6 +659,59 @@ def test_detailed_pages_show_most_words_first_then_newest(store):
     assert shown[0] == newest  # holds 4 of the 5 words
     assert set(shown[1:]) == {by_turn[3], by_turn[6]}  # 3 words, and the 2 rarer ones
     assert f"{newest} (turn 30)\n  [matched: staging, database, port, canary; not matched: rollout]" in text
+
+
+def test_a_strict_match_whose_pages_cannot_be_read_is_no_hit_and_never_approximate(tmp_path):
+    # The fallback runs only when search itself finds no page (reviewer A on PR #267).
+    store = SessionStore(tmp_path, "s1")
+    pids = store.page_out(TURNS, 0)
+    calls = []
+    real = store.search_approximate
+    store.search_approximate = lambda query: calls.append(query) or real(query)
+    strict = store.search("staging database")
+    assert strict == [pids[3]]
+    store.search = lambda query: list(strict)  # the page goes between the search and the reply
+    (store.pages_dir / f"{pids[3]}.json").unlink()
+    text, _ = call(store, "staging database")
+    assert text == mcp.NO_HIT and calls == []
+    event = last_event(store)
+    assert event["approximate"] is False and event["hits"] == 0 and event["total_matches"] == 0
+    del store.search  # search now finds no page for it, so the fallback is asked
+    assert call(store, "nightly zzqqxx")[0].startswith(mcp.SEARCH_APPROX_HEADER) and len(calls) == 1
+
+
+def test_a_reply_that_shows_no_page_is_not_logged_as_approximate(store):
+    store.set_window(200_000, 2.0)
+    store.set_retained(1, 0, [{"turn": 40, "message_index": 0, "role": "user", "text": "what changed?"}])
+    store.set_turn_room("7", 40)  # room for 60 characters: not even the header
+    text, _ = call(store, "what port is the staging databse on")
+    event = last_event(store)
+    assert text == mcp.BUDGET_SPENT and event["hits"] == 0 and event["returned"] == []
+    assert event["approximate"] is False and "approximate_steps" not in event
+    store.page_out([page("the quokka cache " + "x" * 20_000)], 50)  # one matching line longer than a call returns
+    store.set_turn_room("8", 10**6)
+    store.set_window(4_000, 2.0)  # a per-call limit of 1,500 characters
+    text, _ = call(store, "what quokka cache zzqq " + "y" * 1_600)
+    assert text in (mcp.SEARCH_TOO_LONG, mcp.NO_HIT)
+    assert last_event(store)["approximate"] is False
+
+
+def test_the_logged_steps_are_those_of_the_pages_the_reply_showed(store):
+    store.set_window(200_000, 2.0)
+    store.set_retained(1, 0, [{"turn": 40, "message_index": 0, "role": "user", "text": "what changed?"}])
+    store.page_out([page("the refreshToken staging note")], 60)
+    store.set_turn_room("7", 10_000)
+    text, _ = call(store, "refresh_token staging database port")
+    assert len(DETAILED.findall(text)) == 3 and last_event(store)["approximate_steps"] == ["fold", "any_word"]
+    assert "refreshToken" not in text.split("\n")[3]  # the first page holds the three plain words
+    for room in range(150, 400, 5):  # the smallest room that shows a page: the first page only
+        store.set_turn_room(str(room), room)
+        text, _ = call(store, "refresh_token staging database port")
+        if text != mcp.BUDGET_SPENT:
+            break
+    assert len(DETAILED.findall(text)) == 1 and "refreshToken" not in text
+    event = last_event(store)
+    assert event["approximate"] is True and event["approximate_steps"] == ["any_word"] and event["hits"] == 1
 
 
 def test_the_log_says_approximate_and_which_steps_without_the_words(store):
@@ -575,6 +833,8 @@ def test_a_store_without_the_fallback_behaves_as_before():
 def test_the_instructions_and_the_tool_description_say_what_search_does():
     search = next(t for t in mcp.TOOLS if t["name"] == "contexto_search")["description"]
     assert "exact substring" not in mcp.INSTRUCTIONS and "No fuzzy" not in search
+    # an approximate reply lists 10 further pages, a strict one 50: the description promises neither count
+    assert "up to 50 more are listed" in search and "the next 50" not in search and mcp.APPROX_MORE_LIMIT == 10
     for text in (mcp.INSTRUCTIONS, search):
         assert "every word" in text and "approximate" in text
     tail = ("When the user states a standing rule, preference, or obligation (whenever, from now on, always, never), "
@@ -608,11 +868,13 @@ def test_the_command_prints_approximate_matches_with_a_note_and_the_words(home, 
     assert code == 0
     assert ("no paged-out turn in session s1 contains every word of 'what port is the staging databse on'; "
             "approximate matches, best first:") in err
+    assert err.splitlines()[-1] == "[searched for: port, staging, databse]"  # as the tool's reply says
     lines = out.splitlines()
     assert lines[0].startswith(f"{home[3]} turn 3:")
     assert lines[1] == "  [matched: port, staging, databse as database]"
     assert any(line.lstrip().startswith(">") and "staging database listens" in line for line in lines)
     code, out, err = run(capsys, "search", "refresh_token", "zzqqxx", "keychain")
+    assert "[searched for" not in err  # every word was searched
     assert code == 0 and "  [matched: refresh_token as refreshToken, keychain; not matched: zzqqxx]" in out.splitlines()
     assert any(line.lstrip().startswith(">") and "refreshToken" in line for line in out.splitlines())
 
@@ -621,9 +883,9 @@ def test_the_command_is_unchanged_for_a_strict_hit_and_for_nothing(home, capsys)
     code, out, err = run(capsys, "search", "refreshToken")
     assert code == 0 and out.splitlines()[0].startswith(f"{home[1]} turn 1:") and "approximate" not in out + err
     assert "[matched" not in out
-    code, out, err = run(capsys, "search", "zzqqxx", "nightly")
+    code, out, err = run(capsys, "search", "zzqqxx", "yyqqxx", "nightly")
     assert code == 0 and out == ""
-    assert err.splitlines()[-1] == "no paged-out turn in session s1 contains every word of 'zzqqxx nightly'"
+    assert err.splitlines()[-1] == "no paged-out turn in session s1 contains every word of 'zzqqxx yyqqxx nightly'"
 
 
 def test_the_command_says_when_more_pages_matched_than_it_can_list(tmp_path, monkeypatch, capsys):

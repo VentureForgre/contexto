@@ -2,23 +2,32 @@
 "scale17":[
 {
 "query":"staging database",
-"total":0,
-"ids":[]
+"total":1,
+"ids":[
+"pg_0da5b2cfbce830b4"
+]
 },
 {
 "query":"fails intermittently",
-"total":0,
-"ids":[]
+"total":2,
+"ids":[
+"pg_c4b2baf04827849a",
+"pg_98fc55673852edd2"
+]
 },
 {
 "query":"S3 bucket",
-"total":0,
-"ids":[]
+"total":1,
+"ids":[
+"pg_23588f8c5b8669c0"
+]
 },
 {
 "query":"hashing algorithm",
-"total":0,
-"ids":[]
+"total":1,
+"ids":[
+"pg_2551f063a40af6c5"
+]
 },
 {
 "query":"rate-limit",
@@ -86,8 +95,12 @@
 },
 {
 "query":"logging level",
-"total":0,
-"ids":[]
+"total":3,
+"ids":[
+"pg_080d8c481057a8dc",
+"pg_40108986b9fadc0a",
+"pg_30f699983c954a46"
+]
 }
 ],
 "acceptance":[
@@ -121,30 +134,34 @@
 },
 {
 "query":"Follow the notes from the ledger-svc service to its owner, the owner's team and the region it covers. Which region is it? Answer with the region only.",
-"total":1,
+"total":2,
 "ids":[
-"pg_d2792ed7d84d2ab7"
+"pg_d2792ed7d84d2ab7",
+"pg_ab94bbd39ccfbfd9"
 ]
 },
 {
 "query":"Follow the notes from the resolver-ctl service to its owner, the owner's team and the region it covers. Which region is it? Answer with the region only.",
-"total":1,
+"total":2,
 "ids":[
-"pg_8a751d1e7fbe9c33"
+"pg_8a751d1e7fbe9c33",
+"pg_ab94bbd39ccfbfd9"
 ]
 },
 {
 "query":"Follow the notes from the tracker-sync service to its owner, the owner's team and the region it covers. Which region is it? Answer with the region only.",
-"total":1,
+"total":2,
 "ids":[
-"pg_6bbaead030c1c0f8"
+"pg_6bbaead030c1c0f8",
+"pg_ab94bbd39ccfbfd9"
 ]
 },
 {
 "query":"Follow the notes from the pricing-core service to its owner, the owner's team and the region it covers. Which region is it? Answer with the region only.",
-"total":1,
+"total":2,
 "ids":[
-"pg_e251e83431bf718c"
+"pg_e251e83431bf718c",
+"pg_ab94bbd39ccfbfd9"
 ]
 },
 {
@@ -490,72 +507,68 @@
 },
 {
 "query":"Is action item AI-78048 open or closed? Answer open or closed.",
-"total":7,
+"total":2,
 "ids":[
 "pg_54014e2ded920902",
-"pg_1a9c73b3a81fecad",
-"pg_504fc43816c08277",
-"pg_ab94bbd39ccfbfd9",
-"pg_df530a781233a27f",
-"pg_e251e83431bf718c",
-"pg_d2792ed7d84d2ab7"
+"pg_1a9c73b3a81fecad"
 ]
 },
 {
 "query":"Is action item AI-88593 open or closed? Answer open or closed.",
-"total":8,
+"total":2,
 "ids":[
 "pg_ff47d323bdb223a6",
-"pg_8a751d1e7fbe9c33",
-"pg_54014e2ded920902",
-"pg_504fc43816c08277",
-"pg_ab94bbd39ccfbfd9",
-"pg_df530a781233a27f",
-"pg_e251e83431bf718c",
-"pg_d2792ed7d84d2ab7"
+"pg_8a751d1e7fbe9c33"
 ]
 },
 {
 "query":"Is action item AI-43806 open or closed? Answer open or closed.",
-"total":6,
+"total":3,
 "ids":[
 "pg_504fc43816c08277",
 "pg_ab94bbd39ccfbfd9",
-"pg_df530a781233a27f",
-"pg_54014e2ded920902",
-"pg_e251e83431bf718c",
-"pg_d2792ed7d84d2ab7"
+"pg_df530a781233a27f"
 ]
 },
 {
 "query":"Is action item AI-48831 open or closed? Answer open or closed.",
-"total":7,
+"total":3,
 "ids":[
 "pg_54014e2ded920902",
 "pg_ab94bbd39ccfbfd9",
-"pg_ff47d323bdb223a6",
-"pg_504fc43816c08277",
-"pg_df530a781233a27f",
-"pg_e251e83431bf718c",
-"pg_d2792ed7d84d2ab7"
+"pg_ff47d323bdb223a6"
 ]
 },
 {
 "query":"Of action items AI-54382, AI-55327, AI-74615, AI-83198, AI-88201, AI-91032, which are still open? List their ids.",
-"total":4,
+"total":10,
 "ids":[
 "pg_d2792ed7d84d2ab7",
 "pg_43bb9f3c5c3770a7",
 "pg_504fc43816c08277",
-"pg_c9964b38440784f9"
+"pg_c9964b38440784f9",
+"pg_ea837acb79ca9414",
+"pg_17110c76bc661f5c",
+"pg_e251e83431bf718c",
+"pg_ab94bbd39ccfbfd9",
+"pg_6bbaead030c1c0f8",
+"pg_df530a781233a27f"
 ]
 },
 {
 "query":"Of action items AI-55302, AI-64547, AI-92624, AI-93532, AI-98470, AI-98479, which are still open? List their ids.",
-"total":2,
+"total":10,
 "ids":[
 "pg_43bb9f3c5c3770a7",
-"pg_1a9c73b3a81fecad"
+"pg_1a9c73b3a81fecad",
+"pg_ab94bbd39ccfbfd9",
+"pg_ff47d323bdb223a6",
+"pg_504fc43816c08277",
+"pg_e251e83431bf718c",
+"pg_17110c76bc661f5c",
+"pg_8a751d1e7fbe9c33",
+"pg_df530a781233a27f",
+"pg_71d19b9b06eb3848"
 ]
 },
 {
@@ -604,8 +617,10 @@
 "small":[
 {
 "query":"nightly restore",
-"total":0,
-"ids":[]
+"total":1,
+"ids":[
+"pg_5eb28064214eb228"
+]
 },
 {
 "query":"retry-budget",
@@ -688,8 +703,10 @@
 },
 {
 "query":"zzqqxx nightly",
-"total":0,
-"ids":[]
+"total":1,
+"ids":[
+"pg_5eb28064214eb228"
+]
 },
 {
 "query":"\u00e9",
@@ -708,11 +725,13 @@
 },
 {
 "query":"worker config max_retries retention_days",
-"total":3,
+"total":5,
 "ids":[
 "pg_d3625cbc3d81ad36",
 "pg_b445f9cd801890ac",
-"pg_666b4deac658e800"
+"pg_666b4deac658e800",
+"pg_cef054caf4380b98",
+"pg_bdd426cb820e0d50"
 ]
 }
 ],

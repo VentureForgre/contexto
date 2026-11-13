@@ -244,8 +244,8 @@ TOOLS: list[dict[str, Any]] = [
             "Find paged-out turns holding every word of the query, in any case and order, in text or "
             "stub; best first: whole query, then relevance, newer among similar. "
             f"For the best {SEARCH_LIMIT} pages, shown newest first, returns up to {MATCHES_PER_PAGE} matching lines "
-            f"(marked >) with {_lines(MATCH_CONTEXT)} of context either side, each with its page offset; the next "
-            f"{SEARCH_MORE_LIMIT} are listed as page id, turn, @offsets. Answer from a "
+            f"(marked >) with {_lines(MATCH_CONTEXT)} of context either side, each with its page offset; up to "
+            f"{SEARCH_MORE_LIMIT} more are listed as page id, turn, @offsets. Answer from a "
             "matching line, or call contexto_recall with its page id and offset to read on. Search covers only "
             "paged-out turns: the conversation in view is newer than any hit. If no turn holds every word, the reply "
             "gives approximate matches, marked as such, with the words each page matched."
@@ -558,7 +558,8 @@ class Server:
     def _tool_search(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], None, dict[str, Any]]:
         _reject_extra(args, {"query"})
         query = _require_str(args, "query")
-        found, pages = self._readable_pages(self.store.search(query))  # best first (D34)
+        strict = self.store.search(query)  # best first (D34)
+        found, pages = self._readable_pages(strict)
         # The best pages are chosen by relevance and shown newest first, so among them the newest statement
         # of a fact comes first (D28); the next best are listed newest first too. In each part turn pages
         # come first and paged context blocks after them, under their own line (D34).
@@ -575,24 +576,24 @@ class Server:
         more_header = "[more matching pages, newest first; recall one at its offset:]"
         not_shown = "[{count} more matching pages not shown; {why}]"
         total = len(found)
-        steps: list[str] = []
-        if not hits and not lead:
-            # No paged page holds every word and nothing in view matches: approximate matches, said to be (D65).
+        plan: Plan | None = None
+        detailed_hits: list[ApproxHit] = []  # the approximate hits shown in detail, in the reply's order
+        if not strict and not lead:
+            # No paged page holds every word and nothing in view matches: approximate matches, said to be
+            # (D65). Only then: a strict match whose pages cannot be read now is still "no hit".
             approximate, total, plan = self._approximate(query)
             total = total if approximate else 0
             if approximate:
                 shown = _most_words_first(approximate[:SEARCH_LIMIT])
+                detailed_hits = [hit for hit, _ in shown]
                 hits = _with_context_header([(_hit_rows(hit.id, page, query, (hit, plan)), page)
                                              for hit, page in shown])
                 more = _with_context_header([([_more_row(hit.id, page, query, (hit, plan))], page)
                                              for hit, page in _most_words_first(approximate[SEARCH_LIMIT:])])
-                head = [SEARCH_APPROX_HEADER]
-                if plan is not None and (plan.dropped or plan.cut):
-                    head.append(f"[searched for: {', '.join(plan.typed)}]")
+                head = [SEARCH_APPROX_HEADER] + ([plan.searched()] if plan is not None and plan.searched() else [])
                 more_header = "[more approximate matches, recall one at its offset:]"
                 not_shown = "[{count} more approximate matches not shown; {why}]"
                 specific = "use a more specific query"
-                steps = _approximate_steps(plan, [hit for hit, _ in shown])
 
         def render(rows: list[Row], detailed: int, listed: int, why: str) -> str:
             lines = [t for t, _ in lead] + head + [t for t, _ in rows]
@@ -603,7 +604,7 @@ class Server:
                 lines.append(not_shown.format(count=total - detailed - listed, why=why))
             return "\n".join(lines)
 
-        picked: dict[str, Any] = {"rows": [], "pages": 0}
+        picked: dict[str, Any] = {"rows": [], "pages": 0, "detailed": 0}
 
         def build(room: int | None) -> list[str] | None:
             if not hits and not lead:
@@ -624,7 +625,7 @@ class Server:
                     complete = detailed == len(hits) and listed == len(more)
                     text = render(rows, detailed, listed, specific if complete else why)
                     if len(text) <= cap:
-                        picked.update(rows=rows, pages=detailed + listed)
+                        picked.update(rows=rows, pages=detailed + listed, detailed=detailed)
                         return [text]
             # Not even one whole hit: its page line and matching lines, without context, as far as they fit.
             context = [row for row in hits[0] if row[0] == SEARCH_CONTEXT_HEADER]
@@ -636,18 +637,20 @@ class Server:
                         (f"  [the rest of this hit is not shown; {why}]", None)]
                 text = render(rows, 1, 0, why)
                 if len(text) <= cap:
-                    picked.update(rows=rows, pages=1)
+                    picked.update(rows=rows, pages=1, detailed=1)
                     return [text]
             return [SEARCH_TOO_LONG] if by_cap and len(SEARCH_TOO_LONG) <= cap else None
 
         texts, budget = self._within_room(build, "contexto_search")
         text = texts[0] if texts else BUDGET_SPENT
         shown = texts is not None and text not in CONTROL_REPLIES
+        # D65, content-free: whether the reply showed approximate matches, and which steps of the fallback
+        # the pages it showed in detail needed (_approximate_steps); never the words. A reply that showed
+        # no page (the budget is used up, or the result is too long) showed no approximate match.
+        steps = _approximate_steps(plan, detailed_hits[:picked["detailed"]]) if shown and detailed_hits else []
         coverage = SEARCH_COVERAGE if in_view is not None else SEARCH_COVERAGE_UNCHECKED
         return ([{"type": "text", "text": text}, {"type": "text", "text": coverage}], None,
                 {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": total,
-                 # D65, content-free: whether the pages found are approximate matches, and which steps of the
-                 # fallback the detailed ones needed (_approximate_steps); never the words
                  "approximate": bool(steps), **({"approximate_steps": steps} if steps else {}),
                  "in_view_hits": sum(1 for _, span in lead if span) if shown else 0,
                  "in_view_more": max(0, in_view_found[0] - IN_VIEW_LIMIT) if shown else 0,
