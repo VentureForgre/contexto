@@ -31,7 +31,8 @@ from test_serve import child_env, served, session_log, sessions
 CLAUDE = shutil.which("claude")
 pytestmark = pytest.mark.skipif(CLAUDE is None, reason="claude CLI not installed")
 SANDBOX = "/usr/bin/sandbox-exec"
-LOCAL_ONLY = '(version 1)\n(allow default)\n(deny network-outbound)\n(allow network-outbound (remote ip "localhost:*"))\n'
+LOCAL_ONLY = ('(version 1)\n(allow default)\n(deny network-outbound)\n'
+              '(allow network-outbound (remote ip "localhost:*"))\n')
 FIRST = "0d700000-0000-4000-8000-000000000001"
 SECOND = "0d700000-0000-4000-8000-000000000002"
 
