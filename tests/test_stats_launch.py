@@ -415,9 +415,9 @@ def test_a_full_disk_is_seen_at_exit_in_stats_and_in_state(tmp_path, token_upstr
     assert str(home) not in err.getvalue()  # the exception's text, with its path, is never shown or logged
     assert str(home) not in (home / "sessions" / "disk1" / "log.jsonl").read_text()
     lines = stats.exit_summary(home, "disk1", "claude", 12.0, quiet=True)
-    assert lines == ["contexto: warning: this run logged 4 events (store_error 2, degraded_enter 1, bound_too_small 1)"
-                     ": 2 requests went out unpaged, and paging resumed before exit. Details: contexto stats disk1"] \
-        or (len(lines) == 1 and "2 requests went out unpaged, and paging resumed before exit" in lines[0])
+    # --quiet keeps the one line that counts the run's faults.
+    assert lines == ["contexto: warning: this run logged 3 events (store_error 2, degraded_enter 1): 2 requests went "
+                     "out unpaged, and paging resumed before exit. Details: contexto stats disk1"]
 
 
 # Codex -----------------------------------------------------------------------------------------------

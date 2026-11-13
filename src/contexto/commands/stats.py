@@ -48,7 +48,7 @@ def run(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(out, indent=2, sort_keys=True))
         return EXIT_OK
-    say_session(session_id, how)
+    say_session(session_id, "SESSION" if args.session_id is not None and how == "--session" else how)
     runs = f"{out['runs']:,} run{'' if out['runs'] == 1 else 's'}"
     scope = f"the latest of {runs}" if args.last_run else f"the whole session ({runs}"
     span = f"{duration_text(out['span_seconds'])} of log" if out["span_seconds"] is not None else "no log"

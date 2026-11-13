@@ -601,12 +601,13 @@ def _n(count: int, noun: str, plural: str | None = None) -> str:
 
 def render(out: dict[str, Any], *, brief: bool = False) -> list[str]:
     """The stats as indented text lines, one per subject, each only when its data exists. ``brief``
-    is the exit summary's: the request and byte lines are left to ``contexto stats``."""
+    is the exit summary's: the byte line, and the request line unless a request failed, are left to
+    ``contexto stats``."""
     lines: list[str] = []
     requests, prompt, over = out["requests"], out["prompt"], out["over_bound"]
     if not requests["model"]:
         lines.append("  requests    no model request in the log")
-    elif not brief:
+    elif not brief or requests["failed"]:
         text = f"{_n(requests['model'], 'model request')} ({requests['main']:,} main, {requests['side']:,} side)"
         if requests["failed"]:
             codes = ", ".join(f"{code} x{count}" for code, count in sorted(requests["status"].items()))

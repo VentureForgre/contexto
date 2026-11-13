@@ -31,7 +31,8 @@ contexto: resume this conversation through Contexto with: contexto run --session
   stands: a store has no runs. `contexto stats ID` shows the whole session and
   `contexto stats ID --last-run` shows what the summary showed.
 - A line appears only when the log holds its data. A run that paged nothing has no `paged out`
-  line; a run with no usage from the API has no `cache` line.
+  line; a run with no usage from the API has no `cache` line. The `requests` and `bytes` lines are
+  left to `contexto stats`, except that a run with failed model requests shows the `requests` line.
 - `contexto run --quiet claude ...` or `CONTEXTO_QUIET=1` (any value but empty, `0`, `false` or
   `no`) drops the summary. Warnings are never dropped: the held warnings, and the line that counts a
   run's faults (below), are printed either way.
@@ -183,7 +184,7 @@ not tool calls and are not counted.
 | `tools.recall`, `tools.search`, `tools.state`, `tools.pin`, `tools.close` | One object per tool. |
 | `tools.recall.calls` | Calls that succeeded (the same key exists for each tool). |
 | `tools.recall.failed` | Calls that returned an error to the model. |
-| `tools.recall.charged_tokens` | Tokens the tool's replies were charged against the turn's recall room: an estimate, the reply's characters over the session's bytes-per-token ratio. Always 0 for `pin` and `close`. |
+| `tools.recall.charged_tokens` | Tokens the tool's replies were charged against the turn's recall room: an estimate, the reply's characters divided by the session's measured bytes per token, capped at 1.5, so it errs high. Always 0 for `pin` and `close`. |
 | `tools.out_of_room` | Calls that found the turn's recall room used up, so they returned little or nothing. |
 | `pins.readable` | `false` when the ledger is damaged; the two counts are then `null`. |
 | `pins.active_records` | Records in the ledger that nothing supersedes, now. |

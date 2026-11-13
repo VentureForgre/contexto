@@ -425,11 +425,15 @@ def test_only_events_that_mean_something_went_wrong_are_counted(tmp_path):
                      {"event": "sizing_restored"}, {"event": "main_changed", "reason": "more_turn_starts"})
     write_log(tmp_path, "n1", [*launch(0), *expected_in_normal_use, request(1, events=nested_normal),
                                request(2, status=429), request(3, client_aborted=True, tokens=None)])
+    write_log(tmp_path, "n2x", [*launch(0), request(1)])
     out = session_stats(tmp_path, "n1")
     assert out["faults"]["total"] == 0 and out["faults"]["events"] == {}
     assert out["requests"]["failed"] == 1 and out["requests"]["status"] == {"429": 1}
     assert out["requests"]["aborted"] == 1
     assert "faults      none" in "\n".join(render(out)) and "1 failed (429 x1)" in "\n".join(render(out))
+    # The exit summary leaves the request line to `contexto stats`, unless a request failed.
+    assert "1 failed (429 x1)" in "\n".join(render(out, brief=True))
+    assert not [line for line in render(session_stats(tmp_path, "n2x"), brief=True) if "requests" in line.split()[:1]]
     wrong_top = [{"event": name} for name in ("transform_error", "proxy_error", "request_too_deep", "page_quarantined",
                                               "page_unreadable", "ledger_damaged", "turn_room_missing",
                                               "engine_unavailable", "websocket_rejected", "observe_usage_error")]
@@ -565,6 +569,7 @@ def test_the_stats_command_prints_a_session_by_id_prefix_or_default(tmp_path):
     # No id: the same default as `contexto state` (the most recent session with pages or pins).
     default = contexto(tmp_path, "stats")
     assert default.stdout == done.stdout and "session abc123 (" in default.stderr
+    assert done.stderr == "session abc123 (SESSION)\n"  # how it was named
     assert contexto(tmp_path, "stats", env={"CONTEXTO_SESSION": "abd999"}).stdout.startswith(
         "Contexto stats for session abd999")
     ambiguous = contexto(tmp_path, "stats", "ab")
