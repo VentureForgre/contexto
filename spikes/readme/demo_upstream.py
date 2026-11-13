@@ -21,6 +21,7 @@ import argparse
 import json
 import re
 import signal
+import socketserver
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -154,17 +155,28 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+class Server(ThreadingHTTPServer):
+    """``HTTPServer.server_bind`` names the server with ``socket.getfqdn(host)``, a reverse lookup that
+    took longer than the recorder's 10 s wait on macOS CI runners. Nothing here reads the name."""
+
+    daemon_threads = True
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name, self.server_port = str(host), port
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--quiet-start", action="store_true", help="do not print the listening line")
     args = parser.parse_args(argv)
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        server = Server(("127.0.0.1", args.port), Handler)
     except OSError as exc:
         print(f"demo_upstream: cannot listen on 127.0.0.1:{args.port}: {exc}", file=sys.stderr)
         return 1
-    server.daemon_threads = True
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     if not args.quiet_start:
         say(f"listening on 127.0.0.1:{server.server_address[1]}, "
