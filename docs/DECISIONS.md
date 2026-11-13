@@ -2792,13 +2792,14 @@ the owner's delegation. Open decisions are listed at the end with the options an
     are in `serve.log` and in no store (`tests/test_serve_real_client.py`). Latency
     (`spikes/m2/serve/bench_serve.py`): the same 63,119-byte Messages request, 1,000 times through
     a plain `ContextoProxy` started as the launcher starts it and 1,000 times through `serve`,
-    alternating, the engine and a session store on both sides: median 15.34 ms against 15.06 ms
-    (p90 40.81 and 38.69), and 15.46 against 15.06 over 400 in an earlier run. The difference of
-    the medians, -0.28 and -0.40 ms, is inside the noise: the machine was running several other
-    test suites (load average 41 to 57 on 18 cores), so these runs bound what `serve` adds at well
-    under a millisecond and say no more. Throughput: 20 sessions sending 50 requests each at once
-    completed 68 and 86 requests a second in the two runs, against 44 and 59 for one session
-    sending alone under the same load.
+    alternating, the engine and a session store on both sides. Three runs: 400 requests each,
+    median 15.46 ms plain against 15.06 ms through `serve` (p90 35.24 and 38.87); 1,000 each, 15.34
+    against 15.06 (p90 40.81 and 38.69); 1,000 each, 12.60 against 12.67 (p90 28.54 and 29.14). The
+    difference of the medians is -0.40, -0.28 and +0.08 ms, which is inside the noise: the machine
+    was running several other test suites (load average 41 to 57 on 18 cores), so these runs bound
+    what `serve` adds at well under a millisecond and say no more. Throughput: 20 sessions sending
+    50 requests each at once completed 86, 68 and 95 requests a second in the three runs, against
+    59, 44 and 72 for one session sending alone under the same load.
   - **Not confirmed.** No IDE extension, desktop app, Agent SDK program or GitHub Action was run
     against the service; only `claude -p` was. A claude.ai (OAuth) login was not run. `contexto
     mcp --serve`, the client of `/contexto/resolve`, is a separate change, so the endpoint is
