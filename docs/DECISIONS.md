@@ -2704,6 +2704,114 @@ the owner's delegation. Open decisions are listed at the end with the options an
   so the next release follows v0.5.24. A backup of each release's notes, assets and tags is kept
   outside the repository. Old commits, pull request diffs and pull request comments still hold the
   hostname (D42).
+- **D70. `contexto serve`, gateway hint headers, and a cloud-provider guard.** Claude, 2026-11-12,
+  under D0; contract change (Stack, Upstream resolution, main selection, the missing-tools and
+  session-start checks, the `contexto run claude` checks). This entry is written in slices; the
+  first covers the hint headers and the guard on the launcher path. Measured at zero spend on Claude
+  Code 2.1.322, macOS, against loopback stubs with temporary config directories and a fake key
+  (`docs/research/D70-serve-probes.md`: 34 runs, 177 requests; and 36 more runs for this slice,
+  `spikes/m2/serve/q10_truthy.sh`).
+  - **Gateway hint headers: the problem.** The engine decides what a request is from signatures that
+    each Claude Code release can change: a tool list for "the main conversation or a subagent, not a
+    side request" (D38, D50), the summary's first line for "Claude Code compacted main" (D50; D59
+    found it missed 7 of 8 real captures), and `X-Claude-Code-Agent-Id` for "a subagent". Claude
+    Code documents the same facts as headers (`llm-gateway-protocol`, "Gateway hint headers", from
+    2.1.273): `x-claude-code-request-class` on every request (`main`, `subagent`, `workflow`,
+    `compaction`, `auxiliary`), `x-claude-code-compaction` on the summarization request and
+    `x-claude-code-context-compacted` once on the first main request after it (`auto`, `manual`,
+    `reactive`), and `x-claude-code-prompt-id`, `x-claude-code-agent-type` and
+    `x-claude-code-prev-tool-durations`. With a custom base URL they are off unless
+    `CLAUDE_CODE_GATEWAY_HINT_HEADERS` is on. Measured in an interactive session of 39 requests with
+    the variable on: every Messages and `count_tokens` request carried the class (title and
+    `count_tokens` `auxiliary`, main turns `main`, the subagent `subagent`, `/compact`'s two
+    summarization requests `compaction` with `x-claude-code-compaction: manual`, and the next main
+    request `x-claude-code-context-compacted: manual`); without it, and with `0`, none of the six
+    appeared, while the session id and agent id headers still did.
+  - **Decided: ask for them, prefer them, keep the signatures.** `contexto run claude` sets
+    `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` in its `--settings` file. Where a request carries a hint
+    with a documented value, it decides; where it does not, the signature decides as before, request
+    by request (`RewriteEngine._classify` has the table, and the contract repeats it). Class `main`
+    or `compaction`: the request is judged whatever its tool list. Class `subagent`, `workflow` or
+    `auxiliary`: never takes over main by any rule, the turn-start rule included, is not judged for
+    the session start, and is not checked for Contexto's tools while it is main for having arrived
+    first. Any other class value is read as no header. `x-claude-code-context-compacted` with any
+    value marks the conversation as the compaction of main, whatever its first message says; the
+    rule's other conditions (main's session id and entrypoint, main idle when there is no turn
+    start) stay. The header is sent once, so the summary text still marks every other request. With
+    no hint header on a request nothing changes: the 1,5xx tests that existed before pass unchanged,
+    except three assertions on the exact content of the `--settings` file.
+  - **The summarization request (`compaction`).** It is main's history with the instructions
+    appended, under main's key, with main's tools and system (D50 on 2.1.314 and 2.1.318; the same
+    on 2.1.322). Decided: it is main's request and gets no path of its own. It goes through main's
+    epoch and is paged under the bound like any main turn (the test sends the same request with and
+    without the header and gets the same bytes, paged). Rejected: forwarding it unchanged because
+    Claude Code is compacting anyway. It would carry the whole local history over the bound.
+  - **Disagreements.** When a header and the signature beside it disagree the header decides, and
+    the engine logs `hint_mismatch` (`header`, `value`, `signature`) once per pair and engine: the
+    early warning that a signature drifted. One exception: class `main` with
+    `X-Claude-Code-Agent-Id` never takes over, since the agent id is a documented header too and the
+    answer that leaves main where it is cannot cost the bound. Not logged: the summary text without
+    `context-compacted`, which a resumed session's compacted transcript also has.
+  - **What the upstream gets.** The docs say why the hints are off for a custom base URL: "a proxy
+    that rejects unknown headers would fail the request". Contexto turns them on for its own use, so
+    the proxy leaves the six out of everything it sends upstream, at the one place it writes request
+    headers, which covers the transformed request, requests it does not transform, and the CLI's own
+    request on every fail-open path. Tested: with the hints stripped, the upstream receives the same
+    headers in the same order and the same bytes as for the same requests sent without hints, over a
+    first request and a paged second one, so the prompt cache sees no difference. Exception: when
+    the user had the hints on already, their gateway was getting them, and they pass through. "On"
+    is the value Claude Code would run with without Contexto's `--settings`: measured, a settings
+    file's value wins over the environment's in both directions (environment `1` with settings `0`:
+    no hint header; environment `0` with settings `1`: sent); `1`, `true`, `yes`, `on` and `TRUE`
+    send them and `0`, `false` and `2` do not. Contexto's own `--settings` value `1` wins over a `0`
+    in the environment and over a `0` in the user's settings file (measured), so the engine gets the
+    hints even for a user who turned them off, and the upstream still gets none. Only the class and
+    the compaction trigger are ever logged, after matching the documented sets; a trigger outside
+    them is logged as `other`. `ContextoProxy(strip_hint_headers=...)` is off by default, so
+    `contexto proxy` and `contexto run codex` are unchanged; `contexto.hints.user_enabled_hint_headers`
+    makes the decision for any other caller.
+  - **Real binary, through `contexto run claude` against a fake upstream** (zero spend,
+    `tests/test_hint_headers_real_client.py`, 2.1.322). `-p "say hi"`: 1 model request, class `main`
+    in the session log, 0 gated headers at the upstream, the session id forwarded. The same with the
+    variable `1` in the environment: the upstream got `x-claude-code-request-class` and
+    `x-claude-code-prompt-id`. A headless session (a prompt that launches a subagent, `/compact`, a
+    prompt): 7 model requests, classed `main`, `subagent`, `main`, `main`, `compaction`,
+    `compaction`, `main`; the last carried `context_compacted: manual` and logged `main_changed:
+    compacted`; the subagent's request was not main; 0 gated headers on the 7 upstream requests; no
+    `hint_mismatch`, so on 2.1.322 each signature still agrees with its header.
+  - **Cloud-provider guard: the problem.** With `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+    `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE` or `CLAUDE_CODE_USE_ANTHROPIC_AWS` set to
+    `1`, every request went to the provider's stub and 0 to `ANTHROPIC_BASE_URL`, not even
+    `HEAD /api/hello` (5 runs, one per switch), also when the switch was only in the config
+    directory's `settings.json`. `contexto run claude` would start its proxy, print its session
+    line, and bound nothing.
+  - **Which values are on (measured for this slice).** `CLAUDE_CODE_USE_BEDROCK` in the process
+    environment: `1`, `true`, `yes`, `on`, `TRUE` and `" 1 "` sent 5 requests to the Bedrock stub and
+    0 to the base URL; `0`, `false`, the empty string, `no`, `2` and `enabled` sent 2 to the base URL
+    (`HEAD /api/hello` and the Messages request) and 0 to Bedrock. That is the rule Claude Code uses
+    for `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` (D52): `1`, `true`, `yes` or `on`, lower-cased and
+    trimmed. In the config directory's `settings.json` `env` block: `"true"`, a JSON `true` and the
+    number `1` were on, `"0"` off. Environment `1` with settings `0` was off, and environment `0`
+    with settings `1` on. The other four switches: on for `true`, off for `0`.
+  - **Decided: refuse.** `contexto run claude` exits 2 before it opens a session, naming the
+    variable, where it is set (the process environment or which settings file's `env` block) and
+    what to do. `claude --version` and `--help` alone still run. The detection is
+    `contexto.upstream.cloud_provider`, for any other caller. Rejected: a warning (the session line
+    still says "bound 150,000" and the user reads no further); forcing the switch to `0` in
+    Contexto's `--settings` (it would send a Bedrock user's requests to the Anthropic API with
+    credentials they may not have); pointing `ANTHROPIC_BEDROCK_BASE_URL` at the proxy (the Bedrock
+    and Vertex request paths and signing are not the Messages API the proxy speaks).
+  - **Not confirmed.** The class `workflow`, the triggers `auto` and `reactive`, nested agents, and
+    a subagent's own compaction or side requests were not provoked, so whether a workflow agent
+    carries an agent id is not known; its class keeps it out either way. A drifted summary was
+    tested by altering the captured text, since no Claude Code release has another one. Claude Code
+    2.1.302 to 2.1.319 were not run with the hints on; the docs say 2.1.273 and later send them, and
+    an older one falls back to the signatures. Sessions signed in with a claude.ai account, the
+    interactive TUI through `contexto run`, and Linux were not run. Organization-managed settings
+    are not read, so a switch or a hint setting there is not seen, and
+    `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` was not measured. Vertex, Foundry, Mantle and Claude
+    Platform on AWS were measured with `1`, `true` and `0` only. 2.1.322 is not in
+    `TESTED_VERSIONS`: the routine of `docs/cli-updates.md` was not run on it here.
 
 ## Open decisions
 

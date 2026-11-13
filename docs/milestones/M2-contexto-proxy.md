@@ -52,6 +52,28 @@ same design after Claude Code works.
   and Contexto's key are different signals and may map to different credentials, so the key pins
   only requests that carry no CLI signal. The launch event records `affinity_header` (true when the
   header is sent).
+- Gateway hint headers (D70). Claude Code (2.1.273 or later) sends six more headers when
+  `CLAUDE_CODE_GATEWAY_HINT_HEADERS` is on, and with a custom base URL only then:
+  `x-claude-code-request-class`, `x-claude-code-context-compacted`, `x-claude-code-compaction`,
+  `x-claude-code-prompt-id`, `x-claude-code-agent-type` and `x-claude-code-prev-tool-durations`.
+  `contexto run claude` turns them on in its `--settings` file, and the engine reads the first three
+  (main selection below). The proxy then leaves all six out of every request it sends upstream: a
+  transformed request, a request it forwards unchanged (`count_tokens`, any other path), and the
+  CLI's own request on each fail-open path (rule 14's failed transform, rule 18, the last-resort
+  forward). The header names match in any case. So the upstream gets the same headers, in the same
+  order, and the same bytes as for the request Claude Code sends with the hints off, and the prompt
+  cache is not affected. Exception: when the user turned the hints on themselves, the six pass
+  through unchanged, as they did before D70. That is decided once at launch from the value Claude
+  Code would run with without Contexto's `--settings`: the first settings file `env` block that sets
+  the variable, in the order and under the trust rule of the upstream resolution below, else the
+  process environment; on is `1`, `true`, `yes` or `on` in any case, with surrounding whitespace
+  ignored (measured on 2.1.322, where a settings file's value also wins over the environment's in
+  both directions). The launch event records `hint_headers` (`stripped` or `forwarded`).
+  `X-Claude-Code-Session-Id`, `x-claude-code-agent-id` and `x-claude-code-parent-agent-id` are sent
+  without the variable and are always forwarded. `contexto proxy` and `contexto run codex` do not
+  ask for the hints and remove nothing (`ContextoProxy(strip_hint_headers=...)` is off by default).
+  No hint value is stored or logged except the request class and the compaction trigger, each
+  only after it matched its documented set.
 
 ## Architecture
 
@@ -60,6 +82,7 @@ contexto run claude ...      (launcher)
   |-- starts proxy on 127.0.0.1:<free port> for session S, upstream = the URL Claude would use
   |-- starts nothing else; Claude Code spawns the MCP server itself from --mcp-config
   `-- execs: claude --settings=<tmp file: env.ANTHROPIC_BASE_URL=proxy,
+                                         env.CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 (D70),
                                          permissions.allow=Contexto's 5 tools (D44)> \
                     --mcp-config=<tmp file: contexto mcp --session S> [user args]
              (one argument per flag: --mcp-config takes several files, so in the two-argument form
@@ -85,6 +108,20 @@ directory's files are (D52, 27 layouts with Claude Code 2.1.314). Else `ANTHROPI
 process environment; else `https://api.anthropic.com`. The launcher's own flag-level `--settings`
 outranks all of these, which is what makes the proxy attachment work. Organization-managed
 settings still outrank `--settings`; document that limit.
+
+Cloud providers (D70): with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+`CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE` or `CLAUDE_CODE_USE_ANTHROPIC_AWS` on, Claude Code
+2.1.322 sends every request to that provider's own endpoint and none to `ANTHROPIC_BASE_URL`, not
+even `HEAD /api/hello`, so the proxy would see nothing and the session would run with no bound.
+`contexto run claude` refuses such a launch (exit 2) before it opens a session, with a message that
+names the variable, where it is set (the process environment, or which settings file's `env`
+block; never a path or the value) and what to do. A switch is read as Claude Code would see it: the
+first settings file `env` block that sets it (same files and trust rule as the base URL above; a
+JSON `true` or number counts as its text, and an empty string is a value), else the process
+environment. On is `1`, `true`, `yes` or `on` in any case with surrounding whitespace ignored;
+`0`, `false`, `no`, `2`, any other text and the empty string are off (all measured, D70).
+`claude --version` and `--help` alone are not checked. Not covered: organization-managed settings,
+and `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` (not measured).
 
 Project settings trust (D52): every settings file above except the user's comes with the
 repository. `contexto run claude` and `contexto proxy` use them as Claude Code does: Claude Code
@@ -1126,7 +1163,49 @@ unknown page, never read. Tools:
   sends no Claude Code session id, only the fourth applies). A request whose `metadata.user_id` has
   `parent_session_id` (an agent-team teammate, in process or in its own pane, on 2.1.314), and one
   carrying `X-Claude-Code-Agent-Id` (every subagent request on 2.1.302 to 2.1.318, and an in-process
-  teammate's), never takes over, by any rule. The engine logs content-free
+  teammate's), never takes over, by any rule.
+
+  Gateway hint headers (D70). The rules above read signatures that were measured on some Claude Code
+  versions and can change with the next: a tool list, the summary's text, the agent id header. When
+  a Messages request carries Claude Code's documented hint headers (Stack; `contexto run claude`
+  asks for them, `contexto proxy` does not), each one decides in place of its signature, request by
+  request, and the signature decides when the header is absent or its value is not one of the
+  documented ones:
+
+  | Header and value | What it decides | Without it |
+  |---|---|---|
+  | `x-claude-code-request-class: main` | The request counts as one "with a tool list" in the rules above and in the session-start check, whatever its tool list | It has a tool list |
+  | `x-claude-code-request-class: compaction` | The same as `main` | The same |
+  | `x-claude-code-request-class: subagent` or `workflow` | Not counted as one with a tool list; never takes over main, by any rule; not checked for Contexto's tools | `X-Claude-Code-Agent-Id` or `parent_session_id`; without those, the turn-start rule |
+  | `x-claude-code-request-class: auxiliary` | The same, whatever its tool list | It has no tool list |
+  | any other class value | Nothing | The signatures |
+  | `x-claude-code-context-compacted`, any value | The conversation is Claude Code's compaction of main, whatever its first message says; the rule's other conditions (main's session id and entrypoint, main idle when there is no turn start) are unchanged | The first message is the compaction summary |
+  | `x-claude-code-compaction` | Nothing | Nothing |
+
+  The class `compaction` is the request that summarizes the conversation: main's own history with
+  the instructions appended, under main's key (measured on 2.1.314, 2.1.318 and 2.1.322). It is
+  main's request and goes through main's epoch, so it is paged under the bound like any main turn;
+  it has no path of its own, and it does not mark anything compacted.
+  `x-claude-code-context-compacted` is sent once, on the first main request after a compaction, so
+  the summary text still marks every request that does not carry it. The first conversation an
+  engine sees is main whatever its class, as before; a side class is only kept from taking main
+  over, and the main conversation's first turn start then takes it (`after_side_request`).
+
+  The engine's `request` event records `request_class` when the request carried a known class, and
+  `compaction` and `context_compacted` (the trigger: `auto`, `manual`, `reactive`, or `other` for a
+  value outside that set) when it carried those headers; a `count_tokens` request is not
+  classified. When a header and a signature disagree the header
+  decides, except that a request with `X-Claude-Code-Agent-Id` never takes over whatever its class,
+  and the engine logs content-free `hint_mismatch` (`header`, `value`, `signature`) once per engine
+  for each pair: class `main` or `compaction` with an agent id (`agent_id`) or without a tool list
+  (`no_tool_list`); class `subagent` or `workflow` with neither an agent id nor a
+  `parent_session_id` (`no_agent_id`); class `auxiliary` with a tool list (`tool_list`); and
+  `context_compacted` on a request whose first message is not the summary (`compaction_summary`).
+  That event is the early warning that a signature drifted. The summary text without the header is
+  not logged: a resumed session's compacted transcript has the text and no header. Codex requests
+  are not classified by these headers.
+
+  The engine logs content-free
   `main_changed` with `reason` (`new_cli_session`, `resumed_cli_session`, `compacted`,
   `after_side_request`, or `more_turn_starts`) and the request's `turn_starts` on the request that takes over; never the
   session id. Main moves only at a request, never at a response: a response that arrives after
@@ -1193,7 +1272,9 @@ before relying on a paged-out detail.
 without the tools (measured: until v0.2.8, `contexto run codex` registered a bare `contexto` command,
 and with it off PATH codex-cli 0.163.0 ran with no Contexto tool and no error). So the proxy checks
 the main conversation's requests (the same choice as `publishes`; subagents and side requests may
-lack the tools and are not judged), never `count_tokens`:
+lack the tools and are not judged, and neither is a request whose `x-claude-code-request-class` is
+`subagent`, `workflow` or `auxiliary` while it is main for having arrived first, D70), never
+`count_tokens`:
 
 - Messages API: present when `tools` names an `mcp__contexto__` tool, or, with tool search, the
   system prompt or a role `system` message lists one by name on its own line (Claude Code 2.1.302),
@@ -1284,7 +1365,8 @@ starting the CLI. The log gets `cli_version_check` (`cli`, `version`, `tested`, 
 `User-Agent` (`claude-cli/<v>`, `codex_<surface>/<v>`) and logs `cli_version` (`cli`, `client`,
 `version`, `tested`, `tested_versions`) once per distinct version, at most 8, and
 `cli_version_untested` once for the first untested one. It judges the session start once, on the
-first request that has a tool list (for the Responses API, any request) and carries the CLI's
+first request that has a tool list (for the Responses API, any request; for a Claude Code request
+with a known `x-claude-code-request-class`, one whose class is `main` or `compaction`, D70) and carries the CLI's
 injected context (a role `system` message or a `<system-reminder>` block; for Codex, a developer item
 in the lead). That is the main conversation's first request: side requests have no tool list, and
 subagents start from a main turn's tool call. The engine's `publishes` choice of main is not used,
@@ -1435,7 +1517,8 @@ A store resumed while prune deletes its session waits, starts empty, and prints 
   secrets) stays in `$TMPDIR`.
 - Checks before any session is opened, each a usage error (exit 2) unless noted: Contexto's own
   `contexto run` options right after `claude` (the message shows the command with them moved before
-  `claude`); a malformed upstream URL, named with its source; a `$CONTEXTO_HOME` that is not a
+  `claude`); a cloud-provider switch that is on (D70, see Upstream resolution); a malformed upstream
+  URL, named with its source; a `$CONTEXTO_HOME` that is not a
   directory; and `${` in the home, the session id or the interpreter path, which Claude Code would
   expand in the MCP config (2.1.314 expands `${VAR}` and `${VAR:-x}` in `command`, `args` and `env`,
   keeps `$VAR`, and has no escape). A `claude` on PATH that is not executable, a broken symlink or a
