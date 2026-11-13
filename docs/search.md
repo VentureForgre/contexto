@@ -23,8 +23,8 @@ pg_d3a8859d41f0620c (turn 3)
 ```
 
 Lines marked `>` are the matching lines. The number before each line is its offset in the turn, which
-`contexto_recall` (or `contexto recall PAGE_ID --offset N`) reads on from. The [README](../README.md)
-describes ranking and the rest of the reply under "MCP tools the model gets".
+`contexto_recall` (or `contexto recall PAGE_ID --offset N`) reads on from.
+[mcp-tools.md](mcp-tools.md) describes ranking and the rest of the reply.
 
 If any paged-out turn holds every word, or a line of the conversation still in view does, this is
 all search does. The steps below never change such a result.
