@@ -409,7 +409,10 @@ class PageCatalog:
 
 def _view(page: dict[str, Any]) -> dict[str, Any]:
     """The fields the index and page ids read, of a page ``check_page`` passed."""
-    return {"id": page["id"], "turn": page["turn"], "stub": page["stub"]}
+    view = {"id": page["id"], "turn": page["turn"], "stub": page["stub"]}
+    if "kind" in page:  # D63: an in-turn page; the index leaves result pages out
+        view["kind"] = page["kind"]
+    return view
 
 
 def check_page(page: Any, page_id: str | None = None) -> dict[str, Any]:
@@ -419,7 +422,8 @@ def check_page(page: Any, page_id: str | None = None) -> dict[str, Any]:
     A page record is an object with a string ``id`` (equal to ``page_id``, the id its file is named
     by, when given), an integer ``turn`` (not a bool), a ``messages`` list, and a ``stub`` object whose
     ``user_text`` is a string, whose ``tools`` and ``paths`` are lists of strings, and whose
-    ``system_text`` and ``reminder_text``, when present, are strings. Those are every field the index
+    ``system_text`` and ``reminder_text``, when present, are strings, and a ``kind``, when present, that is
+    a string (D63: an in-turn page). Those are every field the index
     line, search, and the sort of pages read outside ``messages``. A file whose record names another id
     would be listed by search and the index under that id, which recall cannot find (reviewer A on
     PR #228).
@@ -444,6 +448,8 @@ def check_page(page: Any, page_id: str | None = None) -> dict[str, Any]:
         raise TypeError("page turn is not an integer")
     if not isinstance(page["messages"], list):
         raise TypeError("page messages is not a list")
+    if "kind" in page and not isinstance(page["kind"], str):  # D63: optional; absent means a whole turn
+        raise TypeError("page kind is not a string")
     stub = page["stub"]
     if not isinstance(stub, dict):
         raise TypeError("page stub is not an object")

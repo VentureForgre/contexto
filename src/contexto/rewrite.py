@@ -139,6 +139,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, ClassVar, NamedTuple, Protocol
 
+from contexto import inturn
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.pdfpages import PDF_MAX_PAGES
@@ -237,6 +238,9 @@ class Config:
     recall_example: str = ""  # one line placed after the rule
     preamble_first: bool = True  # V2 (intake 03:26Z): the preamble block goes before carried context blocks
     turn_reminder: str = ""  # appended to each retained turn-start user message while turns are paged
+    # D63 (rule 5): page inside a running turn so the bound holds in a tool loop (contexto.inturn). A record
+    # written before it has no such setting and still resumes (resume_state).
+    in_turn_paging: bool = True
 
 
 @dataclass(frozen=True)
@@ -289,6 +293,8 @@ class EpochState:
     # Rule 3: (messages, hash of the last message) of the newest request sent whose usage has not arrived;
     # only that request's usage is paired with last_sent_bytes and last_estimate. Per-request, never recorded.
     pending_usage: tuple[int, str] | None = None
+    # D63 (rule 5): the epoch's in-turn edits: stubbed results, folded rounds and the thinking they cost.
+    inturn: inturn.InTurn = inturn.EMPTY
 
 
 # Message classification -------------------------------------------------------------------------
@@ -434,6 +440,9 @@ class Dialect:
     # D48: whether media's floor cost (MediaCost.floor) is at or under what this API charges, so the ratio
     # can take it off real usage. True for Claude's pixel prices.
     media_floor = True
+    # D63 (rule 5): this API's in-turn paging primitives (contexto.inturn.MessagesInTurn), or None for a
+    # dialect that does not page inside a turn.
+    in_turn: Any = inturn.MESSAGES
 
     def is_context_block(self, block: Any) -> bool:
         return _anthropic_is_context_block(block)
@@ -526,12 +535,13 @@ class _RequestMemo:
     call a message's normalised hash and the request list's turn starts do not change: each is computed
     once and reused by history matching, the epoch's hashes, usage attribution, and the turn scans."""
 
-    __slots__ = ("root", "hashes", "starts")
+    __slots__ = ("root", "hashes", "starts", "sent")
 
     def __init__(self, root: Any) -> None:
         self.root = root  # the request's message list, the only list whose turn starts are cached
         self.hashes: dict[int, tuple[Any, Dialect, str]] = {}  # id(message) -> (message, dialect, hash)
         self.starts: dict[int, tuple[Dialect, int, tuple[int, ...]]] = {}  # id(dialect) -> (dialect, len, starts)
+        self.sent: tuple | None = None  # D63: (in-turn edits, dialect, the root list's view under them)
 
 
 _MEMO: ContextVar[_RequestMemo | None] = ContextVar("contexto_rewrite_memo", default=None)
@@ -1083,6 +1093,8 @@ def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
     out = []
     for i in range(start, end):
         m = messages[i]
+        if m is inturn.FOLDED:  # D63: a view's folded message is in its rounds page
+            continue
         if is_system_like(m) and classify_system(messages, i) != HOOK_OUTPUT:
             continue
         start = is_turn_start(m)
@@ -1131,10 +1143,14 @@ def _with_reminder(message: dict, reminder: str) -> dict:
 
 def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
     d = _dialect()
+    sent = inturn.view(messages, state, d)  # rule 5: the epoch's stubs and folds; the list itself without any
+    edits = state.inturn
     out = []
     for i in range(state.k, len(messages)):
-        m = messages[i]
-        if i < state.strip_upto:
+        m = sent[i]
+        if m is inturn.FOLDED:
+            continue
+        if i < state.strip_upto or (edits.strips and inturn.strips_thinking(edits, i)):
             m = strip_thinking(m)
         if m is not None:  # a dialect may drop an item entirely (Responses reasoning items)
             out.append(m)
@@ -1170,7 +1186,8 @@ def estimate_upstream(request: dict, messages: list[dict], previous_n: int, stat
                       estimator: TokenEstimator) -> int:
     """Rule 3: last real input plus the messages added since, else an estimate of the whole request."""
     if state.last_input_tokens is not None and previous_n <= len(messages):
-        return state.last_input_tokens + estimate_items(estimator, messages[previous_n:])
+        added = inturn.view(messages, state, _dialect())[previous_n:]  # as sent (rule 5)
+        return state.last_input_tokens + estimate_items(estimator, added)
     head = estimator.estimate(canonical_json(_dialect().head_estimate_source(request)))
     return head + estimate_items(estimator, transform_messages(messages, state))
 
@@ -1250,7 +1267,8 @@ def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Sto
     new = replace(state, epoch=state.epoch + 1, k=k, pinned_text=store.pinned_text(config.pin_budget),
                   index_text=store.index_text(config.index_budget), head_fingerprint=head_fingerprint(request),
                   head_tokens=measured_head(request, state, estimator), head_size=head_size(request),
-                  strip_upto=strip_upto, turns_paged=turns_paged, head_changed=False, last_input_tokens=None)
+                  strip_upto=strip_upto, turns_paged=turns_paged, head_changed=False, last_input_tokens=None,
+                  inturn=inturn.after_epoch(state.inturn, k, strip_upto))
     rotation = {"event": "rotation", "epoch": new.epoch, "reason": reason, "k": k,
                 "retained_messages": len(messages) - k, "turns_paged": turns_paged}
     if sizing is not None:
@@ -1655,12 +1673,17 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
         events.append({"event": "usage_missing", "epoch": state.epoch})
         state = replace(state, last_input_tokens=None)
     estimate = estimate_upstream(request, messages, previous_n, state, estimator)
+    # Rule 5 (D63): everything that sizes or pages the window sees the messages as the epoch sends them,
+    # with a stubbed result as its stub and a folded round gone, not the CLI's raw history.
+    sent_view = inturn.view(messages, state, _dialect())
+    in_tool_loop = bool(turn_starts(messages)) and not at_turn_start(messages)
+    paged = None
     if n > previous_n and at_turn_start(messages):
         count = len(turn_starts(messages))
         if state.last_turn_start_n is not None and count > state.last_turn_count and n > state.last_turn_start_n:
             # Per-turn growth: the messages added since the previous turn start, estimated at the current
             # ratio, averaged when several turns arrive at once (a resume or a missed request).
-            added = estimate_items(estimator, messages[state.last_turn_start_n:])
+            added = estimate_items(estimator, sent_view[state.last_turn_start_n:])
             growth = added // (count - state.last_turn_count)
             # Rule 17: the previous maximum decays once per turn start that measures growth, before the
             # rotation decision. A retry or a resumed engine's first request (the turn start that wrote
@@ -1679,15 +1702,21 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
         else:
             streak = 0
         state = replace(state, last_carried_text_count=texts, carried_text_streak=streak)
-        state = guarded_rotation(request, messages, n, estimate, state, store, config, estimator, events)
+        state = guarded_rotation(request, sent_view, n, estimate, state, store, config, estimator, events)
+    elif n > previous_n and in_tool_loop:
+        # Rule 5 (D63): inside a tool loop, a batch of in-turn paging when the estimate passes its trigger.
+        state, paged = inturn.page(request, messages, estimate, state, store, config, estimator, events)
     rotated = any(e["event"] == "rotation" for e in events)
     # The estimate observe_usage compares with real usage must describe what is actually sent: after a
-    # rotation that is the transformed request, not the history that triggered it (A2b review).
-    sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
+    # rotation that is the transformed request, not the history that triggered it (A2b review); after an
+    # in-turn batch, the batch's own anchored estimate (D63).
+    if paged is not None:
+        sent_estimate = paged
+    else:
+        sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
     # Pre-send over-bound, checked on every request forwarded, rotated or not (D49). Inside a tool loop it
-    # is rule 5's allowed exception and in degraded mode rule 14's; at a turn start it goes with
-    # bound_too_small, or means the rotation's sizing did not hold.
-    in_tool_loop = bool(turn_starts(messages)) and not at_turn_start(messages)
+    # means in-turn paging had nothing left to page (rule 5), is off, or the store failed (rule 14); at a
+    # turn start it goes with bound_too_small, or means the rotation's sizing did not hold.
     over = sent_estimate > config.bound
 
     upstream = {**request, field_name: transform_messages(messages, state)}
@@ -1702,6 +1731,8 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     # Within one epoch, window, degraded state and head the transform is a function of the request's own
     # messages, so their rule 10 hashes (computed once per request) stand for what is sent (D48).
     scope = (state.epoch, state.k, state.degraded, fingerprint)
+    if state.inturn.batches:  # D63: a batch changes what is sent without a new epoch or window
+        scope = (*scope, state.inturn.batches)
     hashes = tuple(message_hash(m) for m in messages)
     state = replace(state, hashes=hashes, last_sent_bytes=sent,
                     last_sent_media=sent_media(sent_items), last_estimate=sent_estimate,
@@ -1716,14 +1747,13 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
                        "pages": PDF_MAX_PAGES})
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
-    if rotated:
+    if rotated or paged is not None:
         event["sent_estimate"] = sent_estimate
     if state.degraded:
         event["degraded"] = True
     if over:
-        # Pre-send over-bound: with in_tool_loop (rule 5: a turn that grows past the bound inside a tool
-        # loop) the allowed, logged exception for acceptance 1, kept distinct from observe_usage's source
-        # "real" record.
+        # Pre-send over-bound: with in_tool_loop, a turn that grew past the bound inside a tool loop with
+        # nothing left to page (rule 5), kept distinct from observe_usage's source "real" record.
         event["over_bound"] = True
         bound_event = {"event": "over_bound", "source": "estimate", "in_tool_loop": in_tool_loop, "epoch": state.epoch,
                        "estimate": sent_estimate, "bound": config.bound}
@@ -1776,7 +1806,8 @@ def _rewrite(request: dict, state: EpochState | None, store: Store, config: Conf
             events.append({"event": "resync", "epoch": state.epoch, "kind": "paged_changed",
                            "matched": match, "previous_messages": previous_n, "messages": n,
                            "inflight_thinking_kept": inflight})
-            fresh = replace(state, k=0, turns_paged=state.turns_paged)
+            # D63: the in-turn edits name positions in the history that changed; none of them stands.
+            fresh = replace(state, k=0, turns_paged=state.turns_paged, inturn=inturn.EMPTY)
             calls, attempt = StoreCalls(store), []
             try:
                 resynced = new_epoch(messages, request, fresh, calls, config, estimator, current, current, attempt,
@@ -1792,7 +1823,7 @@ def _rewrite(request: dict, state: EpochState | None, store: Store, config: Conf
         else:
             events.append({"event": "resync", "epoch": state.epoch, "kind": "window_changed",
                            "matched": match, "previous_messages": previous_n, "messages": n})
-            state = replace(state, last_input_tokens=None)
+            state = replace(state, last_input_tokens=None, inturn=inturn.clipped(state.inturn, match))
         previous_n = match
 
     try:
@@ -1815,6 +1846,9 @@ def count_tokens_view(request: dict, state: EpochState | None, dialect: Dialect 
         messages = request.get(field_name) or []
         if state.k and (state.k >= len(messages) or matching_prefix(state.hashes, messages) < state.k):
             return request  # history no longer matches the epoch; count what the CLI sent
+        edited = inturn.extent(state.inturn)
+        if edited and matching_prefix(state.hashes, messages) < min(edited, len(state.hashes)):
+            return request  # D63: nor the messages the in-turn edits name
         return {**request, field_name: transform_messages(messages, state)}
     finally:
         _DIALECT.reset(token)
@@ -2182,13 +2216,16 @@ def epoch_record(state: EpochState, request: dict, messages: list[dict], key: st
     rotation decisions, the configuration, and the anchor. Per-request values (the previous request's
     hashes, sizes, and estimates) are not in it."""
     hashes = state.hashes if len(state.hashes) == len(messages) else tuple(message_hash(m) for m in messages)
-    return {**{name: getattr(state, name) for name in RECORD_INT},
-            "pinned_text": state.pinned_text, "index_text": state.index_text,
-            "preamble_sha256": preamble_sha256(config, state.pinned_text, state.index_text),
-            "head_fingerprint": state.head_fingerprint, "dialect": dialect.name, "conversation": key,
-            "model": request.get("model") if isinstance(request.get("model"), str) else None,
-            "paged_carried": sorted(state.paged_carried), "config": asdict(config),
-            "anchor": {"n": len(messages), "hash": anchor_hash(hashes)}, "head_rule": HEAD_RULE}
+    record = {**{name: getattr(state, name) for name in RECORD_INT},
+              "pinned_text": state.pinned_text, "index_text": state.index_text,
+              "preamble_sha256": preamble_sha256(config, state.pinned_text, state.index_text),
+              "head_fingerprint": state.head_fingerprint, "dialect": dialect.name, "conversation": key,
+              "model": request.get("model") if isinstance(request.get("model"), str) else None,
+              "paged_carried": sorted(state.paged_carried), "config": asdict(config),
+              "anchor": {"n": len(messages), "hash": anchor_hash(hashes)}, "head_rule": HEAD_RULE}
+    if inturn.extent(state.inturn):  # D63: only an epoch with in-turn edits carries the field
+        record["in_turn"] = inturn.to_record(state.inturn)
+    return record
 
 
 def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dialect,
@@ -2207,7 +2244,12 @@ def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dia
     model = request.get("model") if isinstance(request.get("model"), str) else None
     if record.get("model") != model:
         return None, "model_changed"
-    if record.get("config") != asdict(config):
+    recorded = record.get("config")
+    if isinstance(recorded, dict) and "in_turn_paging" not in recorded:
+        # D63: a record written before in-turn paging has no such setting and no in-turn edits, so it
+        # resumes under either value; every other setting must match.
+        recorded = {**recorded, "in_turn_paging": config.in_turn_paging}
+    if recorded != asdict(config):
         return None, "settings_changed"
     if record.get("preamble_sha256") != preamble_sha256(config, record["pinned_text"], record["index_text"]):
         return None, "preamble_changed"
@@ -2222,6 +2264,7 @@ def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dia
     state = EpochState(pinned_text=record["pinned_text"], index_text=record["index_text"],
                        head_fingerprint=record["head_fingerprint"], head_size=head_size(request), hashes=hashes,
                        paged_carried=frozenset(record["paged_carried"]),
+                       inturn=inturn.from_record(record.get("in_turn"), n),
                        **{name: record[name] for name in RECORD_INT})
     if record.get("head_rule") != HEAD_RULE:
         state = replace(state, head_tokens=None, window_budget=None)
@@ -2279,6 +2322,9 @@ class RewriteEngine:
         # D38: which CLI version sends the requests, and was the session start recognised?
         self.clients = ClientVersions()
         self._side_rooms: dict[str, _SideRoom] = {}  # D40: the side rooms this engine opened, by id
+        # D63: per conversation key, the number its running turn gets when it is paged; a side
+        # conversation's in-turn pages carry main's.
+        self._turn_numbers: dict[str, int] = {}
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -2324,11 +2370,14 @@ class RewriteEngine:
         if not main and session and session.id in self._displaced and self._session_mains.get(session.id) == key:
             self._displaced[session.id] = False  # still running beside the new main: not a /resume later
         owner = _WINDOW_OWNER.set(main)
+        turn = inturn.TURN.set(None if main else self._turn_numbers.get(self._main))
         try:
             upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator,
                                                          dialect)
         finally:
+            inturn.TURN.reset(turn)
             _WINDOW_OWNER.reset(owner)
+        self._turn_numbers[key] = inturn.current_turn(request.get(dialect.field) or [], self.states[key], dialect)
         events[0:0] = resumed
         # The CLI's own request (rewrite() leaves it unchanged); the engine's request event stays last.
         # A diagnostic: if it ever raised, the proxy's catch-all would discard this successful rewrite.
@@ -2467,7 +2516,9 @@ class RewriteEngine:
         messages = request.get(dialect.field) or []
         token = _DIALECT.set(dialect)
         try:
-            due = at_turn_start(messages) or "degraded_leave" in names_of(events)
+            # D63: an in-turn batch changes what later requests send, so it writes the record too.
+            due = (at_turn_start(messages) or "degraded_leave" in names_of(events)
+                   or "in_turn_batch" in names_of(events))
             if not (due and key == self._main and self._may_write(self._turn_starts.get(key, 0))):
                 return
             record = epoch_record(state, request, messages, key, dialect, self.config)
@@ -2618,7 +2669,9 @@ class RewriteEngine:
         checked"): it logs the content-free retained_stale, exactly once, and is not degraded mode
         (lane B PR #128 removes the old snapshot, so ``retained_current()`` serves none)."""
         try:
-            self.store.set_retained(state.epoch, state.k, retained_entries(messages, state.k, dialect))
+            # D63: the window as sent: a stubbed result is its stub, a folded round is in its page.
+            sent = inturn.view(messages, state, dialect)
+            self.store.set_retained(state.epoch, state.k, retained_entries(sent, state.k, dialect))
         except STORE_FAILURES as error:
             events.append({"event": "retained_stale", "epoch": state.epoch, "error": type(error).__name__})
 

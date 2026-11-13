@@ -43,6 +43,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--no-version-check", action="store_true",
                         help="do not compare the CLI's --version with the versions Contexto was tested with "
                              "(also CONTEXTO_NO_VERSION_CHECK=1)")
+    parser.add_argument("--no-in-turn-paging", action="store_true",
+                        help="do not page inside a running turn: a tool loop that outgrows the bound is sent "
+                             "whole, as before v0.6.0 (also CONTEXTO_IN_TURN_PAGING=0)")
     parser.add_argument("cli", choices=["claude", "codex"], help="the CLI to run")
     parser.add_argument("cli_args", nargs=argparse.REMAINDER, help="arguments passed to the CLI unchanged")
     try:

@@ -6,7 +6,7 @@ import json
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -144,9 +144,15 @@ class MemoryStore(LedgerOps):
             return summary
 
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]:
+        return self._write_pages(build_page(self._key, turn, first_turn + offset) for offset, turn in enumerate(turns))
+
+    def page_parts(self, parts: list[list[dict]], turn: int, kind: str) -> list[str]:
+        """As ``SessionStore.page_parts`` (D63)."""
+        return self._write_pages(build_page(self._key, part, turn, kind) for part in parts)
+
+    def _write_pages(self, pages: Iterable[dict[str, Any]]) -> list[str]:
         ids = []
-        for offset, turn in enumerate(turns):
-            page = build_page(self._key, turn, first_turn + offset)
+        for page in pages:
             existing = self.pages.get(page["id"])
             if existing is None:
                 self.pages[page["id"]] = page

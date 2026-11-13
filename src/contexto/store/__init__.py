@@ -48,7 +48,7 @@ import secrets
 import sys
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -298,8 +298,28 @@ EPOCH_FIELDS: dict[str, Callable[[Any], bool]] = {
     "config": lambda v: isinstance(v, dict),
     "anchor": lambda v: isinstance(v, dict) and set(v) == {"n", "hash"} and _nat(v["n"]) and _hex64(v["hash"]),
 }
-# Fields a record may leave out, so a record written before one was added still reads (D61: head_rule).
-EPOCH_OPTIONAL_FIELDS: dict[str, Callable[[Any], bool]] = {"head_rule": _nat}
+def _ranges(v: Any) -> bool:
+    return isinstance(v, list) and all(
+        isinstance(r, list) and len(r) == 2 and _nat(r[0]) and _nat(r[1]) and r[0] < r[1] for r in v)
+
+
+def _in_turn(v: Any) -> bool:
+    """D63: the epoch's in-turn edits (``contexto.inturn.to_record``): positions and page ids only."""
+    if not isinstance(v, dict) or set(v) != {"stubs", "folds", "strips", "batches"} or not _nat(v["batches"]):
+        return False
+    stubs, folds = v["stubs"], v["folds"]
+    return (isinstance(stubs, list) and all(
+                isinstance(s, list) and len(s) == 3 and _nat(s[0]) and _nat(s[1])
+                and (s[2] == "" or (isinstance(s[2], str) and bool(_PAGE_ID.fullmatch(s[2])))) for s in stubs)
+            and isinstance(folds, list) and all(
+                isinstance(f, list) and len(f) == 3 and _nat(f[0]) and _ranges(f[1]) and f[1]
+                and isinstance(f[2], str) and bool(_PAGE_ID.fullmatch(f[2])) for f in folds)
+            and _ranges(v["strips"]))
+
+
+# Fields a record may leave out, so a record written before one was added still reads (D61: head_rule;
+# D63: in_turn, present only when the epoch has in-turn edits).
+EPOCH_OPTIONAL_FIELDS: dict[str, Callable[[Any], bool]] = {"head_rule": _nat, "in_turn": _in_turn}
 
 
 def check_epoch(record: Any) -> dict[str, Any]:
@@ -891,9 +911,18 @@ class SessionStore(LedgerOps):
         ``{turn, messages}`` differ under the same id (contract PR #47), or when the stored file cannot be
         read as a page record with that id (rule 18).
         """
+        return self._write_pages(build_page(self._key, turn, first_turn + offset) for offset, turn in enumerate(turns))
+
+    def page_parts(self, parts: list[list[dict]], turn: int, kind: str) -> list[str]:
+        """Write one in-turn page per part (D63): each holds its messages exactly, the turn number
+        ``turn`` (the same for all: the turn they are part of) and ``kind`` (``result``: a tool call and
+        its result; ``rounds``: tool rounds folded out of a running turn). Ids, immutability and
+        conflicts are ``page_out``'s; ``kind`` is not part of the id."""
+        return self._write_pages(build_page(self._key, part, turn, kind) for part in parts)
+
+    def _write_pages(self, pages: Iterable[dict[str, Any]]) -> list[str]:
         ids = []
-        for offset, turn in enumerate(turns):
-            page = build_page(self._key, turn, first_turn + offset)
+        for page in pages:
             path = self.pages_dir / f"{page['id']}.json"
             data = canonical_bytes(page)
             if not write_new(path, data):
