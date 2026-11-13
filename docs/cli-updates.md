@@ -33,7 +33,8 @@ Hook-output signatures were measured on Claude Code 2.1.301 and re-measured on 2
 | `CONTEXT_SECTION` (Codex section tags), `CONTEXT_SECTIONS_CODEX_VERSION` | `src/contexto/codex.py` | `spikes/m2/codex/probe.sh` |
 | the compaction summary's first line (`CLAUDE_CODE_COMPACTION_SUMMARY`, D50, D59) | `src/contexto/rewrite.py` | `tests/fixtures/make_compaction_shapes.py` |
 | gateway hint headers: the six names, the request classes and the compaction triggers (D70) | `src/contexto/hints.py` | `spikes/m2/serve/http_probe.py` ([D70-serve-probes.md](research/D70-serve-probes.md)) |
-| the cloud-provider switches (`CLOUD_PROVIDER_KEYS`) and the values read as on (`env_truthy`, D70) | `src/contexto/upstream.py` | `spikes/m2/serve/q10_truthy.sh` |
+| the cloud-provider switches (`CLOUD_PROVIDER_KEYS`), the values read as on (`env_truthy`) and how a settings value that is not a string is read (`js_string`, D70) | `src/contexto/upstream.py` | `spikes/m2/serve/q10_truthy.sh` |
+| that Claude Code applies the `--settings` `env` block to its own environment, which the marker `CONTEXTO_HINT_HEADERS` exists for (D70) | `src/contexto/hints.py`, `src/contexto/launcher.py` | `tests/test_hint_headers_real_client.py` (the nested tests) |
 | subagent shapes (`AGENT_TOOLS`, `ASYNC_LAUNCH`, `HAND_BACK`, `NOTICE_OPENINGS`, the `<task-notification>`, `resumedAgentId` and `<tools-used-before-summary>` patterns), gated by `SUBAGENT_SHAPES_TESTED` (D40, D56) | `src/contexto/rewrite.py`, `src/contexto/cliversions.py` | `spikes/m2/subagents` |
 
 The subagent shapes are gated by version: when the latest Claude Code version seen in a request's
@@ -188,12 +189,22 @@ Everything here is zero spend unless marked.
    drifted: capture the new requests with `spikes/m2/serve/http_probe.py` (`--hint env`, in `print`,
    `streamjson` and `pty` modes, as [D70-serve-probes.md](research/D70-serve-probes.md) lists) and
    compare the header names, the class on each kind of request, and the two compaction headers with
-   `src/contexto/hints.py`. Also run `spikes/m2/serve/q10_truthy.sh` (about 3 minutes, zero tokens,
+   `src/contexto/hints.py`. The same file runs a launch with the environment a nested
+   `contexto run claude` inherits (the hint variable at `1` and `CONTEXTO_HINT_HEADERS=stripped`):
+   the upstream must get no gated header. Also run `spikes/m2/serve/q10_truthy.sh` (about 6 minutes,
+   zero tokens,
    macOS: it uses `sandbox-exec`): each cloud-provider switch must still send every request to the
    provider stub and none to the base URL for `1` and `true`, and none to the provider for `0`,
    `false` and the empty string, and a settings file's value must still win over the environment's;
-   `CLAUDE_CODE_GATEWAY_HINT_HEADERS` must still be on for `1`, `true`, `yes` and `on`. A new
-   provider switch in Claude Code's documentation goes into `CLOUD_PROVIDER_KEYS`.
+   `CLAUDE_CODE_GATEWAY_HINT_HEADERS` must still be on for `1`, `true`, `yes` and `on`. Its `shapes`
+   group must still read `1.0`, `1e0`, `["1"]`, `[1]`, `[["1"]]`, `[true]`, `" On "` and a file with a
+   byte order mark as on, and `false`, `1.5`, `[]`, `["1","1"]`, `null`, an object and `"1.0"` as off
+   (`js_string`). Its `project` group must still show a project file's switch and hint setting
+   applied by `claude -p`, a project file's value winning over the environment's and the user
+   file's, and a project file's `env` dropped while `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set. A
+   value that changes sides there changes what the guard may let through: the guard refuses on any
+   place a switch is on, so a value newly read as on must be added before the version is listed. A
+   new provider switch in Claude Code's documentation goes into `CLOUD_PROVIDER_KEYS`.
 7. If nothing changed: append the version to `TESTED_VERSIONS["claude"]` and bump
    `SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION` and `CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION` to it,
    in the same commit. Both constants need steps 1, 2 and 6. `tests/test_cliversions.py` fails if the

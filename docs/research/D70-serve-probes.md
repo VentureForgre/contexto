@@ -13,7 +13,7 @@ third, shorter one at the end was added with the hint-header slice: which values
 ## D70 spike: what Claude Code 2.1.322 sends over HTTP (stub upstream, zero spend)
 
 Client: `~/.local/bin/claude`, `2.1.322 (Claude Code)`, macOS arm64. 34 runs, 177 requests captured.
-Probe: `spikes/m2/serve/http_probe.py` (untracked). Captures: `/tmp/d70-http/<run>/NNN-<METHOD>-<kind>.json` (request line, all headers, body), `<run>/index.tsv`, `<run>/setup.json`. Roll-ups: `/tmp/d70-http/aggregate.txt`, `/tmp/d70-http/headers-by-kind.txt` (full header dump per request kind).
+Probe: `spikes/m2/serve/http_probe.py`. Captures: `/tmp/d70-http/<run>/NNN-<METHOD>-<kind>.json` (request line, all headers, body), `<run>/index.tsv`, `<run>/setup.json`. Roll-ups: `/tmp/d70-http/aggregate.txt`, `/tmp/d70-http/headers-by-kind.txt` (full header dump per request kind).
 Isolation on every run: scrubbed env (fresh HOME, `CLAUDE_CONFIG_DIR`, cwd; `ANTHROPIC_API_KEY=stub-key`; no AUTH_TOKEN / USE_* unless the run sets them) and `sandbox-exec` denying all outbound except localhost, DNS included. So traffic to any other host could not leave and was not observed.
 
 ### 1. Path prefix
@@ -305,6 +305,81 @@ On means the Messages request carried `x-claude-code-request-class: main`.
 ### Not confirmed
 
 - The four other provider switches with values other than `1`, `true` and `0`.
-- Project settings files (`.claude/settings.json`, `.claude/settings.local.json`) and managed settings
-  as the place a switch is set; `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`.
+- Managed settings as the place a switch is set; `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`. (Project
+  settings files were not measured in these 36 runs; the next section measures them.)
+- Linux, and any other Claude Code version.
+
+---
+
+## D70 review round: value shapes and project settings files
+
+Measured 2026-11-12 after the review of the hint-header and guard slice, with the `shapes` and
+`project` groups of `spikes/m2/serve/q10_truthy.sh` (23 runs of `http_probe.py`, each one
+`claude -p "say hi"` with Claude Code 2.1.322; the same isolation as above). Zero spend. "Provider"
+and "base" are the two stubs as above.
+
+### 1. `CLAUDE_CODE_USE_BEDROCK` as a JSON value that is not a plain string (15 runs)
+
+In the config directory's `settings.json` `env` block, with the base URL in the same file, so a file
+Claude Code rejected as a whole would show as no request at either stub. None did.
+
+| JSON value | Provider | Base | Read as | JavaScript `String()` of it |
+|---|---|---|---|---|
+| `1.0` | 5 | 0 | on | `1` |
+| `1e0` | 5 | 0 | on | `1` |
+| `["1"]` | 5 | 0 | on | `1` |
+| `[1]` | 5 | 0 | on | `1` |
+| `[["1"]]` | 5 | 0 | on | `1` |
+| `[true]` | 5 | 0 | on | `true` |
+| `" On "` | 5 | 0 | on | ` On ` (lower-cased and trimmed) |
+| `"1"` in a file that starts with a UTF-8 byte order mark | 5 | 0 | on | `1` |
+| `false` | 0 | 2 | off | `false` |
+| `1.5` | 0 | 2 | off | `1.5` |
+| `[]` | 0 | 2 | off | empty |
+| `["1","1"]` | 0 | 2 | off | `1,1` |
+| `null` | 0 | 2 | off | `null`, or not set |
+| `{"a":1}` | 0 | 2 | off | `[object Object]` |
+| `"1.0"` | 0 | 2 | off | `1.0` |
+
+Every row agrees with `["1", "true", "yes", "on"].includes(String(v).toLowerCase().trim())` applied
+to the parsed JSON value. `contexto.upstream.js_string` reproduces that coercion.
+
+### 2. Project settings files (8 runs)
+
+The working directory had no trust record; `claude -p` asks for none.
+
+| Run | Provider | Base | Hint class sent | Reading |
+|---|---|---|---|---|
+| `CLAUDE_CODE_USE_BEDROCK: "1"` in `.claude/settings.json` | 5 | 0 | | a project file's switch is applied |
+| the same in `.claude/settings.local.json` | 5 | 0 | | the same |
+| project file `"0"`, process environment `1` | 0 | 2 | | the project file wins over the environment |
+| project file `"1"`, `CLAUDE_CODE_IGNORE_PERSISTED_TRUST=1` | 0 | 2 | | `claude -p` drops the project file's `env` (as D52 measured for the base URL) |
+| `CLAUDE_CODE_GATEWAY_HINT_HEADERS: "1"` in `.claude/settings.json` | 0 | 2 | `main` | a project file turns the hints on |
+| project file `"0"`, process environment `1` | 0 | 2 | none | the project file wins over the environment |
+| project file `"0"`, `--settings` file `1` | 0 | 2 | `main` | the `--settings` value wins over a project file |
+| project file `"1"`, config-directory settings `0` | 0 | 2 | `main` | a project file wins over the user file |
+
+### 3. Measured by the reviewers of pull request #271, not re-run here
+
+Reported in the review with the same kind of setup (real `claude` 2.1.322, loopback stubs, temporary
+config directories, zero spend):
+
+- With the process environment at `1` and a project file at `"0"`, Claude Code still went to the
+  provider when that project file also held `"x": NaN`, when it also held `"permissions": "garbage"`
+  (a schema error), and when the claude arguments had `--setting-sources user`. Claude Code did not
+  apply the file in those three cases. `1.0` and `["1"]` in a project file, `1e0` in a project file,
+  and a byte order mark in a project file were on.
+- Claude Code applies the `env` block of a `--settings` file to its own environment: a Bash command
+  of a session started with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` in that block printed the variable
+  as `1`. A nested `claude -p` pointed at another base URL then sent `x-claude-code-request-class`
+  and `x-claude-code-prompt-id` to it.
+
+### Not confirmed
+
+- Managed settings: no run used a managed settings file, so that it outranks the other files and
+  the `--settings` file is from Claude Code's documentation only.
+- Whether the interactive CLI applies a project file's provider switch after its trust dialog while
+  `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set (D52 measured that for the base URL).
+- Value shapes for the four other provider switches and for the hint variable; a settings file
+  with JSON syntax that Python rejects (a trailing comma, a comment).
 - Linux, and any other Claude Code version.

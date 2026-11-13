@@ -62,13 +62,36 @@ same design after Claude Code works.
   CLI's own request on each fail-open path (rule 14's failed transform, rule 18, the last-resort
   forward). The header names match in any case. So the upstream gets the same headers, in the same
   order, and the same bytes as for the request Claude Code sends with the hints off, and the prompt
-  cache is not affected. Exception: when the user turned the hints on themselves, the six pass
-  through unchanged, as they did before D70. That is decided once at launch from the value Claude
-  Code would run with without Contexto's `--settings`: the first settings file `env` block that sets
-  the variable, in the order and under the trust rule of the upstream resolution below, else the
-  process environment; on is `1`, `true`, `yes` or `on` in any case, with surrounding whitespace
-  ignored (measured on 2.1.322, where a settings file's value also wins over the environment's in
-  both directions). The launch event records `hint_headers` (`stripped` or `forwarded`).
+  cache is not affected. A launch is in one of three states, decided once and recorded in the
+  launch event as `hint_headers`:
+  - `stripped`: the default, as just described.
+  - `forwarded`: the user turned the hints on themselves, so the six pass through unchanged, as
+    they did before D70. "On" is the value Claude Code would run with without Contexto's
+    `--settings`: the managed settings file's `env` block if it sets the variable, else the first
+    settings file `env` block that sets it, in the order and under the trust rule of the upstream
+    resolution below (a project file counts as `claude -p` reads it, with no trust record needed,
+    and not at all while `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set), else the process
+    environment; on is `1`, `true`, `yes` or `on` in any case, with surrounding whitespace ignored.
+    Measured on 2.1.322: a settings file's value wins over the environment's in both directions, a
+    project file's wins over the user file's, and Contexto's `--settings` value wins over a
+    project file's `0`. That managed settings come first is from Claude Code's documentation.
+    Interactively Claude Code applies a project file only after its trust dialog, so a project
+    file that turns the hints on lets them reach the upstream before the folder is trusted.
+  - `off`: the hints are not on, and the user set the variable to `0`, `false`, `no` or `off` in
+    the process environment or their user settings file (or the managed settings file does, which
+    outranks `--settings`). The launcher leaves the variable out of its `--settings` file, Claude
+    Code sends no hint header, the engine reads its signatures, and the proxy removes nothing.
+
+  Claude Code applies the `env` block of the `--settings` file to its own environment, so every
+  process the session starts inherits `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` (measured). The launcher
+  therefore writes its state beside it as `CONTEXTO_HINT_HEADERS`, and a nested
+  `contexto run claude` that finds `stripped` there does not count the inherited value as the
+  user's (with `forwarded` it does, since the user had the hints on; a settings file's value counts
+  either way). Limit: a nested plain `claude` pointed at another base URL also inherits the `1` and
+  sends the hints to that URL, with no Contexto proxy in its path. The way out is the `off` state.
+  Only the managed settings file is read (`/Library/Application Support/ClaudeCode/managed-settings.json`
+  on macOS, `/etc/claude-code/managed-settings.json` on Linux); managed settings delivered another
+  way are not seen.
   `X-Claude-Code-Session-Id`, `x-claude-code-agent-id` and `x-claude-code-parent-agent-id` are sent
   without the variable and are always forwarded. `contexto proxy` and `contexto run codex` do not
   ask for the hints and remove nothing (`ContextoProxy(strip_hint_headers=...)` is off by default).
@@ -114,14 +137,42 @@ Cloud providers (D70): with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
 2.1.322 sends every request to that provider's own endpoint and none to `ANTHROPIC_BASE_URL`, not
 even `HEAD /api/hello`, so the proxy would see nothing and the session would run with no bound.
 `contexto run claude` refuses such a launch (exit 2) before it opens a session, with a message that
-names the variable, where it is set (the process environment, or which settings file's `env`
-block; never a path or the value) and what to do. A switch is read as Claude Code would see it: the
-first settings file `env` block that sets it (same files and trust rule as the base URL above; a
-JSON `true` or number counts as its text, and an empty string is a value), else the process
-environment. On is `1`, `true`, `yes` or `on` in any case with surrounding whitespace ignored;
-`0`, `false`, `no`, `2`, any other text and the empty string are off (all measured, D70).
-`claude --version` and `--help` alone are not checked. Not covered: organization-managed settings,
-and `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` (not measured).
+names the variable, each place it is on (the process environment, or which settings file's `env`
+block; never a path of the user's or the value) and what to do.
+
+The check fails closed. It does not predict which value Claude Code ends up with: a switch counts
+when it is on in the process environment or in the `env` block of any settings file Contexto can
+find, whatever the precedence between them and whatever the folder's trust state. The files are
+those of the base URL above (the main checkout's and the folder's project files, and the user
+file) and the managed settings file (`/Library/Application Support/ClaudeCode/managed-settings.json`
+on macOS, `/etc/claude-code/managed-settings.json` on Linux; managed settings delivered another way
+are not seen). A project file can therefore only cause a refusal, never let a launch through. The
+reason: Claude Code does not apply every file Contexto can read. Measured on 2.1.322, with the
+environment at `1` and a project file at `0`, Claude Code still went to the provider when the file
+also held `NaN` or a schema error, or when it ran with `--setting-sources user`; and `claude -p`
+drops a project file's `env` while `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set, where the
+interactive CLI applies it once its dialog is accepted. Accepted cost: a refusal Claude Code would
+not have needed, when the environment says on and a file Claude Code does apply says off (measured:
+the file wins), or when a file Claude Code ignores says on. The message says so and names what to
+unset.
+
+A file value is on when JavaScript's `String()` of it is `1`, `true`, `yes` or `on` in any case
+with surrounding whitespace ignored: a JSON `true`, the numbers `1`, `1.0` and `1e0`, and a list
+whose items join with commas to one of those words (`["1"]`, `[1]`, `[["1"]]`, `[true]`) are on;
+`0`, `false`, `no`, `2`, `1.5`, `"1.0"`, `[]`, `["1","1"]`, `null`, an object, any other text and the
+empty string are off. Measured for `CLAUDE_CODE_USE_BEDROCK` in the process environment and in the
+user settings file; a project file was measured with `"1"`, `"0"`, `1.0`, `1e0` and `["1"]`, and the
+other four switches with `1`, `true` and `0` (D70).
+
+Settings files are read once per launch, through one reader with a bound: a regular file only, at
+most 4 MiB, with a UTF-8 byte order mark accepted as Claude Code accepts one. A file that does not
+exist, or that this user cannot open, counts as absent: Claude Code cannot read it either. A file
+that is there and that Contexto could not read (not a regular file, larger than the bound, not
+valid JSON for Python) is not evidence that a switch is off, so the launch is refused with a
+message naming that file.
+
+`claude --version` and `--help` alone are not checked. Not covered: managed settings that are not
+in that file, and `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` (not measured).
 
 Project settings trust (D52): every settings file above except the user's comes with the
 repository. `contexto run claude` and `contexto proxy` use them as Claude Code does: Claude Code
@@ -1179,7 +1230,7 @@ unknown page, never read. Tools:
   | `x-claude-code-request-class: subagent` or `workflow` | Not counted as one with a tool list; never takes over main, by any rule; not checked for Contexto's tools | `X-Claude-Code-Agent-Id` or `parent_session_id`; without those, the turn-start rule |
   | `x-claude-code-request-class: auxiliary` | The same, whatever its tool list | It has no tool list |
   | any other class value | Nothing | The signatures |
-  | `x-claude-code-context-compacted`, any value | The conversation is Claude Code's compaction of main, whatever its first message says; the rule's other conditions (main's session id and entrypoint, main idle when there is no turn start) are unchanged | The first message is the compaction summary |
+  | `x-claude-code-context-compacted`, any value | The conversation is Claude Code's compaction of main, whatever its first message says; the rule's other conditions (main's session id and entrypoint, main idle when there is no turn start) are unchanged. A compaction that keeps a pending tool call hands over at the request that carries the header, also when a side request used its key first | The first message is the compaction summary; a compaction that keeps a pending call hands over only at its key's first request (D59), else at the conversation's next turn start |
   | `x-claude-code-compaction` | Nothing | Nothing |
 
   The class `compaction` is the request that summarizes the conversation: main's own history with
@@ -1517,7 +1568,8 @@ A store resumed while prune deletes its session waits, starts empty, and prints 
   secrets) stays in `$TMPDIR`.
 - Checks before any session is opened, each a usage error (exit 2) unless noted: Contexto's own
   `contexto run` options right after `claude` (the message shows the command with them moved before
-  `claude`); a cloud-provider switch that is on (D70, see Upstream resolution); a malformed upstream
+  `claude`); a cloud-provider switch that is on anywhere Contexto can see, or a settings file it
+  could not read (D70, see Upstream resolution); a malformed upstream
   URL, named with its source; a `$CONTEXTO_HOME` that is not a
   directory; and `${` in the home, the session id or the interpreter path, which Claude Code would
   expand in the MCP config (2.1.314 expands `${VAR}` and `${VAR:-x}` in `command`, `args` and `env`,
