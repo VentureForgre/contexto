@@ -554,7 +554,7 @@ of the 18 cores, at loads of 25 to 84.
 | Added time per request, p95 | 28.2 to 41.9 ms | 41.5 and 109.8 ms | 50.3 to 388.2 ms | 800 ms | 7.3 |
 | Growth of added time per million tokens | 25.8 to 36.5 ms | 28.1 and 14.7 ms | 20.4 to 164.6 ms | 300 ms | 8.2 |
 | Startup, best of 3 | 77 to 101 ms | 113 and 423 ms | 133 to 1,049 ms | 3,000 ms | 7.1 |
-| Peak RSS | PENDING-LINUX-RSS | 66.0 and 55.3 MB | 51.6 to 62.8 MB | 300 MB | 4.5 |
+| Peak RSS | not read correctly in that run (see above) | 66.0 and 55.3 MB | 51.6 to 62.8 MB | 300 MB | 4.5 |
 | RSS growth per MB of body growth | 3.5 to 9.8 MB | 17.9 and 9.6 MB | 6.4 to 13.9 MB | 150 MB | 8.4 |
 | Live objects gained per turn | 7.43 to 8.91 | 7.27 and 8.91 | 7.11 to 7.59 | 40 | 4.5 |
 | Throughput, 100 concurrent | 148 to 226 req/s | 150 and 50 req/s | 15 to 125 req/s | floor of 5 req/s | 10 (below) |
