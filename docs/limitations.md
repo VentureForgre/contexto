@@ -7,7 +7,8 @@ has the short list; this is the full one.
 
 - **Tool loops.** Contexto never rotates inside a tool loop. A turn that grows past the bound inside
   one very long tool loop is sent as is and logged `over_bound` with `in_tool_loop: true`. The next
-  turn start rotates ([Troubleshooting](troubleshooting.md)).
+  turn start rotates. A turn start goes over only when the bound is too small for the fixed overhead
+  and the new prompt together, logged `bound_too_small` ([Troubleshooting](troubleshooting.md)).
 - **Recall is a search the model must run.** Once a turn is paged out, the model sees its opening in
   the page index and the rest only through a search it chooses to run. Each search is one more
   request: in acceptance run 3 the six probe turns took 26 requests through Contexto against 6 for

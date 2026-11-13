@@ -7,7 +7,7 @@ moving the oldest turns to disk, word for word, and giving the model tools to se
 
 - **A fixed bound.** Each turn starts with the request under the bound, 150,000 tokens by default,
   however long the session runs. The turns removed to make room stay on disk word for word, not as
-  a summary. One very long tool loop can still pass the bound ([limitations](#known-limitations)).
+  a summary. A very long tool loop or an oversized prompt can still pass it ([limitations](#known-limitations)).
 - **Recall no worse than full context on a scripted recall test.** On claude-haiku-5-5, Contexto
   answered 52 of 54 questions; the same model given the whole history of about 426,000 tokens
   answered 47. That is one synthetic session and one seed, and the gap is inside noise (p = 0.18).
@@ -168,7 +168,8 @@ is one more request: in acceptance run 3 the six question turns took 26 requests
 ## Known limitations
 
 - **Tool loops.** Contexto never rotates inside a tool loop. A turn that grows past the bound inside
-  one very long tool loop is sent as is and logged `over_bound`. The next turn start rotates.
+  one very long tool loop is sent as is and logged `over_bound`. The next turn start rotates. A
+  single prompt too large for the bound also goes over, logged `bound_too_small`.
 - **Tested scope.** Recall was measured with one synthetic session script, on two models, at one
   bound, on Claude Code 2.1.301, 2.1.302 and 2.1.318. Codex passed the long-session checks on one
   model; its accuracy against a full-context baseline was not measured.
@@ -181,8 +182,7 @@ is one more request: in acceptance run 3 the six question turns took 26 requests
   counted high, 4,568 tokens a page, so a large PDF can page out the earlier conversation.
 - **New CLI versions** come out every week and can change the text Contexto recognises in their
   requests. Until a version is tested, the launch warns ([CLI updates](docs/cli-updates.md)).
-- **Search** matches words, not meaning: it finds the turns that hold every word of the query
-  ([MCP tools](docs/mcp-tools.md)).
+- **Search** matches words, not meaning: it finds turns that hold every word of the query ([MCP tools](docs/mcp-tools.md)).
 - **Windows** is not supported.
 - The full list is in [docs/limitations.md](docs/limitations.md).
 
