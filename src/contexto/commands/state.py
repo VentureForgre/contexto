@@ -12,6 +12,7 @@ import os
 
 from contexto.commands._common import EXIT_OK, add_session_option, fail, say_session
 from contexto.paths import contexto_home
+from contexto.stats import session_faults
 from contexto.store import SessionNotFoundError, SessionStore
 from contexto.store.ledger import LedgerError
 from contexto.store.pinned import render_state
@@ -58,6 +59,9 @@ def run(args: argparse.Namespace) -> int:
               f"`contexto search --session {session_id} WORDS`.")
     else:
         print("No turns paged out yet.")
+    faults = session_faults(home, session_id)  # D64: a store that stopped paging in the latest run, and what to do
+    for message in faults["messages"]:
+        print(f"\n{'Warning' if faults['degraded']['now'] else 'Note'}: {message[0].upper()}{message[1:]}")
     return EXIT_OK
 
 

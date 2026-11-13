@@ -127,6 +127,7 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 from __future__ import annotations
 
 import bisect
+import errno
 import hashlib
 import math
 import os
@@ -1472,6 +1473,9 @@ def store_failure(error: Exception, calls: StoreCalls, state: EpochState) -> dic
     """The content-free ``page_conflict`` or ``store_error`` event for ``error`` (rule 14)."""
     kind = "page_conflict" if isinstance(error, PageConflictError) else "store_error"
     failure = {"event": kind, "epoch": state.epoch, "operation": calls.last, "error": type(error).__name__}
+    code = errno.errorcode.get(getattr(error, "errno", None) or 0)
+    if code:  # D64: ENOSPC or EACCES, so a full disk can be told from a permission problem; a name, not the text
+        failure["errno"] = code
     if state.degraded:
         failure["degraded"] = True
     if kind == "page_conflict" and error.page_id:  # set by both stores (lane B B11, PR #73)

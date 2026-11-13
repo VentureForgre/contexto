@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from urllib.parse import urlsplit
 from contexto import paths
 from contexto.canonical import canonical_bytes, loads_bounded
 from contexto.rewrite import CARRIED_TEXT, SESSION_START, UNCLASSIFIED, Dialect
+from contexto.stats import print_exit_summary
 from contexto.tokens import TokenEstimator
 from contexto.upstream import claude_key_helper, untrusted_note
 
@@ -707,6 +709,8 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         return getattr(exc, "code", 2)
     plan = None
     started = False
+    ran: float | None = None  # when codex was started, for the exit summary (D64)
+    notices = getattr(proxy, "session_log", None)  # the launcher's NoticeLog
     code = launcher.EXIT_PROXY
     try:
         plan = plan_codex(codex_args, proxy.url, session_id, auth_mode=args.codex_auth,
@@ -738,7 +742,9 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         if warning:
             print(f"contexto: {warning}", file=stderr, flush=True)
             store.log({"event": "window_budget_warning", "bound": options.bound, "assumed_overhead": ASSUMED_OVERHEAD})
-        started = True
+        started, ran = True, time.monotonic()
+        if hasattr(notices, "hold"):
+            notices.hold()  # Codex owns the terminal until it exits, as Claude Code does (D55, D64)
         # Codex's shell commands (`contexto state`, `contexto search`) then name this session (D57).
         code = launcher.run_child(plan.argv, {**plan.env, "CONTEXTO_SESSION": session_id}, stderr=stderr)
         return code
@@ -751,7 +757,14 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             plan.cleanup()
         proxy.stop()
         launcher.report_missing_tools(proxy)  # Codex reports no MCP server that fails to start
-        store.log({"event": "exit", "code": code})
+        if hasattr(notices, "release"):
+            notices.release()
+        try:
+            (notices if hasattr(notices, "log") else store).log({"event": "exit", "code": code})
+        except OSError:  # D64: a full disk, already said by the NoticeLog; codex's exit code stands
+            pass
+        print_exit_summary(store, "codex", ran, cli_args=codex_args, quiet=options.quiet,
+                           log_incomplete="log_unwritable" in getattr(notices, "shown", ()), stderr=stderr)
         if not started:
             _remove_session(created)
 
