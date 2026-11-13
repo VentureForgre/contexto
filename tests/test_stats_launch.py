@@ -86,8 +86,12 @@ def test_a_run_ends_with_a_summary_and_the_resume_line_stays_last(env, upstream,
     assert lines[0].startswith("contexto: run of session s1 ended after ") and lines[0].split()[-1].endswith("s")
     # The stub upstream reports 5 input tokens: a measured number, shown against the bound.
     assert lines[1] == "  prompt      peak 5 of 150,000 tokens (measured); over the bound: 0 requests"
-    assert "  cache       0% of input tokens read from cache (measured)" in lines
-    assert lines[-1] == "  compaction  none seen: Claude Code did not compact the main conversation"
+    # The stub upstream's usage has no cache field, so no cache share is claimed (not "0% (measured)"),
+    # and the fake claude sends no claude-cli User-Agent, so "did not compact" is not claimed either.
+    assert not [line for line in lines if line.startswith("  cache")]
+    assert lines[-1] == ("  compaction  none seen; whether Claude Code compacted cannot be told from this log (the log "
+                         "does not show a Claude Code session id on every request; the log does not name Claude "
+                         "Code's version)")
     # Nothing was paged or recalled in one request, so those lines are left out.
     assert not [line for line in lines if line.startswith(("  paged out", "  recall", "  faults"))]
     err = done.stderr
@@ -349,14 +353,107 @@ def conversation(turns: int) -> list[dict]:
     return [*messages, {"role": "user", "content": [{"type": "text", "text": f"prompt {turns}"}]}]
 
 
-def post(proxy, messages: list[dict]) -> None:
+def post(proxy, messages: list[dict], *, headers: dict | None = None, **fields) -> None:
     tools = [{"name": name, "input_schema": {"type": "object"}}
              for name in ("Bash", "mcp__contexto__contexto_search", "mcp__contexto__contexto_recall")]
-    body = json.dumps({"model": "claude-haiku-5-5", "max_tokens": 16, "tools": tools, "messages": messages}).encode()
+    body = json.dumps({"model": "claude-haiku-5-5", "max_tokens": 16, "tools": tools, "messages": messages,
+                       **fields}).encode()
     request = urllib.request.Request(proxy.url + "/v1/messages", data=body, method="POST",
-                                     headers={"Content-Type": "application/json", "x-api-key": "fake-key"})
+                                     headers={"Content-Type": "application/json", "x-api-key": "fake-key",
+                                              **(headers or {})})
     with urllib.request.urlopen(request, timeout=30) as response:
         response.read()
+
+
+SMALL = {"bound": 30_000, "headroom_floor": 2_000, "min_turn_room": 1_000, "pin_budget": 200, "index_budget": 200}
+
+
+def log_events(home: Path, session: str) -> list[dict]:
+    return [json.loads(line) for line in (home / "sessions" / session / "log.jsonl").read_text().splitlines()]
+
+
+def test_a_launch_that_pages_the_history_again_adds_only_its_new_pages(tmp_path, token_upstream):
+    """Reviewer B's M1, through the launcher's own proxy and engine: 25 turns, then two more launches of
+    3 turns each that cannot resume their epoch (a changed system prompt, then another model). Each
+    pages the whole history again onto the pages already there, and its ``page_out`` event counts all
+    of it; the store gained 3 or 4 pages."""
+    home = tmp_path / "contexto"
+    launches = [(range(0, 25), {}), (range(25, 28), {"system": "a changed system prompt"}),
+                (range(28, 31), {"system": "a changed system prompt", "model": "claude-sonnet-5-5"})]
+    on_disk, summaries = [], []
+    for turns, fields in launches:
+        store = SessionStore(home, "m1")
+        proxy, engine = launcher.start_proxy(store, token_upstream, "flag", SMALL, False, stderr=io.StringIO(),
+                                             cli="claude")
+        try:
+            store.log({"event": "launch", "cli": "claude", "session": "m1", "config": SMALL, "engine": engine})
+            for t in turns:
+                post(proxy, conversation(t), **fields)
+        finally:
+            proxy.stop()
+        proxy.session_log.log({"event": "exit", "code": 0})
+        on_disk.append(len(list(store.pages_dir.glob("pg_*.json"))))
+        summaries.append("\n".join(stats.exit_summary(home, "m1", "claude", 5.0)))
+    events = log_events(home, "m1")
+    # The proxy records the store's page count when it starts and when it stops.
+    assert [e["pages"] for e in events if e["event"] == "proxy_start"] == [0, *on_disk[:2]]
+    assert [e["pages"] for e in events if e["event"] == "proxy_stop"] == on_disk
+    repaged = [inner["turns"] for e in events for inner in e.get("transform_events") or []
+               if inner.get("event") == "page_out" and inner["first_turn"] == 0]
+    assert len(repaged) == 3 and repaged[1] == on_disk[1] and repaged[2] == on_disk[2]  # the whole history, again
+    first, second, third = on_disk
+    assert first > 8 and 0 < second - first <= 4 and 0 < third - second <= 4
+    assert f"paged out   {second - first} pages in 1 rotation this run; the session has {second} pages on disk" \
+        in summaries[1]
+    assert f"paged out   {third - second} pages in 1 rotation this run; the session has {third} pages on disk" \
+        in summaries[2]
+    whole = session_stats(home, "m1")
+    assert whole["paging"]["pages_added"] == whole["pages"]["count"] == third
+    text = "\n".join(stats.render(whole))
+    assert f"paged out   {third} pages on disk, about " in text and "turns" not in text
+    assert str(sum(inner["turns"] for e in events for inner in e.get("transform_events") or []
+                   if inner.get("event") == "page_out")) not in text  # the sum of page_out.turns is shown nowhere
+
+
+CLAUDE_CODE = {"User-Agent": "claude-cli/2.1.318 (external, cli)", "X-Claude-Code-Session-Id": CLAUDE_SESSION}
+SUMMARY = ("This session is being continued from a previous conversation that ran out of context. The summary below "
+           "covers the earlier portion of the conversation.\n\nsynthetic summary of the earlier turns")
+
+
+@pytest.mark.parametrize("headers,reasons,seen", [
+    (CLAUDE_CODE, [], 1),
+    ({"User-Agent": CLAUDE_CODE["User-Agent"]}, ["no_session_id"], 0),  # no Claude Code session id
+    ({**CLAUDE_CODE, "User-Agent": "claude-code/3.0.0 (external, cli)"}, ["no_session_id", "cli_version_unknown"], 0),
+    ({**CLAUDE_CODE, "User-Agent": "claude-cli/9.9.9 (external, cli)"}, ["cli_version_not_measured"], 1),
+])
+def test_no_compaction_is_claimed_only_for_requests_the_engine_could_judge(tmp_path, token_upstream, headers, reasons,
+                                                                           seen):
+    """Reviewer B's M5: the same compaction, sent as Claude Code sends it, without its session id, and
+    with a User-Agent the engine does not read. The engine recognises it only in the first form, so only
+    there can the log support "did not compact"."""
+    home = tmp_path / "contexto"
+    for session, compact in (("quiet", False), ("compacted", True)):
+        store = SessionStore(home, session)
+        proxy, _ = launcher.start_proxy(store, token_upstream, "flag", SMALL, False, stderr=io.StringIO(), cli="claude")
+        try:
+            post(proxy, conversation(2), headers=headers)
+            post(proxy, conversation(3), headers=headers)
+            if compact:  # Claude Code replaces the conversation with its summary and the new prompt
+                post(proxy, [{"role": "user", "content": [{"type": "text", "text": SUMMARY}]}], headers=headers)
+        finally:
+            proxy.stop()
+    quiet = session_stats(home, "quiet")
+    assert quiet["compaction"]["seen"] == 0 and quiet["compaction"]["reasons"] == reasons
+    line = next(x for x in stats.render(quiet) if x.startswith("  compaction"))
+    if reasons:
+        assert quiet["compaction"]["detectable"] is False and "did not compact" not in line
+        assert line.startswith("  compaction  none seen; whether Claude Code compacted cannot be told from this log")
+    else:
+        assert line == "  compaction  none seen: Claude Code did not compact the main conversation"
+    # The claim is withheld exactly where the engine would have missed the compaction (or may have).
+    assert session_stats(home, "compacted")["compaction"]["seen"] == seen
+    sent = [e["transform_events"][-1] for e in log_events(home, "quiet") if e["event"] == "request"]
+    assert [e["cli_session"] for e in sent] == ["no_session_id" not in reasons] * 2
 
 
 def test_a_full_disk_is_seen_at_exit_in_stats_and_in_state(tmp_path, token_upstream, monkeypatch, capsys):

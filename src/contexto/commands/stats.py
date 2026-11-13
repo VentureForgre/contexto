@@ -51,7 +51,13 @@ def run(args: argparse.Namespace) -> int:
     say_session(session_id, "SESSION" if args.session_id is not None and how == "--session" else how)
     runs = f"{out['runs']:,} run{'' if out['runs'] == 1 else 's'}"
     scope = f"the latest of {runs}" if args.last_run else f"the whole session ({runs}"
-    span = f"{duration_text(out['span_seconds'])} of log" if out["span_seconds"] is not None else "no log"
+    span, in_runs = out["span_seconds"], out["run_seconds"]
+    if span is None:
+        span = "no log"
+    elif args.last_run or in_runs is None or in_runs == span:
+        span = f"{duration_text(span)} of log"
+    else:  # runs days apart: the time in runs, and the span of the log, which is not time spent working
+        span = f"{duration_text(in_runs)} in runs, {duration_text(span)} from the first log line to the last"
     print(f"Contexto stats for session {session_id}: {scope}{', ' if not args.last_run else ' ('}{span})")
     for line in render(out):
         print(line)

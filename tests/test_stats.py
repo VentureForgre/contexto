@@ -26,17 +26,37 @@ def ts(second: int) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(1_800_000_000 + second)) + ".000000Z"
 
 
-def launch(second: int = 0, cli: str = "claude", bound: int = 150_000) -> list[dict]:
-    return [{"event": "proxy_start", "port": 1, "ts": ts(second)},
-            {"event": "launch", "cli": cli, "config": {"bound": bound}, "engine": "rewrite", "ts": ts(second)}]
+def launch(second: int = 0, cli: str = "claude", bound: int = 150_000, pages: int | None = None) -> list[dict]:
+    """A run's first lines; ``pages`` is the store's page count the proxy logs when it starts."""
+    start = {"event": "proxy_start", "port": 1, "ts": ts(second)}
+    if pages is not None:
+        start["pages"] = pages
+    return [start, {"event": "launch", "cli": cli, "config": {"bound": bound}, "engine": "rewrite", "ts": ts(second)}]
+
+
+def stop(second: int, pages: int | None = None) -> list[dict]:
+    """A run's last lines, as the proxy and the launcher write them."""
+    stopped = {"event": "proxy_stop", "ts": ts(second)}
+    if pages is not None:
+        stopped["pages"] = pages
+    return [stopped, {"event": "exit", "code": 0, "ts": ts(second)}]
+
+
+def version(number: str = "2.1.318", cli: str = "claude") -> dict:
+    """The engine's ``cli_version`` event, logged with the first request of each client version."""
+    return {"event": "cli_version", "cli": cli, "client": "claude-cli" if cli == "claude" else "codex_exec",
+            "version": number, "tested": True}
 
 
 def request(second: int, *, tokens: int | None = 1_000, cache_read: int = 0, sent: int = 2_000, original: int = 2_000,
             events: tuple = (), usage_events: tuple = (), main: bool = True, degraded: bool = False,
-            status: int = 200, api: str = "messages", estimate: int = 900, **extra) -> dict:
+            status: int = 200, api: str = "messages", estimate: int = 900, cli_session: bool | None = True,
+            **extra) -> dict:
     """One model request line as the proxy logs it; ``tokens`` is the prompt the API counted."""
     engine = {"event": "request", "epoch": 0, "k": 0, "messages": 3, "upstream_messages": 3, "estimate": estimate,
               "sent_bytes": sent, "main": main, "conversations": 1}
+    if api == "messages" and cli_session is not None:
+        engine["cli_session"] = cli_session
     if degraded:
         engine["degraded"] = True
     if api == "responses":
@@ -102,10 +122,10 @@ def test_stats_reads_a_session_s_numbers_from_its_log_and_store(tmp_path):
     store.pin("decision", "synthetic decision")
     store.close(store.pin("obligation", "synthetic done"), "synthetic closure")
     write_log(tmp_path, "s1", [
-        *launch(0),
+        *launch(0, pages=0),
         {"event": "request", "method": "HEAD", "path": "/api/hello", "status": 401, "ts": ts(1)},
         {"event": "upstream_4xx", "status": 401, "path": "/api/hello", "ts": ts(1)},
-        request(10, tokens=40_000, cache_read=0, original=160_000, sent=160_000),
+        request(10, tokens=40_000, cache_read=0, original=160_000, sent=160_000, events=(version(),)),
         request(20, tokens=120_000, cache_read=100_000, original=480_000, sent=480_000),
         request(30, tokens=148_210, cache_read=140_000, original=600_000, sent=590_000, main=False),
         request(40, tokens=60_000, cache_read=30_000, original=700_000, sent=240_000, events=rotation(3)),
@@ -114,20 +134,20 @@ def test_stats_reads_a_session_s_numbers_from_its_log_and_store(tmp_path):
          "transform_events": [{"event": "count_tokens", "epoch": 1}]},
         mcp("search", 42, charged=900), mcp("search", 43, charged=100), mcp("recall", 44, charged=4_000),
         mcp("recall", 45, ok=False, error="ToolError"), mcp("pin", 46), mcp("state", 47, charged=50),
-        {"event": "proxy_stop", "ts": ts(3_725)},
-        {"event": "exit", "code": 0, "ts": ts(3_725)},
+        *stop(3_725, pages=3),
     ])
     out = session_stats(tmp_path, "s1")
     assert out["session"] == "s1" and out["scope"] == "session" and out["runs"] == 1
     assert out["cli"] == "claude" and out["bound"] == 150_000 and out["span_seconds"] == 3_725
     assert out["requests"] == {"model": 4, "main": 3, "side": 1, "with_usage": 4, "failed": 0, "status": {},
-                               "aborted": 0, "count_tokens": 1, "other": 1}
+                               "aborted": 0, "cut_short": 0, "not_transformed": 0, "rejected_encoding": 0,
+                               "in_flight_at_stop": 0, "count_tokens": 1, "other": 1}
     # The peak is the largest prompt the API counted, in any conversation; the last is the main one's.
-    assert out["prompt"] == {"peak_tokens": 148_210, "peak_source": "usage", "last_tokens": 60_000,
-                             "last_source": "usage", "bound": 150_000}
+    assert out["prompt"] == {"peak_tokens": 148_210, "peak_source": "usage", "peak_estimate_without_usage": None,
+                             "last_tokens": 60_000, "last_source": "usage", "bound": 150_000}
     assert out["over_bound"] == {"requests": 0, "measured": 0, "estimate_only": 0, "in_tool_loop": 0,
                                  "at_turn_start": 0, "degraded": 0}
-    assert out["paging"] == {"rotations": 1, "turns_paged": 3, "pages_written": 3, "carried_items_paged": 0}
+    assert out["paging"] == {"rotations": 1, "pages_added": 3, "carried_items_paged": 0}
     assert out["pages"]["count"] == 3 and out["pages"]["unreadable"] == 0
     stored = [json.loads(p.read_text()) for p in store.pages_dir.glob("pg_*.json")]
     assert out["pages"]["tokens_estimate"] == sum(p["tokens"] for p in stored) > 0
@@ -138,19 +158,21 @@ def test_stats_reads_a_session_s_numbers_from_its_log_and_store(tmp_path):
     assert out["tools"]["close"] == {"calls": 0, "failed": 0, "charged_tokens": 0} and out["tools"]["out_of_room"] == 0
     assert out["pins"] == {"readable": True, "active_records": 4, "open_obligations": 1}
     assert pinned  # the open obligation
-    assert out["cache"] == {"requests": 4, "input_tokens": 368_210, "cache_read_tokens": 270_000,
-                            "cache_write_tokens": 0, "read_share": round(270_000 / 368_210, 4)}
+    assert out["cache"] == {"requests": 4, "unreported_requests": 0, "input_tokens": 368_210,
+                            "cache_read_tokens": 270_000, "cache_write_tokens": 0,
+                            "read_share": round(270_000 / 368_210, 4)}
     assert out["bytes"] == {"cli_sent": 1_940_000, "forwarded": 1_470_000,
                             "forwarded_share": round(1_470_000 / 1_940_000, 4),
                             "largest_cli_request": 700_000, "largest_forwarded_request": 590_000}
-    assert out["compaction"] == {"seen": 0}
+    assert out["compaction"] == {"seen": 0, "detectable": True, "reasons": [], "cli_versions": ["2.1.318"]}
+    assert out["run_seconds"] == 3_725 and out["log"]["ignored_values"] == 0
     assert out["faults"]["total"] == 0 and out["faults"]["events"] == {} and out["faults"]["messages"] == []
     text = "\n".join(render(out))
     assert "peak 148,210 of 150,000 tokens (measured)" in text and "over the bound: 0 requests" in text
-    assert "3 turns in 1 rotation" in text and "3 pages on disk" in text and "estimate" in text
-    assert "1 recall, 2 search, 1 state, 1 pin" in text and "1 obligation open" in text
-    assert "73% of input tokens read from cache" in text
-    assert "none seen" in text and "faults      none" in text
+    assert "paged out   3 pages on disk, about" in text and "; 1 rotation" in text and "turns" not in text
+    assert "5 calls (1 recall, 2 search, 1 state, 1 pin); 1 failed" in text and "1 obligation open" in text
+    assert "73% of input tokens read from cache (measured)" in text
+    assert "none seen: Claude Code did not compact the main conversation" in text and "faults      none" in text
 
 
 def test_a_codex_session_reads_responses_usage_and_claims_nothing_about_compaction(tmp_path):
@@ -171,17 +193,17 @@ def test_a_number_without_data_is_left_out_and_an_estimate_is_called_one(tmp_pat
     write_log(tmp_path, "e1", [*launch(0), request(1, tokens=None, estimate=31_000),
                                request(2, tokens=None, estimate=30_000, events=(dict(rotation(2)[1], k=4),))])
     out = session_stats(tmp_path, "e1")
-    assert out["prompt"] == {"peak_tokens": 31_000, "peak_source": "estimate", "last_tokens": 30_000,
-                             "last_source": "estimate", "bound": 150_000}
-    assert out["cache"] == {"requests": 0, "input_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0,
-                            "read_share": None}
+    assert out["prompt"] == {"peak_tokens": 31_000, "peak_source": "estimate", "peak_estimate_without_usage": 31_000,
+                             "last_tokens": 30_000, "last_source": "estimate", "bound": 150_000}
+    assert out["cache"] == {"requests": 0, "unreported_requests": 0, "input_tokens": 0, "cache_read_tokens": 0,
+                            "cache_write_tokens": 0, "read_share": None}
     assert out["pages"]["count"] == 0 and out["pins"]["active_records"] == 0
     lines = render(out)
     text = "\n".join(lines)
     assert "peak 31,000 of 150,000 tokens (Contexto's estimate; the API reported no usage)" in text
     assert not [line for line in lines if line.lstrip().startswith(("cache", "recall"))]
     # A rotation that pages nothing (a head change) is a rotation, and no page is claimed.
-    assert "0 turns in 1 rotation" in text and "pages on disk" not in text
+    assert "paged out   no page on disk; 1 rotation" in text
     # No launch event: the bound comes from an event that carries it, else the line has no "of".
     write_log(tmp_path, "e2", [request(1, tokens=5_000)])
     assert "peak 5,000 tokens (measured)" in "\n".join(render(session_stats(tmp_path, "e2")))
@@ -204,16 +226,18 @@ def test_over_bound_requests_are_split_by_where_and_how_they_were_seen(tmp_path)
     assert out["over_bound"] == {"requests": 5, "measured": 4, "estimate_only": 1, "in_tool_loop": 3,
                                  "at_turn_start": 1, "degraded": 1}
     text = "\n".join(render(out))
-    assert "over the bound: 5 requests" in text and "4 measured by the API" in text and "1 by estimate only" in text
-    assert "3 inside a tool loop" in text and "1 at a turn start" in text
+    # L3: the headline is what the API measured; the estimate-only request and the positions come after it.
+    assert ("over the bound: 4 requests (measured); 1 more by Contexto's estimate only; of the 4 flagged before "
+            "sending, 3 inside a tool loop and 1 at a turn start; 1 while paging was stopped") in text
 
 
 def test_a_compaction_of_the_main_conversation_is_counted(tmp_path):
     changed = {"event": "main_changed", "reason": "compacted", "turn_starts": 2}
     other = {"event": "main_changed", "reason": "new_cli_session", "turn_starts": 1}  # /clear is not a compaction
-    write_log(tmp_path, "k1", [*launch(0), request(1), request(2, events=(other,)), request(3, events=(changed,))])
+    write_log(tmp_path, "k1", [*launch(0), request(1, events=(version(),)), request(2, events=(other,)),
+                               request(3, events=(changed,))])
     out = session_stats(tmp_path, "k1")
-    assert out["compaction"] == {"seen": 1}
+    assert out["compaction"]["seen"] == 1
     assert "Claude Code compacted the main conversation 1 time" in "\n".join(render(out))
 
 
@@ -228,11 +252,381 @@ def test_the_last_run_of_a_resumed_session_is_counted_apart(tmp_path):
     assert whole["scope"] == "session" and last["scope"] == "last_run" and whole["runs"] == last["runs"] == 2
     assert whole["prompt"]["peak_tokens"] == 140_000 and last["prompt"]["peak_tokens"] == 70_000
     assert whole["bound"] == last["bound"] == 120_000  # the latest launch's
-    assert whole["paging"]["turns_paged"] == 5 and last["paging"]["turns_paged"] == 0
+    assert whole["paging"]["rotations"] == 1 and last["paging"]["rotations"] == 0
     assert whole["tools"]["recall"]["calls"] == 1 and last["tools"]["recall"]["calls"] == 0
     assert last["tools"]["search"]["calls"] == 1 and last["requests"]["model"] == 1
     assert whole["span_seconds"] == 1_060 and last["span_seconds"] == 60
     assert whole["started"] == ts(0) and last["started"] == ts(1_000)
+
+
+# Reviewer B's findings on what the numbers mean (PR #263) --------------------------------------------
+
+def paged(turns: int, first: int = 0, epoch: int = 1) -> tuple[dict, dict]:
+    """A rotation as the engine logs it: ``first_turn`` and ``turns_paged`` are the conversation's."""
+    return ({"event": "page_out", "epoch": epoch, "turns": turns, "pages": turns, "first_turn": first},
+            {"event": "rotation", "epoch": epoch, "reason": "bound", "k": 9, "retained_messages": 4,
+             "turns_paged": first + turns})
+
+
+def three_launches(pages: bool = True) -> list[dict]:
+    """M1: 25 turns paged in five rotations, then two launches that could not resume their epoch and
+    paged the whole history again, onto pages that already existed, plus the 3 turns each added."""
+    def count(n: int) -> int | None:
+        return n if pages else None
+
+    not_resumed = {"event": "epoch_not_resumed", "reason": "head_changed"}
+    return [
+        *launch(0, pages=count(0)), *[request(10 + i, events=paged(4, 4 * i, i + 1)) for i in range(5)],
+        *stop(100, pages=count(20)),
+        *launch(200, pages=count(20)), request(210, events=(not_resumed, *paged(23))), request(211), request(212),
+        *stop(300, pages=count(23)),
+        *launch(400, pages=count(23)), request(410, events=(dict(not_resumed, reason="model_changed"), *paged(26))),
+        request(411), request(412), *stop(500, pages=count(26)),
+    ]
+
+
+def fill_pages(home: Path, session: str, count: int) -> None:
+    SessionStore(home, session).page_out([turn(i) for i in range(count)], 0)
+
+
+def test_m1_turns_paged_again_by_a_launch_that_cannot_resume_are_not_counted_again(tmp_path):
+    from contexto.stats import exit_summary
+
+    fill_pages(tmp_path, "m1", 26)
+    lines = three_launches()
+    write_log(tmp_path, "m1", lines)
+    whole = session_stats(tmp_path, "m1")
+    assert whole["pages"]["count"] == 26 and whole["paging"] == {"rotations": 7, "pages_added": 26,
+                                                                  "carried_items_paged": 0}
+    text = "\n".join(render(whole))
+    assert "paged out   26 pages on disk, about" in text and "; 7 rotations" in text
+    assert "69" not in text and "turns" not in text  # the sum of page_out.turns is never shown
+    # The run in which 3 turns were typed gained 3 pages, whatever its page_out event counted.
+    cut = lines.index(next(e for e in lines if e.get("ts") == ts(400)))
+    write_log(tmp_path, "m1b", lines[:cut])
+    fill_pages(tmp_path, "m1b", 23)
+    second = session_stats(tmp_path, "m1b", last_run=True)
+    assert second["paging"] == {"rotations": 1, "pages_added": 3, "carried_items_paged": 0}
+    summary = "\n".join(exit_summary(tmp_path, "m1b", "claude", 5.0))
+    assert "paged out   3 pages in 1 rotation this run; the session has 23 pages on disk" in summary
+    assert "23 turns" not in summary
+    assert session_stats(tmp_path, "m1", last_run=True)["paging"]["pages_added"] == 3
+
+
+def test_m1_a_run_in_progress_counts_from_the_disk_and_an_old_log_gives_no_number(tmp_path):
+    # Still running (no proxy_stop yet): the store as it stands is the end of the run.
+    fill_pages(tmp_path, "g1", 9)
+    write_log(tmp_path, "g1", [*launch(0, pages=4), request(1, events=paged(5, 4))])
+    assert session_stats(tmp_path, "g1", last_run=True)["paging"]["pages_added"] == 5
+    assert session_stats(tmp_path, "g1", last_run=True, store=False)["paging"]["pages_added"] is None
+    # A run killed before its proxy_stop ends where the next run starts.
+    write_log(tmp_path, "g1", [*launch(0, pages=0), request(1, events=paged(4)), *launch(50, pages=4),
+                               request(51, events=paged(5, 4)), *stop(60, pages=9)])
+    assert session_stats(tmp_path, "g1")["paging"]["pages_added"] == 9
+    assert session_stats(tmp_path, "g1", last_run=True)["paging"]["pages_added"] == 5
+    # A log written before the proxy recorded the count: no number, and no sum of page_out.turns either.
+    fill_pages(tmp_path, "g2", 26)
+    write_log(tmp_path, "g2", three_launches(pages=False))
+    for last_run in (False, True):
+        out = session_stats(tmp_path, "g2", last_run=last_run)
+        assert out["paging"]["pages_added"] is None and out["paging"]["rotations"] == (1 if last_run else 7)
+    last = "\n".join(render(session_stats(tmp_path, "g2", last_run=True), brief=True))
+    assert "paged out   1 rotation this run; the session has 26 pages on disk" in last
+    # A count that cannot be one (damage) is no count; pages removed during a run are not a negative gain.
+    write_log(tmp_path, "g3", [*launch(0, pages=-4), *stop(5, pages="many")])
+    assert session_stats(tmp_path, "g3")["paging"]["pages_added"] is None
+    write_log(tmp_path, "g3", [*launch(0, pages=9), *stop(5, pages=7)])
+    assert session_stats(tmp_path, "g3")["paging"]["pages_added"] == 0
+
+
+def test_l5_a_run_that_paged_nothing_does_not_show_the_session_s_pages_as_its_own(tmp_path):
+    fill_pages(tmp_path, "q1", 43)
+    write_log(tmp_path, "q1", [*launch(0, pages=0), request(1, events=paged(43)), *stop(9, pages=43),
+                               *launch(50, pages=43), request(51), *stop(60, pages=43)])
+    [line] = [x for x in render(session_stats(tmp_path, "q1", last_run=True), brief=True) if "paged out" in x]
+    assert line.startswith("  paged out   nothing this run; the session has 43 pages on disk, about ")
+
+
+def test_count_pages_counts_page_files_without_opening_them(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path, "cp")
+    ids = store.page_out([turn(i) for i in range(3)], 0)
+    (store.pages_dir / "pg_0000000000000000.json").symlink_to(store.pages_dir / f"{ids[0]}.json")
+    (store.pages_dir / "notes.txt").write_text("not a page")
+    (store.pages_dir / "pg_dir.json").mkdir()
+    monkeypatch.setattr(stats, "open_regular", lambda *a, **k: pytest.fail("a page was opened for the count"))
+    assert stats.count_pages(store.pages_dir) == 3
+    assert stats.count_pages(tmp_path / "nothing") == 0  # a session that has paged nothing yet
+    assert stats.count_pages(store.pages_dir / "notes.txt") is None  # not a directory: no count, not 0
+
+
+def test_m2_a_larger_request_without_usage_is_said_beside_the_measured_peak(tmp_path):
+    refused = request(2, tokens=None, estimate=412_000, status=400, events=(over(in_tool_loop=False),))
+    write_log(tmp_path, "u1", [*launch(0), request(1, tokens=50_000, estimate=49_000), refused,
+                               request(3, tokens=None, estimate=20_000, client_aborted=True)])
+    out = session_stats(tmp_path, "u1")
+    assert out["prompt"]["peak_tokens"] == 50_000 and out["prompt"]["peak_source"] == "usage"
+    assert out["prompt"]["peak_estimate_without_usage"] == 412_000
+    [line] = [x for x in render(out) if x.startswith("  prompt")]
+    assert ("peak 50,000 of 150,000 tokens (measured); a request the API reported no usage for was estimated "
+            "larger, at 412,000") in line
+    # An estimate below the measured peak is in the JSON and adds nothing to the text.
+    write_log(tmp_path, "u2", [*launch(0), request(1, tokens=50_000), request(2, tokens=None, estimate=20_000)])
+    out = session_stats(tmp_path, "u2")
+    assert out["prompt"]["peak_estimate_without_usage"] == 20_000
+    assert "estimated larger" not in "\n".join(render(out))
+    # A request that has usage never counts here, however high its estimate ran.
+    write_log(tmp_path, "u3", [*launch(0), request(1, tokens=50_000, estimate=90_000)])
+    assert session_stats(tmp_path, "u3")["prompt"]["peak_estimate_without_usage"] is None
+
+
+def bare_usage(second: int, tokens: int, **cache) -> dict:
+    """A Messages request whose usage reports the cache fields as given (``None`` is the proxy's
+    record of a field the API left out)."""
+    line = request(second, tokens=tokens)
+    line["usage"] = {"input_tokens": tokens, "output_tokens": 5, "cache_read_input_tokens": None,
+                     "cache_creation_input_tokens": None, **cache}
+    return line
+
+
+def test_m3_the_cache_share_covers_only_requests_that_reported_a_cache_field(tmp_path):
+    write_log(tmp_path, "h1", [*launch(0), bare_usage(1, 4_278), bare_usage(2, 9_000)])
+    responses = request(3, api="responses", tokens=6_000)
+    del responses["usage"]["input_tokens_details"]
+    write_log(tmp_path, "h2", [*launch(0, cli="codex"), responses])
+    for session in ("h1", "h2"):
+        out = session_stats(tmp_path, session)
+        assert out["cache"]["read_share"] is None and out["cache"]["requests"] == 0, session
+        assert out["cache"]["unreported_requests"] == out["requests"]["with_usage"] > 0
+        assert not [x for x in render(out) if x.startswith("  cache")]  # never "0% ... (measured)"
+        assert out["prompt"]["peak_source"] == "usage"  # the prompt was still measured
+    # One request reported the field and two did not: the share is over the one that did.
+    reporting = bare_usage(1, 3_000, cache_read_input_tokens=7_000, cache_creation_input_tokens=0)
+    write_log(tmp_path, "h3", [*launch(0), reporting, bare_usage(2, 20_000), bare_usage(3, 21_000)])
+    out = session_stats(tmp_path, "h3")
+    assert out["cache"] == {"requests": 1, "unreported_requests": 2, "input_tokens": 10_000,
+                            "cache_read_tokens": 7_000, "cache_write_tokens": 0, "read_share": 0.7}
+    assert out["prompt"]["peak_tokens"] == 21_000 and out["requests"]["with_usage"] == 3
+    [line] = [x for x in render(out) if x.startswith("  cache")]
+    assert line == ("  cache       70% of input tokens read from cache (measured, over the 1 of 3 requests with usage "
+                    "that reported a cache field)")
+    # A reported zero is a measurement.
+    write_log(tmp_path, "h4", [*launch(0), bare_usage(1, 500, cache_read_input_tokens=0)])
+    assert "  cache       0% of input tokens read from cache (measured)" in render(session_stats(tmp_path, "h4"))
+
+
+def test_m4_the_recall_room_charge_is_named_a_charge_not_tokens_read(tmp_path):
+    write_log(tmp_path, "t1", [*launch(0), request(1), mcp("recall", 2, charged=5_322, chars=7_983),
+                               mcp("search", 3, charged=7_000, chars=10_500)])
+    out = session_stats(tmp_path, "t1")
+    assert out["tools"]["recall"]["charged_tokens"] == 5_322
+    [line] = [x for x in render(out) if x.startswith("  recall")]
+    assert "read back" not in line and "an estimate" not in line
+    assert ("about 12k tokens charged to the recall room (a budget charge that runs high, not a count of what was "
+            "read)") in line
+    docs = DOCS.read_text()
+    assert "errs high for tool output" in docs  # the pages' estimate, which is not comparable with the charge
+
+
+def test_l7_calls_that_found_no_room_and_failed_calls_are_said(tmp_path):
+    spent = {"turn_budget": "spent", "charged_tokens": 0, "room_left": 0}
+    write_log(tmp_path, "t2", [*launch(0), request(1), dict(mcp("search", 2), **spent), dict(mcp("state", 3), **spent),
+                               mcp("recall", 4, ok=False, error="ToolError"), mcp("pin", 5, ok=False)])
+    out = session_stats(tmp_path, "t2")
+    assert out["tools"]["out_of_room"] == 2 and out["tools"]["search"]["calls"] == 1
+    [line] = [x for x in render(out) if x.startswith("  recall")]
+    assert line == ("  recall      2 calls (1 search, 1 state), 2 of which found the turn's recall room used up and "
+                    "returned little or nothing; 2 failed (1 recall, 1 pin)")
+    write_log(tmp_path, "t3", [*launch(0), request(1), mcp("recall", 4, ok=False)])
+    assert "  recall      no call succeeded; 1 failed (1 recall)" in render(session_stats(tmp_path, "t3"))
+
+
+COMPACTED = {"event": "main_changed", "reason": "compacted", "turn_starts": 2}
+
+
+def test_m5_no_compaction_is_claimed_only_when_the_log_could_have_shown_one(tmp_path):
+    def line(out: dict) -> str:
+        return next(x for x in render(out) if x.startswith("  compaction"))
+
+    # Today's Claude Code, with its session id on every request: the claim holds.
+    write_log(tmp_path, "c1", [*launch(0), request(1, events=(version(),)), request(2)])
+    out = session_stats(tmp_path, "c1")
+    assert out["compaction"] == {"seen": 0, "detectable": True, "reasons": [], "cli_versions": ["2.1.318"]}
+    assert line(out) == "  compaction  none seen: Claude Code did not compact the main conversation"
+    # No Claude Code session id on the requests: the engine cannot recognise a compaction.
+    write_log(tmp_path, "c2", [*launch(0), request(1, events=(version(),), cli_session=False),
+                               request(2, cli_session=False)])
+    out = session_stats(tmp_path, "c2")
+    assert out["compaction"] == {"seen": 0, "detectable": False, "reasons": ["no_session_id"],
+                                 "cli_versions": ["2.1.318"]}
+    assert "did not compact" not in line(out) and "cannot be told" in line(out) and "session id" in line(out)
+    # A User-Agent the engine does not read (no cli_version event), or a version the check was not measured on.
+    write_log(tmp_path, "c3", [*launch(0), request(1), request(2)])
+    out = session_stats(tmp_path, "c3")
+    assert out["compaction"] == {"seen": 0, "detectable": False, "reasons": ["cli_version_unknown"],
+                                 "cli_versions": []}
+    assert "did not compact" not in line(out)
+    write_log(tmp_path, "c4", [*launch(0), request(1, events=(version("3.0.0"),)), request(2)])
+    out = session_stats(tmp_path, "c4")
+    assert out["compaction"] == {"seen": 0, "detectable": False, "reasons": ["cli_version_not_measured"],
+                                 "cli_versions": ["3.0.0"]}
+    assert "did not compact" not in line(out) and "3.0.0" in line(out)
+    # A log written before the engine recorded the session id: nothing is claimed for it either.
+    write_log(tmp_path, "c5", [*launch(0), request(1, events=(version(),), cli_session=None)])
+    assert session_stats(tmp_path, "c5")["compaction"]["reasons"] == ["no_session_id"]
+    # One run that could not show a compaction leaves the whole session unable to; its latest run can.
+    write_log(tmp_path, "c6", [*launch(0), request(1, cli_session=False), *stop(5),
+                               *launch(50), request(51, events=(version(),))])
+    assert session_stats(tmp_path, "c6")["compaction"]["detectable"] is False
+    assert session_stats(tmp_path, "c6", last_run=True)["compaction"]["detectable"] is True
+    # A compaction that was seen is said either way, as a lower bound when others could have been missed.
+    write_log(tmp_path, "c7", [*launch(0), request(1, events=(version(), COMPACTED))])
+    assert line(session_stats(tmp_path, "c7")) == "  compaction  Claude Code compacted the main conversation 1 time"
+    write_log(tmp_path, "c8", [*launch(0), request(1, events=(version("3.0.0"), COMPACTED))])
+    assert "at least 1 time" in line(session_stats(tmp_path, "c8"))
+
+
+def test_m5_the_versions_the_compaction_check_was_measured_on_are_the_engine_s():
+    from contexto import cliversions, rewrite
+
+    source = Path(rewrite.__file__).read_text()
+    note = source[source.index("# D50, D59: the start of the summary"):source.index("CLAUDE_CODE_COMPACTION_SUMMARY =")]
+    assert stats.COMPACTION_MEASURED_ON and all(v in note for v in stats.COMPACTION_MEASURED_ON)
+    assert set(re.findall(r"\d+\.\d+\.\d+", note)) == set(stats.COMPACTION_MEASURED_ON)
+    assert set(stats.COMPACTION_MEASURED_ON) <= set(cliversions.TESTED_VERSIONS["claude"])
+
+
+def test_l1_requests_that_are_in_no_other_number_are_counted(tmp_path):
+    skipped = request(3, tokens=None)
+    skipped.update(transform_skipped="request body is not JSON", transform_events=[])
+    cut = request(4, tokens=None, error="relay: IncompleteRead")
+    write_log(tmp_path, "x1", [
+        *launch(0), request(1),
+        {"event": "encoded_body_rejected", "encoding": "br", "endpoint": "/v1/messages", "reason": "unsupported",
+         "ts": ts(2)},
+        {"event": "encoded_body_rejected", "encoding": "br", "endpoint": "/v1/messages", "reason": "unsupported",
+         "ts": ts(2)},
+        skipped, cut, {"event": "proxy_stop_incomplete", "in_flight": 1, "ts": ts(5)}])
+    out = session_stats(tmp_path, "x1")
+    assert out["requests"]["model"] == 3 and out["requests"]["rejected_encoding"] == 2
+    assert out["requests"]["not_transformed"] == 1 and out["requests"]["cut_short"] == 1
+    assert out["requests"]["in_flight_at_stop"] == 1
+    assert out["faults"]["events"] == {"encoded_body_rejected": 2}
+    [line] = [x for x in render(out) if x.startswith("  requests")]
+    assert line == ("  requests    3 model requests (3 main, 0 side); 1 response cut short; 1 forwarded as the CLI "
+                    "sent it, unread; 2 more refused with 415 before they were read; 1 still in flight when the "
+                    "proxy stopped, so not in these numbers")
+    assert [x for x in render(out, brief=True) if x.startswith("  requests")] == [line]  # in the exit summary too
+
+
+def test_l1_faults_logged_while_a_launch_opens_its_session_belong_to_that_run(tmp_path):
+    """The store repairs its ledger, and the launcher reads the affinity salt, before the proxy starts."""
+    write_log(tmp_path, "y1", [*launch(0), request(1), *stop(5),
+                               {"event": "ledger_repaired", "quarantine": "ledger.jsonl.torn", "ts": ts(50)},
+                               {"event": "affinity_salt_unavailable", "error": "PermissionError", "ts": ts(50)},
+                               *launch(51), request(52)])
+    last = session_stats(tmp_path, "y1", last_run=True)
+    assert last["faults"]["events"] == {"ledger_repaired": 1, "affinity_salt_unavailable": 1}
+    assert last["requests"]["model"] == 1 and last["started"] == ts(50)
+    # Lines after the last run's exit that no launch follows are not a run.
+    write_log(tmp_path, "y2", [*launch(0), request(1), *stop(5), {"event": "ledger_repaired", "ts": ts(50)}])
+    last = session_stats(tmp_path, "y2", last_run=True)
+    assert last["faults"]["total"] == 0 and last["requests"]["model"] == 1
+    assert session_stats(tmp_path, "y2")["faults"]["events"] == {"ledger_repaired": 1}
+
+
+@pytest.mark.parametrize("tokens,text", [(999, "999"), (9_999, "9,999"), (10_000, "10k"), (85_400, "85k"),
+                                         (999_499, "999k"), (999_500, "1.0M"), (999_999, "1.0M"), (1_000_000, "1.0M"),
+                                         (1_949_999, "1.9M")])
+def test_l2_a_token_count_never_reads_1000k(tokens, text):
+    assert stats._about(tokens) == text
+
+
+@pytest.mark.parametrize("share,text", [(0.0, "0%"), (0.004, "under 1%"), (0.0149, "1%"), (0.5, "50%"), (0.9949, "99%"),
+                                        (0.9951, "over 99%"), (0.9996, "over 99%"), (1.0, "100%"), (3.0, "300%")])
+def test_l2_a_share_reads_0_or_100_percent_only_when_it_is(share, text):
+    assert stats.percent_text(share) == text
+
+
+@pytest.mark.parametrize("size,text", [(1023, "1023 B"), (1024, "1.0 KiB"), (1_048_575, "1.0 MiB"),
+                                       (1024 ** 2 * 1024 - 1, "1.0 GiB"), (5 * 1024 ** 3, "5.0 GiB"),
+                                       (5120 * 1024 ** 3, "5.0 TiB"), (345_700 * 1024 // 1000, "345.7 KiB")])
+def test_l2_a_size_never_reads_1024_of_a_unit(size, text):
+    assert stats.size_text(size) == text
+
+
+def test_l4_two_short_runs_days_apart_are_not_three_days_of_work(tmp_path):
+    day = 86_400
+    write_log(tmp_path, "z1", [*launch(0), request(2), *stop(5), *launch(3 * day), request(3 * day + 2),
+                               *stop(3 * day + 5)])
+    out = session_stats(tmp_path, "z1")
+    assert out["span_seconds"] == 3 * day + 5 and out["run_seconds"] == 10
+    done = contexto(tmp_path, "stats", "z1")
+    assert done.stdout.splitlines()[0] == ("Contexto stats for session z1: the whole session (2 runs, 10s in runs, "
+                                           "72h00m from the first log line to the last)")
+    last = session_stats(tmp_path, "z1", last_run=True)
+    assert last["span_seconds"] == last["run_seconds"] == 5
+    # A run that was killed has no exit line: it lasts to its last line.
+    write_log(tmp_path, "z2", [*launch(0), request(7), *launch(100), request(103)])
+    assert session_stats(tmp_path, "z2")["run_seconds"] == 10
+
+
+def test_l6_values_that_cannot_be_a_count_are_ignored_and_counted(tmp_path):
+    negative = request(2, tokens=9_000, original=-10, sent=-10)
+    worse = request(3, tokens=8_000)
+    worse.update(request_bytes="many", status=-200)
+    worse["usage"]["input_tokens"] = -5
+    write_log(tmp_path, "v1", [
+        *launch(0), request(1, tokens=7_000, original=3_000, sent=2_000), negative, worse,
+        {"event": "exit", "code": 0, "ts": "yesterday"}, {"event": "mcp_call", "tool": "contexto_search", "ok": True,
+                                                         "charged_tokens": -40, "ts": 12}])
+    out = session_stats(tmp_path, "v1")
+    assert out["bytes"]["cli_sent"] == 3_000 and out["bytes"]["forwarded"] == 2_000  # never "the CLI sent -10 B"
+    assert out["ended"] == ts(3) and out["span_seconds"] == 3  # "yesterday" and 12 are not timestamps
+    assert out["tools"]["search"]["charged_tokens"] == 0 and out["prompt"]["peak_tokens"] == 9_000
+    # negative: 2 byte counts; worse: a byte count, a status, a token count; 2 timestamps; a charge.
+    assert out["log"] == {"missing": False, "lines": 7, "unreadable_lines": 0, "ignored_values": 8}
+    text = "\n".join(render(out))
+    assert "8 values in the log were not what their field holds" in text and "-10" not in text
+
+
+def test_l6_a_page_with_a_damaged_head_or_a_negative_estimate_is_unreadable(tmp_path):
+    store = SessionStore(tmp_path, "pd")
+    ids = store.page_out([turn(i) for i in range(4)], 0)
+    files = [store.pages_dir / f"{i}.json" for i in ids]
+    tokens = [json.loads(f.read_text())["tokens"] for f in files]
+    data = files[0].read_bytes()
+    files[0].write_bytes(b"\x00" * 40 + data[40:])  # the head is gone and the last bytes are intact
+    spaced = json.loads(files[1].read_text())
+    files[1].write_text(json.dumps(dict(spaced, tokens=-500), indent=2))  # not canonical, and not a count
+    other = files[2].read_bytes()
+    files[2].write_bytes(other.replace(ids[2].encode(), b"pg_ffffffffffffffff", 1))  # another page's record
+    out = session_stats(tmp_path, "pd")["pages"]
+    assert out["count"] == 4 and out["unreadable"] == 3 and out["tokens_estimate"] == tokens[3]
+
+
+def test_l8_a_large_log_is_read_in_blocks_and_gives_the_same_numbers(tmp_path, monkeypatch):
+    lines = long_session_log(600)
+    lines.insert(40, '{"event": "request", "cut short')  # one damaged line: only its block is read line by line
+    directory = write_log(tmp_path, "big", lines)
+    whole = session_stats(tmp_path, "big")
+    assert whole["log"]["unreadable_lines"] == 1 and whole["requests"]["model"] == 600
+    size = (directory / "log.jsonl").stat().st_size
+    parsed: list[int] = []
+    loads = json.loads
+
+    def spy(data, *args, **kwargs):
+        parsed.append(len(data))
+        return loads(data, *args, **kwargs)
+
+    monkeypatch.setattr(stats.json, "loads", spy)
+    monkeypatch.setattr(stats, "LOG_BLOCK_BYTES", 16_384)
+    assert session_stats(tmp_path, "big") == whole  # block edges fall inside lines, and nothing changes
+    assert size > 20 * 16_384 and max(parsed) < 2 * 16_384 + 64  # no parse ever held more than a block
+    # A line longer than a block (not a log line) is counted unreadable without being held or parsed.
+    write_log(tmp_path, "wide", [*launch(0), request(1), "[" * 100_000, request(2), b"\xff" * 50_000])
+    out = session_stats(tmp_path, "wide")
+    assert out["log"] == {"missing": False, "lines": 6, "unreadable_lines": 2, "ignored_values": 0}
+    assert out["requests"]["model"] == 2
 
 
 # A damaged log ---------------------------------------------------------------------------------------
@@ -242,7 +636,7 @@ def test_lines_that_only_parse_when_joined_are_still_damaged_lines(tmp_path):
     write_log(tmp_path, "d2", [*launch(0), request(1, tokens=9_000), '{"event": "request", "x": [1', "2]}",
                                '{"event": "exit"}, {"event": "transform_error"}', "1, 2"])
     out = session_stats(tmp_path, "d2")
-    assert out["log"] == {"missing": False, "lines": 7, "unreadable_lines": 4}
+    assert out["log"] == {"missing": False, "lines": 7, "unreadable_lines": 4, "ignored_values": 0}
     assert out["requests"]["model"] == 1 and out["faults"]["total"] == 0
 
 
@@ -263,10 +657,10 @@ def test_a_damaged_log_is_read_as_far_as_it_goes(tmp_path):
         wrong, odd_nested, {"ts": 12, "event": "exit"},
     ])
     out = session_stats(tmp_path, "d1")
-    assert out["log"] == {"missing": False, "lines": 17, "unreadable_lines": 6}
+    assert out["log"]["lines"] == 17 and out["log"]["unreadable_lines"] == 6
     assert out["requests"]["model"] == 3 and out["prompt"]["peak_tokens"] == 9_000
     assert out["bytes"]["cli_sent"] == 4_000  # the two lines whose byte counts are numbers
-    assert out["paging"] == {"rotations": 1, "turns_paged": 0, "pages_written": 0, "carried_items_paged": 0}
+    assert out["paging"] == {"rotations": 1, "pages_added": None, "carried_items_paged": 0}
     assert out["tools"]["search"] == {"calls": 1, "failed": 0, "charged_tokens": 0}
     assert out["bound"] == 150_000 and out["cli"] == "claude"
     assert "6 lines of the log could not be read" in "\n".join(render(out))
@@ -288,7 +682,7 @@ def test_a_missing_or_unusable_log_gives_empty_numbers_and_never_waits(tmp_path,
         (tmp_path / "elsewhere.jsonl").write_text(json.dumps(request(1)) + "\n")
         log.symlink_to(tmp_path / "elsewhere.jsonl")  # never followed out of the session
     out = session_stats(tmp_path, "m1")
-    assert out["log"] == {"missing": damage != "empty", "lines": 0, "unreadable_lines": 0}
+    assert out["log"] == {"missing": damage != "empty", "lines": 0, "unreadable_lines": 0, "ignored_values": 0}
     assert out["requests"]["model"] == 0 and out["prompt"]["peak_tokens"] is None and out["runs"] == 0
     assert render(out)  # says there is nothing, rather than nothing at all
     before = sorted(p.name for p in directory.iterdir())
@@ -424,6 +818,7 @@ def test_only_events_that_mean_something_went_wrong_are_counted(tmp_path):
         {"event": "upstream_retry", "path": "/v1/messages"}, {"event": "side_room_expired", "age_s": 900},
         {"event": "hold_skipped", "path": "/v1/messages"}, {"event": "stale_temp_removed", "files": 1},
         {"event": "mcp_tools_missing", "at": "exit", "repeated": True},  # said once already during the run
+        {"event": "proxy_stop_incomplete", "in_flight": 2},  # its own number, under requests
     ]
     nested_normal = ({"event": "epoch_not_resumed", "reason": "no_record"}, {"event": "usage_missing"},
                      {"event": "usage_unattributed"}, {"event": "resync", "kind": "window_changed"},
@@ -431,21 +826,26 @@ def test_only_events_that_mean_something_went_wrong_are_counted(tmp_path):
                      {"event": "window_minimal"}, {"event": "pdf_allowance"}, {"event": "estimate_error"},
                      {"event": "mcp_tools_found"}, {"event": "cli_version", "version": "2.1.318"},
                      {"event": "cli_version_untested", "version": "9.9.9"}, {"event": "pdf_pages_uncertain"},
-                     {"event": "sizing_restored"}, {"event": "main_changed", "reason": "more_turn_starts"})
+                     {"event": "sizing_restored"}, {"event": "main_changed", "reason": "more_turn_starts"},
+                     {"event": "carried_text_growing", "messages": 3},
+                     {"event": "sizing_not_restored", "reason": "model_changed"})
     write_log(tmp_path, "n1", [*launch(0), *expected_in_normal_use, request(1, events=nested_normal),
                                request(2, status=429), request(3, client_aborted=True, tokens=None)])
     write_log(tmp_path, "n2x", [*launch(0), request(1)])
     out = session_stats(tmp_path, "n1")
     assert out["faults"]["total"] == 0 and out["faults"]["events"] == {}
     assert out["requests"]["failed"] == 1 and out["requests"]["status"] == {"429": 1}
-    assert out["requests"]["aborted"] == 1
+    assert out["requests"]["aborted"] == 1 and out["requests"]["in_flight_at_stop"] == 2
     assert "faults      none" in "\n".join(render(out)) and "1 failed (429 x1)" in "\n".join(render(out))
     # The exit summary leaves the request line to `contexto stats`, unless a request failed.
     assert "1 failed (429 x1)" in "\n".join(render(out, brief=True))
     assert not [line for line in render(session_stats(tmp_path, "n2x"), brief=True) if "requests" in line.split()[:1]]
     wrong_top = [{"event": name} for name in ("transform_error", "proxy_error", "request_too_deep", "page_quarantined",
                                               "page_unreadable", "ledger_damaged", "turn_room_missing",
-                                              "engine_unavailable", "websocket_rejected", "observe_usage_error")]
+                                              "engine_unavailable", "websocket_rejected", "observe_usage_error",
+                                              "encoded_body_rejected", "request_refused", "ledger_repaired",
+                                              "pruned_while_opening", "search_cache_invalid", "watchdog_unavailable",
+                                              "affinity_salt_unavailable")]
     wrong_nested = tuple({"event": name} for name in (
         "fallback_failed", "retained_stale", "epoch_record_stale", "mcp_tools_missing", "mcp_tools_denied",
         "toolcheck_error", "cli_version_error", "side_room_close_failed", "unclassified_system_message",
@@ -454,9 +854,9 @@ def test_only_events_that_mean_something_went_wrong_are_counted(tmp_path):
                                {"event": "mcp_tools_missing", "at": "exit", "repeated": False}])
     out = session_stats(tmp_path, "n2")
     assert out["faults"]["events"] == {**{e["event"]: 1 for e in [*wrong_top, *wrong_nested]}, "mcp_tools_missing": 2}
-    assert out["faults"]["total"] == 23
+    assert out["faults"]["total"] == 30
     assert set(out["faults"]["events"]) | {"degraded_enter", "store_error", "page_conflict"} == set(FAULT_EVENTS)
-    assert "23 events" in "\n".join(render(out)) and "transform_error 1" in "\n".join(render(out))
+    assert "30 events" in "\n".join(render(out)) and "transform_error 1" in "\n".join(render(out))
 
 
 def test_a_fault_nothing_else_warned_about_outlives_quiet(tmp_path):
@@ -489,6 +889,26 @@ def test_the_engine_s_own_fault_list_is_covered():
     assert listed - set(FAULT_EVENTS) == {"turn_room_low"}
 
 
+def test_every_event_the_source_writes_is_a_fault_or_is_left_out_on_purpose():
+    """L1: an event name added to the source must be put in ``FAULT_EVENTS`` or in ``NOT_FAULT_EVENTS``,
+    and docs/stats.md must say which, so no new event is left uncounted by oversight."""
+    source = Path(stats.__file__).resolve().parent
+    written = set()
+    for path in source.rglob("*.py"):
+        if path.name != "stats.py":
+            written |= set(re.findall(r'"event": ?"([a-z_0-9]+)"', path.read_text()))
+    written |= {"store_error", "page_conflict"}  # built from a variable in rewrite.store_failure
+    assert len(written) > 60 and {"request", "rotation", "encoded_body_rejected"} <= written
+    decided = set(FAULT_EVENTS) | set(stats.NOT_FAULT_EVENTS)
+    assert written - decided == set(), "decide these in contexto.stats and docs/stats.md"
+    assert decided - written == set(), "no longer written by the source"
+    assert set(FAULT_EVENTS) & set(stats.NOT_FAULT_EVENTS) == set()
+    docs = DOCS.read_text()
+    faults = docs[docs.index("### Which events count as a fault"):docs.index("## What the numbers cannot show")]
+    for name in decided:
+        assert f"`{name}`" in faults, f"docs/stats.md does not say whether {name} is a fault"
+
+
 def test_the_paths_stats_counts_are_the_proxy_s():
     assert stats.MODEL_PATHS == proxy.USAGE_FEEDBACK_PATHS
     assert stats.COUNT_TOKENS_PATH == proxy.COUNT_TOKENS_PATH
@@ -497,28 +917,32 @@ def test_the_paths_stats_counts_are_the_proxy_s():
 # The documented JSON shape ---------------------------------------------------------------------------
 
 DOCUMENTED = {
-    "": ["version", "session", "scope", "runs", "cli", "bound", "started", "ended", "span_seconds", "log",
-         "requests", "prompt", "over_bound", "paging", "pages", "tools", "pins", "cache", "bytes", "compaction",
+    "": ["version", "session", "scope", "runs", "cli", "bound", "started", "ended", "span_seconds", "run_seconds",
+         "log", "requests", "prompt", "over_bound", "paging", "pages", "tools", "pins", "cache", "bytes", "compaction",
          "faults"],
-    "log": ["missing", "lines", "unreadable_lines"],
-    "requests": ["model", "main", "side", "with_usage", "failed", "status", "aborted", "count_tokens", "other"],
-    "prompt": ["peak_tokens", "peak_source", "last_tokens", "last_source", "bound"],
+    "log": ["missing", "lines", "unreadable_lines", "ignored_values"],
+    "requests": ["model", "main", "side", "with_usage", "failed", "status", "aborted", "cut_short", "not_transformed",
+                 "rejected_encoding", "in_flight_at_stop", "count_tokens", "other"],
+    "prompt": ["peak_tokens", "peak_source", "peak_estimate_without_usage", "last_tokens", "last_source", "bound"],
     "over_bound": ["requests", "measured", "estimate_only", "in_tool_loop", "at_turn_start", "degraded"],
-    "paging": ["rotations", "turns_paged", "pages_written", "carried_items_paged"],
+    "paging": ["rotations", "pages_added", "carried_items_paged"],
     "pages": ["count", "tokens_estimate", "file_bytes", "unreadable"],
     "tools": ["recall", "search", "state", "pin", "close", "out_of_room"],
-    "tools.recall": ["calls", "failed", "charged_tokens"],
+    **{f"tools.{name}": ["calls", "failed", "charged_tokens"] for name in stats.TOOL_NAMES},
     "pins": ["readable", "active_records", "open_obligations"],
-    "cache": ["requests", "input_tokens", "cache_read_tokens", "cache_write_tokens", "read_share"],
+    "cache": ["requests", "unreported_requests", "input_tokens", "cache_read_tokens", "cache_write_tokens",
+              "read_share"],
     "bytes": ["cli_sent", "forwarded", "forwarded_share", "largest_cli_request", "largest_forwarded_request"],
-    "compaction": ["seen"],
+    "compaction": ["seen", "detectable", "reasons", "cli_versions"],
     "faults": ["total", "events", "degraded", "store_errors", "messages"],
     "faults.degraded": ["entered", "left", "now", "since", "unpaged_requests", "largest_unpaged_request_bytes"],
 }
+STORE_ERROR_KEYS = ["event", "operation", "error", "errno", "cause", "count", "first", "last"]
 
 
 def test_the_json_shape_is_the_documented_one(tmp_path):
-    write_log(tmp_path, "j1", [*launch(0), request(1), mcp("recall", 2, charged=5)])
+    write_log(tmp_path, "j1", [*launch(0), request(1, degraded=True, events=(store_error(), ENTER)),
+                               mcp("recall", 2, charged=5)])
     empty = tmp_path / "sessions" / "j2"
     empty.mkdir()
     docs = DOCS.read_text()
@@ -531,10 +955,18 @@ def test_the_json_shape_is_the_documented_one(tmp_path):
             if where == "compaction" and value is None:
                 continue
             assert sorted(value) == sorted(keys), where
+    # L9: an entry of faults.store_errors has its documented keys too, each named in the docs.
+    [entry] = session_stats(tmp_path, "j1")["faults"]["store_errors"]
+    assert sorted(entry) == sorted(STORE_ERROR_KEYS)
+    row = next(line for line in docs.splitlines() if line.startswith("| `faults.store_errors`"))
+    for key in STORE_ERROR_KEYS:
+        assert f"`{key}`" in row, f"docs/stats.md does not name the store_errors key {key}"
     assert out["version"] == stats.STATS_VERSION == 1
     for where, keys in DOCUMENTED.items():
         for key in keys:
             name = f"{where}.{key}" if where else key
+            if where.startswith("tools.") and where != "tools.recall":
+                continue  # the docs define a tool's keys once, under tools.recall, for every tool
             assert f"`{name}`" in docs, f"docs/stats.md does not define {name}"
     for name in FAULT_EVENTS:
         assert f"`{name}`" in docs, f"docs/stats.md does not list the fault event {name}"
@@ -570,7 +1002,6 @@ def test_stats_of_a_six_hour_log_is_fast(tmp_path):
     out = session_stats(tmp_path, "long")
     elapsed = time.perf_counter() - started
     assert out["requests"]["model"] == 4_000 and out["paging"]["rotations"] == 200 and out["span_seconds"] == 21_600
-    assert out["paging"]["turns_paged"] == 1_200
     assert out["tools"]["recall"]["calls"] + out["tools"]["search"]["calls"] == 445
     # Measured at about 50 ms on a loaded laptop, half of it JSON parsing (docs/stats.md); the limit only
     # catches a change that makes it many times slower, on any CI machine.

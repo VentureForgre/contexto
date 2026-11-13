@@ -2346,6 +2346,11 @@ class RewriteEngine:
             checked = [*checked, {"event": "cli_version_error", "error": type(exc).__name__}]
         events[-1:-1] = checked
         events[-1].update(main=main, conversations=len(self.states))  # content-free, for side requests
+        if dialect.name == "anthropic":
+            # D64, content-free: whether this request carried what ``_compacts`` needs to recognise a
+            # compaction (a Claude Code session id and the User-Agent's entrypoint). ``contexto stats``
+            # says "Claude Code did not compact" only for a log in which every request did.
+            events[-1]["cli_session"] = bool(session and session.entrypoint)
         if main and endpoint != COUNT_TOKENS:
             closes: list[dict] = []
             self._close_finished_side_rooms(request.get(dialect.field) or [], dialect, closes)
