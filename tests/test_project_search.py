@@ -416,6 +416,31 @@ def test_the_rooms_tried_cover_both_a_cut_reply_and_a_spent_one(home, root):
     assert 0 < len(session_lines(text)) < 6
 
 
+def test_a_room_that_holds_the_current_sessions_part_and_the_left_out_line_is_never_refused(home, root):
+    """The current session comes first: its part is cut to leave room for the line that says what was
+    left out of the earlier sessions, so no room above the least that holds both gets the spent reply."""
+    for i in range(3):
+        earlier(home, f"e{i:03d}0000", root, i, f"needle of session {i}")
+    cur = new_session(home, "cur", root, 100)
+    pages(cur, "a needle of the current session", "another needle", "a third needle")
+    cur.set_window(200_000, 2.0)
+    server = serve(cur)
+    left_out = "[3 more matching pages in 3 earlier sessions not shown; the recall budget for this turn is used up]"
+
+    def reply(room: int, **arguments) -> str:
+        cur.set_turn_room("1", room)
+        text = text_of(call(server, "contexto_search", {"query": "needle", **arguments}))
+        assert text == mcp.BUDGET_SPENT or len(text) <= room * RATIO
+        return text
+
+    first = next(room for room in range(1, 400) if reply(room) != mcp.BUDGET_SPENT)
+    need = first + math.ceil((len(left_out) + 1) / RATIO) + 1
+    assert [room for room in range(need, need + 400) if reply(room, scope="project") == mcp.BUDGET_SPENT] == []
+    lines = reply(need, scope="project").splitlines()
+    assert lines[0] == mcp.SEARCH_BEST_HEADER and lines[-1] == left_out
+    assert reply(first - 1, scope="project") == mcp.BUDGET_SPENT
+
+
 def test_with_no_room_left_a_project_scope_search_returns_budget_spent_uncharged(three):
     cur = three["cur"]
     cur.set_window(200_000, 2.0)
@@ -637,26 +662,45 @@ def test_the_text_held_for_earlier_sessions_counts_against_the_one_search_budget
                 *[f"needle {j} of session {i} " + f"filler-{i}-{j} " * 200 for j in range(6)])
     cur = new_session(home, "cur", root, 100)
     pages(cur, *[f"needle {j} here " + f"own-{j} " * 200 for j in range(6)])
-    replies = []
-    for budget in (None, 20_000, 6_000, 0):
+    cur.release()
+    replies, unlimited = [], 0
+    for budget in (None, 40_000, 20_000, 6_000, 0):
         store = SessionStore(home, "cur")  # the MCP server's store: its own catalogs
         store.set_search_cache(budget)
         server = serve(store)
         for _ in range(2):
             replies.append(text_of(call(server, "contexto_search", {"query": "needle", "scope": "project"})))
-        held = store._catalog.held_bytes + store._earlier.held_bytes
+            held = store._catalog.held_bytes + store._earlier.held_bytes
+            assert budget is None or held <= budget  # after every search, the first included
         if budget is None:
             unlimited = held
             assert store._earlier.held_bytes > store._catalog.held_bytes > 0
         else:
-            assert held <= budget < unlimited
+            assert budget < unlimited
             assert budget == 0 or store._earlier.held_bytes > 0  # what the current session leaves is used
-        # The current session's text has the first claim: paging more of it takes room from the earlier ones.
-        pages(store, *[f"more needle {j} " + f"new-{budget}-{j} " * 200 for j in range(3)], first=50)
-        store.search("needle")
-        assert budget is None or store._catalog.held_bytes + store._earlier.held_bytes <= budget
         store.release()
     assert len({reply.split("\n" + mcp.EARLIER_HEADER)[1] for reply in replies}) == 1  # the same under any budget
+
+
+def test_the_current_sessions_text_has_the_first_claim_on_the_search_budget(home, root):
+    for i in range(6):
+        earlier(home, f"e{i:03d}0000", root, i,
+                *[f"needle {j} of session {i} " + f"filler-{i}-{j} " * 200 for j in range(6)])
+    cur = new_session(home, "cur", root, 100)
+    pages(cur, *[f"needle {j} here " + f"own-{j} " * 200 for j in range(6)])
+    budget = 40_000  # holds the current session's text as it is, and most of the earlier sessions'
+    cur.set_search_cache(budget)
+    text_of(call(serve(cur), "contexto_search", {"query": "needle", "scope": "project"}))
+    own, others = cur._catalog.held_bytes, cur._earlier.held_bytes
+    assert own + others <= budget and others > budget // 2
+    assert set(cur._catalog.held().values()) == {"raw"}
+    pages(cur, *[f"more needle {j} " + f"new-{j} " * 400 for j in range(3)], first=50)
+    cur.search("needle")  # a session-scope search reads the new pages, and holds them
+    assert cur._catalog.held_bytes > own + 4_000 and set(cur._catalog.held().values()) == {"raw"}
+    assert cur._catalog.held_bytes + cur._earlier.held_bytes <= budget  # the earlier sessions gave it back
+    assert 0 < cur._earlier.held_bytes < others
+    cur.set_search_cache(1_000)  # and a smaller budget applies to both at once
+    assert cur._catalog.held_bytes + cur._earlier.held_bytes <= 1_000
 
 
 def test_the_mcp_call_event_names_no_other_session_no_path_and_no_text(three, home):

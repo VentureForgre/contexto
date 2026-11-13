@@ -835,8 +835,9 @@ EARLIER_PAGES = 20_000
 # Seconds after which one project-scope search starts on no further session: the older ones are left
 # alone and counted (the newest readable session is always searched, and one begun is finished). Reading
 # 15,000 pages of 8 KB for the first time took about 16 s on a heavily loaded machine, and a client
-# waits a limited time for a tool call (Codex documents 60 s by default). A later search finds the
-# text of the sessions already read held, as far as the search budget goes, and gets further.
+# gives a tool call a limited time (not measured here; the value leaves room under a one-minute limit).
+# A later search finds the text of the sessions already read held, as far as the search budget goes,
+# and gets further.
 EARLIER_SECONDS = 30.0
 EARLIER_HITS = 3  # pages of one earlier session a search returns, its best
 _clock = time.monotonic  # what the deadline reads

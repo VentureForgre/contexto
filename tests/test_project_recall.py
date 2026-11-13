@@ -274,9 +274,11 @@ def test_a_page_or_a_session_that_is_gone_is_an_error_not_a_failure(two, home):
     server = serve(cur)
     assert error_of(recall(server, two["cur_ids"][0], session="e1aaaaaa")).startswith(
         f"Unknown page id: {two['cur_ids'][0]} in session e1aaaaaa.")  # a page of the current session is not there
-    for bad in ("pg_0000000000000000", "../../meta", "pg_" + "0" * 15 + "/", ""):
-        result = recall(server, bad, session="e1aaaaaa")
-        assert "page" in error_of(result)
+    # No path is built from a page id that is not one: these name files that exist, and none is opened.
+    for bad in ("pg_0000000000000000", "../meta", "../page.key", f"../../{cur.session_id}/pages/{two['cur_ids'][0]}",
+                f"{page_id}.json", f"./{page_id}", page_id.upper(), page_id + "\n"):
+        assert error_of(recall(server, bad, session="e1aaaaaa")).startswith("Unknown page id: "), bad
+    assert error_of(recall(server, "", session="e1aaaaaa")) == "page_id is required and must be a non-empty string"
     os.unlink(old.pages_dir / f"{page_id}.json")  # a prune of the page
     assert error_of(recall(server, page_id, session="e1aaaaaa")).startswith(f"Unknown page id: {page_id} in session")
     elsewhere = home / "elsewhere"
