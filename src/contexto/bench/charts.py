@@ -385,7 +385,7 @@ def _accuracy_low(arms: Mapping[str, Any], rows: Sequence[tuple[str, str | None]
     lows = [100.0]
     for arm in arms.values():
         for _, cls in rows:
-            cell = arm if cls is None else arm.get("by_class", {}).get(cls)
+            cell = arm if cls is None else (arm.get("by_class") or {}).get(cls)
             if cell and cell.get("interval"):
                 lows.append(100 * cell["interval"][0])
     lowest = math.floor(min(lows) + 1e-9)
@@ -400,7 +400,7 @@ def accuracy_svg(results: Mapping[str, Any]) -> str:
     """The accuracy chart of a live results file, as SVG text. ``ChartError`` when the file has no
     ``arms`` (a replay file)."""
     arms = _arms_of(results)
-    classes = list(dict.fromkeys(cls for arm in arms.values() for cls in arm.get("by_class", {})))
+    classes = list(dict.fromkeys(cls for arm in arms.values() for cls in arm.get("by_class") or {}))
     rows: list[tuple[str, str | None]] = [("All probes", None), *((cls, cls) for cls in classes)]
     low, step = _accuracy_low(arms, rows)
     title = _labelled("Accuracy by arm, with Wilson 95% intervals", results)
@@ -426,7 +426,7 @@ def accuracy_svg(results: Mapping[str, Any]) -> str:
         if index:
             body.append(_el("line", x1=_n(MARGIN), y1=_n(row_top), x2=_n(WIDTH - MARGIN), y2=_n(row_top), stroke=GRID,
                             stroke_width=1))
-        cells = {arm: (block if cls is None else block.get("by_class", {}).get(cls)) for arm, block in arms.items()}
+        cells = {arm: (block if cls is None else (block.get("by_class") or {}).get(cls)) for arm, block in arms.items()}
         counts = [cell["probes"] if cell else 0 for cell in cells.values()]
         n = f"n = {counts[0]:,}" if len(set(counts)) == 1 else "n = " + " / ".join(f"{c:,}" for c in counts)
         centre = row_top + row_height / 2

@@ -408,6 +408,18 @@ def test_a_sound_results_file_is_read_as_it_is(tmp_path):
     assert records.read_results(path) == live
 
 
+def test_an_arm_with_no_classes_recorded_is_drawn(tmp_path, capsys):
+    # by_class may be null or absent: the reader accepts both, so the chart must too.
+    results = damaged_results()
+    results["arms"]["contexto"]["by_class"] = None
+    del results["arms"]["plain"]["by_class"]
+    path = tmp_path / "results.json"
+    path.write_text(json.dumps(results), encoding="utf-8")
+    assert cli.main(["bench", "--chart", str(path)]) == 0
+    root = parse((tmp_path / "charts" / "accuracy.svg").read_text(encoding="utf-8"))
+    assert [e.get("data-row") for e in root.iter(f"{SVG}text") if e.get("data-row")] == ["All probes"]
+
+
 @pytest.mark.parametrize("change, field, problem", DAMAGE, ids=[f"{i}-{d[1]}" for i, d in enumerate(DAMAGE)])
 def test_chart_mode_names_the_field_of_a_damaged_results_file(tmp_path, capsys, change, field, problem):
     results = damaged_results()
