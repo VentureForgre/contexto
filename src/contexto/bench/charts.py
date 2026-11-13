@@ -386,9 +386,10 @@ def _slug(model: str) -> str:
 
 def views(results: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
     """What to draw from a results file: the file itself, or one view per model when it merges
-    several models (``by_model``). Each view comes with the suffix of its file names."""
+    several models (``by_model`` is filled and the top-level ``arms`` is null). Each view comes
+    with the suffix of its file names."""
     by_model = results.get("by_model")
-    if isinstance(by_model, dict) and by_model:
+    if isinstance(by_model, dict) and by_model and results.get("arms") is None and results.get("kind") != "replay":
         return [(f"-{_slug(model)}", {**results, **block, "chart_model": model}) for model, block in by_model.items()]
     return [("", results)]
 

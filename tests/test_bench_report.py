@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from contexto import cli
-from contexto.bench import prices, records, report, stats
+from contexto.bench import charts, prices, records, report, stats
 from test_bench_records import (
     ARMS,
     MODEL,
@@ -472,7 +472,11 @@ def test_one_run_split_across_directories_gives_the_results_of_the_whole(tmp_pat
     merged, single = report.build(parts), report.build([whole])
     for block in ("arms", "pairs", "noise", "request_series", "plain_compaction", "all_requests", "bound"):
         assert merged[block] == single[block], block
-    assert merged["by_model"] is None
+    # Several directories always give by_model; with one model it repeats the top-level blocks.
+    assert list(merged["by_model"]) == [MODEL] and single["by_model"] is None
+    assert merged["by_model"][MODEL]["arms"] == merged["arms"]
+    assert report.render(merged).count("## Accuracy by arm") == 1
+    assert "## Results for" not in report.render(merged)
     assert merged["manifest"]["seeds"] == [11, 12, 13] and len(merged["manifest"]["units"]) == 12
     assert merged["manifest"]["merged"]["directories"] == 2
 
@@ -569,6 +573,7 @@ def test_write_can_read_other_directories_and_skip_the_charts(tmp_path):
     out = tmp_path / "merged" / "deeper"
     results = report.write(out, sources=[first, second], charts=False)
     assert results["arms"]["contexto"]["units"] == 2
+    assert [name for name, _ in charts.planned(results)] == ["accuracy.svg", "request-size.svg"]  # one model
     assert sorted(p.name for p in out.iterdir()) == ["results.json", "results.md"]
     assert "## Charts" not in (out / "results.md").read_text(encoding="utf-8")
     assert not (first / "results.json").exists()

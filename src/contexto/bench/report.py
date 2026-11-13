@@ -455,10 +455,11 @@ def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any]
     """The results of one or more live output directories, as the dict ``results.json`` holds.
 
     With several directories (one per model, or one run split across shells) the units are pooled
-    per model. One model gives the top-level ``arms``, ``pairs`` and ``noise``; several give
-    ``by_model`` and leave those three null. Directories whose bound, protocol or turn size differ
-    are refused (``ReportError``), and so is a unit that two directories both hold. ``prices`` is a
-    price table (``contexto.bench.prices.load``) to use in place of the shipped one.
+    per model and ``by_model`` holds each model's blocks. The top-level ``arms``, ``pairs`` and
+    ``noise`` are that model's when there is one model and null when there are several, because
+    figures pooled across models would mean nothing. Directories whose bound, protocol or turn
+    size differ are refused (``ReportError``), and so is a unit that two directories both hold.
+    ``prices`` is a price table (``contexto.bench.prices.load``) to use in place of the shipped one.
     """
     dirs = [Path(out_dirs)] if isinstance(out_dirs, (str, Path)) else [Path(d) for d in out_dirs]
     if not dirs:
@@ -495,7 +496,7 @@ def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any]
     }
     if one:
         results.update(blocks[first.model])
-    else:
+    if len(runs) > 1:
         results["by_model"] = blocks
     return json.loads(json.dumps(results))  # tuples become lists, as they are when the file is read back
 
@@ -822,8 +823,7 @@ def _model_sections(block: Mapping[str, Any], results: Mapping[str, Any], h: str
 
 def render(results: Mapping[str, Any]) -> str:
     """The plain-text report (``results.md``) of a results dict. It reads nothing else."""
-    by_model = results.get("by_model")
-    blocks = by_model if by_model else {None: results}
+    blocks = {None: results} if results.get("arms") is not None else results["by_model"]
     lines = ["# Contexto benchmark results", "",
              "Written by `contexto bench` from the records in the output directory: `manifest.json`, `probes.jsonl` "
              "and `requests.jsonl`. `contexto bench --report DIR` recomputes it.", "",
