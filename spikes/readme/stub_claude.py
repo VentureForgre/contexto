@@ -46,7 +46,7 @@ HTTP_TIMEOUT = 60.0
 SHELL_TIMEOUT = 30.0
 # `contexto run` sets CONTEXTO_SESSION for the CLI and its shell commands. `sessions show` prints 13
 # summary lines and then the opening 200 characters of each paged-out turn. The filter keeps the page
-# count, the over-bound count and the page lines; the cut ends each page line after its first sentence.
+# count, the over-bound count and the page lines; the cut ends each page line after its first line.
 SHOW_COLUMNS = 74
 SHOW_COMMAND = ("contexto sessions show $CONTEXTO_SESSION \\\n"
                 f"    | grep -E 'Pages:|Over-bound|pg_' | cut -c1-{SHOW_COLUMNS}")

@@ -9,40 +9,40 @@
 <g class="scroll" transform="translate(0 -76)">
 <text x="22" y="62" textLength="630"><tspan class="n"># Synthetic session: a stub CLI and a fake upstream on 127.0.0.1. No model.</tspan></text>
 <text class="t0" x="22" y="81" textLength="705.6"><tspan class="u">[fake upstream]</tspan><tspan class="d"> listening on 127.0.0.1:8399, counting 1 token per 3.5 bytes received</tspan></text>
-<text class="t1" x="22" y="100" textLength="596.4"><tspan class="p">$</tspan> contexto run --bound 60000 --headroom-floor 5000 --no-version-check \</text>
-<text class="t1" x="55.6" y="119" textLength="327.6">--upstream http://127.0.0.1:8399 claude</text>
-<text class="t2" x="22" y="138" textLength="672">contexto: session 884be18dd5024fdfb49505a555faea96 (bound 60,000, upstream flag)</text>
-<text class="t3" x="22" y="157" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 0: history </tspan>13,216<tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan>13,216<tspan class="d"> tokens</tspan></text>
+<text class="t1" x="22" y="100" textLength="596.4"><tspan class="p">$</tspan><tspan> contexto run --bound 60000 --headroom-floor 5000 --no-version-check \</tspan></text>
+<text class="t1" x="55.6" y="119" textLength="327.6"><tspan>--upstream http://127.0.0.1:8399 claude</tspan></text>
+<text class="t2" x="22" y="138" textLength="672"><tspan>contexto: session 884be18dd5024fdfb49505a555faea96 (bound 60,000, upstream flag)</tspan></text>
+<text class="t3" x="22" y="157" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 0: history </tspan><tspan>13,216</tspan><tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan><tspan>13,216</tspan><tspan class="d"> tokens</tspan></text>
 <text class="t4" x="22" y="176" textLength="630"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 1 ends with: "The release codename is </tspan><tspan class="h">amber-kestrel-17</tspan><tspan class="d">."</tspan></text>
-<text class="t5" x="22" y="195" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 1: history </tspan>25,542<tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan>25,542<tspan class="d"> tokens</tspan></text>
-<text class="t6" x="22" y="214" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 2: history </tspan>37,856<tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan>37,856<tspan class="d"> tokens</tspan></text>
-<text class="t7" x="22" y="233" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 3: history </tspan>50,170<tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan>13,806<tspan class="d"> tokens</tspan></text>
-<text class="t8" x="22" y="252" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 4: history </tspan>62,484<tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan>26,120<tspan class="d"> tokens</tspan></text>
-<text class="t9" x="22" y="271" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 5: history </tspan>74,798<tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan>38,434<tspan class="d"> tokens</tspan></text>
-<text class="t10" x="22" y="290" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 6: history </tspan>87,112<tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan>14,003<tspan class="d"> tokens</tspan></text>
-<text class="t11" x="22" y="309" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 7: history </tspan>99,426<tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan>26,317<tspan class="d"> tokens</tspan></text>
+<text class="t5" x="22" y="195" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 1: history </tspan><tspan>25,542</tspan><tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan><tspan>25,542</tspan><tspan class="d"> tokens</tspan></text>
+<text class="t6" x="22" y="214" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 2: history </tspan><tspan>37,856</tspan><tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan><tspan>37,856</tspan><tspan class="d"> tokens</tspan></text>
+<text class="t7" x="22" y="233" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 3: history </tspan><tspan>50,170</tspan><tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan><tspan>13,806</tspan><tspan class="d"> tokens</tspan></text>
+<text class="t8" x="22" y="252" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 4: history </tspan><tspan>62,484</tspan><tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan><tspan>26,120</tspan><tspan class="d"> tokens</tspan></text>
+<text class="t9" x="22" y="271" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 5: history </tspan><tspan>74,798</tspan><tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan><tspan>38,434</tspan><tspan class="d"> tokens</tspan></text>
+<text class="t10" x="22" y="290" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 6: history </tspan><tspan>87,112</tspan><tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan><tspan>14,003</tspan><tspan class="d"> tokens</tspan></text>
+<text class="t11" x="22" y="309" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 7: history </tspan><tspan>99,426</tspan><tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan><tspan>26,317</tspan><tspan class="d"> tokens</tspan></text>
 <text class="t12" x="22" y="328" textLength="722.4"><tspan class="s">[stub claude]</tspan><tspan class="d"> runs (the turns now on disk): contexto sessions show $CONTEXTO_SESSION \</tspan></text>
 <text class="t12" x="22" y="347" textLength="537.6"><tspan class="s">[stub claude]</tspan><tspan class="d">     | grep -E 'Pages:|Over-bound|pg_' | cut -c1-74</tspan></text>
-<text class="t13" x="22" y="366" textLength="67.2">Pages: 6</text>
-<text class="t13" x="22" y="385" textLength="159.6">Over-bound turns: 0</text>
-<text class="t13" x="38.8" y="404" textLength="604.8">pg_943b3b63e3ba1170 turn 5: Build log for step 5. Keep it for reference.</text>
-<text class="t13" x="38.8" y="423" textLength="604.8">pg_5414a49f71718017 turn 4: Build log for step 4. Keep it for reference.</text>
-<text class="t13" x="38.8" y="442" textLength="604.8">pg_013c60e824b0e950 turn 3: Build log for step 3. Keep it for reference.</text>
-<text class="t13" x="38.8" y="461" textLength="604.8">pg_5fa5d6d76a34f5d7 turn 2: Build log for step 2. Keep it for reference.</text>
-<text class="t13" x="38.8" y="480" textLength="604.8">pg_80b44e3184b56aa3 turn 1: Build log for step 1. Keep it for reference.</text>
-<text class="t13" x="38.8" y="499" textLength="604.8">pg_c75ba5c144e8fbf1 turn 0: Build log for step 0. Keep it for reference.</text>
+<text class="t13" x="22" y="366" textLength="67.2"><tspan>Pages: 6</tspan></text>
+<text class="t13" x="22" y="385" textLength="159.6"><tspan>Over-bound turns: 0</tspan></text>
+<text class="t13" x="38.8" y="404" textLength="604.8"><tspan>pg_943b3b63e3ba1170 turn 5: Build log for step 5. Keep it for reference.</tspan></text>
+<text class="t13" x="38.8" y="423" textLength="604.8"><tspan>pg_5414a49f71718017 turn 4: Build log for step 4. Keep it for reference.</tspan></text>
+<text class="t13" x="38.8" y="442" textLength="604.8"><tspan>pg_013c60e824b0e950 turn 3: Build log for step 3. Keep it for reference.</tspan></text>
+<text class="t13" x="38.8" y="461" textLength="604.8"><tspan>pg_5fa5d6d76a34f5d7 turn 2: Build log for step 2. Keep it for reference.</tspan></text>
+<text class="t13" x="38.8" y="480" textLength="604.8"><tspan>pg_80b44e3184b56aa3 turn 1: Build log for step 1. Keep it for reference.</tspan></text>
+<text class="t13" x="38.8" y="499" textLength="604.8"><tspan>pg_c75ba5c144e8fbf1 turn 0: Build log for step 0. Keep it for reference.</tspan></text>
 <text class="t14" x="22" y="518" textLength="487.2"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 8 asks: "What is the release codename?"</tspan></text>
-<text class="t15" x="22" y="537" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 8: history </tspan>99,468<tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan>26,358<tspan class="d"> tokens</tspan></text>
+<text class="t15" x="22" y="537" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 8: history </tspan><tspan>99,468</tspan><tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan><tspan>26,358</tspan><tspan class="d"> tokens</tspan></text>
 <text class="t16" x="22" y="556" textLength="688.8"><tspan class="u">[fake upstream]</tspan><tspan class="d"> scripted reply: call contexto_search {"query": "release codename"}</tspan></text>
 <text class="t17" x="22" y="575" textLength="638.4"><tspan class="s">[stub claude]</tspan><tspan class="d"> ran contexto_search on the contexto MCP server, which returns:</tspan></text>
-<text class="t17" x="22" y="594" textLength="462">[best matching pages by relevance, shown newest first:]</text>
-<text class="t17" x="22" y="613" textLength="235.2">pg_80b44e3184b56aa3 (turn 1)</text>
-<text class="t17" x="38.8" y="632" textLength="436.8">42050: build 01.0904 linked module mod_164 in 335 ms</text>
-<text class="t17" x="22" y="651" textLength="420">&gt; 42096: The release codename is <tspan class="h">amber-kestrel-17</tspan>.</text>
-<text class="t17" x="38.8" y="670" textLength="218.4">42138: [turn 1] assistant:</text>
-<text class="t17" x="22" y="689" textLength="756">[Paged hits come only from paged-out turns; the conversation in view is newer than any of </text>
-<text class="t17" x="22" y="708" textLength="50.4">them.]</text>
-<text class="t18" x="22" y="727" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 8: history </tspan>99,642<tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan>26,533<tspan class="d"> tokens</tspan></text>
+<text class="t17" x="22" y="594" textLength="462"><tspan>[best matching pages by relevance, shown newest first:]</tspan></text>
+<text class="t17" x="22" y="613" textLength="235.2"><tspan>pg_80b44e3184b56aa3 (turn 1)</tspan></text>
+<text class="t17" x="38.8" y="632" textLength="436.8"><tspan>42050: build 01.0904 linked module mod_164 in 335 ms</tspan></text>
+<text class="t17" x="22" y="651" textLength="420"><tspan>&gt; 42096: The release codename is </tspan><tspan class="h">amber-kestrel-17</tspan><tspan>.</tspan></text>
+<text class="t17" x="38.8" y="670" textLength="218.4"><tspan>42138: [turn 1] assistant:</tspan></text>
+<text class="t17" x="22" y="689" textLength="756"><tspan>[Paged hits come only from paged-out turns; the conversation in view is newer than any of </tspan></text>
+<text class="t17" x="22" y="708" textLength="50.4"><tspan>them.]</tspan></text>
+<text class="t18" x="22" y="727" textLength="714"><tspan class="s">[stub claude]</tspan><tspan class="d"> turn 8: history </tspan><tspan>99,642</tspan><tspan class="d"> tokens -&gt; </tspan><tspan class="u">[fake upstream]</tspan><tspan class="d"> received </tspan><tspan>26,533</tspan><tspan class="d"> tokens</tspan></text>
 <text class="t18" x="22" y="746" textLength="646.8"><tspan class="s">[stub claude]</tspan><tspan class="d"> scripted reply: "The search result names it: </tspan><tspan class="h">amber-kestrel-17</tspan><tspan class="d">."</tspan></text>
 </g>
 </g>

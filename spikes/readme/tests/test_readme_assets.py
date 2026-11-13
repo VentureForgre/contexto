@@ -8,6 +8,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -88,9 +89,9 @@ def test_chart_full_history_is_the_plain_run_shape_of_the_record():
     assert series.plain[18:] == list(make_chart.BASELINE_PROBE_TOKENS)
     assert make_chart.BASELINE_PROBE_TOKENS == (435_590, 436_155, 436_710, 437_280, 437_846, 438_406)
     listed = " / ".join(f"{v:,}" for v in make_chart.BASELINE_PROBE_TOKENS)
-    record = make_chart.RECORD_PATH.read_text(encoding="utf-8").splitlines()
-    assert f"`count_tokens` per request: {listed};" in record[169], "the record's line 170 lists the six counts"
-    assert "overstates plain" in " ".join(record), "why the CSV's probe-turn column is not plotted"
+    record = make_chart.RECORD_PATH.read_text(encoding="utf-8")
+    assert f"`count_tokens` per request: {listed};" in record, "the record lists the six counts"
+    assert "overstates plain" in record, "why the CSV's probe-turn column is not plotted"
     # The same-request-points peak of the CSV is not in the chart.
     assert 493_902 not in series.plain
     with pytest.raises(ValueError, match="probe turns"):
@@ -302,7 +303,11 @@ def test_recording_frames_first_drop_and_last():
     assert [(span.get("class"), span.text) for span in line][:2] == [("s", demo_script.STUB_LABEL),
                                                                     ("d", " turn 3: history ")]
     sizes = TURN_LINE.search(rows[drop].text).groups()
-    assert [span.tail for span in line if span.tail] == list(sizes)
+    assert [span.text for span in line if span.get("class") is None] == list(sizes)
+    # WebKit stretches bare text next to a <tspan> to the whole textLength, so a row has none.
+    for text in texts:
+        assert not (text.text or "").strip() and len(text), "a row is made of <tspan> pieces only"
+        assert not any((span.tail or "").strip() for span in text), "no bare text between <tspan> pieces"
 
 
 def check_story(text: str) -> None:
@@ -429,6 +434,18 @@ def test_recorder_ends_a_session_that_runs_too_long():
         port = s.getsockname()[1]
     with pytest.raises(RuntimeError, match=r"did not finish within 0\.05 s and was killed(.|\n)*\$ contexto run"):
         record_demo.record(port=port, pace=0, timeout=0.05)
+
+
+def test_recorder_ends_what_a_finished_session_left_running():
+    """A child that outlives the session (a shell command the stub gave up on) holds the terminal, and
+    the capture's close would wait for it. The recorder ends the session's whole process group."""
+    capture = record_demo.Capture(90, 10)
+    std = {"stdin": subprocess.DEVNULL, "stdout": capture.slave, "stderr": capture.slave}
+    started = time.monotonic()
+    assert record_demo.run_session("sleep 60 & echo left-behind", capture, 20, **std) == 0
+    events = capture.close()
+    assert time.monotonic() - started < 15, "the sleep was ended, not waited for"
+    assert "left-behind" in "".join(text for _, text in events)
 
 
 def test_stub_gives_up_on_a_silent_mcp_server():

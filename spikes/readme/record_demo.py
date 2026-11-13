@@ -177,9 +177,10 @@ def run_session(line: str, capture: Capture, timeout: float, **popen: object) ->
         capture.settle()
         raise RuntimeError(f"`contexto run` did not finish within {timeout:g} s and was killed. Captured:\n"
                            f"{capture.text()}") from None
-    except BaseException:
+    finally:
+        # Nothing the session started may outlive it: a child left holding the terminal (a shell
+        # command the stub gave up on, say) would block the capture's close.
         stop_group(session)
-        raise
 
 
 def check_checkout() -> None:

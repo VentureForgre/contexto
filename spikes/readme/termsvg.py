@@ -219,7 +219,9 @@ def render(events: Events, *, title: str, highlight: str | None = None, cols: in
             continue
         indent = len(line.text) - len(stripped)
         pieces = spans(Row(stripped, line.at, line.kind), highlight)
-        body = "".join(f'<tspan class="{cls}">{_text(piece)}</tspan>' if cls else _text(piece)
+        # Every piece is a <tspan>, the tool's own text a plain one. WebKit (Safari, and every browser
+        # on iOS) stretches a bare text node that sits next to a <tspan> to the row's whole textLength.
+        body = "".join(f'<tspan class="{cls}">{_text(piece)}</tspan>' if cls else f"<tspan>{_text(piece)}</tspan>"
                        for cls, piece in pieces)
         cls = f' class="{classes[play[i]]}"' if play[i] in classes else ""
         out.append(f'<text{cls} x="{_number(PAD_X + indent * CHAR_W)}" y="{top + i * LINE_H + 14}" '

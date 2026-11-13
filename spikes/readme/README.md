@@ -91,8 +91,8 @@ contexto sessions show $CONTEXTO_SESSION \
 ```
 
 `contexto run` sets `CONTEXTO_SESSION` for the CLI and its shell commands. The `grep` keeps the page
-count, the over-bound count and the page lines. The `cut` ends each page line after its first
-sentence. What the recording shows under the command is that pipe's output, unchanged.
+count, the over-bound count and the page lines. The `cut` ends each page line after the turn's
+first line. What the recording shows under the command is that pipe's output, unchanged.
 
 ### What the numbers mean
 
