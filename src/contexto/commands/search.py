@@ -12,6 +12,9 @@ were searched when not every word was (stop words dropped, or a query of more th
 each page's index line a line names the words the page matched and the ones it did not. With
 ``--json`` the object then has ``approximate`` and ``searched``, and each hit ``matched`` and
 ``missing``; a strict result's object is as D64 made it.
+
+``--project`` (D69) also searches the earlier sessions of the session's project, as the tool does with
+``scope: "project"``: the same sessions, under the same labels, read without changing them.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from contexto.commands._common import EXIT_OK, add_session_option, fail, say_ses
 from contexto.paths import contexto_home
 from contexto.store import PageUnreadableError, SessionNotFoundError, SessionStore
 from contexto.store.pages import current_stub, index_line
+from contexto.store.project import EARLIER_HITS, EARLIER_SESSIONS
 from contexto.store.render import MATCHES_PER_PAGE, match_lines, matching_line_starts, render_page
 from contexto.store.search import APPROX_LIMIT, ApproxHit, Plan, Query, hit_view, hit_words, text_matches
 from contexto.store.sessions import select_session
@@ -64,6 +68,11 @@ def register(subparsers) -> None:
                         help=f"show at most N matching pages (default {DEFAULT_LIMIT})")
     parser.add_argument("--json", action="store_true",
                         help="print JSON; no match is an empty hits list, and an error is still one line on stderr")
+    parser.add_argument("--project", action="store_true",
+                        help=f"also search the earlier sessions of the session's project (the newest "
+                             f"{EARLIER_SESSIONS}), read-only: the best {EARLIER_HITS} pages of each, under a "
+                             "line with the session's label and date; `contexto recall PAGE_ID --from LABEL` "
+                             "prints one")
     parser.set_defaults(func=run)
 
 
@@ -121,6 +130,8 @@ def run(args: argparse.Namespace) -> int:
         rest = len(found) - shown
         print(f"[{rest} more matching page{'' if rest == 1 else 's'}: rerun with --limit {len(found)}]",
               file=sys.stderr)
+    if args.project:
+        search_earlier(store, query, bool(shown))
     return EXIT_OK
 
 
@@ -165,11 +176,43 @@ def hit_json(page_id: str, page: dict, query: str,
     return hit
 
 
+def search_earlier(store: SessionStore, query: str, after_hits: bool) -> None:
+    """Print what the earlier sessions of the session's project hold of ``query`` (D69): for each with a
+    match, newest first, a line with its label and date as the MCP tool shows them, then its best pages.
+    Those sessions are only read: nothing is locked, logged or created in them."""
+    session_id = store.session_id
+    found = store.search_earlier(query)
+    if found is None:
+        print(f"session {session_id} is not in a project, or project memory is off for it: only this session "
+              "was searched", file=sys.stderr)
+        return
+    for hits in found.hits:
+        if after_hits:
+            print()
+        best = f", the best {len(hits.pages)} of {hits.found} matching pages" if hits.found > len(hits.pages) else ""
+        print(f"[session {hits.label}, {hits.date}{best}:]")
+        print("\n\n".join("\n".join(hit_lines(page_id, page, query, session_id, earlier=hits.label))
+                          for page_id, page in hits.pages))
+        after_hits = True
+    if found.hits:
+        print(f"[to print a page of an earlier session: contexto recall PAGE_ID --session {session_id} "
+              "--from LABEL --offset N]", file=sys.stderr)
+    else:
+        print(f"no earlier session of this project contains every word of {query!r}", file=sys.stderr)
+    if found.not_searched:
+        print(f"[{found.not_searched} older session{'' if found.not_searched == 1 else 's'} of this project not "
+              "searched]", file=sys.stderr)
+    if found.skipped:
+        print(f"[{found.skipped} earlier session{'' if found.skipped == 1 else 's'} could not be read]",
+              file=sys.stderr)
+
+
 def hit_lines(page_id: str, page: dict, query: str, session_id: str,
-              approximate: tuple[ApproxHit, Plan | None] | None = None) -> list[str]:
+              approximate: tuple[ApproxHit, Plan | None] | None = None, earlier: str | None = None) -> list[str]:
     """The page's index line, then its matching lines (``>``) and their context, each with its offset.
     An approximate hit (D65) has a line under the index line naming the words the page matched and the
-    ones it did not, and its matching lines are chosen by the forms found on the page."""
+    ones it did not, and its matching lines are chosen by the forms found on the page. ``earlier`` is the
+    label of the earlier session the page is in, when it is not ``session_id``'s (D69)."""
     lines = [index_line(current_stub(page))]
     text = render_page(page)
     if approximate is None:
@@ -185,6 +228,7 @@ def hit_lines(page_id: str, page: dict, query: str, session_id: str,
     lines += [f"  {'>' if is_match else ' '} {start}: {line}" for start, _, is_match, line in rows]
     if total > MATCHES_PER_PAGE:
         first = matching_line_starts(text, q)[0]
+        origin = f" --from {earlier}" if earlier else ""
         lines.append(f"  [{total - MATCHES_PER_PAGE} more matching lines: contexto recall {page_id} "
-                     f"--session {session_id} --offset {first}]")
+                     f"--session {session_id}{origin} --offset {first}]")
     return lines

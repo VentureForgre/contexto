@@ -6,6 +6,8 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
 
 - ``pages/<page id>.json``: one immutable page per paged-out turn (see ``contexto.store.pages``).
   Search and the index read them through a per-process cache (``contexto.store.catalog``, D34).
+  ``search_earlier`` and ``earlier_page`` read the pages of the project's earlier sessions (D69),
+  without writing anything to those sessions (``contexto.store.project.EarlierPages``).
 - ``page.key``: the random per-store HMAC key for page ids. It never leaves the store.
 - ``ledger.jsonl`` (with ``ledger.lock`` and ``quarantine/``): the hash-chained session ledger.
   Opening a store repairs a crash-truncated tail and logs ``ledger_repaired``; other damage is
@@ -75,7 +77,21 @@ from contexto.private import (
 from contexto.store.catalog import PageCatalog, load_page
 from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, render_index, same_content
-from contexto.store.project import Project, merged_main_records, project_root, recorded_root, session_project
+from contexto.store.project import (
+    PAGE_DAMAGE,
+    EarlierPages,
+    EarlierSearch,
+    EarlierSession,
+    NotEarlierSessionError,
+    Project,
+    merged_main_records,
+    project_root,
+    read_page,
+    recorded_root,
+    session_date,
+    session_project,
+    shown_label,
+)
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 from contexto.store.search import Approximate, rank, rank_approximate
@@ -1020,8 +1036,10 @@ class SessionStore(LedgerOps):
 
     def set_search_cache(self, budget_bytes: int | None) -> None:
         """Hold at most ``budget_bytes`` of page text for search in this process (None: no limit; D39).
-        Search results do not depend on it: a page whose text is not held is read again when searched."""
+        Search results do not depend on it: a page whose text is not held is read again when searched.
+        The text of earlier sessions' pages, held for project-scope searches, counts against it too (D69)."""
         self._catalog.set_text_budget(budget_bytes)
+        self._trim_earlier()
 
     def get_page(self, page_id: str) -> dict[str, Any] | None:
         """The page record for ``page_id``, or None if this store has no such page. Raises
@@ -1058,6 +1076,7 @@ class SessionStore(LedgerOps):
             found = rank(entries, query, fetch)
             if self._catalog.all_present(names):
                 break
+        self._trim_earlier()  # this session's text has the first claim on the budget (D69)
         return found
 
     def search_approximate(self, query: str) -> Approximate:
@@ -1069,7 +1088,61 @@ class SessionStore(LedgerOps):
             found = rank_approximate(entries, query, fetch)
             if self._catalog.all_present(names):
                 break
+        self._trim_earlier()  # as ``search``: this session's text has the first claim (D69)
         return found
+
+    # The pages of the project's earlier sessions (D69, design section 7)
+
+    @property
+    def _earlier(self) -> EarlierPages:
+        """This process's reader of the earlier sessions' pages; its text shares the search budget."""
+        earlier = self.__dict__.get("_earlier_pages")
+        if earlier is None:
+            earlier = self.__dict__["_earlier_pages"] = EarlierPages(self._catalog)
+        return earlier
+
+    def _trim_earlier(self) -> None:
+        """Give back what earlier sessions' text holds of the search budget beyond what this session's
+        leaves. Nothing to do, and nothing read, until a project-scope search has run in this process."""
+        earlier = self.__dict__.get("_earlier_pages")
+        if earlier is not None:
+            earlier.trim()
+
+    def search_earlier(self, query: str) -> EarlierSearch | None:
+        """Search the earlier sessions of this session's project (``EarlierPages.search``: the newest
+        50, the best 3 pages of each with a match, newest session first); None when this session has no
+        project view. Strictly read-only in those sessions, and nothing about them is logged here."""
+        project = self.project()
+        return None if project is None else self._earlier.search(project, query)
+
+    def earlier_session(self, session: str) -> EarlierSession:
+        """The earlier session of this session's project that ``session`` names: its id, or its label or
+        any other start of its id that no other earlier session shares.
+
+        Anything else raises ``NotEarlierSessionError``: this session itself, a later session, a session
+        of another project or with project memory off, an unknown or ambiguous value, a value that is
+        not a string, or any value when this session has no project view. The value is only compared
+        with the ids of the earlier sessions listed; no path is ever built from it."""
+        project = self.project()
+        if project is None:
+            raise NotEarlierSessionError()
+        try:
+            member = project.earlier_session(session)
+        except LookupError:
+            starts = sum(m.id.startswith(session) for m in project.earlier) if isinstance(session, str) else 0
+            raise NotEarlierSessionError(starts if session else 0) from None
+        return EarlierSession(member.id, shown_label(project.label(member.id)), session_date(member.created),
+                              member.pages_dir)
+
+    def earlier_page(self, session: EarlierSession, page_id: str) -> dict[str, Any] | None:
+        """A page of an earlier session ``earlier_session`` returned; None when that session has no such
+        page, or lost it or itself to a prune. Raises ``PageUnreadableError`` when the page file cannot
+        be read or is not a page record; unlike ``get_page`` nothing is logged, here or in that session,
+        and nothing in that session is created, locked or changed."""
+        try:
+            return read_page(session.pages_dir, page_id)
+        except (OSError, *PAGE_DAMAGE) as e:
+            raise PageUnreadableError(f"page {page_id} cannot be read", damaged=not isinstance(e, OSError)) from None
 
     def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
         salient = lists_identifiers(self.recall_variant(variant))
