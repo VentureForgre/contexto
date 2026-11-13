@@ -450,6 +450,26 @@ def test_only_events_that_mean_something_went_wrong_are_counted(tmp_path):
     assert "23 events" in "\n".join(render(out)) and "transform_error 1" in "\n".join(render(out))
 
 
+def test_a_fault_nothing_else_warned_about_outlives_quiet(tmp_path):
+    from contexto.stats import NOTICED_EVENTS, exit_summary
+
+    write_log(tmp_path, "w1", [*launch(0), {"event": "transform_error", "level": "error", "error": "KeyError"},
+                               request(1, events=({"event": "mcp_tools_missing", "at": "request"},)),
+                               request(2, events=({"event": "retained_stale", "error": "OSError"},))])
+    warning = ("contexto: warning: this run logged 2 events (retained_stale 1, transform_error 1) that Contexto left "
+               "its designed path. Details: contexto stats w1")
+    assert exit_summary(tmp_path, "w1", "claude", 5.0, quiet=True) == [warning]
+    loud = exit_summary(tmp_path, "w1", "claude", 5.0)
+    assert loud[0] == "contexto: session w1 ended after 5s" and loud[-1] == warning
+    assert ("  faults      3 events (mcp_tools_missing 1, retained_stale 1, transform_error 1); details: contexto "
+            "stats w1") == loud[-2]
+    # A run whose only faults the launcher's own warnings described adds no second warning.
+    write_log(tmp_path, "w2", [*launch(0), request(1, degraded=True, events=(store_error(), ENTER)),
+                               request(2, events=({"event": "mcp_tools_denied"}, {"event": "bound_too_small"}))])
+    assert exit_summary(tmp_path, "w2", "claude", 5.0, quiet=True) == []
+    assert NOTICED_EVENTS < set(FAULT_EVENTS)
+
+
 def test_the_engine_s_own_fault_list_is_covered():
     """The contract's acceptance check (M2, check 1) fails a run on these events; all but one are faults
     here. ``turn_room_low`` is left out on purpose: at a small bound every epoch logs it (docs/stats.md)."""

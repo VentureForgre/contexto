@@ -688,6 +688,10 @@ def fault_lines(out: dict[str, Any]) -> list[str]:
 # The exit summary of ``contexto run`` ---------------------------------------------------------------
 
 INFO_ARGS = (["--version"], ["-v"], ["-V"], ["--help"], ["-h"])  # the CLI prints and exits: no summary
+# The fault events the launcher's NoticeLog already puts on stderr in its own words (a store failure is
+# said with ``degraded_enter``'s cause), so the exit summary does not warn about them a second time.
+NOTICED_EVENTS = frozenset({"store_error", "page_conflict", "degraded_enter", "mcp_tools_missing",
+                            "mcp_tools_denied", "bound_too_small"})
 QUIET_ENV = "CONTEXTO_QUIET"
 
 
@@ -701,8 +705,9 @@ def quiet_from_env(env: Any = None) -> bool:
 def exit_summary(home: Path, session_id: str, cli: str, elapsed_s: float, *, quiet: bool = False,
                  log_incomplete: bool = False) -> list[str]:
     """The lines ``contexto run`` prints on stderr once the CLI has exited: what this run did (the log
-    from its proxy start on, not the whole of a resumed session), then one warning line when the run
-    logged faults. ``quiet`` drops the summary and keeps the warning."""
+    from its proxy start on, not the whole of a resumed session), with a ``faults`` line when it logged
+    any, then one warning line for the faults no earlier warning described (``NOTICED_EVENTS``).
+    ``quiet`` drops the summary and keeps the warning."""
     out = session_stats(home, session_id, last_run=True)
     head = f"contexto: session {session_id} ended after {duration_text(elapsed_s)}"
     requests = out["requests"]
@@ -723,13 +728,17 @@ def exit_summary(home: Path, session_id: str, cli: str, elapsed_s: float, *, qui
         lines.append(f"{head} with no model request through Contexto ({reached}). If you sent {cli} a prompt, it "
                      f"bypassed Contexto and nothing was bounded or paged: see docs/stats.md, 'No model request'.")
     faults = out["faults"]
-    if faults["total"]:
+    if faults["total"] and lines and requests["model"]:
         degraded = faults["degraded"]
         state = ""
         if degraded["entered"] or degraded["unpaged_requests"]:
             state = (f": {_n(degraded['unpaged_requests'], 'request')} went out unpaged, and paging "
                      f"{'had not resumed at exit' if degraded['now'] else 'resumed before exit'}")
-        lines.append(f"contexto: warning: this run logged {fault_summary(faults)}{state}. "
+        lines.append(f"  faults      {fault_summary(faults)}{state}; details: contexto stats {session_id}")
+    unsaid = {name: count for name, count in faults["events"].items() if name not in NOTICED_EVENTS}
+    if unsaid:
+        counted = fault_summary({"total": sum(unsaid.values()), "events": unsaid})
+        lines.append(f"contexto: warning: this run logged {counted} that Contexto left its designed path. "
                      f"Details: contexto stats {session_id}")
     return lines
 

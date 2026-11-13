@@ -34,8 +34,8 @@ contexto: resume this conversation through Contexto with: contexto run --session
   line; a run with no usage from the API has no `cache` line. The `requests` and `bytes` lines are
   left to `contexto stats`, except that a run with failed model requests shows the `requests` line.
 - `contexto run --quiet claude ...` or `CONTEXTO_QUIET=1` (any value but empty, `0`, `false` or
-  `no`) drops the summary. Warnings are never dropped: the held warnings, and the line that counts a
-  run's faults (below), are printed either way.
+  `no`) drops the summary. Warnings are never dropped: the held warnings, and the warning for faults
+  that no other warning described (below), are printed either way.
 - Building the summary never changes the exit code. If it fails, nothing is printed.
 - No summary is printed when the CLI was only asked for its version or help (`--version`, `-v`,
   `-V`, `--help`, `-h`), or when the launch ended before the CLI started (a usage error, Ctrl+C
@@ -271,10 +271,10 @@ It is now said in three places:
    contexto: warning: the disk that holds Contexto's store is full (ENOSPC during page_out), so paging has stopped: requests go out unpaged and can exceed the bound. Free space on the disk that holds $CONTEXTO_HOME (default ~/.contexto). Contexto retries at each turn start and pages again once the store works; turns already paged are kept.
    ```
 
-   and, after the summary, a line that counts the run's faults, which `--quiet` does not drop:
+   and a line in the summary that counts the run's faults and says whether paging resumed:
 
    ```
-   contexto: warning: this run logged 3 events (store_error 2, degraded_enter 1): 2 requests went out unpaged, and paging had not resumed at exit. Details: contexto stats 7f3a...
+     faults      3 events (store_error 2, degraded_enter 1): 2 requests went out unpaged, and paging had not resumed at exit; details: contexto stats 7f3a...
    ```
 
 2. **In `contexto stats`**, under `faults`, with the same advice and whether paging has resumed.
@@ -332,6 +332,14 @@ are logged outside the engine added.
 | `mcp_tools_denied` | The CLI refused a Contexto tool. |
 | `turn_room_missing` | A Contexto tool found no recall room for its turn. |
 | `toolcheck_error`, `cli_version_error`, `observe_usage_error` | One of Contexto's own checks failed. |
+
+The launcher already warns on stderr, in its own words, about `store_error`, `page_conflict` (and so
+`degraded_enter`), `mcp_tools_missing`, `mcp_tools_denied` and `bound_too_small`. For a run that
+logged any other fault, `contexto run` ends with one more warning, which `--quiet` does not drop:
+
+```
+contexto: warning: this run logged 2 events (retained_stale 1, transform_error 1) that Contexto left its designed path. Details: contexto stats 7f3a...
+```
 
 Events that are **not** counted, because they happen in normal use:
 

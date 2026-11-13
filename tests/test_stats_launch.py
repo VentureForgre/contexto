@@ -106,13 +106,14 @@ def test_quiet_drops_the_summary_and_never_a_warning(env, upstream, tmp_path, ho
     done = run(env, *args, "--upstream", upstream, "--session", "q1", "claude", "-p", "hello", cwd=tmp_path)
     assert done.returncode == 0, done.stderr
     assert summary(done.stderr) == [] and "ended after" not in done.stderr
-    assert "warning: Claude Code is running without Contexto's tools" in done.stderr
+    [warning] = [line for line in done.stderr.splitlines() if "warning" in line]
+    assert "Claude Code is running without Contexto's tools" in warning
     assert done.stderr.splitlines()[-1].startswith("contexto: resume this conversation")
-    # The same run without it has both, and the warning that counts the fault outlives --quiet.
-    assert "contexto: warning: this run logged 1 event (mcp_tools_missing 1). Details: contexto stats q1" in done.stderr
+    # The same run without it has the summary, whose faults line counts what the warning described.
     env.pop("CONTEXTO_QUIET", None)
     loud = run(env, "--upstream", upstream, "--session", "q2", "claude", "-p", "hello", cwd=tmp_path)
-    assert summary(loud.stderr) and "this run logged 1 event (mcp_tools_missing 1)" in loud.stderr
+    assert summary(loud.stderr)[-1] == "  faults      1 event (mcp_tools_missing 1); details: contexto stats q2"
+    assert len([line for line in loud.stderr.splitlines() if "warning" in line]) == 1  # said once, not twice
     assert env["CONTEXTO_HOME"] not in loud.stderr and str(tmp_path) not in "".join(summary(loud.stderr))
 
 
@@ -415,9 +416,10 @@ def test_a_full_disk_is_seen_at_exit_in_stats_and_in_state(tmp_path, token_upstr
     assert str(home) not in err.getvalue()  # the exception's text, with its path, is never shown or logged
     assert str(home) not in (home / "sessions" / "disk1" / "log.jsonl").read_text()
     lines = stats.exit_summary(home, "disk1", "claude", 12.0, quiet=True)
-    # --quiet keeps the one line that counts the run's faults.
-    assert lines == ["contexto: warning: this run logged 3 events (store_error 2, degraded_enter 1): 2 requests went "
-                     "out unpaged, and paging resumed before exit. Details: contexto stats disk1"]
+    assert lines == []  # --quiet: the warning above said it, and nothing else is printed
+    lines = stats.exit_summary(home, "disk1", "claude", 12.0)
+    assert lines[-1] == ("  faults      3 events (store_error 2, degraded_enter 1): 2 requests went out unpaged, and "
+                         "paging resumed before exit; details: contexto stats disk1")
 
 
 # Codex -----------------------------------------------------------------------------------------------
@@ -475,11 +477,11 @@ def test_codex_ends_with_a_summary_too(tmp_path, monkeypatch, codex_bin, token_u
     assert lines[1] == f"  prompt      peak {tokens:,} of 150,000 tokens (measured); over the bound: 0 requests"
     assert "  cache       50% of input tokens read from cache (measured)" in lines
     assert not [line for line in lines if "compaction" in line]  # nothing in a Codex log shows one
-    # Codex has no resume line. The stand-in never asked the MCP server for its tools, which is a fault,
-    # so the line that counts it follows the summary.
-    assert err.splitlines()[-2] == lines[-1]
-    assert err.splitlines()[-1] == ("contexto: warning: this run logged 1 event (mcp_tools_missing 1). Details: "
-                                    "contexto stats cx1")
+    # Codex has no resume line, so the summary is last. The stand-in never asked the MCP server for its
+    # tools, which the launcher warns about and the summary counts.
+    assert lines[-1] == "  faults      1 event (mcp_tools_missing 1); details: contexto stats cx1"
+    assert err.splitlines()[-1] == lines[-1]
+    assert len([line for line in err.splitlines() if "warning" in line]) == 1
     quiet_code, quiet_err = codex_run(monkeypatch, token_upstream, "cx2", responses_request, "exec", "hi", quiet=True)
     assert quiet_code == 5 and "ended after" not in quiet_err
     monkeypatch.setenv("CONTEXTO_QUIET", "yes")
