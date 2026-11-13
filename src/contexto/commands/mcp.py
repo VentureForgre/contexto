@@ -1,8 +1,13 @@
-"""`contexto mcp --session S`: serve one session's store to Claude Code or Codex over stdio (MCP).
+"""`contexto mcp`: serve session stores to Claude Code or Codex over stdio (MCP), in one of two modes.
 
-The session must exist: ``contexto run`` creates it before the CLI spawns this server, and a server
-started for a mistyped id would otherwise create an empty session that later became the default for
-``state`` and ``recall`` (D57).
+``--session S`` serves one session. The session must exist: ``contexto run`` creates it before the
+CLI spawns this server, and a server started for a mistyped id would otherwise create an empty
+session that later became the default for ``state`` and ``recall`` (D57).
+
+``--serve`` is for clients of ``contexto serve``, which Contexto does not launch: the server is
+registered once in the user's Claude Code configuration, starts with no session, and finds the
+session of each tool call by asking the service (``contexto.mcp.ServeServer``, D70). It needs neither
+a session nor the service to start and to list its tools, and it never creates a session either.
 """
 
 from __future__ import annotations
@@ -10,20 +15,34 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import IO, TYPE_CHECKING
 
 from contexto.paths import absolute_home, contexto_home, session_dir
+
+if TYPE_CHECKING:
+    from contexto.mcp import ServeServer
+    from contexto.store import SessionStore
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "mcp",
-        help="run the MCP server for a session on stdio (the CLI spawns this)",
+        help="run the MCP server on stdio, for one session or for the service's sessions (the CLI spawns this)",
         description="Serve contexto_recall, contexto_pin, contexto_close, contexto_state, and contexto_search "
-        "for one existing session over stdio. `contexto run` starts it for Claude Code and Codex. Only "
-        "protocol messages are written to stdout.",
+        "over stdio. Give exactly one of --session and --serve. With --session ID it serves that one existing "
+        "session; `contexto run` starts it this way for Claude Code and Codex. With --serve it serves the "
+        "sessions of a running `contexto serve`: each tool call goes to the session of the conversation that "
+        "made it, and fails with a message when that session cannot be found. Only protocol messages are "
+        "written to stdout.",
     )
-    parser.add_argument("--session", required=True, help="session id (the exact id of an existing session)")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--session", help="session id (the exact id of an existing session)")
+    mode.add_argument("--serve", action="store_true",
+                      help="find each tool call's session by asking the running `contexto serve`; for an MCP "
+                      "server registered in Claude Code's own configuration")
     parser.add_argument("--home", type=Path, default=None,
                         help="data directory (default: $CONTEXTO_HOME, else ~/.contexto)")
     parser.add_argument("--search-cache-mb", type=_megabytes, default=None, metavar="MB",
@@ -48,6 +67,8 @@ def run(args: argparse.Namespace) -> int:
     # The same resolution as the other subcommands, and --home under the same rule (B24): a client that
     # writes --home=~/y without a shell gets the expanded absolute path, not a literal ./~/y.
     home = absolute_home(args.home) if args.home else contexto_home()
+    if args.serve:  # no session and no service needed to start: the tools must always list
+        return serve_server(home, args.search_cache_mb, sys.stdout, sys.stderr).serve(sys.stdin)
     try:
         # lexists: an entry that is there but cannot be opened (a dangling link) gets the store's own error
         if not os.path.lexists(session_dir(home, args.session)):
@@ -75,3 +96,65 @@ def env_budget(store) -> int:
     except ValueError:
         store.log({"event": "search_cache_invalid", "value": str(value)[:100]})
         return text_budget_bytes(None)
+
+
+class ExistingSessions:
+    """The sessions under one home, for ``contexto mcp --serve``: opened only when they already exist
+    as real directories, each with the search text budget ``--session`` mode gives its one store (the
+    flag, else ``CONTEXTO_SEARCH_CACHE_MB``, else the default; per store, so the server holds at most
+    ``contexto.mcp.STORE_CACHE`` times that)."""
+
+    def __init__(self, home: Path, search_cache: int | None) -> None:
+        self.home = home
+        self.search_cache = search_cache
+
+    def check(self, session_id: str) -> None:
+        """``SessionUnavailable`` unless ``session_id`` is a valid id naming an existing session directory
+        that is not a symlink. Nothing is created or changed, so it is also run before every call on a
+        store that is already open: a session deleted since is refused, not written back."""
+        from contexto.mcp import SessionUnavailable
+        from contexto.store import refuse_symlinked_session
+
+        try:
+            path = session_dir(self.home, session_id)
+        except ValueError:
+            raise SessionUnavailable("it is not a valid session id") from None
+        try:
+            refuse_symlinked_session(path)
+        except OSError:
+            raise SessionUnavailable("its directory is a symlink, and Contexto uses only real directories") from None
+        if not os.path.lexists(path):  # as --session mode: the MCP server never creates a session (D57)
+            raise SessionUnavailable(f"there is no such session under {self.home / 'sessions'}")
+
+    def open(self, session_id: str) -> SessionStore:
+        """The session's store. ``SessionUnavailable`` as ``check``, or when opening fails;
+        ``LockFileDamagedError`` passes through, since its reply names the file to delete (D59)."""
+        from contexto.mcp import SessionUnavailable
+        from contexto.store import LockFileDamagedError, SessionStore
+
+        self.check(session_id)
+        try:
+            store = SessionStore(self.home, session_id)
+        except LockFileDamagedError:
+            raise
+        except (OSError, ValueError) as exc:  # the class only: the text can hold paths and stored values
+            raise SessionUnavailable(f"opening it failed with {type(exc).__name__}") from None
+        store.set_search_cache(self.search_cache if self.search_cache is not None else env_budget(store))
+        return store
+
+
+def serve_server(home: Path, search_cache: int | None, stdout: IO[str], stderr: IO[str], *,
+                 environ: Mapping[str, str] | None = None, clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep) -> ServeServer:
+    """The ``--serve`` server for ``home``: it asks the service named by ``home``'s ``serve.json`` and
+    ``serve.token`` (``contexto.serveclient``) and opens sessions under ``home``. ``environ`` (default
+    the process environment) is read only for the provider switches that make Claude Code bypass the
+    service; ``clock`` and ``sleep`` drive the retry, so a test does not wait."""
+    from contexto import serveclient
+    from contexto.mcp import ServeServer, provider_switch
+
+    def resolve(tool_use_id: str) -> str:
+        return serveclient.resolve(home, tool_use_id, clock=clock, sleep=sleep)
+
+    return ServeServer(resolve, ExistingSessions(home, search_cache), stdout, stderr,
+                       switch=provider_switch(os.environ if environ is None else environ))
