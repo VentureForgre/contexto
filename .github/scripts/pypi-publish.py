@@ -17,7 +17,8 @@ plan     Ask the index what it holds for the version and write the paths that ma
            404                              both files
            200, same sha256 for every file  the files the index does not have yet, possibly none
            200, a file with another sha256  fail: a version on PyPI cannot be replaced
-           anything else                    fail without a plan
+           200, no files at all             fail: the version's files were deleted
+           anything else                    asked again, then fail without a plan
 confirm  After the upload, wait until the index lists both files with this release's digests.
 
 Every subcommand runs verify first. The upload itself is `uv publish` in the workflow.
@@ -26,6 +27,7 @@ Every subcommand runs verify first. The upload itself is `uv publish` in the wor
 import argparse
 import email.parser
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -33,20 +35,25 @@ import sys
 import tarfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
-RELEASE_TAG = re.compile(r"v(\d+\.\d+\.\d+)")
+RELEASE_TAG = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+)")
 SUMS_LINE = re.compile(r"([0-9a-f]{64})  (\S+)")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 # A generic client name: the request says nothing about the repository it comes from.
 USER_AGENT = "release-publish-check (python-urllib)"
-NOT_REPLACEABLE = (
-    "A version on PyPI cannot be replaced, even after it is deleted. Cut a new release (a new "
-    "version) instead. Nothing was uploaded."
-)
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+# Nothing this script reads is large: the index's answer for one version is a few kilobytes, and
+# so are METADATA, PKG-INFO and SHA256SUMS.
+MAX_ANSWER = 4 * 1024 * 1024
+MAX_METADATA = 1024 * 1024
+MAX_SUMS = 64 * 1024
+NOT_REPLACEABLE = "A version on PyPI cannot be replaced, even after it is deleted. Cut a new release (a new version)."
 
 
 class Refused(Exception):
@@ -78,29 +85,38 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def _headers(text):
-    message = email.parser.HeaderParser().parsestr(text)
+def _headers(file):
+    data = file.read(MAX_METADATA + 1)
+    if len(data) > MAX_METADATA:
+        raise ValueError(f"the metadata is larger than {MAX_METADATA} bytes")
+    message = email.parser.HeaderParser().parsestr(data.decode("utf-8"))
     return message.get("Name"), message.get("Version")
 
 
-def _wheel_metadata(path):
+def _wheel_metadata(path, _stem):
     with zipfile.ZipFile(path) as archive:
         names = [name for name in archive.namelist() if re.fullmatch(r"[^/]+\.dist-info/METADATA", name)]
         if len(names) != 1:
             raise ValueError(f"expected one .dist-info/METADATA, found {len(names)}")
-        return _headers(archive.read(names[0]).decode("utf-8"))
+        with archive.open(names[0]) as file:
+            return _headers(file)
 
 
-def _sdist_metadata(path):
+def _sdist_metadata(path, stem):
+    # Only the sdist's own top directory: a PKG-INFO anywhere else says nothing about the sdist.
+    wanted = f"{stem}/PKG-INFO"
     with tarfile.open(path, "r:gz") as archive:
-        members = [m for m in archive.getmembers() if m.isfile() and re.fullmatch(r"[^/]+/PKG-INFO", m.name)]
+        members = [member for member in archive.getmembers() if member.name == wanted and member.isfile()]
         if len(members) != 1:
-            raise ValueError(f"expected one PKG-INFO at the top of the sdist, found {len(members)}")
-        return _headers(archive.extractfile(members[0]).read().decode("utf-8"))
+            raise ValueError(f"expected the file {wanted}, found {len(members)}")
+        with archive.extractfile(members[0]) as file:
+            return _headers(file)
 
 
 def _read_sums(path):
     try:
+        if path.stat().st_size > MAX_SUMS:
+            raise Refused(f"SHA256SUMS is larger than {MAX_SUMS} bytes; it lists two files")
         text = path.read_text(encoding="ascii")
     except FileNotFoundError:
         raise Refused(
@@ -136,6 +152,9 @@ def load_release(dist, project, tag):
         raise Refused(f"Expected exactly one wheel and one sdist on the release {tag}, found: {found}")
     wheel, sdist = wheels[0], sdists[0]
     files = {wheel.name: wheel, sdist.name: sdist}
+    for path in (wheel, sdist, dist / "SHA256SUMS"):
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise Refused(f"{path.name} on the release {tag} is not a regular file")
 
     sums = _read_sums(dist / "SHA256SUMS")
     for name in sorted(files):
@@ -155,15 +174,20 @@ def load_release(dist, project, tag):
     stem = f"{normalize(project).replace('-', '_')}-{version}"
     for kind, path, read in (("wheel", wheel, _wheel_metadata), ("sdist", sdist, _sdist_metadata)):
         try:
-            name, got = read(path)
-        except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile, tarfile.TarError) as error:
+            name, got = read(path, stem)
+        except (OSError, ValueError, KeyError, EOFError, RuntimeError, NotImplementedError, zipfile.BadZipFile,
+                tarfile.TarError, zlib.error) as error:
             raise Refused(f"Cannot read the metadata of the {kind} {path.name}: {error}") from None
-        if name is None or normalize(name) != normalize(project):
-            raise Refused(
-                f"The {kind} {path.name} is the distribution {name!r} (metadata Name), not {project}. "
-                f"A file built before the distribution was renamed cannot be published to PyPI as "
-                f"{project}: publish a release that was cut after the rename."
-            )
+        if name is None:
+            raise Refused(f"The {kind} {path.name} has no Name in its metadata. Only {project} is published.")
+        if normalize(name) != normalize(project):
+            why = f"Only {project} is published by this workflow."
+            if normalize(name) == "contexto":
+                why = (
+                    f"A file built before the distribution was renamed cannot be published to PyPI as "
+                    f"{project}: publish a release that was cut after the rename."
+                )
+            raise Refused(f"The {kind} {path.name} is the distribution {name!r} (metadata Name), not {project}. {why}")
         if got != version:
             raise Refused(
                 f"The {kind} {path.name} carries version {got!r} (metadata Version), not {version!r}, "
@@ -183,15 +207,26 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def fetch(url, timeout=30):
-    """GET `url` and return (status, body). A redirect is returned, not followed."""
+    """GET `url` and return (status, body). A redirect is returned, not followed.
+
+    Raises OSError or http.client.HTTPException when there is no whole answer, and OSError when the
+    answer is larger than MAX_ANSWER.
+    """
     request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
-    opener = urllib.request.build_opener(_NoRedirect)
+    handlers = [_NoRedirect]
+    if urllib.parse.urlsplit(url).hostname in LOOPBACK:
+        # A proxy from the environment must not get a request meant for this machine.
+        handlers.append(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(*handlers)
     try:
         with opener.open(request, timeout=timeout) as response:
-            return response.status, response.read()
+            status, body = response.status, response.read(MAX_ANSWER + 1)
     except urllib.error.HTTPError as error:
         with error:
-            return error.code, error.read()
+            status, body = error.code, error.read(MAX_ANSWER + 1)
+    if len(body) > MAX_ANSWER:
+        raise OSError(f"the answer is larger than {MAX_ANSWER} bytes")
+    return status, body
 
 
 def _published(release, project, index, fetch):
@@ -199,8 +234,9 @@ def _published(release, project, index, fetch):
     url = f"{index.rstrip('/')}/pypi/{normalize(project)}/{release.version}/json"
     try:
         status, body = fetch(url)
-    except OSError as error:
-        raise _Unreadable(f"{url} could not be reached: {error}") from None
+    except (OSError, http.client.HTTPException) as error:
+        # No connection, a timeout, or an answer that broke off or was not HTTP.
+        raise _Unreadable(f"no usable answer from {url}: {error!r}") from None
     if status == 404:
         return None
     if status != 200:
@@ -218,19 +254,24 @@ def _published(release, project, index, fetch):
     return published
 
 
-def _compare(release, project, published):
+def _compare(release, project, published, after_upload=False):
     """Raise Refused when the index holds a file for the version that is not one of ours."""
+    what = f"{project} {release.version}"
+    if after_upload:
+        # The upload step has run, so this run may have put files on PyPI.
+        start = "After the upload, PyPI lists"
+        end = f"{NOT_REPLACEABLE} Look at https://pypi.org/project/{normalize(project)}/{release.version}/#files."
+    else:
+        start = "PyPI already has"
+        end = f"{NOT_REPLACEABLE} Nothing was uploaded."
     for name in sorted(published):
         ours = release.digests.get(name)
         if ours is None:
-            raise Refused(
-                f"PyPI has {name} for {project} {release.version}, and the release {release.tag} has no "
-                f"such file. {NOT_REPLACEABLE}"
-            )
+            raise Refused(f"{start} {name} for {what}, and the release {release.tag} has no such file. {end}")
         if published[name] != ours:
             raise Refused(
-                f"PyPI already has {name} for {project} {release.version} with sha256 {published[name]}; "
-                f"the release {release.tag} has sha256 {ours}. {NOT_REPLACEABLE}"
+                f"{start} {name} for {what} with sha256 {published[name]}; the release {release.tag} has "
+                f"sha256 {ours}. {end}"
             )
 
 
@@ -250,6 +291,11 @@ def plan(release, project, index, fetch=fetch, attempts=3, delay=5.0, sleep=time
             sleep(delay)
     if published is None:
         return sorted(release.files)
+    if not published:
+        raise Refused(
+            f"PyPI has the version {release.version} of {project} with no files. Its files were deleted, "
+            f"and PyPI never accepts a deleted file's name again. {NOT_REPLACEABLE} Nothing was uploaded."
+        )
     _compare(release, project, published)
     return [name for name in sorted(release.files) if name not in published]
 
@@ -265,8 +311,10 @@ def confirm(release, project, index, fetch=fetch, attempts=20, delay=6.0, sleep=
         else:
             if published is None:
                 state = f"PyPI does not list {project} {release.version}"
+            elif not published:
+                state = f"PyPI lists no files for {project} {release.version}"
             else:
-                _compare(release, project, published)
+                _compare(release, project, published, after_upload=True)
                 missing = [name for name in sorted(release.files) if name not in published]
                 if not missing:
                     return
@@ -280,10 +328,17 @@ def confirm(release, project, index, fetch=fetch, attempts=20, delay=6.0, sleep=
     )
 
 
-def _index_url(value):
-    if value.startswith("https://") or re.match(r"http://(127\.0\.0\.1|localhost)(:\d+)?(/|$)", value):
-        return value
-    raise argparse.ArgumentTypeError("the index must be an https:// URL (http:// only for 127.0.0.1)")
+def index_url(value):
+    """An https:// URL, or http:// for this machine only. Anything else is refused."""
+    try:
+        parts = urllib.parse.urlsplit(value)
+        host, _port = parts.hostname, parts.port
+    except ValueError:
+        parts, host = None, None
+    if parts and host and "@" not in parts.netloc and not parts.query and not parts.fragment:
+        if parts.scheme == "https" or (parts.scheme == "http" and host in LOOPBACK):
+            return value
+    raise argparse.ArgumentTypeError("the index must be an https:// URL (http:// only for 127.0.0.1 or localhost)")
 
 
 def main(argv=None, fetch=fetch):
@@ -292,7 +347,7 @@ def main(argv=None, fetch=fetch):
     common.add_argument("--project", required=True, help="the PyPI project name")
     common.add_argument("--tag", required=True, help="the release tag, vX.Y.Z")
     asks = argparse.ArgumentParser(add_help=False)
-    asks.add_argument("--index", default="https://pypi.org", type=_index_url, help="base URL of the JSON API")
+    asks.add_argument("--index", default="https://pypi.org", type=index_url, help="base URL of the JSON API")
     asks.add_argument("--attempts", type=int, help="how many times to ask the index")
     asks.add_argument("--delay", type=float, help="seconds between two attempts")
 

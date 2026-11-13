@@ -2,7 +2,7 @@ name: Release
 
 # Releases are cut by hand. Merging a pull request never releases: this workflow has no push
 # trigger, only a manual run (Actions tab, or `gh workflow run release.yml --ref main`) with an
-# action:
+# action. Every action is run from main:
 #
 #   release    Cut the next release from main. The version comes from the Conventional Commits since
 #              the last v* tag. Creates the v{version} tag on the commit the run was started on and
@@ -66,8 +66,10 @@ jobs:
       - name: Report that releases are off
         run: echo "::notice::Releases are disabled. Set the repository variable RELEASES_ENABLED to true to enable them (see RELEASING.md)."
 
-  # Checks the inputs before anything else runs: a release only from main and without a tag, a
-  # reattach or publish only with a vX.Y.Z tag, a publish only from main. Every other job needs it.
+  # Checks the inputs before anything else runs: every action only from main, a release without a
+  # tag, a reattach or publish with a vX.Y.Z tag. Every other job needs it. It catches a mistaken
+  # run. It cannot stop a run started from another ref, which executes that ref's copy of this file
+  # and of the script: the `pypi` environment's branch rule and the attestation check do that.
   request:
     if: vars.RELEASES_ENABLED == 'true'
     runs-on: ubuntu-latest
@@ -121,6 +123,7 @@ jobs:
           last=$($PSR version --print-last-released-tag || true)
           next=$($PSR version --print-tag)
           echo "Last released: ${last:-none}. Next: ${next:-none}."
+          echo "last=$last" >> "$GITHUB_OUTPUT"
           # With no tags and no feat, fix, or perf commit, semantic-release proposes v0.0.0
           # ("Initial Release"); that is not a release.
           if [ -n "$next" ] && [ "$next" != "$last" ] && [ "$next" != "v0.0.0" ] \
@@ -137,7 +140,8 @@ jobs:
         if: steps.plan.outputs.released == 'true'
         env:
           TAG: ${{ steps.plan.outputs.tag }}
-        run: python3 -I .github/scripts/changelog-check.py "$TAG"
+          LAST: ${{ steps.plan.outputs.last }}
+        run: python3 -I .github/scripts/changelog-check.py "$TAG" --last-released "$LAST"
 
       - name: Build, tag the commit, and create the release (no commit)
         if: steps.plan.outputs.released == 'true'
@@ -226,7 +230,10 @@ jobs:
           $PSR changelog --post-to-release-tag "$TAG"
       - name: Rebuild at the tagged version
         run: |
-          git checkout --quiet --detach "refs/tags/$TAG"
+          # --force: semantic-release's changelog command rewrites CHANGELOG.md in the work tree
+          # when the file holds its "<!-- version list -->" marker, and a plain checkout would then
+          # stop on the local change, after the release was created.
+          git checkout --quiet --force --detach "refs/tags/$TAG"
           # Drop files main's checkout left behind (semantic-release writes CHANGELOG.md), so the
           # sdist holds exactly the tagged tree.
           git clean -ffdx
@@ -276,6 +283,12 @@ jobs:
   # matters because release and reattach also hold an OIDC token (for the attestation) and run
   # python-semantic-release, which is fetched from PyPI. This job runs no tool fetched at run time:
   # pinned actions, the pinned uv, the runner's gh, sha256sum and python3 (standard library only).
+  #
+  # The environment exists and is limited to the branch main (Settings > Environments > pypi,
+  # "Selected branches and tags"). That rule, which lives in the repository's settings and not in
+  # this file, is what stops a run started from another ref: such a run executes its own copy of
+  # this workflow, without these checks, and PyPI does not look at the ref. Never delete the
+  # environment or its branch rule while the publisher is registered (docs/pypi-publishing.md).
   pypi:
     needs: [request, release]
     if: >-
@@ -293,15 +306,18 @@ jobs:
       name: pypi
       url: https://pypi.org/project/contexto-proxy/
     # id-token: the OIDC token PyPI exchanges. contents: the checkout and the release download.
-    # Reading a public repository's attestations needs no permission of its own.
+    # attestations: read-only, for `gh attestation verify` (the REST reference asks for it; the
+    # endpoint also answers without it for a public repository, which cannot be relied on).
     permissions:
       contents: read
       id-token: write
+      attestations: read
     env:
       PROJECT: contexto-proxy
       TAG: ${{ inputs.action == 'publish' && inputs.tag || needs.release.outputs.tag }}
     steps:
-      # main's copy of the scripts: the request job refuses a release or publish from another ref.
+      # The commit the run was started on. In a run from main these are main's scripts; the
+      # environment's branch rule, not the request job, is what keeps other refs out of this job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
@@ -342,13 +358,18 @@ jobs:
           cd "$RUNNER_TEMP/pypi-dist"
           sha256sum --check --strict SHA256SUMS
 
-      - name: Check that this workflow built both files (build provenance attestation)
+      # Release assets can be replaced by anyone with write access. This check ties the bytes to
+      # reviewed code: an attestation for this repository, signed by release.yml as it was on main
+      # (--source-ref; --signer-workflow alone matches a run from any ref), on a hosted runner.
+      # The source commit is not pinned: a reattach run's commit is main's head at that time.
+      - name: Check that release.yml on main built both files (build provenance attestation)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for file in "$RUNNER_TEMP"/pypi-dist/*.whl "$RUNNER_TEMP"/pypi-dist/*.tar.gz; do
             gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref refs/heads/main --deny-self-hosted-runners
           done
 
       # 404: both files. Same digests already there: only the missing files, or none. Another
