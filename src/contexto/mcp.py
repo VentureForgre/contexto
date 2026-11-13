@@ -169,6 +169,8 @@ class Store(Protocol):
     def log(self, event: dict[str, Any]) -> None: ...
     def window(self) -> tuple[int | None, float | None]: ...
     # Optional: charge_turn_room(charge) (contract PR #69); without it, calls are not budgeted per turn.
+    # Optional (D69): project(), and when it returns a view at server start, search_earlier(query),
+    # earlier_session(id or label) and earlier_page(session, page_id), which only read the earlier sessions.
 
 
 class ToolError(Exception):
