@@ -150,17 +150,18 @@ not in its counts.
    when they apply, then [`launch`](#launch), [`cli_version_check`](#cli_version_check) and
    [`window_budget_warning`](#window_budget_warning) when it applies.
 4. The run's `request` lines and the other lines of the proxy, the MCP server and the store.
-5. [`proxy_stop`](#proxy_stop), then [`mcp_tools_missing`](#mcp_tools_missing) when it applies, then
-   [`exit`](#exit), the last line.
+5. [`proxy_stop_incomplete`](#proxy_stop_incomplete) when it applies, [`proxy_stop`](#proxy_stop),
+   then [`mcp_tools_missing`](#mcp_tools_missing) when it applies, then [`exit`](#exit), the last
+   line.
 
 A launch that fails after the proxy started writes `proxy_start`, `proxy_stop` and `exit` with no
-`launch` between them; `contexto run codex` does so when it cannot build Codex's configuration (no
-key helper, for example). Such a launch removes a session it created, log included, so these lines
-are found only in a session that already existed. A launcher that is killed (SIGKILL) writes no
-`proxy_stop` and no `exit`, so a run can also end at the next `proxy_start` or at the end of the
-file. `contexto proxy`, which runs the proxy alone, writes `proxy_start` and `proxy_stop` and neither
-`launch` nor `exit`. The MCP server and the `contexto` commands open the session too, so their lines
-can come after an `exit`.
+`launch` between them. `contexto run codex` does so when it cannot build Codex's configuration (no
+key helper, for example); it then removes a session that this launch created, log included, so
+those three lines are found only in a session that already existed. A launcher that is killed
+(SIGKILL) writes no `proxy_stop` and no `exit`, so a run can also end at the next `proxy_start` or
+at the end of the file. `contexto proxy`, which runs the proxy alone, writes `proxy_start` and
+`proxy_stop` and neither `launch` nor `exit`. A store line can also be written outside any run, by a
+`contexto` command that opens the session (`contexto recall`, for example).
 
 **Credentials.** The value of any key named `authorization`, `x-api-key`, `cookie`, `set-cookie` or
 `proxy-authorization` (in any letter case, at any depth) is replaced by `[redacted]` before the line
@@ -274,7 +275,8 @@ The model reads a paged turn back:
   a quarter of the bound.
 - **Window budget** (`W`): `bound - headroom - F`, what is left for turns.
 - **Window target**: the size a rotation cuts the retained turns down to: `W` times
-  `--window-fraction` (0.5 by default). The other half is room to grow before the next rotation.
+  `--window-fraction` (0.5 by default). The other half is room to grow before the next rotation. A
+  rotation made for the room (reason `min_turn_room`) uses `W - min_turn_room` in place of `W`.
 - **Room**: the tokens `contexto_recall`, `contexto_search` and `contexto_state` may return in the
   current turn. A **side room** is a subagent's own.
 - **`min_turn_room`**: the least room a turn should start with, 12,000 tokens. A turn that would
@@ -299,8 +301,8 @@ a separate state for each conversation, and each run starts a new engine. So:
 - A [`resync`](#resync) with `paged_changed` pages everything before the current turn again within
   one run, and counts those turns again in `turns_paged`.
 - The store keeps one page per page id, and a turn paged again with the same turn number and the
-  same messages gets the same id. So a run that pages a conversation from turn 0 again does not
-  store those turns twice. A `paged_changed` resync gives its pages new turn numbers, so they are
+  same messages gets the same id. So a run that pages a conversation from turn 0 again normally
+  does not store those turns twice. A `paged_changed` resync gives its pages new turn numbers, so they are
   stored beside the earlier ones.
 
 A tool that reads a log must not:
@@ -385,9 +387,9 @@ How the exchange ended:
 
 `usage_events` and `stream_hold` can appear only on a model request that reached the engine (the
 first row of the first table and its two `transform_error` rows) and was answered with a 2xx status.
-A `count_tokens` line never has them, and its `usage` is always null. A line with `fallback: true`
-has no `api`, so its response is read as a Messages API response: for Codex its `usage` is null and
-it has no end fields.
+A `count_tokens` line never has them, and its `usage` is null: that response holds a count and no
+usage object. A line with `fallback: true` has no `api`, so its response is read as a Messages API
+response: for Codex its `usage` is null and it has no end fields.
 
 Every request:
 
@@ -912,7 +914,7 @@ the `transform_events` of the same `request` line.
 | --- | --- | --- |
 | `estimate` with `in_tool_loop: true` and no `degraded` | notice | The allowed case (contract rule 5). The turn grew past the bound inside a tool loop, where the engine never rotates. The next turn start rotates. |
 | `estimate` with `degraded: true` | problem | A consequence of degraded mode, in which nothing is paged. The fault to look at is the [`store_error`](#store_error) or [`page_conflict`](#page_conflict) that started it. |
-| `estimate` with `in_tool_loop: false` and no `degraded` | problem | Over the bound at a turn start. Either [`bound_too_small`](#bound_too_small) or [`pdf_allowance`](#pdf_allowance) is on the same line, or the rotation's sizing did not hold. |
+| `estimate` with `in_tool_loop: false` and no `degraded` | problem | Over the bound at a turn start. A [`bound_too_small`](#bound_too_small) or [`pdf_allowance`](#pdf_allowance) on the same line says why. With neither, the rotation's sizing did not hold. |
 | `real`, with an `estimate` event on the same line | that event's kind | The real input confirms the estimate. |
 | `real`, with no `estimate` event on the same line | problem | The estimate was at or under the bound and the real input was over it, so the estimate was low. The log does not say whether the request was inside a tool loop. If the nested `request` event on the line has `degraded: true`, it is a consequence of degraded mode. |
 
@@ -1292,8 +1294,8 @@ The CLI exited and the launcher cleaned up. It is the launcher's last line. A la
 killed writes none.
 
 - `code`: the exit code `contexto run` returns. Normally the CLI's own, which is 128 plus the signal
-  number when a signal killed the CLI. 127 when the CLI could not be started (its file is gone or
-  not executable). 130 for Ctrl+C before the CLI started, 128 plus the signal number when the
+  number when a signal killed the CLI. 127 when the CLI could not be started (its `#!` interpreter
+  is missing, for example). 130 for Ctrl+C before the CLI started, 128 plus the signal number when the
   launcher was terminated, and 1 or 2 when the launch failed before the CLI ran.
 
 ### `engine_unavailable`
