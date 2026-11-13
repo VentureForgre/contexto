@@ -97,6 +97,7 @@ from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
 from contexto.mcp import TOOLS as MCP_TOOLS
 from contexto.paths import contexto_home, mcp_env, session_dir
 from contexto.private import affinity_salt, open_private, private_dir
+from contexto.providers import bypass_event, bypass_warning, provider_overrides
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.store import LIVE_LOCK, SessionStore
 from contexto.store.prune import discard_new_session
@@ -1136,6 +1137,10 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
             print(f"contexto: {warning}", file=stderr, flush=True)
             store.log({"event": "window_budget_warning", "bound": options.bound,
                        "assumed_overhead": assumed_overhead()})
+        bypass = provider_overrides(Path.cwd(), Path.home(), os.environ)
+        if bypass:  # D64: Claude Code would talk to another provider, past the proxy; say so and still launch
+            print(f"contexto: {bypass_warning(bypass, os.environ)}", file=stderr, flush=True)
+            store.log(bypass_event(bypass))
         notices.hold()  # claude owns the terminal until it exits (D55)
         # The CLI's shell commands (`contexto state`, `contexto search`) then name this session (D57).
         code = run_child(claude_argv(claude, settings, mcp, options.claude_args), session_env(session_id),
