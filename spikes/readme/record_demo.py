@@ -13,7 +13,9 @@ No model is called and nothing leaves 127.0.0.1. What runs:
 
 All three write to one pseudo-terminal, 90 columns wide. The recorder reads it and keeps each chunk
 with the time it arrived. It adds only the note line at the top and the command line it then runs with
-``/bin/sh -c``, exactly as shown. It writes, under ``docs/assets``:
+``/bin/sh -c``, exactly as shown. It starts the session only once the capture holds the fake upstream's
+own "listening" line, and it ends a session that runs longer than ``SESSION_TIMEOUT`` seconds. It
+writes, under ``docs/assets``:
 
 - ``demo.cast.json``: the chunks and their times, the source of the other two;
 - ``demo.txt``: the chunks joined, so the capture can be read without playing it;
@@ -33,6 +35,7 @@ import json
 import os
 import pty
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -55,6 +58,8 @@ PORT = 8399
 BOUND = 60_000
 HEADROOM_FLOOR = 5_000
 PACE = 0.8
+LISTEN_TIMEOUT = 20.0  # seconds to wait for the fake upstream's listening line
+SESSION_TIMEOUT = 120.0  # seconds the session may run; it takes about 25 at the default pace
 TITLE = "synthetic session: a stub CLI and a fake upstream, no model"
 CAST_VERSION = 1
 MAX_SVG_BYTES = 1_000_000
@@ -99,6 +104,11 @@ class Capture:
             self.events.append((round(now - self.started, 3), text))
             self.last = now
 
+    def text(self) -> str:
+        """Everything captured so far."""
+        with self.lock:
+            return "".join(text for _, text in self.events)
+
     def settle(self, quiet: float = 0.15, timeout: float = 5.0) -> None:
         """Wait until nothing has arrived for ``quiet`` seconds, so a typed line lands after earlier output."""
         deadline = time.monotonic() + timeout
@@ -117,18 +127,59 @@ class Capture:
             return list(self.events)
 
 
-def wait_for_port(port: int, process: subprocess.Popen, timeout: float = 10.0) -> None:
+def wait_for_listening(capture: Capture, port: int, process: subprocess.Popen,
+                       timeout: float = LISTEN_TIMEOUT) -> None:
+    """Wait until the capture holds the fake upstream's own listening line for ``port``.
+
+    The upstream prints that line after it has bound the port, so the line in the capture means two
+    things: this upstream, not another server on the port, will answer; and the command line the
+    recorder adds next lands after it. A port that only accepts connections proves neither."""
+    line = f"{script.UPSTREAM_LABEL} listening on 127.0.0.1:{port},"
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError(f"the fake upstream exited with code {process.returncode}; is port {port} in use? "
-                               f"Pass --port.")
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+    while True:
+        text = capture.text()
+        at = text.find(line)
+        if at >= 0 and "\n" in text[at:]:
             return
-        except OSError:
-            time.sleep(0.05)
-    raise RuntimeError(f"the fake upstream did not listen on 127.0.0.1:{port} within {timeout:.0f} s")
+        if process.poll() is not None:
+            capture.settle()
+            raise RuntimeError(f"the fake upstream exited with code {process.returncode} before it listened on "
+                               f"127.0.0.1:{port}; is the port in use? Pass --port. Captured:\n{capture.text()}")
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"the fake upstream did not print its listening line for 127.0.0.1:{port} within "
+                               f"{timeout:g} s. Captured:\n{capture.text()}")
+        time.sleep(0.02)
+
+
+def stop_group(process: subprocess.Popen, grace: float = 5.0) -> None:
+    """End a process started with ``start_new_session=True`` and everything in its process group:
+    SIGTERM, then SIGKILL after ``grace`` seconds."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            process.wait(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def run_session(line: str, capture: Capture, timeout: float, **popen: object) -> int:
+    """Run the shown command line with ``/bin/sh -c`` and return its exit code. A session that is still
+    running after ``timeout`` seconds is killed with its children, and the error holds the capture."""
+    session = subprocess.Popen(["/bin/sh", "-c", line], start_new_session=True, **popen)
+    try:
+        return session.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        stop_group(session)
+        capture.settle()
+        raise RuntimeError(f"`contexto run` did not finish within {timeout:g} s and was killed. Captured:\n"
+                           f"{capture.text()}") from None
+    except BaseException:
+        stop_group(session)
+        raise
 
 
 def check_checkout() -> None:
@@ -145,7 +196,7 @@ def check_checkout() -> None:
 
 
 def record(port: int = PORT, pace: float = PACE, cols: int = termsvg.COLS, rows: int = termsvg.ROWS,
-           ) -> tuple[list[tuple[float, str]], list[str]]:
+           timeout: float = SESSION_TIMEOUT) -> tuple[list[tuple[float, str]], list[str]]:
     """Run the session. Returns the capture and the strings that must not appear in it."""
     check_checkout()
     work = Path(tempfile.mkdtemp(prefix="contexto-demo-")).resolve()
@@ -168,16 +219,16 @@ def record(port: int = PORT, pace: float = PACE, cols: int = termsvg.COLS, rows:
         capture.add(f"# {script.SYNTHETIC_LABEL}\n")
         upstream = subprocess.Popen([sys.executable, str(HERE / "demo_upstream.py"), "--port", str(port)],
                                     env=env, cwd=work / "cwd", **std)
-        wait_for_port(port, upstream)
+        wait_for_listening(capture, port, upstream)
         capture.settle()
         time.sleep(2 * pace)
         line = command_line(port)
         capture.add(f"$ {line}\n")
         time.sleep(pace)
-        code = subprocess.run(["/bin/sh", "-c", line], env=env, cwd=work / "cwd", check=False, **std).returncode
+        code = run_session(line, capture, timeout, env=env, cwd=work / "cwd", **std)
         if code != 0:
             capture.settle()
-            raise RuntimeError(f"`contexto run` exited with code {code}:\n" + "".join(t for _, t in capture.events))
+            raise RuntimeError(f"`contexto run` exited with code {code}:\n{capture.text()}")
     finally:
         if upstream is not None:
             upstream.terminate()

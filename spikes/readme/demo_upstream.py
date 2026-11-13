@@ -7,8 +7,8 @@ engine measures against it as it would against real usage.
 
 The reply follows three rules (``scripted_reply``):
 
-1. The newest message holds a tool result: answer with the name that result gives after "token is
-   named", or say that the result does not name it.
+1. The newest message holds a tool result: answer with the name that result gives after "codename
+   is", or say that the result does not name it.
 2. The newest message asks the scripted question: call ``mcp__contexto__contexto_search``.
 3. Anything else: answer ``OK``.
 
@@ -71,7 +71,7 @@ def scripted_reply(request: dict[str, Any]) -> dict[str, Any]:
     text, result = newest(request)
     if result:
         # The name is read out of the result that arrived, not taken from the script.
-        named = re.search(r"token is named ([\w-]+)", result)
+        named = re.search(r"codename is ([\w-]+)", result)
         if named:
             return {"text": f"The search result names it: {named.group(1)}."}
         return {"text": "The search result does not name it."}
@@ -157,7 +157,8 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     """``HTTPServer.server_bind`` names the server with ``socket.getfqdn(host)``, a reverse lookup that
-    took longer than the recorder's 10 s wait on macOS CI runners. Nothing here reads the name."""
+    took longer than the recorder's wait for the listening line on macOS CI runners. Nothing here reads
+    the name."""
 
     daemon_threads = True
 
@@ -170,7 +171,6 @@ class Server(ThreadingHTTPServer):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--quiet-start", action="store_true", help="do not print the listening line")
     args = parser.parse_args(argv)
     try:
         server = Server(("127.0.0.1", args.port), Handler)
@@ -178,9 +178,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"demo_upstream: cannot listen on 127.0.0.1:{args.port}: {exc}", file=sys.stderr)
         return 1
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
-    if not args.quiet_start:
-        say(f"listening on 127.0.0.1:{server.server_address[1]}, "
-            f"counting 1 token per {script.BYTES_PER_TOKEN} bytes received")
+    # The recorder waits for this line before it starts the session.
+    say(f"listening on 127.0.0.1:{server.server_address[1]}, "
+        f"counting 1 token per {script.BYTES_PER_TOKEN} bytes received")
     try:
         server.serve_forever(poll_interval=0.05)
     except KeyboardInterrupt:

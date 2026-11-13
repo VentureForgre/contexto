@@ -8,10 +8,13 @@ through ``<img>``, where scripts do not run and CSS animations do.
 What the renderer changes, and what it does not:
 
 - It never adds, drops or rewrites text. A line longer than the screen wraps, as in a terminal.
-- A line appears when its last chunk arrived. Pauses longer than ``MAX_GAP`` seconds are cut to
-  ``MAX_GAP``, and the last frame is held for ``HOLD`` seconds before the loop restarts.
+- The first line is there from the start of the loop, so a viewer that stops at time 0 does not show
+  an empty terminal. Every later line appears when its last chunk arrived. Pauses longer than
+  ``MAX_GAP`` seconds are cut to ``MAX_GAP``, and the last frame is held for ``HOLD`` seconds before
+  the loop restarts.
 - Colour only marks who printed what: the prompt and command, the ``[stub claude]`` and
-  ``[fake upstream]`` lines (dim), and the planted fact. Unlabelled lines are the tool's own output.
+  ``[fake upstream]`` lines (dim, with the two sizes of a turn line bright), and the planted fact.
+  Unlabelled lines are the tool's own output.
 
 Without animation support (a static renderer, or ``prefers-reduced-motion``) the SVG shows its last
 frame. ``frame_at`` gives the capture up to a time, to render an earlier frame as a still.
@@ -26,19 +29,21 @@ from xml.sax.saxutils import escape
 Events = list[tuple[float, str]]
 
 COLS = 90
-ROWS = 30
+ROWS = 33  # the recording is 37 rows: the last frame runs from the `contexto: session` line to the last reply
 FONT_SIZE = 14
 CHAR_W = 8.4  # 0.6 em, the advance of the common monospace fonts; textLength pins it for the others
 LINE_H = 19
 PAD_X = 22
 PAD_Y = 14
 BAR_H = 34
-LEAD = 0.8  # seconds before the first timed line
+LEAD = 0.8  # seconds the first line is shown alone when the capture has no pause after it
 MAX_GAP = 4.0
 HOLD = 8.0
 FONT = 'ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono","DejaVu Sans Mono",monospace'
 
 LABELS = {"[stub claude]": "s", "[fake upstream]": "u"}
+# The two sizes of a turn line: what the stub sent and what the fake upstream received.
+FIGURES = re.compile(r"(?<=history )[\d,]*\d(?= tokens)|(?<=received )[\d,]*\d(?= tokens)")
 # Each colour is at least 4.5:1 against the panel (#161b22); see test_readme_assets.py.
 PALETTE = {
     "panel": "#161b22", "bar": "#21262d", "border": "#30363d",
@@ -122,6 +127,7 @@ def spans(row: Row, highlight: str | None) -> list[tuple[str, str]]:
         position = match.end()
     if position < len(text):
         pieces.append((current, text[position:]))
+    pieces = [part for cls, piece in pieces for part in (_figures(piece) if cls == "d" else [(cls, piece)])]
     if not highlight:
         return pieces
     out: list[tuple[str, str]] = []
@@ -132,6 +138,20 @@ def spans(row: Row, highlight: str | None) -> list[tuple[str, str]]:
                 out.append(("h", highlight))
             if part:
                 out.append((cls, part))
+    return out
+
+
+def _figures(piece: str) -> list[tuple[str, str]]:
+    """A dim piece with its sizes in the bright colour of the tool's own output."""
+    out: list[tuple[str, str]] = []
+    position = 0
+    for match in FIGURES.finditer(piece):
+        if match.start() > position:
+            out.append(("d", piece[position:match.start()]))
+        out.append(("", match.group()))
+        position = match.end()
+    if position < len(piece):
+        out.append(("d", piece[position:]))
     return out
 
 
@@ -162,6 +182,8 @@ def render(events: Events, *, title: str, highlight: str | None = None, cols: in
     scroll: list[tuple[float, int]] = []
     if animate:
         for i, at in enumerate(play):
+            if at == play[0]:
+                continue  # the first line has no animation: it is there from 0%
             if at not in classes:
                 name = f"t{len(classes)}"
                 classes[at] = name
@@ -199,7 +221,7 @@ def render(events: Events, *, title: str, highlight: str | None = None, cols: in
         pieces = spans(Row(stripped, line.at, line.kind), highlight)
         body = "".join(f'<tspan class="{cls}">{_text(piece)}</tspan>' if cls else _text(piece)
                        for cls, piece in pieces)
-        cls = f' class="{classes[play[i]]}"' if animate else ""
+        cls = f' class="{classes[play[i]]}"' if play[i] in classes else ""
         out.append(f'<text{cls} x="{_number(PAD_X + indent * CHAR_W)}" y="{top + i * LINE_H + 14}" '
                    f'textLength="{_number(len(stripped) * CHAR_W)}">{body}</text>')
     out += ["</g>", "</g>", "</svg>", ""]

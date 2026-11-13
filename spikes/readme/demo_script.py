@@ -18,15 +18,18 @@ STUB_LABEL = "[stub claude]"
 UPSTREAM_LABEL = "[fake upstream]"
 SYNTHETIC_LABEL = "Synthetic session: a stub CLI and a fake upstream on 127.0.0.1. No model."
 
+# Turns are counted from 0, as Contexto counts them: the growth turns are 0 to GROWTH_TURNS - 1 and the
+# question is turn GROWTH_TURNS. The stub's lines, the page list and the search result then name the
+# same turn.
 GROWTH_TURNS = 8
 TURN_BYTES = 42_000  # about 12,000 tokens of pasted build log a turn
-PLANT_TURN = 2
-# A made-up name, not a credential. It sits after the log, so it is not in the opening 200 characters
-# that Contexto's page index keeps in view: only a search of the paged-out turn finds it.
+PLANT_TURN = 1
+# A made-up codename. It sits after the log, so it is not in the opening 200 characters that Contexto's
+# page index keeps in view: only a search of the paged-out turn finds it.
 PLANT_FACT = "amber-kestrel-17"
-PLANT = f"The staging deploy token is named {PLANT_FACT}."
-QUESTION = "What is the staging deploy token named?"
-QUERY = "staging deploy token"
+PLANT = f"The release codename is {PLANT_FACT}."
+QUESTION = "What is the release codename?"
+QUERY = "release codename"
 SEARCH_TOOL = "mcp__contexto__contexto_search"
 MODEL = "stub-model"
 
@@ -53,8 +56,9 @@ def build_log(turn: int, nbytes: int) -> str:
 
 
 def prompt(turn: int) -> str:
-    """The user message of growth turn ``turn`` (1-based)."""
-    text = f"Turn {turn}: here is the build log for step {turn}. Keep it for reference.\n{build_log(turn, TURN_BYTES)}"
+    """The user message of growth turn ``turn`` (counted from 0). It does not say "turn": the stub's
+    label and the tool's page list do."""
+    text = f"Build log for step {turn}. Keep it for reference.\n{build_log(turn, TURN_BYTES)}"
     if turn == PLANT_TURN:
         text += f"\n{PLANT}"
     return text
