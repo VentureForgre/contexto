@@ -1,5 +1,7 @@
 # Running Contexto with CLIProxyAPI
 
+[Contexto](../README.md) / [Documentation](README.md)
+
 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) is a local or hosted proxy that serves
 Claude Code, Codex, and other CLIs through subscription logins and API keys. Contexto can use it as
 its upstream for both Claude Code and Codex. This guide covers the setup, what to check when it
