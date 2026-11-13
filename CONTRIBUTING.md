@@ -19,8 +19,14 @@ cd contexto
 uv run contexto --help                # creates .venv and runs the checkout's code
 ```
 
+The distribution is named `contexto-proxy`, its name on PyPI, where `contexto` is an unrelated
+project. The command and the import name are `contexto`.
+
 An install from a checkout reports its version as `0.0.0+checkout`. Only release builds carry a real
-version (see [RELEASING.md](RELEASING.md)).
+version (see [RELEASING.md](RELEASING.md)). An install from a git URL also prints the revision, which
+the installer records in the distribution's `direct_url.json`:
+`contexto 0.0.0+checkout (git v1.2.3, commit 0123abcd)` for a tag or branch, and
+`contexto 0.0.0+checkout (git commit 0123abcd)` when the URL names a commit or no revision.
 
 ## Tests and lint
 
@@ -28,7 +34,13 @@ version (see [RELEASING.md](RELEASING.md)).
 uv run --with pytest pytest -q        # the whole suite, about 4 minutes
 uvx ruff@0.17.2 check .               # lint, with the rules in pyproject.toml
 uv build                              # the sdist and wheel, into dist/
+bash .github/scripts/install-check.sh 3.12   # install the built wheel and sdist, run the command
+bash .github/scripts/package-check.sh        # twine check, metadata, the rendered PyPI description
 ```
+
+The two scripts need only uv. They build into a new temporary directory, create their virtual
+environments there, and remove it when they finish. `install-check.sh` takes the Python version to
+use.
 
 The suite collects `tests/` (the package) and `spikes/` (measurement code that the research notes in
 `docs/research/` cite). It makes no model calls and needs no API key. Tests that drive a real
@@ -56,6 +68,9 @@ pip install -e . pytest
 pytest -q
 ```
 
+`pip install -e .` installs the checkout as before. `pip list` shows it as `contexto-proxy`, and
+`pip uninstall contexto-proxy` removes it.
+
 The suite runs on macOS and Linux. Windows is not supported (see the README's Platforms note).
 
 ## What CI runs
@@ -65,10 +80,20 @@ The suite runs on macOS and Linux. Windows is not supported (see the README's Pl
 - `lint`: `uvx ruff@0.17.2 check .`. `ruff format` is not enforced.
 - `test`: `uv run --with pytest==9.1.1 pytest` and `uv build`, on Python 3.12, 3.13, 3.14 and 3.15
   on Ubuntu, and on 3.12 and 3.15 on macOS.
-- `ci`: passes only when lint and every test job pass. It is the one required check.
+- `install`: `.github/scripts/install-check.sh`, on the same Pythons and systems as `test`. It builds
+  the sdist and wheel, installs the wheel into an empty virtual environment, and from a directory
+  outside the checkout runs `contexto --version`, `contexto --help`, `python -m contexto --version`
+  and `contexto sessions list` against an empty `CONTEXTO_HOME`. Then it installs the sdist into a
+  second empty environment and checks that it holds the same package.
+- `package`: `.github/scripts/package-check.sh`, once. It runs `twine check --strict` on the sdist
+  and wheel, checks their name, metadata and contents, builds a wheel again from the unpacked sdist,
+  and renders the PyPI description ([docs/pypi-description.md](docs/pypi-description.md)) with
+  `readme_renderer`, the renderer PyPI uses. It uploads nothing.
+- `ci`: passes only when lint, package and every test and install job pass. It is the one required
+  check.
 
-uv, Ruff, pytest and the actions are pinned, so a new release of any of them cannot fail CI on code
-that did not change. Workflow runs on pull requests from forks wait for a maintainer to approve them.
+uv, Ruff, pytest, twine, readme-renderer and the actions are pinned, so a new release of any of them
+cannot fail CI on code that did not change. Workflow runs on pull requests from forks wait for a maintainer to approve them.
 
 ## Pull requests
 
