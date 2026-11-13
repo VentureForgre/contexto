@@ -74,8 +74,9 @@ QUALITY_FIELDS = ["n", "dialect", "fact", "kind", "query", "outcome", "rank_show
 
 
 def build_store(home: Path, session: str, n: int, *, dialect: str, floor: float, seed: int,
-                sizes: str = "spike") -> dict[str, Any]:
-    """Write an ``n``-page store the way the engine pages turns; return its manifest and size figures."""
+                sizes: str = "spike", extra: tuple[Any, ...] = ()) -> dict[str, Any]:
+    """Write an ``n``-page store the way the engine pages turns; return its manifest and size figures.
+    ``extra`` facts are planted as well (D65, ``scale_synth.session_turn``); none by default."""
     store = SessionStore(home, session)
     store.set_window(WINDOW, BYTES_PER_TOKEN, model=MODEL)
     queries = all_queries()
@@ -83,14 +84,14 @@ def build_store(home: Path, session: str, n: int, *, dialect: str, floor: float,
     ids, tokens, write_s = [], [], 0.0
     markers_ok = True
     for t in range(n):
-        turn = scale_synth.session_turn(t, n, seed=seed, floor=floor, sizes=sizes)
+        turn = scale_synth.session_turn(t, n, seed=seed, floor=floor, sizes=sizes, extra=extra)
         if dialect == "responses":
             turn = scale_synth.to_responses(turn)
         text = "\n".join(_texts(turn))
         for q in queries:
             if q in text:
                 df[q] += 1
-        for _, _, plant in scale_synth.plants_for(t, n):
+        for _, _, plant in scale_synth.plants_for(t, n, extra):
             markers_ok &= plant.marker in text
         start = time.perf_counter()
         (page_id,) = store.page_out([turn], t)  # one turn per call; the engine batches, each page is built alike
@@ -123,10 +124,12 @@ def publish_request(store: SessionStore, seq: int) -> None:
 
 
 class McpChild:
-    """``python -m contexto mcp --session S`` with ``CONTEXTO_HOME`` set, as ``launcher.mcp_payload`` spawns it."""
+    """``python -m contexto mcp --session S`` with ``CONTEXTO_HOME`` set, as ``launcher.mcp_payload`` spawns it.
+    ``src`` is the ``src`` directory the child imports ``contexto`` from: this checkout's, or another
+    checkout's to time two commits side by side (D65)."""
 
-    def __init__(self, home: Path, session: str) -> None:
-        env = {**os.environ, "CONTEXTO_HOME": str(home), "PYTHONPATH": str(ROOT / "src")}
+    def __init__(self, home: Path, session: str, src: Path | None = None) -> None:
+        env = {**os.environ, "CONTEXTO_HOME": str(home), "PYTHONPATH": str(src or ROOT / "src")}
         env.pop("CONTEXTO_SEARCH_CACHE_MB", None)
         if SEARCH_CACHE_MB is not None:
             env["CONTEXTO_SEARCH_CACHE_MB"] = SEARCH_CACHE_MB
