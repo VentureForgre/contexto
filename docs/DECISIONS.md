@@ -2705,6 +2705,224 @@ the owner's delegation. Open decisions are listed at the end with the options an
   outside the repository. Old commits, pull request diffs and pull request comments still hold the
   hostname (D42).
 
+- **D63. Contexto pages inside a running turn, so the bound holds in a tool loop.** Claude,
+  2026-11-12, under D0; contract change (rule 5 rewritten; rules 2, 14, 16 and 17 and the Store
+  section amended). It supersedes D17.
+  **The problem** (verified at v0.5.24, main b0e2dbc). The engine paged only at a turn start, and
+  rule 5 said "never rotate inside a tool loop". One prompt followed by 120 tool rounds reached an
+  estimate of 775,851 tokens at bound 150,000 with 0 pages and 96 `over_bound` events. A subagent has
+  one turn start, so it never paged at all. The recall room is `bound - used - headroom_floor`,
+  so `contexto_search` and `contexto_recall` were refused exactly when the turn was longest.
+  **Why D17 is superseded.** D17 rested on two vendor rules. The first, preserved thinking, is
+  enforced with a 400 on accounts created on or after 2026-08-31: nothing before a kept thinking
+  block may change (measured: adding a text block to an earlier user turn with thinking kept
+  returned 400; O2). The second, "within a tool-use turn, pass thinking blocks back", is not
+  enforced with an error: its documented consequence is that the API does not error but may
+  disable thinking (`docs/research/M0-paging-policy.md`, "No client-side paging inside an active
+  tool-use turn"). D17 took the two together as "no valid
+  client-side form of paging mid-turn". That holds only for an edit that keeps later thinking. An
+  edit that removes every thinking block from its first changed message on leaves no thinking
+  block with a changed prefix, which is the same thing a rotation does at a turn start (rule 2, the
+  conformance probe's "full epoch rewrite with all thinking stripped", 200). What it gives up is
+  the second rule, inside the turn, and that case has never been measured live (below).
+  **The thinking rule.** An in-turn edit whose first changed message is at index `p` strips every
+  thinking and redacted-thinking block in messages `[p, n)`, `n` being the request's message count
+  at that moment, on that request and deterministically on every later one (`[thinking omitted]`
+  for a message left empty). Thinking before `p`, and in messages added afterwards, passes through
+  byte for byte. The paged_changed resync still keeps in-flight thinking after a prefix change
+  (rule 10, a known limitation); in-turn paging does not copy that.
+  **The ladder.** In a tool loop, on a request that adds messages, not degraded, when the pre-send
+  estimate passes the line `T - min_turn_room / 4`, with `T = bound - headroom_floor -
+  min_turn_room` (113,000 and 110,000 with the defaults; `T` is the point where the published
+  recall room would fall under `min_turn_room`), one batch pages down to a target between what
+  cannot be paged and the line (`window_fraction`), in order, stopping when the target is met:
+  (0) a result the model has not read is stubbed on arrival only when the head, the part of the
+  messages that cannot be paged and the unread results could not be sent under `T` with
+  everything older paged, largest first, which strips nothing and changes no earlier message;
+  (1) older tool results are stubbed, oldest first, across the retained window, each original
+  going to a result page, and the results of Contexto's own search, recall and state calls
+  getting a stub with the call's arguments and no page; (2) if that leaves less than two
+  `min_turn_room` under the line, the earlier turns of the window are paged as a rotation pages
+  them, with `k` at the running turn's start; (3) if still less, the oldest complete tool rounds
+  of the running turn are folded into one rounds page, with a note in the turn-start message;
+  (4) if the request is still over the bound, unread results are stubbed, largest first;
+  (5) still over the bound, `over_bound` as before and `in_turn_exhausted`. A result is stubbed
+  only when its content is at least 2,048 bytes and twice its stub, a byte rule that never
+  depends on the measured ratio, and only when it is a string or text and image blocks. Stubs
+  and fold notes are pure functions of the CLI's blocks and the page id; a note goes on the
+  turn-start message only. The state is in `EpochState.inturn` and in the epoch record, which the
+  main conversation now also writes when a batch runs, so a proxy restart mid-turn resumes and
+  sends the same bytes. A store failure during a batch follows rule 14.
+  **Rules added by the harness review** (PR #268, 2026-11-12), which replace the first plan's
+  "one result larger than a batch can free is stubbed unread":
+  (a) The model reads every result once unless it cannot fit: step 0 above.
+  (b) The room at response time. The room published when a response arrives is `bound - (input +
+  output) - headroom_floor`, so the line is `T` less an allowance for the output, a quarter of
+  `min_turn_room` (3,000): an output of up to 9,000 tokens still leaves half of `min_turn_room`.
+  (c) The estimate of a result that has just arrived. The harness measured it 17,195 tokens low on
+  a 60,000-token result: the ratio is learned mostly from the head's text, and tool output is
+  denser. For the trigger and every decision of a batch, a tool result that arrived with the
+  request counts at 1.8 bytes a token, the density rule 3 cites for log-heavy tool output, when
+  that is more than the ratio gives, until usage has measured it. The 1.5 seed was tried first
+  and dropped: it counts the harness's tool output (2.2 bytes a token) 1.47 times, so step 0
+  would stub results that fit, where 1.8 counts it 1.22 times and real log output once. The
+  logged estimate stays rule 3's. The cost is for sparse text: prose or source code near 3.3
+  bytes a token counts about twice, so a result of more than about 160 KB can be stubbed on
+  arrival although it would have fit, and a batch starts about one round early.
+  (d) Rewrites of the cached prefix. Steps 1 to 3 run only when together they could free
+  `min_turn_room`, never on the request right after a batch that ran one of them unless the
+  request would be over the bound, and a batch leaves two `min_turn_room` of growth under the
+  line when it can.
+  **Choices made where the task left room.**
+  (e) Steps 2 and 3 start when the step before leaves less than two `min_turn_room` under the
+  line, not only when it leaves the estimate over `T`: a step 1 that ended just under `T` would be
+  followed by another batch one request later. Going on to the target in every batch was tried
+  and dropped: an existing test (`test_carried_bound.py`, 39 turns with reminders) showed it
+  paging all 18 earlier turns in a tool loop where stubbing had already left enough headway.
+  (f) Step 2 waits while the head is unmeasured at `k = 0` (rule 4 measures the head only
+  there, from the first usage; a new epoch before it would leave the head estimated for the rest
+  of the session), unless step 3 has left the request over the bound itself. Found by the
+  existing D49 tests of a late first usage.
+  (g) A tool round whose result message carries nested memory (D46) is never folded, and a
+  carried system message inside a folded round stays in place, so carried content never leaves
+  the request and is never moved.
+  (h) A result stubbed before the model read it was that request's last block, so its page holds
+  Claude Code's moving `cache_control` mark with it, as a whole-turn page's last block can. Pages
+  are the blocks as they were in the request that paged them; the content is byte for byte.
+  (i) A side conversation's in-turn pages carry the main conversation's current turn number; a
+  whole-turn page's number can still differ from the number in-turn pages of that turn were given
+  when the bounded fallback pages carried items in between (the fallback's pages take turn
+  numbers too).
+  (j) The package tests run the small-rounds scenario at 600 rounds and a 60,000 bound (9 s); the
+  1,500-round run at the default bound takes minutes, most of it per-request work the engine did
+  before this change, and is in the replay harness (`replay.py --scenario small --full`).
+  **Where the targets pull against each other.** Two large results in consecutive rounds, each
+  fitting on its own: the first is read whole and stubbed by a batch when the second arrives. If
+  a third arrives on the very next request, rule (d) forbids a second rewrite in a row unless
+  the request would be over the bound and rule (a) forbids stubbing the new result unread, so
+  that request goes out under the bound with less than `min_turn_room` of room. None of the six
+  harness scenarios does this (`large` spaces its three results three rounds apart); a package
+  test covers it (`test_no_rewrite_on_the_request_right_after_a_rewrite_unless_over_the_bound`).
+  **Store format.** A page may carry `kind`: `result` (a tool call and its result, verbatim, as
+  an assistant message and a user message) or `rounds` (folded tool rounds, a stubbed result
+  staying a stub); absent, a whole turn, as every page written before. `kind` is not in the page
+  id. The index lists turn and rounds pages, not result pages; search and recall reach all.
+  In-turn pages do not advance `turns_paged`. The epoch record gains the optional `in_turn` field
+  (positions and page ids) and its configuration gains `in_turn_paging`. Old stores and records
+  work unchanged: a record without the setting resumes under either value. Checked by reading a
+  store this branch wrote (1 turn page, 24 result pages, 1 rounds page, a record with `in_turn`)
+  with the v0.5.24 code: it lists, searches and recalls every page as an ordinary page, its index
+  lists the 24 result pages too, and it reads the record as no record (`epoch_not_resumed`,
+  `no_record`), since its store refuses an unknown field; a record without `in_turn` would be
+  `settings_changed`. Either way a downgrade starts from epoch 0.
+  **Measured** (zero spend). The replay harness of PR #268 (`spikes/m2/inturn/`): the real engine,
+  a real `SessionStore`, the Claude Code dialect, bound 150,000, and the harness's own upstream,
+  which counts tool output at 2.2 bytes a token and other text at 3.1, models the prompt cache,
+  and refuses a kept thinking block whose prefix changed. Before is v0.5.24
+  (`docs/research/M2-in-turn-paging-baseline.md`).
+
+  | Scenario | `over_bound` before | Largest request before | `over_bound` after | Largest request after | Batches that rewrote the prefix (allowed: 2 + loop tokens / 25,000) | Cached tokens made stale per rewrite, mean / largest | Their share of all input tokens | Requests whose newest thinking was stripped | Smallest recall room, at request / at response |
+  |---|---|---|---|---|---|---|---|---|---|
+  | loop120 | 100 | 810,520 | 0 | 108,417 | 13 (33.8) | 75,402 / 92,573 | 10.4% | 13 of 121 | 17,233 / 16,405 |
+  | large | 7 | 405,604 | 0 | 85,910 | 0 (17.6) | none | 0% | 0 of 13 | 39,117 / 38,796 |
+  | small, 1,500 rounds | 1,270 | 889,690 | 0 | 109,690 | 13 (37.0) | 94,433 / 94,589 | 1.1% | 13 of 1,501 | 15,343 / 15,170 |
+  | subagent | 124 | 793,088 | 0 | 108,760 | 12 (33.4) | 78,239 / 99,086 | 6.4% | 12 of 210 | side room only / 16,062 |
+  | images | 67 | 399,945 | 0 | 108,379 | 6 (17.4) | 75,056 / 85,901 | 5.7% | 6 of 101 | 16,629 / 16,443 |
+  | multiturn | 77 | 549,854 | 0 | 107,856 | 9 (22.9) | 75,599 / 90,069 | 8.1% | 9 of 116 | 17,650 / 16,966 |
+
+  No request violated a rule of the harness's upstream. Every stub's original was reachable in
+  the store and no tool result was lost. No two rewrites fell on consecutive requests. The
+  response-time room was at or above 6,000 on every loop request, so the allowance of (b) and
+  the count of (c) hold with 3,170 tokens to spare at the least (15,170 against `min_turn_room`
+  12,000). In `large` the 60,000-token result is read whole and stays in view, and the 120,000
+  and 200,000-token results are stubbed on arrival, with no rewrite. In loop120 the recall room
+  was 0 on 104 of 121 requests before and never under 16,405 after. The re-sent tokens are the
+  harness's count: the previous request from its first changed message on, which the cache held
+  and the batch made stale. Codex is unchanged (loop120: 100 `over_bound`, largest 810,447).
+  With `in_turn_paging` off, every forwarded message list and every event of four scenarios
+  (`spikes/m2/inturn/d63_measure.py --digest`: 120 rounds, three huge results, a subagent,
+  images) hash the same on this branch and on the v0.5.24 code.
+  **Existing tests changed**, each because it relied on a tool loop reaching the bound unpaged:
+  `test_rewrite.py::test_no_rotation_inside_a_tool_loop_marks_over_bound` asserted the old rule 5
+  and is now two tests (paged in place; sent as is with the switch off);
+  `test_rule17_headroom.py::test_rule_5_is_unchanged_nothing_rotates_inside_a_tool_loop` is now
+  `test_headroom_never_enters_the_tool_loop`, both ways;
+  `test_rewrite.py::test_pre_send_and_real_over_bound_records_are_distinct`, five reproductions in
+  `test_head_change.py` of a turn start after an over-bound loop, the estimator sessions of
+  `test_image_estimate.py` (`_engine`) and `test_pdf_pages.py` (`_session`, and the compact PDF
+  near the bound), `test_usage_attribution.py`'s request without usage, and the A32 and A33
+  replays (`spikes/m2/acceptance/seat_bound.py` and the engines in `test_seat_bound.py` and
+  `test_headroom_outliers.py`, which reproduce numbers measured with a tool loop sent whole) now
+  run with `in_turn_paging` off, since they test the estimate or the turn-start sizing of a loop
+  that reaches the bound; `test_epoch_record.py` lists `in_turn` among the optional fields.
+  **Off for Codex.** The engine reaches the dialect's primitives through `Dialect.in_turn`
+  (`contexto.inturn.MessagesInTurn`: the results of an item, the call of a result, what can be
+  stubbed, the stub and the page shape, the note, the rounds). `ResponsesDialect.in_turn` is None,
+  so a Codex tool loop is sent as before; adding it means implementing those methods for
+  Responses items, with no change to the engine.
+  **Not confirmed live.** No model call was made for this decision. One question is open, and it
+  is the one the second vendor rule leaves: whether a request inside a tool loop, with thinking
+  on, whose earlier tool result was stubbed and whose later in-loop thinking was stripped,
+  returns 200 on an enforcing account (one created on or after 2026-08-31), and whether later
+  responses in that turn still think. The fake upstream used in the tests enforces the first
+  rule only. The acceptance harness's `live` mode cannot drive this (its script is fixed prompts
+  with no tool loop), but its driver can. From the repository root, with a seat settings file
+  for such an account and its upstream URL:
+
+  ```sh
+  python3 - "$SEAT_SETTINGS" "$UPSTREAM" <<'EOF'
+  import json, sys, tempfile
+  from pathlib import Path
+  sys.path.insert(0, "spikes/m2")
+  from acceptance import driver
+
+  scratch = Path(tempfile.mkdtemp(prefix="d63-live-"))  # outside any git repository
+  for i in range(16):  # 16 files of about 16 KB, about 5,000 tokens each
+      (scratch / f"notes_{i:02d}.txt").write_text(
+          "".join(f"line {n:04d} of notes {i:02d}: synthetic filler text, nothing of note\n" for n in range(280)))
+  home = scratch / "contexto-home"
+  log = home / "sessions" / "d63-live" / "log.jsonl"
+  command = driver.launcher_command("d63-live", 80_000, sys.argv[2])  # the line: 80,000 - 25,000 - 12,000 - 3,000
+  command.insert(2, "--observe-thinking")
+  env = driver.child_env(home, driver.isolated_config(scratch, Path(sys.argv[1])))
+  run = driver.StreamJsonTransport(command, scratch, env, log, approved=1_000_000)
+  result = run.send("Read notes_00.txt to notes_15.txt one at a time, in order, each with its own Read call. "
+                    "After each file, say in one line what its last line number is, then read the next. "
+                    "Use no other tool.")
+  run.close()
+  entries = [json.loads(line) for line in log.read_text().splitlines()]
+  requests = [e for e in entries if e.get("event") == "request" and e.get("path") == "/v1/messages"]
+  batches = [t for e in requests for t in e.get("transform_events") or [] if t.get("event") == "in_turn_batch"]
+  refused = [e for e in entries if e.get("event") == "upstream_4xx"]
+  dropped = [e["input_transformations"] for e in requests if e.get("input_transformations")]
+  print(json.dumps({"is_error": result.get("is_error"), "requests": len(requests), "batches": batches,
+                    "upstream_4xx": refused, "thinking_dropped": dropped}, indent=1))
+  print("transcript:", *sorted((scratch / "claude-config" / "projects").glob("*/*.jsonl")))
+  EOF
+  ```
+
+  It passes when the turn ends without an error; `batches` holds at least one batch with
+  `results_stubbed` above 0, `unseen_results_stubbed` 0 and `first_changed` below `messages - 1`
+  (so in-loop thinking was stripped); `upstream_4xx` is empty; `thinking_dropped` is empty; and
+  Claude Code's transcript (the path printed last) has `thinking` blocks in assistant messages
+  after the first batch's request. A 400 "bound to a different conversation" on a request after a
+  batch would mean the rule is wrong; no thinking after the first batch would mean the API
+  disabled it for the rest of the turn, the documented risk. Estimated cost: 17 requests of at
+  most 40,000 input tokens, about 600,000 tokens in all on claude-haiku-5-5, most of them cache
+  reads; the driver stops the run before it passes 1,000,000. Until it is run, the off switch is
+  `contexto run --no-in-turn-paging` or `CONTEXTO_IN_TURN_PAGING=0`.
+  **Limits.** The re-sent figures (the table's, and the event's `resent_tokens`, which counts the
+  request after the edit) both count from the first changed message on. Whether the API reads the
+  unchanged prefix before that message from cache depends on its lookback of about 20 content
+  blocks from a breakpoint, and Claude Code marks the tail; after a batch that changes an old
+  message the request may read only `system` and `tools` from cache and write every message
+  again. That is not modelled or measured here.
+  After a restart a subagent's in-turn edits are not restored (rule 16 never covered subagents).
+  While the system prompt and tools alone are near the line, a batch runs only when it can free
+  `min_turn_room`, so the room can be under `min_turn_room` between batches. A prompt larger than
+  the bound is still `bound_too_small`. The paged_changed resync (rule 10) still keeps in-flight
+  thinking after a prefix change. User guide: `docs/in-turn-paging.md`.
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.

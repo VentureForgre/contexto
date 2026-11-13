@@ -1,20 +1,23 @@
-"""D63 measurement: tool loops replayed through the real engine and a real ``SessionStore``, with
-in-turn paging off (what v0.5.24 sends) and on. Zero spend: the model is the fake upstream of
-``tests/inturn_harness.py``, which also refuses any thinking block whose prefix changed.
+"""D63: a second, independent replay of tool loops through the real engine and a real ``SessionStore``,
+with in-turn paging off and on. Zero spend: the model is the fake upstream of ``tests/inturn_harness.py``
+(text at 3.2 bytes a token), which refuses any thinking block whose prefix changed. The numbers D63
+records come from the replay harness beside this file (``replay.py``); this script adds the engine's
+own batch figures and the proof that paging off changes nothing.
 
-    uv run python spikes/m2/inturn/d63_measure.py            # the table in docs/DECISIONS.md D63
+    uv run python spikes/m2/inturn/d63_measure.py            # one JSON line per scenario, paging off and on
     uv run python spikes/m2/inturn/d63_measure.py --digest   # a hash of every forwarded body, paging off
 
 ``--digest`` runs on any checkout from v0.5.24 on (it never names the new setting when the engine has
-none), so the same command on two checkouts shows whether paging off sends v0.5.24's bytes.
+none), so the same command with ``PYTHONPATH`` at a v0.5.24 ``src`` and at this one shows whether paging
+off sends v0.5.24's bytes and logs its events. Measured for D63: the four scenarios below other than
+``small1500`` hash the same.
 
 Scenarios, all at the default configuration (bound 150,000, headroom floor 25,000, minimum turn room
-12,000, so the in-turn trigger is 113,000) with a 20,000-token head, the fake tokenizer at 3.2 bytes a
-token:
+12,000) with a 20,000-token head:
 
 - ``loop120``: one prompt, 120 tool rounds of about 6,400 tokens each.
 - ``huge3``: 12 rounds, three of them one result of about 160,000 tokens.
-- ``small1500``: 1,500 rounds of 400-byte results.
+- ``small1500``: 1,500 rounds of 400-byte results (several minutes).
 - ``subagent``: main launches a subagent whose one turn runs 120 rounds of about 6,400 tokens.
 - ``images``: two screenshots in the prompt, 60 rounds of 9,000 bytes of text and one image each.
 """

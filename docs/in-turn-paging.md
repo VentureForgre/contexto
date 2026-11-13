@@ -79,7 +79,7 @@ The stored page holds the tool call and its result exactly as Claude Code sent t
 - The model calls `contexto_recall` with the page id from the stub. A long page comes in chunks;
   each reply gives the offset of the next one.
 - `contexto_search` finds lines inside paged results, like any other page.
-- From a terminal: `contexto recall --session <id> pg_3f9c1a7b22d04e61`.
+- From a terminal: `contexto recall pg_3f9c1a7b22d04e61 --session <id>` (add `--offset N` to read on).
 - The page index in the prompt lists whole turns and folded rounds. It does not list single
   results, which would crowd out everything else; the stub in the request names each one.
 
@@ -91,8 +91,10 @@ on that request and every later one. Thinking before the first changed message, 
 the model writes afterwards, is kept. A batch also changes the cached prefix, so that request is
 written to the cache again instead of read from it.
 
-In the 120-round replay the 13 batches re-sent 10.4% of all input tokens, and the model's newest
-thinking was removed on those 13 requests of 121. Contexto does not rewrite the prefix on two
+In the 120-round replay 13 batches ran. The cached tokens they made stale add up to 10.4% of all
+input tokens sent, and the model's newest thinking was removed on those 13 requests of 121. How
+much of the unchanged start of the request the API still reads from cache after a batch is not
+measured. Contexto does not rewrite the prefix on two
 requests in a row unless the second would be over the bound, and not at all for less than 12,000
 tokens.
 
