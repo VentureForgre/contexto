@@ -196,7 +196,7 @@ class Script:
             files = data["files"]
             if not isinstance(files, dict) or not all(isinstance(v, str) for v in files.values()):
                 raise TypeError("files must map a path to its text")
-            return cls(
+            script = cls(
                 seed=int(data["seed"]), turns=_strings(data["turns"]),
                 probes=tuple(Probe.from_dict(p) for p in data["probes"]), paged_only=_strings(data["paged_only"]),
                 turn_bytes=tuple(int(n) for n in data["turn_bytes"]),
@@ -209,6 +209,30 @@ class Script:
             )
         except (KeyError, TypeError) as exc:
             raise ValueError(f"not a benchmark script: {exc!r}") from exc
+        script._check_shape()
+        return script
+
+    def _check_shape(self) -> None:
+        """Refuse a script whose parts do not fit together, so a damaged file fails here and not
+        later with an index error."""
+        n = len(self.turns)
+        problems = []
+        if not (len(self.kinds) == len(self.turn_bytes) == n):
+            problems.append(f"{n} turns but {len(self.kinds)} kinds and {len(self.turn_bytes)} sizes")
+        if len(self.probe_turn_ids) > n:
+            problems.append(f"{len(self.probe_turn_ids)} probe turns in {n} turns")
+        if self.protocol not in PROTOCOLS:
+            problems.append(f"unknown protocol {self.protocol!r}")
+        problems += [f"unknown turn kind {k!r}" for k in sorted(set(self.kinds) - set(KINDS))]
+        known = {p.id for p in self.probes}
+        problems += [f"probe turn asks unknown probe {i!r}" for ids in self.probe_turn_ids for i in ids
+                     if i not in known]
+        problems += [f"decision for turn {d.turn}, which is not a decision turn" for d in self.decisions
+                     if not (0 <= d.turn < len(self.kinds) and self.kinds[d.turn] == "decision")]
+        problems += [f"read of {path!r}, which is not among the files" for path in self.reads
+                     if path not in self.files]
+        if problems:
+            raise ValueError(f"not a benchmark script: {'; '.join(problems[:5])}")
 
     def to_json(self) -> str:
         """The script as JSON text. The same script always gives the same bytes."""

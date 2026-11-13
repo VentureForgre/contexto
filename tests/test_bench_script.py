@@ -210,6 +210,27 @@ def test_from_json_refuses_a_malformed_probe(v2):
         Script.from_dict(data)
 
 
+@pytest.mark.parametrize("change, message", [
+    ({"kinds": ["log"]}, "34 turns but 1 kinds and 34 sizes"),
+    ({"turn_bytes": [1, 2]}, "34 turns but 34 kinds and 2 sizes"),
+    ({"protocol": "v9"}, "unknown protocol 'v9'"),
+    ({"reads": ["bench-files/absent.txt"]}, "read of 'bench-files/absent.txt', which is not among the files"),
+    ({"probe_turn_ids": [["q_zz_99"]]}, "probe turn asks unknown probe 'q_zz_99'"),
+    ({"decisions": [{"turn": 0, "probe": "q_c_01", "label": "DX-1", "value": "v", "reply": "r"}]},
+     "decision for turn 0, which is not a decision turn"),
+    ({"decisions": [{"turn": 99, "probe": "q_c_01", "label": "DX-1", "value": "v", "reply": "r"}]},
+     "decision for turn 99, which is not a decision turn"),
+])
+def test_from_json_refuses_a_script_whose_parts_do_not_fit(v2, change, message):
+    data = {**v2.to_dict(), **change}
+    with pytest.raises(ValueError, match=re.escape(message)):
+        Script.from_dict(data)
+    kinds = list(v2.kinds)
+    kinds[0] = "chat"
+    with pytest.raises(ValueError, match="unknown turn kind 'chat'"):
+        Script.from_dict({**v2.to_dict(), "kinds": kinds})
+
+
 # Protocol v2
 
 
