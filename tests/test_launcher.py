@@ -174,7 +174,8 @@ def test_run_wires_settings_mcp_and_args_and_cleans_up(env, upstream, tmp_path):
     assert argv[0] == "--settings=" + record["settings_path"] and argv[1] == "--mcp-config=" + record["mcp_path"]
     assert argv[2:] == ["-p", "hello", "--model", "m"]
     base = record["settings"]["env"]["ANTHROPIC_BASE_URL"]
-    assert record["settings"] == {"env": {"ANTHROPIC_BASE_URL": base}, "permissions": {"allow": contexto_tool_rules()}}
+    settings = {k: v for k, v in record["settings"].items() if k != "statusLine"}  # D64: tests/test_statusline.py
+    assert settings == {"env": {"ANTHROPIC_BASE_URL": base}, "permissions": {"allow": contexto_tool_rules()}}
     assert base.startswith("http://127.0.0.1:")
     server = record["mcp"]["mcpServers"]["contexto"]
     assert server["command"] == sys.executable and server["args"] == ["-P", "-m", "contexto", "mcp", "--session=s1"]

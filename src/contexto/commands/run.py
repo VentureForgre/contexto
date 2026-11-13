@@ -46,6 +46,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--quiet", action="store_true",
                         help="do not print the summary when the CLI exits; warnings are still printed "
                              "(also CONTEXTO_QUIET=1)")
+    parser.add_argument("--no-statusline", action="store_true",
+                        help="claude only: do not add Contexto's status line to Claude Code (it is added only "
+                             "when no settings file has a statusLine; also CONTEXTO_NO_STATUSLINE=1)")
     parser.add_argument("cli", choices=["claude", "codex"], help="the CLI to run")
     parser.add_argument("cli_args", nargs=argparse.REMAINDER, help="arguments passed to the CLI unchanged")
     try:
