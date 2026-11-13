@@ -42,6 +42,9 @@ install it and how to start it.
   measurements.
 - [maintainer-process.md](maintainer-process.md): how the maintainer runs the project with AI
   agents, and what the reviewer comments on pull requests are.
+- [pypi-publishing.md](pypi-publishing.md): the steps that turn on publishing to PyPI as
+  `contexto-proxy`: the `pypi` environment, the trusted publisher, the switch, and what is
+  permanent on PyPI.
 
 ## Research
 
