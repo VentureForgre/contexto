@@ -424,3 +424,212 @@ def test_read_run_refuses_a_probe_record_of_another_model_and_accepts_such_a_req
     with pytest.raises(records.RecordError) as exc:
         records.read_run(out)
     assert (exc.value.line, exc.value.field) == (4, "model") and "'claude-opus-5-5'" in str(exc.value)
+
+
+# Strict reading: what JSON allows and a careless writer gets wrong
+
+
+def _write_lines(path: Path, rows: list[dict], **dumps) -> None:
+    path.write_text("".join(json.dumps(r, **dumps) + "\n" for r in rows), encoding="utf-8")
+
+
+@pytest.mark.parametrize("separator", [" ", " ", "\u0085", "\x0b", "\x0c", "\x1c"])
+def test_a_line_separator_character_inside_a_string_is_data_not_a_line_end(tmp_path, separator):
+    probes, _ = _good_rows()
+    probes[4] = {**probes[4], "given": f"first{separator}second"}
+    path = tmp_path / "probes.jsonl"
+    # A raw control character below U+0020 is not JSON, so those three are written escaped; the
+    # others are written raw, as ensure_ascii=False does with a model's own text.
+    _write_lines(path, probes, ensure_ascii=ord(separator) < 0x20)
+    assert records.read_probes(path)[4]["given"] == f"first{separator}second"
+
+
+def test_crlf_line_ends_and_a_missing_final_newline_are_accepted(tmp_path):
+    probes, _ = _good_rows()
+    path = tmp_path / "probes.jsonl"
+    path.write_bytes("\r\n".join(json.dumps(r) for r in probes).encode("utf-8"))
+    assert records.read_probes(path) == probes
+
+
+def test_a_repeated_key_is_an_error_that_names_the_key(tmp_path):
+    probes, requests = _good_rows()
+    path = tmp_path / "probes.jsonl"
+    line = json.dumps(probes[1])[:-1] + ', "correct": true}'
+    path.write_text(json.dumps(probes[0]) + "\n" + line + "\n", encoding="utf-8")
+    with pytest.raises(records.RecordError, match="line 2: field 'correct': the key appears twice") as exc:
+        records.read_probes(path)
+    assert (exc.value.line, exc.value.field) == (2, "correct")
+    path = tmp_path / "requests.jsonl"
+    path.write_text(json.dumps(requests[0])[:-1] + ', "uncached": 5}\n', encoding="utf-8")
+    with pytest.raises(records.RecordError, match="line 1: field 'uncached': the key appears twice"):
+        records.read_requests(path)
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest([unit("contexto", 1)]))[:-1] + ', "bound": 9}', encoding="utf-8")
+    with pytest.raises(records.RecordError, match="manifest.json: field 'bound': the key appears twice"):
+        records.read_manifest(path)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity", "1e400"])
+def test_a_number_that_is_not_finite_is_refused_wherever_it_is(tmp_path, constant):
+    path = tmp_path / "manifest.json"
+    text = json.dumps(manifest([unit("contexto", 1)]))
+    path.write_text(text[:-1] + f', "extra": {{"deeper": [1, {constant}]}}}}', encoding="utf-8")
+    with pytest.raises(records.RecordError, match=r"field 'extra.deeper\[1\]': not a finite number") as exc:
+        records.read_manifest(path)
+    assert exc.value.field == "extra.deeper[1]"
+    _, requests = _good_rows()
+    path = tmp_path / "requests.jsonl"
+    path.write_text(json.dumps(requests[0])[:-1] + f', "note": {constant}}}\n', encoding="utf-8")
+    with pytest.raises(records.RecordError, match="line 1: field 'note': not a finite number"):
+        records.read_requests(path)
+    # A known field still gets its own message.
+    path.write_text(json.dumps(requests[0]).replace('"output": 12', f'"output": {constant}') + "\n",
+                    encoding="utf-8")
+    with pytest.raises(records.RecordError, match="line 1: field 'output': expected a whole number"):
+        records.read_requests(path)
+
+
+def test_a_token_count_too_large_to_be_one_is_an_error_not_an_overflow(tmp_path):
+    _, requests = _good_rows()
+    path = tmp_path / "requests.jsonl"
+    for field in ("uncached", "history_tokens"):
+        huge = "1" + "0" * 400
+        path.write_text(json.dumps(requests[0]).replace(f'"{field}": {requests[0][field]}', f'"{field}": {huge}')
+                        + "\n", encoding="utf-8")
+        with pytest.raises(records.RecordError, match=f"line 1: field '{field}': expected 1,000,000,000,000 or "
+                                                      "less") as exc:
+            records.read_requests(path)
+        assert len(str(exc.value)) < 400  # the number is not printed in full
+    path.write_text(json.dumps({**requests[0], "uncached": records.LARGEST}) + "\n", encoding="utf-8")
+    assert records.read_requests(path)[0]["uncached"] == 10 ** 12
+
+
+@pytest.mark.parametrize("opening", ["[", '{"a": '])
+def test_nesting_too_deep_to_read_is_an_error_not_a_recursion_error(tmp_path, opening):
+    path = tmp_path / "requests.jsonl"
+    path.write_text(opening * 200_000 + "\n", encoding="utf-8")
+    with pytest.raises(records.RecordError, match="line 1: ") as exc:
+        records.read_requests(path)
+    assert "not JSON" in str(exc.value) or "nested too deeply" in str(exc.value)
+    path = tmp_path / "manifest.json"
+    path.write_text(opening * 200_000, encoding="utf-8")
+    with pytest.raises(records.RecordError):
+        records.read_manifest(path)
+
+
+def test_a_lone_surrogate_is_refused_because_it_cannot_be_written_as_utf8(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest([unit("contexto", 1)], model="m\ud800")), encoding="utf-8")
+    with pytest.raises(records.RecordError, match="field 'model': .*not valid Unicode"):
+        records.read_manifest(path)
+
+
+def test_a_missing_file_is_said_to_be_missing_and_is_not_called_bad_json(tmp_path):
+    for read in (records.read_manifest, records.read_probes, records.read_requests):
+        with pytest.raises(records.RecordError) as exc:
+            read(tmp_path / "absent.json")
+        assert str(exc.value) == f"{tmp_path / 'absent.json'}: cannot read the file: it is missing"
+    (tmp_path / "manifest.json").mkdir()
+    with pytest.raises(records.RecordError) as exc:
+        records.read_manifest(tmp_path / "manifest.json")
+    assert "cannot read the file" in str(exc.value) and "not JSON" not in str(exc.value)
+
+
+# The manifest's optional fields
+
+
+def test_a_label_is_optional_short_and_one_line(tmp_path):
+    path = tmp_path / "manifest.json"
+    for label in ("Stub run: no model answered", None):
+        path.write_text(json.dumps(manifest([unit("contexto", 1)], label=label)), encoding="utf-8")
+        assert records.read_manifest(path)["label"] == label
+    path.write_text(json.dumps(manifest([unit("contexto", 1)])), encoding="utf-8")
+    assert "label" not in records.read_manifest(path)
+    for label, problem in ((5, "expected a string or null"), ("x" * 201, "expected 200 characters or fewer"),
+                           ("two\nlines", "expected one line"), ("bell\x07", "expected one line")):
+        path.write_text(json.dumps(manifest([unit("contexto", 1)], label=label)), encoding="utf-8")
+        with pytest.raises(records.RecordError, match=f"field 'label': {problem}"):
+            records.read_manifest(path)
+
+
+def test_the_intended_compaction_trigger_is_one_token_or_more(tmp_path):
+    data = manifest([unit("plain", 1)])
+    data["plain_compaction"]["intended_trigger"] = 0
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(records.RecordError, match=r"field 'plain_compaction.intended_trigger': expected 1 or more"):
+        records.read_manifest(path)
+
+
+def test_a_unit_may_carry_its_record_counts_and_its_cache_lifetime(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest([unit("contexto", 1, probes=72, requests=40, cache_ttl="1h")])),
+                    encoding="utf-8")
+    assert records.read_manifest(path)["units"][0]["requests"] == 40
+    for field, value, problem in (("probes", -1, "expected 0 or more"), ("requests", "40", "expected a whole number"),
+                                  ("cache_ttl", "2h", "expected one of '5m', '1h'")):
+        path.write_text(json.dumps(manifest([unit("contexto", 1, **{field: value})])), encoding="utf-8")
+        with pytest.raises(records.RecordError, match=rf"field 'units\[0\].{field}': {problem}"):
+            records.read_manifest(path)
+
+
+# read_run: records that were cut, dropped or written twice
+
+
+def _one_unit(tmp_path, change=lambda probes, requests: None, **unit_fields) -> Path:
+    s = small_script(1)
+    probes = probe_rows(s, "contexto", 0, set())
+    requests = request_rows(s, "contexto", 0)[0]
+    change(probes, requests)
+    return write_run(tmp_path / "run", [unit("contexto", 1, **unit_fields)], probes, requests)
+
+
+def test_read_run_refuses_a_request_recorded_twice(tmp_path):
+    out = _one_unit(tmp_path, lambda probes, requests: requests.extend([dict(r) for r in requests[:3]]))
+    with pytest.raises(records.RecordError, match="requests.jsonl: line .*: field 'n': the request 0 appears twice "
+                                                  "for the unit contexto, seed 1, repeat 0") as exc:
+        records.read_run(out)
+    assert exc.value.line == len(small_script(1).turns) + 1
+
+
+def test_read_run_refuses_a_gap_in_the_requests_of_a_unit(tmp_path):
+    out = _one_unit(tmp_path, lambda probes, requests: requests.pop(5))
+    with pytest.raises(records.RecordError, match="requests.jsonl: the unit contexto, seed 1, repeat 0 has no "
+                                                  "request 5"):
+        records.read_run(out)
+    out = _one_unit(tmp_path, lambda probes, requests: requests.reverse())  # the order in the file is free
+    assert len(records.read_run(out).requests) == len(small_script(1).turns)
+
+
+@pytest.mark.parametrize("keep", [0, 1])
+def test_read_run_refuses_a_complete_unit_whose_requests_are_gone(tmp_path, keep):
+    s = small_script(1)
+    units = [unit("contexto", 1), unit("full", 1)]
+    probes = probe_rows(s, "contexto", 0, set()) + probe_rows(s, "full", 0, set())
+    requests = (request_rows(s, "contexto", 0)[0] + request_rows(s, "full", 0)[0])[:keep]
+    out = write_run(tmp_path / "run", units, probes, requests)
+    arm = "contexto" if keep == 0 else "full"
+    with pytest.raises(records.RecordError, match=f"requests.jsonl: the unit {arm}, seed 1, repeat 0 is complete in "
+                                                  "manifest.json but has no request record"):
+        records.read_run(out)
+
+
+def test_read_run_accepts_a_stopped_unit_with_no_requests(tmp_path):
+    s = small_script(1)
+    units = [unit("contexto", 1), unit("plain", 1, status="stopped", reason="the CLI exited")]
+    out = write_run(tmp_path / "run", units, probe_rows(s, "contexto", 0, set()), request_rows(s, "contexto", 0)[0])
+    assert len(records.read_run(out).manifest["units"]) == 2
+
+
+def test_read_run_checks_the_record_counts_a_unit_carries(tmp_path):
+    turns = len(small_script(1).turns)
+    assert records.read_run(_one_unit(tmp_path, probes=72, requests=turns)).manifest["units"][0]["probes"] == 72
+    # The tail of a unit cut at a line boundary: nothing else in the directory shows it.
+    out = _one_unit(tmp_path, lambda probes, requests: requests.pop(), probes=72, requests=turns)
+    with pytest.raises(records.RecordError, match=f"requests.jsonl: the unit contexto, seed 1, repeat 0 has "
+                                                  f"{turns - 1} request records and manifest.json says {turns}"):
+        records.read_run(out)
+    out = _one_unit(tmp_path, lambda probes, requests: probes.pop(), probes=72, requests=turns)
+    with pytest.raises(records.RecordError, match="probes.jsonl: the unit contexto, seed 1, repeat 0 has 71 probe "
+                                                  "records and manifest.json says 72"):
+        records.read_run(out)

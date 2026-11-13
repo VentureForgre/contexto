@@ -66,6 +66,11 @@ def requests_of(run: records.Run, arm: str, repeat: int = 0) -> list[dict]:
     return [r for r in run.requests if r["arm"] == arm and r["repeat"] == repeat]
 
 
+def requests_for(s, *arms: str) -> list[dict]:
+    """The request rows of repeat 0 of each arm: a complete unit has request records."""
+    return [row for arm in arms for row in request_rows(s, arm, 0)[0]]
+
+
 # Per arm
 
 
@@ -369,7 +374,7 @@ def test_concluded_accuracy_is_given_over_all_probes_and_over_those_whose_decisi
     for arm in ("contexto", "full"):
         units.append(unit(arm, 1, concluded_ok=decisions if arm == "contexto" else {}))
         probes += probe_rows(s, arm, 0, set(concluded[:3]))  # three wrong: two with a wrong decision, one without
-    out = write_run(tmp_path / "run", units, probes, [])
+    out = write_run(tmp_path / "run", units, probes, requests_for(s, "contexto", "full"))
     results = report.build([out])
     block = results["arms"]["contexto"]["concluded"]
     assert (block["decisions"], block["decisions_right"], block["scripted"]) == (6, 4, False)
@@ -435,7 +440,8 @@ def test_the_request_series_is_the_main_requests_of_the_first_seed_repeat_0(tmp_
 
 def test_a_complete_unit_without_probe_records_is_an_error(tmp_path):
     s = small_script(1)
-    out = write_run(tmp_path / "run", [unit("contexto", 1), unit("full", 1)], probe_rows(s, "contexto", 0, set()), [])
+    out = write_run(tmp_path / "run", [unit("contexto", 1), unit("full", 1)], probe_rows(s, "contexto", 0, set()),
+                    requests_for(s, "contexto", "full"))
     with pytest.raises(report.ReportError, match="full, seed 1, repeat 0 is complete .* has no records for it"):
         report.build([out])
 
@@ -443,7 +449,8 @@ def test_a_complete_unit_without_probe_records_is_an_error(tmp_path):
 def test_units_of_one_seed_that_answered_different_probes_are_an_error(tmp_path):
     s = small_script(1)
     rows = probe_rows(s, "contexto", 0, set()) + probe_rows(s, "full", 0, set())[:-5]
-    out = write_run(tmp_path / "run", [unit("contexto", 1), unit("full", 1)], rows, [])
+    out = write_run(tmp_path / "run", [unit("contexto", 1), unit("full", 1)], rows,
+                    requests_for(s, "contexto", "full"))
     with pytest.raises(report.ReportError, match="72 probes .* 67"):
         report.build([out])
 
