@@ -13,31 +13,36 @@ on that request and on every later one (``InTurn.strips``), exactly as rule 2 st
 Thinking before ``p`` and in messages added afterwards passes through byte for byte. No request carries
 a thinking block with anything changed before it.
 
-**A batch** (``page``) runs in a tool loop when the pre-send estimate passes the trigger ``T = bound -
-headroom_floor - min_turn_room``, the point where the recall room the request publishes would fall under
-``min_turn_room``. It pages down to a target between what cannot be paged and ``T``
-(``window_fraction``), in this order, stopping as soon as the target is met:
+**A batch** (``page``) runs in a tool loop when the pre-send estimate passes the line ``T - min_turn_room
+/ 4``, where ``T = bound - headroom_floor - min_turn_room`` is the point at which the recall room the
+request publishes would fall under ``min_turn_room`` and the quarter is an allowance for the response's
+output (``page_line``). For these decisions a tool result that arrived with the request counts at 1.8
+bytes a token when that is more than the session's ratio gives (``fresh_margin``): the ratio is a
+blend, tool output is denser, and no usage has measured the result yet. A batch pages down to a target:
+halfway between what cannot be paged and the line (``window_fraction``), and at least two
+``min_turn_room`` under the line when that much can be paged, so the next rounds need no batch. In this
+order, stopping as soon as the target is met:
 
-0. An unseen result (one after the last assistant message) that alone cannot fit under ``T`` with
-   everything else paged is replaced by a stub. It sits after the last thinking block, so nothing is
+0. The model reads every result whole at least once unless it cannot fit. A result that has just
+   arrived (one after the last assistant message) is replaced by a stub only when the head, what cannot
+   be paged of the messages and the unread results could not be sent under ``T`` with everything older
+   paged; then the largest go first. An unread result sits after the last thinking block, so nothing is
    stripped and the cached prefix stays.
 1. Older tool results are replaced by stubs, oldest first, across the retained window. The originals
    go to result pages; the results of Contexto's own search, recall and state calls are copies of
    pages, so they get a stub and no page.
-2. If the estimate is still over the escalation line: the whole earlier turns of the window are paged
-   through the rotation machinery (``new_epoch`` at the current turn's start). While the head is still
-   unmeasured at ``k == 0`` (rule 4 measures it only there) this waits until step 3 has left the request
-   over the bound itself.
-3. If still over it: the oldest complete tool rounds of the running turn are folded into one page and
-   removed from the request, with a note in the turn-start message.
-4. If the request is still over the bound itself: unseen results are stubbed, largest first.
+2. If the target is not met: the whole earlier turns of the window are paged through the rotation
+   machinery (``new_epoch`` at the current turn's start). While the head is still unmeasured at ``k ==
+   0`` (rule 4 measures it only there) this waits until step 3 has left the request over the bound.
+3. If still not met: the oldest complete tool rounds of the running turn are folded into one page and
+   removed from the request, with a note in the turn-start message (never in a results message, where
+   the API wants the ``tool_result`` blocks first).
+4. If the request is still over the bound itself: unread results are stubbed, largest first.
 5. Still over the bound: ``over_bound`` as before, and ``in_turn_exhausted``.
 
-The escalation line is the higher of the target and ``T - min_turn_room``: a batch that ends just under
-``T`` would be followed by another at the next request, so a step that leaves less than
-``min_turn_room`` of growth before the trigger hands over to the next step. A request over ``T`` starts
-no batch when the whole ladder could free less than ``min_turn_room`` and the request is under the
-bound.
+Steps 1 to 3 change messages the previous request had, which rewrites the cached prefix. They run only
+when they could free at least ``min_turn_room``, and never on the request right after such a rewrite,
+unless the request would be over the bound.
 
 **State.** Everything the engine needs to send the same bytes again is in ``EpochState.inturn``: which
 result blocks are stubs and their page ids, which messages are folded and into which page, and the
@@ -69,6 +74,11 @@ from contexto.tokens import TokenEstimator
 
 STUB_MIN_BYTES = 2_048  # a result is stubbed only when its content is at least this many bytes
 STUB_MIN_RATIO = 2  # and at least this many times its stub
+# A tool result that has just arrived counts at this many bytes a token for in-turn decisions when the
+# session's ratio would count it lower: the density measured for log-heavy tool output (contract rule 3).
+FRESH_BYTES_PER_TOKEN = 1.8
+OUTPUT_ALLOWANCE_SHARE = 4  # the response's output allowance: min_turn_room over this
+HEADWAY_ROOMS = 2  # a batch leaves this many min_turn_room of growth before the line when it can
 LOCATOR_CHARS = 200  # characters of a path, command or input a stub shows
 NOTE_NAMES = 12  # tools and files a fold note lists
 LOCATOR_KEYS = ("file_path", "path", "notebook_path", "command", "pattern", "url", "query")
@@ -95,6 +105,9 @@ class InTurn(NamedTuple):
     folds: tuple[tuple[int, tuple[tuple[int, int], ...], str], ...] = ()
     strips: tuple[tuple[int, int], ...] = ()  # sorted, disjoint [first, end): thinking stripped there
     batches: int = 0  # batches run in this conversation; part of the ratio's scope (D48)
+    # The message count of the last request whose batch changed a message the request before it had (a
+    # rewrite of the cached prefix); the request right after it starts no other unless over the bound.
+    rewrote: int = 0
 
 
 EMPTY = InTurn()
@@ -320,6 +333,11 @@ def stub_page(content: Any) -> str | None:
     return found.group(1) if found else None
 
 
+def is_own_stub(content: Any) -> bool:
+    """A stub of one of Contexto's own search, recall or state results, which names no page."""
+    return isinstance(content, str) and content.startswith("[Contexto dropped this result of its own tool ")
+
+
 def note_page(text: Any) -> str | None:
     """The page id a fold note names, or None when ``text`` is not one (``fold_note``'s form)."""
     if not isinstance(text, str) or not text.startswith("[Contexto folded "):
@@ -477,7 +495,7 @@ def clipped(edits: InTurn, matched: int) -> InTurn:
 def to_record(edits: InTurn) -> dict[str, Any]:
     return {"stubs": [list(s) for s in edits.stubs],
             "folds": [[start, [list(r) for r in ranges], page_id] for start, ranges, page_id in edits.folds],
-            "strips": [list(r) for r in edits.strips], "batches": edits.batches}
+            "strips": [list(r) for r in edits.strips], "batches": edits.batches, "rewrote": edits.rewrote}
 
 
 def from_record(record: Any, n: int) -> InTurn:
@@ -490,10 +508,12 @@ def from_record(record: Any, n: int) -> InTurn:
             stubs=tuple((int(i), int(j), str(page_id)) for i, j, page_id in record["stubs"]),
             folds=tuple((int(start), tuple((int(a), int(b)) for a, b in ranges), str(page_id))
                         for start, ranges, page_id in record["folds"]),
-            strips=tuple((int(a), int(b)) for a, b in record["strips"]), batches=int(record["batches"]))
+            strips=tuple((int(a), int(b)) for a, b in record["strips"]), batches=int(record["batches"]),
+            rewrote=int(record["rewrote"]))
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("epoch record field in_turn") from error
-    if extent(edits) > n or edits.strips != _merged(list(edits.strips)) or list(edits.stubs) != sorted(edits.stubs):
+    if (extent(edits) > n or edits.rewrote > n or edits.strips != _merged(list(edits.strips))
+            or list(edits.stubs) != sorted(edits.stubs)):
         raise ValueError("epoch record field in_turn")
     return edits
 
@@ -511,6 +531,15 @@ def trigger(config: Any) -> int:
     return config.bound - config.headroom_floor - config.min_turn_room
 
 
+def page_line(config: Any) -> int:
+    """The line a batch holds requests under: ``T`` less an allowance for the response's output, a
+    quarter of ``min_turn_room``. The room published when the response arrives is ``bound - (input +
+    output) - headroom_floor``, so a request at ``T`` would publish less than ``min_turn_room`` by the
+    whole output; with the allowance an output of up to three quarters of ``min_turn_room`` (9,000
+    tokens with the defaults) still leaves half of it."""
+    return trigger(config) - config.min_turn_room // OUTPUT_ALLOWANCE_SHARE
+
+
 class _Candidate(NamedTuple):
     i: int
     j: int
@@ -521,19 +550,21 @@ class _Candidate(NamedTuple):
     result: dict
 
 
-_SEED = TokenEstimator()  # never observes usage: the contract's seed ratios (tool output at 1.5 bytes a token)
+_DENSE = TokenEstimator()  # counts at FRESH_BYTES_PER_TOKEN, whatever the session has measured
+_DENSE.observe(round(FRESH_BYTES_PER_TOKEN * 1_000_000), 1_000_000)
 
 
 def fresh_margin(items: list[dict], estimator: Any, dialect: Any) -> int:
     """What the estimate of tool results that arrived with this request may be short by. The session's
-    ratio is a blend, and one large result can be much denser than it (measured in the replay harness:
-    a 60,000-token result estimated 17,195 low). Until a response's usage has measured it, a fresh result
-    counts at the tool-output seed for in-turn decisions; this is the difference, never negative."""
+    ratio is a blend learned mostly from the head's text, and tool output is denser (measured in the
+    replay harness: a 60,000-token result estimated 17,195 low). Until a response's usage has measured
+    it, a fresh result counts at ``FRESH_BYTES_PER_TOKEN`` for in-turn decisions; this is the
+    difference, never negative."""
     hooks = dialect.in_turn
     extra = 0
     for item in items:
         if item is not FOLDED and hooks.results(item):
-            extra += max(0, dialect.estimate_items(_SEED, [item]) - dialect.estimate_items(estimator, [item]))
+            extra += max(0, dialect.estimate_items(_DENSE, [item]) - dialect.estimate_items(estimator, [item]))
     return extra
 
 
@@ -552,7 +583,7 @@ def page(request: dict, messages: list[dict], previous_n: int, estimate: int, st
             or not callable(getattr(store, "page_parts", None))):
         return state, None
     margin = fresh_margin(view(messages, state, dialect)[previous_n:], estimator, dialect)
-    if estimate + margin <= trigger(config):
+    if estimate + margin <= page_line(config):
         return state, None
     calls, attempt = rw.StoreCalls(store), []
     try:
@@ -571,7 +602,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     rw = _rw()
     dialect = rw._dialect()
     n = len(messages)
-    line_t = trigger(config)
+    line = page_line(config)
     start = rw.turn_starts(messages)[-1]
     last_assistant = max(i for i in range(start, n) if rw.is_assistant(messages[i]))
     sent = view(messages, state, dialect)
@@ -613,23 +644,40 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     # Rule 4 measures the head only at k == 0, from the first usage. A new epoch before that would leave
     # it unmeasured for the rest of the session, so step 2 waits for it; the other steps keep k.
     may_page_turns = start > state.k and not (state.head_tokens is None and state.k == 0)
-    earlier = tokens(rw.window_items(sent[:start], state.k)) if may_page_turns else 0
-    freeable = (earlier + sum(counted(i, sent[i]) for r in rounds for i in r.removed)
+    earlier = tokens(rw.window_items(sent[:start], state.k)) if start > state.k else 0
+    freeable = ((earlier if may_page_turns else 0) + sum(counted(i, sent[i]) for r in rounds for i in r.removed)
                 + sum(c.saving for c in seen if c.i not in in_rounds and (c.i >= start or not may_page_turns)))
     pressure = estimate + margin
     floor = pressure - freeable
-    target = floor + math.ceil(config.window_fraction * max(0, line_t - floor))
-    escalate = max(target, line_t - config.min_turn_room)
+    halfway = floor + math.ceil(config.window_fraction * max(0, line - floor))
+    # Down to halfway between what cannot be paged and the line, and far enough under the line that the
+    # next rounds do not need another batch; never under what cannot be paged.
+    target = max(floor, min(halfway, line - HEADWAY_ROOMS * config.min_turn_room))
     over_bound = pressure > config.bound
-    # Step 0: a result that cannot fit under T whatever else is paged, or that with its margin would
-    # leave no recall room at all.
-    kept_floor = floor - sum(c.saving for c in unseen)
-    no_room = config.bound - config.headroom_floor
-    huge = [c for c in unseen if kept_floor + c.plain > line_t or kept_floor + c.saving > no_room]
-    if not (over_bound or huge or freeable >= config.min_turn_room):
-        return state, None  # nothing meaningful to page: no batch on every request (no thrash)
-
     base = tokens(rw.transform_messages(messages, state))
+    # Step 0: the model reads every result whole at least once unless it cannot fit. A result is stubbed
+    # on arrival only when the head, what cannot be paged of the messages (the turn-start prompt, the
+    # newest round) and the unread results could not be sent under T with everything older paged. The
+    # messages are counted directly here, not from the anchored estimate, which carries the error of the
+    # older results that paging would take out with them.
+    head = rw.measured_head(request, state, estimator)
+    if head is None:
+        head = estimator.estimate(canonical_json(dialect.head_estimate_source(request)))
+    pageable = (earlier + sum(tokens([sent[i] for i in r.removed]) for r in rounds)
+                + sum(c.plain for c in seen if c.i >= start and c.i not in in_rounds))
+    least = head + base - pageable + sum(c.saving - c.plain for c in unseen)
+    huge: list[_Candidate] = []
+    for c in sorted(unseen, key=lambda c: (-c.saving, c.i, c.j)):
+        if least <= trigger(config):
+            break
+        huge.append(c)
+        least -= c.saving
+    # A batch that changes earlier messages rewrites the cached prefix. The request right after one starts
+    # no other unless it would be over the bound; and none starts for less than min_turn_room.
+    after_rewrite = state.inturn.rewrote == previous_n and state.inturn.rewrote > 0
+    may_rewrite = over_bound or (not after_rewrite and freeable >= config.min_turn_room)
+    if not (huge or may_rewrite):
+        return state, None
     before = state
 
     def measured(new: Any) -> int:
@@ -685,8 +733,11 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     if huge:
         stubbed(huge, True)
         unseen = [c for c in unseen if c not in huge]
+    # Steps 1 to 3 change messages the previous request had, so they run together or not at all: once
+    # the prefix is rewritten, the batch goes down to its target.
+    rewriting = may_rewrite and cur > line
     # Step 1: older results, oldest first, down to the target.
-    if cur > line_t and seen:
+    if rewriting and seen:
         chosen, left = [], cur
         for c in seen:
             if left <= target:
@@ -696,10 +747,10 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         if chosen:
             stubbed(chosen, False)
     # Step 2: the earlier turns of the window, through the rotation machinery.
-    if cur > escalate and may_page_turns:
+    if rewriting and cur > target and may_page_turns:
         page_turns()
     # Step 3: the oldest complete rounds of the running turn, into one page.
-    if cur > escalate:
+    if rewriting and cur > target:
         sent = view(messages, state, dialect)
         rounds = [r for r in hooks.rounds(sent, start, n)[:-1] if r.foldable and r.removed]
         folded, left = [], cur
@@ -738,7 +789,8 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             events.append({"event": "in_turn_exhausted", "epoch": state.epoch, "estimate": estimate,
                            "bound": config.bound})
         return state, None
-    state = replace(state, inturn=state.inturn._replace(batches=state.inturn.batches + 1))
+    rewrote = n if first_changed < previous_n else state.inturn.rewrote
+    state = replace(state, inturn=state.inturn._replace(batches=state.inturn.batches + 1, rewrote=rewrote))
     after = measured(state)
     if first_changed <= state.k:  # the first retained message changed: everything sent is new
         resent = tokens(rw.transform_messages(messages, state))

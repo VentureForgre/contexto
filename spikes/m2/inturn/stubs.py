@@ -14,7 +14,9 @@ from contexto import inturn
 
 
 class StubRef(NamedTuple):
-    page_id: str  # the store page the stub names (``SessionStore.get_page``)
+    # The store page the stub names (``SessionStore.get_page``); None only for the result of one of
+    # Contexto's own tools, which has no page.
+    page_id: str | None
     # The tool calls whose results the stub stands for: Messages ``tool_use`` ids, Responses
     # ``call_id``s. The harness checks that the page holds each one's original result. Leave it empty
     # for a stub that names no call; then only the page's existence is checked.
@@ -29,7 +31,8 @@ def find_stubs(dialect: str, request: dict) -> list[StubRef]:
     result page that holds its call and result, and a fold note in a user message names the rounds page
     that holds the folded tool rounds (no call is named: a result folded with its round may itself be a
     stub there, its original in its own result page). A stub of one of Contexto's own search, recall or
-    state results names no page and is not listed. Codex has no in-turn paging yet, so no stubs."""
+    state results names no page (``page_id`` None): the result was a copy of stored pages, and the stub
+    gives the call's arguments. Codex has no in-turn paging yet, so no stubs."""
     if dialect != "claude":
         return []
     found = []
@@ -42,6 +45,8 @@ def find_stubs(dialect: str, request: dict) -> list[StubRef]:
                 page = inturn.stub_page(block.get("content"))
                 if page is not None:
                     found.append(StubRef(page, (block["tool_use_id"],)))
+                elif inturn.is_own_stub(block.get("content")):
+                    found.append(StubRef(None, (block["tool_use_id"],)))
             elif block.get("type") == "text" and message.get("role") == "user":
                 page = inturn.note_page(block.get("text"))
                 if page is not None:

@@ -429,12 +429,18 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      `min_turn_room` (rule 3's second condition, applied inside the turn). A request over `T`
      starts no batch when everything the steps below could free is less than `min_turn_room` and
      the request is at or under the bound, so a turn that cannot be paged further does not pay a
-     batch on every request.
+     batch on every request. For the trigger and every decision of a batch, a tool result that
+     arrived with the request counts at the tool-output seed of rule 3, 1.5 bytes a token, when
+     that is more than the session's ratio gives, until a response's usage has measured it: the
+     ratio is a blend, and one large result can be much denser (measured in the replay harness: a
+     60,000-token result estimated 17,195 low). The estimate that is logged and published stays
+     rule 3's.
    - **A batch** pages down to a target, `floor + window_fraction * (T - floor)`, where `floor` is
      the estimate less everything steps 1 to 3 could free. In order, stopping as soon as the
      target is met:
      0. A result the model has not seen yet (one after the last assistant message) that could not
-        fit under `T` even with everything else paged is replaced by a stub. It sits after the
+        fit under `T` even with everything else paged, or that counted at the seed would leave no
+        recall room at all (`bound - headroom_floor`), is replaced by a stub. It sits after the
         last thinking block, so nothing is stripped and no earlier message changes. A batch that
         only does this stops there if the request is then at or under `T`.
      1. Older tool results are replaced by stubs, oldest first, across the retained window
@@ -448,7 +454,10 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      2. If the estimate is still over the escalation line, the higher of the target and
         `T - min_turn_room`: the whole earlier turns of the window are paged as a rotation does
         (rule 4: one page per turn, carried content kept, pinned and index text rebuilt), with `k`
-        at the running turn's start; the `rotation` event has `reason: "in_turn"`.
+        at the running turn's start; the `rotation` event has `reason: "in_turn"` and no sizing
+        fields. While the head is still unmeasured at `k = 0` (rule 4 measures it only there, from
+        the first usage), this step waits, so that the head can still be measured; it runs after
+        step 3 if the request is then still over the bound itself.
      3. If still over that line: the oldest complete tool rounds of the running turn (an assistant
         message and what follows it up to the next one) are folded into one rounds page and
         removed from the request, whole rounds only. The turn-start message gets a note after its
@@ -487,8 +496,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    - **Events.** One content-free `in_turn_batch` per batch: the epoch, `trigger` (`room`,
      `bound` when the request was over the bound, `result` when only step 0 ran),
      `results_stubbed`, `own_results_stubbed`, `unseen_results_stubbed`, `rounds_folded`,
-     `turns_paged`, `pages`, `estimate_before`, `estimate_after`, `first_changed` (the index `p`),
-     `resent_tokens` (the tokens from `p` on, which a cache rewrite re-sends at least), and
+     `turns_paged`, `pages`, `estimate_before`, `estimate_after`, `margin` (what the fresh
+     results' seed count added to `estimate_before` for the decision), `first_changed` (the index
+     `p`), `resent_tokens` (the tokens from `p` on, which a cache rewrite re-sends at least), and
      `messages`.
    - **Switch.** `in_turn_paging` (default on), a configuration setting under rule 16's check:
      `contexto run --no-in-turn-paging`, or `CONTEXTO_IN_TURN_PAGING=0`. Off, a turn that grows

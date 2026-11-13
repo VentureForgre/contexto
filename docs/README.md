@@ -19,6 +19,8 @@ install it and how to start it.
   where, and the commands that inspect and remove sessions.
 - [standing-rules.md](standing-rules.md): how a rule you give once stays in view after its turn is
   paged out.
+- [in-turn-paging.md](in-turn-paging.md): how a long tool loop or a subagent stays under the bound:
+  what a paged tool result looks like, how the model reads it back, and how to turn it off.
 - [mcp-tools.md](mcp-tools.md): the five MCP tools the model gets, how search ranks, and the recall
   budget.
 - [faq.md](faq.md): subscription logins, API keys, cost, what is sent where, and continuing a

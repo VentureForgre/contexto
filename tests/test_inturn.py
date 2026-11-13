@@ -208,6 +208,11 @@ def test_a_subagents_loop_stays_under_the_bound(subagent):
     assert main_state.turns_paged >= 1 and turn >= 1
     pages = {page for _, _, page in side_state(engine, side).inturn.stubs if page}
     assert pages and {store.get_page(page)["turn"] for page in pages} == {turn}
+    # Search and recall reach the subagent's stubbed results while its turn is still in the window.
+    found = tool(store, "contexto_search", {"query": "needle-audit-0003-midpoint"})
+    page = next(p for p in pages if p in found)
+    assert "needle-audit-0003-midpoint" in found and "row 00000 of audit-0003" in tool(
+        store, "contexto_recall", {"page_id": page})
 
 
 def side_state(engine: RewriteEngine, side: Cli) -> EpochState:
@@ -383,16 +388,58 @@ def test_a_round_with_carried_content_is_not_folded():
     assert cli.sent[-1].messages[2]["content"][-1] == memory_block
 
 
-def test_unseen_results_are_stubbed_largest_first_when_the_request_is_over_the_bound():
+def test_results_that_cannot_fit_together_are_stubbed_largest_first_on_arrival():
     cli = Cli(memory(), SMALL, head_bytes=8_000)
     cli.prompt("Read four files at once.")
     sizes = (40_000, 70_000, 55_000, 60_000)  # 12,500 to 21,900 tokens: each fits alone, together they do not
     cli.loop(1, lambda r: tuple(output(f"par-{c}", size) for c, size in enumerate(sizes)))
     assert_bound_held(cli, SMALL.bound)
     (batch,) = batches(cli)
-    assert batch["trigger"] == "bound" and batch["unseen_results_stubbed"] == batch["results_stubbed"]
-    assert sorted(j for _, j, _ in cli.state.inturn.stubs) == [1, 3][:batch["results_stubbed"]] or \
-        {j for _, j, _ in cli.state.inturn.stubs} >= {1}  # the largest first
+    assert batch["trigger"] == "result" and batch["unseen_results_stubbed"] == batch["results_stubbed"] >= 2
+    stubbed = sorted(j for _, j, _ in cli.state.inturn.stubs)
+    assert stubbed == [1, 3, 2][:len(stubbed)] or stubbed == sorted([1, 3, 2][:len(stubbed)])  # the largest first
+    assert 0 not in stubbed  # the smallest is read whole
+
+
+def test_a_large_result_that_fits_is_read_whole_and_stubbed_only_once_seen():
+    # The model reads every result at least once unless it cannot fit: a 31,000-token result arrives when
+    # the request has room for it with everything older paged, so it is sent whole; a later batch stubs it.
+    cli = Cli(memory())
+    cli.prompt("Read the notes, then the big file.")
+    for r in range(3):
+        cli.send([("Read", {"file_path": f"note{r}.md"})])
+        cli.results([output(f"note-{r}", RESULT)])
+    cli.send([("Read", {"file_path": "big.log"})])
+    cli.results([output("big", 100_000)])
+    at = len(cli.history) - 1
+    sent = cli.send([("Read", {"file_path": "after.md"})])
+    assert sent.messages[at] == cli.history[at] and not any(e["unseen_results_stubbed"] for e in batches(cli))
+    cli.results([output("after", RESULT)])
+    cli.loop(30, lambda r: output(f"later-{r}", RESULT))
+    assert_bound_held(cli)
+    assert not any(e["unseen_results_stubbed"] for e in batches(cli))
+    assert (at, 0) in {(i, j) for i, j, _ in cli.state.inturn.stubs}
+
+
+def test_no_rewrite_on_the_request_right_after_a_rewrite_unless_over_the_bound():
+    cli = Cli(memory(), SMALL, head_bytes=8_000)
+    cli.prompt("Read every module.")
+    for r in range(40):
+        sent = cli.send([("Read", {"file_path": f"m{r}.py"})])
+        if "in_turn_batch" in sent.names:
+            break
+        cli.results([output(f"m-{r}", RESULT)])
+    first = batches(cli)[0]
+    assert first["first_changed"] < first["messages"] - 1 and cli.state.inturn.rewrote == first["messages"]
+    # A 15,600-token result arrives right after: over the line, under the bound. It is read whole, and
+    # the cached prefix is not rewritten a second time in a row.
+    cli.results([output("wide", 50_000)])
+    after = cli.send([("Read", {"file_path": "next.py"})])
+    assert "in_turn_batch" not in after.names and after.estimate <= SMALL.bound
+    assert after.estimate + 10_000 > inturn.page_line(SMALL)  # it would have paged
+    cli.results([output("next", RESULT)])
+    later = cli.send([("Read", {"file_path": "last.py"})])
+    assert "in_turn_batch" in later.names and later.estimate <= inturn.page_line(SMALL)
 
 
 def test_over_the_bound_with_nothing_left_to_page_is_logged():
@@ -425,9 +472,11 @@ def test_the_event_is_content_free_and_complete():
                           "unseen_results_stubbed", "rounds_folded", "turns_paged", "pages", "estimate_before",
                           "estimate_after", "margin", "first_changed", "resent_tokens", "messages"}
     assert all(isinstance(v, (int, str)) for v in event.values())
-    # The trigger counts the result that just arrived at the tool-output seed until usage measures it.
-    assert event["estimate_before"] + event["margin"] > inturn.trigger(SMALL) >= event["estimate_after"]
-    assert 0 < event["margin"] < 9_000 and event["estimate_before"] <= inturn.trigger(SMALL)
+    # The line is T less the output allowance, and the result that just arrived counts at 1.8 bytes a
+    # token until usage measures it.
+    assert inturn.page_line(SMALL) == inturn.trigger(SMALL) - SMALL.min_turn_room // 4 == 47_000
+    assert event["estimate_before"] + event["margin"] > inturn.page_line(SMALL) >= event["estimate_after"]
+    assert 0 < event["margin"] < 6_000
     sent = cli.sent[first_batch(cli)]
     assert sent.events[-1]["sent_estimate"] == event["estimate_after"] == sent.estimate
     assert 0 < event["resent_tokens"] < event["estimate_after"]
@@ -541,7 +590,8 @@ def test_a_record_written_before_d63_still_resumes(tmp_path):
 def test_the_record_field_is_checked_by_the_store_and_the_engine():
     base = {k: v for k, v in sample_record().items()}
     good = {"stubs": [[2, 0, "pg_0123456789abcdef"], [4, 1, ""]],
-            "folds": [[0, [[1, 3], [5, 9]], "pg_0123456789abcdef"]], "strips": [[2, 11]], "batches": 2}
+            "folds": [[0, [[1, 3], [5, 9]], "pg_0123456789abcdef"]], "strips": [[2, 11]], "batches": 2,
+            "rewrote": 11}
     assert check_epoch({**base, "in_turn": good})["in_turn"] == good
     for bad in ({**good, "stubs": [[2, 0, "not a page"]]}, {**good, "strips": [[5, 5]]}, {**good, "extra": 1},
                 {**good, "folds": [[0, [], "pg_0123456789abcdef"]]}, {**good, "batches": -1}, []):
