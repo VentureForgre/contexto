@@ -9,22 +9,25 @@ What they guarantee:
 - Names, both ways. Every event name the source can write has an entry in the document (a heading
   ``### `name```), and every entry names an event the source can write.
 - The scan is not silently incomplete in the forms it reads: a dict display with an ``"event"`` key,
-  ``dict(event=...)``, ``x.update(event=...)``, ``x.setdefault("event", ...)`` and ``x["event"] = ...``.
-  When the value is not a string literal (or a conditional expression of string literals), the test
-  fails unless the function is listed in ``DYNAMIC_SITES`` with the names it can produce. Each listed
-  name must be a string literal in that function, and an entry no site needs any more fails too. A
-  function whose dicts never reach a log is exempt only by listing it in ``NOT_SESSION_LOG``.
+  any call with an ``event=`` keyword (``dict(event=...)``, ``x.update(event=...)``, a helper of the
+  package's own), ``x.setdefault("event", ...)`` and ``x["event"] = ...``. The name is read when it is a
+  string literal, a conditional expression of string literals, or a local variable or module constant
+  that is assigned only those. Any other value fails unless the site is listed in ``DYNAMIC_SITES``
+  with the names it can produce. A site is a function and the expression it uses for the name, so a
+  second site in a listed function is not covered by the first. An entry no site needs fails too. A
+  dict that never reaches a log is exempt only by listing its site in ``NOT_SESSION_LOG``.
 - Fields, source to document, for the fields the scan can read. Each of these is listed under its
   event (a bullet ``- `field`: ...``):
-  - a key written as a literal next to a literal event name;
+  - a key written as a literal next to an event name the scan read;
   - a key unpacked into the event with ``**``, from a dict display written in place (either branch of
     a conditional expression) or from a local variable that the same function assigns only dict
     displays to;
   - a key stored later on the same local variable (``v["key"] = ...``, ``v.update(key=...)``,
     ``v.update({"key": ...})``, ``v.update(**local)``, ``v.setdefault("key", ...)``) when that
-    variable holds one event name in its function;
-  - a key stored on a variable listed in ``FIELD_CARRIERS``, which names the variables that carry one
-    event across functions.
+    variable holds one event name in its function and is bound to nothing else there;
+  - for an event listed in ``CARRIED_EVENTS``, whose dict is filled in by several functions of one
+    file: a key stored anywhere in that file on a variable with the name the event's dict is assigned
+    to. The name is read from the source, so renaming the variable throughout needs no change here.
 - Fields the scan cannot read, by a list. ``HELPER_FIELDS`` names the fields that reach an event
   through a helper's return value or through a variable that holds more than one event name. Each
   is listed under its event, so such a bullet cannot be removed from the document unnoticed.
@@ -41,18 +44,27 @@ What they guarantee:
 - Each ``json`` example in the document is one object with sorted keys, as a line in the file has,
   whose event and keys the document lists, nested events included, each nested event shown in a place
   its entry names.
+- The tables below name things that exist: a site, an event, a file or a field that the source no
+  longer has fails, with the entry to remove or correct.
 
 What they do not guarantee:
 
-- An event built in a form the scan does not read: a computed key (``{key: name}``), a dict read from
-  a file or built by ``dict(zip(...))``, or a keyword ``event=`` passed to a function of the package's
-  own. None exists today.
+- An event built in a form the scan does not read: a computed key (``{key: name}``), a dict
+  comprehension, ``dict(pairs)`` or ``dict(zip(...))``, ``dataclasses.asdict``, ``x.__setitem__``, a
+  loop that assigns to ``x["event"]``, or a dict read from a file or parsed from a string. None exists
+  today.
+- The names a ``DYNAMIC_SITES`` entry lists. They are kept by hand; the test checks only that each is
+  a string literal somewhere in the package.
 - A field the source starts to write through a helper's return value, through ``**`` of anything but
-  the forms above, or on a variable that holds more than one event name. Nothing fails until someone
-  adds it to ``HELPER_FIELDS``. A field the document lists that is in neither the scan nor that list
-  is checked document to source only.
+  the forms above, on a variable that holds more than one event name, or on an attribute
+  (``self.entry["key"]``). Nothing fails until someone adds it to ``HELPER_FIELDS``. A field the
+  document lists that is in neither the scan nor that list is checked document to source only.
 - That ``HELPER_FIELDS`` is right about the source. It is a list kept by hand. It only makes sure the
-  document keeps the bullets it names.
+  document keeps the bullets it names. ``mcp_call`` is the event that depends on it most: each tool
+  returns its own log fields.
+- A ``CARRIED_EVENTS`` dict under another name. A key stored on it through a parameter with a
+  different name is not read, and an unrelated variable of the same name in that file is read as the
+  event.
 - An entry's writer, where it appears and its kind against the source. The index and the examples
   must agree with the entry, so a change to one of these is a change in two places, but none of them
   is read from the source.
@@ -64,6 +76,7 @@ What they do not guarantee:
 from __future__ import annotations
 
 import ast
+import dataclasses
 import functools
 import json
 import re
@@ -76,21 +89,22 @@ DOC = ROOT / "docs" / "events.md"
 DOC_NAME = "docs/events.md"
 TEST_NAME = "tests/test_events_doc.py"
 
-# Functions that write an event whose name is not a literal at the site: (file, function) -> the names
-# it can produce. A new one fails ``test_every_event_name_is_read_from_the_source`` until it is listed.
-DYNAMIC_SITES: dict[tuple[str, str], frozenset[str]] = {
-    ("src/contexto/rewrite.py", "store_failure"): frozenset({"page_conflict", "store_error"}),
-}
+# Sites that write an event whose name the scan cannot read: (file, function, the expression used for the
+# name) -> the names it can produce. A new one fails ``test_every_event_name_is_read_from_the_source`` until
+# it is listed. Empty today; an entry no site needs fails.
+DYNAMIC_SITES: dict[tuple[str, str, str], frozenset[str]] = {}
 
-# Functions whose dicts with an "event" key never reach a session log (say, an SSE event built for a
-# stream): (file, function). The scan ignores them. Empty today; an entry no site needs fails.
-NOT_SESSION_LOG: frozenset[tuple[str, str]] = frozenset()
+# Sites whose dict with an "event" key never reaches a session log (say, an SSE event built for a stream):
+# (file, function, the expression used for the name), as the failure message prints it. The scan ignores
+# that site and no other. Empty today; an entry no site needs fails.
+NOT_SESSION_LOG: frozenset[tuple[str, str, str]] = frozenset()
 
-# Variables that carry one event across functions, so its fields are stored where the scan cannot follow
-# the dict: (file, variable name) -> the event. Every key stored on that name in that file is a field.
-FIELD_CARRIERS: dict[tuple[str, str], str] = {
-    ("src/contexto/proxy.py", "entry"): "request",
-}
+# Events whose dict is filled in by several functions of one file, so its fields are stored where the scan
+# cannot follow the dict: (file, event). The scan reads the name of the variable the event's dict is assigned
+# to in that file, and takes every key stored on a variable of that name in that file as a field of the event.
+CARRIED_EVENTS: frozenset[tuple[str, str]] = frozenset({
+    ("src/contexto/proxy.py", "request"),
+})
 
 # Event names with more than one entry in the document: event -> {source file: the writer named by the
 # entry that covers the event as that file writes it}. The proxy's ``request`` line and the engine's nested
@@ -107,18 +121,18 @@ HELPER_FIELDS: dict[tuple[str, str], frozenset[str]] = {
     # UsageReader.end_fields(), merged with entry.update(...)
     ("request", "src/contexto/proxy.py"): frozenset({
         "stop_reason", "error_type", "end_event", "response_status", "incomplete_reason", "error_code"}),
+    # RewriteEngine._call adds these to the last event of the list, which is the nested request event
+    ("request", "src/contexto/rewrite.py"): frozenset({"main", "conversations"}),
     # each tool returns its log fields; _within_room returns the budget fields
     ("mcp_call", "src/contexto/mcp.py"): frozenset({
         "turn_budget", "charged_tokens", "room_left", "limited_by", "side_rooms", "limiting_age_s", "returned",
         "chars", "page_id", "offset", "total_chars", "query_chars", "hits", "total_matches", "in_view_hits",
         "in_view_more", "in_view_checked", "kind", "record_id", "supersedes", "obligation_id"}),
-    # RewriteEngine._call adds these to the last event of the list, which is the nested request event
-    ("request", "src/contexto/rewrite.py"): frozenset({"main", "conversations"}),
     # ToolCheck.verdict() adds it to the event its helper returns
     ("mcp_tools_missing", "src/contexto/toolcheck.py"): frozenset({"repeated"}),
-    # store_failure() builds one dict for both names
-    ("store_error", "src/contexto/rewrite.py"): frozenset({"epoch", "operation", "error", "degraded"}),
-    ("page_conflict", "src/contexto/rewrite.py"): frozenset({"epoch", "operation", "error", "degraded", "page_id"}),
+    # store_failure() stores these on one variable that holds both names
+    ("store_error", "src/contexto/rewrite.py"): frozenset({"degraded"}),
+    ("page_conflict", "src/contexto/rewrite.py"): frozenset({"degraded", "page_id"}),
 }
 
 WRITERS = frozenset({"proxy", "engine", "launcher (Claude)", "launcher (Codex)", "MCP server", "store"})
@@ -128,21 +142,42 @@ NESTED = {"transform_events": "`transform_events`", "usage_events": "`usage_even
 
 
 @dataclass(frozen=True)
+class Tables:
+    """The five tables above. Every check takes them as an argument, so the tests of the checks themselves
+    run on tables of their own and never on the package's."""
+
+    dynamic_sites: dict[tuple[str, str, str], frozenset[str]] = field(default_factory=dict)
+    not_session_log: frozenset[tuple[str, str, str]] = frozenset()
+    carried_events: frozenset[tuple[str, str]] = frozenset()
+    shared_names: dict[str, dict[str, str]] = field(default_factory=dict)
+    helper_fields: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict)
+
+
+TABLES = Tables(DYNAMIC_SITES, NOT_SESSION_LOG, CARRIED_EVENTS, SHARED_NAMES, HELPER_FIELDS)
+
+
+@dataclass(frozen=True)
 class Site:
     """One place in the source that sets a dict's ``event`` value."""
 
     path: str
     line: int
     scope: str  # the enclosing function, as ``Class.method`` or ``function``; ``<module>`` outside one
-    names: frozenset[str] | None  # None: the value is not a string literal
-    value: str  # the value's source text, for messages
+    names: frozenset[str] | None  # None: the scan cannot read the value
+    value: str  # the value's source text, for messages and for the tables' keys
     fields: tuple[tuple[str, int], ...] = ()  # the literal keys written with it, each with its line
     variable: str | None = None  # the local name the dict is assigned to, if any
     spreads: tuple[str, ...] = ()  # the local variables unpacked into it with ``**``
+    reference: str | None = None  # the variable the value is, when it is a bare name
 
     @property
     def where(self) -> str:
         return f"{self.path}:{self.line}"
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        """How ``DYNAMIC_SITES`` and ``NOT_SESSION_LOG`` name this site."""
+        return self.path, self.scope, self.value
 
 
 @dataclass
@@ -151,15 +186,26 @@ class Module:
     sites: list[Site] = field(default_factory=list)
     stores: list[tuple[str, str, str, int]] = field(default_factory=list)  # (scope, variable, key, line)
     spread_stores: list[tuple[str, str, str]] = field(default_factory=list)  # (scope, variable, unpacked variable)
-    # (scope, variable) -> the literal keys of the dict displays assigned to it; None when the function also
-    # assigns it something that is not a dict display, so its keys are not known
+    # (scope, variable) -> the literal keys of the dicts assigned to it; None when the function also binds
+    # it to something that is not a dict display, so neither its keys nor what it holds is known
     local_dicts: dict[tuple[str, str], list[tuple[str, int]] | None] = field(default_factory=dict)
-    literals: dict[str, set[str]] = field(default_factory=dict)  # scope -> its string literals
+    # (scope, variable) -> the strings assigned to it; None when it is also bound to anything else
+    local_strings: dict[tuple[str, str], set[str] | None] = field(default_factory=dict)
+    literals: set[str] = field(default_factory=set)  # every string literal
     vocabulary: set[str] = field(default_factory=set)  # every string literal and keyword argument name
 
     def unpacked(self, scope: str, variable: str) -> list[tuple[str, int]]:
         """The keys ``**variable`` adds in ``scope``, as far as the scan knows them."""
         return self.local_dicts.get((scope, variable)) or []
+
+    def strings(self, scope: str, variable: str) -> frozenset[str] | None:
+        """The event names the variable can be: what its function assigns it, if only strings; for a name
+        the function never binds, what the module assigns it. None when that is not known."""
+        for where in (scope, "<module>"):
+            if (where, variable) in self.local_strings:
+                found = self.local_strings[(where, variable)]
+                return frozenset(found) if found else None
+        return None
 
 
 def _string(node: ast.AST | None) -> str | None:
@@ -174,6 +220,11 @@ def _names(value: ast.AST) -> frozenset[str] | None:
         body, orelse = _names(value.body), _names(value.orelse)
         return body | orelse if body is not None and orelse is not None else None
     return None
+
+
+def _builds_dict(value: ast.AST | None) -> bool:
+    return isinstance(value, ast.Dict) or (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                                           and value.func.id == "dict")
 
 
 def _display_keys(node: ast.Dict, fields: list[tuple[str, int]], spreads: list[str]) -> None:
@@ -197,11 +248,20 @@ def _spread(value: ast.AST, fields: list[tuple[str, int]], spreads: list[str]) -
         spreads.append(value.id)
 
 
+def _call_keys(node: ast.Call, fields: list[tuple[str, int]], spreads: list[str]) -> None:
+    """The keyword arguments of a call other than ``event``, and what it unpacks with ``**``."""
+    for kw in node.keywords:
+        if kw.arg is None:
+            _spread(kw.value, fields, spreads)
+        elif kw.arg != "event":
+            fields.append((kw.arg, kw.value.lineno))
+
+
 class _Scan(ast.NodeVisitor):
     def __init__(self, path: str) -> None:
         self.module = Module(path)
         self._scope: list[str] = []
-        self._assigned: dict[int, str] = {}  # id(dict display) -> the local name it is assigned to
+        self._assigned: dict[int, str] = {}  # id(a dict display or dict() call) -> the local name it is assigned to
 
     @property
     def scope(self) -> str:
@@ -210,15 +270,26 @@ class _Scan(ast.NodeVisitor):
     def _site(self, value: ast.AST, fields: list[tuple[str, int]], variable: str | None = None,
               spreads: list[str] | None = None) -> None:
         self.module.sites.append(Site(self.module.path, value.lineno, self.scope, _names(value), ast.unparse(value),
-                                      tuple(fields), variable, tuple(spreads or ())))
+                                      tuple(fields), variable, tuple(spreads or ()),
+                                      value.id if isinstance(value, ast.Name) else None))
 
     def _store(self, target: ast.AST, fields: list[tuple[str, int]], spreads: list[str] | None = None) -> None:
         if isinstance(target, ast.Name):
             self.module.stores.extend((self.scope, target.id, key, line) for key, line in fields)
             self.module.spread_stores.extend((self.scope, target.id, name) for name in spreads or ())
 
+    def _unknown(self, target: ast.AST | None) -> None:
+        """``target`` is bound to something the scan does not read: a parameter, a loop variable, a call."""
+        for node in ast.walk(target) if target is not None else ():
+            if isinstance(node, (ast.Name, ast.arg)):
+                name = node.id if isinstance(node, ast.Name) else node.arg
+                self.module.local_dicts[(self.scope, name)] = None
+                self.module.local_strings[(self.scope, name)] = None
+
     def _scoped(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> None:
         self._scope.append(node.name)
+        if not isinstance(node, ast.ClassDef):
+            self._unknown(node.args)
         self.generic_visit(node)
         self._scope.pop()
 
@@ -227,7 +298,7 @@ class _Scan(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> None:
         if isinstance(node.value, str):
             self.module.vocabulary.add(node.value)
-            self.module.literals.setdefault(self.scope, set()).add(node.value)
+            self.module.literals.add(node.value)
 
     def visit_keyword(self, node: ast.keyword) -> None:
         if node.arg is not None:
@@ -246,17 +317,15 @@ class _Scan(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
-        builds = isinstance(func, ast.Name) and func.id == "dict"
+        builds = _builds_dict(node)
         method = func.attr if isinstance(func, ast.Attribute) else None
-        fields = [(kw.arg, kw.value.lineno) for kw in node.keywords if kw.arg not in (None, "event")]
+        fields: list[tuple[str, int]] = []
         spreads: list[str] = []
+        _call_keys(node, fields, spreads)
         for kw in node.keywords:
-            if kw.arg is None:
-                _spread(kw.value, fields, spreads)
-        if builds or method == "update":
-            for kw in node.keywords:
-                if kw.arg == "event":
-                    self._site(kw.value, fields if builds else [], spreads=spreads if builds else None)
+            if kw.arg == "event":  # dict(event=...), x.update(event=...), or a helper that takes the name
+                self._site(kw.value, fields if builds else [], self._assigned.get(id(node)),
+                           spreads if builds else None)
         if method == "setdefault" and len(node.args) >= 2 and (key := _string(node.args[0])) is not None:
             if key == "event":
                 self._site(node.args[1], [])
@@ -274,18 +343,32 @@ class _Scan(ast.NodeVisitor):
             for inner, part in zip(target.elts, value.elts):
                 self._assign(inner, part)
         elif isinstance(target, ast.Name):
-            known = self.module.local_dicts.setdefault((self.scope, target.id), [])
-            if isinstance(value, ast.Dict):
+            if value is None:  # a bare annotation binds nothing
+                return
+            key = (self.scope, target.id)
+            dicts = self.module.local_dicts.setdefault(key, [])
+            strings = self.module.local_strings.setdefault(key, set())
+            if _builds_dict(value):
                 self._assigned[id(value)] = target.id
-                if known is not None:
-                    _display_keys(value, known, [])
-            elif value is not None:  # a bare annotation assigns nothing
-                self.module.local_dicts[(self.scope, target.id)] = None
+                self.module.local_strings[key] = None
+                if dicts is not None:
+                    if isinstance(value, ast.Dict):
+                        _display_keys(value, dicts, [])
+                    else:
+                        _call_keys(value, dicts, [])
+            elif (names := _names(value)) is not None:
+                self.module.local_dicts[key] = None
+                if strings is not None:
+                    strings.update(names)
+            else:
+                self._unknown(target)
         elif isinstance(target, ast.Subscript) and (key := _string(target.slice)) is not None:
             if key == "event" and value is not None:
                 self._site(value, [])
             elif key != "event":
                 self._store(target.value, [(key, target.lineno)])
+        elif isinstance(target, (ast.Tuple, ast.List, ast.Starred)):
+            self._unknown(target)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         for target in node.targets:
@@ -300,43 +383,79 @@ class _Scan(ast.NodeVisitor):
         self._assign(node.target, node.value)
         self.generic_visit(node)
 
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self._assign(node.target, node.value)
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
+        self._unknown(node.target)
+        self.generic_visit(node)
+
+    visit_AsyncFor = visit_For
+
+    def visit_With(self, node: ast.With | ast.AsyncWith) -> None:
+        for item in node.items:
+            self._unknown(item.optional_vars)
+        self.generic_visit(node)
+
+    visit_AsyncWith = visit_With
+
 
 def scan_source(text: str, path: str) -> Module:
+    """Scan one module. A site whose name is a bare variable is read through that variable's assignments,
+    once the whole module has been seen."""
     scan = _Scan(path)
     scan.visit(ast.parse(text, filename=path))
-    return scan.module
-
-
-def log_sites(module: Module) -> list[Site]:
-    """The module's sites, without those in functions listed in ``NOT_SESSION_LOG``."""
-    return [site for site in module.sites if (site.path, site.scope) not in NOT_SESSION_LOG]
+    module = scan.module
+    module.sites = [dataclasses.replace(site, names=module.strings(site.scope, site.reference))
+                    if site.names is None and site.reference is not None else site for site in module.sites]
+    return module
 
 
 @functools.cache
 def scan_package() -> list[Module]:
     """Every module of the package, scanned once per test run. Callers do not change the result."""
-    return [scan_source(file.read_text(encoding="utf-8"), file.relative_to(ROOT).as_posix())
-            for file in sorted(PACKAGE.rglob("*.py"))]
+    modules = [scan_source(file.read_text(encoding="utf-8"), file.relative_to(ROOT).as_posix())
+               for file in sorted(PACKAGE.rglob("*.py"))]
+    assert any(module.sites for module in modules), (
+        f"the scan found no event under {PACKAGE}: these tests read the package source and must run from a "
+        f"checkout that has it at src/contexto, beside tests/")
+    return modules
 
 
-def site_names(site: Site) -> frozenset[str]:
+def log_sites(module: Module, tables: Tables) -> list[Site]:
+    """The module's sites, without those listed in ``NOT_SESSION_LOG``."""
+    return [site for site in module.sites if site.key not in tables.not_session_log]
+
+
+def site_names(site: Site, tables: Tables) -> frozenset[str]:
     """The names ``site`` can write: read from the source, else from ``DYNAMIC_SITES``, else none."""
     if site.names is not None:
         return site.names
-    return DYNAMIC_SITES.get((site.path, site.scope), frozenset())
+    return tables.dynamic_sites.get(site.key, frozenset())
 
 
-def written_names(modules: list[Module]) -> dict[str, list[Site]]:
+def written_names(modules: list[Module], tables: Tables) -> dict[str, list[Site]]:
     """Every event name the source can write, with the sites that write it."""
     out: dict[str, list[Site]] = {}
     for module in modules:
-        for site in log_sites(module):
-            for name in site_names(site):
+        for site in log_sites(module, tables):
+            for name in site_names(site, tables):
                 out.setdefault(name, []).append(site)
     return out
 
 
-def written_fields(modules: list[Module]) -> dict[tuple[str, str], dict[str, str]]:
+def carriers(module: Module, tables: Tables) -> dict[str, set[str]]:
+    """variable name -> the ``CARRIED_EVENTS`` events of this file whose dict is assigned to that name."""
+    out: dict[str, set[str]] = {}
+    for site in log_sites(module, tables):
+        for name in site_names(site, tables) if site.variable is not None else ():
+            if (module.path, name) in tables.carried_events:
+                out.setdefault(site.variable, set()).add(name)
+    return out
+
+
+def written_fields(modules: list[Module], tables: Tables) -> dict[tuple[str, str], dict[str, str]]:
     """(event name, source file) -> {field: how the test knows of it}: what the scan reads, then
     ``HELPER_FIELDS``. Each value completes the sentence "the entry does not list the field `x`, ..."."""
     out: dict[tuple[str, str], dict[str, str]] = {}
@@ -346,8 +465,8 @@ def written_fields(modules: list[Module]) -> dict[tuple[str, str], dict[str, str
 
     for module in modules:
         held: dict[tuple[str, str], set[str]] = {}  # (scope, variable) -> the event names it holds
-        for site in log_sites(module):
-            names = site_names(site)
+        for site in log_sites(module, tables):
+            names = site_names(site, tables)
             if site.names is not None:  # a registered site's keys belong to only some of its names
                 unpacked = [pair for spread in site.spreads for pair in module.unpacked(site.scope, spread)]
                 for name in names:
@@ -357,15 +476,17 @@ def written_fields(modules: list[Module]) -> dict[tuple[str, str], dict[str, str
                 held.setdefault((site.scope, site.variable), set()).update(names or {""})
         stores = [*module.stores, *((scope, variable, key, line) for scope, variable, spread in module.spread_stores
                                     for key, line in module.unpacked(scope, spread))]
+        carrying = carriers(module, tables)
         for scope, variable, key, line in stores:
-            carried = FIELD_CARRIERS.get((module.path, variable))
+            carried = carrying.get(variable, set())
             names = held.get((scope, variable), set())
-            if carried is not None:
-                add(carried, key, module.path, f"written at {module.path}:{line} (on `{variable}`, which "
-                                               f"FIELD_CARRIERS in {TEST_NAME} says carries `{carried}`)")
-            elif len(names) == 1 and "" not in names:
+            if len(carried) == 1:
+                event = next(iter(carried))
+                add(event, key, module.path, f"written at {module.path}:{line} (on `{variable}`, the variable that "
+                                             f"holds `{event}` there: see CARRIED_EVENTS in {TEST_NAME})")
+            elif len(names) == 1 and "" not in names and module.local_dicts.get((scope, variable)) is not None:
                 add(next(iter(names)), key, module.path, f"written at {module.path}:{line}")
-    for (name, path), keys in HELPER_FIELDS.items():
+    for (name, path), keys in tables.helper_fields.items():
         for key in sorted(keys):
             add(name, key, path, f"which HELPER_FIELDS in {TEST_NAME} names as a field {path} writes in a way "
                                  f"the scan cannot read; if the source no longer writes it, remove it from "
@@ -421,6 +542,7 @@ class Entry:
 
 @dataclass
 class Document:
+    lines: list[str] = field(default_factory=list)
     entries: list[Entry] = field(default_factory=list)  # in order; a name can have more than one
     examples: list[tuple[int, str]] = field(default_factory=list)  # each ``json`` block: its line, its text
     headings: list[tuple[int, str]] = field(default_factory=list)  # every heading: its line, its text
@@ -430,6 +552,10 @@ class Document:
     def named(self, name: str) -> list[Entry]:
         return [entry for entry in self.entries if entry.name == name]
 
+    def with_line(self, number: int, *replacement: str) -> Document:
+        """This document with line ``number`` replaced by ``replacement`` (no lines: the line removed)."""
+        return read_document("\n".join([*self.lines[:number - 1], *replacement, *self.lines[number:]]))
+
 
 def read_document(text: str) -> Document:
     """The document's entries, ``json`` examples, headings, index rows and internal links.
@@ -437,11 +563,11 @@ def read_document(text: str) -> Document:
     An entry runs from its ``### `name``` heading to the next heading of any level. Its fields are its
     bullets that start at the margin with a name in backticks; indented bullets are not fields. The index
     is the table rows that start with a link, between the ``## Index`` heading and the next heading."""
-    doc = Document()
+    doc = Document(text.splitlines())
     current: Entry | None = None
     in_index = False
     fence: tuple[int, str, list[str]] | None = None
-    for number, line in enumerate(text.splitlines(), 1):
+    for number, line in enumerate(doc.lines, 1):
         if fence is not None:
             if line.startswith("```"):
                 if fence[1] == "json":
@@ -471,56 +597,99 @@ def read_document(text: str) -> Document:
     return doc
 
 
-def entry_for(doc: Document, name: str, path: str) -> Entry | None:
+def entry_for(doc: Document, name: str, path: str, tables: Tables) -> Entry | None:
     """The entry that covers the event ``name`` as the source file ``path`` writes it, if the document and
     ``SHARED_NAMES`` settle that; ``shared_name_problems`` reports the cases where they do not."""
     entries = doc.named(name)
     if len(entries) == 1:
         return entries[0]
-    writer = SHARED_NAMES.get(name, {}).get(path)
+    writer = tables.shared_names.get(name, {}).get(path)
     covering = [entry for entry in entries if writer in entry.writers]
     return covering[0] if len(covering) == 1 else None
 
 
-def entry_files(doc: Document, entry: Entry, written: dict[str, list[Site]]) -> list[str]:
+def entry_files(doc: Document, entry: Entry, written: dict[str, list[Site]], tables: Tables) -> list[str]:
     """The source files that write the event ``entry`` covers."""
     paths = sorted({site.path for site in written.get(entry.name, [])})
     if len(doc.named(entry.name)) == 1:
         return paths
-    return [path for path in paths if SHARED_NAMES.get(entry.name, {}).get(path) in entry.writers]
+    return [path for path in paths if tables.shared_names.get(entry.name, {}).get(path) in entry.writers]
 
 
 # The checks: each returns the problems it found, as sentences a contributor can act on -----------------------
 
-def unread_sites(modules: list[Module]) -> list[str]:
+READ_FORMS = ("a string literal, a conditional expression of string literals, or a local variable or module "
+              "constant that is assigned only those")
+
+
+def unread_sites(modules: list[Module], tables: Tables) -> list[str]:
     problems = []
     needed = set()
-    scopes = {(site.path, site.scope) for module in modules for site in module.sites}
-    for path, scope in sorted(NOT_SESSION_LOG - scopes):
-        problems.append(f"NOT_SESSION_LOG in {TEST_NAME} lists {scope} in {path}, but no dict there has an "
-                        f"\"event\" key; remove the entry")
+    literals = set().union(*(module.literals for module in modules)) if modules else set()
+    keys = {site.key for module in modules for site in module.sites}
+    for path, scope, value in sorted(tables.not_session_log - keys):
+        problems.append(f"NOT_SESSION_LOG in {TEST_NAME} lists ({path!r}, {scope!r}, {value!r}), but {scope} in "
+                        f"{path} has no dict whose \"event\" value is written `{value}`; remove the entry, or "
+                        f"correct it to the site as it is now")
     for module in modules:
-        for site in log_sites(module):
+        for site in log_sites(module, tables):
             if site.names is not None:
                 continue
-            key = (site.path, site.scope)
-            needed.add(key)
-            if key not in DYNAMIC_SITES:
+            needed.add(site.key)
+            if site.key not in tables.dynamic_sites:
                 problems.append(
-                    f"{site.where} (in {site.scope}) writes an event whose name is not a string literal "
-                    f"(`{site.value}`), so the scan cannot read it; add ({site.path!r}, {site.scope!r}) to "
-                    f"DYNAMIC_SITES in {TEST_NAME} with the event names it can produce, and document each in "
-                    f"{DOC_NAME}")
+                    f"{site.where} (in {site.scope}) writes an event whose name the scan cannot read "
+                    f"(`{site.value}`). It reads {READ_FORMS}. Either write the name in one of those forms, or "
+                    f"add {site.key!r} to DYNAMIC_SITES in {TEST_NAME} with the event names it can produce (each "
+                    f"must be a string literal somewhere under src/contexto) and document each in {DOC_NAME}. If "
+                    f"that dict never reaches a session log, add {site.key!r} to NOT_SESSION_LOG instead")
                 continue
-            literals = module.literals.get(site.scope, set())
-            for name in sorted(DYNAMIC_SITES[key] - literals):
+            for name in sorted(tables.dynamic_sites[site.key] - literals):
                 problems.append(
                     f"DYNAMIC_SITES in {TEST_NAME} says {site.scope} in {site.path} can write the event `{name}`, but "
-                    f"`{name}` is not a string literal in that function; correct the entry")
-    for path, scope in sorted(set(DYNAMIC_SITES) - needed):
+                    f"`{name}` is not a string literal anywhere under src/contexto, so nothing can pass it there; "
+                    f"correct the entry. A name that is put together from parts must be written out in full "
+                    f"where it is chosen for the scan to find it")
+    for path, scope, value in sorted(set(tables.dynamic_sites) - needed):
         problems.append(
-            f"DYNAMIC_SITES in {TEST_NAME} lists {scope} in {path}, but no event there has a name the scan cannot "
-            f"read; remove the entry")
+            f"DYNAMIC_SITES in {TEST_NAME} lists ({path!r}, {scope!r}, {value!r}), but {scope} in {path} has no "
+            f"event whose name is written `{value}` and that the scan cannot read; remove the entry, or correct "
+            f"it to the site as it is now")
+    return problems
+
+
+def table_problems(modules: list[Module], tables: Tables) -> list[str]:
+    """``CARRIED_EVENTS`` and ``HELPER_FIELDS`` name things the source has. (``DYNAMIC_SITES`` and
+    ``NOT_SESSION_LOG`` are checked by ``unread_sites``, ``SHARED_NAMES`` by ``shared_name_problems``.)"""
+    problems = []
+    written = written_names(modules, tables)
+    words = set().union(*(module.vocabulary for module in modules)) if modules else set()
+    for module in modules:
+        held = carriers(module, tables)
+        for path, event in sorted(tables.carried_events):
+            if path == module.path and not any(event in events for events in held.values()):
+                problems.append(f"CARRIED_EVENTS in {TEST_NAME} lists the event `{event}` in {path}, but no variable "
+                                f"there is assigned a dict with that event any more; remove the entry, or name the "
+                                f"file that builds `{event}` now")
+        for variable, events in sorted(held.items()):
+            if len(events) > 1:
+                problems.append(f"{module.path} assigns the events {', '.join(sorted(events))} to variables named "
+                                f"`{variable}`, and CARRIED_EVENTS in {TEST_NAME} lists more than one of them, so a "
+                                f"key stored on `{variable}` cannot be given to one event; give the dicts different "
+                                f"names")
+    for path, event in sorted(tables.carried_events):
+        if path not in {module.path for module in modules}:
+            problems.append(f"CARRIED_EVENTS in {TEST_NAME} lists {path}, which does not exist; remove the entry, or "
+                            f"name the file that builds `{event}` now")
+    for (event, _path), keys in sorted(tables.helper_fields.items()):
+        if event not in written:
+            problems.append(f"HELPER_FIELDS in {TEST_NAME} names fields of the event `{event}`, which nothing under "
+                            f"src/contexto writes; remove the entry, or rename it to the name the source writes")
+            continue
+        for key in sorted(keys - words):
+            problems.append(f"HELPER_FIELDS in {TEST_NAME} names the field `{key}` of `{event}`, but `{key}` does not "
+                            f"appear anywhere under src/contexto; remove it from HELPER_FIELDS, or rename it to the "
+                            f"key the source writes")
     return problems
 
 
@@ -529,7 +698,7 @@ def undocumented_events(written: dict[str, list[Site]], doc: Document) -> list[s
     return [f"{DOC_NAME} does not document the event `{name}` written at {', '.join(s.where for s in sites)}; "
             f"add an entry for it: a heading ### `{name}` in the section for its writer, then its writer, where it "
             f"appears, its kind, what it means, and one bullet per field, and add its row to the index. If that "
-            f"dict never reaches a session log, add its function to NOT_SESSION_LOG in {TEST_NAME} instead"
+            f"dict never reaches a session log, add {sites[0].key!r} to NOT_SESSION_LOG in {TEST_NAME} instead"
             for name, sites in sorted(written.items()) if name not in listed]
 
 
@@ -539,14 +708,14 @@ def unwritten_events(written: dict[str, list[Site]], doc: Document) -> list[str]
             for entry in doc.entries if entry.name not in written]
 
 
-def shared_name_problems(written: dict[str, list[Site]], doc: Document) -> list[str]:
+def shared_name_problems(written: dict[str, list[Site]], doc: Document, tables: Tables) -> list[str]:
     """Where the document has more than one entry for a name, ``SHARED_NAMES`` must give each source file
     that writes the name to exactly one of them, and leave none of them without a file."""
     problems = []
     counts: dict[str, int] = {}
     for entry in doc.entries:
         counts[entry.name] = counts.get(entry.name, 0) + 1
-    for name in sorted(set(SHARED_NAMES) - {name for name, count in counts.items() if count > 1}):
+    for name in sorted(set(tables.shared_names) - {name for name, count in counts.items() if count > 1}):
         problems.append(f"SHARED_NAMES in {TEST_NAME} lists `{name}`, but {DOC_NAME} does not have more than one "
                         f"entry for it; remove it from SHARED_NAMES")
     for name, count in sorted(counts.items()):
@@ -554,7 +723,7 @@ def shared_name_problems(written: dict[str, list[Site]], doc: Document) -> list[
             continue
         entries = doc.named(name)
         where = ", ".join(f"line {entry.line}" for entry in entries)
-        files = SHARED_NAMES.get(name)
+        files = tables.shared_names.get(name)
         if files is None:
             problems.append(f"{DOC_NAME} has {count} entries for `{name}` ({where}); give them one entry, or add "
                             f"`{name}` to SHARED_NAMES in {TEST_NAME} with the writer whose entry covers each "
@@ -574,17 +743,17 @@ def shared_name_problems(written: dict[str, list[Site]], doc: Document) -> list[
             problems.append(f"SHARED_NAMES in {TEST_NAME} lists {path} for `{name}`, but no `{name}` event is written "
                             f"there; remove it, or name the file that writes it now")
         for entry in entries:
-            if not entry_files(doc, entry, written):
+            if not entry_files(doc, entry, written, tables):
                 problems.append(f"{DOC_NAME}:{entry.line} no source file in SHARED_NAMES[{name!r}] in {TEST_NAME} "
                                 f"is given to this entry (writer {', '.join(entry.writers) or 'unknown'}); remove "
                                 f"the entry, or correct SHARED_NAMES")
     return problems
 
 
-def undocumented_fields(fields: dict[tuple[str, str], dict[str, str]], doc: Document) -> list[str]:
+def undocumented_fields(fields: dict[tuple[str, str], dict[str, str]], doc: Document, tables: Tables) -> list[str]:
     problems = []
     for (name, path), keys in sorted(fields.items()):
-        entry = entry_for(doc, name, path)
+        entry = entry_for(doc, name, path, tables)
         if entry is None:  # no entry, or more than one and SHARED_NAMES does not choose: reported elsewhere
             continue
         for key, where in sorted(keys.items()):
@@ -594,11 +763,12 @@ def undocumented_fields(fields: dict[tuple[str, str], dict[str, str]], doc: Docu
     return problems
 
 
-def unwritten_fields(modules: list[Module], written: dict[str, list[Site]], doc: Document) -> list[str]:
+def unwritten_fields(modules: list[Module], written: dict[str, list[Site]], doc: Document,
+                     tables: Tables) -> list[str]:
     vocabulary = {module.path: module.vocabulary for module in modules}
     problems = []
     for entry in doc.entries:
-        paths = entry_files(doc, entry, written)
+        paths = entry_files(doc, entry, written, tables)
         for key, line in entry.fields.items():
             if paths and not any(key in vocabulary[path] for path in paths):
                 problems.append(
@@ -734,7 +904,9 @@ def _document() -> Document:
     return read_document(DOC.read_text(encoding="utf-8"))
 
 
-# The scan itself ---------------------------------------------------------------------------------------------
+# The checks themselves, on a source and a document of their own ----------------------------------------------
+# These tests never read the tables above, the package or docs/events.md, so an entry added to a table, or an
+# event or a field renamed in the source and the document together, cannot fail them.
 
 FORMS = '''
 def literal(log):
@@ -783,20 +955,49 @@ def spread(log, flag, helper):
     later = {"event": "a_spread_store"}
     later.update(status=1, **sizing)
     return dict(event="a_spread_call", **sizing)
+
+A_CONSTANT = "a_constant"
+
+def named(log, error):
+    kind = "a_first" if error else "a_second"
+    failure = {"event": kind, "at": 1}
+    failure["late"] = 2
+    log(failure)
+    log({"event": A_CONSTANT})
+    log({"event": f"a_{kind}"})
+
+def keyword(emit, log):
+    emit(log, event="a_keyword_call", size=1)
+
+def rebound(rows):
+    event = {"event": "a_rebound", "code": 0}
+    for event in rows:
+        event["unrelated"] = 1
+    held = dict(event="a_dict_holder", code=0)
+    held["late"] = 1
+
+def frame(text):
+    return {"event": "error", "data": text}
 '''
+ALL_FORMS = {"a_literal", "a_continued", "a_conflict", "an_error", "a_dict_call", "an_update", "a_setdefault",
+             "a_subscript", "a_variable_holder", "a_tuple_target", "a_spread", "a_spread_store", "a_spread_call",
+             "a_first", "a_second", "a_constant", "a_keyword_call", "a_rebound", "a_dict_holder", "error"}
+DYNAMIC_FORM = ("forms.py", "Helper.dynamic", "kind")
+FSTRING_FORM = ("forms.py", "named", "f'a_{kind}'")
+FRAME_FORM = ("forms.py", "frame", "'error'")
+NONE = Tables()
 
 
 def test_the_scan_reads_every_form_it_claims_to():
     module = scan_source(FORMS, "forms.py")
     by_name = {name: site for site in module.sites for name in site.names or ()}
-    assert set(by_name) == {"a_literal", "a_continued", "a_conflict", "an_error", "a_dict_call", "an_update",
-                            "a_setdefault", "a_subscript", "a_variable_holder", "a_tuple_target", "a_spread",
-                            "a_spread_store", "a_spread_call"}
+    assert set(by_name) == ALL_FORMS
     assert by_name["a_continued"].line == 8  # the line of the name, not of the dict's opening brace
     assert by_name["a_conflict"] is by_name["an_error"]
+    assert by_name["a_first"] is by_name["a_second"]  # a local variable, read through its one assignment
     unread = [site for site in module.sites if site.names is None]
-    assert [(site.scope, site.value, site.line) for site in unread] == [("Helper.dynamic", "kind", 33)]
-    fields = {name: set(keys) for (name, path), keys in written_fields([module]).items() if path == "forms.py"}
+    assert [site.key for site in unread] == [DYNAMIC_FORM, FSTRING_FORM]  # a parameter; a computed name
+    fields = {name: set(keys) for (name, path), keys in written_fields([module], NONE).items()}
     assert fields["a_literal"] == {"count", "more"}
     assert fields["a_dict_call"] == {"size"}
     assert fields["a_variable_holder"] == {"at", "late", "later", "latest", "default"}  # not "unpacked"
@@ -806,46 +1007,274 @@ def test_the_scan_reads_every_form_it_claims_to():
     assert fields["a_spread"] == {"budget", "overhead", "inline"}
     assert fields["a_spread_store"] == {"status", "budget", "overhead"}
     assert fields["a_spread_call"] == {"budget", "overhead"}
+    # a key next to a name read through a variable belongs to each name; a key stored later on a variable
+    # that holds two names belongs to neither
+    assert fields["a_first"] == fields["a_second"] == {"at"}
+    assert "a_keyword_call" not in fields  # a helper's other keyword arguments are not known to be fields
+    assert fields["a_rebound"] == {"code"}  # the loop binds `event` to something else: its stores are not read
+    assert fields["a_dict_holder"] == {"code", "late"}
     assert "kind" not in str(fields)  # an unread site contributes no fields
 
 
-def test_an_unread_site_must_be_registered():
+def test_an_unread_site_must_be_listed_and_the_message_says_how():
     module = scan_source(FORMS, "forms.py")
-    assert unread_sites([module])[0].startswith(
-        "forms.py:33 (in Helper.dynamic) writes an event whose name is not a string literal (`kind`), so the scan "
-        "cannot read it; add ('forms.py', 'Helper.dynamic') to DYNAMIC_SITES in tests/test_events_doc.py")
+    first, second = unread_sites([module], NONE)
+    assert first.startswith(
+        "forms.py:33 (in Helper.dynamic) writes an event whose name the scan cannot read (`kind`). It reads a string "
+        "literal, a conditional expression of string literals, or a local variable or module constant that is "
+        "assigned only those. Either write the name in one of those forms, or add ('forms.py', 'Helper.dynamic', "
+        "'kind') to DYNAMIC_SITES in tests/test_events_doc.py with the event names it can produce")
+    assert first.endswith("add ('forms.py', 'Helper.dynamic', 'kind') to NOT_SESSION_LOG instead")
+    assert second.startswith("forms.py:57 (in named) writes an event whose name the scan cannot read (`f'a_{kind}'`)")
+
+
+def test_a_listed_site_can_name_what_a_caller_passes_and_only_that_site_is_covered():
+    module = scan_source(FORMS, "forms.py")
+    # the names need only be string literals somewhere in the source, as a caller's argument is
+    listed = Tables(dynamic_sites={DYNAMIC_FORM: frozenset({"a_literal"}), FSTRING_FORM: frozenset({"a_first"})})
+    assert unread_sites([module], listed) == []
+    assert "a_literal" in written_names([module], listed)
+    # an entry covers its own site, not another in the same function, and its names must exist somewhere
+    one = Tables(dynamic_sites={DYNAMIC_FORM: frozenset({"never_written"})})
+    problems = unread_sites([module], one)
+    assert len(problems) == 2 and problems[1].startswith("forms.py:57 (in named) writes an event whose name")
+    assert "`never_written` is not a string literal anywhere under src/contexto" in problems[0]
+    stale = Tables(dynamic_sites={**listed.dynamic_sites, ("forms.py", "literal", "name"): frozenset({"a_literal"})})
+    assert unread_sites([module], stale) == [
+        "DYNAMIC_SITES in tests/test_events_doc.py lists ('forms.py', 'literal', 'name'), but literal in forms.py "
+        "has no event whose name is written `name` and that the scan cannot read; remove the entry, or correct it "
+        "to the site as it is now"]
+
+
+def test_not_session_log_exempts_one_site_and_a_stale_entry_is_reported():
+    module = scan_source(FORMS, "forms.py")
+    exempt = Tables(not_session_log=frozenset({FRAME_FORM, DYNAMIC_FORM, FSTRING_FORM}))
+    assert unread_sites([module], exempt) == []
+    assert set(written_names([module], exempt)) == ALL_FORMS - {"error"}
+    assert ("error", "forms.py") not in written_fields([module], exempt)
+    stale = Tables(not_session_log=exempt.not_session_log | {("forms.py", "frame", "'gone'")})
+    assert unread_sites([module], stale) == [
+        "NOT_SESSION_LOG in tests/test_events_doc.py lists ('forms.py', 'frame', \"'gone'\"), but frame in forms.py "
+        "has no dict whose \"event\" value is written `'gone'`; remove the entry, or correct it to the site as it "
+        "is now"]
+
+
+LINE_SOURCE = '''
+def line(log):
+    entry = {"event": "shared", "size": 1, "epoch": 0}
+    fill(entry)
+    log(entry)
+
+def fill(entry):
+    entry["status"] = 200
+    entry["transform_events"] = []
+    entry.update(ending())
+
+def ending():
+    return {"ended": "x"}
+'''
+INNER_SOURCE = '''
+def nested(events):
+    sizing = {"budget": 1}
+    events.append({"event": "shared", "epoch": 0, **sizing})
+    events.append({"event": "plain", "count": 1})
+'''
+SAMPLE_DOC = '''# Sample
+
+## Index
+
+| Event | Writer | Where | Kind |
+| --- | --- | --- | --- |
+| [`shared`](#shared) | proxy | own line | normal |
+| [`shared` (nested)](#shared-nested) | engine | `transform_events` | notice, problem |
+| [`plain`](#plain) | engine | `transform_events` | normal |
+
+## Entries
+
+### `shared`
+
+Writer: proxy. Where: own line. Kind: normal.
+
+See [`plain`](#plain).
+
+- `size`: a size.
+- `epoch`: an epoch.
+- `status`: a status.
+- `ended`: how it ended.
+- `transform_events`: the nested events.
+
+### `shared` (nested)
+
+Writer: engine. Where: `transform_events`. Kind: notice, problem.
+
+- `epoch`: an epoch.
+- `budget`: a budget.
+
+### `plain`
+
+Writer: engine. Where: `transform_events`. Kind: normal.
+
+- `count`: a count.
+
+```json
+{"epoch":0,"event":"shared","size":1,"transform_events":[{"budget":1,"epoch":0,"event":"shared"}]}
+```
+'''
+SAMPLE = Tables(carried_events=frozenset({("line.py", "shared")}),
+                shared_names={"shared": {"line.py": "proxy", "inner.py": "engine"}},
+                helper_fields={("shared", "line.py"): frozenset({"ended"})})
+
+
+def _sample(text: str = SAMPLE_DOC, tables: Tables = SAMPLE) -> dict[str, list[str]]:
+    """Every check's problems for the sample source (two files, as the proxy and the engine are) and ``text``."""
+    modules = [scan_source(LINE_SOURCE, "line.py"), scan_source(INNER_SOURCE, "inner.py")]
+    doc = read_document(text)
+    written = written_names(modules, tables)
+    return {"sites": unread_sites(modules, tables), "tables": table_problems(modules, tables),
+            "undocumented": undocumented_events(written, doc), "unwritten": unwritten_events(written, doc),
+            "shared": shared_name_problems(written, doc, tables),
+            "fields": undocumented_fields(written_fields(modules, tables), doc, tables),
+            "words": unwritten_fields(modules, written, doc, tables), "facts": missing_facts(doc),
+            "index": index_problems(doc), "links": broken_links(doc), "examples": bad_examples(doc)}
+
+
+def _only(problems: dict[str, list[str]], check: str) -> str:
+    """The one problem, found by ``check`` and by no other."""
+    assert {name for name, found in problems.items() if found} == {check}, problems
+    assert len(problems[check]) == 1, problems[check]
+    return problems[check][0]
+
+
+def test_the_sample_document_passes_every_check():
+    assert not any(_sample().values()), _sample()
+
+
+def test_an_entry_that_is_removed_or_made_up_is_reported():
+    removed = _sample(SAMPLE_DOC.replace("### `plain`", "### plain"))
+    assert removed["undocumented"][0].startswith("docs/events.md does not document the event `plain` written at "
+                                                 "inner.py:5; add an entry for it")
+    made_up = _sample(SAMPLE_DOC + "\n### `made_up`\n\nWriter: proxy. Where: own line. Kind: normal.\n")
+    assert made_up["unwritten"] == ["docs/events.md:42 documents the event `made_up`, but nothing under "
+                                    "src/contexto writes it; remove the entry, or rename it to the name the "
+                                    "source writes"]
+
+
+def test_each_of_two_entries_with_one_name_must_list_its_own_fields():
+    # both entries list `epoch`, which both files write: each entry must list it itself, and the other
+    # entry's bullet must not stand in for it
+    for bullet, title, how in (("- `epoch`: an epoch.\n- `status`", "`shared`", "written at line.py:3"),
+                               ("- `epoch`: an epoch.\n- `budget`", "`shared` (nested)", "written at inner.py:4"),
+                               ("- `budget`: a budget.", "`shared` (nested)", "written at inner.py:3")):  # by **
+        key = bullet.split("`")[1]
+        assert bullet in SAMPLE_DOC
+        found = _sample(SAMPLE_DOC.replace(bullet, bullet.replace(f"- `{key}`", f"- {key}", 1)))["fields"]
+        assert len(found) == 1 and f"the entry {title} does not list the field `{key}`, {how}" in found[0], found
+    unlisted = _only(_sample(tables=dataclasses.replace(SAMPLE, shared_names={})), "shared")
+    assert unlisted.startswith("docs/events.md has 2 entries for `shared` (line 13, line 25); give them one entry, "
+                               "or add `shared` to SHARED_NAMES")
+
+
+def test_a_field_on_a_carried_event_or_named_in_helper_fields_is_reported_when_its_bullet_goes():
+    carried = _only(_sample(SAMPLE_DOC.replace("- `status`", "- status")), "fields")
+    assert ("does not list the field `status`, written at line.py:8 (on `entry`, the variable that holds `shared` "
+            "there: see CARRIED_EVENTS in tests/test_events_doc.py); add a bullet - `status`: ...") in carried
+    helper = _only(_sample(SAMPLE_DOC.replace("- `ended`", "- ended")), "fields")
+    assert ("does not list the field `ended`, which HELPER_FIELDS in tests/test_events_doc.py names as a field "
+            "line.py writes in a way the scan cannot read; if the source no longer writes it, remove it from "
+            "HELPER_FIELDS instead; add a bullet - `ended`: ...") in helper
+
+
+def test_a_carried_event_is_followed_under_whatever_name_its_variable_has():
+    renamed = scan_source(LINE_SOURCE.replace("entry", "rec"), "line.py")  # the variable renamed throughout
+    assert set(written_fields([renamed], SAMPLE)[("shared", "line.py")]) == {
+        "size", "epoch", "status", "transform_events", "ended"}
+    assert table_problems([renamed], SAMPLE) == []
+
+
+def test_a_table_entry_the_source_no_longer_has_is_reported():
+    gone = dataclasses.replace(SAMPLE, carried_events=frozenset({("line.py", "plain")}))
+    assert _sample(tables=gone)["tables"] == [
+        "CARRIED_EVENTS in tests/test_events_doc.py lists the event `plain` in line.py, but no variable there is "
+        "assigned a dict with that event any more; remove the entry, or name the file that builds `plain` now"]
+    stale = dataclasses.replace(SAMPLE, helper_fields={("shared", "line.py"): frozenset({"ended", "dropped"}),
+                                                       ("removed", "line.py"): frozenset({"size"})})
+    assert _sample(tables=stale)["tables"] == [
+        "HELPER_FIELDS in tests/test_events_doc.py names fields of the event `removed`, which nothing under "
+        "src/contexto writes; remove the entry, or rename it to the name the source writes",
+        "HELPER_FIELDS in tests/test_events_doc.py names the field `dropped` of `shared`, but `dropped` does not "
+        "appear anywhere under src/contexto; remove it from HELPER_FIELDS, or rename it to the key the source writes"]
+
+
+def test_a_documented_field_no_writing_module_mentions_is_reported():
+    made_up = _sample(SAMPLE_DOC.replace("- `count`: a count.", "- `count`: a count.\n- `made_up`: x"))
+    assert _only(made_up, "words") == ("docs/events.md:37 lists the field `made_up` under `plain`, but `made_up` "
+                                       "does not appear in inner.py, which writes that event; remove the bullet, or "
+                                       "rename it to the key the source writes")
+    # `status` is a word in line.py only, so it cannot be listed under the entry that inner.py writes
+    other = _sample(SAMPLE_DOC.replace("- `budget`: a budget.", "- `budget`: a budget.\n- `status`: x"))
+    assert _only(other, "words").startswith("docs/events.md:31 lists the field `status` under `shared`, but `status` "
+                                            "does not appear in inner.py, which writes that event")
+
+
+def test_an_index_row_that_is_missing_moved_or_unlike_its_entry_is_reported():
+    row = "| [`plain`](#plain) | engine | `transform_events` | normal |\n"
+    assert _only(_sample(SAMPLE_DOC.replace(row, "")), "index").endswith(
+        "add this row to the table under `## Index`, after the row for `shared` (nested): " + row.strip())
+    first = "| [`shared`](#shared) |"
+    moved = _only(_sample(SAMPLE_DOC.replace(row, "").replace(first, row + first)), "index")
+    assert moved == ("docs/events.md:7 the index rows are not in the order of the entries; the row here should be "
+                     "the one for `shared`")
+    for changed in (SAMPLE_DOC.replace(row, row.replace("normal", "notice")),  # the row alone
+                    SAMPLE_DOC.replace("`transform_events`. Kind: normal.", "`transform_events`. Kind: notice.")):
+        assert "the index row for `plain` does not repeat its entry at line 32" in _only(_sample(changed), "index")
+
+
+def test_a_link_to_no_heading_and_an_example_in_the_wrong_place_are_reported():
+    assert _only(_sample(SAMPLE_DOC.replace("](#plain).", "](#plian).")), "links") == (
+        "docs/events.md:17 links to #plian, but no heading has that anchor; correct the link, or restore the "
+        "heading it names")
+    moved = _only(_sample(SAMPLE_DOC.replace('{"epoch":0,"event":"shared","size":1,', '{"event":"plain",')), "examples")
+    assert moved == ("docs/events.md:38 the json example shows `plain` as own line, but no entry for `plain` says "
+                     "Where: own line; correct the example, or the entry's facts line")
+    extra = _only(_sample(SAMPLE_DOC.replace('"event":"shared"}]', '"event":"shared","status":1}]')), "examples")
+    assert "has the key `status`, which the entry `shared` (nested) at line 25 does not list" in extra
 
 
 # The package against the document ----------------------------------------------------------------------------
 
 def test_every_event_name_is_read_from_the_source():
-    problems = unread_sites(scan_package())
+    problems = unread_sites(scan_package(), TABLES)
+    assert not problems, _report(problems)
+
+
+def test_the_tables_name_things_that_exist():
+    problems = table_problems(scan_package(), TABLES)
     assert not problems, _report(problems)
 
 
 def test_every_event_the_source_writes_is_documented():
-    problems = undocumented_events(written_names(scan_package()), _document())
+    problems = undocumented_events(written_names(scan_package(), TABLES), _document())
     assert not problems, _report(problems)
 
 
 def test_every_documented_event_is_written_by_the_source():
-    problems = unwritten_events(written_names(scan_package()), _document())
+    problems = unwritten_events(written_names(scan_package(), TABLES), _document())
     assert not problems, _report(problems)
 
 
 def test_entries_that_share_a_name_are_told_apart():
-    problems = shared_name_problems(written_names(scan_package()), _document())
+    problems = shared_name_problems(written_names(scan_package(), TABLES), _document(), TABLES)
     assert not problems, _report(problems)
 
 
 def test_every_field_the_scan_finds_or_the_test_names_is_documented():
-    problems = undocumented_fields(written_fields(scan_package()), _document())
+    problems = undocumented_fields(written_fields(scan_package(), TABLES), _document(), TABLES)
     assert not problems, _report(problems)
 
 
 def test_every_documented_field_appears_in_a_module_that_writes_the_event():
     modules = scan_package()
-    problems = unwritten_fields(modules, written_names(modules), _document())
+    problems = unwritten_fields(modules, written_names(modules, TABLES), _document(), TABLES)
     assert not problems, _report(problems)
 
 
@@ -871,82 +1300,27 @@ def test_every_json_example_shows_documented_events_and_fields():
     assert not problems, _report(problems)
 
 
-# The checks have teeth: the same functions, on the real document with one change -----------------------------
+# The same checks on the real document with one line changed. The test picks what to change from the document
+# as it is, so an event or a field renamed in the source and the document together does not fail it.
 
-def _changed(old: str, new: str, *, after: str = "") -> Document:
-    """The document with the first ``old`` after the text ``after`` replaced by ``new``."""
-    text = DOC.read_text(encoding="utf-8")
-    start = text.index(after)
-    assert old in text[start:], f"{DOC_NAME} no longer has {old!r} after {after!r}; update this test's mutation"
-    return read_document(text[:start] + text[start:].replace(old, new, 1))
-
-
-def test_removing_an_entry_or_inventing_one_is_reported():
-    text = DOC.read_text(encoding="utf-8")
-    written = written_names(scan_package())
-    without = _changed("\n### `rotation`\n", "\n### rotation\n")
-    assert any(problem.startswith(f"{DOC_NAME} does not document the event `rotation` written at "
-                                  "src/contexto/rewrite.py:") for problem in undocumented_events(written, without))
-    invented = read_document(text + "\n### `made_up_event`\n\nWriter: proxy. Where: own line. Kind: normal.\n")
-    line = len(text.splitlines()) + 2
-    assert (f"{DOC_NAME}:{line} documents the event `made_up_event`, but nothing under src/contexto writes it; "
-            "remove the entry, or rename it to the name the source writes") in unwritten_events(written, invented)
-
-
-def test_removing_a_field_or_inventing_one_is_reported():
+def test_the_real_document_fails_when_a_field_an_index_row_or_an_entry_goes():
+    doc = _document()
     modules = scan_package()
-    fields = written_fields(modules)
-    without = _changed("\n- `retained_messages`:", "\n- retained_messages:")
-    assert any("the entry `rotation` does not list the field `retained_messages`, written at src/contexto/rewrite.py:"
-               in problem for problem in undocumented_fields(fields, without))
-    invented = _changed("\n- `retained_messages`:", "\n- `made_up_field`: x\n- `retained_messages`:")
-    assert any("lists the field `made_up_field` under `rotation`" in problem
-               for problem in unwritten_fields(modules, written_names(modules), invented))
-
-
-def test_a_field_missing_from_one_of_two_entries_with_the_same_name_is_reported():
-    # `epoch` and `over_bound` are fields of the proxy's request line and of the engine's nested request
-    # event. Each entry must list them itself: the other entry's bullet does not count.
-    fields = written_fields(scan_package())
-    for key in ("epoch", "over_bound"):
-        line_entry = _changed(f"\n- `{key}`:", f"\n- {key}:", after="\n### `request`\n")
-        assert any(f"the entry `request` does not list the field `{key}`, written at src/contexto/proxy.py:"
-                   in problem for problem in undocumented_fields(fields, line_entry)), key
-        nested = _changed(f"\n- `{key}`:", f"\n- {key}:", after="\n### `request` (")
-        assert any(f"the entry `request` (the engine's nested event) does not list the field `{key}`, written at "
-                   "src/contexto/rewrite.py:" in problem for problem in undocumented_fields(fields, nested)), key
-
-
-def test_a_field_that_arrives_by_unpacking_or_through_a_helper_is_reported_when_removed():
-    fields = written_fields(scan_package())
-    for name, key, how in (("bound_too_small", "fixed_overhead", "written at src/contexto/rewrite.py:"),  # **sizing
-                           ("request", "stop_reason", "which HELPER_FIELDS in"),  # UsageReader.end_fields()
-                           ("mcp_call", "charged_tokens", "which HELPER_FIELDS in")):  # _within_room's budget
-        without = _changed(f"\n- `{key}`:", f"\n- {key}:", after=f"\n### `{name}`\n")
-        assert any(f"the entry `{name}` does not list the field `{key}`, {how}" in problem
-                   for problem in undocumented_fields(fields, without)), (name, key)
-
-
-def test_an_index_row_that_is_missing_or_disagrees_with_its_entry_is_reported():
-    row = "| [`rotation`](#rotation) | engine | `transform_events` | normal |"
-    missing = index_problems(_changed(row + "\n", ""))
-    assert len(missing) == 1 and missing[0].endswith(f"after the row for `count_tokens`: {row}"), missing
-    # an entry whose kind (or writer, or place) changes without its row, and a row that changes without its entry
-    for changed in (_changed("Kind: normal.", "Kind: problem.", after="\n### `rotation`\n"),
-                    _changed(row, row.replace("normal", "notice"))):
-        problems = index_problems(changed)
-        assert len(problems) == 1 and "the index row for `rotation` does not repeat its entry" in problems[0], problems
-    first = "| [`request`](#request) |"
-    moved = read_document(DOC.read_text(encoding="utf-8").replace(row + "\n", "").replace(first, f"{row}\n{first}", 1))
-    problems = index_problems(moved)
-    assert len(problems) == 1 and "the index rows are not in the order of the entries" in problems[0], problems
-
-
-def test_a_link_to_a_heading_that_does_not_exist_is_reported():
-    broken = broken_links(_changed("](#rotation)", "](#rotatoin)"))
-    assert len(broken) == 1 and "links to #rotatoin, but no heading has that anchor" in broken[0], broken
-
-
-def test_an_example_that_shows_an_event_where_its_entry_does_not_say_is_reported():
-    moved = bad_examples(_changed('{"epoch":2,"event":"rotation"', '{"epoch":2,"event":"estimate_error"'))
-    assert any("shows `estimate_error` as `transform_events`, but no entry" in problem for problem in moved), moved
+    fields = written_fields(modules, TABLES)
+    written = written_names(modules, TABLES)
+    for (name, path), keys in sorted(fields.items()):  # every field the test knows of, in its own entry
+        entry = entry_for(doc, name, path, TABLES)
+        assert entry is not None, (name, path)
+        for key in sorted(keys):
+            bullet = doc.lines[entry.fields[key] - 1]
+            without = doc.with_line(entry.fields[key], bullet.replace(f"- `{key}`", f"- {key}", 1))
+            assert any(f"the entry {entry.title} does not list the field `{key}`, " in problem
+                       for problem in undocumented_fields(fields, without, TABLES)), (name, path, key)
+    for entry in doc.entries:
+        row = next(number for number, text in doc.index if text == entry.index_row)
+        assert any(f"the index has no row for the entry {entry.title} " in problem
+                   for problem in index_problems(doc.with_line(row))), entry.title
+        if len(doc.named(entry.name)) == 1:
+            gone = doc.with_line(entry.line, entry.title)  # no longer a heading
+            assert any(problem.startswith(f"{DOC_NAME} does not document the event `{entry.name}` written at ")
+                       for problem in undocumented_events(written, gone)), entry.title

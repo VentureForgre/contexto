@@ -169,7 +169,9 @@ never put in an event.
 
 **No conversation content.** Events are built from counts, sizes, ids, fixed words and exception class
 names, and the few strings from outside that the table below lists. They hold no prompt, response,
-tool argument, tool output or file content. The proxy adds a
+tool output or file content, and no text from a tool argument: of a tool call's arguments,
+[`mcp_call`](#mcp_call) logs only a page id, an offset, a record kind and an obligation id, and only
+when the call succeeded. The proxy adds a
 second guard to nested engine events, to a request's `model` and to `input_transformations`: a string
 longer than 80 characters is replaced by its length (`<123 chars>`), a list is cut to its first 50
 items, and anything nested deeper than 16 levels becomes `<dict>` or `<list>`. The guard does not
@@ -186,7 +188,7 @@ None is a credential or conversation text:
 | [`search_cache_invalid`](#search_cache_invalid) `value` | The first 100 characters of `CONTEXTO_SEARCH_CACHE_MB`. | The environment. |
 | [`launch`](#launch) `session` | The session id. With `--session` it is the name the user chose. | The command line. |
 | `model` on a `request` line and in [`upstream_4xx`](#upstream_4xx) | The model the request names, at most 80 characters. | The request body. |
-| `method`, `path` and `endpoint`, on every line that has one | The request's HTTP method and its path without the query string, at any length. | The request line. |
+| `method`, `path` and `endpoint`, on every line that has one | The request's HTTP method and its path without the query string, at any length. On a [`request_refused`](#request_refused) line they are those of a request that did not come from the CLI. | The request line. |
 | [`encoded_body_rejected`](#encoded_body_rejected) `encoding` | The request's `Content-Encoding` header, lower-cased, at any length: the 80-character guard does not apply to it. | A request header. |
 | [`hold_skipped`](#hold_skipped) `encoding`, and `usage_unavailable` on a `request` line | The response's `Content-Encoding` header, lower-cased, at any length. | Upstream's response header. |
 | `usage` on a Responses API `request` line | Upstream's usage object: its key names as sent, with their numbers. Other values are dropped. | Upstream's response. |
