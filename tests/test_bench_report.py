@@ -32,7 +32,7 @@ LIMITS = (
     "The sessions are synthetic",
     "Scoring is exact match",
     "One version of Claude Code",
-    "A difference between arms that is smaller than the run-to-run noise is not a finding",
+    "Run-to-run noise is described, not tested",
 )
 
 
@@ -302,8 +302,8 @@ def test_with_few_seeds_the_seed_level_test_cannot_reach_005_and_the_report_says
     assert pair["pooled"]["interval"][0] > 0 and pair["seed_level"]["sign_flip_p"] == 0.0625
     verdict = pair["verdict"]
     assert verdict["result"] == "no_difference_shown"
-    assert (verdict["interval_excludes_zero"], verdict["seed_p_below_alpha"], verdict["seed_test_can_reach_alpha"],
-            verdict["seed_test_min_p"]) == (True, False, False, 0.0625)
+    assert (verdict["interval_excludes_zero"], verdict["pooled_significant"], verdict["seed_p_below_alpha"],
+            verdict["seed_test_can_reach_alpha"], verdict["seed_test_min_p"]) == (True, True, False, False, 0.0625)
     text = report.render(results)
     assert "With 5 seeds the seed-level test cannot reach 0.05" in text
     assert "2 / 2^5 = 0.0625" in text
@@ -327,31 +327,117 @@ def test_a_direction_is_named_only_when_the_pooled_interval_and_the_seed_level_t
     text = report.render(results)
     assert "Contexto answered more probes correctly than plain Claude Code" in text
     assert "Full context answered more probes correctly than plain Claude Code" in text
-    assert "Contexto against full context: no difference shown, because the pooled interval contains 0" in text
+    assert ("Contexto against full context: no difference shown, because the pooled interval contains 0 and the "
+            "exact McNemar p value is 0.05 or more.") in text
 
 
-def test_a_difference_smaller_than_the_run_to_run_noise_is_not_named(tmp_path):
-    # Plain misses 20 of 72 on every seed (27.8 points below Contexto), and a second run of the first
-    # seed misses 50: the accuracy range across repeats (41.7 points) is larger than that difference.
-    wrong = {"plain": 20, ("plain", 1, 1): 50}
-    out = crafted(tmp_path / "run", wrong, seeds=(1, 2, 3, 4, 5, 6), repeats=2)
-    results = report.build([out])
-    pair = results["pairs"]["contexto_vs_plain"]
-    assert results["noise"]["plain"]["accuracy_range"] == pytest.approx(30 / 72)
-    verdict = pair["verdict"]
-    assert (verdict["interval_excludes_zero"], verdict["seed_p_below_alpha"]) == (True, True)
-    assert verdict["noise_range"] == pytest.approx(30 / 72) and verdict["difference_exceeds_noise"] is False
-    assert verdict["result"] == "no_difference_shown"
-    text = report.render(results)
-    assert "is not larger than the run-to-run noise" in text
+def test_run_to_run_noise_is_described_and_does_not_change_what_is_shown(tmp_path):
+    # Reviewer A's case. On each of 12 seeds 1 probe is right only in Contexto and 4 only in full
+    # context: a deficit every seed shows (sign-flip p = 2 / 2**12). Two more runs of the first seed
+    # in which Contexto scores 65 and 68 of 72 give an accuracy range of 3 probes, 4.2 points, which
+    # is the size of the pooled difference. The range of one session is not comparable with a mean
+    # over 12, so it is printed and the result stays.
+    seeds = tuple(range(1, 13))
+    wrong = {"contexto": range(0, 4), "full": range(4, 5), ("contexto", 1, 1): range(0, 7)}
+    arms = ("contexto", "full")
+    alone = report.build([crafted(tmp_path / "alone", wrong, seeds=seeds, arms=arms)])
+    repeated = report.build([crafted(tmp_path / "repeated", wrong, seeds=seeds, repeats=3, arms=arms)])
+    for results in (alone, repeated):
+        pair = results["pairs"]["contexto_vs_full"]
+        assert (pair["pooled"]["a_only"], pair["pooled"]["b_only"]) == (12, 48)
+        assert pair["seed_level"]["sign_flip_p"] == 2 / 2 ** 12
+        verdict = pair["verdict"]
+        assert verdict["result"] == "b_higher"
+        assert "noise_range" not in verdict and "difference_exceeds_noise" not in verdict
+        assert "- Contexto against full context: Full context answered more probes correctly than Contexto." in (
+            report.render(results))
+    assert repeated["noise"]["contexto"]["accuracy_range"] == pytest.approx(3 / 72)
+    assert alone["pairs"]["contexto_vs_full"]["repeats"] is None
+    block = repeated["pairs"]["contexto_vs_full"]["repeats"]
+    assert (block["seed"], block["repeat_ids"]) == (1, [0, 1, 2])
+    assert block["differences"] == pytest.approx([-3 / 72, -6 / 72, -3 / 72])
+    assert (block["accuracy_range_a"], block["accuracy_range_b"]) == (pytest.approx(3 / 72), 0)
+    text = report.render(repeated)
+    assert ("Run-to-run noise, which is described and is not part of the rule: seed 1 was run 3 times in both "
+            "arms. On that seed alone the difference between the arms was -4.2, -8.3 and -4.2 points in the 3 "
+            "runs, and across those runs accuracy ranged over 4.2 points for Contexto and 0.0 points for full "
+            "context.") in text
+    assert "is not larger than the run-to-run noise" not in text and "weak estimate" not in text
+    assert "Run-to-run noise was not measured for these arms" in report.render(alone)
 
 
-def test_the_noise_is_printed_next_to_the_difference_between_arms(tmp_path):
+def test_the_repeated_seeds_own_difference_is_printed_next_to_the_range_of_each_arm(tmp_path):
     out = crafted(tmp_path / "run", {"plain": 30, ("plain", 1, 1): 27}, seeds=(1, 2), repeats=2)
-    text = report.render(report.build([out]))
-    line = next(x for x in text.splitlines() if x.startswith("| Contexto against plain Claude Code | +41.7 points"))
-    assert line == ("| Contexto against plain Claude Code | +41.7 points | 0.0 points | 4.2 points | "
-                    "larger than the noise |")
+    results = report.build([out])
+    text = report.render(results)
+    line = next(x for x in text.splitlines() if x.startswith("| Contexto against plain Claude Code | 1 | 2 |"))
+    assert line == ("| Contexto against plain Claude Code | 1 | 2 | +41.7, +37.5 points | 0.0 points | "
+                    "4.2 points |")
+    # Two repeats: the report says how little a range from two runs is worth, in the section and
+    # next to each pair's result.
+    assert text.count("A range from two repeats is a weak estimate") == 4
+    assert "A range of 0.0 points does not mean the repeats agreed" in text
+    assert results["pairs"]["plain_vs_full"]["repeats"]["differences"] == pytest.approx([-30 / 72, -27 / 72])
+
+
+def test_a_direction_is_not_named_when_the_exact_mcnemar_p_is_005_or_more(tmp_path):
+    # Reviewer A's case: 20 probes right only in Contexto against 9 only in full context, over 6
+    # seeds. Tango's interval excludes 0 and the sign-flip p is 2 / 64, but the exact McNemar p is
+    # 0.0614, and that is the test the audit of the published run used.
+    counts = {1: (4, 2), 2: (3, 1), 3: (3, 2), 4: (4, 1), 5: (3, 2), 6: (3, 1)}
+    wrong = {}
+    for seed, (only_contexto, only_full) in counts.items():
+        wrong[("contexto", seed, 0)] = range(0, only_full)
+        wrong[("full", seed, 0)] = range(10, 10 + only_contexto)
+    results = report.build([crafted(tmp_path / "run", wrong, seeds=tuple(counts), arms=("contexto", "full"))])
+    pair = results["pairs"]["contexto_vs_full"]
+    assert (pair["pooled"]["a_only"], pair["pooled"]["b_only"]) == (20, 9)
+    assert pair["pooled"]["interval"][0] > 0 and pair["pooled"]["mcnemar_p"] == pytest.approx(0.0614, abs=5e-5)
+    assert pair["seed_level"]["sign_flip_p"] == 2 / 64
+    verdict = pair["verdict"]
+    assert verdict["result"] == "no_difference_shown"
+    assert (verdict["interval_excludes_zero"], verdict["mcnemar_p_below_alpha"], verdict["pooled_significant"],
+            verdict["seed_p_below_alpha"], verdict["same_direction"]) == (True, False, False, True, True)
+    text = report.render(results)
+    assert ("- Contexto against full context: no difference shown, because the exact McNemar p value is 0.05 or "
+            "more. The pooled difference is +2.5 points") in text
+    assert "its 95% interval excludes 0 and the exact McNemar p value is below 0.05" in text  # the rule, in words
+
+
+def _pooled(a_only: int, b_only: int, n: int = 432) -> dict:
+    return stats.paired([True] * a_only + [False] * b_only + [True] * (n - a_only - b_only),
+                        [False] * a_only + [True] * b_only + [True] * (n - a_only - b_only))
+
+
+def test_a_direction_needs_the_pooled_and_the_seed_level_result_to_point_the_same_way():
+    pooled = _pooled(60, 20)
+    agree = report._verdict("contexto", "full", pooled, stats.seed_level([0.1, 0.08, 0.12, 0.1, 0.09, 0.07]), None)
+    assert agree["result"] == "a_higher" and agree["same_direction"] is True
+    # Seeds of different sizes can pull the two apart: the pooled difference is positive and every
+    # seed-level figure is negative.
+    apart = report._verdict("contexto", "full", pooled, stats.seed_level([-0.1, -0.08, -0.12, -0.1, -0.09, -0.07]),
+                            None)
+    assert (apart["pooled_significant"], apart["seed_p_below_alpha"], apart["same_direction"]) == (True, True, False)
+    assert apart["result"] == "no_difference_shown"
+    assert "because the pooled difference and the mean of the seed differences have opposite signs" in apart["text"]
+    other = report._verdict("contexto", "full", _pooled(20, 60),
+                            stats.seed_level([-0.1, -0.08, -0.12, -0.1, -0.09, -0.07]), None)
+    assert other["result"] == "b_higher"
+
+
+def test_a_seed_with_no_difference_lowers_what_the_seed_level_test_can_reach(tmp_path):
+    # Six seeds, one of them with a difference of exactly 0: a zero carries no sign, so the smallest
+    # p value is 2 / 2**5 = 0.0625 and not 2 / 2**6.
+    wrong = {"plain": 30, ("plain", 6, 0): 0}
+    results = report.build([crafted(tmp_path / "run", wrong, seeds=(1, 2, 3, 4, 5, 6), arms=("contexto", "plain"))])
+    pair = results["pairs"]["contexto_vs_plain"]
+    assert pair["seed_level"]["sign_flip_p"] == 0.0625
+    verdict = pair["verdict"]
+    assert (verdict["result"], verdict["seed_test_min_p"], verdict["seed_test_can_reach_alpha"]) == (
+        "no_difference_shown", 0.0625, False)
+    assert ("With 6 seeds, 1 of which has a difference of exactly 0, the seed-level test cannot reach 0.05: a seed "
+            "with no difference carries no sign, so the smallest possible p value is 2 / 2^5 = 0.0625") in (
+        verdict["text"])
 
 
 def test_the_report_always_states_its_limits(tmp_path):

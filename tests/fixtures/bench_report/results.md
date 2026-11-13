@@ -77,7 +77,7 @@ Probes inside one session are not independent, so each seed is also treated as o
 
 ## Run-to-run noise
 
-The same session run more than once in the same arm. The range is the highest accuracy minus the lowest; a flipped probe is one the repeats did not all agree on.
+The same session run more than once in the same arm. The range is the highest accuracy minus the lowest over the repeats; a flipped probe is one the repeats did not all agree on. A range of 0.0 points does not mean the repeats agreed, because probes that flip in opposite directions cancel in the accuracy: read the flipped probes too. This section describes; it is not part of the rule under "What this run shows".
 
 | Arm | Seed | Repeats | Accuracy of each repeat | Range | Probes that flipped | Pairwise agreement |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -85,13 +85,13 @@ The same session run more than once in the same arm. The range is the highest ac
 | Full context | 11 | 3 | 84.7%, 90.3%, 95.8% | 11.1 points | 18 of 72 | 83.3% |
 | Plain Claude Code | 11 | 3 | 73.6%, 76.4%, 66.7% | 9.7 points | 41 of 72 | 62.0% |
 
-The difference between arms next to the noise of each arm:
+The repeated seed's own difference between two arms in each repeat (the first arm's accuracy minus the second's, repeat by repeat), next to the range of each arm's accuracy over the same repeats. Both are figures of one session, so they can be set side by side: a difference that stays outside both ranges in every repeat is not run-to-run noise on that seed. The pooled difference is a mean over every seed and is not comparable with these ranges.
 
-| Pair | Difference between arms | Noise of the first arm | Noise of the second arm | Difference against noise |
-| --- | --- | --- | --- | --- |
-| Contexto against full context | +4.9 points | 5.6 points | 11.1 points | not larger than the noise |
-| Contexto against plain Claude Code | +21.5 points | 5.6 points | 9.7 points | larger than the noise |
-| Plain Claude Code against full context | -16.7 points | 9.7 points | 11.1 points | larger than the noise |
+| Pair | Seed | Repeats | Difference in each repeat | Range of the first arm | Range of the second arm |
+| --- | --- | --- | --- | --- | --- |
+| Contexto against full context | 11 | 3 | +8.3, -1.4, -1.4 points | 5.6 points | 11.1 points |
+| Contexto against plain Claude Code | 11 | 3 | +19.4, +12.5, +27.8 points | 5.6 points | 9.7 points |
+| Plain Claude Code against full context | 11 | 3 | -11.1, -13.9, -29.2 points | 9.7 points | 11.1 points |
 
 ## Facts concluded by the assistant
 
@@ -154,15 +154,15 @@ Compactions seen: 32 across 8 sessions. The `pre_tokens` the CLI reported at eac
 
 ## What this run shows
 
-Each line is produced by a fixed rule. A direction is named only when the pooled 95% interval excludes 0, the seed-level p value is below 0.05, and the difference is larger than the run-to-run noise where noise was measured. Otherwise the line says no difference was shown.
+Each line is produced by a fixed rule. A direction is named only when three things hold: the pooled comparison is significant (its 95% interval excludes 0 and the exact McNemar p value is below 0.05), the seed-level sign-flip p value is below 0.05, and the two point the same way. Otherwise the line says no difference was shown, with each reason that applies. Run-to-run noise is described after each result and does not change it.
 
-- Contexto against full context: no difference shown, because the seed-level p value is 0.05 or more and the difference is not larger than the run-to-run noise (11.1 points). The pooled difference is +4.9 points (95% interval +1.4 to +8.5 points, exact McNemar p = 0.0099) over 432 probes of 6 seeds, and the seed-level sign-flip p value is 0.0625. Run-to-run noise (the range of accuracy across repeats of one seed) is 5.6 points for Contexto and 11.1 points for full context; the difference between the arms is 4.9 points.
-- Contexto against plain Claude Code: Contexto answered more probes correctly than plain Claude Code. The pooled difference is +21.5 points (95% interval +16.8 to +26.4 points, exact McNemar p < 0.0001) over 432 probes of 6 seeds, and the seed-level sign-flip p value is 0.0312. Run-to-run noise (the range of accuracy across repeats of one seed) is 5.6 points for Contexto and 9.7 points for plain Claude Code; the difference between the arms is 21.5 points.
-- Plain Claude Code against full context: Full context answered more probes correctly than plain Claude Code. The pooled difference is -16.7 points (95% interval -21.7 to -11.7 points, exact McNemar p < 0.0001) over 432 probes of 6 seeds, and the seed-level sign-flip p value is 0.0312. Run-to-run noise (the range of accuracy across repeats of one seed) is 9.7 points for plain Claude Code and 11.1 points for full context; the difference between the arms is 16.7 points.
+- Contexto against full context: no difference shown, because the seed-level p value is 0.05 or more. The pooled difference is +4.9 points (95% interval +1.4 to +8.5 points, exact McNemar p = 0.0099) over 432 probes of 6 seeds, and the seed-level sign-flip p value is 0.0625. With 6 seeds, 1 of which has a difference of exactly 0, the seed-level test cannot reach 0.05: a seed with no difference carries no sign, so the smallest possible p value is 2 / 2^5 = 0.0625. Run-to-run noise, which is described and is not part of the rule: seed 11 was run 3 times in both arms. On that seed alone the difference between the arms was +8.3, -1.4 and -1.4 points in the 3 runs, and across those runs accuracy ranged over 5.6 points for Contexto and 11.1 points for full context.
+- Contexto against plain Claude Code: Contexto answered more probes correctly than plain Claude Code. The pooled difference is +21.5 points (95% interval +16.8 to +26.4 points, exact McNemar p < 0.0001) over 432 probes of 6 seeds, and the seed-level sign-flip p value is 0.0312. Run-to-run noise, which is described and is not part of the rule: seed 11 was run 3 times in both arms. On that seed alone the difference between the arms was +19.4, +12.5 and +27.8 points in the 3 runs, and across those runs accuracy ranged over 5.6 points for Contexto and 9.7 points for plain Claude Code.
+- Plain Claude Code against full context: Full context answered more probes correctly than plain Claude Code. The pooled difference is -16.7 points (95% interval -21.7 to -11.7 points, exact McNemar p < 0.0001) over 432 probes of 6 seeds, and the seed-level sign-flip p value is 0.0312. Run-to-run noise, which is described and is not part of the rule: seed 11 was run 3 times in both arms. On that seed alone the difference between the arms was -11.1, -13.9 and -29.2 points in the 3 runs, and across those runs accuracy ranged over 9.7 points for plain Claude Code and 11.1 points for full context.
 
 ### Limits
 
 - The sessions are synthetic: generated log text with facts planted in it, not recorded work. A result here says how the arms handle this kind of session and may not carry over to real ones.
 - Scoring is exact match after normalisation against the generator's answers, with no model judge. A right answer in other words is counted wrong, in every arm alike.
 - One version of Claude Code and one version of Contexto were run. Another version can behave differently.
-- A difference between arms that is smaller than the run-to-run noise is not a finding.
+- Run-to-run noise is described, not tested. It comes from repeats of one seed, as the range of a single session's accuracy, and a single session's range is not comparable with a difference pooled over several seeds, so it does not change what a comparison shows. The seed-level test carries the variation between sessions.

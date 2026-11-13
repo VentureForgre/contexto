@@ -45,7 +45,10 @@ LIMITS = (
     "Scoring is exact match after normalisation against the generator's answers, with no model judge. A right "
     "answer in other words is counted wrong, in every arm alike.",
     "One version of Claude Code and one version of Contexto were run. Another version can behave differently.",
-    "A difference between arms that is smaller than the run-to-run noise is not a finding.",
+    "Run-to-run noise is described, not tested. It comes from repeats of one seed, as the range of a single "
+    "session's accuracy, and a single session's range is not comparable with a difference pooled over several "
+    "seeds, so it does not change what a comparison shows. The seed-level test carries the variation between "
+    "sessions.",
 )
 
 
@@ -273,31 +276,48 @@ def _plural(n: int, word: str) -> str:
     return f"{n:,} {word}" + ("" if n == 1 else "s")
 
 
+def _number_list(values: Sequence[float]) -> str:
+    """Signed percentage points in words: "+1.0", "+1.0 and +2.0", "+1.0, +2.0 and +3.0"."""
+    shown = [_points(v, True) for v in values]
+    return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
+
+
+WEAK_RANGE = "A range from two repeats is a weak estimate: two runs can agree, or differ, by chance."
+
+
 def _verdict(a: str, b: str, pooled: dict[str, Any] | None, seed_level: dict[str, Any] | None,
-             noise_a: dict[str, Any] | None, noise_b: dict[str, Any] | None) -> dict[str, Any]:
+             repeats: dict[str, Any] | None) -> dict[str, Any]:
     """What a comparison shows, by fixed rules.
 
-    A direction is named only when the pooled 95% interval excludes 0, the seed-level sign-flip p
-    value is below 0.05, and the difference is larger than the run-to-run noise where noise was
-    measured. Otherwise the result is "no difference shown", with the reasons. The noise figure is
-    the larger of the two arms' accuracy ranges across repeats of one seed. The smallest p value
-    the sign-flip test can give with n seeds is 2 / 2**n, so the text says when the number of
-    seeds makes 0.05 unreachable.
+    A direction is named only when three things hold: the pooled comparison is significant (its
+    95% interval excludes 0 and the exact McNemar p value is below 0.05), the seed-level sign-flip
+    p value is below 0.05, and the pooled difference and the mean of the seed differences have the
+    same sign. Otherwise the result is "no difference shown", with each reason that applies.
+
+    The smallest p value the sign-flip test can give is 2 / 2**k, where k is the number of seeds
+    whose difference is not 0 (a zero carries no sign), so the text says when the seeds make 0.05
+    unreachable.
+
+    Run-to-run noise is not part of the rule. ``repeats`` (``_repeat_differences``) is described
+    in a sentence: the repeated seed's own difference in each repeat, next to the range of each
+    arm's accuracy over the same repeats. Those are like quantities, one session against one
+    session, where the pooled difference is a mean over every seed.
     """
     title = f"{label(a)} against {_inline(b)}"
     if pooled is None or seed_level is None:
-        return {"result": "not_compared", "text": f"{title}: not compared, because no seed has a complete unit of "
-                                                  "both arms."}
+        return {"result": "not_compared", "text": f"{title}: not compared, because no seed has a complete session "
+                                                  "of both arms."}
     low, high = pooled["interval"]
     difference = pooled["difference"]
     seeds = seed_level["seeds"]
-    min_p = 2 / 2 ** seeds
+    signed = sum(1 for d in seed_level["differences"] if d != 0)
+    min_p = 2 / 2 ** signed if signed else 1.0
     excludes = low > 0 or high < 0
+    exact = pooled["mcnemar_p"] < ALPHA
+    significant = excludes and exact
     below = seed_level["sign_flip_p"] < ALPHA
-    ranges = [n["accuracy_range"] for n in (noise_a, noise_b) if n is not None]
-    noise_range = max(ranges) if ranges else None
-    exceeds = None if noise_range is None else abs(difference) > noise_range + 1e-12
-    if excludes and below and exceeds is not False:
+    same_way = difference * seed_level["mean"] > 0
+    if significant and below and same_way:
         result = "a_higher" if difference > 0 else "b_higher"
         winner, loser = (a, b) if difference > 0 else (b, a)
         lead = f"{label(winner)} answered more probes correctly than {_inline(loser)}."
@@ -306,10 +326,12 @@ def _verdict(a: str, b: str, pooled: dict[str, Any] | None, seed_level: dict[str
         reasons = []
         if not excludes:
             reasons.append("the pooled interval contains 0")
+        if not exact:
+            reasons.append(f"the exact McNemar p value is {ALPHA} or more")
         if not below:
             reasons.append(f"the seed-level p value is {ALPHA} or more")
-        if exceeds is False:
-            reasons.append(f"the difference is not larger than the run-to-run noise ({_points(noise_range)} points)")
+        if not same_way and difference and seed_level["mean"]:
+            reasons.append("the pooled difference and the mean of the seed differences have opposite signs")
         lead = f"no difference shown, because {' and '.join(reasons)}."
     sentences = [
         f"{title}: {lead}",
@@ -318,26 +340,63 @@ def _verdict(a: str, b: str, pooled: dict[str, Any] | None, seed_level: dict[str
         f"{_plural(pooled['n'], 'probe')} of {_plural(seeds, 'seed')}, and the seed-level sign-flip p value is "
         f"{seed_level['sign_flip_p']:.4f}.",
     ]
-    if min_p >= ALPHA:
+    if min_p >= ALPHA and signed == seeds:
         sentences.append(
             f"With {_plural(seeds, 'seed')} the seed-level test cannot reach {ALPHA}: its smallest possible p value "
             f"is 2 / 2^{seeds} = {min_p:.4f}, because the test only asks whether each seed's difference could have "
             "had the other sign. This run cannot show a difference at that level, however large the difference is.")
-    if noise_range is None:
-        sentences.append("Run-to-run noise was not measured for these arms (no seed was repeated), so the "
-                         "difference cannot be compared with it.")
+    elif min_p >= ALPHA and signed:
+        zeros = seeds - signed
+        sentences.append(
+            f"With {_plural(seeds, 'seed')}, {zeros} of which {'has' if zeros == 1 else 'have'} a difference of "
+            f"exactly 0, the seed-level test cannot reach {ALPHA}: a seed with no difference carries no sign, so "
+            f"the smallest possible p value is 2 / 2^{signed} = {min_p:.4f}.")
+    elif min_p >= ALPHA:
+        sentences.append("Every seed's difference is exactly 0, so the seed-level p value is 1.")
+    if repeats is None:
+        sentences.append("Run-to-run noise was not measured for these arms: no seed has two or more complete runs "
+                         "of both.")
     else:
-        parts = [f"{_points(n['accuracy_range'])} points for {_inline(arm)}"
-                 for arm, n in ((a, noise_a), (b, noise_b)) if n is not None]
-        sentences.append(f"Run-to-run noise (the range of accuracy across repeats of one seed) is "
-                         f"{' and '.join(parts)}; the difference between the arms is "
-                         f"{_points(abs(difference))} points.")
-    return {"result": result, "interval_excludes_zero": excludes, "seed_p_below_alpha": below,
-            "seed_test_min_p": min_p, "seed_test_can_reach_alpha": min_p < ALPHA, "noise_range": noise_range,
-            "difference_exceeds_noise": exceeds, "text": " ".join(sentences)}
+        runs = len(repeats["repeat_ids"])
+        sentences.append(
+            f"Run-to-run noise, which is described and is not part of the rule: seed {repeats['seed']} was run "
+            f"{runs} times in both arms. On that seed alone the difference between the arms was "
+            f"{_number_list(repeats['differences'])} points in the {runs} runs, and across those runs accuracy "
+            f"ranged over {_points(repeats['accuracy_range_a'])} points for {_inline(a)} and "
+            f"{_points(repeats['accuracy_range_b'])} points for {_inline(b)}.")
+        if runs == 2:
+            sentences.append(WEAK_RANGE)
+    return {"result": result, "interval_excludes_zero": excludes, "mcnemar_p_below_alpha": exact,
+            "pooled_significant": significant, "seed_p_below_alpha": below, "same_direction": same_way,
+            "seed_test_min_p": min_p, "seed_test_can_reach_alpha": min_p < ALPHA, "text": " ".join(sentences)}
 
 
-def _pair(group: _Group, a: str, b: str, noise: Mapping[str, Any]) -> dict[str, Any]:
+def _repeat_differences(group: _Group, a: str, b: str) -> dict[str, Any] | None:
+    """Run-to-run noise in the terms of a comparison, from the first seed that has two or more
+    repeats complete in both arms: that seed's own difference between the arms in each repeat
+    (repeat r of ``a`` against repeat r of ``b``), and the range of each arm's accuracy over the
+    same repeats. None when no seed has such repeats."""
+    for seed in group.seeds:
+        ids = sorted(key[2] for key, unit in group.units.items()
+                     if key[:2] == (a, seed) and unit["status"] == "complete"
+                     and group.units.get((b, seed, key[2]), {}).get("status") == "complete")
+        if len(ids) < 2:
+            continue
+        of_a, of_b, differences = [], [], []
+        for repeat in ids:
+            rows_a, rows_b = group.probes[(a, seed, repeat)], group.probes[(b, seed, repeat)]
+            compared = stats.paired([bool(row["correct"]) for row in rows_a.values()],
+                                    [bool(rows_b[pid]["correct"]) for pid in rows_a])
+            of_a.append(compared["accuracy_a"])
+            of_b.append(compared["accuracy_b"])
+            differences.append(compared["difference"])
+        return {"seed": seed, "repeat_ids": ids, "differences": differences, "accuracies_a": of_a,
+                "accuracies_b": of_b, "accuracy_range_a": max(of_a) - min(of_a),
+                "accuracy_range_b": max(of_b) - min(of_b)}
+    return None
+
+
+def _pair(group: _Group, a: str, b: str) -> dict[str, Any]:
     seeds: list[int] = []
     dropped_units: list[dict[str, Any]] = []
     per_seed: dict[str, int] = {}  # probes dropped, by seed
@@ -347,7 +406,7 @@ def _pair(group: _Group, a: str, b: str, noise: Mapping[str, Any]) -> dict[str, 
             unit = group.units.get((arm, seed, 0))
             if unit is None:
                 missing.append({"arm": arm, "seed": seed, "repeat": 0, "status": "absent",
-                                "reason": "the manifest lists no such unit"})
+                                "reason": "the manifest lists no such session"})
             elif unit["status"] != "complete":
                 missing.append({"arm": arm, "seed": seed, "repeat": 0, "status": unit["status"],
                                 "reason": unit["reason"]})
@@ -357,7 +416,7 @@ def _pair(group: _Group, a: str, b: str, noise: Mapping[str, Any]) -> dict[str, 
         dropped_units += missing
         per_seed[str(seed)] = max((len(rows) for key, rows in group.probes.items() if key[1] == seed), default=0)
     out: dict[str, Any] = {"a": a, "b": b, "seeds": seeds, "pooled": None, "by_class": {}, "seed_level": None,
-                           "per_seed": [],
+                           "per_seed": [], "repeats": _repeat_differences(group, a, b),
                            "dropped": {"probes": sum(per_seed.values()), "per_seed": per_seed, "units": dropped_units}}
     right_a: list[bool] = []
     right_b: list[bool] = []
@@ -379,7 +438,7 @@ def _pair(group: _Group, a: str, b: str, noise: Mapping[str, Any]) -> dict[str, 
         out["pooled"] = stats.paired(right_a, right_b)
         out["by_class"] = {cls: stats.paired(x, y) for cls, (x, y) in classes.items()}
         out["seed_level"] = stats.seed_level([s["difference"] for s in out["per_seed"]])
-    out["verdict"] = _verdict(a, b, out["pooled"], out["seed_level"], noise.get(a), noise.get(b))
+    out["verdict"] = _verdict(a, b, out["pooled"], out["seed_level"], out["repeats"])
     return out
 
 
@@ -418,7 +477,7 @@ def _plain_compaction(group: _Group, bound: int) -> dict[str, Any] | None:
 def _model_block(group: _Group, bound: int, table: Mapping[str, Any]) -> dict[str, Any]:
     arms = {arm: _arm(group, arm, bound, table) for arm in group.arms}
     noise = {arm: _noise(group, arm) for arm in group.arms}
-    pairs = {f"{a}_vs_{b}": _pair(group, a, b, noise) for a, b in PAIRS if a in arms and b in arms}
+    pairs = {f"{a}_vs_{b}": _pair(group, a, b) for a, b in PAIRS if a in arms and b in arms}
     every = [r for rows in group.requests.values() for r in rows]
     return {"arms": arms, "pairs": pairs, "noise": noise, "request_series": _series(group),
             "plain_compaction": _plain_compaction(group, bound),
@@ -672,28 +731,33 @@ def _noise_section(block: Mapping[str, Any], h: str) -> list[str]:
                         "Without it there is no way to tell a difference between arms from the variation of one "
                         "arm between two runs of the same session.", ""]
     lines += ["The same session run more than once in the same arm. The range is the highest accuracy minus the "
-              "lowest; a flipped probe is one the repeats did not all agree on.", ""]
+              "lowest over the repeats; a flipped probe is one the repeats did not all agree on. A range of 0.0 "
+              "points does not mean the repeats agreed, because probes that flip in opposite directions cancel in "
+              "the accuracy: read the flipped probes too. This section describes; it is not part of the rule "
+              "under \"What this run shows\".", ""]
     lines += _table(["Arm", "Seed", "Repeats", "Accuracy of each repeat", "Range", "Probes that flipped",
                      "Pairwise agreement"],
                     [[label(arm), n["seed"], n["repeats"], ", ".join(_percent(a) for a in n["accuracies"]),
                       f"{_points(n['accuracy_range'])} points", f"{n['flips']} of {n['probes']}",
                       _percent(n["pairwise_agreement"])] for arm, n in measured.items()])
+    if any(n["repeats"] == 2 for n in measured.values()):
+        lines += [WEAK_RANGE, ""]
     rows = []
     for pair in pairs.values():
-        if pair["pooled"] is None:
+        r = pair["repeats"]
+        if r is None:
             continue
-        verdict = pair["verdict"]
-        a, b = noise.get(pair["a"]), noise.get(pair["b"])
-        against = {True: "larger than the noise", False: "not larger than the noise",
-                   None: "noise not measured"}[verdict["difference_exceeds_noise"]]
-        rows.append([f"{label(pair['a'])} against {_inline(pair['b'])}",
-                     f"{_points(pair['pooled']['difference'], True)} points",
-                     "not measured" if a is None else f"{_points(a['accuracy_range'])} points",
-                     "not measured" if b is None else f"{_points(b['accuracy_range'])} points", against])
+        rows.append([f"{label(pair['a'])} against {_inline(pair['b'])}", r["seed"], len(r["repeat_ids"]),
+                     ", ".join(_points(d, True) for d in r["differences"]) + " points",
+                     f"{_points(r['accuracy_range_a'])} points", f"{_points(r['accuracy_range_b'])} points"])
     if rows:
-        lines += ["The difference between arms next to the noise of each arm:", ""]
-        lines += _table(["Pair", "Difference between arms", "Noise of the first arm", "Noise of the second arm",
-                         "Difference against noise"], rows)
+        lines += ["The repeated seed's own difference between two arms in each repeat (the first arm's accuracy "
+                  "minus the second's, repeat by repeat), next to the range of each arm's accuracy over the same "
+                  "repeats. Both are figures of one session, so they can be set side by side: a difference that "
+                  "stays outside both ranges in every repeat is not run-to-run noise on that seed. The pooled "
+                  "difference is a mean over every seed and is not comparable with these ranges.", ""]
+        lines += _table(["Pair", "Seed", "Repeats", "Difference in each repeat", "Range of the first arm",
+                         "Range of the second arm"], rows)
     return lines
 
 
@@ -838,9 +902,11 @@ def render(results: Mapping[str, Any]) -> str:
         for chart in results["charts"]:
             lines += [f"![{chart['title']}]({chart['path']})", ""]
     lines += ["## What this run shows", "",
-              "Each line is produced by a fixed rule. A direction is named only when the pooled 95% interval "
-              f"excludes 0, the seed-level p value is below {ALPHA}, and the difference is larger than the "
-              "run-to-run noise where noise was measured. Otherwise the line says no difference was shown.", ""]
+              "Each line is produced by a fixed rule. A direction is named only when three things hold: the "
+              f"pooled comparison is significant (its 95% interval excludes 0 and the exact McNemar p value is "
+              f"below {ALPHA}), the seed-level sign-flip p value is below {ALPHA}, and the two point the same way. "
+              "Otherwise the line says no difference was shown, with each reason that applies. Run-to-run noise "
+              "is described after each result and does not change it.", ""]
     for model, block in blocks.items():
         for pair in block["pairs"].values():
             lines.append(f"- {'' if model is None else model + ': '}{pair['verdict']['text']}")
