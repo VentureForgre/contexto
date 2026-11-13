@@ -268,6 +268,33 @@ def test_the_ci_workflow_uses_the_same_uv():
     assert set(re.findall(uv_version, ci, flags=re.MULTILINE)) == set(re.findall(uv_version, TEXT, flags=re.MULTILINE))
 
 
+def test_the_owner_steps_name_what_the_workflow_uses():
+    doc = (ROOT / "docs" / "pypi-publishing.md").read_text(encoding="utf-8")
+    project = re.search(r"^      PROJECT: (\S+)$", JOBS["pypi"], flags=re.MULTILINE).group(1)
+    assert project == "contexto-proxy"
+    fields = {
+        "PyPI Project Name": project,
+        "Owner": "VentureForgre",
+        "Repository name": "contexto",
+        "Workflow name": WORKFLOW.name,
+        "Environment name": "pypi",
+    }
+    for field, value in fields.items():
+        assert f"| {field} | `{value}` |" in doc, field
+    assert "gh variable set PYPI_PUBLISH_ENABLED --body true" in doc
+    assert "-f action=publish -f tag=" in doc
+
+
+def test_releasing_md_describes_every_script_and_switch():
+    doc = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+    for script in sorted((ROOT / ".github" / "scripts").iterdir()):
+        assert f"`.github/scripts/{script.name}`" in doc, script.name
+    for word in ("RELEASES_ENABLED", "PYPI_PUBLISH_ENABLED", "-f action=release", "-f action=reattach",
+                 "-f action=publish", "docs/pypi-publishing.md"):
+        assert word in doc, word
+    assert "Every push to `main`" not in doc
+
+
 # --- the dispatch's inputs ---------------------------------------------------------------------------
 
 MAIN = "refs/heads/main"
