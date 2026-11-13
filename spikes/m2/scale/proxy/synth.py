@@ -6,7 +6,13 @@ Zero spend: nothing here talks to a network. The shapes follow what the reposito
   first message; the task's range is 20,000 to 90,000).
 - ``messages[0]`` is a user message with a ``<system-reminder>`` context block and then the prompt, and
   ``messages[1]`` is a role ``system`` message of about 8,470 characters with ``output_config`` (finding 1 of
-  spikes/m2/carried/README.md).
+  spikes/m2/carried/README.md). Its first line is ``# Environment``, by which the engine knows Claude
+  Code's session-start message since D33.
+- What else the engine reads to know a Claude Code session under ``contexto run`` (added 2026-11-12, so
+  that it does not log ``session_start_unrecognised`` or ``mcp_tools_missing`` and measure a session it
+  misreads): five of the 40 tools are Contexto's MCP tools by name, ``metadata.user_id`` carries a session
+  id as Claude Code 2.1.314 and later write it, and the driver sends ``USER_AGENT`` and the same session
+  id in ``X-Claude-Code-Session-Id``. tests/test_scale_proxy_drift.py checks each against the package.
 - Every turn is a turn-start user message, then 0 to 4 tool rounds (assistant thinking + text + tool_use,
   then a user tool_result), then a final assistant message with thinking and text. Turns average
   ``turn_tokens`` (live run #3 averaged about 26,000 tokens per page) with +/-25 percent spread.
@@ -38,8 +44,18 @@ from typing import Any
 
 BYTES_PER_TOKEN = 1.83
 SESSION_START_CHARS = 8_470
+SESSION_START_HEADING = "# Environment\n"
 CACHE = {"type": "ephemeral"}
 TOOLS = ("Read", "Bash", "Grep", "Edit", "Glob", "Write")
+# Contexto's MCP tools as Claude Code names them with tool search off (contexto.mcp.TOOLS under
+# contexto.toolcheck.TOOL_PREFIX).
+CONTEXTO_TOOLS = ("mcp__contexto__contexto_recall", "mcp__contexto__contexto_pin", "mcp__contexto__contexto_close",
+                  "mcp__contexto__contexto_state", "mcp__contexto__contexto_search")
+# The newest Claude Code version in contexto.cliversions.TESTED_VERSIONS, and the interactive CLI's
+# User-Agent with it.
+CLAUDE_CODE_VERSION = "2.1.318"
+USER_AGENT = f"claude-cli/{CLAUDE_CODE_VERSION} (external, cli)"
+CLAUDE_CODE_SESSION = "5ca1e000-0000-4000-8000-000000000001"  # made up; the form of Claude Code's session id
 
 _WORDS = (
     "the a of to and in is for on with that this it as be are from by at or an not we can will def "
@@ -106,15 +122,16 @@ def head(shape: Shape) -> dict[str, Any]:
     target = int(shape.head_tokens * BYTES_PER_TOKEN)
     system_bytes = int(target * 0.35)
     system = [
-        {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.301; cc_entrypoint=cli",
+        {"type": "text", "text": f"x-anthropic-billing-header: cc_version={CLAUDE_CODE_VERSION}; cc_entrypoint=cli",
          "cache_control": CACHE},
         {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.\n"
          + text(rng, system_bytes), "cache_control": CACHE},
     ]
     tools = []
     per_tool = max(400, (target - system_bytes) // 40)
+    named = (*TOOLS, *CONTEXTO_TOOLS)
     for i in range(40):
-        name = TOOLS[i] if i < len(TOOLS) else f"mcp__server{i // 8}__tool_{i}"
+        name = named[i] if i < len(named) else f"mcp__server{i // 8}__tool_{i}"
         tools.append({"name": name, "description": text(rng, per_tool - 445),
                       "input_schema": {"type": "object", "properties": {
                           "file_path": {"type": "string", "description": "Absolute path to the file"},
@@ -123,7 +140,8 @@ def head(shape: Shape) -> dict[str, Any]:
                           "required": ["file_path"], "additionalProperties": False,
                           "$schema": "http://json-schema.org/draft-07/schema#"}})
     return {"model": shape.model, "system": system, "tools": tools,
-            "metadata": {"user_id": "user_scale_harness_session_0000"},
+            "metadata": {"user_id": json.dumps({"device_id": "scale-harness", "account_uuid": "",
+                                                "session_id": CLAUDE_CODE_SESSION})},
             "max_tokens": 32_000, "thinking": {"type": "enabled", "budget_tokens": 31_999}, "stream": True}
 
 
@@ -174,7 +192,8 @@ def turn(shape: Shape, t: int) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": [*_turn_reminders(shape, rng, t), {"type": "text", "text": prompt}]}]
     if t == 0:
-        messages.append({"role": "system", "content": [{"type": "text", "text": text(rng, SESSION_START_CHARS)}],
+        start = SESSION_START_HEADING + text(rng, SESSION_START_CHARS - len(SESSION_START_HEADING))
+        messages.append({"role": "system", "content": [{"type": "text", "text": start}],
                          "output_config": {"effort": "medium"}})
     for j in range(rounds):
         name = TOOLS[rng.randrange(len(TOOLS))]

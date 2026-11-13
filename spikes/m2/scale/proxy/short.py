@@ -13,6 +13,9 @@ What it measures, and what ``tests/test_scale_proxy_short.py`` holds to ``BUDGET
 - **Added time per request**: the driver's send-to-last-byte time minus the time the fake upstream spent on
   the request (from its headers to its last event). That is the client's write of the body to the proxy, the
   proxy's read, parse, transform and serialization, its connection to the upstream, and the relay back.
+  Reported over every request of the session (median and p95), and for the session's first request alone,
+  sent ``SMALL_SENDS`` times to a new proxy and as often straight to the fake upstream: the difference of
+  those two medians is what the proxy adds to a request with no history.
 - **Growth with history**: the slope of added time against the size of the history the CLI sent, in
   milliseconds per million tokens, over the tool-loop requests (Theil-Sen: the median of the slopes between
   every pair of requests, so a few slow requests do not move it).
@@ -20,9 +23,9 @@ What it measures, and what ``tests/test_scale_proxy_short.py`` holds to ``BUDGET
   the session, building the engine, binding the port), the smallest of ``STARTUPS`` starts.
 - **Memory**: the proxy's peak RSS (``ru_maxrss`` of the process itself), how much its RSS grows per MB the
   request body grows, and how many live Python objects it gains per turn (after ``gc.collect()``).
-- **Throughput**: ``CLIENTS`` threads each sending ``PER_CLIENT`` small requests at once, in requests a
-  second. The clients, the fake upstream and the timer share one Python process, so this is a floor for the
-  proxy, not its limit.
+- **Throughput**: ``CLIENTS`` threads each sending the session's first request ``PER_CLIENT`` times at
+  once (``--burst tiny``: a 100-byte request with no tools instead), in requests a second. The clients, the
+  fake upstream and the timer share one Python process, so this is a floor for the proxy, not its limit.
 """
 
 from __future__ import annotations
@@ -51,12 +54,15 @@ from scale.proxy.upstream import FakeUpstream  # noqa: E402
 
 TURNS = 200
 HEAD_TOKENS = 20_000
-TURN_TOKENS = 8_000
+TURN_TOKENS = 3_000
 BOUND = 150_000
 REMINDERS = "mixed"
 STARTUPS = 3
 CLIENTS = 100
-PER_CLIENT = 3
+PER_CLIENT = 2
+SMALL_SENDS = 30
+TINY_BODY = json.dumps({"model": "claude-haiku-5-5", "max_tokens": 16, "stream": True,
+                        "messages": [{"role": "user", "content": "ping"}]}, separators=(",", ":")).encode()
 SAMPLE_EVERY = 20  # turns between memory samples
 SEND_TIMEOUT_S = 120
 
@@ -125,8 +131,21 @@ def burst(worker: run.Worker, upstream: FakeUpstream, body: bytes, clients: int,
             "seconds": round(seconds, 3), "rps": round(len(flat) / seconds, 1) if seconds else 0.0}
 
 
+def added_ms(port: int, upstream: FakeUpstream, body: bytes, name: str, sends: int) -> list[float]:
+    """``body`` sent ``sends`` times, one after another, to ``port``: each send's time less the fake
+    upstream's own, in milliseconds."""
+    out = []
+    for i in range(sends):
+        request_id = f"{name}{i}"
+        result = run.send(port, body, request_id, "end_turn", SEND_TIMEOUT_S)
+        seen = upstream.take(request_id) or {}
+        if result["status"] == 200 and "t_done" in seen:
+            out.append((result["e2e_s"] - (seen["t_done"] - seen["t_recv"])) * 1e3)
+    return out
+
+
 def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = STARTUPS, clients: int = CLIENTS,
-            per_client: int = PER_CLIENT, home: Path | None = None) -> dict[str, Any]:
+            per_client: int = PER_CLIENT, burst_body: str = "first", home: Path | None = None) -> dict[str, Any]:
     """One short run. Returns the measurements (see the module docstring); ``rows`` holds one dict per
     request of the session, with the columns of ``run.REQUEST_FIELDS``."""
     args = short_args(reminders)
@@ -144,16 +163,25 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
             first = session.next_messages()
             first_body = session.wire.body(first[:synth.request_points(session.shape, 0, first)[0][0]])
             probe = None
-            for i in range(startups):
-                probe, seconds = start(args, home / f"startup-{i}", upstream, err)
-                startup_s.append(seconds)
-                if i < startups - 1:
-                    probe.close(save=False)
+            small: list[float] = []
+            direct: list[float] = []
+            concurrent: dict[str, Any] = {}
             try:
-                concurrent = burst(probe, upstream, first_body, clients, per_client) if probe and clients else {}
+                for i in range(startups):
+                    if probe is not None:
+                        probe.kill()
+                    probe, seconds = start(args, home / f"startup-{i}", upstream, err)
+                    startup_s.append(seconds)
+                if probe is not None:
+                    small = added_ms(probe.port, upstream, first_body, "small", SMALL_SENDS)
+                    direct = added_ms(upstream.upstream_port, upstream, first_body, "direct", SMALL_SENDS)
+                    if clients:
+                        concurrent = burst(probe, upstream, TINY_BODY if burst_body == "tiny" else first_body,
+                                           clients, per_client)
+                        concurrent["body"] = burst_body
             finally:
                 if probe is not None:
-                    probe.close(save=False)
+                    probe.kill()
             worker, _ = start(args, home / "run", upstream, err)
             peak = 0.0
             try:
@@ -198,6 +226,11 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
         "added_p95_ms": round(p95(added), 3) if added else None,
         "added_max_ms": round(max(added), 3) if added else None,
         "added_ms_per_mtok": round(slope, 3), "added_intercept_ms": round(intercept, 3),
+        "first_request_bytes": len(first_body),
+        "first_request_added_ms": round(statistics.median(small), 3) if small else None,
+        "first_request_direct_ms": round(statistics.median(direct), 3) if direct else None,
+        "first_request_over_direct_ms": round(statistics.median(small) - statistics.median(direct), 3)
+        if small and direct else None,
         "startup_ms": round(min(startup_s) * 1e3, 1) if startup_s else None,
         "startup_all_ms": [round(s * 1e3, 1) for s in startup_s],
         "peak_rss_mb": round(peak, 1),
@@ -242,8 +275,12 @@ def report(result: dict[str, Any]) -> str:
         else:
             lines.append(f"  {key}: {value} (budget {limit:g}, {limit / value:.1f} times the measured value)"
                          if value > 0 else f"  {key}: {value} (budget {limit:g})")
-    lines.append(f"  added time at no history (the fit's intercept): {result['added_intercept_ms']} ms; "
-                 f"largest {result['added_max_ms']} ms; startups {result['startup_all_ms']} ms")
+    lines.append(f"  added time at no history: the fit's intercept {result['added_intercept_ms']} ms; the first "
+                 f"request ({result['first_request_bytes']:,} bytes) {result['first_request_added_ms']} ms through "
+                 f"the proxy, {result['first_request_direct_ms']} ms straight to the fake upstream, "
+                 f"{result['first_request_over_direct_ms']} ms more")
+    lines.append(f"  largest added time {result['added_max_ms']} ms; startups {result['startup_all_ms']} ms; "
+                 f"burst {json.dumps(result['throughput'])}")
     lines.append(f"  memory samples: {json.dumps(result['samples'])}")
     return "\n".join(lines)
 
@@ -254,12 +291,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--reminders", choices=("first", "mixed"), default=REMINDERS)
     parser.add_argument("--repeat", type=int, default=1, help="runs; with more than one, the spread is printed")
     parser.add_argument("--clients", type=int, default=CLIENTS, help="concurrent clients of the throughput burst")
+    parser.add_argument("--burst", choices=("first", "tiny"), default="first",
+                        help="what the burst sends: the session's first request, or a 100-byte request")
     parser.add_argument("--json", help="append each run's measurements (without the rows) to this file, one per line")
     args = parser.parse_args(argv)
     results = []
     failed = False
     for _ in range(args.repeat):
-        result = measure(args.turns, reminders=args.reminders, clients=args.clients)
+        result = measure(args.turns, reminders=args.reminders, clients=args.clients, burst_body=args.burst)
         results.append(result)
         print(report(result), flush=True)
         problems = [*result["broken"], *over_budget(result)]
@@ -271,8 +310,9 @@ def main(argv: list[str]) -> int:
                 f.write(json.dumps({k: v for k, v in result.items() if k != "rows"}) + "\n")
     if len(results) > 1:
         print(f"spread over {len(results)} runs (smallest, median, largest):")
-        for key in ("added_median_ms", "added_p95_ms", "added_intercept_ms", "added_ms_per_mtok", "startup_ms",
-                    "peak_rss_mb", "rss_mb_per_body_mb", "objects_per_turn", "throughput_rps", "seconds"):
+        for key in ("added_median_ms", "added_p95_ms", "added_intercept_ms", "first_request_added_ms",
+                    "first_request_over_direct_ms", "added_ms_per_mtok", "startup_ms", "peak_rss_mb",
+                    "rss_mb_per_body_mb", "objects_per_turn", "throughput_rps", "seconds"):
             values = sorted(r[key] for r in results if r.get(key) is not None)
             if values:
                 print(f"  {key}: {values[0]}, {statistics.median(values)}, {values[-1]}")

@@ -1,12 +1,12 @@
 """The proxy side of the scale harness: one process per phase, over one engine and one session store.
 
-``serve``: the proxy ``contexto run`` starts, wired as ``launcher.start_proxy`` wires it
-(``ContextoProxy(upstream, NoticeLog(store), engine, observe_usage=engine.observe_usage)`` on
-127.0.0.1), with the engine either new (``launcher.build_engine``) or unpickled from the previous phase.
-Timers are wrapped around the handler's ``_read_body`` and ``_transform``, the engine call, its
-``observe_usage``, and the store's methods; nothing in ``src/`` changes. A JSON-lines control channel on
-stdin/stdout returns per-request timings, ``ru_maxrss``, toggles cProfile, and on ``exit`` stops the
-proxy and pickles the engine for the next phase.
+``serve``: the proxy ``contexto run claude`` starts, started by ``launcher.start_proxy`` itself (so it has
+the launcher's ``NoticeLog``, ``SessionRecorder`` and ``X-Session-Affinity`` key) on 127.0.0.1, with the
+engine either new (``launcher.build_engine``) or unpickled from the previous phase. Timers are wrapped
+around the handler's ``_read_body`` and ``_transform``, the engine call, its ``observe_usage``, and the
+methods of the store and its page catalog named in ``INSTRUMENTED``; nothing in ``src/`` changes. A
+JSON-lines control channel on stdin/stdout returns per-request timings, ``ru_maxrss``, toggles cProfile,
+and on ``exit`` stops the proxy as the launcher does and pickles the engine for the next phase.
 
 ``ff`` (fast-forward): the same engine, called directly at each turn start only, with the usage the fake
 upstream would report for the bytes the proxy would send (``ceil(len(serialize_request(upstream)) /
@@ -41,15 +41,37 @@ for p in (ROOT / "spikes" / "m2", ROOT / "src"):
 
 from contexto import launcher  # noqa: E402
 from contexto import proxy as proxy_mod  # noqa: E402
+from contexto.rewrite import RewriteEngine  # noqa: E402
 from contexto.store import SessionStore  # noqa: E402
+from contexto.store.catalog import PageCatalog  # noqa: E402
 from scale.proxy import synth  # noqa: E402
+from scale.proxy.upstream import OUTPUT_TOKENS  # noqa: E402
 
-STORE_METHODS = ("index_text", "pinned_text", "page_out", "_pages", "set_retained", "set_epoch",
-                 "set_turn_room", "set_window", "log")
+# Every name the harness reaches for in the package, by the class that has it: the methods it wraps a
+# timer around, and the engine attributes its timer forwards. tests/test_scale_proxy_drift.py fails when
+# one is not an attribute of its class, so a rename or a move in the package is caught by the suite.
+STORE_METHODS = ("index_text", "pinned_text", "page_out", "set_retained", "set_epoch", "set_turn_room",
+                 "set_side_room", "set_window", "log")
+# The store's page catalog (``SessionStore._catalog``; D34). Until the store was split, ``index_text``
+# read every page file through ``SessionStore._pages``. Now ``PageCatalog.entries`` lists ``pages/`` and
+# reads only the files this process has not seen, and ``_read`` is one page file read. ``entries`` keeps
+# the old timer key, ``store_pages`` (the ``pages_read_s`` and ``store_pages_s`` columns).
+CATALOG_METHODS = {"entries": "store_pages", "_read": "store_page_read"}
+HANDLER_METHODS = ("_read_body", "_transform")
+ENGINE_ATTRIBUTES = ("observe_usage", "prime", "preserves_input", "tools_verdict", "states", "store")
+INSTRUMENTED: tuple[tuple[type, tuple[str, ...]], ...] = (
+    (SessionStore, (*STORE_METHODS, "_catalog")),
+    (PageCatalog, tuple(CATALOG_METHODS)),
+    (proxy_mod._Handler, HANDLER_METHODS),
+    (RewriteEngine, ENGINE_ATTRIBUTES),
+)
 EVENT_NAMES = ("rotation", "rotation_noop", "page_out", "window_minimal", "bound_too_small", "over_bound",
                "carried_over_budget", "carried_paged", "carried_text_growing", "turn_room_low", "estimate_error",
                "usage_missing", "usage_unattributed", "resync", "degraded_enter", "store_error", "page_conflict",
-               "fallback_failed", "retained_stale", "epoch_record_stale", "head_changed")
+               "fallback_failed", "retained_stale", "epoch_record_stale", "head_changed",
+               # Added 2026-11-12: the engine did not take the synthetic session for Claude Code's.
+               "session_start_unrecognised", "unclassified_system_message", "cli_version_untested",
+               "mcp_tools_missing", "toolcheck_error", "cli_version_error")
 
 
 class Meter:
@@ -115,33 +137,39 @@ def timed(key: str, fn):
 
 def instrument_store(store: SessionStore) -> None:
     for name in STORE_METHODS:
-        setattr(store, name, timed("store_" + name.lstrip("_"), getattr(store, name)))
+        setattr(store, name, timed("store_" + name, getattr(store, name)))
+    catalog = store._catalog
+    for name, key in CATALOG_METHODS.items():
+        setattr(catalog, name, timed(key, getattr(catalog, name)))
 
 
 def uninstrument_store(store: SessionStore) -> None:
+    """Take the timers off, and the page catalog with them: it holds a lock, which cannot be pickled, and
+    the next process builds its own (reading each page file once, as a restarted proxy does)."""
     for name in STORE_METHODS:
         store.__dict__.pop(name, None)
+    store.__dict__.pop("_page_catalog", None)
 
 
 def instrument_handler() -> None:
     handler = proxy_mod._Handler
     read_body, transform = handler._read_body, handler._transform
 
-    def _read_body(self):
+    def _read_body(self, *args, **kwargs):
         METER.begin(self.headers.get("x-scale-id") or f"anon-{time.monotonic_ns()}")
         t = time.perf_counter()
         try:
-            return read_body(self)
+            return read_body(self, *args, **kwargs)
         finally:
             METER.add("read_body", time.perf_counter() - t)
 
-    def _transform(self, body, headers, entry, endpoint):
+    def _transform(self, *args, **kwargs):
         t = time.perf_counter()
         try:
             profiler = PROFILE["p"]
             if profiler is not None:
-                return profiler.runcall(transform, self, body, headers, entry, endpoint)
-            return transform(self, body, headers, entry, endpoint)
+                return profiler.runcall(transform, self, *args, **kwargs)
+            return transform(self, *args, **kwargs)
         finally:
             METER.add("proxy_transform", time.perf_counter() - t)
 
@@ -149,26 +177,60 @@ def instrument_handler() -> None:
     handler._transform = _transform
 
 
-def make_transform(engine):
-    def transform(request, headers, endpoint):
+class TimedEngine:
+    """The engine with timers on its two entry points. Every other attribute is the engine's
+    (``preserves_input``, ``prime``, ``tools_verdict``), so the proxy and the launcher take the same paths
+    as with the bare engine. ``observe_usage`` passes its keywords through: the proxy gives a callback
+    ``tool_calls`` and ``tool_call_ids`` only when its signature takes them (D40)."""
+
+    def __init__(self, engine) -> None:
+        self.engine = engine
+
+    def __call__(self, request, headers, endpoint):
         t = time.perf_counter()
-        out = engine(request, headers, endpoint)
+        out = self.engine(request, headers, endpoint)
         METER.add("engine", time.perf_counter() - t)
         METER.events("events", out[2])
         return out
 
-    # The timer forwards the engine's declaration, so the proxy takes the same path as with the bare engine.
-    transform.preserves_input = getattr(engine, "preserves_input", False)
-
-    def observe(endpoint, usage, request):
+    def observe_usage(self, endpoint, usage, request, **extra):
         t = time.perf_counter()
         profiler = PROFILE["p"]
-        events = (profiler.runcall(engine.observe_usage, endpoint, usage, request) if profiler is not None
-                  else engine.observe_usage(endpoint, usage, request))
+        observe = self.engine.observe_usage
+        events = (profiler.runcall(observe, endpoint, usage, request, **extra) if profiler is not None
+                  else observe(endpoint, usage, request, **extra))
         METER.add("observe", time.perf_counter() - t)
         METER.events("usage_events", events)
         return events
-    return transform, observe
+
+    def __getattr__(self, name: str) -> Any:
+        engine = self.__dict__.get("engine")
+        if engine is None:
+            raise AttributeError(name)
+        return getattr(engine, name)
+
+
+def start_proxy(store: SessionStore, engine, upstream: str, bound: int) -> proxy_mod.ContextoProxy:
+    """``launcher.start_proxy`` as ``contexto run claude`` calls it, with the timed engine in place of the
+    one it would build: the launcher's own wiring, whatever it becomes. Its stderr notices are dropped."""
+    timed_engine = TimedEngine(engine)
+    build = launcher.build_engine
+    launcher.build_engine = lambda store, config: (timed_engine, timed_engine.observe_usage, "rewrite")
+    try:
+        proxy, _ = launcher.start_proxy(store, upstream, "scale-harness", {"bound": bound}, False,
+                                        stderr=io.StringIO(), cli="claude")
+    finally:
+        launcher.build_engine = build
+    return proxy
+
+
+def stop_proxy(proxy: proxy_mod.ContextoProxy) -> None:
+    """What the launcher does when the CLI exits: stop, judge the tools once more, record the CLI sessions."""
+    proxy.stop()
+    launcher.report_missing_tools(proxy)
+    flush = getattr(proxy.transform, "flush", None)
+    if callable(flush):
+        flush()
 
 
 def open_engine(home: Path, session: str, engine_in: str | None, bound: int):
@@ -211,14 +273,15 @@ def reply(obj: dict[str, Any]) -> None:
 
 
 def serve(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     store, engine = open_engine(Path(args.home), args.session, args.engine_in, args.bound)
     instrument_store(store)
     instrument_handler()
-    transform, observe = make_transform(engine)
-    proxy = proxy_mod.ContextoProxy(args.upstream, launcher.NoticeLog(store, io.StringIO()), transform,
-                                    observe_usage=observe, upstream_source="scale-harness")
-    port = proxy.start(0)
-    reply({"ready": True, "port": port, "pid": os.getpid(), "maxrss_mb": maxrss_mb()})
+    proxy = start_proxy(store, engine, args.upstream, args.bound)
+    # ``start_s``: opening the session, building the engine and starting the proxy, without the interpreter
+    # and the imports before them (the driver times the whole start, to this line).
+    reply({"ready": True, "port": proxy.port, "pid": os.getpid(), "maxrss_mb": maxrss_mb(),
+           "start_s": round(time.perf_counter() - started, 4)})
     for line in sys.stdin:
         cmd = json.loads(line)
         name = cmd.get("cmd")
@@ -245,9 +308,10 @@ def serve(args: argparse.Namespace) -> int:
             reply({"top": [{"mb": round(s.size / 1e6, 2), "count": s.count,
                             "trace": [f"{f.filename.rsplit('/', 1)[-1]}:{f.lineno}" for f in s.traceback]}
                            for s in top]})
-        elif name == "exit":
-            proxy.stop()
-            save_engine(engine, cmd["engine_out"])
+        elif name == "exit":  # without ``engine_out`` nothing is kept for a next phase
+            stop_proxy(proxy)
+            if cmd.get("engine_out"):
+                save_engine(engine, cmd["engine_out"])
             reply({"ok": True, "maxrss_mb": maxrss_mb()})
             return 0
         else:
@@ -257,7 +321,8 @@ def serve(args: argparse.Namespace) -> int:
 
 FF_FIELDS = ("turn", "history_tokens", "upstream_tokens", "turn_peak_tokens", "upstream_messages", "engine_s", "observe_s",
              "store_index_text_s", "store_index_text_n", "store_pages_s", "store_page_out_s", "rotated",
-             "rotation_reason", "k", "epoch", "turns_paged", "fixed_overhead", "window_budget", "events")
+             "rotation_reason", "k", "epoch", "turns_paged", "fixed_overhead", "window_budget", "events",
+             "store_page_reads_n")
 
 
 def fast_forward(args: argparse.Namespace) -> int:
@@ -294,12 +359,17 @@ def fast_forward(args: argparse.Namespace) -> int:
             points = synth.request_points(shape, t, messages)
             later = sum(len(synth.serialize(m)) + 1 for m in messages[first:points[-1][0]])
             peak = synth.tokens_of(sent + later)
+            # What the fake upstream would answer the turn start with: its usage, and whether the reply
+            # holds a tool call, which the proxy tells ``observe_usage`` (D40).
+            calls_tool = points[0][1] == "tool_use"
             usage = {"input_tokens": 2, "cache_creation_input_tokens": 0, "cache_read_input_tokens": tokens - 2,
-                     "output_tokens": 180}
+                     "output_tokens": OUTPUT_TOKENS[points[0][1]]}
             t0 = time.perf_counter()
-            usage_events = engine.observe_usage("/v1/messages", usage, request)
+            usage_events = engine.observe_usage("/v1/messages", usage, request, tool_calls=calls_tool,
+                                                tool_call_ids=(f"toolu_ff{t}",) if calls_tool else ())
             METER.add("observe", time.perf_counter() - t0)
             entry = {"event": "request", "method": "POST", "path": "/v1/messages", "fast_forward": True,
+                     "api": "messages", "original_message_count": len(request["messages"]),
                      "original_request_bytes": history_bytes, "request_bytes": sent, "status": 200,
                      "usage": usage, "message_count": len(upstream["messages"]),
                      "transform_events": [proxy_mod._scalar_summary(e) for e in events],
@@ -323,7 +393,8 @@ def fast_forward(args: argparse.Namespace) -> int:
                              "k": state.k if state else "", "epoch": state.epoch if state else "",
                              "turns_paged": state.turns_paged if state else "",
                              "fixed_overhead": rotation.get("fixed_overhead", ""),
-                             "window_budget": rotation.get("window_budget", ""), "events": " ".join(names)})
+                             "window_budget": rotation.get("window_budget", ""), "events": " ".join(names),
+                             "store_page_reads_n": rec.get("store_page_read_n", 0)})
             history.extend(messages)
             if (t + 1) % 50 == 0:
                 f.flush()

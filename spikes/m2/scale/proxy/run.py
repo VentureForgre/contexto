@@ -32,17 +32,31 @@ for p in (ROOT / "spikes" / "m2", ROOT / "src"):
 from scale.proxy import synth  # noqa: E402
 from scale.proxy.upstream import FakeUpstream  # noqa: E402
 
+# A run stops at any of these. The second group (added 2026-11-12) is the proxy refusing or giving up on a
+# request; the third is the engine not taking the synthetic session for Claude Code's, which means
+# ``synth.py`` has fallen behind the signatures in ``contexto.rewrite`` and the run measures a misread
+# session.
 BREAK_EVENTS = ("over_bound", "bound_too_small", "transform_error", "proxy_error", "fallback_failed",
-                "degraded_enter", "store_error", "page_conflict", "observe_usage_error")
+                "degraded_enter", "store_error", "page_conflict", "observe_usage_error",
+                "request_refused", "request_too_deep", "hold_skipped", "page_unreadable", "proxy_stop_incomplete",
+                "session_start_unrecognised", "unclassified_system_message", "cli_version_untested",
+                "mcp_tools_missing", "toolcheck_error", "cli_version_error")
+# Counted per checkpoint (the ``n_<event>`` columns of checkpoints_<label>.csv). Names are only ever
+# appended, so the columns of the 2026-10-17 files keep their places.
 COUNTED_EVENTS = ("rotation", "rotation_noop", "page_out", "window_minimal", "bound_too_small", "over_bound",
                   "carried_over_budget", "carried_paged", "turn_room_low", "estimate_error", "usage_missing",
                   "usage_unattributed", "resync", "transform_error", "proxy_error", "degraded_enter", "store_error",
-                  "fallback_failed", "retained_stale")
+                  "fallback_failed", "retained_stale",
+                  "page_conflict", "observe_usage_error", "request_refused", "request_too_deep", "hold_skipped",
+                  "page_unreadable", "proxy_stop_incomplete", "session_start_unrecognised",
+                  "unclassified_system_message", "cli_version_untested", "mcp_tools_missing", "toolcheck_error",
+                  "cli_version_error", "cli_version", "epoch_not_resumed", "epoch_resumed")
 REQUEST_FIELDS = ("label", "checkpoint_m", "phase", "round", "turn", "kind", "req_in_turn", "history_tokens",
                   "body_mb", "upstream_bytes", "upstream_tokens", "upstream_messages", "status", "e2e_s", "ttfb_s",
                   "pre_forward_s", "read_body_s", "proxy_transform_s", "engine_s", "observe_s", "index_text_s",
                   "index_text_n", "pages_read_s", "page_out_s", "set_retained_s", "set_epoch_s", "rotated",
-                  "rotation_reason", "events", "proxy_maxrss_mb", "load1")
+                  "rotation_reason", "events", "proxy_maxrss_mb", "load1",
+                  "upstream_s", "added_s", "page_file_reads")
 CHECKPOINT_FIELDS = ("label", "checkpoint_m", "turn", "history_tokens", "reached_by", "ff_turns", "ff_seconds",
                      "pages", "pages_mb", "store_mb", "log_mb", "proxy_idle_rss_mb", "proxy_maxrss_mb",
                      "max_upstream_tokens", "ff_turn_peak_max", "ff_turns_over_bound", "uptime", *(f"n_{e}" for e in COUNTED_EVENTS))
@@ -128,8 +142,16 @@ class Worker:
         self.proc.stdin.flush()
         return self._read()
 
-    def close(self) -> float:
-        out = self.call({"cmd": "exit", "engine_out": str(self.engine_pkl)})
+    def kill(self) -> None:
+        """End the process at once, keeping nothing (a clean stop waits out the proxy's server loop)."""
+        self.proc.kill()
+        self.proc.wait(timeout=120)
+        for pipe in (self.proc.stdin, self.proc.stdout):
+            pipe.close()
+
+    def close(self, save: bool = True) -> float:
+        """Stop the proxy and return its peak RSS in MB; ``save`` pickles the engine for the next phase."""
+        out = self.call({"cmd": "exit", "engine_out": str(self.engine_pkl) if save else None})
         self.proc.wait(timeout=120)
         return out.get("maxrss_mb", 0.0)
 
@@ -180,12 +202,13 @@ class Session:
         self.pending = None
 
 
-def send(port: int, body: bytes, request_id: str, reply: str) -> dict[str, Any]:
+def send(port: int, body: bytes, request_id: str, reply: str, timeout: float = 900) -> dict[str, Any]:
     headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01",
                "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14",
-               "x-api-key": "sk-ant-scale-harness-not-a-key", "User-Agent": "contexto-scale-harness",
+               "x-api-key": "sk-ant-scale-harness-not-a-key", "User-Agent": synth.USER_AGENT,
+               "X-Claude-Code-Session-Id": synth.CLAUDE_CODE_SESSION,
                "x-scale-id": request_id, "x-scale-reply": reply}
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=900)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     t0 = time.monotonic()
     try:
         conn.request("POST", "/v1/messages", body=body, headers=headers)
@@ -201,20 +224,26 @@ def send(port: int, body: bytes, request_id: str, reply: str) -> dict[str, Any]:
 
 
 def run_turn(session: Session, worker: Worker, upstream: FakeUpstream, rows: list[dict[str, Any]],
-             base: dict[str, Any]) -> None:
-    """Send every request of the next turn (turn start, then one per tool_result) and finish the turn."""
+             base: dict[str, Any], timeout: float = 900) -> None:
+    """Send every request of the next turn (turn start, then one per tool_result) and finish the turn.
+
+    ``upstream_s`` is the time the fake upstream spent on the request and ``added_s`` the rest of the
+    driver's ``e2e_s``: the body's way to the proxy, the proxy's own work, and the relay back."""
     messages = session.next_messages()
     for j, (end, reply) in enumerate(synth.request_points(session.shape, session.turn, messages)):
         body = session.wire.body(messages[:end])
         request_id = f"t{session.turn}r{j}"
-        result = send(worker.port, body, request_id, reply)
+        result = send(worker.port, body, request_id, reply, timeout)
         up = upstream.take(request_id) or {}
+        upstream_s = up["t_done"] - up["t_recv"] if "t_done" in up else None
         rows.append({**base, "turn": session.turn, "kind": "turn_start" if j == 0 else "tool_loop", "req_in_turn": j,
                      "history_tokens": synth.tokens_of(len(body)), "body_mb": round(len(body) / 1e6, 3),
                      "upstream_bytes": up.get("bytes"), "upstream_tokens": up.get("tokens"),
                      "upstream_messages": up.get("messages"), "status": result["status"],
                      "e2e_s": round(result["e2e_s"], 4), "ttfb_s": round(result["ttfb_s"], 4),
                      "pre_forward_s": round(up["t_recv"] - result["t0"], 4) if up else None,
+                     "upstream_s": round(upstream_s, 6) if upstream_s is not None else None,
+                     "added_s": round(result["e2e_s"] - upstream_s, 6) if upstream_s is not None else None,
                      "load1": load_avg(), "_id": request_id})
     session.finish_turn()
 
@@ -237,6 +266,7 @@ def merge_stats(rows: list[dict[str, Any]], records: list[dict[str, Any]], maxrs
                     "page_out_s": round(rec.get("store_page_out", 0), 4),
                     "set_retained_s": round(rec.get("store_set_retained", 0), 4),
                     "set_epoch_s": round(rec.get("store_set_epoch", 0), 4),
+                    "page_file_reads": rec.get("store_page_read_n", 0),
                     "rotated": int(bool(rotation)), "rotation_reason": rotation.get("reason", ""),
                     "events": " ".join(names), "proxy_maxrss_mb": round(maxrss, 1)})
 
