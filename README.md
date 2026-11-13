@@ -87,10 +87,11 @@ has the newest.
 
 On PyPI the package is `contexto-proxy`, and the command is still `contexto`:
 `uv tool install contexto-proxy`, `pipx install contexto-proxy`, or
-`uvx --from contexto-proxy contexto`. If
-[pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/) does not exist yet, no
-release has been published there: use the script. The PyPI package named `contexto` is an unrelated
-project, so `pip install contexto` and `uvx contexto` install the wrong thing.
+`uvx --from contexto-proxy contexto`. Before you install from it, check that the project page,
+[pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/), links to this
+repository (`VentureForgre/contexto`). If the page does not exist or links elsewhere, use the
+script. The PyPI package named `contexto` is an unrelated project, so `pip install contexto` and
+`uvx contexto` fetch the wrong thing.
 
 ### Upgrade
 
