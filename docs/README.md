@@ -23,6 +23,9 @@ install it and how to start it.
   budget.
 - [faq.md](faq.md): subscription logins, API keys, cost, what is sent where, and continuing a
   session later.
+- [doctor.md](doctor.md): `contexto doctor`, a check of what `contexto run` needs: the CLIs, the
+  upstream, a key, the store home, the MCP server, and variables that make Claude Code bypass the
+  proxy.
 - [troubleshooting.md](troubleshooting.md): the warnings and errors you are most likely to see, each
   with its cause and what to do.
 - [exit-codes.md](exit-codes.md): the exit codes of every command.
