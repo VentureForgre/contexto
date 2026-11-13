@@ -583,7 +583,9 @@ def test_a_service_that_hangs_up_is_reported_as_not_running(home, service, serve
     thread.start()
     try:
         (home / serveclient.SERVE_FILE).write_text(json.dumps({"port": silent.getsockname()[1], "pid": os.getpid()}))
-        refused(tool(served[0], "contexto_state", {}), "not running", "RemoteDisconnected")
+        message = refused(tool(served[0], "contexto_state", {}), "not running", "the request to port")
+        # the close arrives as an end of stream or, when unread request bytes remain, as a reset
+        assert "(RemoteDisconnected)" in message or "(ConnectionResetError)" in message
     finally:
         thread.join(5)
         silent.close()
