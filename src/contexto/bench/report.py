@@ -2,9 +2,9 @@
 
 ``build(out_dirs)`` reads one or more live output directories (``contexto.bench.records``) and
 returns the results as a dict; ``render(results)`` is the plain-text report of that dict;
-``write(out_dir)`` writes both, and the charts, into a directory. The live run calls
-``write(out)`` when it finishes, and ``contexto bench --report DIR [DIR ...]`` calls it on
-directories that already exist.
+``write(out_dir)`` writes both, and the charts, into a directory: all of them or none. The live
+run calls ``write(out)`` when it finishes, and ``contexto bench --report DIR [DIR ...]`` calls it
+on directories that already exist.
 
 What is counted:
 
@@ -20,8 +20,12 @@ The "What this run shows" text is produced by fixed rules (``_verdict``), not wr
 
 from __future__ import annotations
 
+import errno
 import json
 import math
+import os
+import shutil
+import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -551,13 +555,25 @@ def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any]
         "prices": {"cache_ttl": first.cache_ttl or DEFAULT_CACHE_TTL, "cache_ttl_assumed": first.cache_ttl is None,
                    "replaced": prices is not None, "run_model_priced": priced, "table": table},
         "arms": None, "pairs": None, "noise": None, "plain_compaction": None, "all_requests": None,
-        "by_model": None, "charts": [],
+        "by_model": None, "charts": [], "charts_skipped": [],
     }
     if one:
         results.update(blocks[first.model])
     if len(runs) > 1:
         results["by_model"] = blocks
-    return json.loads(json.dumps(results))  # tuples become lists, as they are when the file is read back
+    try:
+        return json.loads(_json(results))  # tuples become lists, as they are when the file is read back
+    except ValueError as exc:
+        raise ReportError(f"the results hold {exc}: a price table given as a dict must hold only finite "
+                          "numbers") from exc
+
+
+def _json(results: Mapping[str, Any]) -> str:
+    """The text of ``results.json``: strict JSON, so ``NaN`` or ``Infinity`` is a ``ValueError``."""
+    try:
+        return json.dumps(results, indent=1, allow_nan=False) + "\n"
+    except ValueError as exc:
+        raise ValueError("a value that is not a finite number, which JSON cannot hold") from exc
 
 
 # The report in words
@@ -897,10 +913,12 @@ def render(results: Mapping[str, Any]) -> str:
             lines += _model_sections(block, results, "##")
         else:
             lines += [f"## Results for {model}", "", *_model_sections(block, results, "###")]
-    if results.get("charts"):
+    if results.get("charts") or results.get("charts_skipped"):
         lines += ["## Charts", ""]
-        for chart in results["charts"]:
-            lines += [f"![{chart['title']}]({chart['path']})", ""]
+        for chart in results.get("charts") or []:
+            lines += [f"![{_cell(chart['title'])}]({chart['path']})", ""]
+        for chart in results.get("charts_skipped") or []:
+            lines += [f"Not drawn: `{chart['path']}`, because {chart['reason']}.", ""]
     lines += ["## What this run shows", "",
               "Each line is produced by a fixed rule. A direction is named only when three things hold: the "
               f"pooled comparison is significant (its 95% interval excludes 0 and the exact McNemar p value is "
@@ -917,24 +935,74 @@ def render(results: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _refuse(code: int, problem: str, path: Path) -> OSError:
+    return OSError(code, problem, str(path))
+
+
+def _place(out_dir: Path, files: Mapping[str, bytes]) -> None:
+    """Put ``files`` (relative path to content) into ``out_dir``: all of them or none.
+
+    Every file is first written into a staging directory inside ``out_dir`` (the same file
+    system, so each move is one rename), and what would stop a move is looked for before the first
+    one: a file where a directory has to be, a directory where a file has to be, a file the user
+    made read-only. Then the files are moved into place in the order given. A move replaces the
+    name, so a symbolic link there is replaced and not followed. If a move still fails, the files
+    after it keep their previous content; the caller puts ``results.json`` last, so a directory
+    never holds a new ``results.json`` beside an older report. The staging directory is removed
+    whatever happens.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name in files:
+        target = out_dir / name
+        for parent in target.relative_to(out_dir).parents:
+            if (out_dir / parent).exists() and not (out_dir / parent).is_dir():
+                raise _refuse(errno.ENOTDIR, "a file is where this directory has to be", out_dir / parent)
+        if target.is_symlink():
+            continue
+        if target.is_dir():
+            raise _refuse(errno.EISDIR, "a directory is where this file has to be", target)
+        if target.exists() and not os.access(target, os.W_OK):
+            raise _refuse(errno.EACCES, "the file is read-only", target)
+    staging = Path(tempfile.mkdtemp(prefix=".contexto-bench-", dir=out_dir))
+    try:
+        for name, content in files.items():
+            (staging / name).parent.mkdir(parents=True, exist_ok=True)
+            (staging / name).write_bytes(content)
+        for name in files:
+            (out_dir / name).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staging / name, out_dir / name)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def write(out_dir: Path | str, sources: Iterable[Path | str] | None = None,
           prices: Mapping[str, Any] | None = None, charts: bool = True) -> dict[str, Any]:
     """Write ``results.json``, ``results.md`` and the charts into ``out_dir`` and return the results.
 
     The records are read from ``sources``, or from ``out_dir`` itself when ``sources`` is None,
-    which is what the live run does when it finishes. Nothing is written if the records cannot be
-    read. ``charts=False`` leaves the SVG files out.
+    which is what the live run does when it finishes. ``charts=False`` leaves the SVG files out.
+
+    All of the files are written or none. The results are built, the report is rendered and every
+    chart is drawn in memory first, so a directory that cannot be reported on is an error before
+    anything is touched (``RecordError``, ``ReportError``, ``PriceError``). Then ``_place`` moves
+    the finished files into place, ``results.json`` last; what it cannot write is an ``OSError``
+    and the previous files stay. ``results["charts"]`` lists the charts written and
+    ``results["charts_skipped"]`` those the results cannot give, each with the reason.
     """
     out_dir = Path(out_dir)
     results = build([out_dir] if sources is None else list(sources), prices)
-    chart_module = None
+    files: dict[str, str] = {}
     if charts:
         from contexto.bench import charts as chart_module
-        results["charts"] = [{"path": f"charts/{name}", "title": title}
-                             for name, title in chart_module.planned(results)]
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "results.json").write_text(json.dumps(results, indent=1) + "\n", encoding="utf-8")
-    (out_dir / "results.md").write_text(render(results), encoding="utf-8")
-    if chart_module is not None and results["charts"]:
-        chart_module.write(results, out_dir / "charts")
+        drawn, left_out = chart_module.render(results)
+        results["charts"] = [{"path": f"charts/{name}", "title": title} for name, title, _ in drawn]
+        results["charts_skipped"] = [{"path": f"charts/{name}", "reason": reason} for name, reason in left_out]
+        files.update({f"charts/{name}": svg for name, _, svg in drawn})
+    files["results.md"] = render(results)
+    files["results.json"] = _json(results)  # last: see _place
+    try:
+        encoded = {name: text.encode("utf-8") for name, text in files.items()}
+    except UnicodeEncodeError as exc:
+        raise ReportError(f"the report holds text that cannot be written as UTF-8: {exc.reason}") from exc
+    _place(out_dir, encoded)
     return results

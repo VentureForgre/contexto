@@ -1,9 +1,10 @@
 """``contexto bench --report DIR [DIR ...]``: recompute the results of existing output directories.
 
 It reads ``manifest.json``, ``probes.jsonl`` and ``requests.jsonl`` from each directory and writes
-``results.json``, ``results.md`` and the charts. No calls are made. With one directory it writes
-into that directory unless ``--out`` is given; with several (one per model, or one run split across
-shells) it needs ``--out``. ``--prices FILE`` replaces the shipped price table.
+``results.json``, ``results.md`` and the charts: all of them or none, so a report that fails
+leaves the files of an earlier report as they were. No calls are made. With one directory it
+writes into that directory unless ``--out`` is given; with several (one per model, or one run
+split across shells) it needs ``--out``. ``--prices FILE`` replaces the shipped price table.
 """
 
 from __future__ import annotations
@@ -47,8 +48,8 @@ def run(args: argparse.Namespace) -> int:
         return 1
     for name in ("results.json", "results.md", *(chart["path"] for chart in results["charts"])):
         print(f"written: {out / name}")
-    for name, reason in charts.skipped(results):
-        print(f"not written: {name}: {reason}")
+    for chart in results["charts_skipped"]:
+        print(f"not written: {chart['path'].removeprefix('charts/')}: {chart['reason']}")
     text = (out / "results.md").read_text(encoding="utf-8")
     print()
     print(text[text.index("## What this run shows"):].rstrip())

@@ -7,6 +7,7 @@ generated scripts, invented answers and request records. No arm is run.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -685,6 +686,161 @@ def test_nothing_about_where_the_files_are_goes_into_the_outputs(tmp_path):
         text = path.read_text(encoding="utf-8")
         for private in ("zebediah", "private-runs", "my-prices", str(tmp_path)):
             assert private not in text, (path.name, private)
+
+
+# All of the outputs or none
+
+
+OUTPUTS = ("results.json", "results.md", "charts/accuracy.svg", "charts/request-size.svg")
+
+
+def reported(tmp_path) -> tuple[Path, dict[str, bytes]]:
+    """A directory with a report in it, then records that give another report, and the first
+    report's bytes: what must still be there after a write that failed."""
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,))
+    report.write(out)
+    before = {name: (out / name).read_bytes() for name in OUTPUTS}
+    make_run(out, repeats=1, seeds=(11,), rng_seed=6)  # other answers: a new report would differ
+    return out, before
+
+
+def unchanged(out: Path, before: dict[str, bytes]) -> bool:
+    left = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    assert left == sorted([*before, "manifest.json", "probes.jsonl", "requests.jsonl"]), left  # nothing staged
+    return all((out / name).read_bytes() == data for name, data in before.items())
+
+
+def test_a_second_write_replaces_every_output(tmp_path):
+    out, before = reported(tmp_path)
+    report.write(out)
+    after = {name: (out / name).read_bytes() for name in OUTPUTS}
+    assert after["results.json"] != before["results.json"] and after["results.md"] != before["results.md"]
+    assert sorted(p.name for p in out.iterdir()) == ["charts", "manifest.json", "probes.jsonl", "requests.jsonl",
+                                                     "results.json", "results.md"]
+
+
+@pytest.mark.skipif(os.name == "nt" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="needs a file its owner cannot write")
+def test_a_results_file_that_cannot_be_replaced_leaves_every_output_as_it_was(tmp_path, capsys):
+    out, before = reported(tmp_path)
+    (out / "results.md").chmod(0o444)
+    assert cli.main(["bench", "--report", str(out)]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith(f"contexto bench: error: cannot write the results into {out}: ")
+    assert "results.md" in err and len(err.splitlines()) == 1 and "Traceback" not in err
+    assert unchanged(out, before)
+
+
+def test_a_file_where_the_charts_directory_goes_leaves_every_output_as_it_was(tmp_path, capsys):
+    out, before = reported(tmp_path)
+    for name in ("charts/accuracy.svg", "charts/request-size.svg"):
+        (out / name).unlink()
+        del before[name]
+    (out / "charts").rmdir()
+    (out / "charts").write_text("not a directory", encoding="utf-8")
+    before["charts"] = b"not a directory"
+    assert cli.main(["bench", "--report", str(out)]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith(f"contexto bench: error: cannot write the results into {out}: ")
+    assert "charts" in err and len(err.splitlines()) == 1
+    assert unchanged(out, before)
+
+
+@pytest.mark.parametrize("stage", ["render", "charts"])
+def test_a_failure_before_writing_leaves_every_output_as_it_was(tmp_path, monkeypatch, stage):
+    out, before = reported(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise report.ReportError("made to fail")
+
+    monkeypatch.setattr(report, "render", fail) if stage == "render" else monkeypatch.setattr(charts, "render", fail)
+    with pytest.raises(report.ReportError, match="made to fail"):
+        report.write(out)
+    assert unchanged(out, before)
+
+
+def test_a_failure_while_the_files_are_put_in_place_leaves_results_json_as_it_was(tmp_path, monkeypatch):
+    # results.json is moved last, so a directory never has a new results.json beside older files.
+    out, before = reported(tmp_path)
+    moved = []
+    real = os.replace
+
+    def replace(source, target):
+        moved.append(Path(target).relative_to(out).as_posix())
+        if Path(target).name == "results.md":
+            raise OSError(28, "No space left on device", str(target))
+        return real(source, target)
+
+    monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(OSError, match="No space left"):
+        report.write(out)
+    assert moved[-1] == "results.md" and "results.json" not in moved
+    assert (out / "results.json").read_bytes() == before["results.json"]
+    assert (out / "results.md").read_bytes() == before["results.md"]
+    assert not [p for p in out.iterdir() if p.name.startswith(".")]  # the staging directory is gone
+    monkeypatch.setattr(os, "replace", real)
+    moved.clear()
+    monkeypatch.setattr(os, "replace", lambda source, target: moved.append(Path(target).name) or real(source, target))
+    report.write(out)
+    assert moved[-1] == "results.json" and len(moved) == 4
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs a symbolic link")
+def test_a_results_json_that_is_a_link_is_replaced_not_followed(tmp_path):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,))
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text("someone else's file", encoding="utf-8")
+    (out / "results.json").symlink_to(elsewhere)
+    report.write(out)
+    assert elsewhere.read_text(encoding="utf-8") == "someone else's file"
+    assert not (out / "results.json").is_symlink()
+    assert json.loads((out / "results.json").read_text(encoding="utf-8"))["kind"] == "live"
+
+
+def test_a_report_that_cannot_be_made_creates_no_output_directory(tmp_path, capsys):
+    run = make_run(tmp_path / "run", repeats=1, seeds=(11,))
+    (run / "probes.jsonl").write_text("{", encoding="utf-8")
+    assert cli.main(["bench", "--report", str(run), "--out", str(tmp_path / "new" / "deeper")]) == 1
+    assert not (tmp_path / "new").exists()
+
+
+def test_each_chart_is_drawn_once_and_a_chart_left_out_is_recorded(tmp_path, monkeypatch, capsys):
+    calls = []
+    for name in ("accuracy_svg", "request_size_svg"):
+        real = getattr(charts, name)
+        monkeypatch.setattr(charts, name, lambda results, name=name, real=real: calls.append(name) or real(results))
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,))
+    assert cli.main(["bench", "--report", str(out)]) == 0
+    assert sorted(calls) == ["accuracy_svg", "request_size_svg"]
+    results = json.loads((out / "results.json").read_text(encoding="utf-8"))
+    assert results["charts_skipped"] == []
+    # No main request has a history length, so there is no request-size chart: the report says so.
+    lines = [json.loads(line) for line in (out / "requests.jsonl").read_text(encoding="utf-8").splitlines()]
+    write_jsonl(out / "requests.jsonl", [{**r, "main": False} for r in lines])
+    (out / "charts" / "request-size.svg").unlink()
+    capsys.readouterr()
+    assert cli.main(["bench", "--report", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "not written: request-size.svg: the results file has no request_series with points" in printed
+    results = json.loads((out / "results.json").read_text(encoding="utf-8"))
+    assert [c["path"] for c in results["charts"]] == ["charts/accuracy.svg"]
+    assert [c["path"] for c in results["charts_skipped"]] == ["charts/request-size.svg"]
+    text = (out / "results.md").read_text(encoding="utf-8")
+    assert "Not drawn: `charts/request-size.svg`, because the results file has no request_series with points" in text
+
+
+def test_results_json_is_strict_json(tmp_path):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,))
+    report.write(out)
+
+    def refuse(constant):
+        raise AssertionError(f"{constant} in results.json")
+
+    json.loads((out / "results.json").read_text(encoding="utf-8"), parse_constant=refuse)
+    table = prices.load()
+    table["extra"] = float("nan")
+    with pytest.raises(report.ReportError, match="not a finite number"):
+        report.build([out], prices=table)
 
 
 # contexto bench --report
