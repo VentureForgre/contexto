@@ -13,20 +13,26 @@ import os
 import sys
 import time
 
-raw = sys.stdin.read()
-try:
-    event = json.loads(raw)
-except ValueError:
-    event = {"_unparsed": raw}
-env_file = os.environ.get("CLAUDE_ENV_FILE")
-wrote = False
-if env_file and isinstance(event, dict) and event.get("session_id"):
+
+def main() -> None:
+    raw = sys.stdin.read()
     try:
-        with open(env_file, "a") as f:
-            f.write(f"export D70_FROM_ENV_FILE={event['session_id']}\n")
-        wrote = True
-    except OSError:
-        pass
-with open(sys.argv[1], "a") as f:
-    f.write(json.dumps({"t": time.time(), "pid": os.getpid(), "ppid": os.getppid(), "cwd": os.getcwd(),
-                        "argv": sys.argv, "stdin": event, "wrote_env_file": wrote, "env": dict(os.environ)}) + "\n")
+        event = json.loads(raw)
+    except ValueError:
+        event = {"_unparsed": raw}
+    env_file = os.environ.get("CLAUDE_ENV_FILE")
+    wrote = False
+    if env_file and isinstance(event, dict) and event.get("session_id"):
+        try:
+            with open(env_file, "a") as f:
+                f.write(f"export D70_FROM_ENV_FILE={event['session_id']}\n")
+            wrote = True
+        except OSError:
+            pass
+    with open(sys.argv[1], "a") as f:
+        f.write(json.dumps({"t": time.time(), "pid": os.getpid(), "ppid": os.getppid(), "cwd": os.getcwd(),
+                            "argv": sys.argv, "stdin": event, "wrote_env_file": wrote, "env": dict(os.environ)}) + "\n")
+
+
+if __name__ == "__main__":
+    main()

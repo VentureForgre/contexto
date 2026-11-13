@@ -1,7 +1,7 @@
 #!/bin/bash
 # D70 spike, question 10: which values of CLAUDE_CODE_USE_BEDROCK and of
 # CLAUDE_CODE_GATEWAY_HINT_HEADERS does Claude Code treat as on?
-# usage: q10_truthy.sh [values|providers|all]   (captures under $D70_OUT, default /tmp/d70-truthy)
+# usage: q10_truthy.sh [values|providers|shapes|project|all]   (captures under $D70_OUT, default /tmp/d70-truthy)
 # Each run is one `claude -p` through http_probe.py: a scrubbed environment, a temporary config
 # directory, the key stub-key, fake AWS values, two stubs on 127.0.0.1 and a sandbox that denies
 # every other outbound connection. Zero spend.
@@ -10,6 +10,10 @@
 #   hint-*:    one stub. The variable is on when a request carries x-claude-code-request-class.
 #   <provider>-*: the other four switches with the values true and 0, and which wins when the
 #              process environment and the config directory's settings.json disagree.
+#   shape-*:   CLAUDE_CODE_USE_BEDROCK in the config directory's settings.json env block as a JSON
+#              value that is not a string (a float, a list, an object, null), and in a file with a BOM.
+#   project-*: the switch and the hint variable in the working directory's .claude/settings.json and
+#              .claude/settings.local.json (claude -p, a folder with no trust record).
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 export D70_OUT=${D70_OUT:-/tmp/d70-truthy}
@@ -84,11 +88,51 @@ providers() {
   wait
 }
 
+shape() {  # <run> <JSON value>   The base URL is in the same file (see providers above).
+  python3 "$here/http_probe.py" "shape-$1" "${aws[@]}" --base-via config-settings \
+    --cfg-env-json "CLAUDE_CODE_USE_BEDROCK=$2" --timeout 60
+}
+
+shapes() {
+  shape float '1.0' & shape exp '1e0' & shape list-str '["1"]' & shape list-num '[1]' &
+  wait
+  shape list-nested '[["1"]]' & shape list-two '["1","1"]' & shape list-true '[true]' & shape list-empty '[]' &
+  wait
+  shape object '{"a":1}' & shape null 'null' & shape false 'false' & shape half '1.5' &
+  wait
+  shape str-float '"1.0"' & shape str-padded-on '" On "' &
+  python3 "$here/http_probe.py" shape-bom "${aws[@]}" --base-via config-settings --cfg-bom \
+    --cfg-env-json 'CLAUDE_CODE_USE_BEDROCK="1"' --timeout 60 &
+  wait
+}
+
+project() {
+  python3 "$here/http_probe.py" project-bedrock-1 "${aws[@]}" \
+    --project-env-json 'CLAUDE_CODE_USE_BEDROCK="1"' --timeout 60 &
+  python3 "$here/http_probe.py" project-local-bedrock-1 "${aws[@]}" \
+    --local-env-json 'CLAUDE_CODE_USE_BEDROCK="1"' --timeout 60 &
+  python3 "$here/http_probe.py" project-bedrock-0-env-1 "${aws[@]}" --env CLAUDE_CODE_USE_BEDROCK=1 \
+    --project-env-json 'CLAUDE_CODE_USE_BEDROCK="0"' --timeout 60 &
+  python3 "$here/http_probe.py" project-bedrock-1-trustless "${aws[@]}" --env CLAUDE_CODE_IGNORE_PERSISTED_TRUST=1 \
+    --project-env-json 'CLAUDE_CODE_USE_BEDROCK="1"' --timeout 60 &
+  wait
+  python3 "$here/http_probe.py" project-hint-1 --project-env-json 'CLAUDE_CODE_GATEWAY_HINT_HEADERS="1"' --timeout 60 &
+  python3 "$here/http_probe.py" project-hint-0-env-1 --env CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 \
+    --project-env-json 'CLAUDE_CODE_GATEWAY_HINT_HEADERS="0"' --timeout 60 &
+  python3 "$here/http_probe.py" project-hint-0-flag-1 --flag-env CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 \
+    --project-env-json 'CLAUDE_CODE_GATEWAY_HINT_HEADERS="0"' --timeout 60 &
+  python3 "$here/http_probe.py" project-hint-1-cfg-0 --cfg-env CLAUDE_CODE_GATEWAY_HINT_HEADERS=0 \
+    --project-env-json 'CLAUDE_CODE_GATEWAY_HINT_HEADERS="1"' --timeout 60 &
+  wait
+}
+
 case ${1:-all} in
   values) values ;;
   providers) providers ;;
-  all) values; providers ;;
-  *) echo "usage: q10_truthy.sh [values|providers|all]" >&2; exit 2 ;;
+  shapes) shapes ;;
+  project) project ;;
+  all) values; providers; shapes; project ;;
+  *) echo "usage: q10_truthy.sh [values|providers|shapes|project|all]" >&2; exit 2 ;;
 esac
 
 for run in "$D70_OUT"/*/; do

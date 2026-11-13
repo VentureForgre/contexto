@@ -256,6 +256,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cfg-env", action="append", default=[], help="extra K=V for <config dir>/settings.json's env")
     p.add_argument("--cfg-env-json", action="append", default=[],
                    help="K=<JSON> for <config dir>/settings.json's env: a value that is not a string (true, 1)")
+    p.add_argument("--project-env-json", action="append", default=[],
+                   help="K=<JSON> for the env block of <working directory>/.claude/settings.json")
+    p.add_argument("--local-env-json", action="append", default=[],
+                   help="K=<JSON> for the env block of <working directory>/.claude/settings.local.json")
+    p.add_argument("--cfg-bom", action="store_true", help="write <config dir>/settings.json with a UTF-8 BOM")
     p.add_argument("--second", action="store_true",
                    help="start a second local stub, named 'provider'; {PORT2} in --env values is its port")
     p.add_argument("--model", default=None)
@@ -384,6 +389,14 @@ def main() -> None:
     for pair in args.cfg_env_json:
         k, _, v = pair.partition("=")
         config_settings["env"][k] = json.loads(v)
+    project_settings: dict[str, dict] = {}
+    for name, pairs in (("settings.json", args.project_env_json), ("settings.local.json", args.local_env_json)):
+        for pair in pairs:
+            k, _, v = pair.partition("=")
+            project_settings.setdefault(name, {"env": {}})["env"][k] = json.loads(v)
+    for name, content in project_settings.items():
+        (work / ".claude").mkdir(exist_ok=True)
+        (work / ".claude" / name).write_text(json.dumps(content))
     claude = os.environ.get("CLAUDE") or str(Path.home() / ".local/bin/claude")
     argv = [claude]
     if args.bare:
@@ -393,7 +406,8 @@ def main() -> None:
         path.write_text(json.dumps(flag_settings))
         argv += ["--settings", str(path)]
     if config_settings["env"]:
-        (cfg / "settings.json").write_text(json.dumps(config_settings))
+        (cfg / "settings.json").write_text(json.dumps(config_settings),
+                                           encoding="utf-8-sig" if args.cfg_bom else "utf-8")
     if args.model:
         argv += ["--model", args.model]
     argv += args.arg
@@ -401,7 +415,8 @@ def main() -> None:
     setup = {"run": args.run, "claude": claude, "base_url": base, "base_via": args.base_via, "hint": args.hint,
              "bare": args.bare, "reply": args.reply, "mode": args.mode, "prompts": args.prompt,
              "env": {k: v for k, v in env.items() if k != "PATH"}, "flag_settings": flag_settings,
-             "config_settings": config_settings, "scratch": str(scratch)}
+             "config_settings": config_settings, "config_bom": args.cfg_bom,
+             "project_settings": project_settings, "scratch": str(scratch)}
     prompts = args.prompt or ["say hi"]
     if args.mode == "print":
         got_messages = (lambda: any(r["kind"] == "messages" for r in recorder.rows)) if args.reply == "401" else None
