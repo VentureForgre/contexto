@@ -1,10 +1,11 @@
 # python-semantic-release configuration, read with `semantic-release -c .github/semantic-release.toml`.
 # It lives here, not in pyproject.toml, so releases work before any package exists on main.
 #
-# Releases never commit. The workflow runs `version --no-commit`, so semantic-release
-# computes the next version from Conventional Commits since the last v* tag, runs the
-# build command (which stamps that version into the runner's copy of pyproject.toml only),
-# tags the merged commit, pushes only that tag, and creates the GitHub Release.
+# A release is a manual run of the Release workflow on main; a merge never releases. Releases never
+# commit. The workflow runs `version --no-commit`, so semantic-release computes the next version
+# from Conventional Commits since the last v* tag, runs the build command (which stamps that
+# version into the runner's copy of pyproject.toml only), tags the commit the run was started on,
+# pushes only that tag, and creates the GitHub Release.
 
 [semantic_release]
 tag_format = "v{version}"
