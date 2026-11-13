@@ -104,10 +104,11 @@ def test_sessions_show_unknown_or_unsafe_id_exits_1(home, capsys, bad):
     assert code == 1 and out == "" and err.startswith("contexto: error:")
 
 
-def test_sessions_requires_a_subcommand(home, capsys):
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["sessions"])
-    assert exc.value.code == 2
+def test_sessions_alone_lists_the_sessions(home, capsys):  # it was a usage error, exit 2, before D64
+    make(home, "s1", 1_000_000)
+    assert run(capsys, "sessions") == run(capsys, "sessions", "list")
+    code, out, _ = run(capsys, "sessions")
+    assert code == 0 and "s1" in out
 
 
 # recall

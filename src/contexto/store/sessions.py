@@ -135,6 +135,15 @@ def check_home(home: Path) -> None:
         raise SessionNotFoundError(f"{home} is not a directory (check $CONTEXTO_HOME)")
 
 
+FIRST_RUN_HINT = "run `contexto run claude` (or `contexto run codex`) first"
+
+
+def no_sessions_yet(home: Path) -> str:
+    """What every reader says when the store holds no session at all (D64): a fresh install, where the
+    next step is a first ``contexto run``, not a different id."""
+    return f"no sessions yet under {Path(home) / 'sessions'}: {FIRST_RUN_HINT}"
+
+
 def starting_with(home: Path, prefix: str) -> list[str]:
     """Ids of the sessions that start with ``prefix`` and are not ``prefix`` itself, sorted."""
     return sorted(i for i in session_ids(home) if i.startswith(prefix) and i != prefix)
@@ -166,8 +175,10 @@ def resolve_session(home: Path, given: str, how: str | None = None) -> str:
         return matches[0]
     if matches:
         raise SessionNotFoundError(f"session id prefix {given!r} matches {named(matches)}; give more characters")
-    raise SessionNotFoundError(f"no session {given!r} under {Path(home) / 'sessions'}"
-                               + (f" (from {how})" if how else ""))
+    origin = f" (from {how})" if how else ""
+    if not session_ids(home):
+        raise SessionNotFoundError(f"no session {given!r}{origin}: {no_sessions_yet(home)}")
+    raise SessionNotFoundError(f"no session {given!r} under {Path(home) / 'sessions'}{origin}")
 
 
 def is_empty(info: SessionInfo) -> bool:
@@ -206,7 +217,7 @@ def select_session(home: Path, explicit: str | None) -> tuple[str, str]:
     else:
         sessions = list_sessions(home)
         if not sessions:
-            raise SessionNotFoundError(f"no sessions under {Path(home) / 'sessions'}")
+            raise SessionNotFoundError(no_sessions_yet(home))
         chosen = next((i for i, s in enumerate(sessions) if not is_empty(s) or in_use(home, s.id)), 0)
         return sessions[chosen].id, "most recent" if chosen == 0 else "most recent with pages or pins, or in use"
     return resolve_session(home, sid, how), how

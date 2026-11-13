@@ -18,12 +18,13 @@ from contexto.paths import absolute_home, contexto_home, session_dir
 def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "mcp",
-        help="run the MCP server for a session on stdio (the CLI spawns this)",
+        help="run a session's MCP server on stdio (the CLI spawns this)",
         description="Serve contexto_recall, contexto_pin, contexto_close, contexto_state, and contexto_search "
         "for one existing session over stdio. `contexto run` starts it for Claude Code and Codex. Only "
         "protocol messages are written to stdout.",
     )
-    parser.add_argument("--session", required=True, help="session id (the exact id of an existing session)")
+    parser.add_argument("--session", required=True,
+                        help="session id (the full id of an existing session; a prefix is refused)")
     parser.add_argument("--home", type=Path, default=None,
                         help="data directory (default: $CONTEXTO_HOME, else ~/.contexto)")
     parser.add_argument("--search-cache-mb", type=_megabytes, default=None, metavar="MB",
@@ -44,6 +45,7 @@ def _megabytes(value: str) -> int:
 def run(args: argparse.Namespace) -> int:
     from contexto.mcp import UnopenedStore, serve_stdio
     from contexto.store import LockFileDamagedError, SessionStore
+    from contexto.store.sessions import named, starting_with
 
     # The same resolution as the other subcommands, and --home under the same rule (B24): a client that
     # writes --home=~/y without a shell gets the expanded absolute path, not a literal ./~/y.
@@ -51,7 +53,12 @@ def run(args: argparse.Namespace) -> int:
     try:
         # lexists: an entry that is there but cannot be opened (a dangling link) gets the store's own error
         if not os.path.lexists(session_dir(home, args.session)):
-            raise ValueError(f"no session {args.session!r} under {home / 'sessions'}")
+            # The CLI's MCP config carries the full id, so a prefix here is a hand-typed one: it is not
+            # resolved (the server would write another session's log and ledger), and the error names
+            # the session it starts, as `run` and `prune` do (D64).
+            starts = starting_with(home, args.session)
+            raise ValueError(f"no session {args.session!r} under {home / 'sessions'}"
+                             + (f" (it is the start of {named(starts)}; mcp needs the full id)" if starts else ""))
         store = SessionStore(home, args.session)
     except LockFileDamagedError as exc:  # each tool call says so, naming the file (D59)
         print(f"contexto mcp: {exc}", file=sys.stderr)

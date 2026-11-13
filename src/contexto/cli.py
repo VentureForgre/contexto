@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="contexto",
         description="Durable, recoverable context for very long-running AI sessions.",
     )
-    parser.add_argument("--version", action="version", version=f"contexto {__version__}")
+    parser.add_argument("-V", "--version", action="version", version=f"contexto {__version__}")
     subparsers = parser.add_subparsers(title="commands", metavar="<command>")
     for info in sorted(pkgutil.iter_modules(commands.__path__), key=lambda m: m.name):
         if info.name.startswith("_"):

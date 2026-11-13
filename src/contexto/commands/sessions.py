@@ -19,7 +19,14 @@ from contexto.store.prune import (
     remove_session,
     select,
 )
-from contexto.store.sessions import check_home, list_sessions, resolve_session, session_summary, starting_with
+from contexto.store.sessions import (
+    check_home,
+    list_sessions,
+    no_sessions_yet,
+    resolve_session,
+    session_summary,
+    starting_with,
+)
 from contexto.store.sessions import named as name_sessions
 
 PAGES_SHOWN = 20  # pages `sessions show` lists without --all
@@ -52,10 +59,16 @@ def _count(text: str) -> int:
 
 def register(subparsers) -> None:
     parser = subparsers.add_parser("sessions", help="list and inspect sessions",
-                                   description="List and inspect sessions under $CONTEXTO_HOME.")
-    sub = parser.add_subparsers(title="sessions commands", metavar="<list|show|prune>", required=True)
-    ls = sub.add_parser("list", help="list sessions, most recent activity first")
-    ls.add_argument("--json", action="store_true", help="print JSON")
+                                   description="List and inspect sessions under $CONTEXTO_HOME. With no command, "
+                                               "lists the sessions, as `contexto sessions list` does.")
+    # --json is accepted before the command too (`contexto sessions --json`). Each command's own --json
+    # leaves the value alone when it is not given (SUPPRESS): argparse would otherwise copy the command's
+    # default over one given here and drop it without a word.
+    parser.add_argument("--json", action="store_true", help="print JSON")
+    parser.set_defaults(func=run_list)
+    sub = parser.add_subparsers(title="sessions commands", metavar="<list|show|prune>")
+    ls = sub.add_parser("list", help="list sessions, most recent activity first (the default)")
+    ls.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     ls.set_defaults(func=run_list)
     show = sub.add_parser("show", help="summarize one session and list its pages",
                           description="Summarize one session, then list its paged-out turns newest first: "
@@ -63,7 +76,7 @@ def register(subparsers) -> None:
                                       "prints one.")
     show.add_argument("session_id", metavar="ID", help=SESSION_HELP)
     show.add_argument("--all", action="store_true", help=f"list every page, not only the newest {PAGES_SHOWN}")
-    show.add_argument("--json", action="store_true", help="print JSON")
+    show.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     show.set_defaults(func=run_show)
     prune = sub.add_parser(
         "prune", help="delete old sessions (dry run unless --yes)",
@@ -74,9 +87,10 @@ def register(subparsers) -> None:
                        help="select sessions with no activity for DURATION (for example 30d, 12h, 90m, 2w)")
     prune.add_argument("--keep", type=_count, metavar="N",
                        help="keep the N sessions with the most recent activity; select the rest")
-    prune.add_argument("--session", metavar="ID", help="select this one session (its full id)")
+    prune.add_argument("--session", metavar="ID",
+                       help="select this one session (its full id; a prefix is refused, since prune deletes)")
     prune.add_argument("--yes", action="store_true", help="delete; without it nothing is deleted")
-    prune.add_argument("--json", action="store_true",
+    prune.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="print JSON: dry_run, total_bytes, and each selected session with its status")
     prune.set_defaults(func=run_prune, prune_parser=prune)
 
@@ -92,7 +106,8 @@ def run_list(args: argparse.Namespace) -> int:
         print(json.dumps([vars(s) for s in sessions], indent=2, sort_keys=True))
         return EXIT_OK
     if not sessions:
-        print(f"No sessions under {home / 'sessions'}.")
+        message = no_sessions_yet(home)  # not an error: an empty list is an answer (and `[]` with --json)
+        print(f"{message[0].upper()}{message[1:]}.")
         return EXIT_OK
     rows = [("ID", "CREATED", "PAGES", "RECORDS", "LAST ACTIVITY", "SIZE")]
     rows += [(s.id, s.created, str(s.pages), "?" if s.records is None else str(s.records), s.last_activity,
