@@ -12,8 +12,13 @@ What is counted:
   repeated is not counted more than once. The repeats are used for the noise figures alone.
 - Two arms are compared only on seeds where both arms' units are ``complete``; the probes left out
   are counted and the reason is given.
-- Cost is the measured token classes priced per request (``contexto.bench.prices``) at every model
-  in the price table, so the comparison does not depend on one model's prices.
+- Cost is the recorded token classes priced per request (``contexto.bench.prices``) at every model
+  in the price table, so the comparison does not depend on one model's prices. The report calls
+  the tokens measured only when every request record counted gives ``measured`` as its basis.
+
+Words. The manifest calls one arm on one seed, run once, a unit; ``results.md`` calls it a session
+throughout. A manifest ``label`` is printed in the title of ``results.md``, under "What this run
+shows" and in every chart's title.
 
 The "What this run shows" text is produced by fixed rules (``_verdict``), not written by hand.
 """
@@ -139,7 +144,7 @@ def _group(runs: Sequence[records.Run]) -> dict[str, _Group]:
                                   f"directory {position}: a unit may be recorded once")
             origin[(model, key)] = position
             group.units[key] = unit
-            group.ttl[key] = manifest["cache_ttl"] or DEFAULT_CACHE_TTL
+            group.ttl[key] = unit.get("cache_ttl") or manifest["cache_ttl"] or DEFAULT_CACHE_TTL
         for row in run.probes:
             group.probes.setdefault(records.unit_key(row), {})[row["id"]] = row
         for row in run.requests:
@@ -153,20 +158,35 @@ def _group(runs: Sequence[records.Run]) -> dict[str, _Group]:
 
 
 def _check_group(group: _Group) -> None:
-    """A complete unit has probe records, and the complete units of one seed answered the same probes."""
-    reference: dict[int, tuple[Key, set[str]]] = {}
+    """A complete unit has probe records, and the complete units of one seed answered the same
+    probes: the same ids, each with the same ``expected`` and ``cls``. Directories made from two
+    versions of the script share ids and differ in the answers, so they are refused here."""
+    reference: dict[int, tuple[Key, dict[str, dict[str, Any]]]] = {}
     for key, unit in group.units.items():
         if unit["status"] != "complete":
             continue
-        ids = set(group.probes.get(key, {}))
-        if not ids:
+        rows = group.probes.get(key, {})
+        if not rows:
             raise ReportError(f"the unit {_unit_words(group.model, key)} is complete in manifest.json but "
                               "probes.jsonl has no records for it")
-        other_key, other_ids = reference.setdefault(key[1], (key, ids))
-        if ids != other_ids:
-            raise ReportError(f"the units of seed {key[1]} did not answer the same probes: "
-                              f"{_unit_words(group.model, other_key)} has {len(other_ids)} probes and "
-                              f"{_unit_words(group.model, key)} has {len(ids)}. A probes.jsonl cut short gives this.")
+        other_key, other = reference.setdefault(key[1], (key, rows))
+        first, second = _unit_words(group.model, other_key), _unit_words(group.model, key)
+        if set(rows) != set(other) and len(rows) != len(other):
+            raise ReportError(f"the units of seed {key[1]} did not answer the same probes: {first} has "
+                              f"{len(other)} probes and {second} has {len(rows)}. A probes.jsonl cut short gives "
+                              "this.")
+        if set(rows) != set(other):
+            only = min(set(rows) - set(other) or set(other) - set(rows))
+            raise ReportError(f"the units of seed {key[1]} did not answer the same probes: {first} and {second} "
+                              f"have the same number of probes ({len(rows)}) and not the same ids, for example "
+                              f"{only!r}, which only {second if only in rows else first} has")
+        for pid, row in rows.items():
+            for name in ("expected", "cls"):
+                if row[name] != other[pid][name]:
+                    raise ReportError(
+                        f"the probe {pid!r} of seed {key[1]} is not the same question in every session: {name!r} "
+                        f"is {other[pid][name]!r} in {first} and {row[name]!r} in {second}. Directories made from "
+                        "different versions of the script give this; report them separately.")
 
 
 # The blocks of one model
@@ -239,6 +259,7 @@ def _arm(group: _Group, arm: str, bound: int, table: Mapping[str, Any]) -> dict[
     block = {"units": len(keys), "seeds": [key[1] for key in keys], **block}
     block.update({
         "stale": sum(1 for r in rows if r["stale"]),
+        "bases": sorted({r["basis"] for r in requests}),
         "by_class": {cls: _proportion(of_class) for cls, of_class in _by_class(rows).items()},
         "tokens": _tokens(requests),
         "max_input": max(sizes, default=0),
@@ -278,6 +299,42 @@ def _points(value: float, signed: bool = False) -> str:
 
 def _plural(n: int, word: str) -> str:
     return f"{n:,} {word}" + ("" if n == 1 else "s")
+
+
+def _and(words: Sequence[str]) -> str:
+    """ "a", "a and b", "a, b and c". """
+    words = list(words)
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def _dropped_words(probes: int, seed: int) -> str:
+    """What happened to a seed that a pair could not use, with the verb that fits the count."""
+    if not probes:
+        return f"seed {seed} was left out"
+    return f"{_plural(probes, 'probe')} of seed {seed} {'was' if probes == 1 else 'were'} dropped"
+
+
+def _basis_words(bases: Sequence[str]) -> str:
+    """What the request records say their token counts are, as the end of "The ... are"."""
+    if list(bases) == ["measured"]:
+        return "measured"
+    if len(bases) == 1:
+        return f"{bases[0]}, not measured"
+    return f"{_and(list(bases))}, as each request record says" if bases else "not recorded"
+
+
+def _limits(results: Mapping[str, Any]) -> list[str]:
+    """The limits every report states. The one about versions follows the manifest: merged
+    directories that differ in a version cannot say one version was run."""
+    limits = list(LIMITS)
+    differs = (results["manifest"].get("merged") or {}).get("differs", {})
+    versions = [f"{words} ({', '.join(str(v) if v is not None else 'not recorded' for v in differs[name])})"
+                for name, words in (("contexto_version", "Contexto"), ("claude_code_version", "Claude Code"))
+                if name in differs]
+    if versions:
+        limits[2] = (f"The merged directories were not all run with the same version of {' and of '.join(versions)}, "
+                     "so a difference between sessions can come from the version and not from the arm.")
+    return limits
 
 
 def _number_list(values: Sequence[float]) -> str:
@@ -467,8 +524,10 @@ def _plain_compaction(group: _Group, bound: int) -> dict[str, Any] | None:
         return None
     values = [v for _, unit in units for v in unit["compaction_pre_tokens"]]
     trigger = group.plain_set["intended_trigger"] if group.plain_set else bound
+    ran = [key for key, unit in units if unit["status"] != "not_run"]
     return {
         "set": group.plain_set, "bound": bound,
+        "sessions_run": len(ran), "repeats_included": any(key[2] > 0 for key in ran),
         "units": [{"seed": key[1], "repeat": key[2], "status": unit["status"], "compactions": unit["compactions"],
                    "pre_tokens": list(unit["compaction_pre_tokens"])} for key, unit in units],
         "compactions": sum(unit["compactions"] or 0 for _, unit in units),
@@ -501,17 +560,39 @@ def _manifest(runs: Sequence[records.Run]) -> dict[str, Any]:
     merged["seeds"] = list(dict.fromkeys(seed for run in runs for seed in run.manifest["seeds"]))
     merged["arms"] = list(dict.fromkeys(arm for run in runs for arm in run.manifest["arms"]))
     merged["repeats"] = max(run.manifest["repeats"] for run in runs)
+    labels = [run.manifest.get("label") for run in runs]
+    merged.pop("label", None)
+    if any(labels):
+        merged["label"] = labels[0] if all(one == labels[0] for one in labels) else "; ".join(
+            f"{one} (directory {position} of {len(runs)})" for position, one in enumerate(labels, start=1) if one)
     merged["started"] = min(run.manifest["started"] for run in runs)
     finished = [run.manifest["finished"] for run in runs]
     merged["finished"] = None if any(f is None for f in finished) else max(finished)
     merged["units"] = [{**unit, "model": run.manifest["model"]} for run in runs for unit in run.manifest["units"]]
     differs = {}
-    for name in ("contexto_version", "claude_code_version", "upstream", "cache_ttl", "plain_compaction"):
-        values = [run.manifest[name] for run in runs]
+    for name in ("contexto_version", "claude_code_version", "upstream", "cache_ttl", "plain_compaction", "label"):
+        values = [run.manifest.get(name) for run in runs]
         if any(value != values[0] for value in values):
             differs[name] = list({json.dumps(v, sort_keys=True): v for v in values}.values())
-    merged["merged"] = {"directories": len(runs), "differs": differs}
+    merged["merged"] = {"directories": len(runs), "differs": differs,
+                        "repeats": [run.manifest["repeats"] for run in runs]}
     return merged
+
+
+def _lifetimes(runs: Sequence[records.Run]) -> list[dict[str, Any]]:
+    """The cache lifetime each directory's sessions are priced at, by arm: the unit's own
+    ``cache_ttl`` when it has one, else the manifest's, else 5 minutes (``assumed``)."""
+    out = []
+    for position, run in enumerate(runs, start=1):
+        manifest = run.manifest
+        by_arm: dict[str, set[str]] = {}
+        for unit in manifest["units"]:
+            by_arm.setdefault(unit["arm"], set()).add(
+                unit.get("cache_ttl") or manifest["cache_ttl"] or DEFAULT_CACHE_TTL)
+        arms = sorted(by_arm, key=lambda arm: (ARM_ORDER.index(arm) if arm in ARM_ORDER else len(ARM_ORDER), arm))
+        out.append({"directory": position, "assumed": manifest["cache_ttl"] is None,
+                    "by_arm": {arm: sorted(by_arm[arm], key=price_tables.CACHE_TTLS.index) for arm in arms}})
+    return out
 
 
 def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -546,6 +627,10 @@ def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any]
     if basis <= {"measured"}:
         notes.append(f"Request size is the input the upstream reported (uncached, cache write and cache read "
                      f"tokens added) for each main request of seed {first.first_seed}, repeat 0.")
+    else:
+        notes.append(f"Request size is the input each main request of seed {first.first_seed}, repeat 0 records "
+                     f"(uncached, cache write and cache read tokens added). The records give it as "
+                     f"{_and(sorted(basis))}; the legend says which for each line.")
     notes.append(f"History length is estimated from the script, not counted by a tokenizer: {BYTES_PER_TOKEN_LOG} "
                  f"bytes per token for log turns plus {REPLY_TOKENS} tokens per reply, and {BYTES_PER_TOKEN_TEXT} "
                  "bytes per token for probe turns.")
@@ -553,7 +638,8 @@ def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any]
         "format": FORMAT, "kind": "live", "manifest": _manifest(runs),
         "request_series": blocks[first.model]["request_series"], "bound": bound, "notes": notes,
         "prices": {"cache_ttl": first.cache_ttl or DEFAULT_CACHE_TTL, "cache_ttl_assumed": first.cache_ttl is None,
-                   "replaced": prices is not None, "run_model_priced": priced, "table": table},
+                   "lifetimes": _lifetimes(runs), "replaced": prices is not None, "run_model_priced": priced,
+                   "table": table},
         "arms": None, "pairs": None, "noise": None, "plain_compaction": None, "all_requests": None,
         "by_model": None, "charts": [], "charts_skipped": [],
     }
@@ -619,22 +705,28 @@ def _what_was_run(results: Mapping[str, Any]) -> list[str]:
     models = m.get("models") or [m["model"]]
     units = m["units"]
     counts = {status: sum(1 for u in units if u["status"] == status) for status in records.STATUSES}
+    merged = m.get("merged")
+    by_directory = (merged or {}).get("repeats") or []
+    if len(set(by_directory)) > 1:
+        repeats = (f"Runs of the first seed, by directory: {', '.join(str(r) for r in by_directory)}. Run-to-run "
+                   "noise is reported below, where a seed was run more than once.")
+    elif m["repeats"] > 1:
+        repeats = f"The first seed was run {m['repeats']} times to measure run-to-run noise."
+    else:
+        repeats = "No seed was repeated."
     lines = [
         f"- A live run of `contexto bench`: protocol {m['protocol']}, bound {m['bound']:,} tokens, content turns of "
         f"{m['turn_kbytes'] * 1_000:,} bytes.",
         f"- Model: {', '.join(str(x) for x in models)}. Upstream: {upstream}.",
         f"- Versions: Contexto {m['contexto_version']}, Claude Code {m['claude_code_version'] or 'not recorded'}.",
-        f"- Seeds: {', '.join(str(s) for s in m['seeds'])} ({_plural(len(m['seeds']), 'seed')}). "
-        + (f"The first seed was run {m['repeats']} times to measure run-to-run noise."
-           if m["repeats"] > 1 else "No seed was repeated."),
+        f"- Seeds: {', '.join(str(s) for s in m['seeds'])} ({_plural(len(m['seeds']), 'seed')}). {repeats}",
         f"- Arms: {', '.join(_inline(a) for a in m['arms'])}.",
         f"- Started {m['started']}, finished {m['finished'] or 'not recorded (the run did not finish)'}.",
-        f"- Units (one arm on one seed, once): {len(units)} recorded, {counts['complete']} complete, "
+        f"- Sessions (one arm on one seed, run once): {len(units)} recorded, {counts['complete']} complete, "
         f"{counts['stopped']} stopped, {counts['not_run']} not run.",
         "- The tables below use repeat 0 of each seed, so the repeated seed is counted once. The other repeats are "
         "used only for run-to-run noise.",
     ]
-    merged = m.get("merged")
     if merged:
         lines.append(f"- These results merge {merged['directories']} output directories.")
         for name, values in merged["differs"].items():
@@ -642,7 +734,7 @@ def _what_was_run(results: Mapping[str, Any]) -> list[str]:
     lines.append("")
     incomplete = [u for u in units if u["status"] != "complete"]
     if incomplete:
-        lines += ["Units that are not complete:", ""]
+        lines += ["Sessions that are not complete:", ""]
         lines += _table(["Arm", "Seed", "Repeat", "Status", "Reason"],
                         [[label(u["arm"]), u["seed"], u["repeat"], u["status"].replace("_", " "),
                           u["reason"] or "none given"] for u in incomplete])
@@ -652,10 +744,15 @@ def _what_was_run(results: Mapping[str, Any]) -> list[str]:
 def _accuracy(block: Mapping[str, Any], h: str) -> list[str]:
     arms = block["arms"]
     lines = [f"{h} Accuracy by arm", "",
-             "Probes answered correctly, with the Wilson 95% interval. A session is one arm on one seed.", ""]
+             "Probes answered correctly, with the Wilson 95% interval. A session is one arm on one seed. A stale "
+             "answer is a wrong answer that equals an older value of the same fact (a value the session later "
+             "replaced, or a look-alike planted beside it); it is counted among the wrong answers.", ""]
     lines += _table(["Arm", "Sessions", "Probes", "Correct", "Accuracy", "95% interval", "Stale answers"],
                     [[label(arm), a["units"], f"{a['probes']:,}", f"{a['correct']:,}", _percent(a["accuracy"]),
                       _range(a["interval"]), a["stale"]] for arm, a in arms.items()])
+    if len({a["units"] for a in arms.values()}) > 1:
+        lines += ["The arms completed different numbers of sessions, so the rows of this table are not over the "
+                  "same probes. The comparison on the same probes is under \"Differences between arms\".", ""]
     classes = list(dict.fromkeys(cls for a in arms.values() for cls in a["by_class"]))
     if classes:
         lines += [f"{h}# Accuracy by probe class", "",
@@ -693,14 +790,14 @@ def _differences(block: Mapping[str, Any], h: str) -> list[str]:
         for unit in pair["dropped"]["units"]:
             counted.setdefault(unit["seed"], []).append(unit)
         for seed, units in counted.items():
-            why = " and ".join(f"the {_inline(u['arm'])} unit {_status_words(u['status'])}"
+            why = " and ".join(f"the {_inline(u['arm'])} session {_status_words(u['status'])}"
                                + (f" ({u['reason']})" if u["reason"] else "") for u in units)
             per_seed = pair["dropped"]["per_seed"][str(seed)]
-            dropped.append(f"- {title}: {_plural(per_seed, 'probe')} of seed {seed} were dropped because {why}.")
+            dropped.append(f"- {title}: {_dropped_words(per_seed, seed)} because {why}.")
     if dropped:
-        lines += ["A pair is compared only on seeds where both arms' units are complete.", "", *dropped, ""]
+        lines += ["A pair is compared only on seeds where both arms' sessions are complete.", "", *dropped, ""]
     else:
-        lines += ["No probe was dropped from a comparison: every pair had complete units of both arms on every "
+        lines += ["No probe was dropped from a comparison: every pair had complete sessions of both arms on every "
                   "seed.", ""]
     classes = list(dict.fromkeys(cls for pair in pairs.values() for cls in pair["by_class"]))
     if classes:
@@ -717,7 +814,7 @@ def _differences(block: Mapping[str, Any], h: str) -> list[str]:
                            f"p {_p(c['mcnemar_p'])}), n = {c['n']}")
             body.append(row)
         lines += _table(["Class", *(f"{label(p['a'])} against {_inline(p['b'])}" for p in pairs.values())], body)
-    lines += [f"{h}# Differences with seeds as the unit", "",
+    lines += [f"{h}# Differences with each seed as one observation", "",
               "Probes inside one session are not independent, so each seed is also treated as one observation: its "
               "difference in accuracy between the two arms. The p value is an exact sign-flip permutation test and "
               "the interval a percentile bootstrap over seeds.", ""]
@@ -799,9 +896,14 @@ def _concluded_section(block: Mapping[str, Any], h: str) -> list[str]:
 
 
 def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str) -> list[str]:
+    bases = sorted({basis for a in block["arms"].values() for basis in a["bases"]})
+    counts = {"measured": "The counts are measured: the upstream reported them."}.get(
+        _basis_words(bases), f"The counts are {_and(bases)}: no upstream reported them." if len(bases) == 1
+        else f"The counts are {_basis_words(bases)}.")
     lines = [f"{h} Tokens and requests", "",
              f"Every request that reached the upstream in the sessions counted above, side requests included. "
-             f"Input is uncached, cache write and cache read added. The bound is {results['bound']:,} tokens.", ""]
+             f"Input is uncached, cache write and cache read added. {counts} The bound is {results['bound']:,} "
+             "tokens; a request of exactly the bound is not over it.", ""]
     lines += _table(["Arm", "Sessions", "Requests", "Uncached input", "Cache write", "Cache read", "Output",
                      "Largest request input", "Requests over the bound", "Compactions", "Requests not answered 2xx"],
                     [[label(arm), a["units"], f"{a['tokens']['requests']:,}", f"{a['tokens']['uncached']:,}",
@@ -812,20 +914,63 @@ def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str
     return lines
 
 
-def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str) -> list[str]:
+def _rate(lifetimes: Sequence[str]) -> str:
+    return _and([{"5m": "5-minute", "1h": "1-hour"}.get(ttl, ttl) for ttl in lifetimes]) + " rate"
+
+
+def _lifetime_words(prices: Mapping[str, Any]) -> str:
+    """The sentence about which cache-write price was used, for one lifetime or for several."""
+    lifetimes = prices["lifetimes"]
+    used = {ttl for d in lifetimes for ttls in d["by_arm"].values() for ttl in ttls} or {prices["cache_ttl"]}
+    assumed = any(d["assumed"] for d in lifetimes)
+    if len(used) == 1:
+        return (f"Cache writes are priced at the {_rate(sorted(used))} for every arm, because a request record "
+                "does not carry its cache lifetime."
+                + (" The manifest does not record a cache lifetime, so 5 minutes is assumed." if assumed else ""))
+    parts = []
+    for d in lifetimes:
+        arms_at: dict[tuple[str, ...], list[str]] = {}
+        for arm, ttls in d["by_arm"].items():
+            arms_at.setdefault(tuple(ttls), []).append(arm)
+        words = (_rate(next(iter(arms_at))) if len(arms_at) == 1 else
+                 " and the ".join(f"{_rate(ttls)} for {_and([_inline(arm) for arm in arms])}"
+                              for ttls, arms in arms_at.items()))
+        parts.append(f"the {words}" if len(lifetimes) == 1 else f"directory {d['directory']} at the {words}")
+    return ("Cache writes are priced at the cache lifetime recorded for each session, because a request record "
+            f"does not carry its own: {'; '.join(parts)}."
+            + (" Where a manifest records no cache lifetime, 5 minutes is assumed." if assumed else ""))
+
+
+def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, model: str) -> list[str]:
     arms = block["arms"]
     prices = results["prices"]
     table = prices["table"]
     models = list(dict.fromkeys(m for a in arms.values() for m in a["cost"]))
+    try:
+        own = price_tables.resolve(model, table)
+    except price_tables.PriceError:
+        own = None
+    bases = sorted({basis for a in arms.values() for basis in a["bases"]})
+    if own is None:
+        rows = (f"The run's model, {model}, has no row in the price table, so every row answers what the same "
+                "tokens would cost at another model's prices. `--prices FILE` takes a table that includes it.")
+    else:
+        rows = (f"The first row is at the prices of the run's own model, {model}"
+                + (f" (priced as {own})" if own != model else "")
+                + "; the others answer what the same tokens would cost at another model's prices.")
+    manifest = results["manifest"]
+    local = manifest["upstream"] == "local" and "upstream" not in (manifest.get("merged") or {}).get("differs", {})
+    bill = ("No row is a bill. The upstream was a local stub, so nothing was billed for this run." if local else
+            "No row is a bill: what an account was charged depends on how it pays, and these are published prices "
+            "only.")
     lines = [f"{h} Cost at published prices", "",
-             "The measured token classes of each arm priced at every model in the price table, request by request. "
-             "Only the first row is what this run was billed at; the others answer what the same tokens would "
-             "cost at another model's prices. Each cell is USD per session, then the total over the arm's "
-             "sessions.", ""]
+             f"The token classes of each arm are {_basis_words(bases)}, and are priced here at every model in the "
+             f"price table, request by request. {rows} {bill} Each cell is USD per session, then the total over "
+             "the arm's sessions.", ""]
     lines += _table(["Prices of", *(label(arm) for arm in arms)],
-                    [[model, *((f"{_usd(a['cost_per_unit'][model])} ({_usd(a['cost'][model])} over "
-                                f"{_plural(a['units'], 'session')})") if a["units"] else "not run"
-                               for a in arms.values())] for model in models])
+                    [[m, *((f"{_usd(a['cost_per_unit'][m])} ({_usd(a['cost'][m])} over "
+                            f"{_plural(a['units'], 'session')})") if a["units"] else "not run"
+                           for a in arms.values())] for m in models])
     sessions = {a["units"] for a in arms.values() if a["units"]}
     if len(sessions) > 1:
         lines += ["The arms completed different numbers of sessions, so compare the cost per session, not the "
@@ -834,29 +979,20 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str) 
     accessed = table.get("accessed") or next(iter(table["models"].values())).get("accessed")
     lines.append(f"- Prices: {source}, read {accessed}, USD per million tokens"
                  + (", from a table given with `--prices`." if prices["replaced"] else "."))
-    lines.append(f"- Cache writes are priced at the {'1-hour' if prices['cache_ttl'] == '1h' else '5-minute'} rate "
-                 "for every arm, because a request record does not carry its cache lifetime."
-                 + (" The manifest does not record a cache lifetime, so 5 minutes is assumed."
-                    if prices["cache_ttl_assumed"] else ""))
-    for model in models:
-        entry = table["models"][model]
+    lines.append(f"- {_lifetime_words(prices)}")
+    for m in models:
+        entry = table["models"][m]
         if len(entry["rows"]) > 1 and entry.get("note"):
-            lines.append(f"- {model}: {entry['note']}")
+            lines.append(f"- {m}: {entry['note']}")
     other = sum(a["other_model_requests"] for a in arms.values())
     if other:
         lines.append(f"- {_plural(other, 'request')} went to a model other than the run's own (a CLI sends some "
                      "side requests to a smaller model). Every row prices them at that row's model, so the first "
-                     "row is close to the bill, not equal to it.")
-    if not prices["run_model_priced"]:
-        own = results["manifest"].get("models") or [results["manifest"]["model"]]
-        for model in own:
-            if model not in table["models"]:
-                lines.append(f"- {model} has no row in the price table, so no row above is what this run was "
-                             "billed at. `--prices FILE` takes a table that includes it.")
+                     "row is close to the cost at the run's own prices, not equal to it.")
     total = block["all_requests"]
     if total["cost"]:
         first = next(iter(total["cost"]))
-        lines.append(f"- Every request recorded, repeats and unfinished units included: "
+        lines.append(f"- Every request recorded, repeats and unfinished sessions included: "
                      f"{total['tokens']['requests']:,} requests, {total['tokens']['input']:,} input and "
                      f"{total['tokens']['output']:,} output tokens, {_usd(total['cost'][first])} at the prices of "
                      f"{first}.")
@@ -878,12 +1014,15 @@ def _compaction_section(block: Mapping[str, Any], h: str) -> list[str]:
                      f"{'forced' if setting['forced'] else 'not forced'}. {setting['note']}".rstrip())
         lines.append("")
     pre = c["pre_tokens"]
+    seen = (f"Compactions seen: {c['compactions']} across the "
+            f"{_plural(c['sessions_run'], 'plain Claude Code session')} that ran"
+            + (", repeats included (the tokens table above counts repeat 0 of each seed only)."
+               if c["repeats_included"] else "."))
     if pre is None:
-        lines.append(f"Compactions seen: {c['compactions']}. No `pre_tokens` figure was reported, so where "
-                     "compaction started cannot be checked.")
+        lines.append(f"{seen} No `pre_tokens` figure was reported, so where compaction started cannot be checked.")
     else:
         trigger = setting["intended_trigger"] if setting else c["bound"]
-        lines.append(f"Compactions seen: {c['compactions']} across {_plural(len(c['units']), 'session')}. The "
+        lines.append(f"{seen} The "
                      f"`pre_tokens` the CLI reported at each ranged from {pre['min']:,} to {pre['max']:,} tokens "
                      f"(mean {pre['mean']:,.0f}), which is {pre['min'] / trigger:.2f} to {pre['max'] / trigger:.2f} "
                      f"times the intended start of {trigger:,} tokens; {pre['below_trigger']} of {pre['count']} "
@@ -896,30 +1035,33 @@ def _compaction_section(block: Mapping[str, Any], h: str) -> list[str]:
     return lines
 
 
-def _model_sections(block: Mapping[str, Any], results: Mapping[str, Any], h: str) -> list[str]:
+def _model_sections(block: Mapping[str, Any], results: Mapping[str, Any], h: str, model: str) -> list[str]:
     return [*_accuracy(block, h), *_differences(block, h), *_noise_section(block, h), *_concluded_section(block, h),
-            *_tokens_section(block, results, h), *_cost_section(block, results, h), *_compaction_section(block, h)]
+            *_tokens_section(block, results, h), *_cost_section(block, results, h, model),
+            *_compaction_section(block, h)]
 
 
 def render(results: Mapping[str, Any]) -> str:
     """The plain-text report (``results.md``) of a results dict. It reads nothing else."""
     blocks = {None: results} if results.get("arms") is not None else results["by_model"]
-    lines = ["# Contexto benchmark results", "",
+    manifest = results["manifest"]
+    tag = manifest.get("label")
+    lines = ["# Contexto benchmark results" + (f": {tag}" if tag else ""), "",
              "Written by `contexto bench` from the records in the output directory: `manifest.json`, `probes.jsonl` "
              "and `requests.jsonl`. `contexto bench --report DIR` recomputes it.", "",
              "## What was run", "", *_what_was_run(results)]
     for model, block in blocks.items():
         if model is None:
-            lines += _model_sections(block, results, "##")
+            lines += _model_sections(block, results, "##", (manifest.get("models") or [manifest["model"]])[0])
         else:
-            lines += [f"## Results for {model}", "", *_model_sections(block, results, "###")]
+            lines += [f"## Results for {model}", "", *_model_sections(block, results, "###", model)]
     if results.get("charts") or results.get("charts_skipped"):
         lines += ["## Charts", ""]
         for chart in results.get("charts") or []:
             lines += [f"![{_cell(chart['title'])}]({chart['path']})", ""]
         for chart in results.get("charts_skipped") or []:
             lines += [f"Not drawn: `{chart['path']}`, because {chart['reason']}.", ""]
-    lines += ["## What this run shows", "",
+    lines += ["## What this run shows", "", *([f"This run is labelled: {tag}.", ""] if tag else []),
               "Each line is produced by a fixed rule. A direction is named only when three things hold: the "
               f"pooled comparison is significant (its 95% interval excludes 0 and the exact McNemar p value is "
               f"below {ALPHA}), the seed-level sign-flip p value is below {ALPHA}, and the two point the same way. "
@@ -931,7 +1073,7 @@ def render(results: Mapping[str, Any]) -> str:
         if not block["pairs"]:
             lines.append(f"- {'' if model is None else model + ': '}Fewer than two arms were run, so there is no "
                          "comparison.")
-    lines += ["", "### Limits", "", *(f"- {limit}" for limit in LIMITS), ""]
+    lines += ["", "### Limits", "", *(f"- {limit}" for limit in _limits(results)), ""]
     return "\n".join(lines)
 
 

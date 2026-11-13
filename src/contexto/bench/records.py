@@ -245,7 +245,7 @@ _SERIES = _object({"basis": _choice(*BASES), "points": _list_of(_pair_of(_number
 _RESULTS_MANIFEST = _object({}, nullable=True, optional={
     "model": _string(nullable=True), "protocol": _string(nullable=True), "seed": _integer(0, nullable=True),
     "seeds": _or_null(_list_of(_integer(0))), "contexto_version": _string(nullable=True),
-    "claude_code_version": _string(nullable=True), "label": _label})
+    "claude_code_version": _string(nullable=True), "label": _string(nullable=True)})
 
 
 def _cell(nested: bool) -> Check:
@@ -347,6 +347,24 @@ def loads(text: str) -> Any:
     to read raises ``RecursionError``; anything else that is not JSON raises ``ValueError``. The
     caller then checks the value's known fields and calls ``_sound`` on the whole of it."""
     return json.loads(text, object_pairs_hook=_no_repeats)
+
+
+def strict(text: str) -> Any:
+    """Read JSON text strictly and whole, for a caller with its own error type. Everything this
+    module refuses is a ``ValueError`` that says what and where: a key that appears twice, nesting
+    too deep to read, a number that is not finite, a string that is not valid Unicode, and text
+    that is not JSON at all (``json.JSONDecodeError``, itself a ``ValueError``)."""
+    try:
+        value = loads(text)
+    except _Repeated as repeated:
+        raise ValueError(f"the key {repeated.key!r} appears twice in one object") from None
+    except RecursionError:
+        raise ValueError("it is nested too deeply to read") from None
+    try:
+        _sound(value)
+    except _Bad as bad:
+        raise ValueError(f"field {bad.field!r}: {bad.problem}") from None
+    return value
 
 
 def _parse(path: Path, text: str, check: Callable[[dict[str, Any]], None], line: int | None = None,

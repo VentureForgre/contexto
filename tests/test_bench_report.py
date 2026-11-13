@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -173,7 +174,7 @@ def test_a_model_without_a_price_still_gets_the_cost_at_the_models_that_have_one
     results = report.build([out])
     assert list(results["arms"]["full"]["cost"]) == prices.models(prices.load())
     assert results["prices"]["run_model_priced"] is False
-    assert "house-model-7 has no row in the price table" in report.render(results)
+    assert "The run's model, house-model-7, has no row in the price table" in report.render(results)
 
 
 def test_a_replacement_price_table_is_used(tmp_path):
@@ -641,7 +642,7 @@ def test_write_makes_the_results_the_report_and_the_charts(tmp_path):
     assert text.startswith("# Contexto benchmark results\n")
     for heading in ("## What was run", "## Accuracy by arm", "### Accuracy by probe class",
                     "## Differences between arms", "### Differences by probe class",
-                    "### Differences with seeds as the unit",
+                    "### Differences with each seed as one observation",
                     "## Run-to-run noise", "## Facts concluded by the assistant", "## Tokens and requests",
                     "## Cost at published prices", "## Compaction in the plain Claude Code arm", "## Charts",
                     "## What this run shows", "### Limits"):
@@ -686,6 +687,257 @@ def test_nothing_about_where_the_files_are_goes_into_the_outputs(tmp_path):
         text = path.read_text(encoding="utf-8")
         for private in ("zebediah", "private-runs", "my-prices", str(tmp_path)):
             assert private not in text, (path.name, private)
+
+
+# What the words claim
+
+
+def edit_manifest(out: Path, change) -> Path:
+    data = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    change(data)
+    (out / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+    return out
+
+
+def cost_paragraph(text: str) -> str:
+    return text.split("Cost at published prices\n\n", 1)[1].split("\n\n", 1)[0]
+
+
+def test_a_request_of_exactly_the_bound_is_not_over_it(tmp_path):
+    s = small_script(1)
+    requests = request_rows(s, "contexto", 0)[0]
+    for row, size in ((requests[0], SMALL_BOUND), (requests[1], SMALL_BOUND + 1), (requests[2], SMALL_BOUND - 1)):
+        row.update(uncached=size, cache_write=0, cache_read=0)
+    out = write_run(tmp_path / "run", [unit("contexto", 1)], probe_rows(s, "contexto", 0, set()), requests)
+    block = report.build([out])["arms"]["contexto"]
+    assert (block["over_bound"], block["max_input"]) == (1, SMALL_BOUND + 1)
+
+
+def test_the_cost_section_names_no_row_as_a_bill(tmp_path):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,), upstream="anthropic")
+    text = report.render(report.build([out]))
+    assert "billed at" not in text
+    paragraph = cost_paragraph(text)
+    assert "The first row is at the prices of the run's own model, claude-haiku-5-5" in paragraph
+    assert "No row is a bill" in paragraph and "nothing was billed" not in paragraph
+    # A stub upstream: nothing was billed at all.
+    stub = report.render(report.build([make_run(tmp_path / "stub", repeats=1, seeds=(11,))]))
+    assert "The upstream was a local stub, so nothing was billed for this run." in cost_paragraph(stub)
+    # A model the table has no row for: the paragraph must not call the first row the run's own.
+    other = report.render(report.build([make_run(tmp_path / "other", repeats=1, seeds=(11,), model="some-model")]))
+    paragraph = cost_paragraph(other)
+    assert "The first row is at the prices of the run's own model" not in paragraph and "billed at" not in other
+    assert ("The run's model, some-model, has no row in the price table, so every row answers what the same tokens "
+            "would cost at another model's prices") in paragraph
+    assert "`--prices FILE` takes a table that includes it" in paragraph
+
+
+@pytest.mark.parametrize("basis, words", [
+    ("measured", "The token classes of each arm are measured"),
+    ("modelled", "The token classes of each arm are modelled, not measured"),
+])
+def test_the_word_measured_follows_the_basis_of_the_request_records(tmp_path, basis, words):
+    s = small_script(1)
+    units, probes, requests = [], [], []
+    for arm in ("contexto", "full"):
+        units.append(unit(arm, 1))
+        probes += probe_rows(s, arm, 0, set())
+        requests += request_rows(s, arm, 0, basis=basis)[0]
+    results = report.build([write_run(tmp_path / "run", units, probes, requests)])
+    assert results["arms"]["contexto"]["bases"] == [basis]
+    text = report.render(results)
+    assert words in cost_paragraph(text)
+    assert ("measured" in text.split("## Tokens and requests")[1].split("\n\n")[1]) is (basis == "measured")
+    assert "The measured token classes" not in text
+    if basis == "modelled":
+        assert "Request size is the input the upstream reported" not in " ".join(results["notes"])
+        assert "modelled" in " ".join(results["notes"])
+
+
+def test_requests_of_two_bases_in_one_arm_are_said_to_be_both(tmp_path):
+    s = small_script(1)
+    requests = request_rows(s, "contexto", 0)[0]
+    requests[3] = {**requests[3], "basis": "estimated", "main": False}
+    out = write_run(tmp_path / "run", [unit("contexto", 1)], probe_rows(s, "contexto", 0, set()), requests)
+    results = report.build([out])
+    assert results["arms"]["contexto"]["bases"] == ["estimated", "measured"]
+    assert "The token classes of each arm are estimated and measured, as each request record says" in (
+        cost_paragraph(report.render(results)))
+
+
+def test_merged_directories_with_different_cache_lifetimes_are_each_named(tmp_path):
+    first = make_run(tmp_path / "first", repeats=1, seeds=(11,))
+    second = make_run(tmp_path / "second", repeats=1, seeds=(12,), cache_ttl="1h")
+    results = report.build([first, second])
+    assert results["prices"]["lifetimes"] == [
+        {"directory": 1, "assumed": False, "by_arm": {"contexto": ["5m"], "full": ["5m"], "plain": ["5m"]}},
+        {"directory": 2, "assumed": False, "by_arm": {"contexto": ["1h"], "full": ["1h"], "plain": ["1h"]}}]
+    text = report.render(results)
+    assert "for every arm" not in text
+    assert ("- Cache writes are priced at the cache lifetime recorded for each session, because a request record "
+            "does not carry its own: directory 1 at the 5-minute rate; directory 2 at the 1-hour rate.") in text
+    same = report.render(report.build([first, make_run(tmp_path / "third", repeats=1, seeds=(13,))]))
+    assert "- Cache writes are priced at the 5-minute rate for every arm" in same
+
+
+def test_a_session_may_record_its_own_cache_lifetime(tmp_path):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,), cache_ttl="1h")
+    whole = report.build([out])
+    edit_manifest(out, lambda m: [u.update(cache_ttl="5m") for u in m["units"] if u["arm"] == "full"])
+    results = report.build([out])
+    run = records.read_run(out)
+    table = prices.load()
+    assert results["arms"]["full"]["cost"][MODEL] == pytest.approx(
+        prices.cost(requests_of(run, "full"), MODEL, "5m", table))
+    assert results["arms"]["full"]["cost"][MODEL] < whole["arms"]["full"]["cost"][MODEL]
+    assert results["arms"]["contexto"]["cost"] == whole["arms"]["contexto"]["cost"]
+    assert ("- Cache writes are priced at the cache lifetime recorded for each session, because a request record "
+            "does not carry its own: the 1-hour rate for Contexto and plain Claude Code and the 5-minute rate for "
+            "full context.") in report.render(results)
+
+
+def test_the_limit_about_one_version_is_not_printed_when_the_merged_directories_differ_in_version(tmp_path):
+    first = make_run(tmp_path / "first", repeats=1, seeds=(11,))
+    second = make_run(tmp_path / "second", repeats=1, seeds=(12,), contexto_version="0.5.25")
+    text = report.render(report.build([first, second]))
+    assert "One version of Claude Code and one version of Contexto were run" not in text
+    assert ("- The merged directories were not all run with the same version of Contexto (0.5.24, 0.5.25), so a "
+            "difference between sessions can come from the version and not from the arm.") in text
+    same = report.render(report.build([first, make_run(tmp_path / "third", repeats=1, seeds=(13,))]))
+    assert "One version of Claude Code and one version of Contexto were run" in same
+
+
+def test_merged_directories_with_different_repeats_are_each_named(tmp_path):
+    haiku = make_run(tmp_path / "haiku", repeats=2, seeds=(11, 12))
+    opus = make_run(tmp_path / "opus", repeats=1, seeds=(11, 12), model="claude-opus-5-5")
+    results = report.build([haiku, opus])
+    assert results["manifest"]["merged"]["repeats"] == [2, 1]
+    text = report.render(results)
+    assert "The first seed was run 2 times to measure run-to-run noise" not in text
+    assert ("Runs of the first seed, by directory: 2, 1. Run-to-run noise is reported below, where a seed was run "
+            "more than once.") in text
+
+
+@pytest.mark.parametrize("field, value", [("expected", "another-answer"), ("cls", "another_class")])
+def test_a_probe_that_is_not_the_same_question_in_two_sessions_of_a_seed_is_an_error(tmp_path, field, value):
+    s = small_script(1)
+    full = probe_rows(s, "full", 0, set())
+    full[7] = {**full[7], field: value}
+    out = write_run(tmp_path / "run", [unit("contexto", 1), unit("full", 1)],
+                    probe_rows(s, "contexto", 0, set()) + full, requests_for(s, "contexto", "full"))
+    with pytest.raises(report.ReportError) as exc:
+        report.build([out])
+    text = str(exc.value)
+    assert f"the probe {full[7]['id']!r} of seed 1 is not the same question in every session" in text
+    assert f"{field!r} is" in text and repr(value) in text
+    assert "claude-haiku-5-5, contexto, seed 1, repeat 0" in text and "claude-haiku-5-5, full, seed 1, repeat 0" in text
+
+
+def test_merged_directories_whose_scripts_differ_are_refused(tmp_path):
+    # Directories made before and after a revision of the questions: the same ids, other answers.
+    s = small_script(1)
+    first = write_run(tmp_path / "first", [unit("contexto", 1)], probe_rows(s, "contexto", 0, set()),
+                      requests_for(s, "contexto"))
+    revised = [{**row, "expected": row["expected"] + "-v2", "given": row["expected"] + "-v2"}
+               for row in probe_rows(s, "full", 0, set())]
+    second = write_run(tmp_path / "second", [unit("full", 1)], revised, requests_for(s, "full"))
+    with pytest.raises(report.ReportError, match="is not the same question in every session"):
+        report.build([first, second])
+
+
+def test_sessions_with_the_same_number_of_probes_and_other_ids_are_told_apart(tmp_path):
+    s = small_script(1)
+    full = probe_rows(s, "full", 0, set())
+    full[0] = {**full[0], "id": "q_renamed"}
+    out = write_run(tmp_path / "run", [unit("contexto", 1), unit("full", 1)],
+                    probe_rows(s, "contexto", 0, set()) + full, requests_for(s, "contexto", "full"))
+    with pytest.raises(report.ReportError) as exc:
+        report.build([out])
+    assert "have the same number of probes (72) and not the same ids" in str(exc.value)
+    assert "'q_renamed'" in str(exc.value) and "has 72 probes and" not in str(exc.value)
+
+
+def test_the_accuracy_table_says_when_arms_completed_different_numbers_of_sessions(tmp_path):
+    words = "The arms completed different numbers of sessions, so the rows of this table are not over the same probes"
+    uneven = report.render(report.build([make_run(tmp_path / "uneven", repeats=1, not_run=[("full", 12)])]))
+    section = uneven.split("## Accuracy by arm")[1].split("### Accuracy by probe class")[0]
+    assert words in section and '"Differences between arms"' in section
+    even = report.render(report.build([make_run(tmp_path / "even", repeats=1)]))
+    assert words not in even
+
+
+def test_stale_answers_are_defined_where_they_are_printed(tmp_path):
+    text = report.render(report.build([make_run(tmp_path / "run", repeats=1, seeds=(11,))]))
+    section = text.split("## Accuracy by arm")[1].split("### Accuracy by probe class")[0]
+    assert "| Stale answers |" in section
+    assert "A stale answer is a wrong answer that equals an older value of the same fact" in section
+
+
+def test_a_seed_with_no_complete_session_is_left_out_in_words_that_fit(tmp_path):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11, 12), arms=("contexto", "full"),
+                   not_run=[("contexto", 12), ("full", 12)])
+    text = report.render(report.build([out]))
+    assert "0 probes" not in text
+    assert ("- Contexto against full context: seed 12 was left out because the Contexto session was not run (the "
+            "history does not fit the model's context window) and the full context session was not run") in text
+    assert report._dropped_words(1, 7) == "1 probe of seed 7 was dropped"
+    assert report._dropped_words(72, 7) == "72 probes of seed 7 were dropped"
+    assert report._dropped_words(0, 7) == "seed 7 was left out"
+
+
+def test_the_compaction_count_says_which_sessions_it_covers(tmp_path):
+    results = report.build([make_run(tmp_path / "run", repeats=2, not_run=[("plain", 13)])])
+    block = results["plain_compaction"]
+    ran = [u for u in block["units"] if u["status"] != "not_run"]
+    assert len(block["units"]) == 4 and len(ran) == 3
+    text = report.render(results)
+    assert (f"Compactions seen: {block['compactions']} across the 3 plain Claude Code sessions that ran, repeats "
+            "included (the tokens table above counts repeat 0 of each seed only).") in text
+    once = report.render(report.build([make_run(tmp_path / "once", repeats=1)]))
+    assert "across the 3 plain Claude Code sessions that ran. The" in once
+
+
+def test_the_report_says_session_and_never_unit(tmp_path):
+    out = make_run(tmp_path / "run", repeats=2, not_run=[("full", 12)])
+    text = report.render(report.build([out]))
+    assert not re.search(r"\bunits?\b", text, flags=re.IGNORECASE), re.findall(r".{30}\bunits?\b.{20}", text)
+    assert "- Sessions (one arm on one seed, run once): 12 recorded, 11 complete, 0 stopped, 1 not run." in text
+    assert "Sessions that are not complete:" in text
+
+
+# The manifest's label
+
+
+LABEL = "Figures invented by a test generator: no model was run"
+
+
+def test_a_label_is_printed_at_the_top_of_the_report_and_in_every_chart_title(tmp_path):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,), label=LABEL)
+    results = report.write(out)
+    text = (out / "results.md").read_text(encoding="utf-8")
+    assert text.splitlines()[0] == f"# Contexto benchmark results: {LABEL}"
+    assert f"## What this run shows\n\nThis run is labelled: {LABEL}.\n" in text
+    assert f"![Accuracy by arm: {LABEL}](charts/accuracy.svg)" in text
+    for name in ("accuracy.svg", "request-size.svg"):
+        svg = (out / "charts" / name).read_text(encoding="utf-8")
+        assert f": {LABEL}</title>" in svg
+    assert results["manifest"]["label"] == LABEL
+    plain = report.render(report.build([make_run(tmp_path / "plain", repeats=1, seeds=(11,))]))
+    assert plain.splitlines()[0] == "# Contexto benchmark results" and "labelled" not in plain
+    assert report.render(report.build([make_run(tmp_path / "null", repeats=1, seeds=(11,), label=None)])) == plain
+
+
+def test_the_label_of_merged_directories_says_which_directory_it_came_from(tmp_path):
+    first = make_run(tmp_path / "first", repeats=1, seeds=(11,), label=LABEL)
+    second = make_run(tmp_path / "second", repeats=1, seeds=(12,))
+    third = make_run(tmp_path / "third", repeats=1, seeds=(13,), label=LABEL)
+    assert report.build([first, third])["manifest"]["label"] == LABEL
+    partly = report.build([first, second])["manifest"]
+    assert partly["label"] == f"{LABEL} (directory 1 of 2)"
+    assert partly["merged"]["differs"]["label"] == [LABEL, None]
+    edit_manifest(second, lambda m: m.update(label="Another label"))
+    assert report.build([first, second])["manifest"]["label"] == (
+        f"{LABEL} (directory 1 of 2); Another label (directory 2 of 2)")
 
 
 # All of the outputs or none
@@ -943,15 +1195,47 @@ def test_requests_sent_to_another_model_are_counted_and_the_cost_note_says_so(tm
 # The committed sample
 
 
-def test_the_committed_sample_report_and_charts_regenerate_byte_for_byte(tmp_path):
-    """tests/fixtures/bench_report/ is what the fixture run reports. If this fails after a deliberate
-    change to the report or a chart, run tests/fixtures/make_bench_report.py and commit the result."""
+def sample_generator():
     sys.path.insert(0, str(FIXTURES))
     try:
         import make_bench_report
     finally:
         sys.path.remove(str(FIXTURES))
-    run = make_bench_report.build(tmp_path)
-    for name in make_bench_report.FILES:
-        committed = (FIXTURES / "bench_report" / name).read_bytes()
-        assert (run / name).read_bytes() == committed, f"{name} differs from tests/fixtures/bench_report/{name}"
+    return make_bench_report
+
+
+def test_the_committed_sample_report_and_charts_regenerate_byte_for_byte(tmp_path):
+    """tests/fixtures/bench_report_invented_figures/ is what the fixture run reports. If this fails
+    after a deliberate change to the report or a chart, run tests/fixtures/make_bench_report.py and
+    commit the result."""
+    generator = sample_generator()
+    run = generator.build(tmp_path)
+    assert sorted(p.name for p in generator.OUT.iterdir()) == sorted(generator.FILES.values())
+    for name, committed in generator.FILES.items():
+        assert (run / name).read_bytes() == (generator.OUT / committed).read_bytes(), (
+            f"{name} differs from tests/fixtures/{generator.OUT.name}/{committed}")
+
+
+def test_the_committed_sample_cannot_be_taken_for_a_result():
+    """The sample's figures come from a seeded generator in the tests. Every file says so where a
+    reader who meets the file alone would look: its name, its first line or its title."""
+    generator = sample_generator()
+    label = "Figures invented by a test generator: no model was run"
+    assert generator.LABEL == label and "invented" in generator.OUT.name
+    assert not (FIXTURES / "bench_report").exists()
+    for committed in generator.FILES.values():
+        assert "invented" in committed
+    text = (generator.OUT / generator.FILES["results.md"]).read_text(encoding="utf-8")
+    assert text.splitlines()[0] == f"# Contexto benchmark results: {label}"
+    assert "- Model: invented-figures-no-model-was-run." in text
+    assert f"## What this run shows\n\nThis run is labelled: {label}.\n" in text
+    assert "claude-haiku-5-5 has" not in text and "Model: claude" not in text
+    for name in ("charts/accuracy.svg", "charts/request-size.svg"):
+        svg = (generator.OUT / generator.FILES[name]).read_text(encoding="utf-8")
+        title = svg.split("<title>", 1)[1].split("</title>", 1)[0]
+        assert title.endswith(f": {label}"), title
+        assert "invented-figures-no-model-was-run" in svg
+        assert "claude-haiku" not in svg and "claude-opus" not in svg
+    # The words come from the fixture's manifest, not from the report code.
+    assert "invented" not in Path(report.__file__).read_text(encoding="utf-8")
+    assert "invented" not in Path(charts.__file__).read_text(encoding="utf-8")

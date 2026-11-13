@@ -33,6 +33,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from contexto.bench import records
+
 FORMAT = 1
 RATES = ("input", "cache_write_5m", "cache_write_1h", "cache_read", "output")
 CACHE_TTLS = ("5m", "1h")
@@ -120,9 +122,11 @@ def load(path: Path | str | None = None) -> dict[str, Any]:
         except (OSError, UnicodeDecodeError) as exc:
             raise PriceError(f"{where}: cannot read the file: {exc}") from exc
     try:
-        table = json.loads(text)
-    except ValueError as exc:
+        table = records.strict(text)
+    except json.JSONDecodeError as exc:
         raise PriceError(f"{where}: not JSON ({exc})") from exc
+    except ValueError as exc:  # a repeated key, NaN or Infinity, nesting too deep: see records.strict
+        raise PriceError(f"{where}: {exc}") from exc
     return check(table, where)
 
 

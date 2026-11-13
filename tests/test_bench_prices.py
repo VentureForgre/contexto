@@ -209,3 +209,17 @@ def test_a_table_that_cannot_be_read_is_refused(tmp_path):
     path.write_text("[]", encoding="utf-8")
     with pytest.raises(prices.PriceError, match="not a JSON object"):
         prices.load(path)
+
+
+@pytest.mark.parametrize("text, words", [
+    ('"extra": NaN}', "field 'extra': not a finite number"),
+    ('"extra": {"deeper": [Infinity]}}', r"field 'extra.deeper\[0\]': not a finite number"),
+    ('"format": 1}', "the key 'format' appears twice"),
+    ('"extra": ' + "[" * 200_000, "nested too deeply"),
+])
+def test_a_price_file_is_read_strictly(tmp_path, text, words):
+    path = tmp_path / "prices.json"
+    path.write_text(json.dumps(prices.load())[:-1] + ", " + text, encoding="utf-8")
+    with pytest.raises(prices.PriceError, match=words) as exc:
+        prices.load(path)
+    assert str(exc.value).startswith(str(path)) and len(str(exc.value)) < 400

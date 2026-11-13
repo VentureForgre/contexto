@@ -3,9 +3,17 @@
 Input: nothing but the code. The output directory is the fixture ``test_bench_records.make_run``
 builds (real generated scripts for seeds 11 to 16, the first seed three times, answers and request
 records invented by a seeded generator). ``contexto.bench.report.write`` turns it into
-``results.md`` and the two charts, which are copied into ``tests/fixtures/bench_report/``. Zero
-spend: no arm is run and nothing is sent anywhere. The figures are invented; the files show what a
-report looks like, not how any arm performs.
+``results.md`` and the two charts, which are copied into
+``tests/fixtures/bench_report_invented_figures/``. Zero spend: no arm is run and nothing is sent
+anywhere.
+
+The figures are invented; the files show what a report looks like, not how any arm performs. So
+that a file met on its own cannot be taken for a result, the fixture's manifest carries a
+``label`` saying so, which the report prints in the first line of ``results.md`` and in the title
+of each chart, its model is named ``invented-figures-no-model-was-run``, and the directory and
+every file have "invented" in their names. The Markdown links its charts by the names the report
+gives them (``charts/accuracy.svg``), so in this directory, where the copies are renamed, the
+links do not resolve.
 
 Run it again after a deliberate change to the report's wording or to a chart:
 
@@ -21,10 +29,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-OUT = Path(__file__).with_name("bench_report")
-FILES = ("results.md", "charts/accuracy.svg", "charts/request-size.svg")
+OUT = Path(__file__).with_name("bench_report_invented_figures")
+# What the report writes, and the name of its committed copy.
+FILES = {"results.md": "invented-results.md", "charts/accuracy.svg": "invented-accuracy.svg",
+         "charts/request-size.svg": "invented-request-size.svg"}
 SEEDS = (11, 12, 13, 14, 15, 16)
 REPEATS = 3
+LABEL = "Figures invented by a test generator: no model was run"
+MODEL = "invented-figures-no-model-was-run"
 
 
 def build(directory: Path) -> Path:
@@ -32,7 +44,7 @@ def build(directory: Path) -> Path:
     from contexto.bench import report
     from test_bench_records import make_run
 
-    run = make_run(directory / "run", seeds=SEEDS, repeats=REPEATS)
+    run = make_run(directory / "run", seeds=SEEDS, repeats=REPEATS, model=MODEL, label=LABEL)
     report.write(run)
     return run
 
@@ -40,11 +52,10 @@ def build(directory: Path) -> Path:
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         run = build(Path(tmp))
-        for name in FILES:
-            target = OUT / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(run / name, target)
-            print(f"written: {target.relative_to(OUT.parent.parent.parent)}")
+        OUT.mkdir(parents=True, exist_ok=True)
+        for name, committed in FILES.items():
+            shutil.copyfile(run / name, OUT / committed)
+            print(f"written: {(OUT / committed).relative_to(OUT.parent.parent.parent)}")
     return 0
 
 

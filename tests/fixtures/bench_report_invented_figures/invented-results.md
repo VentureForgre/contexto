@@ -1,21 +1,21 @@
-# Contexto benchmark results
+# Contexto benchmark results: Figures invented by a test generator: no model was run
 
 Written by `contexto bench` from the records in the output directory: `manifest.json`, `probes.jsonl` and `requests.jsonl`. `contexto bench --report DIR` recomputes it.
 
 ## What was run
 
 - A live run of `contexto bench`: protocol v2, bound 4,000 tokens, content turns of 2,000 bytes.
-- Model: claude-haiku-5-5. Upstream: a local address (127.0.0.1): a stub standing in for a model.
+- Model: invented-figures-no-model-was-run. Upstream: a local address (127.0.0.1): a stub standing in for a model.
 - Versions: Contexto 0.5.24, Claude Code 2.1.322.
 - Seeds: 11, 12, 13, 14, 15, 16 (6 seeds). The first seed was run 3 times to measure run-to-run noise.
 - Arms: Contexto, full context, plain Claude Code.
 - Started 2026-11-12T10:00:00Z, finished 2026-11-12T12:00:00Z.
-- Units (one arm on one seed, once): 24 recorded, 24 complete, 0 stopped, 0 not run.
+- Sessions (one arm on one seed, run once): 24 recorded, 24 complete, 0 stopped, 0 not run.
 - The tables below use repeat 0 of each seed, so the repeated seed is counted once. The other repeats are used only for run-to-run noise.
 
 ## Accuracy by arm
 
-Probes answered correctly, with the Wilson 95% interval. A session is one arm on one seed.
+Probes answered correctly, with the Wilson 95% interval. A session is one arm on one seed. A stale answer is a wrong answer that equals an older value of the same fact (a value the session later replaced, or a look-alike planted beside it); it is counted among the wrong answers.
 
 | Arm | Sessions | Probes | Correct | Accuracy | 95% interval | Stale answers |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -48,7 +48,7 @@ Each pair is compared on the same probes, pooled across seeds. The difference is
 | Contexto against plain Claude Code | 432 | 299 | 111 | 18 | 4 | +21.5 points | +16.8 to +26.4 points | p < 0.0001 |
 | Plain Claude Code against full context | 432 | 286 | 31 | 103 | 12 | -16.7 points | -21.7 to -11.7 points | p < 0.0001 |
 
-No probe was dropped from a comparison: every pair had complete units of both arms on every seed.
+No probe was dropped from a comparison: every pair had complete sessions of both arms on every seed.
 
 ### Differences by probe class
 
@@ -65,7 +65,7 @@ Each cell is the difference in percentage points, then the two discordant counts
 | concluded | -5.6 points (2, 4; p = 0.6875), n = 36 | +16.7 points (8, 2; p = 0.1094), n = 36 | -22.2 points (1, 9; p = 0.0215), n = 36 |
 | toolloop | -2.8 points (0, 1; p = 1.0000), n = 36 | +13.9 points (7, 2; p = 0.1797), n = 36 | -16.7 points (1, 7; p = 0.0703), n = 36 |
 
-### Differences with seeds as the unit
+### Differences with each seed as one observation
 
 Probes inside one session are not independent, so each seed is also treated as one observation: its difference in accuracy between the two arms. The p value is an exact sign-flip permutation test and the interval a percentile bootstrap over seeds.
 
@@ -105,7 +105,7 @@ A `concluded` fact exists in the session only as the assistant's own `DECISION` 
 
 ## Tokens and requests
 
-Every request that reached the upstream in the sessions counted above, side requests included. Input is uncached, cache write and cache read added. The bound is 4,000 tokens.
+Every request that reached the upstream in the sessions counted above, side requests included. Input is uncached, cache write and cache read added. The counts are measured: the upstream reported them. The bound is 4,000 tokens; a request of exactly the bound is not over it.
 
 | Arm | Sessions | Requests | Uncached input | Cache write | Cache read | Output | Largest request input | Requests over the bound | Compactions | Requests not answered 2xx |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -115,7 +115,7 @@ Every request that reached the upstream in the sessions counted above, side requ
 
 ## Cost at published prices
 
-The measured token classes of each arm priced at every model in the price table, request by request. Only the first row is what this run was billed at; the others answer what the same tokens would cost at another model's prices. Each cell is USD per session, then the total over the arm's sessions.
+The token classes of each arm are measured, and are priced here at every model in the price table, request by request. The run's model, invented-figures-no-model-was-run, has no row in the price table, so every row answers what the same tokens would cost at another model's prices. `--prices FILE` takes a table that includes it. No row is a bill. The upstream was a local stub, so nothing was billed for this run. Each cell is USD per session, then the total over the arm's sessions.
 
 | Prices of | Contexto | Full context | Plain Claude Code |
 | --- | --- | --- | --- |
@@ -127,13 +127,13 @@ The measured token classes of each arm priced at every model in the price table,
 - Prices: https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-12, USD per million tokens.
 - Cache writes are priced at the 5-minute rate for every arm, because a request record does not carry its cache lifetime.
 - claude-haiku-5-5: Priced by prompt length. The page says a request whose prompt is over 100,000 tokens pays higher prices, that the prompt length counts all input tokens including cache reads and cache writes, and that each request is priced on its own. A prompt of exactly 100,000 tokens pays the lower row. That the higher row applies to the whole request, output included, is a reading of the page, which gives two complete price rows and has no wording about an excess; the page does not use the words "whole request". If that reading is wrong, change size_rule: "applies_to" to "excess" prices only the input above the threshold at the higher row, and "output" to "first_row" keeps output at the lower row.
-- Every request recorded, repeats and unfinished units included: 512 requests, 2,725,606 input and 34,560 output tokens, $0.1409 at the prices of claude-haiku-5-5.
+- Every request recorded, repeats and unfinished sessions included: 512 requests, 2,725,606 input and 34,560 output tokens, $0.1409 at the prices of claude-haiku-5-5.
 
 ## Compaction in the plain Claude Code arm
 
 Set: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` = 37,000, intended to start compaction at 4,000 tokens; the bound of the Contexto arm is 4,000 tokens. The run recorded the threshold as forced. The window is the bound plus the 33,000 tokens the CLI reserves.
 
-Compactions seen: 32 across 8 sessions. The `pre_tokens` the CLI reported at each ranged from 4,032 to 6,541 tokens (mean 4,898), which is 1.01 to 1.64 times the intended start of 4,000 tokens; 0 of 32 were below it.
+Compactions seen: 32 across the 8 plain Claude Code sessions that ran, repeats included (the tokens table above counts repeat 0 of each seed only). The `pre_tokens` the CLI reported at each ranged from 4,032 to 6,541 tokens (mean 4,898), which is 1.01 to 1.64 times the intended start of 4,000 tokens; 0 of 32 were below it.
 
 | Seed | Repeat | Status | Compactions | pre_tokens of each |
 | --- | --- | --- | --- | --- |
@@ -148,11 +148,13 @@ Compactions seen: 32 across 8 sessions. The `pre_tokens` the CLI reported at eac
 
 ## Charts
 
-![Accuracy by arm](charts/accuracy.svg)
+![Accuracy by arm: Figures invented by a test generator: no model was run](charts/accuracy.svg)
 
-![Request size against history length](charts/request-size.svg)
+![Request size against history length: Figures invented by a test generator: no model was run](charts/request-size.svg)
 
 ## What this run shows
+
+This run is labelled: Figures invented by a test generator: no model was run.
 
 Each line is produced by a fixed rule. A direction is named only when three things hold: the pooled comparison is significant (its 95% interval excludes 0 and the exact McNemar p value is below 0.05), the seed-level sign-flip p value is below 0.05, and the two point the same way. Otherwise the line says no difference was shown, with each reason that applies. Run-to-run noise is described after each result and does not change it.
 

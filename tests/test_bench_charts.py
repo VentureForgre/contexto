@@ -375,7 +375,7 @@ DAMAGE = [
     (_set("manifest", [1]), "manifest", "expected an object or null"),
     (_set("manifest", {"seeds": 5}), "manifest.seeds", "expected a list"),
     (_set("manifest", {"model": 5}), "manifest.model", "expected a string or null"),
-    (_set("manifest", {"label": "x" * 500}), "manifest.label", "expected 200 characters or fewer"),
+    (_set("manifest", {"label": 5}), "manifest.label", "expected a string or null"),
     (_set("arms.contexto", "an arm"), "arms.contexto", "expected an object"),
     (_set("arms", [1]), "arms", "expected an object"),
     (_set("arms.contexto.interval", None), "arms.contexto.interval", "expected a pair"),
