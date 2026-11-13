@@ -35,12 +35,14 @@ import json
 import os
 import platform
 import pstats
+import queue
 import re
 import shutil
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -126,9 +128,11 @@ def publish_request(store: SessionStore, seq: int) -> None:
 class McpChild:
     """``python -m contexto mcp --session S`` with ``CONTEXTO_HOME`` set, as ``launcher.mcp_payload`` spawns it.
     ``src`` is the ``src`` directory the child imports ``contexto`` from: this checkout's, or another
-    checkout's to time two commits side by side (D65)."""
+    checkout's to time two commits side by side (D65). A child that does not answer a request within
+    ``reply_timeout`` seconds is killed and the request raises, so a hung child fails a run instead of
+    hanging it (D65)."""
 
-    def __init__(self, home: Path, session: str, src: Path | None = None) -> None:
+    def __init__(self, home: Path, session: str, src: Path | None = None, reply_timeout: float = 600.0) -> None:
         env = {**os.environ, "CONTEXTO_HOME": str(home), "PYTHONPATH": str(src or ROOT / "src")}
         env.pop("CONTEXTO_SEARCH_CACHE_MB", None)
         if SEARCH_CACHE_MB is not None:
@@ -138,17 +142,38 @@ class McpChild:
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                      text=True, encoding="utf-8", env=env, bufsize=1)
         self.next_id = 0
-        self._request("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
-                                     "clientInfo": {"name": "scale-bench", "version": "0"}})
+        self.reply_timeout = reply_timeout
+        self._lines: queue.Queue[str] = queue.Queue()  # the child's output lines; "" once it ends
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+        try:
+            self._request("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
+                                         "clientInfo": {"name": "scale-bench", "version": "0"}})
+        except BaseException:  # no caller holds this child yet, so stop and reap it here
+            self.proc.kill()
+            self.proc.wait()
+            raise
         self.startup_s = time.perf_counter() - start
         self.proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
         self.proc.stdin.flush()
+
+    def _read(self) -> None:
+        try:
+            for line in self.proc.stdout:
+                self._lines.put(line)
+        except ValueError:  # the pipe was closed under the reader
+            pass
+        self._lines.put("")
 
     def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.next_id += 1
         self.proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params}) + "\n")
         self.proc.stdin.flush()
-        line = self.proc.stdout.readline()
+        try:
+            line = self._lines.get(timeout=self.reply_timeout)
+        except queue.Empty:
+            self.proc.kill()
+            raise RuntimeError(f"contexto mcp did not answer {method} within {self.reply_timeout:g} s") from None
         if not line:
             raise RuntimeError(f"contexto mcp exited during {method} (code {self.proc.poll()})")
         reply = json.loads(line)
@@ -164,9 +189,13 @@ class McpChild:
 
     def close(self) -> int:
         """End input (the shutdown signal), reap the child, return its peak RSS in bytes."""
-        self.proc.stdin.close()
+        try:
+            self.proc.stdin.close()
+        except OSError:  # a child that was killed has closed its end
+            pass
         _, status, usage = os.wait4(self.proc.pid, 0)
         self.proc.returncode = os.waitstatus_to_exitcode(status)
+        self._reader.join(timeout=5)
         self.proc.stdout.close()
         rss = usage.ru_maxrss
         return rss if sys.platform == "darwin" else rss * 1024  # macOS reports bytes, Linux KiB

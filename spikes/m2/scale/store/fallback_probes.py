@@ -1,16 +1,24 @@
 """The probe queries of D65: what ``contexto_search`` finds when the query is not the page's own words.
 
-154 queries over the 6,000-page synthetic store of this spike (``scale_bench.build_store``, seed 7,
+192 queries over the 6,000-page synthetic store of this spike (``scale_bench.build_store``, seed 7,
 floor 0), in eight classes. ``fallback_bench.py`` runs them and reports recall, false-hit rate and
 latency, before and after a change to search.
 
-How the queries were written (2026-11-12). I wrote every query from the fact's ``question`` and the
-text of its plant in ``scale_probes.FACTS``, as a model would type it, before I ran any query through
-search, and I have not changed a query after seeing its result. Two things were looked up first, one
-word at a time and never a query: how many pages of the store hold a candidate word for the ``none``
-class (its absent words must be on no page, its common word on many), and for the added word of an
-``extra_word`` probe. Nothing here is tuned to the fallback search this set measures: I did not see
-that code.
+How the queries were written. I wrote the first 154 on 2026-11-12 from the fact's ``question`` and the
+text of its plant in ``scale_probes.FACTS``, as a model would type them, before I ran any query
+through search, and I have not changed a query after seeing its result. Two things were looked up
+first, one word at a time and never a query: how many pages of the store hold a candidate word for the
+``none`` class (its absent words must be on no page, its common word on many), and for the added word
+of an ``extra_word`` probe. Nothing here is tuned to the fallback search this set measures: I did not
+see that code.
+
+After review (also 2026-11-12, after the first run on ``main``) 39 probes were added and one was taken
+out; no existing query was changed. The reviewers found that the first typo, extra-word and paraphrase
+probes mostly ask one thing, "ignore a word that is on no page". The added probes (flag
+``after_review``) ask the rest: 15 typos whose misspelled word carries the query, 11 extra words and 12
+paraphrases whose off-page word is on many pages, and one ``none`` probe. They were written the same
+way, from the facts and from single-word lookups: how many pages hold a word, and whether a fact's
+page holds it. ``none-16`` is in ``EXCLUDED`` with the reason.
 
 Classes (``MINIMUM`` has the least each must hold):
 
@@ -18,14 +26,23 @@ Classes (``MINIMUM`` has the least each must hold):
   control: it must not move.
 - ``identifier``: the page holds an identifier in one style and the query writes it in another
   (snake_case, camelCase, kebab-case, dotted). Case alone does not count: search already folds case.
-  ``original`` is the identifier as the page writes it, ``altered`` as the query does.
-- ``paraphrase``: the fact in other words, one per fact. Some words are on the page, at least one is not.
+  ``original`` is the identifier as the page writes it, ``altered`` as the query does. Three probes
+  also hold other words of the page (flag ``page_words``), which alone can find the page.
+- ``paraphrase``: the fact in other words. Some words are on the page, at least one is not. Probes 1
+  to 30 are one per fact. Probes 31 to 42 (``sub_kind`` ``common_word``) replace one word of the page
+  by a word that many pages hold (``altered``) and keep the page's other words.
 - ``question``: a natural-language question, one per fact. Every third is the fact's own
   ``question`` (``sub_kind`` ``fact_question``); the rest are new ones in that style (``new``).
-- ``typo``: exact probe ``i`` with one single-character typo in a word of 6 or more characters
-  (``sub_kind``: substitution, deletion, insertion, or swap of two adjacent characters). ``base`` is
-  the exact query, ``original`` the word and ``altered`` the typo.
-- ``extra_word``: exact probe ``i`` plus one word the page does not hold (``altered``).
+- ``typo``: words of the page with one single-character typo in a word of 6 or more characters
+  (``sub_kind``: substitution, deletion, insertion, or swap of two adjacent characters; a swap counts
+  as one edit here, and is two under plain Levenshtein distance). ``base`` is the query spelled right,
+  ``original`` the word and ``altered`` the typo. Probes 1 to 15 are exact probe ``i`` with a typo:
+  the other words are the page's own and often find it without the misspelled one. In probes 16 to 30
+  (flag ``carries_query``) the misspelled word is the only word, or stands with one word that many
+  pages hold. ``typo-14`` types ``woker``, 5 characters, for ``worker`` (flag ``short_typo``).
+- ``extra_word``: exact probe ``i`` plus one word the expected page does not hold (``altered``).
+  ``sub_kind`` ``no_page``: the word is on no page of the store; ``some_pages``: it is on other pages
+  (5 to 1,885 of the 6,000).
 - ``two_page``: one query naming two facts that sit on different pages; both pages are expected.
 - ``none``: nothing should be found. ``sub_kind`` ``absent``: every word is on no page of the store.
   ``mixed``: a topic that is on no page (``absent``) with a common word that is on many (``timeout``
@@ -35,10 +52,12 @@ Classes (``MINIMUM`` has the least each must hold):
 page id through the list of ids a build returns. For a fact whose value changes it is the last plant,
 the one that is right now.
 
-The two halves. ``split_of`` puts the probes of each class alternately in ``tune`` and ``held_out``,
-in the order they are written here. Parameters of a search change are chosen on ``tune`` and reported
-on ``held_out``. Typo and extra-word probe ``i`` are made from exact probe ``i``, so the three stay in
-the same half.
+The two halves. Every fact is in one half (``HELD_OUT_FACTS``, the rest in ``tune``), and every probe
+is in the half of its fact. The two facts of a two-page probe share a half, and so do facts whose
+expected plants sit on one page, so no page is asked about in both halves. ``none`` probes have no fact and alternate. Parameters of a search change are
+chosen on ``tune`` and reported on ``held_out``. Both halves come from one synthetic corpus and one
+author, so the held-out half shows whether a setting carries over to other facts and other queries of
+the same kind, and nothing more.
 
 The corpus. The default plants write identifiers in snake_case, UPPER_SNAKE, two PascalCase names and
 two kebab-case keys; no page holds a camelCase or dotted identifier. ``EXTRA_FACTS`` adds six pages
@@ -51,7 +70,7 @@ pages differ from the default one, and no page of a ``scale_probes`` fact is amo
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from scale_probes import FACTS, Fact, Plant, planted_turn
 
@@ -104,8 +123,9 @@ class Probe:
     original: str = ""  # typo: the word spelled right; identifier: the identifier as the page writes it
     altered: str = ""  # typo, identifier: that word as the query writes it; extra_word: the added word
     base: str = ""  # typo, extra_word: the exact query it was made from
-    sub_kind: str = ""  # typo: the edit; identifier: "page style>query style"; question, none: see above
+    sub_kind: str = ""  # typo: the edit; identifier: "page style>query style"; others: see the docstring
     absent: tuple[str, ...] = ()  # none: the words of the query that are on no page
+    flags: tuple[str, ...] = ()  # see FLAGS
 
 
 def _last(fact_id: str) -> tuple[str, int]:
@@ -129,11 +149,14 @@ def _exact(n: int, fact_id: str, query: str) -> Probe:
 
 def _identifier(n: int, fact_id: str, original: str, altered: str, query: str = "") -> Probe:
     return Probe(f"identifier-{n:02d}", "identifier", query or altered, (_last(fact_id),), original=original,
-                 altered=altered, sub_kind=f"{style_of(original)}>{style_of(altered)}")
+                 altered=altered, sub_kind=f"{style_of(original)}>{style_of(altered)}",
+                 flags=("page_words",) if query else ())
 
 
-def _paraphrase(n: int, fact_id: str, query: str) -> Probe:
-    return Probe(f"paraphrase-{n:02d}", "paraphrase", query, (_last(fact_id),))
+def _paraphrase(n: int, fact_id: str, query: str, common: str = "") -> Probe:
+    """``common`` (probes added after review): the substituted word, which is on many pages."""
+    return Probe(f"paraphrase-{n:02d}", "paraphrase", query, (_last(fact_id),), altered=common,
+                 sub_kind="common_word" if common else "", flags=("after_review",) if common else ())
 
 
 def _question(n: int, fact_id: str, query: str, own: bool = False) -> Probe:
@@ -141,14 +164,23 @@ def _question(n: int, fact_id: str, query: str, own: bool = False) -> Probe:
                  sub_kind="fact_question" if own else "new")
 
 
-def _typo(n: int, base: Probe, original: str, altered: str, edit: str) -> Probe:
+def _typo(n: int, base: Probe, original: str, altered: str, edit: str, *flags: str) -> Probe:
     query = " ".join(altered if w == original else w for w in base.query.split())
     return Probe(f"typo-{n:02d}", "typo", query, base.expected, original=original, altered=altered,
-                 base=base.query, sub_kind=edit)
+                 base=base.query, sub_kind=edit, flags=flags)
 
 
-def _extra(n: int, base: Probe, query: str, word: str) -> Probe:
-    return Probe(f"extra_word-{n:02d}", "extra_word", query, base.expected, altered=word, base=base.query)
+def _carried(n: int, fact_id: str, base: str, original: str, altered: str, edit: str) -> Probe:
+    """A typo probe added after review: ``base`` is words of the page (one word, or a rare word and a
+    common one), and the misspelled word is the one that tells the page from the others."""
+    return _typo(n, Probe("", "exact", base, (_last(fact_id),)), original, altered, edit, "carries_query",
+                 "after_review")
+
+
+def _extra(n: int, base: Probe, query: str, word: str, kind: str = "no_page") -> Probe:
+    """``kind``: ``no_page`` when the added word is on no page of the store, ``some_pages`` otherwise."""
+    return Probe(f"extra_word-{n:02d}", "extra_word", query, base.expected, altered=word, base=base.query,
+                 sub_kind=kind, flags=("after_review",) if n > 15 else ())
 
 
 def _two(n: int, first: str, second: str, query: str) -> Probe:
@@ -178,7 +210,7 @@ EXACT: tuple[Probe, ...] = (
     _exact(15, "c05", "deploy region"),
 )
 
-# Probes 3, 6, 9, 12, 15 and 18 are on the EXTRA_FACTS pages, three in each half.
+# Probes 3, 6, 9, 12, 15 and 18 are on the EXTRA_FACTS pages.
 IDENTIFIER: tuple[Probe, ...] = (
     _identifier(1, "s07", "stream_chunked_v3", "streamChunkedV3"),
     _identifier(2, "r01", "decode_frame_header", "decodeFrameHeader"),
@@ -236,6 +268,21 @@ PARAPHRASE: tuple[Probe, ...] = (
     _paraphrase(28, "c06", "root logger verbosity level"),
     _paraphrase(29, "c07", "cache expiry seconds"),
     _paraphrase(30, "c08", "uploader retry count"),
+    # Added 2026-11-12 after review: one word of the page is replaced by a word that is on many pages
+    # and not on the expected one; the other words are the page's own (pages at 6,000: timeout 831,
+    # cache 267, name 249, rename 248, limit 131, policy 77, job 72, workers 42, version 38).
+    _paraphrase(31, "c07", "cache timeout seconds", "timeout"),
+    _paraphrase(32, "s02", "flaky test name", "name"),
+    _paraphrase(33, "s03", "artifacts bucket name", "name"),
+    _paraphrase(34, "r03", "fetch_rows rename", "rename"),
+    _paraphrase(35, "r02", "UserCache rename", "rename"),
+    _paraphrase(36, "s08", "Redis cache eviction", "cache"),
+    _paraphrase(37, "s10", "upload size limit", "limit"),
+    _paraphrase(38, "c08", "uploader retries limit", "limit"),
+    _paraphrase(39, "s12", "nightly backup job", "job"),
+    _paraphrase(40, "s04", "password hashing policy", "policy"),
+    _paraphrase(41, "c02", "pool size workers", "workers"),
+    _paraphrase(42, "s15", "minimum Python version", "version"),
 )
 
 QUESTION: tuple[Probe, ...] = (
@@ -271,7 +318,7 @@ QUESTION: tuple[Probe, ...] = (
     _question(30, "c08", "How many retries does the uploader make?"),
 )
 
-# Typo i is exact probe i with one edit. The four edits rotate so each half holds every kind.
+# Typo i (1 to 15) is exact probe i with one edit.
 TYPO: tuple[Probe, ...] = (
     _typo(1, EXACT[0], "staging", "stagng", "deletion"),
     _typo(2, EXACT[1], "policy", "polciy", "swap"),
@@ -286,8 +333,27 @@ TYPO: tuple[Probe, ...] = (
     _typo(11, EXACT[10], "ticket", "tickett", "insertion"),
     _typo(12, EXACT[11], "parse_header", "parse_heador", "substitution"),
     _typo(13, EXACT[12], "timeout", "timeuot", "swap"),
-    _typo(14, EXACT[13], "worker", "woker", "deletion"),
+    _typo(14, EXACT[13], "worker", "woker", "deletion", "short_typo"),
     _typo(15, EXACT[14], "region", "regiom", "substitution"),
+    # Added 2026-11-12 after review: the misspelled word carries the query. 16 to 23 are one word that
+    # only the planted page holds. 24 to 30 are that kind of word with a word of the page that many
+    # other pages hold too (pages at 6,000: flag 1,332, retries 329, bucket 204, python all, limit 131,
+    # timeout 831, region 273).
+    _carried(16, "s08", "allkeys-lfu", "allkeys-lfu", "allkeys-lru", "substitution"),
+    _carried(17, "s06", "SUP-48213", "SUP-48213", "SUP-48231", "swap"),
+    _carried(18, "s11", "WEBHOOK_HMAC_KEY", "WEBHOOK_HMAC_KEY", "WEBHOOK_HAMC_KEY", "swap"),
+    _carried(19, "s07", "stream_chunked_v3", "stream_chunked_v3", "stream_chuncked_v3", "insertion"),
+    _carried(20, "s02", "test_resume_after_crash", "test_resume_after_crash", "test_resume_after_crsh", "deletion"),
+    _carried(21, "s04", "argon2id", "argon2id", "aragon2id", "insertion"),
+    _carried(22, "s13", "Natarajan", "Natarajan", "Natarjan", "deletion"),
+    _carried(23, "s18", "cidr_block", "cidr_block", "cidr_blcok", "swap"),
+    _carried(24, "s07", "streaming flag", "streaming", "streamimg", "substitution"),
+    _carried(25, "c08", "uploader retries", "uploader", "uploder", "deletion"),
+    _carried(26, "s03", "artifacts bucket", "artifacts", "artefacts", "substitution"),
+    _carried(27, "s15", "minimum python", "minimum", "minimun", "substitution"),
+    _carried(28, "s04", "bcrypt limit", "bcrypt", "bcrpyt", "swap"),
+    _carried(29, "c01", "client timeout", "client", "cliant", "substitution"),
+    _carried(30, "c05", "deploy region", "deploy", "depoly", "swap"),
 )
 
 # Extra word i is exact probe i plus one word. Pages of the default 6,000-page store that hold the added
@@ -302,14 +368,28 @@ EXTRA_WORD: tuple[Probe, ...] = (
     _extra(5, EXACT[4], "feature flag streaming path rollout", "rollout"),
     _extra(6, EXACT[5], "release branch cut schedule", "schedule"),
     _extra(7, EXACT[6], "owns payments service team", "team"),
-    _extra(8, EXACT[7], "regression first bad commit bisect", "bisect"),
-    _extra(9, EXACT[8], "nightly backups cron job", "job"),
+    _extra(8, EXACT[7], "regression first bad commit bisect", "bisect", "some_pages"),
+    _extra(9, EXACT[8], "nightly backups cron job", "job", "some_pages"),
     _extra(10, EXACT[9], "max upload size setting", "setting"),
     _extra(11, EXACT[10], "CSV export bug ticket Jira", "Jira"),
     _extra(12, EXACT[11], "Renamed parse_header function", "function"),
     _extra(13, EXACT[12], "current HTTP client timeout", "current"),
-    _extra(14, EXACT[13], "worker pool size config", "config"),
+    _extra(14, EXACT[13], "worker pool size config", "config", "some_pages"),
     _extra(15, EXACT[14], "latest deploy region", "latest"),
+    # Added 2026-11-12 after review: the added word is on many pages, and not on the expected one (pages
+    # at 6,000, one word at a time: owner 1,885, flag 1,332, timeout 831, retries 329, limit 131,
+    # policy 77, failover 66, client 48).
+    _extra(16, EXACT[2], "webhook signing secret owner", "owner", "some_pages"),
+    _extra(17, EXACT[3], "public API rate limit timeout", "timeout", "some_pages"),
+    _extra(18, EXACT[9], "max upload size flag", "flag", "some_pages"),
+    _extra(19, EXACT[10], "CSV export bug ticket owner", "owner", "some_pages"),
+    _extra(20, EXACT[8], "nightly backups cron timeout", "timeout", "some_pages"),
+    _extra(21, EXACT[12], "HTTP client timeout policy", "policy", "some_pages"),
+    _extra(22, EXACT[5], "release branch cut policy", "policy", "some_pages"),
+    _extra(23, EXACT[14], "deploy region failover", "failover", "some_pages"),
+    _extra(24, EXACT[9], "max upload size limit", "limit", "some_pages"),
+    _extra(25, EXACT[4], "feature flag streaming path client", "client", "some_pages"),
+    _extra(26, EXACT[12], "HTTP client timeout retries", "retries", "some_pages"),
 )
 
 TWO_PAGE: tuple[Probe, ...] = (
@@ -325,7 +405,8 @@ TWO_PAGE: tuple[Probe, ...] = (
     _two(10, "s14", "s16", "E4127 shard map first bad commit"),
 )
 
-# Two absent, two mixed, and so on, so each half holds four of each. Pages of the default 6,000-page
+# Two absent, two mixed, and so on; the probes alternate between the halves, so each holds four of
+# each. Pages of the default 6,000-page
 # store that hold the common word: timeout 831, flag 1,332, owner 1,885, region 273, retries 329,
 # regression 355, import, error, session and token 6,000.
 NONE: tuple[Probe, ...] = (
@@ -344,19 +425,56 @@ NONE: tuple[Probe, ...] = (
     _none(13, "websocket heartbeat reconnect", ("websocket", "heartbeat", "reconnect")),
     _none(14, "Stripe invoice proration", ("Stripe", "invoice", "proration")),
     _none(15, "numpy import error", ("numpy",)),
-    _none(16, "OAuth session token", ("OAuth",)),
+    _none(17, "webpack bundle import", ("webpack", "bundle")),  # added 2026-11-12 after review, for none-16
 )
 
-PROBES: tuple[Probe, ...] = (*EXACT, *IDENTIFIER, *PARAPHRASE, *QUESTION, *TYPO, *EXTRA_WORD, *TWO_PAGE, *NONE)
+# Probes taken out of the set after review, with the reason. Their queries are kept as written.
+EXCLUDED: tuple[tuple[Probe, str], ...] = (
+    (_none(16, "OAuth session token", ("OAuth",)),
+     "not nothing-to-find in the extended corpus: the added x01 page is about refresh and access tokens "
+     "for a login, which is near this query"),
+)
+
+PROBES: tuple[Probe, ...] = tuple(
+    replace(p, flags=(*p.flags, "after_review")) if p.id == "none-17" else p
+    for p in (*EXACT, *IDENTIFIER, *PARAPHRASE, *QUESTION, *TYPO, *EXTRA_WORD, *TWO_PAGE, *NONE))
+
+# What a flag on a probe says. The bench reports recall with and without each.
+FLAGS = {
+    "after_review": "added on 2026-11-12 after the review of the first set",
+    "carries_query": "typo: the misspelled word is the only word, or the only rare one",
+    "short_typo": "typo: the misspelled word is under 6 characters as typed (the right spelling has 6)",
+    "page_words": "identifier: the query also holds other words of the page",
+}
 
 _FACTS = {f.id: f for f in (*FACTS, *EXTRA_FACTS)}
-_SPLIT = {p.id: ("tune" if i % 2 == 0 else "held_out")
-          for cls in CLASSES for i, p in enumerate(q for q in PROBES if q.cls == cls)}
+
+# The facts of the held-out half; every other fact is in tune. Fixed here, so adding a probe moves no
+# fact. Chosen once (2026-11-12) so that facts which must share a half do (the two facts of a two-page
+# probe, and facts whose expected plants sit on one page: s05 with c04, s14 with c03), and each class,
+# each kind of fact, each typo edit, the probes added after review and the six added pages are as even
+# as that allows. Both pages with a dotted identifier (x03, x04) came out in tune.
+HELD_OUT_FACTS: frozenset[str] = frozenset({
+    "s01", "s02", "s07", "s08", "s10", "s14", "s16", "s17", "s18", "r02", "c01", "c03", "c05", "c07", "c08",
+    "x02", "x05", "x06"})
+_NONE_HALF = {p.id: ("tune" if i % 2 == 0 else "held_out") for i, p in enumerate(NONE)}
 
 
 def split_of(probe: Probe) -> str:
-    """``tune`` or ``held_out``: the probes of a class alternate, the first in ``tune``."""
-    return _SPLIT[probe.id]
+    """``tune`` or ``held_out``. Every probe of a fact is in that fact's half, so no page is asked about
+    in both; a two-page probe is in the half its two facts share. ``none`` probes have no fact and
+    alternate, the first in ``tune``."""
+    if not probe.expected:
+        return _NONE_HALF[probe.id]
+    halves = {"held_out" if fact_id in HELD_OUT_FACTS else "tune" for fact_id, _ in probe.expected}
+    if len(halves) != 1:
+        raise ValueError(f"{probe.id} names facts of both halves")
+    return halves.pop()
+
+
+def fact_of(fact_id: str) -> Fact:
+    """The fact of ``scale_probes.FACTS`` or ``EXTRA_FACTS`` with this id."""
+    return _FACTS[fact_id]
 
 
 def common_words(probe: Probe) -> list[str]:
