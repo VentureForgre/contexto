@@ -17,6 +17,8 @@ install it and how to start it.
   setup, checks, and what was tested.
 - [sessions.md](sessions.md): how to tell that Contexto is working, what a session stores and
   where, and the commands that inspect and remove sessions.
+- [events.md](events.md): every event in a session's `log.jsonl`: who writes it, where it appears,
+  what it means, and its fields.
 - [standing-rules.md](standing-rules.md): how a rule you give once stays in view after its turn is
   paged out.
 - [mcp-tools.md](mcp-tools.md): the five MCP tools the model gets, how search ranks, and the recall
