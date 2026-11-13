@@ -2738,8 +2738,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     value marks the conversation as the compaction of main, whatever its first message says; the
     rule's other conditions (main's session id and entrypoint, main idle when there is no turn
     start) stay. The header is sent once, so the summary text still marks every other request. With
-    no hint header on a request nothing changes: the 1,5xx tests that existed before pass unchanged,
-    except three assertions on the exact content of the `--settings` file.
+    no hint header on a request nothing changes: the suite's 3,189 other tests pass unchanged, except
+    three assertions on the exact content of the `--settings` file.
   - **The summarization request (`compaction`).** It is main's history with the instructions
     appended, under main's key, with main's tools and system (D50 on 2.1.314 and 2.1.318; the same
     on 2.1.322). Decided: it is main's request and gets no path of its own. It goes through main's
