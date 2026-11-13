@@ -83,6 +83,10 @@ The API, for the engine, the launcher, the MCP server and the commands:
   another session's ``meta.json`` is written, and only by that command.
 - ``main_record_ids(value)``, ``merged_main_records(kept, new)``: how ``main_records`` is read and kept
   (``SessionStore.add_main_records``, which the engine calls).
+- ``EarlierPages``, ``read_page(pages_dir, page_id)``: the pages of earlier sessions, for a search with
+  ``scope: "project"`` and a recall with ``session`` (``SessionStore.search_earlier``,
+  ``SessionStore.earlier_session`` and ``SessionStore.earlier_page``). Pages are read as the ledgers
+  are: without a lock, and with nothing created or logged in the session read.
 """
 
 from __future__ import annotations
@@ -91,8 +95,10 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
 import threading
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -102,14 +108,17 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes
 from contexto.paths import session_dir
-from contexto.private import NotRegularFileError, open_private, read_regular, write_atomic
+from contexto.private import NotRegularFileError, open_private, read_regular, read_regular_text, write_atomic
+from contexto.store.catalog import PageCatalog, load_page
 from contexto.store.ledger import LEDGER_FILE, LedgerCorruptError, _intact, _parse, _problems
 from contexto.store.model import _RECORD_ID, Record
+from contexto.store.search import rank
 from contexto.store.state import Conflict, State, derive
 
-__all__ = ["MAIN_RECORDS_KEPT", "Carried", "Listing", "Member", "Project", "Skipped", "forget", "forget_cache",
-           "main_record_ids", "merged_main_records", "project_id", "project_root", "project_sessions", "read_meta",
-           "read_records", "recorded_root", "session_project"]
+__all__ = ["MAIN_RECORDS_KEPT", "Carried", "EarlierPages", "EarlierSearch", "EarlierSession", "Listing", "Member",
+           "NotEarlierSessionError", "Project", "SessionHits", "Skipped", "forget", "forget_cache", "main_record_ids",
+           "merged_main_records", "project_id", "project_root", "project_sessions", "read_meta", "read_page",
+           "read_records", "recorded_root", "session_date", "session_project", "shown_label"]
 
 MAIN_RECORDS_KEPT = 4096  # record ids in a session's main_records; the oldest are dropped past it
 LEDGER_LIMIT = 64 << 20  # bytes of another session's ledger.jsonl read at most: a larger one is skipped unread
@@ -795,3 +804,228 @@ def _remove_created(created: list[tuple[Path, int]]) -> None:
                 os.unlink(path)
         except OSError:
             pass
+
+
+# The pages of earlier sessions, for search and recall (D69, design section 7).
+
+EARLIER_SESSIONS = 50  # the newest earlier sessions one project-scope search reads
+# Page files one project-scope search lists across those sessions, at most: a session that would take
+# the count past this, and every older one, is not searched (the newest readable session always is).
+EARLIER_PAGES = 20_000
+# Seconds after which one project-scope search starts on no further session: the older ones are left
+# alone and counted (the newest readable session is always searched, and one begun is finished). Reading
+# 15,000 pages of 8 KB for the first time took about 16 s on a heavily loaded machine, and a client
+# waits a limited time for a tool call (Codex documents 60 s by default). A later search finds the
+# text of the sessions already read held, as far as the search budget goes, and gets further.
+EARLIER_SECONDS = 30.0
+EARLIER_HITS = 3  # pages of one earlier session a search returns, its best
+_clock = time.monotonic  # what the deadline reads
+_PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")  # as ``contexto.store.check_page_id``
+# What a page file that is not a page record raises when it is loaded (``contexto.store.catalog.load_page``).
+PAGE_DAMAGE = (ValueError, KeyError, TypeError, AttributeError)
+
+
+class NotEarlierSessionError(LookupError):
+    """The value names no earlier session of the project. ``matches`` is how many earlier sessions' ids
+    start with it (several: it is ambiguous). The message never holds the value or a path."""
+
+    def __init__(self, matches: int = 0) -> None:
+        super().__init__("not an earlier session of this project" if matches < 2 else
+                         f"the start of {matches} earlier sessions of this project")
+        self.matches = matches
+
+
+@dataclass(frozen=True)
+class EarlierSession:
+    """An earlier session a recall may read a page of (``SessionStore.earlier_session``)."""
+
+    id: str
+    label: str  # ``Project.label`` of it, as a reply shows it (``shown_label``)
+    date: str  # the UTC date it was created, YYYY-MM-DD
+    pages_dir: Path
+
+
+@dataclass(frozen=True)
+class SessionHits:
+    """What a project-scope search found in one earlier session."""
+
+    session: str  # its id
+    label: str  # ``Project.label`` of it, as a reply shows it (``shown_label``)
+    date: str  # the UTC date it was created, YYYY-MM-DD
+    found: int  # its pages that hold the query and can be read
+    pages: tuple[tuple[str, dict[str, Any]], ...]  # the best of them, best first, at most EARLIER_HITS
+
+
+@dataclass(frozen=True)
+class EarlierSearch:
+    """A project-scope search over the earlier sessions: the sessions with a match, newest first, and
+    content-free counts."""
+
+    hits: tuple[SessionHits, ...] = ()
+    searched: int = 0  # sessions whose pages were ranked
+    skipped: int = 0  # sessions whose pages directory is missing, a symlink, or cannot be listed
+    not_searched: int = 0  # older sessions left alone: beyond EARLIER_SESSIONS, EARLIER_PAGES or EARLIER_SECONDS
+    pages: int = 0  # page files listed in the sessions searched
+
+
+def shown_label(label: str) -> str:
+    """A session's label as a reply shows it: as JSON writes a string, without the quotes. A session id
+    is any directory name, so one with a line break or a quote must not forge a line of a reply; and
+    written inside a JSON string, as a tool argument is, what is shown is the label again."""
+    return json.dumps(label, ensure_ascii=False)[1:-1]
+
+
+def session_date(created: float) -> str:
+    """The UTC date of a session's creation time, as a search result's label shows it."""
+    return (_EPOCH + timedelta(seconds=created)).date().isoformat()
+
+
+def _no_log(event: dict[str, Any]) -> None:
+    """Where a catalog of another session's pages logs: nowhere. Its ``page_unreadable`` events name
+    files of a session this process must not write to, and they are not this session's either."""
+
+
+def _real_directory(path: Path) -> None:
+    """Raise OSError unless ``path`` is a directory itself, not a symlink to one (FileNotFoundError when
+    it is gone, NotADirectoryError for anything else in its place)."""
+    if not stat.S_ISDIR(os.stat(path, follow_symlinks=False).st_mode):
+        raise NotADirectoryError(f"{path.name} is not a directory")
+
+
+def read_page(pages_dir: Path, page_id: str) -> dict[str, Any] | None:
+    """The page ``page_id`` of the session whose pages are in ``pages_dir``, read without a lock and
+    without creating or logging anything; None when there is no such page (a prune, or an id that is
+    not a page id, from which no path is built). OSError when the session directory or ``pages_dir`` is
+    a symlink, or the file cannot be read or is not a regular file; one of ``PAGE_DAMAGE`` when the file
+    is not a page record."""
+    if not isinstance(page_id, str) or not _PAGE_ID.fullmatch(page_id):
+        return None
+    try:
+        _real_directory(pages_dir.parent)
+        _real_directory(pages_dir)
+        text = read_regular_text(pages_dir / f"{page_id}.json")
+    except FileNotFoundError:
+        return None
+    return load_page(text, page_id)
+
+
+class EarlierPages:
+    """One process's reader of the pages of a project's earlier sessions (the MCP server's, or a command's).
+
+    Nothing is ever written to those sessions: no lock is taken, nothing is logged in them, and no file
+    or directory is created; a session directory or a ``pages`` directory that is a symlink is not read.
+    Each session searched gets a ``PageCatalog`` of its own, which lists ``pages/`` at every search and
+    reads only the files it has not seen, so a page that a prune removes is gone at the next listing.
+
+    The search text held for earlier sessions counts against the same budget as the current session's
+    (``own``, the current session's catalog: ``CONTEXTO_SEARCH_CACHE_MB``). The current session's text
+    has the first claim, then the earlier sessions' in the order they are searched, newest first: a
+    catalog may grow only into what the others leave, and ``trim`` gives back what the current session
+    has since taken, oldest session first. Results never depend on it: a page whose text is not held
+    is read again at the next search."""
+
+    def __init__(self, own: PageCatalog) -> None:
+        self._own = own
+        self._catalogs: dict[str, PageCatalog] = {}  # by session id, newest session first
+
+    @property
+    def held_bytes(self) -> int:
+        """Bytes of earlier sessions' search text held now."""
+        return sum(catalog.held_bytes for catalog in self._catalogs.values())
+
+    def _room(self, session_id: str) -> int | None:
+        """The budget ``session_id``'s catalog may hold: what the current session and the other earlier
+        sessions leave of the one budget (None: no limit)."""
+        total = self._own.text_budget
+        if total is None:
+            return None
+        others = sum(catalog.held_bytes for sid, catalog in self._catalogs.items() if sid != session_id)
+        return max(0, total - self._own.held_bytes - others)
+
+    def trim(self) -> None:
+        """Let go of earlier sessions' text until it fits what the current session leaves of the budget,
+        the oldest session's first."""
+        total = self._own.text_budget
+        if total is None:
+            return
+        left = total - self._own.held_bytes
+        for catalog in self._catalogs.values():
+            if catalog.held_bytes > max(0, left):
+                catalog.set_text_budget(max(0, left))
+            left -= catalog.held_bytes
+
+    def _ranked(self, catalog: PageCatalog, query: str, allowed: int | None) -> tuple[list[str] | None, int]:
+        """The session's matching page ids, best first, and how many page files it lists; None for a
+        session with more than ``allowed`` (which is then not read). As ``SessionStore.search``, a page
+        removed while the search runs is left out by ranking again on a new listing."""
+        found: list[str] = []
+        listed = 0
+        for _ in range(3):
+            entries, fetch, names = catalog.search_entries()
+            listed = len(entries)
+            if allowed is not None and listed > allowed:
+                return None, listed
+            found = rank(entries, query, fetch)
+            if catalog.all_present(names):
+                break
+        return found, listed
+
+    def search(self, project: Project, query: str) -> EarlierSearch:
+        """Search the newest ``EARLIER_SESSIONS`` earlier sessions of ``project``, newest first, and
+        return the best ``EARLIER_HITS`` readable pages of each that has a match.
+
+        Read at most: the page files of those sessions, each once for ranking (not at all while its text
+        is held), up to ``EARLIER_PAGES`` files in all and for ``EARLIER_SECONDS`` (then the older
+        sessions are left alone and counted), and for each session with a match its best pages once
+        more to show them. A session whose pages cannot be listed is skipped and counted; a page that
+        is damaged or was removed meanwhile is left out; none of it raises."""
+        started = _clock()
+        members = project.earlier[:EARLIER_SESSIONS]
+        not_searched = len(project.earlier) - len(members)
+        order = {member.id: n for n, member in enumerate(members)}
+        self._catalogs = {sid: catalog for sid, catalog in self._catalogs.items() if sid in order}
+        self.trim()
+        hits: list[SessionHits] = []
+        searched = skipped = listed = 0
+        for n, member in enumerate(members):
+            if searched and _clock() - started > EARLIER_SECONDS:
+                not_searched += len(members) - n  # their held text stays: the next search may reach them
+                break
+            try:
+                _real_directory(member.dir)
+                _real_directory(member.pages_dir)
+                catalog = self._catalogs.get(member.id)
+                if catalog is None:
+                    catalog = self._catalogs[member.id] = PageCatalog(member.pages_dir, _no_log, 0)
+                catalog.set_text_budget(self._room(member.id))
+                found, count = self._ranked(catalog, query, EARLIER_PAGES - listed if searched else None)
+            except OSError:  # gone (a prune), a symlink, or a directory that cannot be listed
+                self._catalogs.pop(member.id, None)
+                skipped += 1
+                continue
+            if found is None:  # the page limit: this session and every older one are left alone
+                for older in members[n:]:
+                    self._catalogs.pop(older.id, None)
+                not_searched += len(members) - n
+                break
+            searched += 1
+            listed += count
+            pages: list[tuple[str, dict[str, Any]]] = []
+            gone = 0
+            for page_id in found:
+                if len(pages) == EARLIER_HITS:
+                    break
+                try:
+                    page = read_page(member.pages_dir, page_id)
+                except (OSError, *PAGE_DAMAGE):
+                    page = None
+                if page is None:  # removed or damaged since it was ranked
+                    gone += 1
+                else:
+                    pages.append((page_id, page))
+            if pages:
+                label = shown_label(project.label(member.id))
+                hits.append(SessionHits(member.id, label, session_date(member.created),
+                                        len(found) - gone, tuple(pages)))
+        self._catalogs = dict(sorted(self._catalogs.items(), key=lambda item: order[item[0]]))
+        return EarlierSearch(tuple(hits), searched, skipped, not_searched, listed)

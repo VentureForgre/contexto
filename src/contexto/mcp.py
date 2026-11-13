@@ -1,5 +1,11 @@
 """Contexto MCP server: recall, pin, close, state, and search over one session's store, on stdio.
 
+When the session has a project view (D69: ``store.project()`` is not None when the server starts),
+``contexto_search`` takes ``scope: "project"`` and ``contexto_recall`` takes ``session``, which reach
+the pages of the project's earlier sessions, read-only (``store.search_earlier``,
+``store.earlier_session``, ``store.earlier_page``). Without one the tool list and every reply are what
+they were before D69.
+
 Claude Code spawns ``contexto mcp --session S`` from the launcher's ``--mcp-config``. The server
 speaks JSON-RPC 2.0, one message per line on stdin and stdout, and serves both protocol eras:
 
@@ -33,6 +39,7 @@ from contexto.store import LockFileDamagedError, PageUnreadableError
 from contexto.store.ledger import LedgerCorruptError
 from contexto.store.pages import is_context_page
 from contexto.store.pinned import FACT_KINDS
+from contexto.store.project import EarlierSearch, NotEarlierSessionError
 from contexto.store.render import (
     MATCH_CONTEXT,
     MATCHES_PER_PAGE,
@@ -73,6 +80,20 @@ RECALL_NEARLY_SPENT = ("The recall budget for this turn is nearly used up (about
                        "what is in view, or say the detail is unknown.")
 SEARCH_TOO_LONG = "This search result is longer than one call can return; use a longer or more specific query."
 NO_HIT = "No paged-out turn contains every word of that query."
+# D69, a search with scope "project": the current session's part is the session-scope reply (with no hit
+# in it, a first line that says so of this session only), then the earlier sessions' part. All of it is
+# charged text: none of these lines is a control reply.
+SCOPES = ("session", "project")
+NO_HIT_SESSION = "No paged-out turn of this session contains every word of that query."
+EARLIER_HEADER = "[earlier sessions of this project, newest first:]"
+EARLIER_NONE = "[No earlier session of this project matches.]"
+EARLIER_READ_ON = ('[Read on: contexto_recall {"page_id": ..., "offset": ..., "session": "<label on the page\'s '
+                   'session line>"}]')
+NOT_EARLIER_SESSION = ('That "session" is not an earlier session of this project. Use the label on a [session ...] '
+                       'line of a contexto_search with scope "project".')
+AMBIGUOUS_SESSION = 'That "session" is the start of {count} earlier sessions of this project; give more of the label.'
+SPECIFIC_WHY = "use a longer or more specific query"
+BUDGET_WHY = "the recall budget for this turn is used up"
 # Fixed control replies are protocol text, never charged, and returned even when the room is smaller than they
 # are (contract PR #103); the longest is about 225 characters. RECALL_NEARLY_SPENT is a template, checked apart.
 CONTROL_REPLIES = frozenset({BUDGET_SPENT, SEARCH_TOO_LONG, NO_HIT})
@@ -255,6 +276,32 @@ TOOLS: list[dict[str, Any]] = [
 _TOOL_NAMES = {t["name"] for t in TOOLS}
 
 
+def _project_tools() -> list[dict[str, Any]]:
+    """The tool list of a session with a project view (D69): ``TOOLS`` with one more property on each of
+    the two tools that reach the project's earlier sessions, and nothing else changed. Every request
+    carries the list, so the two descriptions are the fewest words that say what the argument is for."""
+    tools = json.loads(json.dumps(TOOLS))  # a copy: TOOLS stays the list of a session without a project view
+    properties = {tool["name"]: tool["inputSchema"].get("properties") for tool in tools}
+    properties["contexto_recall"]["session"] = {
+        "type": "string", "description": "Label of an earlier session, from a search with scope project"}
+    properties["contexto_search"]["scope"] = {
+        "type": "string", "enum": list(SCOPES), "default": "session",
+        "description": "project: also search this project's earlier sessions"}
+    return tools
+
+
+PROJECT_TOOLS = _project_tools()
+
+
+def _has_project(store: Any) -> bool:
+    """Whether the session has a project view now (``store.project()`` is not None). A store without
+    the method, or one that cannot be read, has none: the server then serves what it served before D69."""
+    project = getattr(store, "project", None)
+    try:
+        return callable(project) and project() is not None
+    except Exception:  # an unopened or damaged store: every tool call reports it; the list is the plain one
+        return False
+
 
 
 class Server:
@@ -264,6 +311,10 @@ class Server:
         self.stderr = stderr or sys.stderr
         self.legacy_version: str | None = None  # set by initialize
         self.listed = False  # tools/list answered and recorded (see _tools_list)
+        # D69: decided once, here, so the tool list never changes during a session (it is part of the
+        # prompt's cached head). Without a project view the list and the arguments are those before D69.
+        self.project_tools = _has_project(store)
+        self.tools = PROJECT_TOOLS if self.project_tools else TOOLS
         self.handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "initialize": self._initialize,
             "server/discover": self._discover,
@@ -376,7 +427,7 @@ class Server:
                     self._diag(f"set_mcp_listed failed: {type(exc).__name__}")
                 except (OSError, ValueError):  # a closed or broken stderr
                     pass
-        return {"tools": TOOLS}
+        return {"tools": self.tools}
 
     def _tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
         name = params["name"]
@@ -423,12 +474,27 @@ class Server:
         offset = args.get("offset", 0)
         if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
             raise ToolError("offset must be a non-negative integer")
-        _reject_extra(args, {"page_id", "offset"})
+        _reject_extra(args, {"page_id", "offset", "session"} if self.project_tools else {"page_id", "offset"})
+        if "session" in args and (not isinstance(args["session"], str) or not args["session"]):
+            raise ToolError("session must be a non-empty string")
+        # D69: the earlier session of this project the page is read from, by the label the reply names
+        # it by; None for the current session, which its own id means too.
+        earlier = None
+        if "session" in args and args["session"] != getattr(self.store, "session_id", None):
+            try:
+                earlier = self.store.earlier_session(args["session"])
+            except NotEarlierSessionError as exc:  # compared with the earlier sessions' ids only, and not echoed
+                raise ToolError(AMBIGUOUS_SESSION.format(count=exc.matches) if exc.matches > 1
+                                else NOT_EARLIER_SESSION) from None
+        where = f" of session {earlier.label}" if earlier else ""
         try:
-            page = self.store.get_page(page_id)
+            page = self.store.earlier_page(earlier, page_id) if earlier else self.store.get_page(page_id)
         except PageUnreadableError as exc:
             cause = "its stored file is damaged" if exc.damaged else "reading its stored file failed"
-            raise ToolError(f"Page {page_id} cannot be read: {cause}.") from None
+            raise ToolError(f"Page {page_id}{where} cannot be read: {cause}.") from None
+        if page is None and earlier:
+            raise ToolError(f"Unknown page id: {_clip(page_id)} in session {earlier.label}. The page ids of an "
+                            'earlier session appear in a contexto_search with scope "project".')
         if page is None:
             raise ToolError(f"Unknown page id: {_clip(page_id)}. Page ids appear in the paged-history index.")
         limit, note = recall_limit(*self._window())
@@ -437,10 +503,12 @@ class Server:
         except ValueError as exc:
             raise ToolError(str(exc)) from None
         full, total = part["text"], part["total_chars"]
+        source = "earlier" if earlier else "paged"
+        target = f"page_id {page_id}, session {earlier.label} and offset" if earlier else (
+            f"page_id {page_id} and offset")
 
         def hint(end: int) -> str:
-            return (f"[{total - end} more characters: call contexto_recall with page_id {page_id} and offset {end}; "
-                    f"{note}]")
+            return f"[{total - end} more characters: call contexto_recall with {target} {end}; {note}]"
 
         def build(room: int | None) -> list[str] | None:
             texts = [full] + ([hint(offset + len(full))] if offset + len(full) < total else [])
@@ -458,8 +526,12 @@ class Server:
                      else BUDGET_SPENT]
         return ([{"type": "text", "text": t} for t in texts], None,
                 {"page_id": page_id, "offset": offset, "chars": len(chunk), "total_chars": total,
-                 "returned": [{"source": "paged", "page_id": page_id, "start": offset, "end": offset + len(chunk)}]
+                 "returned": [{"source": source, "page_id": page_id, "start": offset, "end": offset + len(chunk)}]
                  if chunk else [],
+                 # D69, only from a server with a project view: whether the page is an earlier session's
+                 # (never which session). Its span's source is "earlier", so it never credits this
+                 # session's pages, whose ids a copied session directory can share.
+                 **({"earlier": earlier is not None} if self.project_tools else {}),
                  **budget})
 
     def _tool_pin(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
@@ -549,8 +621,11 @@ class Server:
         return [page_id for page_id in found if page_id not in dropped], pages
 
     def _tool_search(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], None, dict[str, Any]]:
-        _reject_extra(args, {"query"})
+        _reject_extra(args, {"query", "scope"} if self.project_tools else {"query"})
         query = _require_str(args, "query")
+        scope = args.get("scope", SCOPES[0])
+        if not isinstance(scope, str) or scope not in SCOPES:
+            raise ToolError('scope must be "session" or "project"')
         found, pages = self._readable_pages(self.store.search(query))  # best first (D34)
         # The best pages are chosen by relevance and shown newest first, so among them the newest statement
         # of a fact comes first (D28); the next best are listed newest first too. In each part turn pages
@@ -563,7 +638,7 @@ class Server:
         in_view = self._in_view_rows(query, in_view_found)  # None: in view not checked
         lead = in_view or []
         limit, _ = recall_limit(*self._window())  # one search reply is held to the per-call recall limit
-        specific = "use a longer or more specific query"
+        specific = SPECIFIC_WHY
 
         def render(rows: list[Row], detailed: int, listed: int, why: str) -> str:
             lines = [t for t, _ in lead] + [SEARCH_BEST_HEADER] + [t for t, _ in rows]
@@ -576,19 +651,18 @@ class Server:
 
         picked: dict[str, Any] = {"rows": [], "pages": 0}
 
-        def build(room: int | None) -> list[str] | None:
+        def fit(cap: int, by_cap: bool) -> list[str] | None:
+            """The current session's reply in at most ``cap`` characters; ``by_cap`` when the per-call
+            limit binds, not the turn's room."""
             if not hits and not lead:
                 return [NO_HIT]
             if not hits:  # matches in view only
                 text = "\n".join(t for t, _ in lead)
-                cap_only = limit if room is None else min(room, limit)
-                if len(text) <= cap_only:
+                if len(text) <= cap:
                     picked.update(rows=[], pages=0)
                     return [text]
                 return None
-            cap = limit if room is None else min(room, limit)
-            by_cap = room is None or limit <= room  # the per-call limit binds, not the turn's room
-            why = specific if by_cap else "the recall budget for this turn is used up"
+            why = specific if by_cap else BUDGET_WHY
             for detailed in range(len(hits), 0, -1):  # whole hits first, then as many compact entries as fit
                 rows = [row for hit in hits[:detailed] for row in hit]
                 for listed in range(len(more) if detailed == len(hits) else 0, -1, -1):
@@ -609,16 +683,57 @@ class Server:
                     return [text]
             return [SEARCH_TOO_LONG] if by_cap and len(SEARCH_TOO_LONG) <= cap else None
 
-        texts, budget = self._within_room(build, "contexto_search")
+        def build(room: int | None) -> list[str] | None:
+            return fit(limit if room is None else min(room, limit), room is None or limit <= room)
+
+        # D69: with scope "project", the earlier sessions' part follows, in the same reply and the same charge.
+        earlier = _EarlierPart(self._search_earlier(query), query) if scope == "project" else None
+
+        def build_project(room: int | None) -> list[str] | None:
+            """The current session's part as ``fit`` gives it, in what the room and the per-call limit
+            leave beside the least the earlier part can be (the line saying what was left out); then as
+            many of the earlier sessions' pages as fit, newest session first."""
+            cap = limit if room is None else min(room, limit)
+            by_cap = room is None or limit <= room
+            why = specific if by_cap else BUDGET_WHY
+            earlier.shown = 0
+            least = earlier.text(0, why)
+            own = fit(cap - len(least) - 1, by_cap)
+            if own is None or own == [SEARCH_TOO_LONG]:
+                return own
+            head = NO_HIT_SESSION if own == [NO_HIT] else own[0]
+            for shown in range(earlier.pages, -1, -1):
+                text = head + "\n" + earlier.text(shown, why)
+                if len(text) <= cap:
+                    earlier.shown = shown
+                    return [text]
+            return None  # no hit in this session, and not even that line fits
+
+        texts, budget = self._within_room(build if earlier is None else build_project, "contexto_search")
         text = texts[0] if texts else BUDGET_SPENT
         shown = texts is not None and text not in CONTROL_REPLIES
         coverage = SEARCH_COVERAGE if in_view is not None else SEARCH_COVERAGE_UNCHECKED
+        rows = lead + picked["rows"] + (earlier.rows(earlier.shown) if earlier else [])
+        extra: dict[str, Any] = {}
+        if self.project_tools:  # content-free: the scope and counts of sessions, never which sessions
+            extra["scope"] = scope
+        if earlier:
+            extra.update(earlier_searched=earlier.found.searched, earlier_skipped=earlier.found.skipped,
+                         earlier_matched=len(earlier.found.hits), earlier_not_searched=earlier.found.not_searched,
+                         earlier_hits=earlier.shown if shown else 0)
         return ([{"type": "text", "text": text}, {"type": "text", "text": coverage}], None,
                 {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": len(found),
                  "in_view_hits": sum(1 for _, span in lead if span) if shown else 0,
                  "in_view_more": max(0, in_view_found[0] - IN_VIEW_LIMIT) if shown else 0,
                  "in_view_checked": in_view is not None,
-                 "returned": _spans(lead + picked["rows"]) if shown else [], **budget})
+                 "returned": _spans(rows) if shown else [], **extra, **budget})
+
+    def _search_earlier(self, query: str) -> EarlierSearch:
+        """What the project's earlier sessions hold of ``query`` (``SessionStore.search_earlier``). A
+        session whose project view is gone since the server started (project memory turned off for it)
+        has no earlier session to search."""
+        search = getattr(self.store, "search_earlier", None)
+        return (search(query) if callable(search) else None) or EarlierSearch()
 
     def _in_view_rows(self, query: str, total: list[int]) -> list[Row] | None:
         """Matching lines of the conversation in view, newest first (B19 b, contract PR #125).
@@ -761,12 +876,15 @@ def _with_context_header(entries: list[tuple[list[Row], dict[str, Any]]]) -> lis
     return out
 
 
-def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
+def _hit_rows(page_id: str, page: dict[str, Any], query: str, session: str | None = None) -> list[Row]:
     """One search hit: the page line, then its matching lines (>) and context, each with its offset.
 
     Each line carries the page span it shows, ``(page_id, start, end)`` with ``end`` exclusive, for
     the content-free log that acceptance 3 reads (contract PR #95). A query from a tool input is
     matched in its JSON-escaped form too, as ``render_page`` prints it (B18).
+
+    ``session`` is the label of the earlier session the page is in (D69), None for the current one: the
+    hit reads the same, its spans are marked ``earlier``, and its hint names the session to recall from.
     """
     rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
     # Search, recall, and state calls are blanked at their offsets, so no line of an earlier reply is shown (D51).
@@ -774,15 +892,82 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     q = Query.parse(query)
     on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only
     shown, total = match_lines(text, q, last=True) if on_page else ([], 0)  # the LAST matching lines (B21)
-    rows += [(f"{'>' if is_match else ' '} {start}: {line}", (page_id, start, end))
+    rows += [(f"{'>' if is_match else ' '} {start}: {line}",
+              (page_id, start, end) if session is None else ("earlier", page_id, start, end))
              for start, end, is_match, line in shown if is_match or not _blanked(text, start, end)]
     if not shown:  # the match is in the stub only: show the stub line as the matching line
         rows.append((f"> stub: {_stub_line(page.get('stub'))}", None))
     elif total > MATCHES_PER_PAGE:  # earlier statements stay reachable from the first match's offset
         first = matching_line_starts(text, q)[0]
+        target = f"page_id {page_id}" if session is None else f"page_id {page_id}, session {session}"
         rows.append((f"  [{total - MATCHES_PER_PAGE} more matching lines in this page, the first at offset "
-                     f"{first}; call contexto_recall with page_id {page_id} and that offset to read them]", None))
+                     f"{first}; call contexto_recall with {target} and that offset to read them]", None))
     return rows
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}{'' if n == 1 else 's'}"
+
+
+class _EarlierPart:
+    """The earlier sessions' part of a project-scope search reply (D69, design section 7).
+
+    For each earlier session with a match, newest session first: a line ``[session <label>, <date>:]``
+    (the label ``contexto_recall`` takes as ``session``, and the UTC date the session was created), then
+    its best pages, each shown as a hit of the current session is. When the room or the per-call limit
+    cuts it, pages are left out from the end and one line says how many, and why. Then how many older
+    sessions were not searched and how many could not be read, when there are any, and last the line
+    that says how to read on. With no match in any earlier session the part is one line saying so."""
+
+    def __init__(self, found: EarlierSearch, query: str) -> None:
+        self.found = found
+        self.shown = 0  # pages in the reply as it was last built
+        self.sessions: list[tuple[str, list[list[Row]]]] = []  # each session's line, and the rows of each page
+        for hits in found.hits:
+            best = (f", the best {len(hits.pages)} of {hits.found} matching pages" if hits.found > len(hits.pages)
+                    else "")
+            self.sessions.append((f"[session {hits.label}, {hits.date}{best}:]", _with_context_header(
+                [(_hit_rows(page_id, page, query, hits.label), page)
+                 for page_id, page in _newest_first(list(hits.pages))])))
+        self.pages = sum(len(entries) for _, entries in self.sessions)
+
+    def _taken(self, shown: int) -> list[tuple[str, list[list[Row]], int]]:
+        """Each session's line and the pages of it among the first ``shown``, and how many it has."""
+        out = []
+        for line, entries in self.sessions:
+            out.append((line, entries[:max(0, shown)], len(entries)))
+            shown -= len(entries)
+        return out
+
+    def rows(self, shown: int) -> list[Row]:
+        return [row for _, entries, _ in self._taken(shown) for entry in entries for row in entry]
+
+    def text(self, shown: int, why: str) -> str:
+        """The part with its first ``shown`` pages; ``why`` is why the rest is not shown."""
+        lines = []
+        if not self.sessions:
+            lines.append(EARLIER_NONE)
+        else:
+            taken = self._taken(shown)
+            if shown:
+                lines.append(EARLIER_HEADER)
+            for line, entries, _ in taken:
+                if entries:
+                    lines.append(line)
+                    lines += [text for entry in entries for text, _ in entry]
+            left = [total - len(entries) for _, entries, total in taken if len(entries) < total]
+            if left:
+                lines.append(f"[{_count(sum(left), 'more matching page')} in {_count(len(left), 'earlier session')} "
+                             f"not shown; {why}]")
+        older, unread = self.found.not_searched, self.found.skipped
+        if older:
+            lines.append(f"[{_count(older, 'older session')} of this project {'was' if older == 1 else 'were'} "
+                         "not searched]")
+        if unread:
+            lines.append(f"[{_count(unread, 'earlier session')} could not be read]")
+        if shown:
+            lines.append(EARLIER_READ_ON)
+        return "\n".join(lines)
 
 
 def _blanked(text: str, start: int, end: int) -> bool:
@@ -820,7 +1005,10 @@ def _spans(rows: list[Row]) -> list[dict[str, Any]]:
 
     Paged spans are ``{source: paged, page_id, start, end}`` into ``render_page``; lines that follow
     each other merge. In-view spans are ``{source: in_view, turn, message_index, start, end}`` into
-    that retained entry's text, with no page id, so they never credit recall (acceptance 3).
+    that retained entry's text, with no page id, so they never credit recall (acceptance 3). Spans of an
+    earlier session's page (D69) are ``{source: earlier, page_id, start, end}``: the same shape as a
+    paged span, under a source of their own, since the page is not this session's (a copied session
+    directory can even hold the same page id) and the session it is in is never logged.
     """
     spans: list[dict[str, Any]] = []
     for _, span in rows:
@@ -830,11 +1018,12 @@ def _spans(rows: list[Row]) -> list[dict[str, Any]]:
             _, turn, index, start, end = span
             spans.append({"source": "in_view", "turn": turn, "message_index": index, "start": start, "end": end})
             continue
-        page_id, start, end = span
-        if spans and spans[-1].get("page_id") == page_id and spans[-1]["end"] + 1 == start:  # the newline is shown too
+        source, (page_id, start, end) = ("earlier", span[1:]) if span[0] == "earlier" else ("paged", span)
+        if (spans and spans[-1]["source"] == source and spans[-1].get("page_id") == page_id
+                and spans[-1]["end"] + 1 == start):  # the newline is shown too
             spans[-1]["end"] = end
         else:
-            spans.append({"source": "paged", "page_id": page_id, "start": start, "end": end})
+            spans.append({"source": source, "page_id": page_id, "start": start, "end": end})
     return spans
 
 
