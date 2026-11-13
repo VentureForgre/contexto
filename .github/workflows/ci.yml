@@ -3,8 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
-  # Test main itself after every merge. release.yml also calls this workflow on pushes to main, but
-  # only when RELEASES_ENABLED is "true"; with releases on, a main push runs CI twice.
+  # Test main itself after every merge. Release (release.yml) calls this workflow when a release is
+  # dispatched.
   push:
     branches: [main]
   workflow_call:
@@ -67,17 +67,72 @@ jobs:
       - name: Check that the package builds
         run: uv build --out-dir "$RUNNER_TEMP/dist"
 
+  # Install what was built, on every leg the tests run on: the matrix is a copy of test's, and
+  # tests/test_packaging.py fails if the two differ. The test job runs the checkout's code from the
+  # project environment; this one runs the wheel, and the sdist, from environments that hold nothing
+  # else. The same script runs locally.
+  install:
+    name: install (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.12", "3.13", "3.14", "3.15"]
+        include:
+          - os: macos-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.15"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          # Pinned like Ruff and pytest. uv is also the build backend, and its version is in the wheel.
+          version: "0.13.7"
+          # uv downloads this CPython when the runner lacks it.
+          python-version: ${{ matrix.python }}
+          # The script installs without the uv cache, so this job may leave nothing to save.
+          ignore-nothing-to-cache: true
+      - name: Install the built wheel and sdist into empty environments and run them
+        env:
+          MATRIX_PYTHON: ${{ matrix.python }}
+        run: bash .github/scripts/install-check.sh "$MATRIX_PYTHON"
+
+  # What PyPI would get, checked once: the artifacts do not depend on the Python that builds them.
+  # twine and readme-renderer are pinned in the script. Nothing is uploaded.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          # Pinned like Ruff and pytest. uv is also the build backend, and its version is in the wheel.
+          version: "0.13.7"
+          python-version: "3.12"
+          ignore-nothing-to-cache: true
+      - name: Check the sdist, the wheel, their metadata and the rendered long description
+        run: bash .github/scripts/package-check.sh
+
   # The one required status check. Branch rules name this job, not the matrix legs.
   ci:
     name: ci
     if: always()
-    needs: [lint, test]
+    needs: [lint, test, install, package]
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI job to succeed
         env:
           LINT: ${{ needs.lint.result }}
           TEST: ${{ needs.test.result }}
+          INSTALL: ${{ needs.install.result }}
+          PACKAGE: ${{ needs.package.result }}
         run: |
           test "$LINT" = success
           test "$TEST" = success
+          test "$INSTALL" = success
+          test "$PACKAGE" = success
