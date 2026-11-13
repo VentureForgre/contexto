@@ -19,6 +19,7 @@ from pathlib import Path
 
 HEADING = re.compile(r"## (\d+\.\d+\.\d+) \(\d{4}-\d{2}-\d{2}\)")
 VERSION = re.compile(r"v?(\d+\.\d+\.\d+)")
+PLACEHOLDERS = {"nothing yet", "nothing", "none", "no changes yet"}
 FIX = (
     'Add the section "## {version} (YYYY-MM-DD)" above the older versions, with the changes since '
     "the last release in user terms, in a docs: pull request. After it merges, run the release "
@@ -42,11 +43,11 @@ def _body(lines, start):
 
 
 def unreleased_entries(text):
-    """The non-blank lines under "## Unreleased", which a release leaves behind."""
+    """The lines under "## Unreleased", which a release leaves behind. A "Nothing yet." is not one."""
     lines = _lines(text)
     for number, line in enumerate(lines):
         if line == "## Unreleased":
-            return _body(lines, number)
+            return [entry for entry in _body(lines, number) if entry.strip(" *_.-").lower() not in PLACEHOLDERS]
     return []
 
 

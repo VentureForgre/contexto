@@ -31,7 +31,12 @@ def _load():
     spec = importlib.util.spec_from_file_location("release_pypi_publish", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    # Leave no __pycache__ next to the workflow's scripts.
+    writes_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = writes_bytecode
     return module
 
 

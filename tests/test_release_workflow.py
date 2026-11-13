@@ -287,7 +287,9 @@ def test_the_owner_steps_name_what_the_workflow_uses():
 
 def test_releasing_md_describes_every_script_and_switch():
     doc = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
-    for script in sorted((ROOT / ".github" / "scripts").iterdir()):
+    scripts = sorted(path for path in (ROOT / ".github" / "scripts").iterdir() if path.suffix in (".py", ".sh"))
+    assert len(scripts) == 6
+    for script in scripts:
         assert f"`.github/scripts/{script.name}`" in doc, script.name
     for word in ("RELEASES_ENABLED", "PYPI_PUBLISH_ENABLED", "-f action=release", "-f action=reattach",
                  "-f action=publish", "docs/pypi-publishing.md"):

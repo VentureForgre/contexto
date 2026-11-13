@@ -18,7 +18,12 @@ def _load():
     spec = importlib.util.spec_from_file_location("release_changelog_check", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    # Leave no __pycache__ next to the workflow's scripts.
+    writes_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = writes_bytecode
     return module
 
 
@@ -135,6 +140,12 @@ def test_unreleased_entries_are_reported_but_do_not_fail():
     assert guard.problem(text, "0.6.0") is None
     assert guard.unreleased_entries(text) == ["- Not yet moved."]
     assert guard.unreleased_entries(GOOD) == []
+
+
+@pytest.mark.parametrize("placeholder", ["Nothing yet.", "_Nothing yet._", "- None", "nothing"])
+def test_a_placeholder_under_unreleased_is_not_an_entry(placeholder):
+    text = GOOD.replace("## Unreleased\n", f"## Unreleased\n\n{placeholder}\n")
+    assert guard.unreleased_entries(text) == []
 
 
 def _run(*args, cwd):
