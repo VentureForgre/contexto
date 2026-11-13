@@ -1,7 +1,10 @@
-# Installing Contexto
+# Install
 
-The short version is in the [README](../README.md#install). This page has every install method,
-how to upgrade each, how to check a download, and what to do when an install goes wrong.
+[Contexto](../README.md) / [Documentation](README.md)
+
+The [README](../README.md#install) has the one command that installs Contexto. This page has the
+install script's options, the other ways to install, how to upgrade each, how to check a download,
+how to uninstall, and what to do when an install goes wrong.
 
 ## What you need
 
@@ -116,7 +119,7 @@ contexto --version
 ```
 
 `pip install "$url"` works too, inside an active Python 3.12+ virtual environment. None of these
-checks the download; to check it first, see [Verifying a download](#verifying-a-download).
+checks the download; to check it first, see [Checking the download](#checking-the-download).
 
 ### Run without installing
 
@@ -180,11 +183,11 @@ depends on the code you installed:
 `pip list`, `pipx list` and `uv tool list` show `0.0.0+checkout` in every case. When the version
 matters, for example in a bug report or a pinned setup, install a release wheel.
 
-## Upgrading
+## Upgrade
 
 Contexto makes no network calls of its own and never checks for a new version. Nothing tells you
-when a release is out. The [changelog](https://github.com/VentureForgre/contexto/blob/main/CHANGELOG.md)
-and the [Releases page](https://github.com/VentureForgre/contexto/releases) list what changed.
+when a release is out. The [changelog](../CHANGELOG.md) and the
+[Releases page](https://github.com/VentureForgre/contexto/releases) list what changed.
 
 An upgrade never touches your session data in `~/.contexto` (or `$CONTEXTO_HOME`).
 
@@ -236,7 +239,7 @@ and pipx 1.18.4 do when it is not followed:
 Under one name, an upgrade replaces the install in place: `uv tool install` of a newer wheel does it
 directly, and `pipx install` does it with `--force`.
 
-## Verifying a download
+## Checking the download
 
 Contexto sees every prompt and every auth header your CLI sends, so it is worth checking that a
 wheel is the one this repository's release workflow built.
@@ -275,7 +278,7 @@ the asset:
 gh release view "v$v" --repo VentureForgre/contexto --json assets --jq '.assets[] | .name + " " + .digest'
 ```
 
-## Uninstalling
+## Uninstall
 
 ```sh
 uv tool uninstall contexto-proxy      # or: pipx uninstall contexto-proxy
@@ -286,8 +289,8 @@ pip uninstall contexto-proxy          # an install made with pip in a virtual en
 `uv tool list` and `pipx list` show which name you have, and which tool has it.
 
 Uninstalling leaves your session data in `~/.contexto` (or `$CONTEXTO_HOME`). Delete that directory
-to remove every stored conversation. The README's
-[What is stored and where](../README.md#what-is-stored-and-where) says what is in it.
+to remove every stored conversation.
+[What is stored and where](sessions.md#what-is-stored-and-where) says what is in it.
 
 ## Platforms
 
@@ -299,6 +302,9 @@ to remove every stored conversation. The README's
 - **WSL.** Untested. Nobody has run Contexto or its test suite there.
 
 ## Troubleshooting
+
+These are install problems. Problems while Contexto runs are in
+[troubleshooting.md](troubleshooting.md).
 
 ### The wrong `contexto` from PyPI
 

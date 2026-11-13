@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from test_docs_links import anchors, broken_links
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "install.sh"
 README = ROOT / "README.md"
@@ -1020,38 +1022,20 @@ def test_readme_names_the_release_version_in_exactly_one_line():
     assert section.count(tag) == 2, f"{tag} appears nowhere else in the Install section"
 
 
-def anchors_of(path: Path) -> set[str]:
-    """The heading anchors GitHub gives a Markdown file."""
-    headings = re.findall(r"^#{1,6} +(.+?) *$", path.read_text(), flags=re.M)
-    return {re.sub(r"[^a-z0-9 _-]", "", heading.lower()).replace(" ", "-") for heading in headings}
-
-
-def check_relative_links(text: str, source: Path):
-    """Every relative link in `text`, a part of `source`, names a file and a heading that exist."""
-    links = re.findall(r"\]\(([^)\s]+)\)", text)
-    assert links
-    for link in links:
-        if link.startswith(("https://", "http://")):
-            continue
-        path, _, fragment = link.partition("#")
-        target = (source.parent / path).resolve() if path else source
-        assert target.exists(), f"{link} in {source.name} points at a file that does not exist"
-        if fragment and target.suffix == ".md":
-            assert fragment in anchors_of(target), f"{link} in {source.name} points at a heading that does not exist"
-
-
-def test_readme_install_section_links_resolve():
+def test_readme_install_section_keeps_its_headings_and_its_links_resolve():
     section = install_section()
-    check_relative_links(section, README)
-    for anchor in ("checking-the-download", "uninstall", "platforms", "upgrade"):
-        assert f"\n### {anchor.replace('-', ' ').capitalize()}\n" in section, anchor
+    for heading in ("Upgrade", "Checking the download", "Uninstall", "Platforms"):
+        assert f"\n### {heading}\n" in section, heading
+    assert re.findall(r"\]\(([^)\s]+)\)", section), "the section links to the script and the full page"
+    assert broken_links(ROOT, ["README.md", "docs/install.md"]) == []
 
 
-def test_install_doc_links_resolve_and_the_script_links_into_it():
-    doc = ROOT / "docs" / "install.md"
-    check_relative_links(doc.read_text(), doc)
-    for fragment in re.findall(r"docs/install\.md#([a-z0-9-]+)", SCRIPT.read_text()):
-        assert fragment in anchors_of(doc), fragment
+def test_links_into_the_install_page_resolve():
+    """The anchors other pages and the script's own messages point at."""
+    offered = anchors((ROOT / "docs" / "install.md").read_text())
+    wanted = set(re.findall(r"docs/install\.md#([a-z0-9-]+)", SCRIPT.read_text() + README.read_text()))
+    assert wanted, "the script and the README link into docs/install.md"
+    assert wanted | {"checking-the-download", "from-a-checkout", "uninstall", "platforms", "upgrade"} <= offered
 
 
 def test_readme_install_section_has_the_one_line_install():
