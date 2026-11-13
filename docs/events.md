@@ -4,9 +4,107 @@ Every Contexto session has a log, `log.jsonl`. This is a reference for every eve
 it: who writes it, where in the log it appears, what it means, its fields, and whether it is normal
 operation, a notice, or a sign that something went wrong.
 
-`tests/test_events_doc.py` reads the package source and fails when it can write an event name or a
-field this document does not list, or when the document lists one the source cannot write. The test
-checks names and fields. It does not check the prose.
+`tests/test_events_doc.py` reads the package source and keeps this document in step with it. What it
+checks:
+
+- Event names, both ways: every name the source can write has an entry here, and every entry names
+  an event the source can write.
+- Fields, as far as the test can read them from the source: a key written next to an event's name,
+  stored later on the same variable, or unpacked into the event from a dict built in the same
+  function must be listed under that event. The fields that reach an event some other way (through
+  a helper's return value, for example) are named in a list in the test, and each of those must be
+  listed here too. A field the source newly writes through a helper is not noticed until someone
+  adds it to that list.
+- Every field listed here appears in a module that writes its event. That catches a renamed or
+  removed field. It does not prove the field is written on that event.
+- The [index](#index) and the entries agree, and each `json` example shows only events and fields
+  that are listed.
+
+It does not check an entry's writer, where it appears or its kind against the source, and it does
+not check the prose: what an event or a field means, and when a field is present.
+
+## Index
+
+Every event, in the order of its entry below. Writer, Where and Kind are explained under
+[Reading an entry](#reading-an-entry). An event whose Where is `transform_events` or `usage_events`
+is never a line of its own: look for it inside a `request` line.
+
+| Event | Writer | Where | Kind |
+| --- | --- | --- | --- |
+| [`request`](#request) | proxy | own line | normal |
+| [`proxy_start`](#proxy_start) | proxy | own line | normal |
+| [`proxy_stop`](#proxy_stop) | proxy | own line | normal |
+| [`proxy_stop_incomplete`](#proxy_stop_incomplete) | proxy | own line | notice |
+| [`request_refused`](#request_refused) | proxy | own line | notice |
+| [`websocket_rejected`](#websocket_rejected) | proxy | own line | problem |
+| [`encoded_body_rejected`](#encoded_body_rejected) | proxy | own line | problem |
+| [`request_too_deep`](#request_too_deep) | proxy | own line | problem |
+| [`transform_error`](#transform_error) | proxy | own line | problem |
+| [`proxy_error`](#proxy_error) | proxy | own line | problem |
+| [`upstream_retry`](#upstream_retry) | proxy | own line | notice |
+| [`upstream_4xx`](#upstream_4xx) | proxy | own line | notice |
+| [`hold_skipped`](#hold_skipped) | proxy | own line | notice |
+| [`observe_usage_error`](#observe_usage_error) | proxy | own line | problem |
+| [`request` (the engine's nested event)](#request-the-engines-nested-event) | engine | `transform_events` | normal |
+| [`count_tokens`](#count_tokens) | engine | `transform_events` | normal |
+| [`rotation`](#rotation) | engine | `transform_events` | normal |
+| [`page_out`](#page_out) | engine | `transform_events` | normal |
+| [`rotation_noop`](#rotation_noop) | engine | `transform_events` | normal |
+| [`window_minimal`](#window_minimal) | engine | `transform_events` | notice |
+| [`bound_too_small`](#bound_too_small) | engine | `transform_events` | problem |
+| [`pdf_allowance`](#pdf_allowance) | engine | `transform_events` | notice |
+| [`pdf_pages_uncertain`](#pdf_pages_uncertain) | engine | `transform_events` | notice |
+| [`turn_room_low`](#turn_room_low) | engine | `transform_events` | problem |
+| [`head_changed`](#head_changed) | engine | `transform_events` | normal |
+| [`usage_missing`](#usage_missing) | engine | `transform_events` | notice |
+| [`carried_text_growing`](#carried_text_growing) | engine | `transform_events` | notice |
+| [`carried_paged`](#carried_paged) | engine | `transform_events` | notice |
+| [`carried_over_budget`](#carried_over_budget) | engine | `transform_events` | problem |
+| [`unclassified_system_message`](#unclassified_system_message) | engine | `transform_events` | problem |
+| [`resync`](#resync) | engine | `transform_events` | notice |
+| [`over_bound`](#over_bound) | engine | `transform_events`, `usage_events` | notice, problem |
+| [`estimate_error`](#estimate_error) | engine | `usage_events` | notice |
+| [`usage_unattributed`](#usage_unattributed) | engine | `usage_events` | notice |
+| [`store_error`](#store_error) | engine | `transform_events`, `usage_events` | problem |
+| [`page_conflict`](#page_conflict) | engine | `transform_events` | problem |
+| [`degraded_enter`](#degraded_enter) | engine | `transform_events`, `usage_events` | problem |
+| [`degraded_leave`](#degraded_leave) | engine | `transform_events` | notice |
+| [`fallback_failed`](#fallback_failed) | engine | `transform_events` | problem |
+| [`sizing_restored`](#sizing_restored) | engine | `transform_events` | normal |
+| [`sizing_not_restored`](#sizing_not_restored) | engine | `transform_events` | notice |
+| [`epoch_resumed`](#epoch_resumed) | engine | `transform_events` | normal |
+| [`epoch_not_resumed`](#epoch_not_resumed) | engine | `transform_events` | normal, notice, problem |
+| [`carried_reclassified`](#carried_reclassified) | engine | `transform_events` | notice |
+| [`epoch_record_stale`](#epoch_record_stale) | engine | `transform_events` | problem |
+| [`main_changed`](#main_changed) | engine | `transform_events` | normal |
+| [`retained_stale`](#retained_stale) | engine | `transform_events` | problem |
+| [`side_room_closed`](#side_room_closed) | engine | `transform_events`, `usage_events` | normal |
+| [`side_room_close_failed`](#side_room_close_failed) | engine | `transform_events` | problem |
+| [`mcp_tools_missing`](#mcp_tools_missing) | engine | `transform_events`, own line | problem |
+| [`mcp_tools_found`](#mcp_tools_found) | engine | `transform_events` | notice |
+| [`mcp_tools_denied`](#mcp_tools_denied) | engine | `transform_events` | problem |
+| [`toolcheck_error`](#toolcheck_error) | engine | `transform_events` | problem |
+| [`cli_version`](#cli_version) | engine | `transform_events` | normal |
+| [`cli_version_untested`](#cli_version_untested) | engine | `transform_events` | notice |
+| [`session_start_unrecognised`](#session_start_unrecognised) | engine | `transform_events` | notice |
+| [`cli_version_error`](#cli_version_error) | engine | `transform_events` | problem |
+| [`launch`](#launch) | launcher (Claude), launcher (Codex) | own line | normal |
+| [`cli_version_check`](#cli_version_check) | launcher (Claude), launcher (Codex) | own line | normal |
+| [`window_budget_warning`](#window_budget_warning) | launcher (Claude), launcher (Codex) | own line | notice |
+| [`exit`](#exit) | launcher (Claude), launcher (Codex) | own line | normal |
+| [`engine_unavailable`](#engine_unavailable) | launcher (Claude), launcher (Codex) | own line | problem |
+| [`affinity_salt_unavailable`](#affinity_salt_unavailable) | launcher (Claude), launcher (Codex) | own line | notice |
+| [`watchdog_unavailable`](#watchdog_unavailable) | launcher (Claude) | own line | notice |
+| [`mcp_call`](#mcp_call) | MCP server | own line | normal |
+| [`turn_room_missing`](#turn_room_missing) | MCP server | own line | problem |
+| [`search_cache_invalid`](#search_cache_invalid) | MCP server | own line | notice |
+| [`stale_temp_removed`](#stale_temp_removed) | store | own line | notice |
+| [`pruned_while_opening`](#pruned_while_opening) | store | own line | notice |
+| [`ledger_damaged`](#ledger_damaged) | store | own line | problem |
+| [`ledger_repaired`](#ledger_repaired) | store | own line | notice |
+| [`page_quarantined`](#page_quarantined) | store | own line | problem |
+| [`page_unreadable`](#page_unreadable) | store | own line | problem |
+| [`side_room_expired`](#side_room_expired) | store | own line | normal |
 
 ## The log
 
@@ -39,13 +137,39 @@ Nested events have no `ts`. Each entry below says where its event appears: `own 
 nothing. `contexto sessions show --json` counts lines only (`events_by_type`), so nested events are
 not in its counts.
 
+**Runs.** A log holds every run of its session, one after another: a session that is resumed
+(`contexto run --session`) appends to the same file. A run of `contexto run` writes, in this order:
+
+1. Notices from opening the session ([`stale_temp_removed`](#stale_temp_removed),
+   [`ledger_repaired`](#ledger_repaired), [`ledger_damaged`](#ledger_damaged),
+   [`pruned_while_opening`](#pruned_while_opening)) and
+   [`affinity_salt_unavailable`](#affinity_salt_unavailable), when there are any.
+2. [`proxy_start`](#proxy_start). Every run whose proxy started has one, and no line of the kinds
+   below comes before it, so split a log into runs at `proxy_start`, not at `launch`.
+3. [`engine_unavailable`](#engine_unavailable) and [`watchdog_unavailable`](#watchdog_unavailable),
+   when they apply, then [`launch`](#launch), [`cli_version_check`](#cli_version_check) and
+   [`window_budget_warning`](#window_budget_warning) when it applies.
+4. The run's `request` lines and the other lines of the proxy, the MCP server and the store.
+5. [`proxy_stop`](#proxy_stop), then [`mcp_tools_missing`](#mcp_tools_missing) when it applies, then
+   [`exit`](#exit), the last line.
+
+A launch that fails after the proxy started writes `proxy_start`, `proxy_stop` and `exit` with no
+`launch` between them; `contexto run codex` does so when it cannot build Codex's configuration (no
+key helper, for example). Such a launch removes a session it created, log included, so these lines
+are found only in a session that already existed. A launcher that is killed (SIGKILL) writes no
+`proxy_stop` and no `exit`, so a run can also end at the next `proxy_start` or at the end of the
+file. `contexto proxy`, which runs the proxy alone, writes `proxy_start` and `proxy_stop` and neither
+`launch` nor `exit`. The MCP server and the `contexto` commands open the session too, so their lines
+can come after an `exit`.
+
 **Credentials.** The value of any key named `authorization`, `x-api-key`, `cookie`, `set-cookie` or
 `proxy-authorization` (in any letter case, at any depth) is replaced by `[redacted]` before the line
 is written. Redaction goes by key name only. No event has such a key: request headers and bodies are
 never put in an event.
 
 **No conversation content.** Events are built from counts, sizes, ids, fixed words and exception class
-names. They hold no prompt, response, tool argument, tool output or file content. The proxy adds a
+names, and the few strings from outside that the table below lists. They hold no prompt, response,
+tool argument, tool output or file content. The proxy adds a
 second guard to nested engine events, to a request's `model` and to `input_transformations`: a string
 longer than 80 characters is replaced by its length (`<123 chars>`), a list is cut to its first 50
 items, and anything nested deeper than 16 levels becomes `<dict>` or `<list>`. The guard does not
@@ -53,16 +177,27 @@ apply to the other fields of the proxy's own lines, or to the launcher's, the MC
 store's lines.
 
 The log is not anonymous. It holds the session id, page ids and pinned-record ids, the model name,
-request paths, the CLI version, and in two places text from the machine:
-[`page_unreadable`](#page_unreadable) carries an exception's message, which for a failed read names
-the page file with its full path, and [`search_cache_invalid`](#search_cache_invalid) carries the
-first 100 characters of an environment variable. Read a log before you share it.
+request paths and the CLI version. These fields hold a string that comes from outside Contexto.
+None is a credential or conversation text:
+
+| Field | What it holds | Where the string comes from |
+| --- | --- | --- |
+| [`page_unreadable`](#page_unreadable) `error` | An exception's message. For a failed read it names the page file with its full path, which includes the home directory. | The machine. |
+| [`search_cache_invalid`](#search_cache_invalid) `value` | The first 100 characters of `CONTEXTO_SEARCH_CACHE_MB`. | The environment. |
+| [`launch`](#launch) `session` | The session id. With `--session` it is the name the user chose. | The command line. |
+| `model` on a `request` line and in [`upstream_4xx`](#upstream_4xx) | The model the request names, at most 80 characters. | The request body. |
+| `method`, `path` and `endpoint`, on every line that has one | The request's HTTP method and its path without the query string, at any length. | The request line. |
+| [`encoded_body_rejected`](#encoded_body_rejected) `encoding` | The request's `Content-Encoding` header, lower-cased, at any length: the 80-character guard does not apply to it. | A request header. |
+| [`hold_skipped`](#hold_skipped) `encoding`, and `usage_unavailable` on a `request` line | The response's `Content-Encoding` header, lower-cased, at any length. | Upstream's response header. |
+| `usage` on a Responses API `request` line | Upstream's usage object: its key names as sent, with their numbers. Other values are dropped. | Upstream's response. |
+| `input_transformations` on a `request` line | What upstream reported, each string at most 80 characters. | Upstream's response. |
+| `client` and `version` in [`cli_version`](#cli_version), `version` in [`cli_version_untested`](#cli_version_untested), `cli_version` in [`session_start_unrecognised`](#session_start_unrecognised) | The client name and version from `User-Agent`, taken only in the form `name/1.2.3`. | A request header. |
+
+Read a log before you share it, and look at these fields first.
 
 **A line cut short.** A write that a full disk stops partway leaves a line without its end. The next
 event starts on a new line, so the cut line stays as one line that is not valid JSON. Skip lines that
 do not parse, as `contexto sessions show` does.
-
-**A missing `exit`.** A launcher that is killed (SIGKILL) writes no [`exit`](#exit) line.
 
 ### Examples
 
@@ -78,13 +213,14 @@ The launcher starts a session:
 ```
 
 A request at a turn start that rotated. The engine paged 7 turns out (`page_out`), started epoch 2
-(`rotation`), and sent 24 of the CLI's 61 messages (its `request` event). Most `request` lines carry
-only that last nested event:
+(`rotation`), and sent 24 of the CLI's 61 messages (its `request` event). The conversation was in
+epoch 1 with 9 turns paged already, so `estimate`, 126,480 tokens, is the size of what epoch 1 would
+have sent, not of the CLI's 492,310 bytes. Most `request` lines carry only that last nested event:
 
 ```json
 {"api":"messages","duration_ms":8412,"epoch":2,"event":"request","message_count":24,
  "method":"POST","model":"claude-sonnet-5-5","original_message_count":61,
- "original_request_bytes":328850,"over_bound":false,"path":"/v1/messages","request_bytes":199940,
+ "original_request_bytes":492310,"over_bound":false,"path":"/v1/messages","request_bytes":199940,
  "response_bytes":18306,"status":200,"stop_reason":"tool_use","stream":true,
  "stream_hold":{"held_events":4,"triggered":true},
  "transform_events":[
@@ -111,23 +247,77 @@ The model reads a paged turn back:
 ### Words used below
 
 - **Bound**: the token limit the session is kept under (`--bound`, 150,000 by default).
+- **Conversation**: one message history. The engine tells conversations apart by their first
+  prompt. The **main conversation** is the one the user is in; subagents and the CLI's side requests
+  (a title, for example) are other conversations in the same session. No line names its conversation.
+  The nested `request` event's `main` says whether a line belongs to the main one.
 - **Turn**: a user prompt and everything up to the next one. A **turn start** is a request whose
   newest turn has no assistant message yet. The engine pages only at turn starts.
-- **Epoch**: the stretch between two rotations. Within an epoch the prompt prefix does not change,
-  so the prompt cache can be read. `epoch` counts from 0.
+- **Tool loop**: the requests of a turn after its turn start. The model called a tool, and the CLI
+  sends the result back with the turn so far. The engine never pages inside a tool loop, so a turn
+  that grows there can pass the bound.
+- **Epoch**: the stretch between two rotations of one conversation. Within an epoch the prompt
+  prefix does not change, so the prompt cache can be read. `epoch` counts from 0.
 - **`k`**: the index, in the CLI's message list, of the first message still sent. Messages before `k`
   are paged out. `k` is 0 in the first epoch.
+- **Carried content**: what is sent on every request and not paged with its turn: the context
+  blocks the CLI puts into a prompt message beside the user's own text, and the `role: "system"`
+  messages the engine classifies as carried (a standing message from a hook or a mode, for
+  example). Only the fallback in [`carried_paged`](#carried_paged) pages any of it.
 - **Fixed overhead** (`F`): system prompt, tools, carried content and the preamble (pinned state and
-  page index), in tokens. **Window budget** (`W`): `bound - headroom - F`, what is left for turns.
-- **Main conversation**: the one the user is in. Subagents and the CLI's side requests are other
-  conversations in the same session.
+  page index), in tokens.
+- **Headroom**: the tokens kept free under the bound for the growth of one turn: 1.25 times the
+  largest recent growth of a turn (an older turn's growth counts for half at each later turn start),
+  at least the headroom floor (`--headroom-floor`, 25,000 by default) and, above that floor, at most
+  a quarter of the bound.
+- **Window budget** (`W`): `bound - headroom - F`, what is left for turns.
+- **Window target**: the size a rotation cuts the retained turns down to: `W` times
+  `--window-fraction` (0.5 by default). The other half is room to grow before the next rotation.
 - **Room**: the tokens `contexto_recall`, `contexto_search` and `contexto_state` may return in the
   current turn. A **side room** is a subagent's own.
+- **`min_turn_room`**: the least room a turn should start with, 12,000 tokens. A turn that would
+  start with less makes the engine rotate if a rotation would restore it.
 - **Degraded mode**: after a store failure the engine stops paging and sends the last good transform,
   extended with the new messages, until the store works again.
 
 The design contract, [milestones/M2-contexto-proxy.md](milestones/M2-contexto-proxy.md), defines
 these and the rules the entries cite.
+
+### What the counters count
+
+`epoch`, `k`, `turns_paged` and `first_turn` belong to one conversation in one run. The engine keeps
+a separate state for each conversation, and each run starts a new engine. So:
+
+- Every conversation starts at epoch 0. A line with `epoch` 3 can be followed by another
+  conversation's line with `epoch` 0.
+- A new run continues the main conversation's counters only when that conversation's first request
+  in the run has [`epoch_resumed`](#epoch_resumed). With [`epoch_not_resumed`](#epoch_not_resumed)
+  the conversation starts again at epoch 0 with nothing counted as paged. Its next rotation pages it
+  from its first turn again (`first_turn` 0) and reports those turns again.
+- A [`resync`](#resync) with `paged_changed` pages everything before the current turn again within
+  one run, and counts those turns again in `turns_paged`.
+- The store keeps one page per page id, and a turn paged again with the same turn number and the
+  same messages gets the same id. So a run that pages a conversation from turn 0 again does not
+  store those turns twice. A `paged_changed` resync gives its pages new turn numbers, so they are
+  stored beside the earlier ones.
+
+A tool that reads a log must not:
+
+- take the highest `epoch` as the number of rotations. Count the [`rotation`](#rotation) events.
+- take the last `turns_paged` as the number of turns the session has paged, or add up
+  `page_out.turns` or `page_out.pages` over a whole log. The number of pages the session holds is
+  `pages` in `contexto sessions show --json`, which counts the store.
+- compare `epoch` or `k` between two lines unless they are the same conversation in the same run.
+
+It can rely on this:
+
+- Each `rotation` event is one rotation, and each [`page_out`](#page_out) belongs to the `rotation`
+  that follows it in the same `transform_events`.
+- A `page_out`'s `first_turn + turns` is the `turns_paged` of its `rotation`.
+- Within one run (from a [`proxy_start`](#proxy_start) to the next), the lines whose nested
+  `request` event has `main: true` belong to one conversation until a line with a
+  [`main_changed`](#main_changed) event, which is the first line of the new main conversation. On
+  the lines of one conversation in one run, `epoch` rises by one at each `rotation`.
 
 ### Reading an entry
 
@@ -137,7 +327,9 @@ not repeated in the field lists. In the facts line:
 - **Writer** is `proxy`, `engine`, `launcher (Claude)`, `launcher (Codex)`, `MCP server` or `store`.
 - **Where** is `own line`, `transform_events` or `usage_events`.
 - **Kind** is `normal` (expected in a healthy session), `notice` (worth knowing, the session carries
-  on as designed) or `problem` (Contexto left its designed path, or cannot do part of its job).
+  on as designed) or `problem` (Contexto left its designed path, or cannot do part of its job). Two
+  entries, [`over_bound`](#over_bound) and [`epoch_not_resumed`](#epoch_not_resumed), name more than
+  one kind: which one applies depends on the event's fields, and the entry says how.
 
 ## The request line
 
@@ -145,11 +337,55 @@ not repeated in the field lists. In the facts line:
 
 Writer: proxy. Where: own line. Kind: normal.
 
-One line for every HTTP request the proxy handled, written when the response has ended. It is the
-line to read for sizes, token usage and timing. A request the proxy only passes through (for example
-Claude Code's `HEAD /api/hello`) usually has the first group of fields and no others. The line itself
-is normal. The fields `error`, `transform_error`, `transform_skipped`, `client_aborted` and a true
-`over_bound` mark a request that did not go as designed.
+One line for each request the proxy sent upstream or tried to send, written when the response has
+ended or the attempt has failed. It is the line to read for sizes, token usage and timing. The line
+itself is normal. The fields `error`, `transform_error`, `transform_skipped`, `fallback`,
+`client_aborted` and a true `over_bound` mark a request that did not go as designed.
+
+Some requests have no `request` line:
+
+- A request the proxy answered itself and did not forward: [`request_refused`](#request_refused)
+  (403), [`websocket_rejected`](#websocket_rejected) (501) and
+  [`encoded_body_rejected`](#encoded_body_rejected) (415). That line is the only record of it.
+- A request that ended in a [`proxy_error`](#proxy_error) with `fallback` `local_502` or `none`.
+- A request still in flight when the proxy stopped
+  ([`proxy_stop_incomplete`](#proxy_stop_incomplete)).
+
+A request with malformed framing (a bad `Content-Length` or chunk size) is not forwarded either. Its
+`request` line has only `method`, `path`, `status` 400 and `error`.
+
+**Which fields a line has.** A field that does not apply is absent, not null, so read every field
+with a default. Four of the line's own fields can be null when present: `usage`, any value inside a
+Messages API `usage`, `model` (a request that names none) and `errno`. Every line except the 400
+line above has `method`, `path`, `original_request_bytes`, `request_bytes` and `duration_ms`. The
+rest depends on two things.
+
+What the proxy did with the request before sending it:
+
+| The request | `api` | `model`, `stream`, `original_message_count`, `message_count` | `transform_events`, `over_bound`, `epoch` |
+| --- | --- | --- | --- |
+| A model request the engine transformed: `POST` to `/v1/messages`, `/responses` or `/v1/responses` | yes | yes | yes |
+| `POST /v1/messages/count_tokens` | yes | yes | yes; `transform_events` holds only [`count_tokens`](#count_tokens) |
+| With `transform_skipped` | yes | no | no |
+| With `transform_error` set to a class name (the engine raised) | yes | yes | no; `over_bound` only when a `usage_events` item sets it |
+| With `transform_error` set to `serialize: <class>` | yes | yes | yes |
+| With `fallback: true` | no | no | no |
+| Any other method or path, passed through (Claude Code's `HEAD /api/hello`, for example) | no | no | no |
+
+How the exchange ended:
+
+| The end | `status` | `response_bytes`, `usage` | `stop_reason` and the other end fields |
+| --- | --- | --- | --- |
+| Upstream answered, with any status | upstream's | yes | those the response held |
+| Upstream answered and the response then broke off (`error` starts `relay:`), or the CLI left during it (`client_aborted` with a `status`) | upstream's | yes: the bytes read and the usage read up to that point | those read up to that point |
+| No answer from upstream (`error` starts `upstream unreachable:`) | 502 | no | no |
+| The CLI left before the response started (`client_aborted` with `upstream_phase`) | no | no | no |
+
+`usage_events` and `stream_hold` can appear only on a model request that reached the engine (the
+first row of the first table and its two `transform_error` rows) and was answered with a 2xx status.
+A `count_tokens` line never has them, and its `usage` is always null. A line with `fallback: true`
+has no `api`, so its response is read as a Messages API response: for Codex its `usage` is null and
+it has no end fields.
 
 Every request:
 
@@ -163,19 +399,23 @@ Every request:
 - `status`: the HTTP status the CLI got. It is upstream's, except 502 (the proxy could not reach
   upstream; see `error`) and 400 (malformed request framing). Absent when the CLI left before a
   response started.
-- `response_bytes`: the size of the response body read from upstream, in bytes.
-- `duration_ms`: milliseconds from the start of handling the request to the end of the response.
-- `usage`: the token usage upstream reported, or null when none was read. On the Messages API (Claude
-  Code) it has `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` and
-  `output_tokens`; the request's real input is the sum of the first three. On the Responses API
-  (Codex) it is the usage object as upstream gave it, numbers only: there `input_tokens` already
-  includes the cached tokens, which `input_tokens_details.cached_tokens` counts.
+- `response_bytes`: the size of the response body read from upstream, in bytes. Absent with status
+  502 and when the CLI left before a response started.
+- `duration_ms`: milliseconds from the start of handling the request to the end of the response, or
+  to the failure. On a `fallback` line it counts from the start of the second attempt.
+- `usage`: the token usage upstream reported, or null when none was read. Absent where
+  `response_bytes` is absent. On the Messages API (Claude Code) it always has the four keys
+  `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` and `output_tokens`; a
+  key upstream did not send is null, so count a null as 0. The request's real input is the sum of
+  the first three. On the Responses API (Codex) it is the usage object as upstream gave it, numbers
+  only: there `input_tokens` already includes the cached tokens, which
+  `input_tokens_details.cached_tokens` counts.
 
-Requests the engine transforms (`POST` to `/v1/messages`, `/v1/messages/count_tokens`, `/responses`
-or `/v1/responses`):
+Requests to a model endpoint (`POST` to `/v1/messages`, `/v1/messages/count_tokens`, `/responses`
+or `/v1/responses`). The tables above say which of these a line has:
 
 - `api`: `messages` or `responses`.
-- `model`: the model the request names.
+- `model`: the model the request names, or null when it names none.
 - `stream`: whether the request asked for a streamed response.
 - `original_message_count`: how many `messages` the CLI's request had. A Responses API request keeps
   its history in `input`, so this and `message_count` are 0 for Codex; the nested `request` event's
@@ -186,12 +426,15 @@ or `/v1/responses`):
 - `usage_events`: the engine's events from the response's real usage. Absent when there are none.
 - `over_bound`: true when the request was over the bound, by the estimate made before sending or by
   the real usage. See [`over_bound`](#over_bound) for which, and whether it was the allowed case.
-- `epoch`: the epoch the request was sent in.
+- `epoch`: the epoch of this request's conversation when it was sent, taken from the last nested
+  event that has one. It is one conversation's counter, not the session's (see
+  [What the counters count](#what-the-counters-count)). Absent when no nested event has an epoch,
+  as under `contexto proxy`, which runs without the engine.
 - `stream_hold`: present when the response was a stream the proxy could hold. `held_events` is how
   many stream events were held back, from the first tool call until the usage was read, so the room
   is published before the CLI starts the call. `triggered` is whether the stream reached its usage.
 - `stop_reason`: Messages API: why the response ended (`end_turn`, `tool_use`, `max_tokens` and the
-  API's other values).
+  API's other values). Absent when the response held none, as for `count_tokens` and most errors.
 - `error_type`: Messages API: the type of an error the response carried.
 - `end_event`: Responses API streams: the event the stream ended on: `completed`, `incomplete`,
   `failed`, or `none` when it ended without one.
@@ -199,7 +442,9 @@ or `/v1/responses`):
 - `incomplete_reason`: Responses API: why the response is incomplete.
 - `error_code`: Responses API: the code of an error the response carried.
 
-The six end fields hold only values on a fixed list; any other value is logged as `other`.
+The six end fields hold only values on a fixed list; any other value is logged as `other`. Each is
+present only when the response held it and the proxy could read the response (no
+`usage_unavailable`).
 
 Only when something unusual happened:
 
@@ -228,7 +473,9 @@ Only when something unusual happened:
   for example). The value is the class of the send failure; the answer was forwarded unchanged.
 - `client_aborted`: true when the CLI closed its connection before it had the whole response (Esc).
   The proxy then closes the upstream connection.
-- `usage_unavailable`: the response was encoded in a way the proxy does not read, so no usage.
+- `usage_unavailable`: the response was encoded in a way the proxy does not read, so `usage` is null
+  and there are no end fields. The value is `response content-encoding ` followed by upstream's
+  `Content-Encoding`.
 - `input_transformations`: with `--observe-thinking`: what the API reported it changed in the input
   (dropped thinking blocks), at most 32 items.
 - `input_transformations_truncated`: true when more than 32 were reported.
@@ -291,9 +538,10 @@ A request body arrived with a `Content-Encoding` the proxy cannot decode, or fai
 was answered 415 and not forwarded, since an unread request cannot be kept under the bound. The
 launcher turns request compression off, so this means a misconfigured client.
 
-- `encoding`: the `Content-Encoding` value.
+- `encoding`: the request's `Content-Encoding` header, lower-cased and otherwise as the client sent
+  it, at any length.
 - `endpoint`: the request path.
-- `reason`: why it could not be read.
+- `reason`: why it could not be read, one of a fixed set of sentences.
 
 ### `request_too_deep`
 
@@ -373,7 +621,8 @@ that response reach the CLI before the room is published from real usage, so a r
 is budgeted from the estimate made before sending.
 
 - `path`: the request path.
-- `encoding`: the response's `Content-Encoding`, or `identity`.
+- `encoding`: the response's `Content-Encoding` header, lower-cased and otherwise as upstream sent
+  it, or `identity`.
 - `chunked`: whether the response was chunked.
 
 ### `observe_usage_error`
@@ -396,15 +645,23 @@ them inside the `request` line, in `transform_events` or `usage_events`. The one
 Writer: engine. Where: `transform_events`. Kind: normal.
 
 The last item of `transform_events` on every request sent to a model endpoint: what the engine sent.
+A `count_tokens` request has a [`count_tokens`](#count_tokens) event in its place.
 
-- `epoch`: the epoch the request was sent in.
-- `k`: the first message still sent; messages before it are paged out.
+- `epoch`: the epoch of this request's conversation when it was sent. It is that conversation's
+  counter in this run (see [What the counters count](#what-the-counters-count)).
+- `k`: the first message still sent; messages before it are paged out. Per conversation, like `epoch`.
 - `messages`: how many messages the CLI's request had.
 - `upstream_messages`: how many messages were sent upstream.
-- `estimate`: the estimated input, in tokens, of the request as it arrived. The rotation decision
-  uses it. Absent with `fallback_failed`.
+- `estimate`: the estimated input, in tokens, of this request as the epoch in force when it arrived
+  would send it: the conversation's last real input plus the messages added since, or, when there
+  is no usable last input (a conversation's first request in a run, after
+  [`usage_missing`](#usage_missing) or a [`resync`](#resync)), an estimate of the system prompt,
+  the tools and the messages that epoch sends. The rotation decision uses it. It is not the size of
+  the CLI's own request: from the first rotation on, the paged turns are not in it. For that size
+  use `original_request_bytes` on the `request` line, which is in bytes. Absent with
+  `fallback_failed`.
 - `sent_estimate`: only when this request rotated: the estimated input of what was sent after the
-  rotation.
+  rotation. The estimate of what was sent is `sent_estimate` when present, else `estimate`.
 - `sent_bytes`: the size of the request sent upstream, in bytes of canonical JSON.
 - `over_bound`: true when the estimate of what was sent exceeds the bound. An
   [`over_bound`](#over_bound) event precedes it.
@@ -430,15 +687,21 @@ Writer: engine. Where: `transform_events`. Kind: normal.
 A new epoch started at this request: older turns went to the store and the retained window was
 rebuilt. The first request after a rotation rewrites the cache from the window on.
 
-- `epoch`: the new epoch's number.
+`epoch`, `k` and `turns_paged` are this conversation's counters in this run, not the session's (see
+[What the counters count](#what-the-counters-count)).
+
+- `epoch`: the new epoch's number: the conversation's previous epoch plus one.
 - `reason`: `bound` (the estimate passed `bound - headroom`), `min_turn_room` (the recall room for
-  the new turn would have been too small), `window_minimal` (see
+  the new turn would have been under `min_turn_room`), `window_minimal` (see
   [`window_minimal`](#window_minimal)), `head_change` (the system prompt or tools changed), or
   `paged_changed` (see [`resync`](#resync)).
 - `k`: the first message still sent in the new epoch.
 - `retained_messages`: how many of the CLI's messages are still sent.
-- `turns_paged`: how many turns have been paged out so far, this rotation's included. Carried items
-  that earlier rotations paged ([`carried_paged`](#carried_paged)) are counted too.
+- `turns_paged`: how many turns this conversation's engine has paged out in this run, this
+  rotation's included, on top of the count it resumed with, if it resumed. Carried items that
+  earlier rotations paged ([`carried_paged`](#carried_paged)) are counted too. It is not the number
+  of pages in the store: after a restart that did not resume, or a `paged_changed` resync, turns
+  paged before are paged and counted again.
 - `fixed_overhead`: `F` in tokens, as used for this decision. Absent with reason `paged_changed`.
 - `window_budget`: `W` in tokens. Absent with reason `paged_changed`.
 
@@ -450,16 +713,20 @@ Turns were written to the store, one page per turn. It comes just before the `ro
 to. A rotation that pages nothing (a head change with nothing to page) has no `page_out`.
 
 - `epoch`: the epoch that is starting.
-- `turns`: how many turns were paged.
-- `pages`: how many pages were written.
-- `first_turn`: the turn number the first of these pages gets.
+- `turns`: how many turns this rotation paged.
+- `pages`: how many pages that made: one per turn. A page already in the store with the same turn
+  number and messages is kept as it is and still counted here.
+- `first_turn`: the turn number the first of these pages gets: the conversation's `turns_paged`
+  before this rotation. It is 0 again after a restart that did not resume, so do not add up `turns`
+  or `pages` over a log (see [What the counters count](#what-the-counters-count)).
 
 ### `rotation_noop`
 
 Writer: engine. Where: `transform_events`. Kind: normal.
 
-A turn start met the rotation trigger, but no more turns could be paged within the window target, so
-nothing changed and the epoch continues.
+A turn start met the rotation trigger, but there was nothing to page: the retained turns already fit
+the window target, or no turn older than the newest complete one is still retained. Nothing changed
+and the epoch continues.
 
 - `epoch`: the current epoch.
 - `fixed_overhead`: `F` in tokens.
@@ -628,23 +895,39 @@ messages (a local compaction, a rewind). The engine continues from the longest m
 
 ### `over_bound`
 
-Writer: engine. Where: `transform_events`, `usage_events`. Kind: notice.
+Writer: engine. Where: `transform_events`, `usage_events`. Kind: notice, problem.
 
 The request was over the bound. With `source: "estimate"` (in `transform_events`) the estimate of
 what is sent exceeded the bound before sending. With `source: "real"` (in `usage_events`) the real
-input upstream reported did. Either sets `over_bound` on the `request` line. Inside a tool loop
-(`in_tool_loop: true`) this is the allowed case: the engine never rotates mid-turn, and the next turn
-start rotates. At a turn start it comes with [`bound_too_small`](#bound_too_small), or means the
-rotation's sizing did not hold. With `degraded` it is a consequence of degraded mode.
+input upstream reported did. One request can have both. Either sets `over_bound` on the `request`
+line.
+
+The kind depends on the case. An `estimate` event says which case it is. A `real` event does not:
+it has neither `in_tool_loop` nor `degraded`. Classify a `real` event by the `estimate` event in
+the `transform_events` of the same `request` line.
+
+| The event | Kind | What it means |
+| --- | --- | --- |
+| `estimate` with `in_tool_loop: true` and no `degraded` | notice | The allowed case (contract rule 5). The turn grew past the bound inside a tool loop, where the engine never rotates. The next turn start rotates. |
+| `estimate` with `degraded: true` | problem | A consequence of degraded mode, in which nothing is paged. The fault to look at is the [`store_error`](#store_error) or [`page_conflict`](#page_conflict) that started it. |
+| `estimate` with `in_tool_loop: false` and no `degraded` | problem | Over the bound at a turn start. Either [`bound_too_small`](#bound_too_small) or [`pdf_allowance`](#pdf_allowance) is on the same line, or the rotation's sizing did not hold. |
+| `real`, with an `estimate` event on the same line | that event's kind | The real input confirms the estimate. |
+| `real`, with no `estimate` event on the same line | problem | The estimate was at or under the bound and the real input was over it, so the estimate was low. The log does not say whether the request was inside a tool loop. If the nested `request` event on the line has `degraded: true`, it is a consequence of degraded mode. |
+
+The acceptance harness is stricter than these kinds: it fails a run for any `real` event and for
+any `estimate` event without `in_tool_loop: true`.
 
 - `source`: `estimate` or `real`.
 - `epoch`: the current epoch.
 - `bound`: the bound.
 - `estimate`: the estimate made before sending, in tokens. Null on a `real` event whose usage was
   not paired with a request (see [`usage_unattributed`](#usage_unattributed)).
-- `in_tool_loop`: `estimate` only: whether the request is inside a tool loop.
-- `degraded`: `estimate` only: true in degraded mode.
-- `real_tokens`: `real` only: the real input: input, cache read and cache write tokens.
+- `in_tool_loop`: `estimate` only: whether the request is inside a tool loop. Absent on a `real`
+  event.
+- `degraded`: `estimate` only: true in degraded mode. Absent otherwise, and on a `real` event.
+- `real_tokens`: `real` only: the real input. On the Messages API it is the sum of `input_tokens`,
+  `cache_read_input_tokens` and `cache_creation_input_tokens`. On the Responses API it is
+  `input_tokens` alone, which already includes the cached tokens.
 - `over_bound`: `real` only: true.
 
 ### `estimate_error`
@@ -656,7 +939,7 @@ bytes-per-token ratio from every response, so one such event is not a fault. Rep
 engine keeps estimating low, which makes the bound less reliable.
 
 - `epoch`: the current epoch.
-- `real_tokens`: the real input.
+- `real_tokens`: the real input, counted as in [`over_bound`](#over_bound).
 - `estimate`: the estimate.
 - `ratio`: estimate divided by real, for this request.
 - `mean_ratio`: the mean of that ratio over the conversation.
@@ -765,17 +1048,27 @@ the cache still holds.
 
 ### `epoch_not_resumed`
 
-Writer: engine. Where: `transform_events`. Kind: normal.
+Writer: engine. Where: `transform_events`. Kind: normal, notice, problem.
 
-The engine started a conversation from epoch 0. On a new session's first request this is expected
-(`reason: "no_record"`). After a restart, the reason says why the recorded epoch was not continued;
-the cost is one rotation.
+The engine started a conversation from epoch 0 instead of continuing a recorded epoch. It is logged
+at a conversation's first request in a run, until the run's epoch record has been used or found
+missing. After a restart the cost is one rotation, and that rotation pages the conversation from
+its first turn again (see [What the counters count](#what-the-counters-count)).
+
+The kind depends on `reason`:
+
+| `reason` | Kind | What it means |
+| --- | --- | --- |
+| `no_record` | normal | The session has no epoch record. Expected on a new session's first request. The store also reports a record file it cannot read, or one of an unknown version or shape, as no record, so after a restart of a session that had rotated this can mean a damaged `epoch.json`. |
+| `other_conversation` | normal | The record belongs to another conversation, as at a subagent's or a side request's first request after a restart. The record stays available for its own conversation. |
+| `dialect_changed`, `model_changed`, `settings_changed`, `head_changed` | notice | The session was resumed with the other CLI, another model, other engine settings (`--bound`, for example), or a changed system prompt or tool list. |
+| `preamble_changed` | notice | The recorded pinned state and page index no longer give the recorded preamble, as after an upgrade that changed how the preamble is written. |
+| `history_shorter`, `history_diverged` | notice | The CLI's history is not the recorded one: it is shorter, or differs before the recorded point (a rewind, a compaction, another conversation with the same first prompt). |
+| `unreadable` | problem | The store failed while reading the record, or the engine cannot use what it read (a field missing or of the wrong type). The record is damaged. |
+| `pages_missing` | problem | The store holds fewer pages than the record says were paged, or cannot list them. Page files were removed, lost or quarantined, so the recorded epoch's page index could not be served. |
 
 - `epoch`: 0.
-- `reason`: `no_record`, `unreadable`, `other_conversation` (the record belongs to another
-  conversation, as for a subagent's or a side request's first request), `dialect_changed`,
-  `model_changed`, `settings_changed`, `preamble_changed`, `head_changed`, `history_shorter`,
-  `history_diverged`, or `pages_missing` (the store holds fewer pages than the record needs).
+- `reason`: one of the values above.
 
 ### `carried_reclassified`
 
@@ -943,7 +1236,8 @@ Writer: launcher (Claude), launcher (Codex). Where: own line. Kind: normal.
 The proxy is up and the CLI is about to start.
 
 - `cli`: `claude` or `codex`.
-- `session`: the session id.
+- `session`: the session id. A new session gets 32 random hex characters; with `--session` it is
+  the name the user gave.
 - `config`: the engine settings given on the command line: `bound`, and `window_fraction` and
   `headroom_floor` when set.
 - `engine`: `rewrite`, or `identity` when the paging engine could not be loaded.
@@ -964,14 +1258,19 @@ Writer: launcher (Claude), launcher (Codex). Where: own line. Kind: normal.
 The launcher ran `<cli> --version` before starting the CLI. When the version is not a tested one it
 prints a warning.
 
+The line has one of three shapes: `cli` and `skipped` when the check was turned off; `cli` and
+`error: "interrupted"` when Ctrl+C ended the check; otherwise `cli`, `version`, `tested` and
+`tested_versions`, with `error` when the version could not be read.
+
 - `cli`: `claude` or `codex`.
-- `version`: the installed version, or null when it could not be read.
+- `version`: the installed version, or null when it could not be read. Absent, not null, on a
+  skipped or interrupted check.
 - `tested`: whether this Contexto release was tested with it; null without a version.
 - `tested_versions`: the tested versions, as one comma-separated string.
 - `error`: why the version could not be read (`not_found`, `timeout`, `unparsed`, `exit_<code>`
   or an exception's class name), or `interrupted` when Ctrl+C ended the check; the CLI is then not
-  started.
-- `skipped`: true when the check was turned off; the other fields except `cli` are then absent.
+  started, and the run's `exit` has code 130.
+- `skipped`: true when the check was turned off.
 
 ### `window_budget_warning`
 
@@ -990,9 +1289,10 @@ Writer: launcher (Claude), launcher (Codex). Where: own line. Kind: normal.
 The CLI exited and the launcher cleaned up. It is the launcher's last line. A launcher that was
 killed writes none.
 
-- `code`: the exit code `contexto run` returns. Normally the CLI's own. 130 for Ctrl+C before the
-  CLI started, 128 plus the signal number when the launcher was terminated, and 1 or 2 when the
-  launch failed before the CLI ran.
+- `code`: the exit code `contexto run` returns. Normally the CLI's own, which is 128 plus the signal
+  number when a signal killed the CLI. 127 when the CLI could not be started (its file is gone or
+  not executable). 130 for Ctrl+C before the CLI started, 128 plus the signal number when the
+  launcher was terminated, and 1 or 2 when the launch failed before the CLI ran.
 
 ### `engine_unavailable`
 
@@ -1038,22 +1338,27 @@ the session directory.
 Every call:
 
 - `tool`: `contexto_recall`, `contexto_search`, `contexto_state`, `contexto_pin` or `contexto_close`.
-- `ok`: whether the call succeeded. The fields after `file` in this entry are on successful calls only.
+- `ok`: whether the call succeeded. A failed call has only `tool`, `ok` and `error`, and `file` with
+  `LockFileDamagedError`. Every field below is on successful calls only.
 - `error`: on a failed call: the exception's class name. `ToolError` is a call the server refused
   with a message to the model.
 - `file`: with `LockFileDamagedError`: the damaged lock file's name.
 
-`contexto_recall`, `contexto_search` and `contexto_state`, which are charged against the turn's room:
+`contexto_recall`, `contexto_search` and `contexto_state`, which are charged against the turn's room.
+`turn_budget` is on every successful call of the three. The next five fields are there only when a
+room was open for the call, that is when `turn_budget` is not `unbudgeted`:
 
 - `turn_budget`: `charged` (the reply was charged), `spent` (no room left, so the reply only says
   so), `nearly_spent` (recall: some room is left but too little for a useful chunk), `control` (a
-  fixed reply such as "no match", never charged), or `unbudgeted` (no room is published; see
-  [`turn_room_missing`](#turn_room_missing)).
-- `charged_tokens`: the tokens charged for this reply.
-- `room_left`: the room left after it, in tokens.
+  fixed reply such as "no match", never charged), or `unbudgeted` (no room is published, so only
+  the per-call limit applied; with a running engine a
+  [`turn_room_missing`](#turn_room_missing) line comes just before this one).
+- `charged_tokens`: the tokens charged for this reply: 0 unless `turn_budget` is `charged`. Absent
+  when `unbudgeted`.
+- `room_left`: the room left after it, in tokens. Absent when `unbudgeted`.
 - `limited_by`: `main` or `side`: whether the main conversation's room or a subagent's was the
-  smaller one, which is the one that bounds the call.
-- `side_rooms`: how many subagent rooms are open.
+  smaller one, which is the one that bounds the call. Absent when `unbudgeted`.
+- `side_rooms`: how many subagent rooms are open. Absent when `unbudgeted`.
 - `limiting_age_s`: with `limited_by: "side"`: seconds since that room was last published. A large
   value is a stale room, not a live subagent.
 - `returned`: recall and search: the spans of text the reply showed, as positions, not text. Each
