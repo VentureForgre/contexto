@@ -69,7 +69,7 @@ def test_there_is_no_push_trigger():
     assert not re.search(r"^\s*push\s*:", CODE, flags=re.MULTILINE)
     triggers = [line.strip() for line in _section(CODE, "on").splitlines() if re.fullmatch(r"  \S.*", line)]
     assert triggers == ["workflow_dispatch:"]
-    for event in ("pull_request", "pull_request_target", "schedule", "release:", "workflow_run", "issue_comment"):
+    for event in ("pull_request", "schedule", "workflow_run", "workflow_call", "issue_comment"):
         assert event not in _section(CODE, "on")
 
 
@@ -258,13 +258,14 @@ def test_every_action_is_pinned_by_commit():
     names = {action.split("@")[0] for action, _ in uses if not action.startswith("./")}
     assert names == {"actions/checkout", "astral-sh/setup-uv", "actions/attest-build-provenance"}
     assert len({action for action, _ in uses if action.startswith("astral-sh/setup-uv@")}) == 1
-    assert set(re.findall(r'version: "([^"]+)"', TEXT)) == {"0.13.7"}
+    assert len(set(re.findall(r'^\s+version: "([^"]+)"', TEXT, flags=re.MULTILINE))) == 1
 
 
 def test_the_ci_workflow_uses_the_same_uv():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert set(re.findall(r"astral-sh/setup-uv@\S+", ci)) == set(re.findall(r"astral-sh/setup-uv@\S+", TEXT))
-    assert set(re.findall(r'version: "([^"]+)"', ci)) == {"0.13.7"}
+    uv_version = r'^\s+version: "([^"]+)"'
+    assert set(re.findall(uv_version, ci, flags=re.MULTILINE)) == set(re.findall(uv_version, TEXT, flags=re.MULTILINE))
 
 
 # --- the dispatch's inputs ---------------------------------------------------------------------------

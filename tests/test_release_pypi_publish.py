@@ -241,7 +241,7 @@ def test_a_file_listed_twice_is_refused(dist):
 def test_a_wheel_that_is_not_a_zip_is_refused(dist):
     (dist / WHEEL).write_bytes(b"not a zip")
     write_sums(dist, [dist / WHEEL, dist / SDIST])
-    with pytest.raises(pypi.Refused, match="cannot read"):
+    with pytest.raises(pypi.Refused, match="Cannot read the metadata"):
         pypi.load_release(dist, PROJECT, TAG)
 
 
@@ -428,7 +428,7 @@ def test_plan_command_uploads_only_what_is_missing(dist, release, server, tmp_pa
     assert "::notice" in capsys.readouterr().out
 
 
-def test_plan_command_uploads_nothing_when_pypi_has_the_same_files(dist, release, server, tmp_path, monkeypatch, capsys):
+def test_plan_command_uploads_nothing_when_pypi_has_the_files(dist, release, server, tmp_path, monkeypatch, capsys):
     github_output = tmp_path / "github-output"
     monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
     output = tmp_path / "upload.txt"
