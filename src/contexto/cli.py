@@ -8,7 +8,7 @@ import pkgutil
 import sys
 from collections.abc import Sequence
 
-from contexto import __version__, commands
+from contexto import commands, version_line
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="contexto",
         description="Durable, recoverable context for very long-running AI sessions.",
     )
-    parser.add_argument("--version", action="version", version=f"contexto {__version__}")
+    parser.add_argument("--version", action="version", version=version_line())
     subparsers = parser.add_subparsers(title="commands", metavar="<command>")
     for info in sorted(pkgutil.iter_modules(commands.__path__), key=lambda m: m.name):
         if info.name.startswith("_"):
