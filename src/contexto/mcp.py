@@ -13,7 +13,9 @@ recorded through ``store.log`` with names, ids, and sizes, never text content.
 The store is the session's ``contexto.store.SessionStore`` (lane B packets B1 and B2): it provides
 ``get_page(page_id) -> dict | None`` (keys ``id``, ``turn``, ``messages``, ``stub``; raises
 ``PageUnreadableError`` for a page file it cannot read),
-``search(query) -> list[str]`` (every word of the query, case-insensitively, best first; D34), ``pin(kind, text, *,
+``search(query) -> list[str]`` (every word of the query, case-insensitively, best first; D34), and
+optionally ``search_approximate(query)`` (pages holding part of the query, for when ``search`` finds
+none; D65), ``pin(kind, text, *,
 supersedes, epistemic, provenance) -> str``, ``close(obligation_id, note) -> str``,
 ``state_text() -> str``, and ``log(event)``. ``pin`` and ``close`` raise ``ValueError`` on
 validation failures, which become tool errors the model can act on.
@@ -43,7 +45,7 @@ from contexto.store.render import (
     recall_limit,
     render_page,
 )
-from contexto.store.search import SHOWN_IN_DETAIL, Query, text_matches
+from contexto.store.search import FOLDED, SHOWN_IN_DETAIL, TYPO, ApproxHit, Plan, Query, hit_view, text_matches
 
 SERVER_NAME = "contexto"
 SERVER_VERSION = "0.1.0"
@@ -61,6 +63,14 @@ SEARCH_BEST_HEADER = "[best matching pages by relevance, shown newest first:]"
 # supersede it, so context pages are shown after every turn page (reviewer-2 on PR #204, D34).
 SEARCH_CONTEXT_HEADER = "[paged reminders and system messages, not dated by turn:]"
 SEARCH_MORE_LIMIT = 50  # the next best pages, listed compactly newest first (page id, turn, match offsets)
+# D65: when no paged page holds every word and nothing in view matches, the reply shows approximate
+# matches under this line in place of SEARCH_BEST_HEADER, each page with a line naming the words it
+# matched. It says what was not found, so the model does not read a partial match as an exact one.
+SEARCH_APPROX_HEADER = ("[no paged-out turn holds every word of that query; approximate matches, most words matched "
+                        "first, then newest first:]")
+# Further approximate matches listed: far fewer than SEARCH_MORE_LIMIT, since a page that holds only
+# some of the words can be one of thousands in a large store.
+APPROX_MORE_LIMIT = 10
 # Per-turn recall budget (M2 contract PR #69): what recall, search, and state return this turn.
 BUDGET_SPENT = ("Recall budget for this turn is used up; answer from what is in view, or say the detail is "
                 "unknown.")
@@ -127,8 +137,8 @@ INSTRUCTIONS = (
     "Contexto keeps this session's older turns in a local store. Use contexto_recall with a page id "
     "from the paged-history index to read a paged-out turn word for word before relying on its "
     "details. Use contexto_pin to record decisions and obligations as you make them, contexto_close "
-    "when an obligation is done, contexto_state for the full pinned state, and contexto_search for "
-    "an exact substring when you do not know the page id. When the user states a standing rule, "
+    "when an obligation is done, contexto_state for the full pinned state, and contexto_search to "
+    "find a page by words: every word, else approximate matches. When the user states a standing rule, "
     "preference, or obligation (whenever, from now on, always, never), pin it at once with contexto_pin "
     "{\"kind\": \"obligation\", \"text\": ...}, even if your reply is one word, and keep it open until "
     "the user withdraws it: once its turn is paged out, only what is pinned stays in view."
@@ -138,6 +148,7 @@ INSTRUCTIONS = (
 class Store(Protocol):
     def get_page(self, page_id: str) -> dict[str, Any] | None: ...
     def search(self, query: str) -> list[str]: ...
+    # Optional: search_approximate(query) (D65); without it, a query no page holds every word of finds nothing.
     def pin(self, kind: str, text: str, *, supersedes: Iterable[str] = (), epistemic: str = "reported",
             provenance: Iterable[dict[str, Any]] = ()) -> str: ...
     def close(self, obligation_id: str, note: str) -> str: ...
@@ -236,7 +247,8 @@ TOOLS: list[dict[str, Any]] = [
             f"(marked >) with {_lines(MATCH_CONTEXT)} of context either side, each with its page offset; the next "
             f"{SEARCH_MORE_LIMIT} are listed as page id, turn, @offsets. Answer from a "
             "matching line, or call contexto_recall with its page id and offset to read on. Search covers only "
-            "paged-out turns: the conversation in view is newer than any hit. No fuzzy or similarity matching."
+            "paged-out turns: the conversation in view is newer than any hit. If no turn holds every word, the reply "
+            "gives approximate matches, marked as such, with the words each page matched."
         ),
         "inputSchema": {
             "type": "object",
@@ -522,15 +534,16 @@ class Server:
         text = texts[0] if texts else BUDGET_SPENT
         return [{"type": "text", "text": text}], None, {"chars": len(text) if texts else 0, **budget}
 
-    def _readable_pages(self, found: list[str]) -> tuple[list[str], list[tuple[str, dict[str, Any]]]]:
-        """The first ``SEARCH_LIMIT + SEARCH_MORE_LIMIT`` pages of ``found`` that can still be read, with
+    def _readable_pages(self, found: list[str], listed: int = SEARCH_MORE_LIMIT,
+                        ) -> tuple[list[str], list[tuple[str, dict[str, Any]]]]:
+        """The first ``SEARCH_LIMIT + listed`` pages of ``found`` that can still be read, with
         their records, and ``found`` without the pages read on the way that were gone or unreadable
         (logged by the store) since search listed them: the reply leaves those out, rather than showing a
         row with no turn. Later pages are not read, so the count of further matches can still include
         one that went bad meanwhile (search itself skips unreadable pages)."""
         pages, dropped = [], set()
         for page_id in found:
-            if len(pages) == SEARCH_LIMIT + SEARCH_MORE_LIMIT:
+            if len(pages) == SEARCH_LIMIT + listed:
                 break
             try:
                 page = self.store.get_page(page_id)
@@ -558,14 +571,36 @@ class Server:
         lead = in_view or []
         limit, _ = recall_limit(*self._window())  # one search reply is held to the per-call recall limit
         specific = "use a longer or more specific query"
+        head = [SEARCH_BEST_HEADER]
+        more_header = "[more matching pages, newest first; recall one at its offset:]"
+        not_shown = "[{count} more matching pages not shown; {why}]"
+        total = len(found)
+        steps: list[str] = []
+        if not hits and not lead:
+            # No paged page holds every word and nothing in view matches: approximate matches, said to be (D65).
+            approximate, total, plan = self._approximate(query)
+            total = total if approximate else 0
+            if approximate:
+                shown = _most_words_first(approximate[:SEARCH_LIMIT])
+                hits = _with_context_header([(_hit_rows(hit.id, page, query, (hit, plan)), page)
+                                             for hit, page in shown])
+                more = _with_context_header([([_more_row(hit.id, page, query, (hit, plan))], page)
+                                             for hit, page in _most_words_first(approximate[SEARCH_LIMIT:])])
+                head = [SEARCH_APPROX_HEADER]
+                if plan is not None and (plan.dropped or plan.cut):
+                    head.append(f"[searched for: {', '.join(plan.typed)}]")
+                more_header = "[more approximate matches, recall one at its offset:]"
+                not_shown = "[{count} more approximate matches not shown; {why}]"
+                specific = "use a more specific query"
+                steps = _approximate_steps(plan, [hit for hit, _ in shown])
 
         def render(rows: list[Row], detailed: int, listed: int, why: str) -> str:
-            lines = [t for t, _ in lead] + [SEARCH_BEST_HEADER] + [t for t, _ in rows]
+            lines = [t for t, _ in lead] + head + [t for t, _ in rows]
             if listed:
-                lines.append("[more matching pages, newest first; recall one at its offset:]")
+                lines.append(more_header)
                 lines += [t for entry in more[:listed] for t, _ in entry]
-            if len(found) > detailed + listed:
-                lines.append(f"[{len(found) - detailed - listed} more matching pages not shown; {why}]")
+            if total > detailed + listed:
+                lines.append(not_shown.format(count=total - detailed - listed, why=why))
             return "\n".join(lines)
 
         picked: dict[str, Any] = {"rows": [], "pages": 0}
@@ -594,9 +629,11 @@ class Server:
             # Not even one whole hit: its page line and matching lines, without context, as far as they fit.
             context = [row for row in hits[0] if row[0] == SEARCH_CONTEXT_HEADER]
             header, *lines = [row for row in hits[0] if row[0] != SEARCH_CONTEXT_HEADER]
+            words = [row for row in lines if row[0].startswith(APPROX_WORDS_PREFIX)]  # an approximate hit's words
             matches = [row for row in lines if row[0].startswith(">")]
             for count in range(len(matches), 0, -1):
-                rows = [*context, header, *matches[:count], (f"  [the rest of this hit is not shown; {why}]", None)]
+                rows = [*context, header, *words, *matches[:count],
+                        (f"  [the rest of this hit is not shown; {why}]", None)]
                 text = render(rows, 1, 0, why)
                 if len(text) <= cap:
                     picked.update(rows=rows, pages=1)
@@ -608,11 +645,25 @@ class Server:
         shown = texts is not None and text not in CONTROL_REPLIES
         coverage = SEARCH_COVERAGE if in_view is not None else SEARCH_COVERAGE_UNCHECKED
         return ([{"type": "text", "text": text}, {"type": "text", "text": coverage}], None,
-                {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": len(found),
+                {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": total,
+                 # D65, content-free: whether the pages found are approximate matches, and which steps of the
+                 # fallback they needed (stop_words, long_query, fold, typo, any_word); never the words
+                 "approximate": bool(steps), **({"approximate_steps": steps} if steps else {}),
                  "in_view_hits": sum(1 for _, span in lead if span) if shown else 0,
                  "in_view_more": max(0, in_view_found[0] - IN_VIEW_LIMIT) if shown else 0,
                  "in_view_checked": in_view is not None,
                  "returned": _spans(lead + picked["rows"]) if shown else [], **budget})
+
+    def _approximate(self, query: str) -> tuple[list[tuple[ApproxHit, dict[str, Any]]], int, Plan | None]:
+        """The store's approximate matches for ``query`` (D65) that can still be read, best first, each
+        with its page record: at most ``SEARCH_LIMIT + APPROX_MORE_LIMIT``. With them, how many pages
+        matched in all and the words searched for. Empty for a store without ``search_approximate``."""
+        fallback = getattr(self.store, "search_approximate", None)
+        result = fallback(query) if callable(fallback) else []
+        by_id = {hit.id: hit for hit in result}
+        found, pages = self._readable_pages(list(by_id), APPROX_MORE_LIMIT)
+        total = getattr(result, "total", len(result)) - (len(by_id) - len(found))
+        return [(by_id[page_id], page) for page_id, page in pages], total, getattr(result, "plan", None)
 
     def _in_view_rows(self, query: str, total: list[int]) -> list[Row] | None:
         """Matching lines of the conversation in view, newest first (B19 b, contract PR #125).
@@ -743,6 +794,31 @@ def _newest_first(pages: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, di
     return sorted(pages, key=key, reverse=True)
 
 
+APPROX_WORDS_PREFIX = "  [matched: "  # the line under an approximate hit's page line
+
+
+def _most_words_first(hits: list[tuple[ApproxHit, dict[str, Any]]]) -> list[tuple[ApproxHit, dict[str, Any]]]:
+    """Approximate hits as a reply shows them (D65): turn pages before paged context blocks, as in
+    ``_newest_first``; among each, the pages that matched the most words first, then the newest."""
+    def key(item: tuple[ApproxHit, dict[str, Any]]) -> tuple[bool, int, int, str]:
+        hit, page = item
+        turn = page.get("turn")
+        return (not is_context_page(page), len(hit.matched),
+                turn if isinstance(turn, int) and not isinstance(turn, bool) else -1, hit.id)
+
+    return sorted(hits, key=key, reverse=True)
+
+
+def _approximate_steps(plan: Plan | None, shown: list[ApproxHit]) -> list[str]:
+    """Which steps of the fallback the detailed hits needed, for the content-free log. When none of the
+    named steps was needed, the words matched once the punctuation at their ends was dropped."""
+    kinds = {m.how for hit in shown for m in hit.matched}
+    return [step for step, used in (("stop_words", plan is not None and bool(plan.dropped)),
+                                    ("long_query", plan is not None and bool(plan.cut)),
+                                    ("fold", FOLDED in kinds), ("typo", TYPO in kinds),
+                                    ("any_word", any(hit.missing for hit in shown))) if used] or ["punctuation"]
+
+
 def _with_context_header(entries: list[tuple[list[Row], dict[str, Any]]]) -> list[list[Row]]:
     """Each entry's rows, with ``SEARCH_CONTEXT_HEADER`` put before the first context page's rows, so
     the line is shown exactly when a context page is. ``entries`` are in ``_newest_first`` order."""
@@ -755,8 +831,13 @@ def _with_context_header(entries: list[tuple[list[Row], dict[str, Any]]]) -> lis
     return out
 
 
-def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
+def _hit_rows(page_id: str, page: dict[str, Any], query: str,
+              approximate: tuple[ApproxHit, Plan | None] | None = None) -> list[Row]:
     """One search hit: the page line, then its matching lines (>) and context, each with its offset.
+
+    An approximate hit (D65) has one more line under the page line, naming the words the page matched
+    and the ones it did not, and its matching lines are chosen by the forms found on the page
+    (``contexto.store.search.hit_view``).
 
     Each line carries the page span it shows, ``(page_id, start, end)`` with ``end`` exclusive, for
     the content-free log that acceptance 3 reads (contract PR #95). A query from a tool input is
@@ -765,8 +846,13 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
     # Search, recall, and state calls are blanked at their offsets, so no line of an earlier reply is shown (D51).
     text = render_page(page, searchable=True) if page.get("messages") is not None else ""
-    q = Query.parse(query)
-    on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only
+    if approximate is None:
+        q = Query.parse(query)
+        on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only
+    else:
+        words, q = hit_view(approximate[0], text, approximate[1])
+        rows.append(("  " + words, None))
+        on_page = q is not None
     shown, total = match_lines(text, q, last=True) if on_page else ([], 0)  # the LAST matching lines (B21)
     rows += [(f"{'>' if is_match else ' '} {start}: {line}", (page_id, start, end))
              for start, end, is_match, line in shown if is_match or not _blanked(text, start, end)]
@@ -784,17 +870,25 @@ def _blanked(text: str, start: int, end: int) -> bool:
     return end > start and not text[start:end].strip()
 
 
-def _more_row(page_id: str, page: dict[str, Any], query: str) -> Row:
+def _more_row(page_id: str, page: dict[str, Any], query: str,
+              approximate: tuple[ApproxHit, Plan | None] | None = None) -> Row:
     """A further matching page, compactly: page id, turn, and where its first and last matching lines
-    start (``@first..last``, one offset when they coincide; B21, contract PR #134)."""
+    start (``@first..last``, one offset when they coincide; B21, contract PR #134). An approximate hit
+    (D65) names its words after the offsets."""
     text = render_page(page, searchable=True) if page.get("messages") is not None else ""
-    q = Query.parse(query)
-    starts = matching_line_starts(text, q) if q is not None and text_matches(text, q) else []
+    words = ""
+    if approximate is None:
+        q = Query.parse(query)
+        starts = matching_line_starts(text, q) if q is not None and text_matches(text, q) else []
+    else:
+        label, q = hit_view(approximate[0], text, approximate[1])
+        starts = matching_line_starts(text, q) if q is not None else []
+        words = " " + label
     if not starts:
-        return (f"{page_id} (turn {page.get('turn')}) @stub", None)
+        return (f"{page_id} (turn {page.get('turn')}) @stub{words}", None)
     first, last = starts[0], starts[-1]
     where = str(first) if first == last else f"{first}..{last}"
-    return (f"{page_id} (turn {page.get('turn')}) @{where}", None)
+    return (f"{page_id} (turn {page.get('turn')}) @{where}{words}", None)
 
 
 def _stub_line(stub: Any) -> str:

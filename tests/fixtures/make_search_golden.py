@@ -22,6 +22,13 @@ The corpora, all synthetic, built in memory with a fixed page key so page ids re
 Rewrite the file only when strict search is changed on purpose:
 
     PYTHONPATH=src python tests/fixtures/make_search_golden.py
+
+``search_golden_fallback.json`` holds, for the queries with no strict hit, what the fallback
+(``search_approximate``, D65) finds: how many pages pass its floor and the ids of the best 13, which
+are the ones a reply can show. The test checks those too, so a change to the fallback shows as a
+change to this file. Rewrite it when the fallback is changed on purpose:
+
+    PYTHONPATH=src python tests/fixtures/make_search_golden.py --fallback
 """
 
 from __future__ import annotations
@@ -45,6 +52,8 @@ from contexto import mcp  # noqa: E402
 from contexto.store.memory import MemoryStore  # noqa: E402
 
 OUT = Path(__file__).with_name("search_golden.json")
+FALLBACK_OUT = Path(__file__).with_name("search_golden_fallback.json")
+FALLBACK_SHOWN = 13  # the pages a reply can show: 3 in detail and 10 listed
 KEY = b"search-golden-page-key-012345678"  # fixed, so page ids are the same on every run
 SCALE_PAGES = 17  # the smallest size of the store-scale spike
 ACCEPTANCE_PAGED = 16  # of the script's 20 content turns; the rest are in view
@@ -203,9 +212,34 @@ def record(store: Any, queries: list[str]) -> list[dict[str, Any]]:
     return rows
 
 
-def main() -> None:
+def record_fallback(store: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """For each recorded query with no strict hit: how many pages the fallback finds, and the best."""
+    out = []
+    for row in rows:
+        if not row["strict"]:
+            hits = store.search_approximate(row["query"])
+            out.append({"query": row["query"], "total": hits.total, "ids": [h.id for h in hits[:FALLBACK_SHOWN]]})
+    return out
+
+
+def _write(path: Path, data: dict[str, Any]) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=True, indent=0, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def main(argv: list[str]) -> None:
+    if argv == ["--fallback"]:
+        golden = json.loads(OUT.read_text(encoding="utf-8"))
+        fallback = {name: record_fallback(build()[0], golden[name]) for name, build in CORPORA.items()}
+        _write(FALLBACK_OUT, fallback)
+        for name, rows in fallback.items():
+            print(f"{name}: {sum(bool(row['ids']) for row in rows)} of {len(rows)} strict misses have approximate "
+                  "matches")
+        print(f"{FALLBACK_OUT.name}: {FALLBACK_OUT.stat().st_size} bytes")
+        return
+    if argv:
+        raise SystemExit("usage: make_search_golden.py [--fallback]")
     golden = {name: record(*build()) for name, build in CORPORA.items()}
-    OUT.write_text(json.dumps(golden, ensure_ascii=True, indent=0, separators=(",", ":")) + "\n", encoding="utf-8")
+    _write(OUT, golden)
     for name, rows in golden.items():
         strict = sum(row["strict"] for row in rows)
         print(f"{name}: {len(rows)} queries, {strict} with a strict hit, {len(rows) - strict} without")
@@ -213,4 +247,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

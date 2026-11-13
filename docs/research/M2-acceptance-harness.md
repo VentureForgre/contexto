@@ -316,15 +316,15 @@ request. Its 5 rotation requests are left out of the gaps above. With PR #48 the
 **The approval figure.** `run.py live` refuses an approval below `budget.simulate`'s worst-case H1,
 so that simulation is the budget to approve. `run.py approval-table` prints it, and the table
 between the markers below is that output; a test fails if they differ. Defaults: 18 turns of 40
-KB, head 47,786, bound 150,000, 2 recalls sized by B9 (below).
+KB, head 47,816, bound 150,000, 2 recalls sized by B9 (below).
 
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,891,202 | 6,573,780 |
-| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,685,665 | 2,873,669 |
-| Full-context baseline through a plain CLI session (alternative) | 5,057,876 | - |
-| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,576,867** | **9,447,449** |
+| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,892,522 | 6,575,400 |
+| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,685,845 | 2,873,849 |
+| Full-context baseline through a plain CLI session (alternative) | 5,058,446 | - |
+| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,578,367** | **9,449,249** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
@@ -367,8 +367,10 @@ up to c8f0b08) plus Contexto's own tool-definition bytes since then at 3.0 bytes
 B21 grew those definitions, in Claude Code's request form, from 2,743 to 2,827 bytes (main 8571095,
 dry run #5): 47,600 + ceil(84 / 3.0) = 47,628. D51 grew them to 2,985 bytes and the MCP server
 instructions, which Claude Code puts in its system prompt, from 426 to 741: 47,600 + ceil(242 / 3.0)
-+ ceil(315 / 3.0) = 47,786 (`budget.HEAD`), and the preamble's fixed lines (`Params.preamble_base`)
-follow the engine's opening lines by its estimator (300 before, 380 with D51). A test fails when the
++ ceil(315 / 3.0) = 47,786, and the preamble's fixed lines (`Params.preamble_base`)
+follow the engine's opening lines by its estimator (300 before, 380 with D51). D65 (search falls back
+to approximate matches) grew the definitions to 3,068 bytes and the instructions to 747: 47,600 +
+ceil(325 / 3.0) + ceil(321 / 3.0) = 47,816 (`budget.HEAD`). A test fails when the
 definitions or the instructions change without updating it. The engine's own estimate of `F` rose about 85 at the dry runs'
 rotations, because it counts tool JSON more conservatively; the gate follows the measured bytes.
 

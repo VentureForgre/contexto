@@ -34,13 +34,15 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 # ("# MCP Server Instructions"); when either changes, the head moves by its byte change at
 # OTHER_BYTES_PER_TOKEN. B19 and B21 (main 8571095, dry run #5) grew the definitions from 2,743 to 2,827
 # bytes: 47,600 + ceil(84 / 3.0) = 47,628. D51 grew them to 2,985 bytes and the instructions from 426 to
-# 741: 47,600 + ceil(242 / 3.0) + ceil(315 / 3.0) = 47,786. test_head_follows_contexto_tool_bytes fails
+# 741: 47,600 + ceil(242 / 3.0) + ceil(315 / 3.0) = 47,786. D65 (search falls back to approximate matches)
+# grew the contexto_search description by 83 bytes, to 3,068 in all, and the instructions by 6, to 747:
+# 47,600 + ceil(325 / 3.0) + ceil(321 / 3.0) = 47,816. test_head_follows_contexto_tool_bytes fails
 # when either changes without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
-CONTEXTO_TOOL_BYTES = 2_985  # D51
+CONTEXTO_TOOL_BYTES = 3_068  # D65
 CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE = 426  # main c8f0b08 (unchanged until D51)
-CONTEXTO_INSTRUCTIONS_BYTES = 741  # D51
+CONTEXTO_INSTRUCTIONS_BYTES = 747  # D65
 HEAD = (HEAD_MEASURED
         + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
         + math.ceil((CONTEXTO_INSTRUCTIONS_BYTES - CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN))

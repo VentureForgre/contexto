@@ -1,0 +1,741 @@
+{
+"scale17":[
+{
+"query":"staging database",
+"total":0,
+"ids":[]
+},
+{
+"query":"fails intermittently",
+"total":0,
+"ids":[]
+},
+{
+"query":"S3 bucket",
+"total":0,
+"ids":[]
+},
+{
+"query":"hashing algorithm",
+"total":0,
+"ids":[]
+},
+{
+"query":"rate-limit",
+"total":0,
+"ids":[]
+},
+{
+"query":"code freeze",
+"total":0,
+"ids":[]
+},
+{
+"query":"upload limit",
+"total":6,
+"ids":[
+"pg_f16a06517493452f",
+"pg_2551f063a40af6c5",
+"pg_40108986b9fadc0a",
+"pg_212d7516b1bd9a42",
+"pg_23588f8c5b8669c0",
+"pg_9aa4db1f1fd69796"
+]
+},
+{
+"query":"bisect",
+"total":0,
+"ids":[]
+},
+{
+"query":"incident channel",
+"total":0,
+"ids":[]
+},
+{
+"query":"renamed UserCache",
+"total":3,
+"ids":[
+"pg_23588f8c5b8669c0",
+"pg_98fc55673852edd2",
+"pg_c4b2baf04827849a"
+]
+},
+{
+"query":"renamed fetch_rows",
+"total":3,
+"ids":[
+"pg_ab7c3f58e697c90f",
+"pg_98fc55673852edd2",
+"pg_c4b2baf04827849a"
+]
+},
+{
+"query":"workers",
+"total":3,
+"ids":[
+"pg_f16a06517493452f",
+"pg_0da5b2cfbce830b4",
+"pg_30f699983c954a46"
+]
+},
+{
+"query":"api_version",
+"total":0,
+"ids":[]
+},
+{
+"query":"logging level",
+"total":0,
+"ids":[]
+}
+],
+"acceptance":[
+{
+"query":"What value did checkout-api.retention_days have in the logs earlier in this conversation? Answer with the value only.",
+"total":1,
+"ids":[
+"pg_70d91fa7ea6f1870"
+]
+},
+{
+"query":"What value did planner-ctl.retention_days have in the logs earlier in this conversation? Answer with the value only.",
+"total":1,
+"ids":[
+"pg_70d91fa7ea6f1870"
+]
+},
+{
+"query":"What value did ingest-api.retention_days have in the logs earlier in this conversation? Answer with the value only.",
+"total":1,
+"ids":[
+"pg_70d91fa7ea6f1870"
+]
+},
+{
+"query":"What value did uploader-api.retention_days have in the logs earlier in this conversation? Answer with the value only.",
+"total":1,
+"ids":[
+"pg_70d91fa7ea6f1870"
+]
+},
+{
+"query":"Follow the notes from the ledger-svc service to its owner, the owner's team and the region it covers. Which region is it? Answer with the region only.",
+"total":1,
+"ids":[
+"pg_d2792ed7d84d2ab7"
+]
+},
+{
+"query":"Follow the notes from the resolver-ctl service to its owner, the owner's team and the region it covers. Which region is it? Answer with the region only.",
+"total":1,
+"ids":[
+"pg_8a751d1e7fbe9c33"
+]
+},
+{
+"query":"Follow the notes from the tracker-sync service to its owner, the owner's team and the region it covers. Which region is it? Answer with the region only.",
+"total":1,
+"ids":[
+"pg_6bbaead030c1c0f8"
+]
+},
+{
+"query":"Follow the notes from the pricing-core service to its owner, the owner's team and the region it covers. Which region is it? Answer with the region only.",
+"total":1,
+"ids":[
+"pg_e251e83431bf718c"
+]
+},
+{
+"query":"Follow the notes from the resolver-core service to its owner, the owner's team, that team's site, and the region it covers. Which region is it? Answer with the region only.",
+"total":1,
+"ids":[
+"pg_71d19b9b06eb3848"
+]
+},
+{
+"query":"Follow the notes from the inventory-edge service to its owner, the owner's team, that team's site, and the region it covers. Which region is it? Answer with the region only.",
+"total":1,
+"ids":[
+"pg_c9964b38440784f9"
+]
+},
+{
+"query":"Follow the notes from the quota-ctl service to its owner, the owner's team, that team's site, and the region it covers. Which region is it? Answer with the region only.",
+"total":1,
+"ids":[
+"pg_e251e83431bf718c"
+]
+},
+{
+"query":"Follow the notes from the cache-lab service to its owner, the owner's team, that team's site, and the region it covers. Which region is it? Answer with the region only.",
+"total":1,
+"ids":[
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What is the current scheduler-core rollout cohort? Answer with the value only.",
+"total":5,
+"ids":[
+"pg_504fc43816c08277",
+"pg_df530a781233a27f",
+"pg_71d19b9b06eb3848",
+"pg_17110c76bc661f5c",
+"pg_d2792ed7d84d2ab7"
+]
+},
+{
+"query":"What was the tracker-lab rollout cohort immediately before its current value? Answer with the value only.",
+"total":2,
+"ids":[
+"pg_df530a781233a27f",
+"pg_71d19b9b06eb3848"
+]
+},
+{
+"query":"What is the current metrics-svc rollout cohort? Answer with the value only.",
+"total":3,
+"ids":[
+"pg_ff47d323bdb223a6",
+"pg_1a9c73b3a81fecad",
+"pg_df530a781233a27f"
+]
+},
+{
+"query":"What was the uploader-edge rollout cohort immediately before its current value? Answer with the value only.",
+"total":4,
+"ids":[
+"pg_6bbaead030c1c0f8",
+"pg_df530a781233a27f",
+"pg_c9964b38440784f9",
+"pg_d2792ed7d84d2ab7"
+]
+},
+{
+"query":"What is the current catalog-ctl rollout cohort? Answer with the value only.",
+"total":5,
+"ids":[
+"pg_6bbaead030c1c0f8",
+"pg_c9964b38440784f9",
+"pg_71d19b9b06eb3848",
+"pg_d2792ed7d84d2ab7",
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What was the gateway-ctl rollout cohort immediately before its current value? Answer with the value only.",
+"total":4,
+"ids":[
+"pg_54014e2ded920902",
+"pg_e251e83431bf718c",
+"pg_c9964b38440784f9",
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What is the current cache-api rollout cohort? Answer with the value only.",
+"total":4,
+"ids":[
+"pg_ff47d323bdb223a6",
+"pg_8a751d1e7fbe9c33",
+"pg_17110c76bc661f5c",
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What was the ingest-edge rollout cohort immediately before its current value? Answer with the value only.",
+"total":4,
+"ids":[
+"pg_ab94bbd39ccfbfd9",
+"pg_6bbaead030c1c0f8",
+"pg_71d19b9b06eb3848",
+"pg_43bb9f3c5c3770a7"
+]
+},
+{
+"query":"What is the current billing-edge rollout cohort? Answer with the value only.",
+"total":3,
+"ids":[
+"pg_504fc43816c08277",
+"pg_e251e83431bf718c",
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What was the auditor-edge rollout cohort immediately before its current value? Answer with the value only.",
+"total":3,
+"ids":[
+"pg_54014e2ded920902",
+"pg_d2792ed7d84d2ab7",
+"pg_43bb9f3c5c3770a7"
+]
+},
+{
+"query":"What is the current archive-sync rollout cohort? Answer with the value only.",
+"total":6,
+"ids":[
+"pg_504fc43816c08277",
+"pg_1a9c73b3a81fecad",
+"pg_6bbaead030c1c0f8",
+"pg_8a751d1e7fbe9c33",
+"pg_e251e83431bf718c",
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What was the reporting-lab rollout cohort immediately before its current value? Answer with the value only.",
+"total":5,
+"ids":[
+"pg_ff47d323bdb223a6",
+"pg_54014e2ded920902",
+"pg_6bbaead030c1c0f8",
+"pg_c9964b38440784f9",
+"pg_17110c76bc661f5c"
+]
+},
+{
+"query":"What is the current archive-hub rollout cohort? Answer with the value only.",
+"total":4,
+"ids":[
+"pg_1a9c73b3a81fecad",
+"pg_8a751d1e7fbe9c33",
+"pg_c9964b38440784f9",
+"pg_d2792ed7d84d2ab7"
+]
+},
+{
+"query":"What was the reporting-edge rollout cohort immediately before its current value? Answer with the value only.",
+"total":3,
+"ids":[
+"pg_504fc43816c08277",
+"pg_17110c76bc661f5c",
+"pg_43bb9f3c5c3770a7"
+]
+},
+{
+"query":"What is the current webhook-svc rollout cohort? Answer with the value only.",
+"total":3,
+"ids":[
+"pg_504fc43816c08277",
+"pg_6bbaead030c1c0f8",
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What is the current ledger-edge rollout cohort? Answer with the value only.",
+"total":6,
+"ids":[
+"pg_ff47d323bdb223a6",
+"pg_54014e2ded920902",
+"pg_df530a781233a27f",
+"pg_71d19b9b06eb3848",
+"pg_17110c76bc661f5c",
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What was the quota-core rollout cohort immediately before its current value? Answer with the value only.",
+"total":4,
+"ids":[
+"pg_504fc43816c08277",
+"pg_71d19b9b06eb3848",
+"pg_d2792ed7d84d2ab7",
+"pg_43bb9f3c5c3770a7"
+]
+},
+{
+"query":"What is the current pricing-api rollout cohort? Answer with the value only.",
+"total":2,
+"ids":[
+"pg_1a9c73b3a81fecad",
+"pg_71d19b9b06eb3848"
+]
+},
+{
+"query":"What was the router-ctl rollout cohort immediately before its current value? Answer with the value only.",
+"total":4,
+"ids":[
+"pg_ff47d323bdb223a6",
+"pg_504fc43816c08277",
+"pg_df530a781233a27f",
+"pg_43bb9f3c5c3770a7"
+]
+},
+{
+"query":"What is the current ingest-core rollout cohort? Answer with the value only.",
+"total":6,
+"ids":[
+"pg_ab94bbd39ccfbfd9",
+"pg_6bbaead030c1c0f8",
+"pg_17110c76bc661f5c",
+"pg_8a751d1e7fbe9c33",
+"pg_df530a781233a27f",
+"pg_c9964b38440784f9"
+]
+},
+{
+"query":"What was the planner-ops rollout cohort immediately before its current value? Answer with the value only.",
+"total":6,
+"ids":[
+"pg_54014e2ded920902",
+"pg_1a9c73b3a81fecad",
+"pg_8a751d1e7fbe9c33",
+"pg_e251e83431bf718c",
+"pg_71d19b9b06eb3848",
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What is the current resolver-lab rollout cohort? Answer with the value only.",
+"total":4,
+"ids":[
+"pg_df530a781233a27f",
+"pg_c9964b38440784f9",
+"pg_ea837acb79ca9414",
+"pg_43bb9f3c5c3770a7"
+]
+},
+{
+"query":"What was the search-hub rollout cohort immediately before its current value? Answer with the value only.",
+"total":4,
+"ids":[
+"pg_6bbaead030c1c0f8",
+"pg_8a751d1e7fbe9c33",
+"pg_c9964b38440784f9",
+"pg_71d19b9b06eb3848"
+]
+},
+{
+"query":"What is the current auditor-sync rollout cohort? Answer with the value only.",
+"total":6,
+"ids":[
+"pg_54014e2ded920902",
+"pg_8a751d1e7fbe9c33",
+"pg_df530a781233a27f",
+"pg_e251e83431bf718c",
+"pg_17110c76bc661f5c",
+"pg_d2792ed7d84d2ab7"
+]
+},
+{
+"query":"What was the metrics-hub rollout cohort immediately before its current value? Answer with the value only.",
+"total":4,
+"ids":[
+"pg_504fc43816c08277",
+"pg_ab94bbd39ccfbfd9",
+"pg_e251e83431bf718c",
+"pg_43bb9f3c5c3770a7"
+]
+},
+{
+"query":"What is the current tracker-core rollout cohort? Answer with the value only.",
+"total":7,
+"ids":[
+"pg_ff47d323bdb223a6",
+"pg_54014e2ded920902",
+"pg_1a9c73b3a81fecad",
+"pg_6bbaead030c1c0f8",
+"pg_e251e83431bf718c",
+"pg_71d19b9b06eb3848",
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What was the mailer-core rollout cohort immediately before its current value? Answer with the value only.",
+"total":5,
+"ids":[
+"pg_54014e2ded920902",
+"pg_ab94bbd39ccfbfd9",
+"pg_df530a781233a27f",
+"pg_71d19b9b06eb3848",
+"pg_17110c76bc661f5c"
+]
+},
+{
+"query":"What is the current identity-api rollout cohort? Answer with the value only.",
+"total":5,
+"ids":[
+"pg_504fc43816c08277",
+"pg_8a751d1e7fbe9c33",
+"pg_df530a781233a27f",
+"pg_d2792ed7d84d2ab7",
+"pg_ea837acb79ca9414"
+]
+},
+{
+"query":"What was the identity-core rollout cohort immediately before its current value? Answer with the value only.",
+"total":7,
+"ids":[
+"pg_ff47d323bdb223a6",
+"pg_1a9c73b3a81fecad",
+"pg_6bbaead030c1c0f8",
+"pg_8a751d1e7fbe9c33",
+"pg_e251e83431bf718c",
+"pg_c9964b38440784f9",
+"pg_17110c76bc661f5c"
+]
+},
+{
+"query":"What is the current payroll-lab rollout cohort? Answer with the value only.",
+"total":5,
+"ids":[
+"pg_1a9c73b3a81fecad",
+"pg_df530a781233a27f",
+"pg_17110c76bc661f5c",
+"pg_d2792ed7d84d2ab7",
+"pg_43bb9f3c5c3770a7"
+]
+},
+{
+"query":"Is action item AI-78048 open or closed? Answer open or closed.",
+"total":7,
+"ids":[
+"pg_54014e2ded920902",
+"pg_1a9c73b3a81fecad",
+"pg_504fc43816c08277",
+"pg_ab94bbd39ccfbfd9",
+"pg_df530a781233a27f",
+"pg_e251e83431bf718c",
+"pg_d2792ed7d84d2ab7"
+]
+},
+{
+"query":"Is action item AI-88593 open or closed? Answer open or closed.",
+"total":8,
+"ids":[
+"pg_ff47d323bdb223a6",
+"pg_8a751d1e7fbe9c33",
+"pg_54014e2ded920902",
+"pg_504fc43816c08277",
+"pg_ab94bbd39ccfbfd9",
+"pg_df530a781233a27f",
+"pg_e251e83431bf718c",
+"pg_d2792ed7d84d2ab7"
+]
+},
+{
+"query":"Is action item AI-43806 open or closed? Answer open or closed.",
+"total":6,
+"ids":[
+"pg_504fc43816c08277",
+"pg_ab94bbd39ccfbfd9",
+"pg_df530a781233a27f",
+"pg_54014e2ded920902",
+"pg_e251e83431bf718c",
+"pg_d2792ed7d84d2ab7"
+]
+},
+{
+"query":"Is action item AI-48831 open or closed? Answer open or closed.",
+"total":7,
+"ids":[
+"pg_54014e2ded920902",
+"pg_ab94bbd39ccfbfd9",
+"pg_ff47d323bdb223a6",
+"pg_504fc43816c08277",
+"pg_df530a781233a27f",
+"pg_e251e83431bf718c",
+"pg_d2792ed7d84d2ab7"
+]
+},
+{
+"query":"Of action items AI-54382, AI-55327, AI-74615, AI-83198, AI-88201, AI-91032, which are still open? List their ids.",
+"total":4,
+"ids":[
+"pg_d2792ed7d84d2ab7",
+"pg_43bb9f3c5c3770a7",
+"pg_504fc43816c08277",
+"pg_c9964b38440784f9"
+]
+},
+{
+"query":"Of action items AI-55302, AI-64547, AI-92624, AI-93532, AI-98470, AI-98479, which are still open? List their ids.",
+"total":2,
+"ids":[
+"pg_43bb9f3c5c3770a7",
+"pg_1a9c73b3a81fecad"
+]
+},
+{
+"query":"What value did identity-ops.shard_32.map_version have in the logs earlier in this conversation? Answer with the value only.",
+"total":1,
+"ids":[
+"pg_1a9c73b3a81fecad"
+]
+},
+{
+"query":"What value did notifier-ctl.shard_56.map_version have in the logs earlier in this conversation? Answer with the value only.",
+"total":1,
+"ids":[
+"pg_d2792ed7d84d2ab7"
+]
+},
+{
+"query":"What value did reporting-ops.shard_42.map_version have in the logs earlier in this conversation? Answer with the value only.",
+"total":1,
+"ids":[
+"pg_1a9c73b3a81fecad"
+]
+},
+{
+"query":"What value did quota-svc.shard_49.map_version have in the logs earlier in this conversation? Answer with the value only.",
+"total":1,
+"ids":[
+"pg_43bb9f3c5c3770a7"
+]
+},
+{
+"query":"What value did auditor-mesh.shard_13.map_version have in the logs earlier in this conversation? Answer with the value only.",
+"total":1,
+"ids":[
+"pg_ab94bbd39ccfbfd9"
+]
+},
+{
+"query":"What value did ingest-lab.shard_63.map_version have in the logs earlier in this conversation? Answer with the value only.",
+"total":1,
+"ids":[
+"pg_ff47d323bdb223a6"
+]
+}
+],
+"small":[
+{
+"query":"nightly restore",
+"total":0,
+"ids":[]
+},
+{
+"query":"retry-budget",
+"total":2,
+"ids":[
+"pg_a40c6da70f104979",
+"pg_2ebc18b76b96f38e"
+]
+},
+{
+"query":"retentionDays",
+"total":1,
+"ids":[
+"pg_666b4deac658e800"
+]
+},
+{
+"query":"maxRetries",
+"total":4,
+"ids":[
+"pg_cef054caf4380b98",
+"pg_bdd426cb820e0d50",
+"pg_b445f9cd801890ac",
+"pg_d3625cbc3d81ad36"
+]
+},
+{
+"query":"refresh_token",
+"total":1,
+"ids":[
+"pg_bae1030e3453ef48"
+]
+},
+{
+"query":"refresh-token",
+"total":1,
+"ids":[
+"pg_bae1030e3453ef48"
+]
+},
+{
+"query":"refresh.token",
+"total":1,
+"ids":[
+"pg_bae1030e3453ef48"
+]
+},
+{
+"query":"what port is the staging database on",
+"total":1,
+"ids":[
+"pg_3a8a33d96bcd3475"
+]
+},
+{
+"query":"staging databse port",
+"total":1,
+"ids":[
+"pg_3a8a33d96bcd3475"
+]
+},
+{
+"query":"deploys tuesday rollback",
+"total":1,
+"ids":[
+"pg_d64a1b8a139ca808"
+]
+},
+{
+"query":"nightly bakcups",
+"total":1,
+"ids":[
+"pg_5eb28064214eb228"
+]
+},
+{
+"query":"zzqqxx",
+"total":0,
+"ids":[]
+},
+{
+"query":"zzqqxx nightly",
+"total":0,
+"ids":[]
+},
+{
+"query":"\u00e9",
+"total":0,
+"ids":[]
+},
+{
+"query":"\ud83d",
+"total":0,
+"ids":[]
+},
+{
+"query":"w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 w27 w28 w29 w30 w31 w32 w33 w34 w35 w36 w37 w38 w39 w40 w41 w42 w43 w44 w45 w46 w47 w48 w49 w50 w51 w52 w53 w54 w55 w56 w57 w58 w59 w60 w61 w62 w63 w64 w65 w66 w67 w68 w69 w70 w71 w72 w73 w74 w75 w76 w77 w78 w79 w80 w81 w82 w83 w84 w85 w86 w87 w88 w89 w90 w91 w92 w93 w94 w95 w96 w97 w98 w99 w100 w101 w102 w103 w104 w105 w106 w107 w108 w109 w110 w111 w112 w113 w114 w115 w116 w117 w118 w119",
+"total":0,
+"ids":[]
+},
+{
+"query":"worker config max_retries retention_days",
+"total":3,
+"ids":[
+"pg_d3625cbc3d81ad36",
+"pg_b445f9cd801890ac",
+"pg_666b4deac658e800"
+]
+}
+],
+"many":[
+{
+"query":"deploy rollback",
+"total":0,
+"ids":[]
+},
+{
+"query":"rolout paused",
+"total":9,
+"ids":[
+"pg_f4aa9215c6e0e874",
+"pg_3a8abe816e7dd9ef",
+"pg_94b9eefc6ca78daa",
+"pg_8cadfa845f3cb2aa",
+"pg_b56f91a325ccf277",
+"pg_5d58b5ab0945ee3d",
+"pg_5aaa13bec1815c4b",
+"pg_9b5813034301f416",
+"pg_078c41fda34de4f1"
+]
+}
+]
+}
