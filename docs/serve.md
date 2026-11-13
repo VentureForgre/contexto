@@ -1,5 +1,7 @@
 # `contexto serve`
 
+[Contexto](../README.md) / [Documentation](README.md)
+
 `contexto run claude` starts Claude Code itself, so it can point that one process at a proxy it
 started for it. Some clients are started by something else: the VS Code and JetBrains extensions,
 the desktop app, the Claude Agent SDK, the GitHub Action, `claude -p` in a CI job. Each of them

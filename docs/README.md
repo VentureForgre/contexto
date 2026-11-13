@@ -13,6 +13,9 @@ install it and how to start it.
   and the `CODEX_HOME` Contexto sets up.
 - [run-reference.md](run-reference.md): the options of `contexto run`, what the launcher does,
   `contexto proxy`, the environment variables, and the supported upstreams.
+- [serve.md](serve.md): `contexto serve`, the engine as a local service for clients Contexto does
+  not launch (IDE extensions, the desktop app, the Agent SDK, CI): the token, client settings,
+  routing, the files it writes, and its limits.
 - [cliproxyapi.md](cliproxyapi.md): running Contexto with a CLIProxyAPI instance as the upstream:
   setup, checks, and what was tested.
 - [sessions.md](sessions.md): how to tell that Contexto is working, what a session stores and
@@ -101,6 +104,8 @@ New CLI versions and upstream checks:
   Claude Code 2.1.310.
 - [research/M2-claude-code-2.1.318.md](research/M2-claude-code-2.1.318.md): the version checks for
   Claude Code 2.1.314 and 2.1.318, and codex-cli 0.166.0.
+- [research/D70-serve-probes.md](research/D70-serve-probes.md): what Claude Code 2.1.322 sends a
+  gateway and an MCP server, measured against stubs for `contexto serve`.
 - [research/O6-thinking-check.md](research/O6-thinking-check.md): a live check for dropped
   thinking after each session was pinned to one credential.
 
