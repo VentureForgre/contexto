@@ -1,5 +1,10 @@
 # Exit codes
 
+[Contexto](../README.md) / [Documentation](README.md)
+
+The exit codes of the `contexto` commands. The Command column names the subcommand, so `run` is
+`contexto run`.
+
 | Command | Code | Meaning |
 |---|---|---|
 | `run` | the CLI's | Claude Code's or Codex's own exit code |

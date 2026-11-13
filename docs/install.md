@@ -1,10 +1,19 @@
 # Install
 
+[Contexto](../README.md) / [Documentation](README.md)
+
 The [README](../README.md#install) has the requirements and the one command that installs Contexto
 from the release URL. This page has the other ways to install, how to check the download, and how
 to uninstall.
 
 ## Other ways to install
+
+Straight from the release URL, with no GitHub login:
+
+```sh
+pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.24/contexto-0.5.24-py3-none-any.whl
+contexto --version                                    # contexto 0.5.24
+```
 
 `pip install <the same URL>` works too, inside an active Python 3.12+ virtual environment. To check
 the download before installing, follow [Checking the download](#checking-the-download) instead.

@@ -1,5 +1,7 @@
 # `contexto run` reference
 
+[Contexto](../README.md) / [Documentation](README.md)
+
 The options of `contexto run` and what the launcher does, `contexto proxy`, the environment
 variables Contexto reads, and the upstreams it supports.
 
@@ -65,7 +67,7 @@ tier, above which every rate is 5 times higher. Replaying a recorded acceptance 
 with the model's behavior held fixed, every request stayed under it, for a modeled 45.7% lower
 cost. Long tool loops can still cross it, and accuracy at that bound is not yet measured. See
 [docs/research/M2-haiku-100k-tier.md](research/M2-haiku-100k-tier.md).
-The Quickstart's `--bound 120000` is also below the tier at turn start: with the default headroom floor
+The [Quickstart](../README.md#quickstart)'s `--bound 120000` is also below the tier at turn start: with the default headroom floor
 (25,000) and minimum turn room (12,000), any bound up to 125000 is.
 
 ## `contexto proxy`
@@ -93,8 +95,8 @@ request is in flight (Esc), the proxy stops the upstream response at once and lo
 | `CONTEXTO_CODEX_UPSTREAM` | `run codex` | Codex upstream when `--codex-upstream` is not given. |
 | `CONTEXTO_SEARCH_CACHE_MB` | `mcp` | Page text the MCP server holds in memory for `contexto_search`, in MB (default 64; `0` holds none). See [MCP tools](mcp-tools.md). |
 | `CONTEXTO_RECALL_VARIANT` | new sessions | `default` or `legacy` recall guidance text. `legacy` is kept for diagnosis. A session keeps the variant it started with. |
-| `ANTHROPIC_BASE_URL` | `run`, `proxy` | Upstream, when no settings file sets one (see Troubleshooting). |
-| `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` | `run`, `proxy` | Read, never set, by Contexto: when truthy, no project `.claude/` settings file is used, as Claude Code does in `-p` mode (see Troubleshooting). |
+| `ANTHROPIC_BASE_URL` | `run`, `proxy` | Upstream, when no settings file sets one (see [Troubleshooting](troubleshooting.md)). |
+| `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` | `run`, `proxy` | Read, never set, by Contexto: when truthy, no project `.claude/` settings file is used, as Claude Code does in `-p` mode (see [Troubleshooting](troubleshooting.md)). |
 | `CONTEXTO_NO_VERSION_CHECK` | `run` | `1` skips the CLI version check, like `--no-version-check`. |
 
 ## Upstreams and CLIProxyAPI

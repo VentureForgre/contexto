@@ -1,5 +1,11 @@
 # Rules you give once
 
+[Contexto](../README.md) / [Documentation](README.md)
+
+What happens to a rule you state once ("from now on, ...") when its turn is paged out, and how to
+make it stay. The terms used here (paged out, pinned state, page index) are defined in the README's
+[How it works](../README.md#how-it-works).
+
 When turns are paged out, the model keeps seeing the pinned state and the page index, which holds
 the opening of each paged-out turn (about its first 200 characters). A standing rule ("from now on,
 write dates in ISO format") stated at the start of a message stays in view through that index. A

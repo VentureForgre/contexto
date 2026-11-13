@@ -1,5 +1,11 @@
 # MCP tools the model gets
 
+[Contexto](../README.md) / [Documentation](README.md)
+
+The five tools Contexto gives the model for reading paged-out turns and keeping pinned state. The
+terms used here (bound, headroom, window budget) are defined in the README's
+[How it works](../README.md#how-it-works).
+
 `contexto run` registers `contexto mcp --session <id>` with the CLI, which starts it over stdio. You do
 not start it by hand.
 

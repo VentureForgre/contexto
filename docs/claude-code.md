@@ -1,5 +1,7 @@
 # Claude Code
 
+[Contexto](../README.md) / [Documentation](README.md)
+
 `contexto run claude` starts Claude Code through Contexto; the [README](../README.md#quickstart) has
 the commands. This page covers resuming a conversation and Claude Code's `/clear`, `/resume` and
 `/compact`.

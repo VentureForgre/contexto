@@ -33,7 +33,7 @@ What it includes:
 
 - Claude Code and Codex (API-key mode) through `contexto run`.
 - Upstreams: the vendor's API with your own key, or a CLIProxyAPI instance
-  ([below](docs/run-reference.md#upstreams-and-cliproxyapi)).
+  ([Upstreams and CLIProxyAPI](docs/run-reference.md#upstreams-and-cliproxyapi)).
 - Word search over paged-out turns ([MCP tools](docs/mcp-tools.md)).
 - A separate recall budget for each subagent, so subagents cannot use up the main conversation's
   room.
@@ -98,7 +98,8 @@ Resuming a conversation, and `/clear`, `/resume` and `/compact`:
 [docs/claude-code.md](docs/claude-code.md). Every option of `contexto run`:
 [docs/run-reference.md](docs/run-reference.md).
 
-For Codex in API-key mode, run `contexto run codex`: [docs/codex.md](docs/codex.md).
+Codex runs through `contexto run codex` in API-key mode. It needs a key helper command and, with an
+OpenAI key, `--codex-upstream https://api.openai.com/v1`: [docs/codex.md](docs/codex.md).
 
 ## Is it working?
 
@@ -121,13 +122,14 @@ The index of everything under `docs/` is [docs/README.md](docs/README.md). The g
 - [Rules you give once](docs/standing-rules.md): how a standing rule stays in view after paging.
 - [MCP tools](docs/mcp-tools.md): the tools the model gets, how search ranks, and the recall budget.
 - [FAQ](docs/faq.md): subscriptions, API keys, cost, what is sent where, and continuing a session.
-- [Troubleshooting](docs/troubleshooting.md): each warning and error, its cause, and what to do.
+- [Troubleshooting](docs/troubleshooting.md): the warnings and errors you are most likely to see,
+  each with its cause and what to do.
 - [Exit codes](docs/exit-codes.md): the exit code of every command.
 - [CLI updates](docs/cli-updates.md): how a new Claude Code or Codex version is tested.
 
 ## Troubleshooting
 
-Each warning and error Contexto prints, with its cause and what to do, is in
+The warnings and errors you are most likely to see, each with its cause and what to do, are in
 [docs/troubleshooting.md](docs/troubleshooting.md). A message that points here for `contexto run`
 means [docs/run-reference.md](docs/run-reference.md#contexto-run).
 

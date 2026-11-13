@@ -1,5 +1,7 @@
 # Sessions
 
+[Contexto](../README.md) / [Documentation](README.md)
+
 How to tell that Contexto is working, what a session stores on disk, and the commands that read and
 delete sessions.
 
@@ -9,7 +11,7 @@ delete sessions.
   `contexto: session 7f3a... (bound 150,000, upstream default)` for Claude Code, or
   `contexto: session 7f3a... (bound 150,000, upstream codex-flag, codex auth apikey, engine rewrite)`
   for Codex. The upstream is named by where it came from (for Claude Code `flag`, `env`, `default`,
-  or a settings file; for Codex [the labels above](codex.md)), never by its URL.
+  or a settings file; for Codex [the labels on the Codex page](codex.md)), never by its URL.
 - **In Claude Code**, `/mcp` lists the `contexto` server as connected.
 - **Nothing else is visible until the prompt nears the bound**, about 125,000 tokens with the
   defaults. Then the proxy rotates for the first time.

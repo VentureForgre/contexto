@@ -1,5 +1,10 @@
 # Codex (API-key mode)
 
+[Contexto](../README.md) / [Documentation](README.md)
+
+How to run Codex through Contexto with an API key: the key helper, the upstream, and what Contexto
+sets up for Codex.
+
 ```sh
 contexto run codex
 contexto run --codex-key-helper 'my-key-command' codex

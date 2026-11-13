@@ -47,6 +47,17 @@ def tracked_markdown() -> list[str]:
     return sorted(name for name in listing.stdout.decode().split("\0") if name)
 
 
+def tracked_paths() -> set[str]:
+    """Every tracked file and every directory that holds one."""
+    listing = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z"], capture_output=True, check=True)
+    paths: set[str] = set()
+    for name in listing.stdout.decode().split("\0"):
+        while name and name not in paths:
+            paths.add(name)
+            name = os.path.dirname(name)
+    return paths
+
+
 def blank(text: str) -> str:
     """The text with everything but its line breaks replaced by spaces, so line numbers hold."""
     return re.sub(r"[^\n]", " ", text)
@@ -149,8 +160,12 @@ def exists_exactly(root: Path, relative: str, listings: dict[Path, set[str]]) ->
     return True
 
 
-def broken_links(root: Path, files: list[str]) -> list[tuple[str, int, str, str]]:
-    """(file, line, target, reason) for each relative link in ``files`` that does not resolve."""
+def broken_links(root: Path, files: list[str], tracked: set[str] | None = None) -> list[tuple[str, int, str, str]]:
+    """(file, line, target, reason) for each relative link in ``files`` that does not resolve.
+
+    With ``tracked`` (tracked files and their directories), a target that exists on disk but is not
+    tracked is broken too: it would be missing from a fresh checkout.
+    """
     listings: dict[Path, set[str]] = {}
     anchor_sets: dict[str, set[str]] = {}
     broken = []
@@ -177,6 +192,9 @@ def broken_links(root: Path, files: list[str]) -> list[tuple[str, int, str, str]
             if resolved != "." and not exists_exactly(root, resolved, listings):
                 broken.append((name, line, target, f"{resolved} does not exist"))
                 continue
+            if tracked is not None and resolved != "." and resolved not in tracked:
+                broken.append((name, line, target, f"{resolved} is not tracked by git"))
+                continue
             if not anchor or not resolved.lower().endswith((".md", ".markdown")):
                 continue
             if resolved not in anchor_sets:
@@ -187,7 +205,8 @@ def broken_links(root: Path, files: list[str]) -> list[tuple[str, int, str, str]
 
 
 def test_relative_links_in_tracked_markdown_resolve():
-    broken = broken_links(REPO, tracked_markdown())
+    files = tracked_markdown()  # skips outside a git work tree
+    broken = broken_links(REPO, files, tracked_paths())
     new = [f"{name}:{line}: ({target}): {reason}" for name, line, target, reason in broken
            if (name, target) not in KNOWN_BROKEN]
     assert not new, "broken relative links:\n" + "\n".join(new)
@@ -242,4 +261,10 @@ def test_a_broken_link_is_reported(tmp_path):
         ("README.md", 6, "docs/Guide.md"), ("README.md", 7, "#bottom"), ("README.md", 8, "docs/missing.png"),
         ("README.md", 9, "../elsewhere.md"),
         ("docs/other.md", 1, "../README.md#nope"), ("docs/other.md", 1, "guide.md#Guide"),
+    ]
+    tracked = {"README.md", "docs", "docs/guide.md", "docs/other.md"}  # docs/shot.png is on disk only
+    assert [(line, target, reason) for name, line, target, reason
+            in broken_links(tmp_path, ["README.md"], tracked) if "tracked" in reason] == [
+        (3, "docs/shot.png", "docs/shot.png is not tracked by git"),
+        (3, "docs/shot.png#L3", "docs/shot.png is not tracked by git"),
     ]

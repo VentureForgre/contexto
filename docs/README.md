@@ -23,8 +23,8 @@ install it and how to start it.
   budget.
 - [faq.md](faq.md): subscription logins, API keys, cost, what is sent where, and continuing a
   session later.
-- [troubleshooting.md](troubleshooting.md): each warning and error Contexto prints, its cause, and
-  what to do.
+- [troubleshooting.md](troubleshooting.md): the warnings and errors you are most likely to see, each
+  with its cause and what to do.
 - [exit-codes.md](exit-codes.md): the exit codes of every command.
 - [cli-updates.md](cli-updates.md): how a new Claude Code or Codex version is tested.
 
@@ -33,7 +33,8 @@ install it and how to start it.
 - [milestones/M0-infinite-session-study.md](milestones/M0-infinite-session-study.md): the brief for
   the first study: the questions and hypotheses about sessions that never compact.
 - [milestones/M1-ledger-and-recovery.md](milestones/M1-ledger-and-recovery.md): a contract for a
-  durable ledger and handoff between sessions. It was not built.
+  durable ledger and handoff between sessions. It was not built as a milestone; its record model
+  became the pinned state of the proxy that ships.
 - [milestones/M2-contexto-proxy.md](milestones/M2-contexto-proxy.md): the design contract for the
   proxy that ships.
 - [DECISIONS.md](DECISIONS.md): every decision, numbered D0, D1 and so on, with its reason and
@@ -49,7 +50,7 @@ code behind them is in `spikes/`.
 The M0 study:
 
 - [research/M0-recommendation.md](research/M0-recommendation.md): what the M0 study recommended
-  building. It draws on the other M0 notes:
+  building. The other M0 notes:
   [interception](research/M0-interception.md),
   [proxy measurements](research/M0-proxy-measurements.md),
   [Codex measurements](research/M0-codex-measurements.md),
@@ -116,5 +117,5 @@ Scale and cost proposals:
 - [research/M2-tool-rounds-lever.md](research/M2-tool-rounds-lever.md): a proposal on limiting
   the search rounds in a turn, from an analysis of live run #3.
 - [research/M2-seat-bound.md](research/M2-seat-bound.md): a modeled choice of bound for Claude Code
-  with Opus 5.5 on an agent seat.
+  with Opus 5.5 when the fixed part of every request is large (82,000 to 92,000 tokens).
 - `research/data/`: the CSV files behind the usage and seat-bound notes.

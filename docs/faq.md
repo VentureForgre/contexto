@@ -1,5 +1,9 @@
 # FAQ
 
+[Contexto](../README.md) / [Documentation](README.md)
+
+Short answers about logins, API keys, cost, what is sent where, and continuing a session.
+
 **Does it work with a Claude Pro or Max login?** The supported upstreams are the vendor's API with
 an API key, and CLIProxyAPI; the live acceptance runs went through CLIProxyAPI. Contexto forwards
 whatever credential Claude Code sends and never stores it, but running it with a claude.ai
