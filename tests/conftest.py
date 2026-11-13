@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import threading
 from http.server import ThreadingHTTPServer
@@ -25,6 +26,25 @@ def sigint_default():
     yield
     if previous is not None:
         signal.signal(signal.SIGINT, previous)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def no_managed_settings(tmp_path_factory):
+    """Keep the suite off this machine's Claude Code managed settings file.
+
+    ``contexto run claude`` reads that file from a fixed system path (D70). The variable below names
+    another path for it, here one in a temporary directory where no file exists, for the tests that
+    call the reader in this process and, through the inherited environment, for every launcher a test
+    starts. A test that needs a managed file passes its own path."""
+    from contexto.upstream import MANAGED_SETTINGS_KEY
+
+    previous = os.environ.get(MANAGED_SETTINGS_KEY)
+    os.environ[MANAGED_SETTINGS_KEY] = str(tmp_path_factory.mktemp("managed") / "managed-settings.json")
+    yield
+    if previous is None:
+        os.environ.pop(MANAGED_SETTINGS_KEY, None)
+    else:
+        os.environ[MANAGED_SETTINGS_KEY] = previous
 
 
 # The stub upstream and proxy factory of test_proxy_server, shared with test_upstream_affinity.

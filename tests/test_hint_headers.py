@@ -387,6 +387,38 @@ def test_context_compacted_hands_over_inside_a_tool_loop_once_main_is_idle():
         assert event["changes"] == expected and event["main"] is bool(expected)
 
 
+def test_context_compacted_hands_over_inside_a_tool_loop_when_the_key_was_seen_before():
+    """Reviewer A's last nit: a side request under the compacted conversation's key arrives first, so
+    the request that keeps the pending call is not that key's first. The header is on that very
+    request, so it hands over there; a request of an older compaction never carries it."""
+    summary = user(DRIFTED + "\nSummary:\nx")
+    compacted = [summary, tool_use(4), tool_result(4)]
+    for answered, expected in ((False, ["compacted"]), (True, [])):
+        engine = new_engine()
+        send(engine, main_request(history(2)), sent(request_class="main"), tool_calls=answered)
+        early = send(engine, toolless([summary]), sent(request_class="auxiliary"))
+        assert early["main"] is False and early["changes"] == []
+        event = send(engine, main_request(compacted), sent(request_class="main", context_compacted="auto"))
+        assert event["changes"] == expected and event["main"] is bool(expected)
+        later = send(engine, main_request(compacted), sent(request_class="main"))  # the header is sent once
+        assert later["changes"] == [] and later["main"] is bool(expected)
+
+
+def test_fallback_a_seen_key_waits_for_its_next_turn_start_without_the_header():
+    """Without the header nothing changes: the text signature hands over a pending-call compaction only
+    at its key's first request (D59), and otherwise at the conversation's next turn start."""
+    summary = user(CLAUDE_CODE_COMPACTION_SUMMARY + "\nSummary:\nx")
+    assert compaction_summary([summary])
+    compacted = [summary, tool_use(4), tool_result(4)]
+    engine = new_engine()
+    send(engine, main_request(history(2)), sent())
+    send(engine, toolless([summary]), sent())
+    event = send(engine, main_request(compacted), sent())
+    assert event["changes"] == [] and event["main"] is False
+    turn = send(engine, main_request([*compacted, assistant("done"), user("next prompt")]), sent())
+    assert turn["changes"] == ["compacted"] and turn["main"] is True
+
+
 def test_context_compacted_with_an_unknown_trigger_still_marks_and_logs_no_value():
     engine = new_engine()
     send(engine, main_request(history(2)), sent(request_class="main"))

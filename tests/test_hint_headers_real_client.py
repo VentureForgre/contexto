@@ -23,7 +23,9 @@ from pathlib import Path
 
 import pytest
 
-from contexto.hints import GATED_HINT_HEADERS, HINT_HEADERS_KEY, REQUEST_CLASS_HEADER, REQUEST_CLASSES
+from contexto.hints import GATED_HINT_HEADERS, HINT_HEADERS_KEY, HINT_MARKER_KEY, REQUEST_CLASS_HEADER, REQUEST_CLASSES
+from contexto.launcher import settings_payload
+from contexto.upstream import MANAGED_SETTINGS_KEY
 
 CLAUDE = shutil.which("claude")
 pytestmark = pytest.mark.skipif(CLAUDE is None, reason="claude CLI not installed")
@@ -158,6 +160,8 @@ def run_claude_through_contexto(tmp_path: Path, extra_env: dict[str, str],
             (tmp_path / name).mkdir()
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("OPENRIG_", "RIGGED_", "CLAUDE", "ANTHROPIC_", "CONTEXTO_", "AWS_"))}
+        # No file exists at this path, so the launcher never reads this machine's managed settings.
+        env[MANAGED_SETTINGS_KEY] = str(tmp_path / "managed-settings.json")
         env.update({"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
                     "CONTEXTO_HOME": str(tmp_path / "contexto"), "ANTHROPIC_API_KEY": "sk-ant-fake-for-stub",
                     "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1",
@@ -224,6 +228,49 @@ def test_real_claude_code_hints_the_user_turned_on_reach_the_upstream(tmp_path):
     assert next(e for e in events if e["event"] == "launch")["hint_headers"] == "forwarded"
     classes = [e["transform_events"][-1].get("request_class") for e in model_requests(events)]
     assert classes == [headers[REQUEST_CLASS_HEADER] for headers in posts]
+
+
+def nested_env(outer_decision: str) -> dict[str, str]:
+    """What a process started inside an outer ``contexto run claude`` session inherits from it: Claude
+    Code applies the launcher's ``--settings`` ``env`` block to its own environment (measured on
+    2.1.322: a Bash command of the session printed ``CLAUDE_CODE_GATEWAY_HINT_HEADERS=1``). The base
+    URL is left out; ``--upstream`` stands in for one the user configured."""
+    block = settings_payload("http://127.0.0.1:1", outer_decision)["env"]
+    return {name: value for name, value in block.items() if name != "ANTHROPIC_BASE_URL"}
+
+
+def test_real_claude_code_nested_under_a_launch_that_strips_sends_the_upstream_no_gated_hint_header(tmp_path):
+    """Review round 2: the nested launch inherits Contexto's own ``1`` with the marker ``stripped``, and
+    must not take it for the user's."""
+    inherited = nested_env("stripped")
+    assert inherited == {HINT_HEADERS_KEY: "1", HINT_MARKER_KEY: "stripped"}
+    seen, events, _ = run_claude_through_contexto(tmp_path, inherited)
+    posts = [headers for method, path, headers in seen if method == "POST" and path == "/v1/messages"]
+    assert posts
+    for method, path, headers in seen:
+        assert not set(headers) & GATED_HINT_HEADERS, (method, path, sorted(set(headers) & GATED_HINT_HEADERS))
+    assert next(e for e in events if e["event"] == "launch")["hint_headers"] == "stripped"
+    classes = [e["transform_events"][-1].get("request_class") for e in model_requests(events)]
+    assert "main" in classes  # the engine still got the hints
+
+
+def test_real_claude_code_nested_under_a_launch_that_forwards_sends_them_on(tmp_path):
+    seen, events, _ = run_claude_through_contexto(tmp_path, nested_env("forwarded"))
+    posts = [headers for method, path, headers in seen if method == "POST" and path == "/v1/messages"]
+    assert posts and all(headers.get(REQUEST_CLASS_HEADER) in REQUEST_CLASSES for headers in posts)
+    assert next(e for e in events if e["event"] == "launch")["hint_headers"] == "forwarded"
+
+
+def test_real_claude_code_with_the_hints_turned_off_sends_none_and_the_engine_reads_its_signatures(tmp_path):
+    """An explicit off: the launcher leaves the variable out, the real Claude Code sends no hint
+    header, and the main request is still found by its tool list."""
+    seen, events, _ = run_claude_through_contexto(tmp_path, {HINT_HEADERS_KEY: "0"})
+    posts = [headers for method, path, headers in seen if method == "POST" and path == "/v1/messages"]
+    assert posts and all(not set(headers) & GATED_HINT_HEADERS for _, _, headers in seen)
+    assert next(e for e in events if e["event"] == "launch")["hint_headers"] == "off"
+    last = [e["transform_events"][-1] for e in model_requests(events)]
+    assert all("request_class" not in e for e in last) and any(e["main"] is True for e in last)
+    assert not [e for e in events if e["event"] in ("transform_error", "proxy_error")]
 
 
 def test_real_claude_code_subagent_and_compaction_are_classed_and_agree_with_the_signatures(tmp_path):

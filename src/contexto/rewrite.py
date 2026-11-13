@@ -2265,6 +2265,8 @@ class RewriteEngine:
         # the header), and the header and signature pairs already logged as disagreeing.
         self._classes: dict[str, str | None] = {}
         self._mismatches: set[tuple[str, str, str]] = set()
+        # D70: the key of the request being handled when it carries x-claude-code-context-compacted.
+        self._context_compacted: str | None = None
         # D50: per conversation key, whether it is idle: the response to its newest request released no
         # client tool call, no response since may have, and it has sent no request since (a headless
         # /clear qualifies; a nested claude -p, run inside one of main's calls, never does).
@@ -2403,7 +2405,10 @@ class RewriteEngine:
         ``x-claude-code-context-compacted``       The conversation is Claude Code's        The first message is the
         (any value)                               compaction of main, whatever its         compaction summary
                                                   summary says (``_compacts`` still needs  (``compaction_summary``)
-                                                  main's session id and entrypoint)
+                                                  main's session id and entrypoint). A
+                                                  compaction that keeps a pending call     Such a compaction hands
+                                                  hands over at the request carrying it,   over only at its key's
+                                                  also when its key was seen before        first request (D59)
         ``x-claude-code-compaction``              Nothing; its trigger is logged           Nothing
         ========================================  =======================================  ============================
 
@@ -2436,6 +2441,7 @@ class RewriteEngine:
         over, and the main conversation's first turn start then takes it (``after_side_request``).
         Codex requests carry no hint headers and are judged by their dialect alone."""
         tools = dialect.judges_session_start(request)
+        self._context_compacted = None
         if dialect.name != "anthropic":
             if tools:
                 self._judged.add(key)
@@ -2446,6 +2452,8 @@ class RewriteEngine:
         summary = compaction_summary(request.get(dialect.field) or [])
         if summary or hints.context_compacted:
             self._compacted.add(key)
+        if hints.context_compacted:
+            self._context_compacted = key
         judged = request_class in MAIN_CLASSES if request_class else tools
         if judged:
             self._judged.add(key)
@@ -2638,13 +2646,16 @@ class RewriteEngine:
             reason = self._takes_over(key, main, len(starts))
             if reason:
                 main, self._main_reason = key, reason
-        elif (key != main and key not in self._turn_starts and self._compacts(key, main)
-              and self._idle.get(main, False)):
+        elif (key != main and (key not in self._turn_starts or self._context_compacted == key)
+              and self._compacts(key, main) and self._idle.get(main, False)):
             # D59: a compaction that keeps a pending tool_use and its result after the summary sends them
             # under the new key with no turn start. It continues main's own loop, and main's newest
             # request (the summary request) was answered with no client tool call, so no call of the old
             # conversation is outstanding to be charged to the new room. Only at the compacted
-            # conversation's first request: a late request of an older compaction keeps out.
+            # conversation's first request: a late request of an older compaction keeps out. D70: or at
+            # the request that itself carries x-claude-code-context-compacted, which Claude Code sends
+            # once, on the first main request after the compaction, so a side request that used the key
+            # first does not delay the hand-over and a late request of an older compaction never has it.
             main, self._main_reason = key, "compacted"
         return main, len(starts)
 
@@ -2652,10 +2663,11 @@ class RewriteEngine:
         """D50: ``key`` is Claude Code's compaction of ``main``: seen with a request the dialect judges,
         its first message the compaction summary or a request of it carrying
         ``x-claude-code-context-compacted`` (D70, ``_classify``), in main's own session id and
-        entrypoint, and neither a child session nor a subagent, by its ids or by its class."""
+        entrypoint, and neither a child session nor a subagent. A request whose class is
+        ``subagent``, ``workflow`` or ``auxiliary`` never gets here as judged: ``_takes_over`` returns
+        before it asks, and ``_classify`` judges a classed request by its class alone."""
         session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
         return bool(key in self._judged and key in self._compacted and session and current
-                    and self._classes.get(key) not in SIDE_CLASSES
                     and not session.parent and not session.agent and session.entrypoint
                     and session.entrypoint == current.entrypoint and session.id == current.id)
 

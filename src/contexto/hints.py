@@ -24,8 +24,18 @@ headers here.
 engine (``contexto.rewrite.RewriteEngine._classify``). The docs give the reason they are off for a
 custom base URL: "a proxy that rejects unknown headers would fail the request". So the proxy removes
 the six before it forwards (``ContextoProxy(strip_hint_headers=True)``), and the upstream gets the
-headers it got before Contexto asked for them. When the user turned the hints on themselves
-(``user_enabled_hint_headers``), their gateway was already getting them, and they pass through.
+headers it got before Contexto asked for them. A launch is in one of three states
+(``hint_headers_state``): ``stripped`` as just described; ``forwarded`` when the user turned the hints
+on themselves, since their gateway was already getting them; ``off`` when the user turned them off,
+in which case Contexto does not ask for them and the engine reads its signatures.
+
+Limit: Claude Code applies the ``env`` block of the ``--settings`` file to its own environment, so
+every process the session starts inherits ``CLAUDE_CODE_GATEWAY_HINT_HEADERS=1``. A nested
+``contexto run claude`` tells that value from the user's by the marker written beside it
+(``HINT_MARKER_KEY``). A nested plain ``claude`` that is pointed at another base URL has no Contexto
+proxy in its path, so it sends the hints to that URL. The way out is the explicit off: with
+``CLAUDE_CODE_GATEWAY_HINT_HEADERS=0`` in the environment or the user settings file Contexto sets
+nothing.
 
 Only two of the values are ever logged, and only after they were matched against the documented set:
 the class and the compaction trigger. A prompt id, an agent type or a tool name never reaches a log.
@@ -33,13 +43,28 @@ the class and the compaction trigger. A prompt id, an agent type or a tool name 
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import NamedTuple
 
-from contexto.upstream import claude_env_value, env_truthy
+from contexto.upstream import (
+    SettingsFiles,
+    claude_env_value,
+    env_falsy,
+    env_truthy,
+    managed_settings_path,
+    settings_file_env,
+    user_settings_path,
+)
 
 HINT_HEADERS_KEY = "CLAUDE_CODE_GATEWAY_HINT_HEADERS"
+# Written beside HINT_HEADERS_KEY in the launcher's ``--settings`` ``env`` block: what that launch
+# decided (one of HINT_STATES). Claude Code applies the block to its own environment, so a nested
+# ``contexto run claude`` inherits both and can tell Contexto's ``1`` from the user's.
+HINT_MARKER_KEY = "CONTEXTO_HINT_HEADERS"
+STRIPPED, FORWARDED, OFF = "stripped", "forwarded", "off"
+HINT_STATES = (STRIPPED, FORWARDED, OFF)
 REQUEST_CLASS_HEADER = "x-claude-code-request-class"
 CONTEXT_COMPACTED_HEADER = "x-claude-code-context-compacted"
 COMPACTION_HEADER = "x-claude-code-compaction"
@@ -100,14 +125,57 @@ def without_hint_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {name: value for name, value in headers.items() if name.lower() not in GATED_HINT_HEADERS}
 
 
+def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None = None, home: Path | None = None,
+                       files: SettingsFiles | None = None, managed: Path | None = None) -> str:
+    """What ``contexto run claude`` does about the hint headers for a launch from ``cwd``:
+
+    - ``forwarded``: the user had the hints on, so the upstream was already getting them. Contexto
+      asks for them too and the proxy removes nothing.
+    - ``off``: the user turned them off. Contexto does not ask for them (the variable is left out of
+      its ``env`` block), Claude Code sends none, the engine reads its signatures, and the proxy
+      removes nothing: the launch behaves as it did before D70.
+    - ``stripped``: neither. Contexto asks for them and the proxy removes the six before it forwards.
+
+    "On" is the value Claude Code would run with without Contexto's ``--settings`` file
+    (``contexto.upstream.claude_env_value``): the managed settings file's, else the first settings
+    file ``env`` block that sets ``CLAUDE_CODE_GATEWAY_HINT_HEADERS``, else the process environment's.
+    Measured on 2.1.322: ``1``, ``true``, ``yes``, ``on`` and ``TRUE`` send the headers, ``0``,
+    ``false`` and ``2`` do not, and a settings file's value wins over the environment's in both
+    directions. A project file follows the trust rule ``contexto run claude`` has for the base URL: it
+    counts as ``claude -p`` reads it, with no trust record needed, and not at all while
+    ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is set. Interactively Claude Code applies a project file
+    only after its trust dialog, so a project file that turns the hints on lets them reach the
+    upstream from the first request, before the folder is trusted.
+
+    The process environment's value does not count while ``CONTEXTO_HINT_HEADERS`` there is
+    ``stripped``: the process then runs inside an outer ``contexto run claude`` session, which put the
+    ``1`` there for itself and removes the hints (module docstring). With ``forwarded`` the outer
+    launch found the user had them on, so the value is the user's; with ``off`` it set nothing.
+
+    "Off" is, when the hints are not on, one of ``0``, ``false``, ``no``, ``off`` in the process
+    environment (unless it is an outer launch's, as above), in the user settings file, or in the
+    managed settings file, which outranks Contexto's ``--settings``. A project file's off value is not
+    the user's choice and Contexto's ``--settings`` value outranks it (measured), so it leaves the
+    launch ``stripped``. A settings file that cannot be read decides nothing."""
+    env = os.environ if env is None else env
+    home = home or Path.home()
+    files = files or SettingsFiles()
+    managed = managed or managed_settings_path()
+    own = env.get(HINT_MARKER_KEY) != STRIPPED  # whether the environment's value is the user's own
+    found = claude_env_value(HINT_HEADERS_KEY, env=env, cwd=cwd, home=home, files=files, managed=managed,
+                             process_env=own)
+    if env_truthy(found.value):
+        return FORWARDED
+    said = (env.get(HINT_HEADERS_KEY) if own else None,
+            settings_file_env(files, user_settings_path(home, env), HINT_HEADERS_KEY),
+            settings_file_env(files, managed, HINT_HEADERS_KEY))
+    return OFF if any(env_falsy(value) for value in said) else STRIPPED
+
+
 def user_enabled_hint_headers(*, env: Mapping[str, str] | None = None, cwd: Path | None = None,
-                              home: Path | None = None) -> bool:
+                              home: Path | None = None, files: SettingsFiles | None = None,
+                              managed: Path | None = None) -> bool:
     """Whether the user turned the hint headers on themselves, so the upstream was already getting them
-    and the proxy must not remove them (``ContextoProxy(strip_hint_headers=not user_enabled_hint_headers())``).
-    True when the value Claude Code would run with, without Contexto's own ``--settings`` file, is one
-    it reads as on: the first settings file ``env`` block that sets ``CLAUDE_CODE_GATEWAY_HINT_HEADERS``
-    (``contexto.upstream.claude_env_value``, the files and trust rules of the base URL resolution),
-    else the process environment. Measured on 2.1.322: ``1``, ``true``, ``yes``, ``on`` and ``TRUE``
-    send the headers, ``0``, ``false`` and ``2`` do not, and a settings file's value wins over the
-    environment's in both directions."""
-    return env_truthy(claude_env_value(HINT_HEADERS_KEY, env=env, cwd=cwd, home=home).value)
+    and the proxy must not remove them: ``hint_headers_state`` is ``forwarded``. A value an outer
+    ``contexto run claude`` put in the process environment is not the user's."""
+    return hint_headers_state(env=env, cwd=cwd, home=home, files=files, managed=managed) == FORWARDED

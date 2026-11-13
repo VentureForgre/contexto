@@ -175,7 +175,8 @@ def test_run_wires_settings_mcp_and_args_and_cleans_up(env, upstream, tmp_path):
     assert argv[0] == "--settings=" + record["settings_path"] and argv[1] == "--mcp-config=" + record["mcp_path"]
     assert argv[2:] == ["-p", "hello", "--model", "m"]
     base = record["settings"]["env"]["ANTHROPIC_BASE_URL"]
-    assert record["settings"] == {"env": {"ANTHROPIC_BASE_URL": base, "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"},
+    assert record["settings"] == {"env": {"ANTHROPIC_BASE_URL": base, "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
+                                          "CONTEXTO_HINT_HEADERS": "stripped"},
                                   "permissions": {"allow": contexto_tool_rules()}}
     assert base.startswith("http://127.0.0.1:")
     server = record["mcp"]["mcpServers"]["contexto"]
@@ -459,9 +460,10 @@ def test_engine_config_passes_only_set_values():
 
 
 def test_payloads_and_private_files(tmp_path):
-    # D70: the hint headers are asked for next to the base URL.
+    # D70: the hint headers are asked for next to the base URL, with the launch's decision about them.
     assert settings_payload("http://127.0.0.1:1") == {
-        "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"},
+        "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
+                "CONTEXTO_HINT_HEADERS": "stripped"},
         "permissions": {"allow": contexto_tool_rules()}}
     assert mcp_payload("s", tmp_path)["mcpServers"]["contexto"]["args"][-1] == "--session=s"
     # An id starting with "-" stays the option's value (security QA 2026-11-05, finding 7).
@@ -484,7 +486,7 @@ def test_settings_allow_exactly_contexto_s_own_tools():
     assert all("*" not in rule and "(" not in rule for rule in rules)
     payload = settings_payload("http://127.0.0.1:1")
     assert set(payload) == {"env", "permissions"} and set(payload["permissions"]) == {"allow"}
-    assert set(payload["env"]) == {"ANTHROPIC_BASE_URL", "CLAUDE_CODE_GATEWAY_HINT_HEADERS"}
+    assert set(payload["env"]) == {"ANTHROPIC_BASE_URL", "CLAUDE_CODE_GATEWAY_HINT_HEADERS", "CONTEXTO_HINT_HEADERS"}
 
 
 def test_exit_code_maps_signals():

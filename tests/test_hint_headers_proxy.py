@@ -16,6 +16,7 @@ import pytest
 from contexto.hints import GATED_HINT_HEADERS, user_enabled_hint_headers
 from contexto.rewrite import RewriteEngine
 from contexto.store.memory import MemoryStore
+from contexto.upstream import resolve_upstream
 from test_clear_main import OLD, metadata
 from test_proxy_server import AUTH, REQUEST_BYTES, StubEngine, Upstream, call
 from test_rewrite import CONFIG, history, request, user
@@ -188,3 +189,107 @@ def test_a_settings_file_that_sets_another_variable_does_not_decide(tmp_path):
     write_settings(home / ".claude" / "settings.json", "http://user.invalid")
     assert user_enabled_hint_headers(env={"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"}, cwd=tmp_path, home=home) is True
     assert user_enabled_hint_headers(env={}, cwd=tmp_path, home=home) is False
+
+
+# Review round 2: whose setting it is, an explicit off, and the managed settings file -------------------
+
+
+def state(tmp_path: Path, env: dict[str, str], *, cwd: Path | None = None) -> str:
+    from contexto.hints import hint_headers_state
+
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    return hint_headers_state(env=env, cwd=cwd or tmp_path, home=home, managed=tmp_path / "managed-settings.json")
+
+
+def test_the_marker_of_an_outer_launch_decides_whose_the_inherited_value_is(tmp_path):
+    """Claude Code applies the launcher's ``env`` block to its own environment, so a nested launch
+    inherits ``CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`` and the outer launch's marker with it."""
+    on = {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"}
+    assert state(tmp_path, on) == "forwarded"
+    assert state(tmp_path, {**on, "CONTEXTO_HINT_HEADERS": "stripped"}) == "stripped"  # Contexto's own value
+    assert state(tmp_path, {**on, "CONTEXTO_HINT_HEADERS": "forwarded"}) == "forwarded"  # the user had them on
+    assert state(tmp_path, {**on, "CONTEXTO_HINT_HEADERS": "off"}) == "forwarded"  # the outer launch set nothing
+    assert state(tmp_path, {**on, "CONTEXTO_HINT_HEADERS": "STRIPPED "}) == "forwarded"  # only the exact word
+    assert user_enabled_hint_headers(env={**on, "CONTEXTO_HINT_HEADERS": "stripped"}, cwd=tmp_path,
+                                     home=tmp_path / "home") is False
+    # A settings file's value is the user's whatever the marker says.
+    hint_settings(tmp_path / "home" / ".claude" / "settings.json", "1")
+    assert state(tmp_path, {**on, "CONTEXTO_HINT_HEADERS": "stripped"}) == "forwarded"
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "FALSE", " 0 "])
+def test_an_off_value_in_the_environment_or_the_user_file_is_an_explicit_off(tmp_path, value):
+    assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": value}) == "off"
+    hint_settings(tmp_path / "home" / ".claude" / "settings.json", value)
+    assert state(tmp_path, {}) == "off"
+    assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"}) == "off"  # the file outranks the environment
+
+
+@pytest.mark.parametrize("value", ["", "2", "enabled", "maybe"])
+def test_a_value_that_is_neither_on_nor_off_leaves_contexto_s_default(tmp_path, value):
+    assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": value}) == "stripped"
+    assert state(tmp_path, {}) == "stripped"
+
+
+def test_on_wins_over_an_explicit_off_where_claude_code_would_send_the_hints(tmp_path):
+    """Environment 0 with the user file at 1: Claude Code sends the hints (measured), so the upstream
+    was getting them. A project file's 1 outranks the user file's 0 the same way (measured)."""
+    hint_settings(tmp_path / "home" / ".claude" / "settings.json", "1")
+    assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "0"}) == "forwarded"
+    hint_settings(tmp_path / "home" / ".claude" / "settings.json", "0")
+    project = tmp_path / "project"
+    hint_settings(project / ".claude" / "settings.json", "1")
+    assert state(tmp_path, {}, cwd=project) == "forwarded"
+    # A project file's off is not the user's: Contexto's --settings value outranks it (measured).
+    hint_settings(project / ".claude" / "settings.json", "0")
+    hint_settings(tmp_path / "home" / ".claude" / "settings.json", "2")
+    assert state(tmp_path, {}, cwd=project) == "stripped"
+
+
+def test_a_project_file_follows_the_base_url_s_trust_rule(tmp_path):
+    """Read as ``claude -p`` reads it, with no trust record needed, and not at all while
+    ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is set: the rule ``contexto run claude`` has for the base URL."""
+    project = tmp_path / "project"
+    hint_settings(project / ".claude" / "settings.local.json", "1")
+    write_settings(project / ".claude" / "settings.json", "http://project.invalid")
+    assert state(tmp_path, {}, cwd=project) == "forwarded"
+    assert resolve_upstream(env={}, cwd=project, home=tmp_path / "home").source == "settings:project"
+    trustless = {"CLAUDE_CODE_IGNORE_PERSISTED_TRUST": "1"}
+    assert state(tmp_path, trustless, cwd=project) == "stripped"
+    assert resolve_upstream(env=trustless, cwd=project, home=tmp_path / "home").source == "default"
+
+
+def test_the_managed_settings_file_counts_as_the_user_s(tmp_path):
+    """Reviewer A, minor 2: managed settings are the documented place for the variable. They outrank
+    every other file and Contexto's own ``--settings``."""
+    managed = tmp_path / "managed-settings.json"
+    managed.write_text(json.dumps({"env": {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"}}))
+    assert state(tmp_path, {}) == "forwarded"
+    assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "0"}) == "forwarded"
+    nested = {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1", "CONTEXTO_HINT_HEADERS": "stripped"}
+    assert state(tmp_path, nested) == "forwarded"
+    hint_settings(tmp_path / "home" / ".claude" / "settings.json", "0")
+    assert state(tmp_path, {}) == "forwarded"
+    managed.write_text(json.dumps({"env": {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "0"}}))
+    hint_settings(tmp_path / "home" / ".claude" / "settings.json", "1")
+    assert state(tmp_path, {}) == "off"  # Contexto cannot turn on what managed settings turn off
+
+
+@pytest.mark.parametrize("content", [b'\xef\xbb\xbf{"env": {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"}}',
+                                     b'{"env": {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": 1.0}}',
+                                     b'{"env": {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": ["true"]}}'])
+def test_the_user_s_file_is_read_as_claude_code_reads_it(tmp_path, content):
+    """A byte order mark, a number or a list: Claude Code sends the hints, so the user's gateway keeps them."""
+    path = tmp_path / "home" / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+    assert state(tmp_path, {}) == "forwarded"
+
+
+def test_a_file_that_cannot_be_read_decides_nothing_for_the_hints(tmp_path):
+    path = tmp_path / "home" / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"env": {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"},}')
+    assert state(tmp_path, {}) == "stripped"
+    assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"}) == "forwarded"

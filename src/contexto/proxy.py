@@ -73,8 +73,9 @@ Gateway hint headers (D70): with ``strip_hint_headers`` the six headers Claude C
 every request the proxy sends upstream: a transformed one, one forwarded unchanged, and the CLI's own
 request on each fail-open path. The transform still gets them, since it reads the request's class from
 them. ``contexto run claude`` turns the hints on for the engine and sets this, so the upstream gets
-the headers it got before; it leaves it off when the user turned the hints on themselves
-(``contexto.hints.user_enabled_hint_headers``). Off by default: ``contexto proxy`` and any other
+the headers it got before; it leaves it off when the user turned the hints on themselves, or turned
+them off so that Contexto does not ask for them (``contexto.hints.hint_headers_state``). Off by
+default: ``contexto proxy`` and any other
 caller forward every header as received. ``X-Claude-Code-Session-Id``, ``x-claude-code-agent-id`` and
 ``x-claude-code-parent-agent-id`` are never removed.
 """
@@ -101,7 +102,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, loads_bounded
-from contexto.hints import GATED_HINT_HEADERS
+from contexto.hints import without_hint_headers
 
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
     from compression import zstd as _zstd
@@ -1273,11 +1274,9 @@ class _Handler(BaseHTTPRequestHandler):
                 conn.putrequest(self.command, owner.base_path + self.path, skip_host=True,
                                 skip_accept_encoding=True)
                 conn.putheader("Host", owner.upstream_netloc)
-                for name, value in headers.items():
-                    # D70: the one place a request's headers are written upstream, so this also covers
-                    # the CLI's own request on every fail-open path.
-                    if owner.strip_hint_headers and name.lower() in GATED_HINT_HEADERS:
-                        continue
+                # D70: the one place a request's headers are written upstream, so this also covers
+                # the CLI's own request on every fail-open path.
+                for name, value in (without_hint_headers(headers) if owner.strip_hint_headers else headers).items():
                     conn.putheader(name, value)
                 if body or self.command in ("POST", "PUT", "PATCH"):
                     conn.putheader("Content-Length", str(len(body)))
