@@ -424,53 +424,63 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      rewrite, so edits are made in batches that are large and rare, and oldest first, so the
      prefix before the previous batch's first changed message stays byte-identical.
    - **Trigger.** In a tool loop, on a request that adds messages, not in degraded mode, when the
-     pre-send estimate exceeds `T = bound - headroom_floor - min_turn_room` (113,000 with the
-     defaults): the point where the recall room the request publishes would fall under
-     `min_turn_room` (rule 3's second condition, applied inside the turn). A request over `T`
-     starts no batch when everything the steps below could free is less than `min_turn_room` and
-     the request is at or under the bound, so a turn that cannot be paged further does not pay a
-     batch on every request. For the trigger and every decision of a batch, a tool result that
-     arrived with the request counts at the tool-output seed of rule 3, 1.5 bytes a token, when
-     that is more than the session's ratio gives, until a response's usage has measured it: the
-     ratio is a blend, and one large result can be much denser (measured in the replay harness: a
-     60,000-token result estimated 17,195 low). The estimate that is logged and published stays
-     rule 3's.
-   - **A batch** pages down to a target, `floor + window_fraction * (T - floor)`, where `floor` is
-     the estimate less everything steps 1 to 3 could free. In order, stopping as soon as the
-     target is met:
-     0. A result the model has not seen yet (one after the last assistant message) that could not
-        fit under `T` even with everything else paged, or that counted at the seed would leave no
-        recall room at all (`bound - headroom_floor`), is replaced by a stub. It sits after the
-        last thinking block, so nothing is stripped and no earlier message changes. A batch that
-        only does this stops there if the request is then at or under `T`.
+     pre-send estimate exceeds the line `T - min_turn_room / 4`, where `T = bound - headroom_floor
+     - min_turn_room` (113,000 with the defaults, so the line is 110,000). `T` is the point where
+     the recall room the request publishes would fall under `min_turn_room` (rule 3's second
+     condition, applied inside the turn). The quarter of `min_turn_room` is an allowance for the
+     response's output: the room published when the response arrives is `bound - (input + output)
+     - headroom_floor`, so with the allowance an output of up to 9,000 tokens still leaves half
+     of `min_turn_room`. For the trigger and every decision of a batch, a tool result that arrived
+     with the request counts at 1.8 bytes a token (the density rule 3 cites for log-heavy tool
+     output) when that is more than the session's ratio gives, until a response's usage has
+     measured it: the ratio is learned mostly from the head's text and tool output is denser
+     (measured in the replay harness: a 60,000-token result estimated 17,195 low). The estimate
+     that is logged and published stays rule 3's.
+   - **A batch** pages down to a target: `floor + window_fraction * (line - floor)`, where `floor`
+     is the estimate less everything steps 1 to 3 could free, and at most `line - 2 *
+     min_turn_room` when that much can be paged, so the rounds that follow need no batch. In
+     order, stopping as soon as the target is met; a step that leaves the estimate at or under
+     `line - 2 * min_turn_room` is enough, and the next one does not run:
+     0. The model reads every result whole at least once unless it cannot fit. A result that has
+        just arrived (one after the last assistant message) is replaced by a stub only when the
+        head, the part of the messages that cannot be paged (the turn-start prompt, the newest
+        round) and the unread results could not be sent under `T` even with everything older
+        paged; then the largest go first, until the rest fits. Otherwise older content is paged
+        to make room, and the result is stubbed by a later batch once the model has read it. An
+        unread result sits after the last thinking block, so stubbing it strips nothing and
+        changes no earlier message.
      1. Older tool results are replaced by stubs, oldest first, across the retained window
-        (earlier retained turns included), never a result the model has not seen. A result is
+        (earlier retained turns included), never a result the model has not read. A result is
         stubbed only when its content is at least 2,048 bytes and at least twice its stub, a byte
         rule, so the choice never depends on the measured ratio; and only when its content is a
         string or text and image blocks (a tool reference or a document is left alone). The
         original goes to a result page (Store). The results of Contexto's own search, recall and
         state calls (D51) are copies of pages: they get a stub that gives the call's arguments,
         and no page.
-     2. If the estimate is still over the escalation line, the higher of the target and
-        `T - min_turn_room`: the whole earlier turns of the window are paged as a rotation does
-        (rule 4: one page per turn, carried content kept, pinned and index text rebuilt), with `k`
-        at the running turn's start; the `rotation` event has `reason: "in_turn"` and no sizing
-        fields. While the head is still unmeasured at `k = 0` (rule 4 measures it only there, from
-        the first usage), this step waits, so that the head can still be measured; it runs after
-        step 3 if the request is then still over the bound itself.
-     3. If still over that line: the oldest complete tool rounds of the running turn (an assistant
+     2. If less than that headway is left: the whole earlier turns of the window are paged as a rotation
+        does (rule 4: one page per turn, carried content kept, pinned and index text rebuilt),
+        with `k` at the running turn's start; the `rotation` event has `reason: "in_turn"` and no
+        sizing fields. While the head is still unmeasured at `k = 0` (rule 4 measures it only
+        there, from the first usage), this step waits, so that the head can still be measured; it
+        runs after step 3 if the request is then still over the bound itself.
+     3. If still less: the oldest complete tool rounds of the running turn (an assistant
         message and what follows it up to the next one) are folded into one rounds page and
         removed from the request, whole rounds only. The turn-start message gets a note after its
         own content: how many rounds, which tools and files, their size in bytes, and the page id.
-        The turn-start message and the newest round always stay. A carried system message inside a
-        folded round stays in place, and a round with carried content next to its results (nested
-        memory, D46) is not folded.
-     4. If the request is still over the bound itself: results the model has not seen are
-        stubbed, largest first, until it fits.
+        A note goes on the turn-start message only, never into a results message, where the API
+        wants the `tool_result` blocks first. The turn-start message and the newest round always
+        stay. A carried system message inside a folded round stays in place, and a round with
+        carried content next to its results (nested memory, D46) is not folded.
+     4. If the request is still over the bound itself: unread results are stubbed, largest
+        first, until it fits.
      5. If it is still over the bound: `over_bound` as below, and `in_turn_exhausted` (the epoch,
         the estimate, the bound).
-     The escalation line is below `T` because a step that ended just under `T` would be followed
-     by another batch at the next request.
+     Steps 1 to 3 change messages the previous request had, which rewrites the cached prefix and
+     costs the loop its thinking. They run only when together they could free at least
+     `min_turn_room`, and never on the request right after a batch that ran one of them, unless
+     the request would otherwise be over the bound. So a turn that cannot be paged further does
+     not pay a rewrite on every request; its recall room can then be under `min_turn_room` until
+     enough has accumulated.
    - **Stubs.** A stub replaces a `tool_result`'s `content` with one string and keeps
      `tool_use_id`, `is_error` and the block's other keys. It gives the tool's name, its path or
      command (the first of `file_path`, `path`, `notebook_path`, `command`, `pattern`, `url`,
@@ -497,7 +507,7 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      `bound` when the request was over the bound, `result` when only step 0 ran),
      `results_stubbed`, `own_results_stubbed`, `unseen_results_stubbed`, `rounds_folded`,
      `turns_paged`, `pages`, `estimate_before`, `estimate_after`, `margin` (what the fresh
-     results' seed count added to `estimate_before` for the decision), `first_changed` (the index
+     results' dense count added to `estimate_before` for the decision), `first_changed` (the index
      `p`), `resent_tokens` (the tokens from `p` on, which a cache rewrite re-sends at least), and
      `messages`.
    - **Switch.** `in_turn_paging` (default on), a configuration setting under rule 16's check:
@@ -647,7 +657,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       `window_budget`, `window_minimal_count`, and `turn_room_low_epoch`; `in_turn`, only when the
       epoch has in-turn edits (D63: `stubs` as message index, block index and page id, empty for
       one of Contexto's own results; `folds` as turn-start index, removed index ranges and page
-      id; `strips` as index ranges; `batches`; positions and page ids, no conversation text); the whole engine
+      id; `strips` as index ranges; `batches`; `rewrote`, the message count of the last request
+      whose batch rewrote the prefix; positions and page ids, no conversation text); the whole engine
       configuration (every setting, including the recall preamble options and budgets); the
       dialect; the model named by the request; the conversation's identity as the engine keys
       it (a hash); and an anchor: the count `n` of messages in the request that wrote the record

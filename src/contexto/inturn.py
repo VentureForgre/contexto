@@ -21,7 +21,8 @@ bytes a token when that is more than the session's ratio gives (``fresh_margin``
 blend, tool output is denser, and no usage has measured the result yet. A batch pages down to a target:
 halfway between what cannot be paged and the line (``window_fraction``), and at least two
 ``min_turn_room`` under the line when that much can be paged, so the next rounds need no batch. In this
-order, stopping as soon as the target is met:
+order, stopping as soon as the target is met; a step that leaves at least two ``min_turn_room`` under
+the line is enough, and the next one does not run:
 
 0. The model reads every result whole at least once unless it cannot fit. A result that has just
    arrived (one after the last assistant message) is replaced by a stub only when the head, what cannot
@@ -31,10 +32,10 @@ order, stopping as soon as the target is met:
 1. Older tool results are replaced by stubs, oldest first, across the retained window. The originals
    go to result pages; the results of Contexto's own search, recall and state calls are copies of
    pages, so they get a stub and no page.
-2. If the target is not met: the whole earlier turns of the window are paged through the rotation
+2. If less than that headway is left: the whole earlier turns of the window are paged through the rotation
    machinery (``new_epoch`` at the current turn's start). While the head is still unmeasured at ``k ==
    0`` (rule 4 measures it only there) this waits until step 3 has left the request over the bound.
-3. If still not met: the oldest complete tool rounds of the running turn are folded into one page and
+3. If still less: the oldest complete tool rounds of the running turn are folded into one page and
    removed from the request, with a note in the turn-start message (never in a results message, where
    the API wants the ``tool_result`` blocks first).
 4. If the request is still over the bound itself: unread results are stubbed, largest first.
@@ -652,7 +653,10 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     halfway = floor + math.ceil(config.window_fraction * max(0, line - floor))
     # Down to halfway between what cannot be paged and the line, and far enough under the line that the
     # next rounds do not need another batch; never under what cannot be paged.
-    target = max(floor, min(halfway, line - HEADWAY_ROOMS * config.min_turn_room))
+    headway = line - HEADWAY_ROOMS * config.min_turn_room
+    target = max(floor, min(halfway, headway))
+    # Stubbing that ends at or under this line is enough; over it, the next step runs.
+    escalate = max(target, headway)
     over_bound = pressure > config.bound
     base = tokens(rw.transform_messages(messages, state))
     # Step 0: the model reads every result whole at least once unless it cannot fit. A result is stubbed
@@ -733,8 +737,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     if huge:
         stubbed(huge, True)
         unseen = [c for c in unseen if c not in huge]
-    # Steps 1 to 3 change messages the previous request had, so they run together or not at all: once
-    # the prefix is rewritten, the batch goes down to its target.
+    # Steps 1 to 3 change messages the previous request had: a rewrite of the cached prefix.
     rewriting = may_rewrite and cur > line
     # Step 1: older results, oldest first, down to the target.
     if rewriting and seen:
@@ -747,10 +750,10 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         if chosen:
             stubbed(chosen, False)
     # Step 2: the earlier turns of the window, through the rotation machinery.
-    if rewriting and cur > target and may_page_turns:
+    if rewriting and cur > escalate and may_page_turns:
         page_turns()
     # Step 3: the oldest complete rounds of the running turn, into one page.
-    if rewriting and cur > target:
+    if rewriting and cur > escalate:
         sent = view(messages, state, dialect)
         rounds = [r for r in hooks.rounds(sent, start, n)[:-1] if r.foldable and r.removed]
         folded, left = [], cur

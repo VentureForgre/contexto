@@ -12,23 +12,27 @@ It applies to Claude Code (the Messages API). Codex tool loops are still sent wh
 
 Inside a tool loop, when the next request would be larger than
 
-    bound - headroom floor - minimum turn room    (150,000 - 25,000 - 12,000 = 113,000 by default)
+    bound - headroom floor - minimum turn room - 3,000    (150,000 - 25,000 - 12,000 - 3,000 = 110,000 by default)
 
-Past that point the model would have less than 12,000 tokens of room for `contexto_recall` and
-`contexto_search`, so they would be refused when the turn is longest. Contexto then pages one batch,
-down to about halfway between what it cannot page and that line, so the next batch is far away. In
-a replay of 120 tool rounds of about 6,400 tokens each, a batch ran every 7 rounds.
+Past 113,000 the model would have less than 12,000 tokens of room for `contexto_recall` and
+`contexto_search`, so they would be refused when the turn is longest; the last 3,000 are kept for
+the model's own reply. Contexto then pages one batch, down to about halfway between what it cannot
+page and that line, so the next batch is far away. In a replay of 120 tool rounds of about 6,400
+tokens each, a batch ran about every 9 rounds (13 in all).
 
-A batch does these in order and stops as soon as it has freed enough:
+The model always gets to read a tool result once. A result that has just arrived is paged before
+the model reads it only when it could not be sent at all: when the system prompt, your prompt and
+the new results together would not fit even with everything older paged (a 300 KB dump, for
+example). Otherwise Contexto makes room by paging older content, in this order, stopping as soon as
+it has freed enough:
 
-1. Replaces older tool results with stubs, oldest first. Results the model has not read yet are
-   left alone.
+1. Replaces older tool results with stubs, oldest first.
 2. Pages the earlier turns still in the window, as a turn start would.
-3. Folds the oldest tool rounds of the running turn into one page and leaves a note in the prompt
-   message.
-4. If the request is still over the bound, replaces results the model has not read yet with stubs,
-   largest first. A single result too large to fit at all (a 500 KB file) is stubbed first, before
-   anything else is touched.
+3. Folds the oldest tool rounds of the running turn into one page and leaves a note after your
+   prompt in the turn's first message.
+
+If the request is still over the bound after that, the results the model has not read yet are
+replaced by stubs, largest first.
 
 ## What a stub looks like
 
@@ -87,11 +91,12 @@ on that request and every later one. Thinking before the first changed message, 
 the model writes afterwards, is kept. A batch also changes the cached prefix, so that request is
 written to the cache again instead of read from it.
 
-In the 120-round replay the 16 batches re-sent between 2.2% and 9.6% of all tokens sent (the lower
-figure if the cache still holds the prefix before the first changed message, the higher if only the
-system prompt and tools are read from cache).
+In the 120-round replay the 13 batches re-sent 10.4% of all input tokens, and the model's newest
+thinking was removed on those 13 requests of 121. Contexto does not rewrite the prefix on two
+requests in a row unless the second would be over the bound, and not at all for less than 12,000
+tokens.
 
-A result that was stubbed before the model read it changes nothing before any thinking block and
+A result that was paged before the model read it changes nothing before any thinking block and
 costs neither.
 
 ## Turning it off
@@ -130,7 +135,12 @@ miss).
 - A prompt that is itself larger than the bound cannot be paged; that is still `bound_too_small`.
 - When the system prompt and tools alone come close to the trigger (a bound under about 70,000 with
   Claude Code's default tools), a batch runs only once it can free 12,000 tokens, so the recall room
-  can be under 12,000 between batches.
+  can be under 12,000 between batches. The same holds for one request when a large result arrives
+  right after a batch.
+- A result that has just arrived is counted at 1.8 bytes per token until the API has reported its
+  real size. For sparse text (plain prose, most source code) that is about twice its real size, so
+  a result of more than about 160 KB can be paged before the model reads it although it would
+  have fit.
 - After a proxy restart a subagent's in-turn state is not restored: its next request over the
   trigger pages again and loses the loop's thinking once more. The main conversation resumes
   exactly.
