@@ -19,10 +19,10 @@ sent anywhere.
 | Part | Meaning |
 |---|---|
 | `ctx` | The line is Contexto's. |
-| `112k/150k` | The current prompt against the bound. The first number is the input of the main conversation's most recent model request, as the API counted it (`prompt.last_tokens` in [docs/stats.md](stats.md)). It is the latest request, not the session's peak, so it falls after a rotation. After `/clear` it shows the last request's prompt until the next reply. The second number is `--bound`. |
+| `112k/150k` | The current prompt against the bound. The first number is the input of the main conversation's most recent model request, as the API counted it (`prompt.last_tokens` in [docs/stats.md](stats.md)). It is the latest request, not the session's peak, so it falls after a rotation or after paging inside a turn ([In-turn paging](in-turn-paging.md)). After `/clear` it shows the last request's prompt until the next reply. The second number is `--bound`. |
 | `~77k/150k` | The same, when the API reported no usage for that request: `~` marks Contexto's own estimate. |
 | `bound 150k` | Shown alone before the first model request of a new session. A resumed session starts with the previous run's latest prompt instead (`61k/150k`), as `contexto stats` does. |
-| `41 paged` | The page files kept on disk for the whole session (`pages.count`), from every conversation in it, subagents' included, and every run. The model can read each of them back. It is not a count of your conversation's turns: a page usually holds one turn, but a page from the bounded fallback holds one carried message, and a subagent's request that pages adds to it while your prompt stays where it was. |
+| `41 paged` | The page files kept on disk for the whole session (`pages.count`), from every conversation in it, subagents' included, and every run. The model can read each of them back. It is not a count of your conversation's turns. A page can hold a turn, one carried message (the bounded fallback), or, from paging inside a turn, one tool result or a run of folded tool rounds, so a long tool loop can add many pages in one turn; a subagent's request that pages adds to it too, while your prompt stays where it was. |
 | `3 recalls` | Calls of the `contexto_recall` tool that succeeded, over the whole session. |
 | `5 searches` | Calls of the `contexto_search` tool that succeeded, over the whole session. |
 | `PAGING STOPPED (disk full)` | The store failed and Contexto has stopped paging: requests go out unpaged and can exceed the bound. See below. |
