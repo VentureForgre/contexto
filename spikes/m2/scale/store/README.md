@@ -660,7 +660,8 @@ says so at any other size.
 `--quality-only` and `--latency-only` run one part and keep the other part's files and its record
 in `env.json`. Without `--store-home` the store is written under a temporary `CONTEXTO_HOME` and
 deleted at the end, also on Ctrl-C and on SIGTERM. `--store-home` may not be `~/.contexto` or
-`$CONTEXTO_HOME`, or a folder under either. There is no model call. A 6,000-page build takes about 20 seconds on an idle
+`$CONTEXTO_HOME`, or a folder under either. A `~` in `CONTEXTO_HOME` is expanded first, as
+Contexto expands it. There is no model call. A 6,000-page build takes about 20 seconds on an idle
 machine.
 
 Results go to `results/d65/<label>/`: `quality.csv` (one row per probe), `latency.csv` (every call),
@@ -675,9 +676,11 @@ set, whether the store had `search_approximate`, or uncommitted changes under `s
 a digest of the probe set, and for each part whether the store had `search_approximate`. An after
 run that never reached the fallback shows "no" there. It exits with status 2 and prints no table
 when a folder is missing, the two runs differ in store size, corpus (seed, floor, the added plants)
-or probe set, or their latency parts timed different queries. Page ids are keyed per store, so they
-cannot be compared across stores; these can. The timed queries are recorded in `env.json`; for a
-run from before that record they are read from its `latency.csv`.
+or probe set, or their latency parts timed different queries. It also refuses two runs that timed
+the same queries in a different order, and says so: the order decides which query is the first
+call of its kind and what ran before each call. Page ids are keyed per store, so they cannot be
+compared across stores; these can. The timed queries are recorded in `env.json`; for a run from
+before that record they are read from its `latency.csv`.
 
 ### The corpus
 
@@ -806,7 +809,9 @@ real sessions, and not queries a model would write.
   probes whose page holds every word. All four must be 0 for the classes to mean what they say. It
   also counts the probes for which `search_approximate` returned a page id more than once: the
   `duplicates` column of `quality.csv` holds how many repeats, and a repeated id keeps its first
-  rank and is not counted again. A
+  rank and is not counted again. And it counts the probes for which `search_approximate` returned
+  a page id the store does not hold: the `unknown` column holds how many. Such an id still counts
+  as a page returned, and as a false hit for `none`, so this count must be 0 too. A
   test also checks that every typo, every added word said to be on no page, and every absent word
   of a `none` probe occurs in no text a page is built from (the line pools, the plants, and the
   distractor lines that can be drawn at floor 0), so the claim holds at every store size.
@@ -822,23 +827,43 @@ real sessions, and not queries a model would write.
   `--baseline-src` a second child runs the other checkout's code on the same store. Every call is
   made against both children in turn, and the child that goes first alternates, so both see the
   same load. The 1-minute load average is recorded at each pass. A child that does not answer
-  within 600 seconds is killed and the run fails.
+  within 600 seconds is killed and the run fails. Next to each kind's ratio the summary gives the
+  lowest and the highest ratio of one pass alone, so a difference in some passes only shows. The
+  overall ratio is that of two medians over all queries and passes, and can fall outside that
+  range. The summary also says which side went first in which pass. Use an even number of passes:
+  with an odd number one order has one pass more, and the medians lean to it, which the summary
+  says.
 - First calls of a process. Each pass starts with a throwaway child's search, which fills the OS
-  file cache, then a new child per side. Each child's first search and its first strict miss (its
-  first `miss_*` call, `streamChunkedV3`) are one-time costs, which the medians of 5 calls hide: a
-  fallback that pays 3 seconds once per process would show only in these rows. They are compared
-  within a pass, where both sides ran under the same load. The side that goes first alternates by
-  pass, so an odd pass and the next even pass are combined by geometric mean, which cancels the
-  position. The summary gives the paired ratio (the geometric mean of the pairs), each pair, and
-  every pass. Use an even number of passes; an unpaired pass is left out and named.
+  file cache, then a new child per side. Each child's first search, its first strict miss (its
+  first `miss_*` call, `streamChunkedV3`) and its first call of each `miss_*` kind (`first
+  miss_typo` is rep 0 of `stagng DB port`) are one-time costs, which the medians of 5 calls hide.
+  A fallback that pays 3 seconds once per process shows in the row of the first kind that runs the
+  costly stage: a cost on the typo step lands in `first miss_typo`, and the first strict miss and
+  the steady `miss_typo` row stay near 1. A test checks this case. The rows are compared within a
+  pass, where both sides ran under the same load. The side that goes first alternates by pass, so
+  an odd pass and the next even pass are combined by geometric mean, which cancels the position.
+  The summary gives the paired ratio (the geometric mean of the pairs), each pair, and every pass;
+  `--compare` gives the paired ratio and the pairs. An unpaired pass is left out and named. A cost
+  paid on the second call of a kind, or later, shows in none of these rows: only `latency.csv`
+  has it.
 
 ### Before: `main` (`results/d65/before`)
 
-`main` has no fallback, so every answer below is strict search's. Both parts ran at commit 698acaa
-of this branch, whose `src/` is `main`'s (b0e2dbc, v0.5.24); Python 3.13.14, macOS 26.6.1, Apple M5
-Pro. This run replaces the first one (154 probes, at 835dadc). `summary.md` was regenerated from
-the checked-in CSVs by the bench after the second review, which added the identifier-typo rows and
-the paired first calls; no CSV changed.
+`main` has no fallback, so every answer below is strict search's. The two parts come from two runs,
+and `summary.md` says so:
+
+- Quality: commit 698acaa of this branch, whose `src/` is `main`'s (b0e2dbc, v0.5.24); Python
+  3.13.14, macOS 26.6.1, Apple M5 Pro. It replaced the first run (154 probes, at 835dadc).
+- Latency: one run with `--latency-only` on 2026-11-14, at commit 01d6dfc of this branch against
+  `--baseline-src`, a checkout of `main` at ef15af0. The two `src/` trees are identical, so both
+  children ran `main`'s code. 4 passes of 5 calls per query, the 34-query list; Python 3.13.14,
+  macOS 27.2.1, Apple M5 Pro. The 1-minute load average was 8.95, 11.61, 10.9 and 10.92 at the
+  start of the four passes. It replaces the earlier latency run (24 queries, load 28 to 67), so
+  every latency number below comes from this one run.
+
+`latency.csv` and `env.json` are that run's files, unchanged except the label. `quality.csv` is
+byte for byte the quality run's, and `summary.md` was regenerated from these files by the bench as
+of the third review (first call of each `miss_*` kind, ratio by pass).
 
 Recall: probes with every expected page in the top 3 and in the top 10. Reachable: probes whose
 page strict search ranks there when the query is spelled the page's way.
@@ -924,69 +949,76 @@ False hits on `none`: probes for which any page comes back.
   page for 0 of the 89 typo, identifier, extra-word and two-page probes, no absent word of a `none`
   probe is on any page, and no paraphrase has all its words on its page.
 
-Latency (stdio, seconds). This run timed `main` against itself (`--baseline-src src`), so the last
-column is the noise of the paired method, not a change.
+Latency (stdio, seconds). Both children ran `main`'s code (this branch at 01d6dfc and `main` at
+ef15af0, with identical `src/`), so the ratio columns are the noise of the paired method, not a
+change. By pass: the lowest and the highest ratio of one pass alone.
 
-| kind | queries | main, s | main again, s | ratio |
-|---|---:|---:|---:|---:|
-| rare (strict hit) | 3 | 0.983 | 0.999 | 0.98 |
-| common (strict hit) | 3 | 0.703 | 0.652 | 1.08 |
-| multi-word (strict hit) | 3 | 1.410 | 1.331 | 1.06 |
-| strict miss: identifier | 3 | 1.275 | 1.244 | 1.03 |
-| strict miss: question | 3 | 1.658 | 1.596 | 1.04 |
-| strict miss: typo | 3 | 2.082 | 2.203 | 0.94 |
-| strict miss: extra word | 3 | 1.050 | 1.180 | 0.89 |
-| strict miss: none | 3 | 1.265 | 1.220 | 1.04 |
-| strict miss: paraphrase | 3 | to come | to come | to come |
-| strict miss: typo in the word that carries the query (`miss_typo_carried`) | 3 | to come | to come | to come |
-| strict miss: added word on many pages (`miss_extra_word_common`) | 2 | to come | to come | to come |
-| strict miss: paraphrase word on many pages (`miss_paraphrase_common`) | 2 | to come | to come | to come |
+| kind | queries | this branch (`main`'s src), s | `main` ef15af0, s | ratio | by pass, min to max |
+|---|---:|---:|---:|---:|---:|
+| rare (strict hit) | 3 | 0.284 | 0.289 | 0.98 | 0.98 to 1.00 |
+| common (strict hit) | 3 | 0.272 | 0.268 | 1.01 | 0.97 to 1.02 |
+| multi-word (strict hit) | 3 | 0.426 | 0.426 | 1.00 | 1.00 to 1.01 |
+| strict miss: identifier | 3 | 0.271 | 0.270 | 1.00 | 0.99 to 1.02 |
+| strict miss: question | 3 | 0.373 | 0.373 | 1.00 | 0.98 to 1.00 |
+| strict miss: typo | 3 | 0.460 | 0.460 | 1.00 | 0.98 to 1.01 |
+| strict miss: extra word | 3 | 0.549 | 0.553 | 0.99 | 0.99 to 1.00 |
+| strict miss: none | 3 | 0.463 | 0.455 | 1.02 | 0.91 to 1.00 |
+| strict miss: paraphrase | 3 | 0.444 | 0.411 | 1.08 | 0.94 to 1.02 |
+| strict miss: typo in the word that carries the query (`miss_typo_carried`) | 3 | 0.340 | 0.333 | 1.02 | 0.96 to 1.04 |
+| strict miss: added word on many pages (`miss_extra_word_common`) | 2 | 0.610 | 0.609 | 1.00 | 1.00 to 1.01 |
+| strict miss: paraphrase word on many pages (`miss_paraphrase_common`) | 2 | 0.534 | 0.532 | 1.00 | 1.00 to 1.01 |
 
-The last four rows are the 10 queries added to the timed list after the second review (34 in all,
-from 24). The checked-in `latency.csv` was measured before they were
-added, so their before values come from the orchestrator's paired run of before and after with the
-new bench, on this machine. Until that run is checked in these rows say "to come", and `--compare`
-refuses this folder against a run that timed the new list.
+First calls of a process, from the same run (`summary.md`, "First calls of a process"). Each row is
+each side's first call of that kind in a pass, paired over passes:
 
-First calls of a process, from the same run (`summary.md`, "First calls of a process"):
+| call | query | this branch, s | `main`, s | ratio, paired | each pair |
+|---|---|---:|---:|---:|---|
+| first search | `E4127` | 2.060 | 2.081 | 1.01 | passes 1-2: 0.98; passes 3-4: 1.04 |
+| first strict miss | `streamChunkedV3` | 0.261 | 0.260 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first `miss_identifier` | `streamChunkedV3` | 0.261 | 0.260 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first `miss_question` | `What port is the staging database on?` | 0.368 | 0.367 | 1.00 | passes 1-2: 1.01; passes 3-4: 0.98 |
+| first `miss_typo` | `stagng DB port` | 0.417 | 0.423 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first `miss_extra_word` | `staging DB port number` | 0.511 | 0.516 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first `miss_none` | `kubernetes ingress annotations` | 0.448 | 0.449 | 1.00 | passes 1-2: 1.01; passes 3-4: 1.00 |
+| first `miss_paraphrase` | `intermittently failing test` | 0.354 | 0.352 | 1.04 | passes 1-2: 1.00; passes 3-4: 1.09 |
+| first `miss_typo_carried` | `allkeys-lru` | 0.295 | 0.304 | 0.97 | passes 1-2: 0.96; passes 3-4: 0.99 |
+| first `miss_extra_word_common` | `webhook signing secret owner` | 0.575 | 0.575 | 1.00 | passes 1-2: 0.99; passes 3-4: 1.01 |
+| first `miss_paraphrase_common` | `artifacts bucket name` | 0.535 | 0.537 | 1.00 | passes 1-2: 1.01; passes 3-4: 0.99 |
 
-| call | main, s | main again, s | ratio, paired | each pair |
-|---|---:|---:|---:|---|
-| first search (`E4127`) | 11.119 | 9.063 | 1.09 | passes 1-2: 1.17; passes 3-4: 1.01 |
-| first strict miss (`streamChunkedV3`) | 0.850 | 0.746 | 1.08 | passes 1-2: 0.97; passes 3-4: 1.20 |
+Seconds are medians over the 4 passes. The first strict miss and the first `miss_identifier` are
+the same call, because `miss_identifier` is timed first. Within one pass the first-search ratio
+ranged from 0.98 to 1.09, the first-strict-miss ratio from 0.98 to 1.01, and the first call of a
+`miss_*` kind from 0.93 to 1.15.
 
-Seconds are medians over the 4 passes. Within one pass the first-search ratio ranged from 0.86 to
-1.59, and the first-strict-miss ratio from 0.80 to 1.30.
-
-- Measured under load. Other agents were using all 18 cores: the 1-minute load average was 42.2,
-  48.4, 66.9 and 28.8 at the start of the four passes. The absolute times are not those of an idle
-  machine and are not in the range of the earlier sections. Trust the ratio column: both children
-  ran in the same passes under the same load. An after run should be read the same way, by its
-  ratio against the baseline child and not against this table's seconds.
-- Steady-state calls are 2.9 to 4.2 times an idle run (D41 at 6,000 pages: rare 0.240, common 0.222,
-  multi 0.372).
-- The first search is slowed more: 5.9 to 7.5 times the idle 1.49 s. It reads and parses all 6,000
-  pages, which is CPU work that the other processes compete for.
-- The first search still depends on position. After the warm-up child, the side that searched first
-  took 11.1 and 10.5 s (median per side) and the side that searched second 9.3 and 8.9 s, 15 to 16
-  percent less. The earlier table compared each side's median in one position, which came from
-  different passes (the tree went first in passes 1 and 3, the baseline in 2 and 4), and the first
-  search ranged from 6.3 to 14.2 s across passes. The ratio is now taken within each pass, and each
-  odd pass is paired with the next even one so that the position cancels: 1.17 and 1.01, paired
-  1.09.
-- The first strict miss shows no one-time cost on `main`. It comes after the first search has read
-  every page, and its medians (0.85 and 0.75 s) are below the steady median of its kind (1.28 and
-  1.24 s). A fallback that builds something on its first use would show here, and in no other row.
-- Noise. In the steady-state rows the same code against itself differs by up to 11 percent, and by
-  up to 28 percent for one kind in one pass. So an after run on a machine this busy shows a change
-  of the fallback in those rows only when its ratio is well outside 0.8 to 1.2. That band is for the
-  steady-state rows only. The two first-call rows rest on one call per side and pass: one pair of
-  passes gave 1.17 and the other 1.01 for the same code, so read them with a wider band and by
-  their pairs.
+- Load. The 1-minute load average was 9 to 12 at the start of each pass (18 cores), against 28 to
+  67 in the earlier latency run. The times are still not an idle machine's. Trust the ratio
+  columns: both children ran in the same passes under the same load. An after run should be read
+  the same way, by its ratio against the baseline child and not against this table's seconds.
+- Steady-state calls are 1.15 to 1.23 times an idle run (D41 at 6,000 pages: rare 0.240, common
+  0.222, multi 0.372). The first search (2.06 and 2.08 s) is 1.4 times the idle 1.49 s.
+- Order. The tree went first in passes 1 and 3, the baseline in passes 2 and 4. At this load the
+  first search shows no position effect: the side that searched first took a median 2.06 s, the
+  side that searched second 2.09 s. In the earlier run, at load 28 to 67, the second was 15 to 16
+  percent faster. The paired ratio cancels it either way.
+- No first call shows a one-time cost on `main`. The paired ratios are 0.97 to 1.04, and each first
+  call is at most 1 percent slower than the steady median of its kind. A fallback that builds
+  something on its first use shows in the first-call row of the first kind that reaches that code:
+  a typo step built on first use lands in `first miss_typo`. A cost paid on a later call of a kind
+  shows in no row of the summary, only in `latency.csv`.
+- Two ratios fall outside their own range by pass: strict miss `none` (1.02, by pass 0.91 to 1.00)
+  and `paraphrase` (1.08, by pass 0.94 to 1.02). Each median is over 12 values, 3 queries in 4
+  passes, and its middle two come from different queries. In pass 4 the paraphrase queries were
+  also slower on both sides (up to 1.05 s, against 0.34 to 0.58 s in the other passes). The by-pass
+  range is the better guide here.
+- Noise. In the steady-state rows the same code against itself gives 0.98 to 1.08, and 0.91 to 1.04
+  for one kind in one pass. At a load like this one, read a change in those rows only when its
+  ratio is well outside 0.9 to 1.1. The earlier run at load 28 to 67 needed 0.8 to 1.2. The
+  first-call rows rest on one call per side and pass and ranged from 0.93 to 1.15 for the same
+  code, so read them with a wider band and by their pairs.
 - What to watch after D65. The fallback adds its work to the strict misses only, so the strict-miss
-  rows, the three fixed costly shapes among them, and the first strict miss are where its cost
-  shows. The three strict-hit rows and the first search should not move.
-- Peak RSS of the MCP child: 125 MB.
+  rows, the three fixed costly shapes among them, and the first call of each `miss_*` kind are
+  where its cost shows. The three strict-hit rows and the first search should not move.
+- Peak RSS of the MCP child: 139 MB (this branch) and 141 MB (`main`).
 
 ## Files
 

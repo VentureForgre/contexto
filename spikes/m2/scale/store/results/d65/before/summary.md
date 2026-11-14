@@ -1,7 +1,8 @@
 # D65 probes: before
 
 - Quality: commit 698acaa2, 6,000 pages, 192 probes (set 38366a406bd3006a); Python 3.13.14, macOS 26.6.1, Apple M5 Pro; the store has no `search_approximate`.
-- Latency: commit 698acaa2, 6,000 pages, 192 probes (set 38366a406bd3006a), 4 passes of 5 calls per query, baseline commit 698acaa2; Python 3.13.14, macOS 26.6.1, Apple M5 Pro; the store has no `search_approximate`.
+- Latency: commit 01d6dfc0, 6,000 pages, 192 probes (set 38366a406bd3006a), 4 passes of 5 calls per query, 34 queries timed at 6,000 pages, baseline commit ef15af03; Python 3.13.14, macOS 27.2.1, Apple M5 Pro; the store has no `search_approximate`.
+- The two parts were not measured on the same commit (quality 698acaa2, latency 01d6dfc0). Read them separately.
 
 ## Recall at 6,000 pages
 
@@ -104,39 +105,63 @@ Whether the reply shows every expected page in detail (the tool details 3 pages 
 - paraphrase and question probes that strict search answers, so a fallback never runs: 6 of 72; the expected page is among the pages returned for 0 of them.
 - question probes strict search finds once the question mark is removed: 3 at rank 1, 3 in the top 3, 3 in the top 10, of 30.
 - probes the fallback answered with a page id more than once: 0 of 0 (0 is right).
+- probes the fallback answered with a page id that is not in the store: 0 of 0 (0 is right). Such an id still counts as a page returned, and as a false hit for `none`.
 
 ## Latency at 6,000 pages
 
-Seconds through an MCP child over stdio: the median of the calls per query per pass, then the median over queries and passes. `miss_*` are queries strict search finds nothing for; `miss_typo_carried`, `miss_extra_word_common` and `miss_paraphrase_common` are fixed probes whose shape costs a fallback most.
+Seconds through an MCP child over stdio: the median of the calls per query per pass, then the median over queries and passes. `miss_*` are queries strict search finds nothing for; `miss_typo_carried`, `miss_extra_word_common` and `miss_paraphrase_common` are fixed probes whose shape costs a fallback most. By pass: the lowest and the highest ratio of one pass alone.
 
-| kind | queries | tree, s | baseline, s | tree / baseline |
-|---|---:|---:|---:|---:|
-| rare | 3 | 0.983 | 0.999 | 0.98 |
-| common | 3 | 0.703 | 0.652 | 1.08 |
-| multi | 3 | 1.410 | 1.331 | 1.06 |
-| miss_identifier | 3 | 1.275 | 1.244 | 1.03 |
-| miss_question | 3 | 1.658 | 1.596 | 1.04 |
-| miss_typo | 3 | 2.082 | 2.203 | 0.94 |
-| miss_extra_word | 3 | 1.050 | 1.180 | 0.89 |
-| miss_none | 3 | 1.265 | 1.220 | 1.04 |
+| kind | queries | tree, s | baseline, s | tree / baseline | tree / baseline by pass, min to max |
+|---|---:|---:|---:|---:|---:|
+| rare | 3 | 0.284 | 0.289 | 0.98 | 0.98 to 1.00 |
+| common | 3 | 0.272 | 0.268 | 1.01 | 0.97 to 1.02 |
+| multi | 3 | 0.426 | 0.426 | 1.00 | 1.00 to 1.01 |
+| miss_identifier | 3 | 0.271 | 0.270 | 1.00 | 0.99 to 1.02 |
+| miss_question | 3 | 0.373 | 0.373 | 1.00 | 0.98 to 1.00 |
+| miss_typo | 3 | 0.460 | 0.460 | 1.00 | 0.98 to 1.01 |
+| miss_extra_word | 3 | 0.549 | 0.553 | 0.99 | 0.99 to 1.00 |
+| miss_none | 3 | 0.463 | 0.455 | 1.02 | 0.91 to 1.00 |
+| miss_paraphrase | 3 | 0.444 | 0.411 | 1.08 | 0.94 to 1.02 |
+| miss_typo_carried | 3 | 0.340 | 0.333 | 1.02 | 0.96 to 1.04 |
+| miss_extra_word_common | 2 | 0.610 | 0.609 | 1.00 | 1.00 to 1.01 |
+| miss_paraphrase_common | 2 | 0.534 | 0.532 | 1.00 | 1.00 to 1.01 |
 
-1-minute load average at the start of each pass: 42.21, 48.39, 66.91, 28.81.
-Peak RSS of the MCP child, MB: tree 125, baseline 126.
+1-minute load average at the start of each pass: 8.95, 11.61, 10.9, 10.92.
+4 passes: the tree went first in passes 1 and 3, the baseline in passes 2 and 4.
+Peak RSS of the MCP child, MB: tree 139, baseline 141.
 
 ## First calls of a process at 6,000 pages
 
-Each pass starts a new child per side, so its first search and its first strict miss are one-time costs, which the medians above hide. The two sides are compared within a pass, under the same load. The side that goes first alternates by pass, so each odd pass is paired with the next even pass by geometric mean, which cancels the position. Paired: the geometric mean of those pairs. These rows rest on one call per side and pass, and are noisier than the rows above.
+Each pass starts a new child per side, so its first search, its first strict miss and its first call of each `miss_*` kind are one-time costs, which the medians above hide. A cost a child pays once, on any stage of a miss, shows in the row of the first kind that runs that stage. The first strict miss is also the first call of the first `miss_*` kind timed. The two sides are compared within a pass, under the same load. The side that goes first alternates by pass, so each odd pass is paired with the next even pass by geometric mean, which cancels the position. Paired: the geometric mean of those pairs. These rows rest on one call per side and pass, and are noisier than the rows above.
 
 | call | query | tree, s | baseline, s | tree / baseline, paired | each pair |
 |---|---|---:|---:|---:|---|
-| first search | E4127 | 11.119 | 9.063 | 1.09 | passes 1-2: 1.17; passes 3-4: 1.01 |
-| first strict miss | streamChunkedV3 | 0.850 | 0.746 | 1.08 | passes 1-2: 0.97; passes 3-4: 1.20 |
+| first search | E4127 | 2.060 | 2.081 | 1.01 | passes 1-2: 0.98; passes 3-4: 1.04 |
+| first strict miss | streamChunkedV3 | 0.261 | 0.260 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first miss_identifier | streamChunkedV3 | 0.261 | 0.260 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first miss_question | What port is the staging database on? | 0.368 | 0.367 | 1.00 | passes 1-2: 1.01; passes 3-4: 0.98 |
+| first miss_typo | stagng DB port | 0.417 | 0.423 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first miss_extra_word | staging DB port number | 0.511 | 0.516 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first miss_none | kubernetes ingress annotations | 0.448 | 0.449 | 1.00 | passes 1-2: 1.01; passes 3-4: 1.00 |
+| first miss_paraphrase | intermittently failing test | 0.354 | 0.352 | 1.04 | passes 1-2: 1.00; passes 3-4: 1.09 |
+| first miss_typo_carried | allkeys-lru | 0.295 | 0.304 | 0.97 | passes 1-2: 0.96; passes 3-4: 0.99 |
+| first miss_extra_word_common | webhook signing secret owner | 0.575 | 0.575 | 1.00 | passes 1-2: 0.99; passes 3-4: 1.01 |
+| first miss_paraphrase_common | artifacts bucket name | 0.535 | 0.537 | 1.00 | passes 1-2: 1.01; passes 3-4: 0.99 |
 
 Seconds are medians over passes. By pass:
 
 | pass | load | went first | first search: tree, s | baseline, s | tree / baseline | first strict miss: tree, s | baseline, s | tree / baseline |
 |---:|---:|---|---:|---:|---:|---:|---:|---:|
-| 1 | 42.21 | tree | 10.057 | 6.330 | 1.59 | 0.934 | 0.801 | 1.17 |
-| 2 | 48.39 | baseline | 12.200 | 14.205 | 0.86 | 0.413 | 0.514 | 0.80 |
-| 3 | 66.91 | tree | 12.181 | 11.399 | 1.07 | 0.766 | 0.692 | 1.11 |
-| 4 | 28.81 | baseline | 6.442 | 6.728 | 0.96 | 1.361 | 1.045 | 1.30 |
+| 1 | 8.95 | tree | 2.028 | 2.078 | 0.98 | 0.252 | 0.251 | 1.00 |
+| 2 | 11.61 | baseline | 1.924 | 1.941 | 0.99 | 0.271 | 0.275 | 0.98 |
+| 3 | 10.9 | tree | 2.345 | 2.160 | 1.09 | 0.272 | 0.270 | 1.01 |
+| 4 | 10.92 | baseline | 2.093 | 2.085 | 1.00 | 0.246 | 0.251 | 0.98 |
+
+The first call of each `miss_*` kind, tree / baseline by pass (the seconds are in `latency.csv`, rep 0 of the kind's first query):
+
+| pass | went first | miss_identifier | miss_question | miss_typo | miss_extra_word | miss_none | miss_paraphrase | miss_typo_carried | miss_extra_word_common | miss_paraphrase_common |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | tree | 1.00 | 1.02 | 0.98 | 0.98 | 1.03 | 0.99 | 0.93 | 0.97 | 1.01 |
+| 2 | baseline | 0.98 | 1.01 | 1.00 | 1.00 | 0.99 | 1.02 | 0.99 | 1.01 | 1.00 |
+| 3 | tree | 1.01 | 0.99 | 1.00 | 0.98 | 1.01 | 1.03 | 1.01 | 1.00 | 0.99 |
+| 4 | baseline | 0.98 | 0.97 | 0.98 | 1.01 | 0.98 | 1.15 | 0.96 | 1.02 | 0.99 |
