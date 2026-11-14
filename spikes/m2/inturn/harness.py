@@ -584,8 +584,8 @@ class _Play:
         in the request's own text (a text part of a message, not a tool result and not another request
         field) reaches it; or the whole turn left (no 40-character run of its prompt or of any of its
         answers that is found in no other turn's text, whitespace, format characters and combining marks
-        removed, is anywhere in that text; a run shorter than 40 characters counts only as a whole text
-        part), that text
+        removed, is anywhere in that text; a text shorter than 40 characters is set aside only when another
+        turn has that same whole text, and counts only as a whole text part), that text
         carries the index's "(N older pages omitted; use contexto_search" line with N at least 1 and at
         most the number of store pages it does not name, and the result is stored byte for byte in some
         page. An index past its budget lists only the newest pages, so a correct long session needs the

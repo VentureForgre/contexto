@@ -810,15 +810,20 @@ def test_text_two_turns_share_says_nothing_about_which_turn_is_in_view():
     from inturn.harness import _bare, _turn_left
 
     def left(turn, texts, *view):
-        return _turn_left(turn, texts, _bare("".join(view)), {_bare(v) for v in view})
+        return _turn_left(turn, texts, _bare("\0".join(view)), {_bare(v) for v in view})  # as the harness joins
 
     template = "Use the same checklist as before and report the result in one table."
     texts = [(template, "the first answer names the file src/a.py"), (template, "the second answer names src/b.py")]
     assert left(0, texts, template, "the second answer names src/b.py")  # only turn 1 is in view
     assert not left(0, texts, template, "the first answer names the file src/a.py")
-    quoted = [("Find every caller of parse_config in the tree.", "Found 3."),
-              ("As before: Find every caller of parse_config in the tree. Then rename it.", "Renamed.")]
+    # Over 40 characters without whitespace, so the window rule decides, not the short-text rule (reviewer A
+    # at 350a23f7: matching aligned windows only, as at a5d680c8, fails this).
+    quoted = [("Find every caller of parse_config in the whole source tree.", "Found 3."),
+              ("As before: Find every caller of parse_config in the whole source tree. Then rename it.", "Renamed.")]
+    assert len(_bare(quoted[0][0])) > 40
     assert left(0, quoted, quoted[1][0], "Renamed.")  # a later prompt quoting turn 0 does not keep it in view
+    assert not left(0, quoted, quoted[0][0], "Found 3.")  # its own answer in view keeps it there
+    assert left(0, quoted, quoted[0][0], "Renamed.")  # a prompt quoted in full elsewhere is not its own (a stated limit)
     short = [("ok", "Done."), ("Run the tests now.", "All pass.")]
     assert left(0, short, "Run the tests now, ok? I am done.", "All pass.")  # "ok" inside other text is not turn 0
     assert not left(0, short, "ok", "Run the tests now.")  # "ok" as a whole text part is

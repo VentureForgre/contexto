@@ -93,7 +93,8 @@ def storage(run: Run) -> list[str]:
       model reads (text parts of messages, not tool results or other fields) names where it went: a page
       id there reaches it, or the whole turn left (no 40-character run of its prompt or of any of its
       answers that is found in no other turn's text, with whitespace, format characters and combining
-      marks removed, is anywhere in that text; a shorter text counts only as a whole text part), that
+      marks removed, is anywhere in that text; a shorter text is set aside only when another turn has
+      that same whole text, and counts only as a whole text part), that
       text carries the index's "(N older pages omitted; use contexto_search"
       line with N at least 1 and at most the store pages it does not name, and the result is stored byte
       for byte.

@@ -527,7 +527,9 @@ min_turn_room`, 113,000 at the defaults.
      every form: a turn cut to fewer than 40 characters of each prompt and answer, with the omission
      line, passes, as does the open case itself (`omit_turns`, tested as passing); so does a short turn
      kept only inside a longer text block (`"yes\n\nDone."` merged into one block), and a turn whose
-     every text is exactly another turn's (it cannot be told apart). A correct engine
+     every text is repeated in other turns: a short text exactly as another turn's, a longer one quoted
+     in full inside another turn's text, whether or not that turn is in the request (its texts cannot
+     be told apart from the other turn's). A correct engine
      whose turns share text (every prompt "continue", "yes" or "ok", a common template or answer
      opener, a final answer "Done.", a later prompt quoting an earlier one) is not failed: a turn's
      runs found in another turn's text are not counted, and a short text counts only whole. What remains open: an engine that
