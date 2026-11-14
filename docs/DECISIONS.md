@@ -2909,7 +2909,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
       unconditionally, and a new engine knows no session's owner from before it started, so a
       subagent without its agent id, still sending in a session cleared before the restart, took main
       as `new_cli_session` and was trusted. A `/clear` after a restart is still trusted, since it is a
-      session id the store had not served, and so is a `/resume` of a listed conversation. A Codex child whose first prompt is byte-identical to a listed
+      session id the store had not served, and so is a `/resume` of a listed conversation, except on
+      a store with no served session ids (from before D55, or a `meta.json` unreadable when the proxy
+      started), where the conversation a `/clear` starts is not trusted, in that launch or later ones,
+      until the next `/clear`. A Codex session with no readable record counts as new, since a Codex
+      store records no served session ids (latent: Codex confirms nothing on codex-cli 0.163.0). A
+      Codex child whose first prompt is byte-identical to a listed
       conversation's has that conversation's key, so it is trusted after a restart, as it already
       was inside the engine that listed the key, where the two share one state (review B round 7,
       N18). That is latent: a Codex session confirms nothing in code mode on codex-cli 0.163.0.

@@ -95,7 +95,10 @@ becomes trusted when it became the main
 one after `/clear`, `/resume`, a compaction, or a side request that came first. After a restart, one
 that takes over after a side request, after `/clear` or by `/resume` is trusted only when the rules
 above would trust it had it reached the proxy first. So `/clear`, which starts a new Claude Code
-session, is trusted, and so is `/resume` of a conversation a proxy on this session trusted before. Claude Code subagents
+session, is trusted, and so is `/resume` of a conversation a proxy on this session trusted before.
+The exception is a session from before Contexto recorded the Claude Code sessions it served (v0.5.11
+or older, or one whose `meta.json` could not be read): there the conversation a `/clear` starts
+after a restart is not trusted until the next `/clear`. Claude Code subagents
 are told apart by the `X-Claude-Code-Agent-Id` header Claude Code sends with their requests, and never
 take over as the main conversation. A request that carries `X-Claude-Code-Agent-Id` or a parent session id
 is never read for pins, even when it has the main conversation's key, as a fork of the main
@@ -258,7 +261,9 @@ U+17B4, U+17B5, U+180B to U+180F and U+16FE4, and the format controls U+13430 to
 U+1BCA3 and U+1D173 to U+1D17A), and a zero-width character next to a space, except a Mongolian free
 variation selector (U+180B to U+180D or U+180F) that ends a word before a space. A blank cell
 (U+2800, U+3164 or U+FFA0) prints on its own, so braille art and spaced Hangul read normally, and is
-an escape next to a zero-width character. One selector after a symbol or an ideograph, or one zero-width character between two letters, can
+an escape next to a zero-width character. One selector after a symbol or an ideograph, one
+zero-width character between two letters, or a Mongolian variation selector after a letter before a
+space, can
 still carry a few bits that a terminal does not show. So can blank cells and spaces mixed in a run (U+3164
 or U+2800 with spaces, no-break spaces with spaces, en spaces with em spaces): the run shows as blank,
 but which kind is where cannot be seen, and at the end of a line it reads as trailing space. The model
@@ -442,7 +447,8 @@ in a repository (reviewing a stranger's pull request, reading unknown code), sta
   on codex-cli 0.163.0 that is how the model calls Contexto's tools, so Codex sessions give nothing.
 - A conversation that became the main one only by having more turn starts than the previous main one
   is not trusted, whoever started it: a pin it makes while it is the main one is not carried. The
-  conversation that `/clear`, `/resume` or a compaction makes the main one is trusted.
+  conversation that `/clear`, `/resume` or a compaction makes the main one is trusted (after a
+  restart, only when the first-main rules above would trust it).
 - A pin made just before a new session starts and confirmed just after can join that session's
   carried records at a turn start, if the session already carries some.
 - Each git worktree and each submodule is its own project; nothing passes between them and the main

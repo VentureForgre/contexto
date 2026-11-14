@@ -2651,8 +2651,8 @@ class RewriteEngine:
         """D69: record in the store the ids of the records the main conversation's own history shows it
         made (``contexto.mainrecords``), reading only the messages it has not read before. Called only
         for a trusted main conversation: the engine's first main (``_first_trusted``), or one that took
-        main by a trusted rule (``_trusted_takeover``: D50's session rules, ``after_side_request`` when
-        ``_first_trusted`` holds, ``more_turn_starts`` for a listed conversation). One that took main by
+        main by a trusted rule (``_trusted_takeover``: D50's session rules and ``after_side_request``
+        when ``_first_trusted`` holds, ``more_turn_starts`` for a listed conversation). One that took main by
         ``more_turn_starts`` from a known main and is not listed (a subagent without
         ``X-Claude-Code-Agent-Id``, a Codex child conversation) is not read until it takes main by a
         trusted rule; a trusted conversation stays trusted when it takes main back by turn starts. A store
