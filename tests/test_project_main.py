@@ -16,7 +16,7 @@ import test_codex as codex
 from contexto import mcp
 from contexto.mainrecords import CLOSE_TOOL, PIN_TOOL, MainRecords, confirmed_id
 from contexto.rewrite import ANTHROPIC, MESSAGES, Config, RewriteEngine, keyed
-from contexto.store import SIDE_ROOM_TTL_S
+from contexto.store import SIDE_ROOM_TTL_S, TRUSTED_CONVERSATIONS_KEPT
 from contexto.store.project import MAIN_RECORDS_KEPT
 from test_clear_main import NEW, OLD, SUBAGENT_TOOLS, headers, main_request, metadata, side_request, subagent_request
 from test_project import carried_ids, main_pin, new_session, repo
@@ -224,6 +224,29 @@ def test_main_records_are_kept_once_each_and_the_oldest_are_dropped(home, tmp_pa
     assert store.main_records() == ids[3:]
     store.add_main_records(["not a record id"])
     assert store.main_records() == ids[3:]
+
+
+def test_trusted_conversations_are_kept_once_each_newest_last_and_the_oldest_are_dropped(home, tmp_path):
+    """Review A round 7, finding 5 (r6, r7): the list's bound and its dedupe. A key added again moves to the
+    end; empty and non-string keys are ignored; a field that is not a list of strings reads as empty."""
+    store = new_session(home, "s1", repo(tmp_path), 1)
+    keys = [f"anthropic:{i:064x}" for i in range(TRUSTED_CONVERSATIONS_KEPT + 6)]
+    for key in keys:
+        store.add_trusted_conversation(key)
+    assert store.trusted_conversations() == keys[6:]
+    store.add_trusted_conversation(keys[10])
+    assert store.trusted_conversations() == [*keys[6:10], *keys[11:], keys[10]]
+    store.add_trusted_conversation(keys[10])
+    for junk in ("", None, 7):
+        store.add_trusted_conversation(junk)
+    assert store.trusted_conversations() == [*keys[6:10], *keys[11:], keys[10]]
+    meta = json.loads((store.dir / "meta.json").read_text())
+    (store.dir / "meta.json").write_text(json.dumps({**meta, "trusted_conversations": {"not": "a list"}}))
+    assert store.trusted_conversations() == []
+    (store.dir / "meta.json").write_text(json.dumps({**meta, "trusted_conversations": [keys[0], 3, None]}))
+    assert store.trusted_conversations() == [keys[0]]
+    store.add_trusted_conversation(keys[1])
+    assert store.trusted_conversations() == keys[:2]
 
 
 # Removals of another session's records
@@ -689,3 +712,52 @@ def test_after_a_restart_a_listed_conversation_that_takes_main_by_turn_starts_is
     assert first.main_records() == [rid]
     assert first.epoch_record()["conversation"] == key_of(a) and "untrusted" not in first.epoch_record()
     assert carried_ids(new_session(home, "s2", root, 2)) == [rid]
+
+
+# The first-main rules' agent and parent clauses, and the list at a resume (review A round 7, finding 5)
+
+
+@pytest.mark.parametrize("variant", ["agent", "parent", "agent header twice"])
+def test_a_first_request_with_an_agent_id_or_a_parent_in_a_new_session_id_is_not_trusted_later(variant, home,
+                                                                                              tmp_path):
+    """After a restart, a conversation's first request in a session id the store had not served carries an
+    agent id or a parent, so it is main untrusted; its next request, without either, carries a pin, which
+    the per-request guard would let through, so only ``_first_trusted``'s clauses keep it out. In "agent
+    header twice" the first of two spellings of X-Claude-Code-Agent-Id is empty: the session's ``agent`` is
+    False and only the header clause sees the agent id."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    first.record_cli_session("claude", OLD)
+    send(RewriteEngine(first, config=ROOMY), MESSAGES, main_request(conversation("the user's prompt", 1), OLD))
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="pinned after the restart")
+    two = RewriteEngine(first, config=ROOMY)
+    messages = conversation("SUB-TASK in a new session id", 2)
+    if variant == "agent":
+        two(main_request(messages, NEW), headers(NEW, agent=True), MESSAGES)
+    elif variant == "parent":
+        two(request(messages, metadata=metadata(NEW, parent=OLD)), headers(NEW), MESSAGES)
+    else:
+        twice = {**headers(NEW), "X-Claude-Code-Agent-Id": "", "x-claude-code-agent-id": "a36c784c53af45cc0"}
+        two(main_request(messages, NEW), twice, MESSAGES)
+    two.observe_usage(MESSAGES, {"input_tokens": 300}, main_request(messages, NEW))
+    send(two, MESSAGES, main_request([*messages, *pin_pair("c1", reply), user("next")], NEW), session=NEW)
+    assert first.main_records() == [] and key_of(messages) not in first.trusted_conversations()
+
+
+def test_a_resume_trusts_a_listed_conversation_whose_record_says_untrusted(home, tmp_path):
+    """``_resume`` honours the list over the record's ``untrusted``: a record that marks a conversation an
+    earlier engine on this store trusted (as one written at dea920ae could, when the listed conversation
+    retook main by turn starts) is resumed and trusted, and its pin is carried."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    engine = RewriteEngine(first, config=ROOMY)
+    send(engine, MESSAGES, main_request(conversation("the user's prompt", 1), OLD))
+    child = conversation("CHILD TASK do it", 3)
+    send(engine, MESSAGES, main_request([*child, user("go on")], OLD))
+    assert first.epoch_record().get("untrusted") is True
+    first.add_trusted_conversation(key_of(child))
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="pinned after the resume")
+    resumed = RewriteEngine(first, config=ROOMY)
+    events = send(resumed, MESSAGES, main_request([*child, user("go on"), *pin_pair("c1", reply), user("more")], OLD))
+    assert any(e["event"] == "epoch_resumed" for e in events)
+    assert first.main_records() == [rid] and carried_ids(new_session(home, "s2", root, 2)) == [rid]
