@@ -67,13 +67,13 @@ Each cell is the difference in percentage points, then the two discordant counts
 
 ### Differences with each seed as one observation
 
-Probes inside one session are not independent, so each seed is also treated as one observation: its difference in accuracy between the two arms. The p value is an exact sign-flip permutation test and the interval a percentile bootstrap over seeds.
+Probes inside one session are not independent, so each seed is also treated as one observation: its difference in accuracy between the two arms. The p value is an exact sign-flip permutation test, over every pattern of signs. The interval is the 95% interval for the mean difference over seeds by Student t on the per-seed differences, n - 1 degrees of freedom; it is not computed from one seed.
 
-| Pair | Seeds | Difference per seed (points) | Mean difference | Sign-flip test | Bootstrap 95% interval |
+| Pair | Seeds | Difference per seed (points) | Mean difference | Sign-flip test | 95% interval over seeds |
 | --- | --- | --- | --- | --- | --- |
-| Contexto against full context | 6 | +8.3, +6.9, +1.4, +0.0, +9.7, +2.8 | +4.9 points | p = 0.0625 | +2.1 to +7.6 points |
-| Contexto against plain Claude Code | 6 | +19.4, +29.2, +23.6, +15.3, +15.3, +26.4 | +21.5 points | p = 0.0312 | +17.4 to +25.9 points |
-| Plain Claude Code against full context | 6 | -11.1, -22.2, -22.2, -15.3, -5.6, -23.6 | -16.7 points | p = 0.0312 | -21.5 to -11.1 points |
+| Contexto against full context | 6 | +8.3, +6.9, +1.4, +0.0, +9.7, +2.8 | +4.9 points | p = 0.0625 | +0.7 to +9.1 points |
+| Contexto against plain Claude Code | 6 | +19.4, +29.2, +23.6, +15.3, +15.3, +26.4 | +21.5 points | p = 0.0312 | +15.4 to +27.6 points |
+| Plain Claude Code against full context | 6 | -11.1, -22.2, -22.2, -15.3, -5.6, -23.6 | -16.7 points | p = 0.0312 | -24.3 to -9.0 points |
 
 ## Run-to-run noise
 
@@ -109,9 +109,9 @@ Every request that reached the upstream in the sessions counted above, side requ
 
 | Arm | Sessions | Requests | Uncached input | Cache write | Cache read | Output | Largest request input | Requests over the bound | Compactions | Requests not answered 2xx |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Contexto | 6 | 120 | 35,992 | 71,960 | 251,867 | 1,440 | 3,200 | 0 | 0 | 0 |
-| Full context | 6 | 120 | 136,617 | 272,999 | 955,602 | 1,440 | 20,711 | 96 | not applicable | 0 |
-| Plain Claude Code | 6 | 144 | 140,946 | 46,076 | 161,347 | 23,040 | 6,541 | 24 | 24 | 0 |
+| Contexto | 6 | 120 | 34,747 | 69,433 | 243,040 | 1,440 | 3,200 | 0 | 0 | 0 |
+| Full context | 6 | 120 | 133,597 | 266,948 | 934,418 | 1,440 | 20,808 | 84 | not applicable | 0 |
+| Plain Claude Code | 6 | 144 | 141,947 | 46,838 | 164,032 | 23,040 | 6,785 | 24 | 24 | 0 |
 
 ## Cost at published prices
 
@@ -119,32 +119,32 @@ The token classes of each arm are measured, and are priced here at every model i
 
 | Prices of | Contexto | Full context | Plain Claude Code |
 | --- | --- | --- | --- |
-| claude-haiku-5-5 | $0.0026 ($0.0158 over 6 sessions) | $0.0097 ($0.0581 over 6 sessions) | $0.0055 ($0.0330 over 6 sessions) |
-| claude-sonnet-5-5 | $0.0486 ($0.2915 over 6 sessions) | $0.1776 ($1.0657 over 6 sessions) | $0.1073 ($0.6436 over 6 sessions) |
-| claude-opus-5-5 | $0.0972 ($0.5829 over 6 sessions) | $0.3552 ($2.1314 over 6 sessions) | $0.2145 ($1.2872 over 6 sessions) |
-| claude-fable-5-2 | $0.1859 ($1.1155 over 6 sessions) | $0.6786 ($4.0716 over 6 sessions) | $0.4237 ($2.5422 over 6 sessions) |
+| claude-haiku-5-5 | $0.0026 ($0.0153 over 6 sessions) | $0.0095 ($0.0568 over 6 sessions) | $0.0055 ($0.0332 over 6 sessions) |
+| claude-sonnet-5-5 | $0.0470 ($0.2818 over 6 sessions) | $0.1737 ($1.0424 over 6 sessions) | $0.1080 ($0.6478 over 6 sessions) |
+| claude-opus-5-5 | $0.0939 ($0.5636 over 6 sessions) | $0.3475 ($2.0848 over 6 sessions) | $0.2159 ($1.2956 over 6 sessions) |
+| claude-fable-5-2 | $0.1798 ($1.0785 over 6 sessions) | $0.6638 ($3.9827 over 6 sessions) | $0.4264 ($2.5584 over 6 sessions) |
 
 - Prices: https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-12, USD per million tokens.
 - Cache writes are priced at the 5-minute rate for every arm, because a request record does not carry its cache lifetime.
 - claude-haiku-5-5: Priced by prompt length. The page says a request whose prompt is over 100,000 tokens pays higher prices, that the prompt length counts all input tokens including cache reads and cache writes, and that each request is priced on its own. A prompt of exactly 100,000 tokens pays the lower row. That the higher row applies to the whole request, output included, is a reading of the page, which gives two complete price rows and has no wording about an excess; the page does not use the words "whole request". If that reading is wrong, change size_rule: "applies_to" to "excess" prices only the input above the threshold at the higher row, and "output" to "first_row" keeps output at the lower row.
-- Every request recorded, repeats and unfinished sessions included: 512 requests, 2,725,606 input and 34,560 output tokens, $0.1409 at the prices of claude-haiku-5-5.
+- Every request recorded, repeats and unfinished sessions included: 512 requests, 2,726,282 input and 34,560 output tokens, $0.1409 at the prices of claude-haiku-5-5.
 
 ## Compaction in the plain Claude Code arm
 
 Set: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` = 37,000, intended to start compaction at 4,000 tokens; the bound of the Contexto arm is 4,000 tokens. The run recorded the threshold as forced. The window is the bound plus the 33,000 tokens the CLI reserves.
 
-Compactions seen: 32 across the 8 plain Claude Code sessions that ran, repeats included (the tokens table above counts repeat 0 of each seed only). The `pre_tokens` the CLI reported at each ranged from 4,032 to 6,541 tokens (mean 4,898), which is 1.01 to 1.64 times the intended start of 4,000 tokens; 0 of 32 were below it.
+Compactions seen: 32 across the 8 plain Claude Code sessions that ran, repeats included (the tokens table above counts repeat 0 of each seed only). The `pre_tokens` the CLI reported at each ranged from 4,133 to 6,785 tokens (mean 4,922), which is 1.03 to 1.70 times the intended start of 4,000 tokens; 0 of 32 were below it.
 
 | Seed | Repeat | Status | Compactions | pre_tokens of each |
 | --- | --- | --- | --- | --- |
-| 11 | 0 | complete | 4 | 5,532, 5,308, 4,488, 4,133 |
-| 11 | 1 | complete | 4 | 5,532, 5,308, 4,488, 4,133 |
-| 11 | 2 | complete | 4 | 5,532, 5,308, 4,488, 4,133 |
-| 12 | 0 | complete | 4 | 4,032, 6,541, 4,413, 4,564 |
-| 13 | 0 | complete | 4 | 4,944, 5,668, 4,731, 4,202 |
-| 14 | 0 | complete | 4 | 4,966, 5,527, 4,763, 4,374 |
-| 15 | 0 | complete | 4 | 4,533, 5,889, 4,551, 5,006 |
-| 16 | 0 | complete | 4 | 4,734, 5,718, 4,578, 4,609 |
+| 11 | 0 | complete | 4 | 4,133, 6,785, 4,488, 4,133 |
+| 11 | 1 | complete | 4 | 4,133, 6,785, 4,488, 4,133 |
+| 11 | 2 | complete | 4 | 4,133, 6,785, 4,488, 4,133 |
+| 12 | 0 | complete | 4 | 5,403, 5,251, 4,413, 4,564 |
+| 13 | 0 | complete | 4 | 5,032, 5,681, 4,731, 4,202 |
+| 14 | 0 | complete | 4 | 5,846, 4,738, 4,763, 4,374 |
+| 15 | 0 | complete | 4 | 5,628, 4,898, 4,551, 5,006 |
+| 16 | 0 | complete | 4 | 5,675, 4,934, 4,578, 4,609 |
 
 ## Charts
 

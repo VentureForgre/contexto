@@ -350,10 +350,11 @@ def _verdict(a: str, b: str, pooled: dict[str, Any] | None, seed_level: dict[str
              repeats: dict[str, Any] | None) -> dict[str, Any]:
     """What a comparison shows, by fixed rules.
 
-    A direction is named only when three things hold: the pooled comparison is significant (its
-    95% interval excludes 0 and the exact McNemar p value is below 0.05), the seed-level sign-flip
-    p value is below 0.05, and the pooled difference and the mean of the seed differences have the
-    same sign. Otherwise the result is "no difference shown", with each reason that applies.
+    A direction is named only when three things hold: the pooled comparison is significant
+    (``stats.paired``'s ``significant``: its 95% interval excludes 0 and the exact McNemar p value
+    is below 0.05), the seed-level sign-flip p value is below 0.05, and the pooled difference and
+    the mean of the seed differences have the same sign. Otherwise the result is "no difference
+    shown", with each reason that applies.
 
     The smallest p value the sign-flip test can give is 2 / 2**k, where k is the number of seeds
     whose difference is not 0 (a zero carries no sign), so the text says when the seeds make 0.05
@@ -375,7 +376,7 @@ def _verdict(a: str, b: str, pooled: dict[str, Any] | None, seed_level: dict[str
     min_p = 2 / 2 ** signed if signed else 1.0
     excludes = low > 0 or high < 0
     exact = pooled["mcnemar_p"] < ALPHA
-    significant = excludes and exact
+    significant = bool(pooled["significant"])
     below = seed_level["sign_flip_p"] < ALPHA
     same_way = difference * seed_level["mean"] > 0
     if significant and below and same_way:
@@ -389,6 +390,8 @@ def _verdict(a: str, b: str, pooled: dict[str, Any] | None, seed_level: dict[str
             reasons.append("the pooled interval contains 0")
         if not exact:
             reasons.append(f"the exact McNemar p value is {ALPHA} or more")
+        if not significant and excludes and exact:  # stats.paired's own rule, should it ever ask for more
+            reasons.append("the pooled comparison is not significant")
         if not below:
             reasons.append(f"the seed-level p value is {ALPHA} or more")
         if not same_way and difference and seed_level["mean"]:
@@ -820,10 +823,21 @@ def _differences(block: Mapping[str, Any], h: str) -> list[str]:
                            f"p {_p(c['mcnemar_p'])}), n = {c['n']}")
             body.append(row)
         lines += _table(["Class", *(f"{label(p['a'])} against {_inline(p['b'])}" for p in pairs.values())], body)
-    lines += [f"{h}# Differences with each seed as one observation", "",
-              "Probes inside one session are not independent, so each seed is also treated as one observation: its "
-              "difference in accuracy between the two arms. The p value is an exact sign-flip permutation test and "
-              "the interval a percentile bootstrap over seeds.", ""]
+    levels = [pair["seed_level"] for pair in pairs.values() if pair["seed_level"] is not None]
+    methods = list(dict.fromkeys(s["interval_method"] for s in levels))
+    tests = list(dict.fromkeys(s["sign_flip_method"] for s in levels))
+    test_words = {"exact": "an exact sign-flip permutation test, over every pattern of signs",
+                  "monte-carlo": "a sign-flip permutation test over random patterns of signs (Monte Carlo)"}
+    intro = ("Probes inside one session are not independent, so each seed is also treated as one observation: its "
+             "difference in accuracy between the two arms. The p value is "
+             + _and([test_words.get(m, m) for m in tests] or [test_words["exact"]])
+             + ". The interval is the 95% interval for the mean difference over seeds by "
+             + _and(methods or [stats.SEED_INTERVAL_METHOD])
+             + "; it is not computed from one seed.")
+    if any(s["seeds"] == 2 for s in levels):
+        intro += (" With two seeds it holds the true difference less often than 95%: 80% to 91% of the time in the "
+                  "simulated benchmarks described in `contexto.bench.stats`.")
+    lines += [f"{h}# Differences with each seed as one observation", "", intro, ""]
     rows = []
     for pair in pairs.values():
         title = f"{label(pair['a'])} against {_inline(pair['b'])}"
@@ -831,13 +845,13 @@ def _differences(block: Mapping[str, Any], h: str) -> list[str]:
         if s is None:
             rows.append([title, 0, "not compared", "", "", ""])
             continue
-        interval = s["bootstrap_interval"]
+        interval = s["interval"]
         rows.append([title, s["seeds"], ", ".join(_points(d, True) for d in s["differences"]),
                      f"{_points(s['mean'], True)} points", f"p {_p(s['sign_flip_p'])}",
-                     "none with one seed" if interval is None else
+                     "not computed (one seed)" if interval is None else
                      f"{_points(interval[0], True)} to {_points(interval[1], True)} points"])
     lines += _table(["Pair", "Seeds", "Difference per seed (points)", "Mean difference", "Sign-flip test",
-                     "Bootstrap 95% interval"], rows)
+                     "95% interval over seeds"], rows)
     return lines
 
 

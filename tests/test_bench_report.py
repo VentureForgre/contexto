@@ -427,6 +427,43 @@ def test_a_direction_needs_the_pooled_and_the_seed_level_result_to_point_the_sam
     assert other["result"] == "b_higher"
 
 
+def test_the_pooled_condition_is_the_significant_flag_of_the_paired_statistics():
+    # The foundation's example: 4 probes right only in Contexto and none only in full context, of
+    # 72. Tango's interval (0.0021, 0.1343) excludes 0, the exact p is 2 / 16 = 0.125, and
+    # stats.paired calls it not significant, so no direction is named.
+    pooled = _pooled(4, 0, n=72)
+    assert pooled["interval"][0] > 0 and pooled["mcnemar_p"] == 0.125 and pooled["significant"] is False
+    six = stats.seed_level([0.02, 0.01, 0.03, 0.02, 0.01, 0.02])
+    verdict = report._verdict("contexto", "full", pooled, six, None)
+    assert (verdict["result"], verdict["pooled_significant"]) == ("no_difference_shown", False)
+    assert "because the exact McNemar p value is 0.05 or more" in verdict["text"]
+    # The verdict reads the flag and does not recompute it.
+    shown = report._verdict("contexto", "full", _pooled(60, 20), six, None)
+    assert shown["result"] == "a_higher"
+    refused = report._verdict("contexto", "full", {**_pooled(60, 20), "significant": False}, six, None)
+    assert refused["result"] == "no_difference_shown"
+    assert "because the pooled comparison is not significant" in refused["text"]
+
+
+def test_the_seed_level_interval_is_printed_with_its_method(tmp_path):
+    results = report.build([crafted(tmp_path / "three", {"plain": 30}, seeds=(1, 2, 3), arms=("contexto", "plain"))])
+    level = results["pairs"]["contexto_vs_plain"]["seed_level"]
+    assert level["interval_method"] == stats.SEED_INTERVAL_METHOD and "bootstrap_interval" not in level
+    assert level["interval"] == pytest.approx([30 / 72, 30 / 72])  # every seed the same: zero width
+    text = report.render(results)
+    assert ("The interval is the 95% interval for the mean difference over seeds by Student t on the per-seed "
+            "differences, n - 1 degrees of freedom; it is not computed from one seed.") in text
+    assert "| Mean difference | Sign-flip test | 95% interval over seeds |" in text
+    assert "| Contexto against plain Claude Code | 3 | +41.7, +41.7, +41.7 | +41.7 points | p = 0.2500 | +41.7 to " \
+           "+41.7 points |" in text
+    assert "With two seeds it holds" not in text and "bootstrap" not in text.lower()
+    one = report.build([crafted(tmp_path / "one", {"plain": 30}, seeds=(1,), arms=("contexto", "plain"))])
+    assert one["pairs"]["contexto_vs_plain"]["seed_level"]["interval"] is None
+    assert "| +41.7 points | p = 1.0000 | not computed (one seed) |" in report.render(one)
+    two = report.build([crafted(tmp_path / "two", {"plain": 30}, seeds=(1, 2), arms=("contexto", "plain"))])
+    assert "With two seeds it holds the true difference less often than 95%" in report.render(two)
+
+
 def test_a_seed_with_no_difference_lowers_what_the_seed_level_test_can_reach(tmp_path):
     # Six seeds, one of them with a difference of exactly 0: a zero carries no sign, so the smallest
     # p value is 2 / 2**5 = 0.0625 and not 2 / 2**6.
@@ -1174,6 +1211,20 @@ def test_report_mode_exits_1_for_a_bad_price_table(tmp_path, capsys):
     run = make_run(tmp_path / "run", repeats=1, seeds=(11,))
     assert cli.main(["bench", "--report", str(run), "--prices", str(tmp_path / "absent.json")]) == 1
     assert "absent.json: cannot read the file" in capsys.readouterr().err
+
+
+def test_prices_belongs_to_the_report_mode_alone(tmp_path, capsys):
+    # Without --report the option would otherwise start the live run, or be ignored by another mode.
+    # (With no mode at all this build, which has no live run, exits 2 before looking at options.)
+    price_file = tmp_path / "prices.json"
+    assert cli.main(["bench", "--prices", str(price_file)]) == 2
+    capsys.readouterr()
+    for argv in (["bench", "--script-only", "--out", str(tmp_path / "s"), "--prices", str(price_file)],
+                 ["bench", "--chart", str(tmp_path / "results.json"), "--prices", str(price_file)]):
+        assert cli.main(argv) == 2, argv
+        assert "--prices belongs to the report mode; give --report with it, or leave it out" in (
+            capsys.readouterr().err)
+    assert not (tmp_path / "s").exists()
 
 
 def test_report_and_chart_are_modes_of_the_command(capsys):
