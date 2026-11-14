@@ -388,6 +388,10 @@ SPECIFIC_MIN_CHARS = 3  # a shorter word (``5``, ``v2``) is too short to stand f
 # a word on no page. One exception: a page that holds a specific word of the query (an identifier, a
 # number, a path) is returned whatever its share, unless more than half the pages hold that word.
 APPROX_FLOOR = 0.3
+# The second-fact place (``_second_page``): the words the best page lacks that a page holds must weigh at
+# least this share of a word on no page, unless one of them is specific. One word passes on at most
+# sqrt((n + 1) / 2) - 1/2 of n pages: 6 of 100 (6.6 percent), 54 of 6,000 (0.9 percent).
+SECOND_BAR = 0.5
 APPROX_LIMIT = 50  # hits returned, best first; ``Approximate.total`` counts every page over the floor
 TYPO_MIN_CHARS = 6  # a shorter word is never matched with a letter changed
 TYPO_MAX_CHARS = 40  # nor a longer one: the pattern of its variants grows with the square of its length
@@ -415,7 +419,9 @@ def _specific(word: str, typed: str) -> bool:
 
 class Plan(NamedTuple):
     """The words the fallback searches for: folded, in query order, at most ``APPROX_WORDS``; each as it
-    was typed; the stop words dropped; and how many further words were left out by the cut."""
+    was typed (the first spelling, or the first in camelCase when the query also writes the word so, so
+    a word is an identifier when any of its spellings is one); the stop words dropped; and how many
+    further words were left out by the cut."""
 
     words: tuple[str, ...]
     typed: tuple[str, ...]
@@ -480,13 +486,14 @@ def plan_words(query: object) -> Plan | None:
     words, or only stop words (strict search has already looked for exactly those)."""
     if not isinstance(query, str):
         return None
-    typed: dict[str, str] = {}
+    typed: dict[str, str] = {}  # each word as first typed, or as first typed in camelCase if it ever is
     order = []  # every word of the query, folded, in order, with repeats
     for token in query.split():
         token = token.lstrip(STRIP_LEFT).rstrip(STRIP_RIGHT)
         if token:
             order.append(fold(token))
-            typed.setdefault(order[-1], token)
+            if order[-1] not in typed or (_mixed_case(token) and not _mixed_case(typed[order[-1]])):
+                typed[order[-1]] = token  # so the order of two spellings does not decide (reviewer B on PR #267)
     kept = [w for w in typed if w not in STOP_WORDS]
     if not kept:
         return None
@@ -565,9 +572,10 @@ class _TypoFinder:
     per page, and one anchored match per place that starts a word. ``spent`` turns true once more
     than ``TYPO_WORK`` places have been looked at over the pages; the typo is then not searched at
     all, so the cost stays bounded when a piece is as common as ``ret`` in a store of thousands of
-    pages."""
+    pages. ``work`` is the places already checked for an earlier word of the same query: the bound is
+    for the query, not for each word tried."""
 
-    def __init__(self, word: str) -> None:
+    def __init__(self, word: str, work: int = 0) -> None:
         size = len(word)
         if size >= 7:
             gap = (size - 1) // 2
@@ -579,8 +587,8 @@ class _TypoFinder:
                 pieces.append((word[:half - 1] + word[half] + word[half - 1] + word[half + 1:], (0,)))
         self.pieces = [(search_key(piece), offsets) for piece, offsets in pieces]
         self.match = _typo_pattern(word).match
-        self.work = 0
-        self.spent = False
+        self.work = work
+        self.spent = work > TYPO_WORK
 
     def find(self, text: bytes) -> bytes | None:
         """A whole word of ``text`` one letter away, or None. The same word for the same text."""
@@ -729,7 +737,7 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
                 together[i] = bits
         if typo is not None and df[typo]:  # this page holds the word: look for the next one from here on
             typo = next((j for j in can_typo if not df[j]), None)
-            finder = _TypoFinder(plan.words[typo]) if typo is not None else None
+            finder = _TypoFinder(plan.words[typo], finder.work) if typo is not None else None
             since, forms = i, {}
         if finder is not None and not finder.spent:
             form = finder.find(text)
@@ -758,7 +766,7 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
     weight = [math.log(1 + (n - df[j] + 0.5) / (df[j] + 0.5)) * (TYPO_WEIGHT if j == typo else 1.0)
               for j in range(count)]
     whole = sum(weight)
-    telling = [specific[j] and 0 < df[j] and 2 * df[j] <= n + 1 for j in range(count)]
+    telling = [specific[j] and 0 < df[j] and 2 * df[j] <= n for j in range(count)]  # at most half the pages
 
     def enough(held: list[int], of: float) -> bool:
         """The floor: the words ``held`` weigh ``APPROX_FLOOR`` of ``of``, or one of them is specific."""
@@ -783,7 +791,7 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
         complete = [s for s in scored if s[0]]
         placed = max([s for s in complete if s[1]] or complete, key=lambda s: (s[5], s[6]))
     elif scored:
-        placed = _second_page(scored[0][7], rows, together, weight, math.log(1 + (n + 0.5) / 0.5), enough)
+        placed = _second_page(scored[0][7], rows, together, weight, math.log(1 + (n + 0.5) / 0.5), telling)
     else:
         placed = None
     if placed is not None and placed[7] not in [s[7] for s in scored[:SHOWN_IN_DETAIL]]:
@@ -816,29 +824,35 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
 
 
 def _second_page(first: int, rows: dict[int, tuple[SearchEntry, list[tuple[str, int] | None]]],
-                 together: dict[int, int], weight: list[float], nowhere: float,
-                 enough: Callable[[list[int], float], bool]) -> tuple | None:
+                 together: dict[int, int], weight: list[float], nowhere: float, telling: list[bool]) -> tuple | None:
     """The best page for the words that page ``first``, the best page of the query, does not hold: the
     second fact of a query whose two facts sit on two pages (D65). None when no page qualifies.
 
-    Among the words ``first`` lacks, a page must pass the floor (``enough``) twice: against those
-    words, so it is about them, and against ``nowhere``, the weight of a word that no page holds, so
-    that what it adds is not a leftover common word. The best such page holds the most of their
-    weight; then, as in the main order, a turn page before a context block, more pairs of words side
-    by side, a word in more texts, the newer page. It is returned as a row of the main order."""
+    A page qualifies when it holds a specific word among those ``first`` lacks (``telling``: on at most
+    half the pages), or when the lacked words it holds weigh at least ``APPROX_FLOOR`` of all the lacked
+    words, so it is about them, and at least ``SECOND_BAR`` of ``nowhere``, the weight of a word on no
+    page, so that what it adds is not a leftover common word. The best such page is, in order: a turn
+    page before a context block; the larger weight of the lacked words; the larger weight of the whole
+    query, so a page that also holds the query's other words beats one that holds only the lacked word;
+    more pairs of words side by side; the newer page, so the latest value wins a tie (D28). It is
+    returned as a row of the main order."""
     lacks = [j for j in range(len(weight)) if rows[first][1][j] is None]
     rest = sum(weight[j] for j in lacks)
     best = None
     for i, (entry, row) in rows.items():
         held = [j for j in lacks if row[j] is not None]
-        if i == first or not held or not (enough(held, rest) and enough(held, nowhere)):
+        if i == first or not held:
             continue
         share = sum(weight[j] for j in held)
-        relevance = sum(weight[j] * _saturated(row[j][1]) for j in held)
-        key = (not entry.context, share, together.get(i, 0).bit_count(), relevance, entry.turn, entry.id)
+        if not (any(telling[j] for j in held) or (share >= APPROX_FLOOR * rest and share >= SECOND_BAR * nowhere)):
+            continue
+        on = [j for j in range(len(weight)) if row[j] is not None]
+        whole = sum(weight[j] for j in on)
+        pairs = together.get(i, 0).bit_count()
+        key = (not entry.context, share, whole, pairs, entry.turn, entry.id)
         if best is None or key > best[0]:
-            best = (key, (False, not entry.context, sum(weight[j] for j in range(len(weight)) if row[j] is not None),
-                          together.get(i, 0).bit_count(), relevance, entry.turn, entry.id, i))
+            relevance = sum(weight[j] * _saturated(row[j][1]) for j in on)
+            best = (key, (False, not entry.context, whole, pairs, relevance, entry.turn, entry.id, i))
     return best[1] if best is not None else None
 
 

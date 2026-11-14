@@ -193,6 +193,18 @@ def test_a_separator_at_the_start_or_the_end_of_a_word_does_not_make_it_an_ident
     assert how(hits[0]) == {"--dry-run": ("folded", "dryrun")}
 
 
+def test_a_word_is_an_identifier_when_any_of_its_spellings_in_the_query_is_one():
+    # Reviewer B on PR #267, round 2: the first spelling typed decided, so the order of the words did.
+    pages = entries(*[f"page {i} ran the build" for i in range(6)], "the refresh_token is stored")
+    for query in ("refreshtoken refreshToken", "refreshToken refreshtoken"):
+        plan = S.plan_words(query)
+        assert plan.words == ("refreshtoken",) and plan.typed == ("refreshToken",), query
+        assert plan.shaped(0) and plan.specific(0), query
+        hits = rank_approximate(pages, query)
+        assert found(hits) == [6] and how(hits[0]) == {"refreshtoken": ("folded", "refresh_token")}, query
+    assert S.plan_words("Staging staging").typed == ("Staging",)  # no spelling is an identifier: the first is kept
+
+
 def test_a_specific_word_has_three_characters_or_more_and_an_accent_is_a_letter():
     plan = S.plan_words("5 42 v2 E41 6543 a.b caf\u00e9 cafe\u0301 it's")
     assert [w for j, w in enumerate(plan.words) if plan.specific(j)] == ["e41", "6543", "a.b"]
@@ -297,6 +309,13 @@ def test_the_floor_is_one_share_with_no_rule_that_depends_on_the_number_of_pages
         assert rank_approximate(entries(*hundred[:size]), "ran build zzqqxx") == [], size
     assert rank_approximate(entries(*seven_pages()), "5 zzqqxx") == []  # a digit is not a specific word
     assert found(rank_approximate(entries(*seven_pages()), "6543 zzqqxx")) == [3]
+
+
+def test_a_specific_word_on_more_than_half_the_pages_is_not_enough_on_its_own():
+    # Reviewer A on PR #267, round 2: with an odd number of pages, 4 of 7 passed as "not more than half".
+    for held, size, expected in ((4, 7, []), (3, 7, [2, 1, 0]), (4, 8, [3, 2, 1, 0]), (5, 8, [])):
+        texts = [f"page {i}" + (" code 6543" if i < held else "") for i in range(size)]
+        assert found(rank_approximate(entries(*texts), "6543 zzqqxx yyqqxx wwqqxx")) == expected, (held, size)
 
 
 def seven_pages():
@@ -423,6 +442,21 @@ def test_only_one_word_per_query_is_tried_as_a_typo_and_work_is_bounded(monkeypa
     assert rank_approximate(many, "databse") == []  # more candidate positions than the bound: the typo is not searched
 
 
+@pytest.mark.parametrize("held", [True, False])
+def test_the_typo_work_bound_is_for_the_whole_query(monkeypatch, held):
+    # Reviewer A on PR #267, round 2: the count started again at 0 for the next typo word. "kubernetes"
+    # is looked for first and checks the 3 places of "kube" on page 0; page 1 holds it, so "databse" is
+    # looked for from there, and on page 2 it is found at its third place, the sixth of the query.
+    texts = ["kube kube kube", "kubernetes runs it", "data data database"]
+    pages = entries(*texts) if held else [e._replace(text=None) for e in entries(*texts)]
+    fetch = (lambda i: entries(*texts)[i]) if not held else None
+    for work, typo_found in ((5, False), (6, True)):
+        monkeypatch.setattr(S, "TYPO_WORK", work)
+        hits = rank_approximate(pages, "kubernetes databse", fetch)
+        assert (2 in found(hits)) is typo_found, work
+        assert 1 in found(hits)
+
+
 def test_the_next_typo_word_is_looked_for_from_the_page_that_held_the_longer_one():
     # "kubernetes" is the longest plain word, so it is looked for first; page 3 holds it. From there on
     # "databse" is looked for, and only pages 0 to 2 are read again (reviewer B on PR #267).
@@ -542,6 +576,81 @@ def test_no_second_page_when_the_best_page_holds_every_word_or_only_a_common_wor
         texts[i] += " in region west"
     left = rank_approximate(entries(*texts), "redis eviction policy region")
     assert found(left)[0] == 5 and all("redis" in how(h) or "eviction" in how(h) for h in left)
+
+
+def hundred_pages(extra):
+    """100 filler pages, oldest first, with ``extra[i]`` added to page ``i``."""
+    texts = [f"page {i} ran the build" for i in range(100)]
+    for i, text in extra.items():
+        texts[i] += text
+    return texts
+
+
+def test_the_bar_for_the_second_page_is_half_the_weight_of_a_word_on_no_page():
+    # The lacked words a page holds must weigh SECOND_BAR of a word on no page: one word is on at most
+    # sqrt((n + 1) / 2) - 1/2 pages, 6 of 100 (6.6 percent) and 54 of 6,000 (0.9 percent).
+    assert S.SECOND_BAR == 0.5
+    for n, most in ((100, 6), (6000, 54)):
+        nowhere = math.log(1 + (n + 0.5) / 0.5)
+        weight = [math.log(1 + (n - d + 0.5) / (d + 0.5)) for d in (most, most + 1)]
+        assert weight[0] >= S.SECOND_BAR * nowhere > weight[1], n
+        assert most == math.floor(math.sqrt((n + 1) / 2) - 0.5)
+    texts = ["page 5 the redis eviction policy is allkeys-lru"] + [f"page {i} ran the build" for i in range(1, 100)]
+    for df, shown in ((6, True), (7, False)):
+        extra = {i: "; the cutover went fine" for i in range(99, 99 - df, -1)}
+        pages = entries(*[t + extra.get(i, "") for i, t in enumerate(texts)])
+        order = found(rank_approximate(pages, "redis eviction policy cutover"))
+        assert (order[1:2] == [99]) is shown, df
+
+
+@pytest.mark.parametrize("word, df", [("server", 12), ("server", 14), ("using", 20)])
+def test_a_leftover_common_word_takes_no_detailed_place(word, df):
+    # Reviewers A and B on PR #267, round 2: a page that held only the word the best page lacked took the
+    # third place, and a page that holds the query's other words fell to the list.
+    extra = {i: f"; {word} it" for i in range(99, 99 - 5 * df, -5)}
+    extra.update({20: "; the staging database port is 6543", 21: "; the staging database was migrated",
+                  22: "; staging database backups ran"})
+    hits = rank_approximate(entries(*hundred_pages(extra)), f"staging database port {word}")
+    assert found(hits) == [20, 22, 21]
+    extra = {i: "; the server restarted" for i in (*range(11, 99, 8), 99)}
+    extra.update({30: "; the canary rollout plan is 5 percent first", 40: "; the canary was healthy",
+                  50: "; the rollout plan was approved", 60: "; rollout notes"})
+    assert found(rank_approximate(entries(*hundred_pages(extra)), "canary rollout plan server")) == [30, 50]
+
+
+def test_a_word_on_two_of_seven_pages_is_a_leftover_too(store):
+    by_turn = ids(store)
+    # "output" is on the two build-log pages (0 and 5): it weighs 1.16 against 2.77 for a word on no page
+    hits = store.search_approximate("canary rollout output")
+    assert [h.id for h in hits] == [by_turn[6]] and hits[0].missing == ("output",)
+
+
+def test_the_second_page_is_the_one_that_also_holds_the_query_s_other_words():
+    # Reviewer B on PR #267, round 2: "restart" is what the best page lacks. Page 30 holds it with
+    # "nginx"; page 90 holds it alone and is newer. Page 30 is the answer.
+    extra = {40: "; nginx proxy timeouts were raised", 41: "; nginx proxy buffers set",
+             30: "; to restart the nginx service run systemctl", 90: "; restart the laptop"}
+    hits = rank_approximate(entries(*hundred_pages(extra)), "how do I restart the nginx proxy")
+    assert found(hits)[:3] == [41, 40, 30] and found(hits)[3:] == [90]
+
+
+def test_the_second_page_is_the_newest_value_when_two_pages_hold_the_lacked_words():
+    # Reviewer B on PR #267, round 2: the older value said in two texts took the place (D28).
+    texts = [f"page {i} ran the build" for i in range(20)]
+    for i, line in ((10, "staging database port is 6543"), (11, "the staging database port moved"),
+                    (12, "staging database port checked")):
+        texts[i] += "; " + line
+    texts[13] = [texts[13] + "; prod host is db1", "confirmed: prod host db1"]
+    texts[15] += "; prod host is now db2"
+    hits = rank_approximate(entries(*texts), "staging database port prod host")
+    assert found(hits)[:3] == [12, 11, 15] and set(found(hits)[3:]) == {10, 13}
+
+
+def test_four_equally_rare_facts_on_four_pages_find_nothing():
+    pages = entries("the kestrel nests", "an osprey dived", "a harrier hunted", "the condor soared",
+                    *[f"filler {i}" for i in range(6)])
+    assert rank_approximate(pages, "kestrel osprey harrier condor") == []  # a quarter each, under the floor
+    assert sorted(found(rank_approximate(pages, "kestrel osprey harrier"))) == [0, 1, 2]  # a third each
 
 
 def test_a_single_fact_keeps_its_page_among_the_first_three():
