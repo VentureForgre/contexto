@@ -45,8 +45,8 @@ CLEARED = "[cleared]"
 LYING_ROOM = 100_000
 INFLATED = 999_999
 OLDER = ("silent_older", "drop_older_stubs", "drop_older_rounds", "noted_older_rounds", "trim_older_prompts",
-         "split_older_prompts", "drop_older_turns")  # Claude Code only
-ROUNDS_GONE = ("drop_older_rounds", "noted_older_rounds", "trim_older_prompts", "split_older_prompts")
+         "split_older_prompts", "drop_older_turns", "fake_omission")  # Claude Code only
+ROUNDS_GONE = ("drop_older_rounds", "noted_older_rounds", "trim_older_prompts", "split_older_prompts", "fake_omission")
 DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "no_room", "room_one",
            "no_stub_text", "show_once", "lying_room", "in_place", "inflate", *OLDER)
 # What each defect does (the reviewers' wrong engines among them):
@@ -73,7 +73,10 @@ DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "n
 #   character, or split into two text blocks with every byte kept (reviewer A's trim and split at
 #   304e598e: a changed prompt is not evidence that its turn was paged);
 # - drop_older_turns: every earlier turn is removed whole and paged, with no index naming the page
-#   (reviewer A's wholeturns).
+#   (reviewer A's wholeturns);
+# - fake_omission: drop_older_rounds, with the index's "(1 older pages omitted; use contexto_search ...)"
+#   line added where the page id would go, though the turns' prompts are still in view (reviewer A at
+#   9fe691ef).
 # The last four strip thinking where they rewrite: in each earlier turn, from the first item they change to
 # the next prompt.
 
@@ -319,6 +322,9 @@ class ToyPager:
             out.append(form)
         earlier = len(out) - (len(items) - p)
         last = max((n for n in range(earlier) if out[n].get("role") == "assistant"), default=None)
+        if self.defect == "fake_omission" and last is not None:
+            note = {"type": "text", "text": "(1 older pages omitted; use contexto_search to find them)"}
+            out[last] = {**out[last], "content": [*out[last]["content"], note]}
         if self.defect == "noted_older_rounds" and last is not None and p in self.older_pages:
             note = {"type": "text", "text": f"[the tool rounds before this point are stored as page {self.older_pages[p]}]"}
             out[last] = {**out[last], "content": [*out[last]["content"], note]}

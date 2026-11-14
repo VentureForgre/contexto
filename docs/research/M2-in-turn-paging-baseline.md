@@ -275,8 +275,8 @@ still open and was answered from the view.
 
 In `multiturn`, turns 5 and 6 come after the turn-start rotation paged turns 1 to 4: their 6 requests
 leave out those turns' 110 results, all in turn pages byte for byte. Their calls and their turns'
-prompts left the request with them, so rule 3 holds them to the storage check only and they do not
-count as unnamed. The index message names the 4 turn pages by id, not their calls.
+prompts left the request with them, and the index message names the 4 turn pages by id, which reach
+every one of them, so they do not count as unnamed.
 
 Both of the subagent's searches found nothing, and that is not the room: search reads the retained
 snapshot, which only the main conversation publishes (contract PR #125), so a subagent's search never
@@ -510,9 +510,17 @@ min_turn_room`, 113,000 at the defaults.
    - or, for a result of an earlier turn only, its call is gone from the request as well, and the
      text the model reads names where it went: a page id in a text part of a message (not a tool
      result, not another request field) reaches it, or that text carries the index's "older pages
-     omitted; use contexto_search" line and the result is stored byte for byte in some page. A missing
-     prompt is not evidence that a turn was paged: an engine that trims, splits or drops earlier
-     prompts without naming the page fails.
+     omitted; use contexto_search" line, with N at least 1 and at most the number of store pages the
+     text does not name, the turn's prompt is gone from that text too (the whole turn left), and the
+     result is stored byte for byte in some page. An index past its budget lists only the newest pages,
+     so a correct long session needs the second way (v0.5.24 with a 40-token index fails 6 requests
+     without it). A missing prompt alone is not evidence that a turn was paged: an engine that trims,
+     splits or drops earlier prompts without naming the page fails, and so does one that adds the
+     omission line while the prompts stay in view (`fake_omission`). What remains open: an engine that
+     drops an earlier turn whole, prompt included, and writes an omission line the store bears out
+     passes rule 3 for that turn; that is what a turn-start rotation past the index budget does, and
+     the results stay stored and searchable. `system` (Codex `instructions`) is not read for page ids:
+     the engine sends it byte for byte (contract rule 1).
 
    Anything else fails. An earlier turn's result whose call is still in view is held to the first
    way, like the running turn's.
@@ -607,7 +615,7 @@ request's text), and the toy with every `StubRef` naming its page as a whole, wi
 | `room_one` | every room is 1 token | room, recall | |
 | `lying_room` (reviewer A) | every room is 100,000 | room (truth) | 123 rooms over the line at request and 123 at response |
 | `in_place` (reviewer A) | clears the CLI's own oldest whole result for the send, restores it when the usage arrives | the run fails (rule 11) | passes every rule without `check_wire` |
-| `inflate` (reviewer A), toy lines 110,000 to 70,000 | once in a run, the request right after a batch is a batch of one more result, with an `estimate` of 999,999 published | cache (in a row) | the second rewrite comes to 69,153 by the upstream's count (76,068 at 1.1 x), under 110,000; 16 rewrites in the loop; the same lines without the defect pass |
+| `inflate` (reviewer A), toy lines 110,000 to 70,000 | once in a run, the request right after a batch is a batch of one more result, with an `estimate` of 999,999 published | cache (in a row) | the second rewrite comes to 69,153 by the upstream's count (70,536 at 1.02 x), under 110,000; 16 rewrites in the loop; the same lines without the defect pass |
 | `silent_older` (reviewer A) | from each turn start, every earlier turn's result is `[cleared]`, its rounds paged, its calls and prompt kept | storage | `multiturn`: 117 requests leave out up to 112 results; none lost |
 | `drop_older_stubs` (reviewer B) | from each turn start, an earlier turn's toy stub becomes `[result removed]` | storage | `multiturn`: 97 requests, up to 99 results |
 | `drop_older_rounds` | from each turn start, the rounds of earlier turns are removed and paged; prompts and final answers kept; nothing names the page | storage | `multiturn`: 117 requests, up to 112 results |

@@ -121,7 +121,7 @@ TRICKLE = (100_000, 75_000)  # reviewer A
 NARROW = (112_500, 87_500)  # reviewer B
 HIGHER = (110_000, 70_000)  # a batch leaves the request over the pressure line, so a second one is held to the in-a-row rule
 OLDER = [("silent_older", 51), ("drop_older_stubs", 31), ("drop_older_rounds", 51), ("trim_older_prompts", 51),
-         ("split_older_prompts", 51), ("drop_older_turns", 51)]  # requests failed, quick build
+         ("split_older_prompts", 51), ("drop_older_turns", 51), ("fake_omission", 51)]  # requests failed, quick build
 
 
 @pytest.mark.parametrize(("defect", "rules"), WRONG)
@@ -175,7 +175,7 @@ def test_rounds_of_an_earlier_turn_may_leave_when_a_page_id_in_the_request_reach
 
 def test_the_v0_5_24_turn_start_rotation_is_accounted_for_by_its_turn_pages():
     """At v0.5.24 the turn start after ``multiturn``'s loop pages every earlier turn whole, prompt
-    included: rule 3 holds those results to the storage check only, and they are all in pages."""
+    included, and the index names the 4 turn pages by id, which reaches every result."""
     run = harness.cached("multiturn", "claude")
     assert run.metrics()["requests_with_an_unnamed_result"] == 0 and run.originals["lost"] == 0
     assert [s.turn for s in run.sent if s.lost] == []
@@ -770,3 +770,18 @@ def test_only_the_text_the_model_reads_names_a_page():
               {"type": "text", "text": "the index"}, {"type": "input_text", "text": "codex"}]
     assert _read_texts({"role": "user", "content": blocks}) == ["the index", "codex"]
     assert _read_texts({"type": "function_call_output", "call_id": "c", "output": "pg_0123456789abcdef"}) == []
+
+
+def test_an_index_past_its_budget_accounts_for_the_whole_turns_it_omits():
+    """Reviewer A's M at 9fe691ef. v0.5.24 with an index of 40 tokens lists only its newest page and writes
+    "(N older pages omitted; ...)"; the whole earlier turns it paged are accounted for by that line."""
+    run = harness.run(scripts.build("multiturn", quick=True), "claude", index_budget=40)
+    assert run.sent and run.metrics()["requests_with_an_unnamed_result"] == 0
+    # (storage itself reports only that v0.5.24 has no stubs hook: the baseline's hook is empty by design)
+    assert targets.unmet_by_rule(run)["storage"] == ["stubs.find_stubs is not filled in, so no stub was checked"]
+
+
+def test_the_omission_line_needs_a_count_the_store_bears_out_and_the_whole_turn_gone():
+    from inturn.harness import OMITTED
+    assert OMITTED.findall("(0 older pages omitted; use contexto_search to find them)") == ["0"]
+    assert OMITTED.findall("see 3 older pages omitted; use contexto_search") == []  # not the index's form

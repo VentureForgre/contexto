@@ -57,7 +57,7 @@ SESSION = "inturn"
 PAGE_LINE = re.compile(r"(\S+) \(turn \d+\)")
 HIT_LINE = re.compile(r"> (\d+): ")
 PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")  # contexto.store.pages.page_id
-OMITTED = re.compile(r"\d+ older pages omitted; use contexto_search")  # render_index's line past its budget
+OMITTED = re.compile(r"\((\d+) older pages omitted; use contexto_search")  # render_index's line past its budget
 NEARLY_SPENT = mcp.RECALL_NEARLY_SPENT.split("{")[0]
 StubFinder = Callable[[str, dict], list[StubRef]]
 EngineFactory = Callable[[Any, Config], Any]
@@ -394,25 +394,8 @@ def _read_texts(item: Any) -> list[str]:
     if isinstance(content, str):
         return [content]
     return [block["text"] for block in content if isinstance(content, list) and isinstance(block, dict)
-            and block.get("type") in ("text", "input_text") and isinstance(block.get("text"), str)] \
+            and block.get("type") in ("text", "input_text", "output_text") and isinstance(block.get("text"), str)] \
         if isinstance(content, list) else []
-
-
-def _texts(item: Any) -> list[str]:
-    """The texts of a forwarded message or item: a string content, its text and ``input_text`` parts, and
-    a string tool result or output, where a prompt the engine moved could be."""
-    if not isinstance(item, dict):
-        return []
-    found = [item["output"]] if isinstance(item.get("output"), str) else []
-    content = item.get("content")
-    if isinstance(content, str):
-        return [*found, content]
-    for block in content if isinstance(content, list) else []:
-        if isinstance(block, dict):
-            found.extend(t for t in (block.get("text"), block.get("content")) if isinstance(t, str))
-            if isinstance(block.get("content"), list):
-                found.extend(b["text"] for b in block["content"] if isinstance(b, dict) and isinstance(b.get("text"), str))
-    return found
 
 
 def _estimate(events: list[dict]) -> tuple[int | None, int | None]:
@@ -424,13 +407,14 @@ def _estimate(events: list[dict]) -> tuple[int | None, int | None]:
 
 
 def run(scenario: Scenario, dialect: str, *, find_stubs: StubFinder = stubs.find_stubs,
-        engine: EngineFactory | None = None, check_wire: bool = False) -> Run:
+        engine: EngineFactory | None = None, check_wire: bool = False, index_budget: int | None = None) -> Run:
     """Play ``scenario`` on ``dialect`` (``claude`` or ``codex``) and measure it.
 
     ``engine(store, config)`` builds the engine under test; the default is the real ``RewriteEngine``.
     It is called like the proxy calls one: ``prime(request)``, ``engine(request, headers, endpoint)``
     returning ``(forwarded, headers, events)``, and ``observe_usage(...)`` returning events.
-    ``check_wire`` also serializes every forwarded request, to prove the byte count."""
+    ``check_wire`` also serializes every forwarded request, to prove the byte count. ``index_budget``
+    sets the engine's ``Config.index_budget``, to run a session whose index lists only its newest pages."""
     if dialect not in scenario.dialects:
         raise ValueError(f"{scenario.name} does not run on {dialect}")
     with tempfile.TemporaryDirectory(prefix="inturn-") as home:
@@ -438,7 +422,7 @@ def run(scenario: Scenario, dialect: str, *, find_stubs: StubFinder = stubs.find
         store.set_mcp_listed()  # as after the MCP server answered tools/list in a real session
         reader = SessionStore(Path(home), SESSION)  # the MCP server's own handle: another process, in real use
         try:
-            return _Play(scenario, dialect, store, reader, find_stubs, engine, check_wire).play()
+            return _Play(scenario, dialect, store, reader, find_stubs, engine, check_wire, index_budget).play()
         finally:
             reader.release()
             store.release()
@@ -446,9 +430,11 @@ def run(scenario: Scenario, dialect: str, *, find_stubs: StubFinder = stubs.find
 
 class _Play:
     def __init__(self, scenario: Scenario, dialect: str, store: RecordingStore, reader: SessionStore,
-                 find_stubs: StubFinder | None, engine: EngineFactory | None, check_wire: bool) -> None:
+                 find_stubs: StubFinder | None, engine: EngineFactory | None, check_wire: bool,
+                 index_budget: int | None = None) -> None:
         self.scenario, self.dialect, self.store, self.check_wire = scenario, dialect, store, check_wire
-        self.config = Config(bound=scenario.bound)
+        self.config = (Config(bound=scenario.bound) if index_budget is None
+                       else Config(bound=scenario.bound, index_budget=index_budget))
         self.engine = engine(store, self.config) if engine else RewriteEngine(store, config=self.config)
         self.upstream = FakeUpstream()
         self.server = mcp.Server(reader, io.StringIO(), io.StringIO())
@@ -544,8 +530,11 @@ class _Play:
         how many are not accounted for. Only a result of an earlier turn whose call is gone from the
         request as well can be, and only when the text the model reads names where it went: a page id
         in the request's own text (a text part of a message, not a tool result and not another request
-        field) reaches it, or that text carries the index's "older pages omitted" line and the result is
-        stored byte for byte in some page (an index past its budget lists only the newest pages)."""
+        field) reaches it; or the whole turn left (its prompt is not in that text either), that text
+        carries the index's "(N older pages omitted; use contexto_search" line with N at least 1 and at
+        most the number of store pages it does not name, and the result is stored byte for byte in some
+        page. An index past its budget lists only the newest pages, so a correct long session needs the
+        second way. ``system`` is not read: the engine sends it byte for byte (contract rule 1)."""
         current = len(actor.prompts) - 1
         earlier = [call_id for call_id in missing if actor.call_turn.get(call_id, current) < current]
         if not earlier:
@@ -558,9 +547,12 @@ class _Play:
         reached: set[str] = set()
         for page_id in set(PAGE_ID.findall(texts)):
             reached |= self.stubs.reach(page_id)
-        omitted = OMITTED.search(texts) is not None
-        accounted = sum(1 for call_id in gone
-                        if call_id in reached or (omitted and actor.results[call_id] in self.paged.get(call_id, ())))
+        named = set(PAGE_ID.findall(texts))
+        unlisted = sum(1 for name in self.page_names if name[:-5] not in named)
+        omitted = any(1 <= int(n) <= unlisted for n in OMITTED.findall(texts))
+        accounted = sum(1 for call_id in gone if call_id in reached or (
+            omitted and actor.prompts[actor.call_turn[call_id]] not in texts
+            and actor.results[call_id] in self.paged.get(call_id, ())))
         return len(missing) - accounted
 
     # One request ----------------------------------------------------------------------------------
