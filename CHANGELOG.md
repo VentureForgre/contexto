@@ -24,6 +24,9 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 - A Claude Code settings file that starts with a UTF-8 byte order mark is read. Claude Code reads
   such a file, and Contexto treated it as absent, so `contexto run` missed an
   `ANTHROPIC_BASE_URL` or `apiKeyHelper` set there and used another upstream than Claude Code's own.
+- A Claude Code settings file is now read as Claude Code reads it in three more cases: a named
+  pipe in its place is skipped (`contexto run` waited on it for ever), a file holding `NaN` or
+  `Infinity` is ignored, and a file holding a number longer than 4,300 digits is read.
 
 ## 0.5.24 (2026-11-06)
 

@@ -290,3 +290,43 @@ def test_a_settings_file_that_starts_with_a_byte_order_mark_is_read(tmp_path, ho
     helper = claude_key_helper(tmp_path, home, {}, trusted_only=False)
     assert (helper.value, helper.source) == ("print-a-key", where)
 
+
+
+def test_a_settings_file_with_a_number_too_long_for_python_is_read(tmp_path, home):
+    """Claude Code 2.1.322 reads a settings file holding an integer of 5,000 digits (PR #258, Reviewer
+    B's re-review, zero spend: every request went to the file's base URL). ``json.loads`` refuses an
+    integer past 4,300 digits, so the file counted as absent and the proxy forwarded elsewhere."""
+    path = tmp_path / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    text = json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://long-number.invalid"}, "apiKeyHelper": "print-a-key",
+                       "cleanupPeriodDays": 0})
+    path.write_text(text.replace(": 0}", f": 1{'0' * 5000}}}"))
+    up = resolve_upstream(env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tmp_path, home=home)
+    assert (up.url, up.source) == ("http://long-number.invalid", "settings:project")
+    assert claude_key_helper(tmp_path, home, {}, trusted_only=False).value == "print-a-key"
+
+
+def test_a_fifo_in_place_of_a_settings_file_is_skipped(tmp_path, home):
+    """Claude Code 2.1.322 skips a named pipe at a settings path (PR #258, Reviewer A's re-review); the
+    reader waited on it for ever, so `contexto run` never started."""
+    import os
+    import time
+
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://user.invalid"}}))
+    (tmp_path / ".claude").mkdir()
+    os.mkfifo(tmp_path / ".claude" / "settings.json")
+    started = time.monotonic()
+    up = resolve_upstream(env={}, cwd=tmp_path, home=home)
+    assert (up.url, up.source) == ("http://user.invalid", "settings:user")
+    assert time.monotonic() - started < 5
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_a_settings_file_with_a_non_json_number_is_not_read(tmp_path, home, literal):
+    """Claude Code rejects a file holding these, so Contexto must not take its base URL either."""
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(
+        f'{{"env": {{"ANTHROPIC_BASE_URL": "http://project.invalid"}}, "n": {literal}}}')
+    up = resolve_upstream(env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tmp_path, home=home)
+    assert up.url == "http://env.invalid"

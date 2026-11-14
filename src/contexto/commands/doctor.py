@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -92,6 +93,8 @@ from contexto.upstream import (
     KEY_HELPER_KEY,
     claude_key_helper,
     claude_settings_order,
+    json_constant,
+    json_int,
     resolve_upstream,
     untrusted_note,
 )
@@ -187,7 +190,16 @@ def run(args: argparse.Namespace) -> int:
                 checks.append(check)
                 if not args.json:
                     print(render_check(check), flush=True)
-            print(json.dumps(report(checks), indent=2) if args.json else f"\n{verdict(checks)}")
+            print(json.dumps(report(checks), indent=2) if args.json else f"\n{verdict(checks)}", flush=True)
+    except BrokenPipeError:
+        # The reader left (`contexto doctor | head -1`). Nothing more can be printed, and Python's flush
+        # of stdout at exit would raise again, so stdout is pointed away first. Not a pass: the run did
+        # not finish.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):  # no file descriptor behind stdout: nothing left to flush
+            pass
+        return EXIT_FAILED
     except KeyboardInterrupt:  # each check stops what it started on the way out
         print("contexto: interrupted", file=sys.stderr)
         return EXIT_INTERRUPTED
@@ -200,13 +212,19 @@ def run(args: argparse.Namespace) -> int:
 def termination_raises() -> Iterator[None]:
     """While the checks run, SIGTERM and SIGHUP (a closed terminal) raise ``launcher.Terminated``, so a
     check's ``finally`` kills the process it started and removes its temporary home, as Ctrl+C already
-    did; before, the ``contexto-doctor-*`` directory stayed and a hung MCP server was orphaned. The first
-    signal makes both ignored until the handlers are put back, so a second one cannot cut the cleanup
-    short. A signal that is ignored already (``nohup``) stays ignored. What the standard library cannot
-    cover: SIGKILL, and a caller that is not in the main thread, where no handler can be set."""
+    did; before, the ``contexto-doctor-*`` directory stayed and a hung MCP server was orphaned. After the
+    first signal both are dropped until the handlers are put back, so a second one cannot cut the cleanup
+    short. They are dropped by a handler that does nothing, not by SIG_IGN: a second signal that arrived
+    before the switch is still delivered to Python, which reports "ignored due to race condition" with a
+    traceback when it finds SIG_IGN. A signal that is ignored already (``nohup``) stays ignored. What the
+    standard library cannot cover: SIGKILL, and a caller that is not in the main thread, where no
+    handler can be set."""
+    def dropped(signum: int, frame: Any) -> None:
+        return None
+
     def stop(signum: int, frame: Any) -> None:
         for other in previous:
-            signal.signal(other, signal.SIG_IGN)
+            signal.signal(other, dropped)
         raise Terminated(signum)
 
     previous: dict[int, Any] = {}
@@ -245,6 +263,13 @@ def signals_held() -> Iterator[None]:
             signal.signal(signum, handler)
         if held:
             signal.raise_signal(held[0])  # now it meets the handler it was sent to
+
+
+def read_version(path: str, env: Mapping[str, str]) -> tuple[str | None, str | None]:
+    """``installed_version`` with SIGINT, SIGTERM and SIGHUP held while the command starts, as for the
+    MCP server: one that landed inside ``subprocess.Popen`` left a hanging ``--version`` running (PR
+    #258's re-review: 27 of 150 timed runs)."""
+    return installed_version(path, env=env, spawn_guard=signals_held)
 
 
 def run_checks(context: Context | None = None) -> list[Check]:
@@ -370,7 +395,7 @@ def check_cli(cli: str, env: Mapping[str, str]) -> Check:
         details["error"] = "not_found"
         return Check(cli, WARN, f"{name}: {cli_not_found(cli, env.get('PATH'))}", install, details)
     details["path"] = path
-    version, error = installed_version(path, env=env)
+    version, error = read_version(path, env)
     if cannot_start(error):  # on PATH and executable, but it does not start: a missing #! interpreter, say
         details["error"] = error
         return Check(cli, WARN, f"{name}: '{cli}' at {path} cannot be run ({error})",
@@ -402,7 +427,8 @@ def settings_problem(path: Path) -> str | None:
     """What is wrong with a settings file that is there and cannot be used, in a few words; None when it
     is absent or usable. The readers (``contexto.upstream``, ``contexto.providers``) treat such a file as
     absent, which is what ``contexto run`` does with it, and then nothing says that the file which sets
-    the upstream is the broken one. A file that is not a regular file is not opened: a FIFO would block."""
+    the upstream is the broken one. A file that is not a regular file is not opened: a FIFO would block,
+    and the readers skip it (``contexto.upstream.read_settings``)."""
     try:
         mode = path.stat().st_mode
     except (FileNotFoundError, NotADirectoryError):
@@ -412,11 +438,12 @@ def settings_problem(path: Path) -> str | None:
     if stat.S_ISDIR(mode):
         return "is a directory, not a file"
     if stat.S_ISFIFO(mode):
-        return "is a FIFO (a named pipe), and reading it does not finish, here or in `contexto run`"
+        return "is a FIFO (a named pipe), so it is skipped, as Claude Code skips it"
     if not stat.S_ISREG(mode):
-        return "is not a regular file"
+        return "is not a regular file, so it is skipped"
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"), parse_int=json_int,  # as read_settings reads it
+                          parse_constant=json_constant)
     except OSError as exc:
         return f"cannot be read ({exc.strerror or type(exc).__name__})"
     except (ValueError, RecursionError):  # not UTF-8, not JSON, or nested too deep to read
@@ -424,7 +451,8 @@ def settings_problem(path: Path) -> str | None:
     if not isinstance(data, dict):
         return "is not a JSON object"
     if "env" in data and not isinstance(data["env"], dict):
-        return "has an env block that is not a JSON object"
+        # Only the block is lost: the readers still take the file's other settings, such as apiKeyHelper.
+        return "has an env block that is not a JSON object, so nothing in env is read (its other settings are read)"
     return None
 
 
@@ -449,8 +477,8 @@ def check_settings(ctx: Context) -> Check:
     details = {"files": files}
     if wrong:
         return Check("settings", WARN, f"Claude Code settings: {'; '.join(wrong)}",
-                     "Fix or remove it: Contexto reads nothing from a settings file it cannot use, so an upstream, a "
-                     "key helper or a provider variable set there is missing from the checks below", details)
+                     "Fix or remove it: what Contexto cannot read there (an upstream, a key helper or a provider "
+                     "variable) is missing from the checks below, as it is from `contexto run`", details)
     if read:
         return Check("settings", PASS, f"Claude Code settings: read {' and '.join(read)}", details=details)
     return Check("settings", PASS, "Claude Code settings: no settings file here or for this user", details=details)
@@ -680,7 +708,12 @@ def check_store(env: Mapping[str, str], *, claude: bool = True) -> Check:
         if sessions.stat().st_uid != os.geteuid() and os.geteuid() != 0:
             return failed("cannot be used: its sessions directory belongs to another user, so `contexto run` cannot "
                           "set its mode")
-        if os.access(sessions, os.W_OK | os.X_OK):
+        if not os.access(sessions, os.R_OK | os.X_OK):
+            # The store opens the directory before it sets the mode, so of the modes that are not
+            # writable only r-x (0500) launches; without read or search permission both launchers exit 1.
+            return failed("cannot be used: its sessions directory cannot be read and entered, and `contexto run` "
+                          "fails there before it can set the mode", f"Run: chmod u+rwx {shlex.quote(str(sessions))}")
+        if os.access(sessions, os.W_OK):
             problem = write_problem(sessions)
             if problem:
                 return failed(f"cannot be written in its sessions directory ({problem})")

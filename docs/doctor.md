@@ -271,9 +271,6 @@ is set up for by a login it holds, without a variable.
 - `--upstream`, `--codex-upstream`, `--codex-key-helper` and `--codex-auth chatgpt`: it reports what
   `contexto run` does without them.
 - Organization-managed Claude Code settings.
-- A named pipe (FIFO) in place of a settings file. The `settings` line names it, and then doctor
-  waits on it for as long as nothing writes to it, as `contexto run claude` does. Stop it with
-  Ctrl+C and remove the pipe.
 
 ## JSON
 

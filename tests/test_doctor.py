@@ -70,7 +70,8 @@ def world(tmp_path, monkeypatch, scripts):
     real ``installed_version`` with a longer timeout than its 3 s: these tests are not about how fast a
     script starts, and a busy machine can take longer."""
     real_version = doctor.installed_version
-    monkeypatch.setattr(doctor, "installed_version", lambda path, env=None: real_version(path, env=env, timeout=60))
+    monkeypatch.setattr(doctor, "installed_version",
+                        lambda path, env=None, **kw: real_version(path, env=env, timeout=60, **kw))
     for name in list(os.environ):
         if name.startswith(("ANTHROPIC_", "CLAUDE", "CONTEXTO_", "OPENRIG_")):
             monkeypatch.delenv(name)
@@ -1149,3 +1150,128 @@ def test_doctor_connects_to_nothing_resolves_no_name_and_never_contacts_the_upst
         thread.join(timeout=2)
         listener.close()
     assert accepted == []
+
+
+# Re-review of the fixes (PR #258) ---------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read and enter any directory")
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o200, 0o300, 0o400, 0o600])
+def test_a_sessions_directory_that_cannot_be_read_and_entered_fails_as_the_launcher_does(both, capsys, fast_mcp,
+                                                                                         mode):
+    """Reviewer B's re-review: the store sets ``sessions`` to 0700 only after it has opened it, so of the
+    modes that are not writable only 0500 launches. Doctor passed 000, 100, 200, 400 and 600 with the
+    "sets it to mode 0700" note, and 300 without it, where both launchers exit 1."""
+    sessions = both.store / "sessions"
+    sessions.mkdir(parents=True)
+    sessions.chmod(mode)
+    try:
+        code, found = checks(capsys)
+        store = found["store"]
+        assert code == 1 and store["status"] == "fail", store
+        assert "sessions directory cannot be read and entered" in store["summary"]
+        assert store["action"] == f"Run: chmod u+rwx {shlex.quote(str(sessions))}"
+        assert stat.S_IMODE(sessions.stat().st_mode) == mode  # doctor changes no mode
+        started = launch(both, "claude", "-p", "hi")
+        assert started.returncode == 1 and "Permission denied" in started.stderr, started.stderr
+    finally:
+        sessions.chmod(0o700)
+
+
+def test_a_reader_that_closes_the_pipe_early_gets_no_traceback(both):
+    """Reviewer B's re-review: with each line printed as its check finishes, ``contexto doctor | head -1``
+    ended in a ``BrokenPipeError`` traceback."""
+    proc = subprocess.Popen([sys.executable, "-m", "contexto", "doctor"], cwd=both.cwd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().startswith("contexto doctor")
+        proc.stdout.close()
+        err = proc.stderr.read()
+        code = proc.wait(timeout=120)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert "Traceback" not in err and "BrokenPipeError" not in err, err
+    assert code == 1  # the run did not finish, so it is not a pass
+
+
+def test_a_second_termination_signal_during_the_cleanup_is_dropped_by_a_handler(monkeypatch):
+    """Reviewer B's re-review: after the first signal the others were set to SIG_IGN, and a signal that
+    had already arrived for the old handler was then reported by Python as "ignored due to race
+    condition", with a traceback on stderr. A handler that does nothing drops it quietly."""
+    with pytest.raises(doctor.Terminated) as stop, doctor.termination_raises():
+        signal.getsignal(signal.SIGHUP)(signal.SIGHUP, None)
+        pytest.fail("the first signal did not raise")
+    assert stop.value.signum == signal.SIGHUP
+    with pytest.raises(doctor.Terminated), doctor.termination_raises():
+        try:
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        finally:
+            for signum in (signal.SIGTERM, signal.SIGHUP):
+                handler = signal.getsignal(signum)
+                assert callable(handler) and handler is not signal.SIG_IGN
+                assert handler(signum, None) is None  # and a second one raises nothing
+
+
+def test_a_settings_file_with_a_very_long_number_is_read_by_every_check(both, capsys, fast_mcp):
+    """Reviewer B's re-review: the settings line called a file holding an integer past Python's 4,300
+    digits "cannot be read as JSON" while the provider check below read it, and the upstream reader
+    still took it as absent, although Claude Code 2.1.322 reads such a file."""
+    text = json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://long-number.invalid", "CLAUDE_CODE_USE_BEDROCK": "1"},
+                       "cleanupPeriodDays": 0}).replace(": 0}", f": 1{'0' * 5000}}}")
+    path = both.cwd / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+    _, found = checks(capsys)
+    assert found["settings"]["status"] == "pass", found["settings"]
+    assert found["claude-upstream"]["details"]["origin"] == "http://long-number.invalid"
+    assert found["provider"]["status"] == "warn"
+
+
+def test_an_env_block_that_is_not_an_object_does_not_hide_the_rest_of_the_file(both, capsys, fast_mcp):
+    """Reviewer B's re-review: the step said Contexto reads nothing from such a file, while both key
+    checks report its ``apiKeyHelper`` and ``contexto run codex`` uses it."""
+    write_settings(both.home / ".claude" / "settings.json", {"env": None, "apiKeyHelper": f"echo {HELPER_SECRET}"})
+    code, found = checks(capsys)
+    settings = found["settings"]
+    assert code == 0 and settings["status"] == "warn"
+    assert "env block that is not a JSON object" in settings["summary"]
+    assert "reads nothing" not in settings["action"] and "its other settings are read" in settings["summary"]
+    assert found["claude-key"]["status"] == "pass"
+    assert found["claude-key"]["details"] == {"found": [{"name": "apiKeyHelper", "source": "settings:user"}]}
+
+
+def test_a_fifo_settings_file_is_named_and_the_other_checks_go_on(both, capsys, fast_mcp):
+    """Reviewer A's re-review: Contexto now skips a named pipe at a settings path, as Claude Code does,
+    so doctor names it and finishes, and the provider check is not blocked by it."""
+    pipe = both.cwd / ".claude" / "settings.json"
+    pipe.parent.mkdir()
+    os.mkfifo(pipe)
+    started = time.monotonic()
+    code, found = checks(capsys)
+    assert time.monotonic() - started < 60
+    assert found["settings"]["status"] == "warn" and "FIFO" in found["settings"]["summary"]
+    assert "skipped" in found["settings"]["summary"] and "does not finish" not in found["settings"]["summary"]
+    assert found["provider"]["status"] == "pass"
+
+
+def test_a_signal_while_a_version_command_starts_leaves_no_process(both, monkeypatch):
+    """Reviewer A's re-review: a signal that landed inside `subprocess.Popen` for `--version` left the
+    command running (27 of 150 timed runs with a hanging `--version`). Doctor now holds signals while
+    the command starts, as it does for the MCP server. Here the signal is raised from inside Popen, the
+    way it lands on a busy machine."""
+    real_popen = subprocess.Popen
+    started: list[subprocess.Popen] = []
+
+    def popen(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        started.append(child)
+        signal.raise_signal(signal.SIGTERM)  # lands before Popen has returned to its caller
+        return child
+
+    hang = fake_cli(both, "hangs", None, body="#!/bin/sh\nexec sleep 60\n")
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    with pytest.raises(doctor.Terminated), doctor.termination_raises():
+        doctor.read_version(str(hang), {})
+    monkeypatch.setattr(subprocess, "Popen", real_popen)
+    assert started and started[0].poll() is not None  # killed and reaped, not left running

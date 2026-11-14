@@ -51,7 +51,6 @@ program); that is not looked for, and what it does to the proxy's base URL was n
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +66,7 @@ from contexto.upstream import (
     TRUTHY,
     claude_settings_order,
     ignores_persisted_trust,
+    read_settings,
 )
 
 # Variable -> the provider's name as Claude Code shows it, in the order Claude Code tests them.
@@ -105,32 +105,20 @@ def _as_string(value: Any) -> str | None:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
-        try:
-            return f"{value:g}"
-        except OverflowError:  # an integer past a float's range, which JavaScript reads as Infinity
-            return "Infinity"
+        # Only the string matters, and of the numbers only 1 (1, 1.0, 1e0) prints as one of Claude Code's
+        # "on" words; any other prints as something that is not, whatever its digits (PR #258's
+        # re-review: rounding to six digits read 1.0000000001 as on).
+        return "1" if value == 1 else repr(value)
     return None
-
-
-def _json_int(text: str) -> int | float:
-    """A JSON integer. Python refuses to convert more digits than ``sys.get_int_max_str_digits()``
-    (4,300), and ``json.loads`` would then reject the whole file, hiding every variable in it;
-    JavaScript reads such a number as Infinity, so this does too."""
-    try:
-        return int(text)
-    except ValueError:
-        return float("-inf" if text.startswith("-") else "inf")
 
 
 def settings_env(path: Path) -> dict[str, Any]:
     """The ``env`` block of a settings file; empty when the file is absent, unreadable, not JSON, or has
     no such block (as ``contexto.upstream`` reads a file it cannot use: as if it were absent). A UTF-8
     byte order mark at the start is skipped, as Claude Code skips it (the module docstring): read as
-    plain UTF-8 the file was not JSON, and a variable it turned on went unreported."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"), parse_int=_json_int)
-    except (OSError, ValueError, RecursionError):
-        return {}
+    plain UTF-8 the file was not JSON, and a variable it turned on went unreported. ``read_settings``
+    also skips a file that is not a regular file: a named pipe at any settings path blocked the launch."""
+    data = read_settings(path)
     block = data.get("env") if isinstance(data, dict) else None
     return block if isinstance(block, dict) else {}
 

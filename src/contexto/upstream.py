@@ -38,9 +38,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 BASE_URL_KEY = "ANTHROPIC_BASE_URL"
@@ -265,15 +267,44 @@ def untrusted_note(what: str, kinds: tuple[str, ...], remedy: str, env: Mapping[
             f"or run claude here once and accept the trust dialog")
 
 
+def json_int(text: str) -> int | float:
+    """A JSON integer, for ``json.loads(parse_int=...)`` on a settings file. Python refuses to convert
+    more digits than ``sys.get_int_max_str_digits()`` (4,300), and ``json.loads`` then rejects the whole
+    file. JavaScript reads such a number as Infinity and Claude Code reads the file (2.1.322 with a
+    5,000-digit integer, measured in PR #258's re-review: its base URL got every request), so every
+    settings reader here reads it too."""
+    try:
+        return int(text)
+    except ValueError:
+        return float("-inf" if text.startswith("-") else "inf")
+
+
+def json_constant(name: str) -> float:
+    """For ``json.loads(parse_constant=...)``: ``NaN``, ``Infinity`` and ``-Infinity`` are not JSON. Python
+    accepts them and Claude Code 2.1.322 rejects a file that holds one (PR #258's re-review), so the
+    file is read as Claude Code reads it: not at all."""
+    raise ValueError(f"{name} is not JSON")
+
+
+def read_settings(path: Path) -> Any:
+    """A Claude Code settings file as Claude Code reads it, or None when it is absent, unreadable, or
+    not JSON. Only a regular file (or a symlink to one) is opened: a named pipe would block until
+    something writes to it, and Claude Code 2.1.322 skips one and runs (PR #258's re-review). A UTF-8
+    byte order mark is skipped and a very long integer read (``json_int``), as Claude Code does."""
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return None
+        return json.loads(path.read_text(encoding="utf-8-sig"), parse_int=json_int, parse_constant=json_constant)
+    except (OSError, ValueError, RecursionError):  # unreadable or not JSON: as if the file were absent
+        return None
+
+
 def _settings_string(path: Path, pick: Callable[[dict], object]) -> str | None:
     """A string setting from one settings file. ``utf-8-sig``: Claude Code reads a file that starts with
     a UTF-8 byte order mark like any other (measured on 2.1.322 with plain ``claude -p`` and the
     project's file, spikes/m2/providers: its base URL got every request and its ``apiKeyHelper`` ran), so reading
-    it as not JSON would send the proxy to another upstream than Claude Code's own."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError, RecursionError):  # unreadable or not JSON: as if the file were absent
-        return None
+    it as not JSON would send the proxy to another upstream than Claude Code's own (``read_settings``)."""
+    data = read_settings(path)
     value = pick(data) if isinstance(data, dict) else None
     return value.strip() if isinstance(value, str) and value.strip() else None
 

@@ -333,3 +333,39 @@ def test_a_check_that_raises_is_contained_by_the_launcher(env, upstream, tmp_pat
     assert Path(env["FAKE_RECORD"]).exists()  # claude ran
     events = [e for e in session_log(env, "b6") if e["event"].startswith("provider_bypass")]
     assert [(e["event"], e["error"]) for e in events] == [("provider_bypass_check_failed", "ZeroDivisionError")]
+
+
+# Re-review of the fixes (PR #258)
+
+
+def test_a_fifo_in_place_of_a_settings_file_is_skipped_without_being_opened(cwd, home):
+    """Reviewer A's re-review: the provider check read every settings file, so a named pipe at any of
+    their paths blocked `contexto run claude` for ever, where main launched with `--upstream` or with a
+    higher file setting the base URL. Claude Code 2.1.322 skips such a file and runs."""
+    import os
+    import time
+
+    settings(home / ".claude" / "settings.json", {BEDROCK: "1"})
+    pipe = cwd / ".claude" / "settings.json"
+    pipe.parent.mkdir()
+    os.mkfifo(pipe)
+    started = time.monotonic()
+    assert found(cwd, home, {}) == [(BEDROCK, "settings:user")]
+    assert time.monotonic() - started < 5
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_a_settings_file_with_a_non_json_number_counts_as_absent(cwd, home, literal):
+    """Reviewer A's re-review: Python accepts these, Claude Code 2.1.322 rejects the file. A "0" in such
+    a project file hid an exported 1 from the check, so a real bypass got no warning."""
+    path = cwd / ".claude" / "settings.json"
+    path.parent.mkdir()
+    path.write_text(f'{{"env": {{"{BEDROCK}": "0"}}, "n": {literal}}}')
+    assert found(cwd, home, {BEDROCK: "1"}) == [(BEDROCK, "env")]
+
+
+@pytest.mark.parametrize("value,on", [(1.0000000001, False), (1.0, True), (1e0, True), (0.99999999999, False)])
+def test_a_number_is_on_only_when_javascript_prints_it_as_1(cwd, home, value, on):
+    """Reviewer A's re-review: numbers were rounded to six digits, so 1.0000000001 read as on."""
+    settings(cwd / ".claude" / "settings.json", {BEDROCK: value})
+    assert bool(found(cwd, home, {})) is on
