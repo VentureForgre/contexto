@@ -27,7 +27,7 @@ contexto run [options] codex [codex arguments]
 | `--no-version-check` | off | Skip the check of `claude --version` or `codex --version` against the versions Contexto was tested with. |
 | `--quiet` | off | Do not print the summary when the CLI exits; warnings are still printed. Also `CONTEXTO_QUIET=1`. See [Stats](stats.md). |
 | `--no-statusline` | off | Claude Code only: do not add Contexto's status line. It is added only when no settings file Claude Code reads has a `statusLine` of its own. Also `CONTEXTO_NO_STATUSLINE=1`. See [Status line](statusline.md). |
-| `--no-in-turn-paging` | off | Do not page inside a running turn: a tool loop that outgrows the bound is sent whole, as before v0.6.0 (see [In-turn paging](in-turn-paging.md)). |
+| `--no-in-turn-paging` | off | Do not page inside a running turn: a tool loop that outgrows the bound is sent whole, as v0.5.24 sends it (see [In-turn paging](in-turn-paging.md)). |
 | `--no-project-memory` | off | Keep this session out of [project memory](project-memory.md): it carries nothing from the earlier sessions of its project (a resumed session stops sending what it carried: at once before its first rotation; after it, from its next rotation) and gives nothing to later ones. The session records it, so a resume stays off without the option. Put it before `claude` or `codex`: after `codex` it goes to Codex unchanged. |
 
 For Claude Code, the launcher:
