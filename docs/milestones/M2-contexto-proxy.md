@@ -94,50 +94,85 @@ client (started by anything)           mcp server (contexto mcp --serve, started
   a symlink; the service refuses to start when the file is not a regular file of the user with no
   group or other permission bit (`contexto serve --rotate-token` replaces it). The raw first path
   segment of the request target is compared with `hmac.compare_digest`, with no percent-decoding
-  and no path normalisation, after the Host and Origin checks; any other request gets the proxy's
-  one 403 body, after its body is read and dropped. The prefix is then removed: the path forwarded
-  upstream, every log entry and every error is the path without the token, and the token is never
-  logged, printed, put on a command line, or put in an error message. A refused request is logged
-  by reason only, at most once a second with a count of the rest. Measured on Claude Code 2.1.322
+  and no path normalisation, after `Host` is checked to name `127.0.0.1` or `localhost` and no
+  `Origin` is present; any other request gets one 403 body, after its body is read and dropped. The
+  prefix is then removed: the path forwarded upstream, every log entry and every error is the path
+  without the token, and the token is never logged, printed, put on a command line, or put in an
+  error message. A request header whose value holds the token is dropped before forwarding (logged
+  as a count). Measured on Claude Code 2.1.322
   (`docs/research/D70-serve-probes.md`): it keeps a base URL's path prefix on every request, sends
   `Host: 127.0.0.1:<port>` or `localhost:<port>`, and never `Origin`.
+- Before the token check. Everything sent before a request has passed the checks is that one 403,
+  including the answer to a request `http.server` cannot parse (no echo, no `Server` header, no
+  `100 Continue`). Every refusal and every failure before the check is logged through one limiter,
+  by reason only, at most one line a second with a count of the rest. A connection that has not
+  passed the check has 5 s in total for its request head and a refused body, after which its read
+  side is shut; at most 64 such connections are open, and one more is closed at once. A connection
+  that passed is outside both limits.
 - Routing. The id is the `X-Claude-Code-Session-Id` header (a plain id, at most 128 characters),
   else `session_id` in `metadata.user_id`. A request with no id, an id that is not a plain id, or a
   header and body that differ (`session_id_mismatch`) is forwarded unchanged through the identity
-  transform and never reaches a store. A request whose `metadata.user_id` names a valid
-  `parent_session_id` (an agent-team teammate in its own process, D50) is routed to the parent's
-  session, and the pair is remembered so the teammate's `count_tokens` (header only) follows. At
+  transform and never reaches a store; for a `/v1/messages` that is logged `unrouted` with its
+  reason (`no_session_id`, `session_id_mismatch`, `invalid_session_id`, `session_cap`,
+  `session_open_failed`) and warned about on stderr at most once per reason per minute, with a
+  count. A `/v1/messages` whose `metadata.user_id` names a valid `parent_session_id` P (an
+  agent-team teammate in its own process, D50) is routed to P's session, and a store it opens or
+  creates records P, never the teammate's id. The teammate -> P pair is kept in memory only and
+  used only for the teammate's `count_tokens` (header only); a `/v1/messages` of the teammate's id
+  that names no parent goes to its own session and ends the pair. At
   the first request of an id the service reuses the Contexto session that last served that Claude
   Code session (its `cli_sessions` record, D55; sessions made by `contexto run claude` included),
   else creates one named `uuid4().hex`: a client-supplied string never names a directory. Only a
   `POST /v1/messages` creates a session; a `count_tokens` for an id no session served is forwarded
-  unchanged. The id is recorded in the session's metadata as the launcher records it. A session
-  the service creates records no working directory.
+  unchanged. The id a request was routed by is recorded in the session's metadata (`cli_sessions`),
+  and an in-memory index of those records is refreshed by one `stat` per store, re-reading only a
+  store whose `meta.json` changed. A store that cannot be opened leaves no new directory, and the
+  failure is remembered for 5 s per id. A session the service creates records no working directory.
 - Sessions. Each open session has its own engine, transform lock and session log; the rewrite
   engine's rules apply to it unchanged, and degraded mode, the stream hold and fail-open are the launcher path's
   code. At most `--max-sessions` (64) are open; one idle for `--idle-minutes` (60) is closed, and
   the least recently used is closed to make room. Closing flushes the recorded ids, runs the
   missing-tools report, logs, and releases the store; the next request reopens the session and the
   engine resumes from its epoch record (rule 16). A session with a request in flight is never
-  closed; when every open session has one, a request of another id is forwarded unchanged and
-  logged (`session_cap`). The engine options (`--bound`, `--allow-large-bound`,
+  closed; when every open session has one, a request of another id waits up to 0.3 s for one to
+  finish and is then forwarded unchanged and logged (`session_cap`). The engine options (`--bound`, `--allow-large-bound`,
   `--window-fraction`, `--headroom-floor`, `--observe-thinking`) are validated as for `contexto
   run` and apply to every session.
 - Local endpoints, under the token prefix, JSON, bodies at most 64 KiB: `GET /contexto/health`
-  gives `{"ok": true, "version", "port", "sessions"}`; `POST /contexto/resolve` with
-  `{"tool_use_id"}` gives `{"session": <Contexto session id>}`, 404 `{"error":
-  "unknown_tool_use"}`, or 400. The service keeps the newest 8,192 ids of client tool calls, taken
-  from each response in the usage callback, which the stream hold (PR #74) runs before it releases
-  a tool call: an id resolves before the client receives the event that completes the call.
-  Claude Code 2.1.322 gives an MCP server the `tool_use` id of each call
-  (`_meta["claudecode/toolUseId"]`) and nothing else that names the session.
-- Files under `$CONTEXTO_HOME`, 0600: `serve.token`; `serve.json` (`{"port", "pid"}`, written once
-  listening, removed on a clean shutdown); `serve.log` (content-free JSON lines, renamed once to
-  `serve.log.1` at 5 MB).
-- Guards. A taken port is one line and exit 1, naming a `contexto serve` that already runs there.
-  An upstream that is a loopback address on the service's own port, or that carries the service's
-  token, is refused with a pointer to `--upstream`; the service never falls back to another
-  upstream. The service warns at start when its own environment sets a cloud-provider switch
+  gives `{"ok": true, "version", "port", "sessions", "resolve": {"found", "unknown"}}`; `POST
+  /contexto/resolve` with `{"tool_use_id"}` gives `{"session": <Contexto session id>}`, 404
+  `{"error": "unknown_tool_use"}`, or 400. The shapes, file names and paths are defined once, in
+  `contexto.servecontract`. The service keeps the newest 8,192 ids of client tool calls. The
+  proxy's `on_tool_calls` hook hands over each id as soon as the proxy has read it off the
+  response and before it writes the bytes that carry it, whether the stream is held, relayed with
+  a `Content-Length` (`hold_skipped`), or a JSON body, with or without `usage`: an id resolves
+  before the client can act on the call whenever the response is not content-encoded. For a
+  response upstream encoded although the proxy asked for identity, the id is read from a decoded
+  side copy that can trail the client's decoder; the MCP server's retry (five tries within 2 s
+  after a 404) covers that. An id two sessions registered is ambiguous and resolves as unknown
+  (`tool_use_ambiguous`, a count). Claude Code 2.1.322 gives an MCP server the `tool_use` id of
+  each call (`_meta["claudecode/toolUseId"]`) and nothing else that names the session.
+- MCP server. `contexto mcp --serve` (exactly one of `--session S` and `--serve`) has no session:
+  it lists the five tools with no service running, and for each `tools/call` resolves the call's
+  tool-use id through the service, then opens that existing session (never one it creates; the
+  8 most recently used stay open) and runs the tool code of `--session` mode against it. Any step
+  that fails is a tool error and nothing is read or written; there is no fallback session. It
+  writes the store's `tools/list` record at a store's first resolved call.
+- Files under `$CONTEXTO_HOME`, 0600: `serve.token`; `serve.lock` (empty; the service holds an
+  exclusive `flock` on it from before it binds until it exits, and "running" means that lock is
+  held); `serve.json` (`{"port", "pid"}`; a record left by a killed service is removed once the
+  lock is taken, the new one written once listening and removed on a clean shutdown; read only as
+  the user's own 0600 regular file and only while the lock is held); `serve.log` (content-free JSON
+  lines, renamed once to `serve.log.1` at 5 MB).
+- Guards. A taken port is one line and exit 1. A second service on the same home is refused
+  whatever its port, naming the one that runs. `--status`, `--print-settings`, `--rotate-token` and
+  the MCP server decide "running" by the lock and send the token to no port when it is free;
+  `--status` creates nothing. An upstream that is a loopback address (any spelling: `127.1`,
+  `2130706433`, `0x7f.1`, `[::1]`, `localhost`) on the service's own port, or that carries the
+  service's token, is refused with a pointer to `--upstream`; the service never falls back to
+  another upstream. `contexto run claude` and `contexto proxy` refuse an upstream that is this
+  home's service (a loopback URL whose first path segment is the token, compared in constant time)
+  with a usage error pointing to `--upstream`. The service warns at start when its own environment sets a cloud-provider switch
   (`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_MANTLE`, `_ANTHROPIC_AWS`): Claude Code then
   sends nothing to `ANTHROPIC_BASE_URL` (measured on 2.1.322).
 - Out of scope: listening off loopback, more than one user, and any request path but Claude Code's

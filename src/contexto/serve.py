@@ -17,8 +17,9 @@ Token. ``serve`` requires a token on every request: 32 random bytes (``secrets.t
 ``$CONTEXTO_HOME/serve.token``, mode 0600, created on first use. It is the first path segment of the
 base URL, ``http://127.0.0.1:<port>/<token>``, so every client that takes a base URL can carry it.
 The raw first segment of the request target is compared in constant time (``hmac.compare_digest``),
-with no percent-decoding and no path normalisation; a request without it gets the proxy's one 403
-(``REFUSED_MESSAGE``), after the Host and Origin checks of D53. The prefix is then removed, so the
+with no percent-decoding and no path normalisation; a request without it gets one 403
+(``REFUSED_MESSAGE``). Before the token, ``Host`` must name ``127.0.0.1`` or ``localhost`` and no
+``Origin`` may be present, or the request gets the same 403. The prefix is then removed, so the
 path forwarded upstream, every log entry and every error is the path without the token; a request
 header whose value holds the token is dropped before forwarding. The token protects the service's
 port: without it a request is neither forwarded upstream nor routed to a store, and a local endpoint

@@ -32,18 +32,34 @@ In scope:
   first path segment of the base URL a client is given (`http://127.0.0.1:<port>/<token>`). The
   token protects the port: without it a request is not forwarded upstream, does not reach a session
   store, and is not answered by the service's own endpoints (`/contexto/health`,
-  `/contexto/resolve`). The raw first path segment is compared in constant time, after the same
-  `Host` and `Origin` checks as the proxy; every refusal gets the same 403. The service removes the
-  token before it forwards or logs a request, and refuses to start if the token file is a symlink,
-  is not a regular file, or has a group or other permission bit set. `contexto serve
-  --rotate-token` replaces the token. `serve.log` holds event names, reasons, counts, request paths
-  without the token, and status codes, never header values, bodies, the token, or the upstream
-  URL; a refused request is logged by its reason only, at most once a second. A client-supplied
-  session id selects a store only through the ids recorded in the stores and never names a
-  directory. Reports of the service answering without the token, the token reaching a log, stderr,
-  an error message or the upstream, a request reaching another session's store, or the service
-  listening off loopback are in scope. The token is as private as the file or environment it is
-  copied into: a settings file that holds the base URL holds the token.
+  `/contexto/resolve`). Before the token, `Host` must name `127.0.0.1` or `localhost` and no
+  `Origin` may be present; then the raw first path segment is compared in constant time.
+  Everything the service sends before a request has passed these checks is the same 403, byte for
+  byte, including the answer to a request it cannot parse: no echo of what was sent, no server or
+  library version, and no `100 Continue`. Every refusal and every failure before the check is
+  logged by its reason only, through one limit of one line a second with a count of the rest. A
+  connection that has not passed the check has 5 seconds in total for its request head and for a
+  refused body, and at most 64 such connections are open; one more is closed at once. The service
+  removes the token before it forwards or logs a request, drops a request header whose value holds
+  the token, and refuses to start if the token file is a symlink, is not a regular file, or has a
+  group or other permission bit set. `contexto serve --rotate-token` replaces the token. One
+  service runs per `$CONTEXTO_HOME`: it holds an exclusive lock on `serve.lock` while it runs, and
+  the commands that talk to it send the token only while that lock is held, to the port of a
+  `serve.json` that is the user's own 0600 file. `serve.log` holds event names, reasons, counts,
+  request paths without the token, and status codes, never header values, bodies, tool-use ids,
+  the token, or the upstream URL. A client-supplied session id selects a store only through the ids
+  recorded in the stores and never names a directory. Claude Code session ids are routing keys, not
+  a boundary between holders of the token: a client with the token reaches any conversation's store
+  by sending that conversation's session id or naming it as a parent. A tool-use id that two
+  sessions registered resolves as unknown. Reports of the service answering without the token, the
+  token reaching a log, stderr, an error message or the upstream, a request without the token
+  reaching a store, a tool call resolved to a session that did not issue it, or the service
+  listening off loopback are in scope. The token is as private as the files it is copied into: a
+  settings file that holds the base URL holds the token, so keep it at mode 0600, and if a
+  conversation reads such a file, the token reaches the model provider inside that conversation;
+  rotate it then. Residual: another local user, without the token, can hold connections open and
+  delay new connections for up to 5 seconds; they cannot read, spend or write through the
+  service.
 - **The session store** under `$CONTEXTO_HOME` (default `~/.contexto`). Every directory Contexto
   creates there is mode 0700 and every file 0600, whatever the umask; an existing
   `$CONTEXTO_HOME` keeps its own mode, and `sessions/` is narrowed to 0700. The temporary
@@ -57,11 +73,20 @@ In scope:
   your own `CODEX_HOME` with `-c` overrides, and Contexto writes nothing there. Any path that
   creates store data with wider modes, follows a link out of the store, or lets a page id from
   outside read a file that is not a page is in scope.
-- **The MCP server** (`contexto mcp`), which the CLI starts over stdin and stdout; it opens no
-  network socket. It reads the session's store and serves `contexto_search`, `contexto_recall`,
-  and the ledger tools (`contexto_pin`, `contexto_close`, `contexto_state`). Reports of it reading
-  or writing outside its session, or crashing on crafted input in a way that affects the store,
-  are in scope.
+- **The MCP server** (`contexto mcp`), which the CLI starts over stdin and stdout. It listens on no
+  socket. With `--session` it opens none and serves one session's store. With `--serve` it serves the
+  sessions of a running `contexto serve`: for each tool call it checks that a service holds the
+  home's `serve.lock`, reads `serve.json` and `serve.token` in `$CONTEXTO_HOME` (each the user's own
+  0600 regular file, never through a symlink), and sends one request to the service on `127.0.0.1`
+  that carries the call's tool-use id and no conversation text; the token goes in that request's
+  path and is never written to stderr, a tool result or a log. With no service holding the lock it
+  sends nothing. A call whose session the service does not name, or names but that is not an
+  existing real session directory, is refused: the server never falls back to another session and
+  never creates one. A token file that is not one token is not sent. Both modes serve
+  `contexto_search`, `contexto_recall`, and the ledger tools (`contexto_pin`, `contexto_close`,
+  `contexto_state`). Reports of the server reading or writing outside the session of the call,
+  connecting anywhere but the service on `127.0.0.1`, disclosing the token, or crashing on crafted
+  input in a way that affects the store, are in scope.
 - The launchers (`contexto run claude`, `contexto run codex`), including what they pass to the CLI
   and which Python runs the MCP server.
 
@@ -103,9 +128,11 @@ These hold no conversation text:
 `$CONTEXTO_HOME` itself holds `affinity.salt`, a random value that the `X-Session-Affinity` header
 is hashed with, so the header does not reveal the session id, and `choose.lock`, an empty lock file
 that lets one launch at a time pick a session automatically. `contexto serve` adds `serve.token`
-(the token), `serve.json` (the running service's port and process id, removed on a clean shutdown)
-and `serve.log` with one rotated copy, `serve.log.1` (at most 5 MB each); all are mode 0600 and
-none holds conversation text.
+(the token), `serve.lock` (empty; held by the running service), `serve.json` (the running service's
+port and process id, removed on a clean shutdown) and `serve.log` with one rotated copy,
+`serve.log.1` (at most 5 MB each); all are mode 0600 and none holds conversation text. Every
+conversation a `serve` client starts adds a session directory, and the service deletes none:
+`contexto sessions prune` does.
 
 Treat `$CONTEXTO_HOME` like your shell history or the CLI's own transcripts. File modes protect it
 from other users on the machine, not from processes running as you, backups, or disk images.

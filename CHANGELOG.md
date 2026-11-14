@@ -11,7 +11,16 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
-Nothing yet.
+- `contexto serve` runs the engine as a standing service on `127.0.0.1:7837` for clients Contexto
+  does not launch (the IDE extensions, the desktop app, the Agent SDK, `claude -p` in CI): each
+  Claude Code session gets its own store. It requires a token, the first path segment of the base
+  URL `--print-settings` prints. See [docs/serve.md](docs/serve.md).
+- `contexto mcp --serve` gives those clients Contexto's tools: one MCP server for every
+  conversation, which asks the service which session each tool call belongs to.
+  `--print-mcp-config` prints its config.
+- `contexto run claude` and `contexto proxy` refuse an upstream that is this home's `contexto
+  serve` (as it is once the service's URL is in your Claude Code settings) and say to pass
+  `--upstream URL`.
 
 ## 0.5.24 (2026-11-06)
 

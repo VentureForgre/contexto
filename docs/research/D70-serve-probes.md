@@ -251,3 +251,41 @@ the stub saw.
   so I cannot say whether either is a documented, stable interface. Strings in the binary also name
   `_meta` keys `claudecode/agentId` and `claudecode/agentType`; they never appeared in a captured call.
 - macOS only, one Claude Code version.
+
+## D70: `contexto mcp --serve` and `contexto serve` with the real client
+
+Claude Code 2.1.322, macOS arm64, API-key mode against stub upstreams on 127.0.0.1, zero spend
+(temporary `HOME` and `CLAUDE_CONFIG_DIR`, a stub key, `DISABLE_TELEMETRY=1`,
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, outbound network denied except localhost).
+
+### 1. The MCP server alone (`tests/test_mcp_serve_real_client.py`, 2026-11-13)
+- `claude -p --bare --strict-mcp-config` with `contexto mcp --serve` as its only server lists the five
+  tools with no service running and no Contexto home at all.
+- With a fake of the resolve contract that knows one tool-use id and a stub upstream that answers with a
+  `contexto_pin` call carrying it: the fake service was asked for exactly that id, once; the pin landed in
+  the session it named and in no other; the model request that followed carried the call's
+  `structuredContent` (`{"record_id": ...}`) as the tool result.
+- The import cost of `--session` mode is unchanged in kind: `contexto.mcp` imports `contexto.serveclient`,
+  which imports `http.client` only when it sends a request.
+
+### 2. End to end through `contexto serve` (`tests/test_serve_end_to_end.py`, 2026-11-14)
+- Setup: `contexto serve --port 0 --upstream <fake>` as a child process on a temporary `CONTEXTO_HOME`;
+  `claude -p --settings <--print-settings> --mcp-config <--print-mcp-config> --strict-mcp-config`, not
+  `--bare`. The fake upstream answers a conversation whose prompt says `PIN:<word>` as a model would: a
+  `ToolSearch` call with `select:mcp__contexto__contexto_pin` while the tool is deferred, then the
+  `contexto_pin` call, then text once the pin's result is back.
+- Without `--bare`, tool search is on: the first request of each turn lists `ToolSearch` and a
+  `DeferredToolPlaceholder` in `tools` and names the five Contexto tools in system text; after the
+  `ToolSearch` result, `contexto_pin` is in `tools`. Each request ends with a role `system` message, so
+  the tool result is in the last user message, not the last message.
+- Two conversations (`--session-id`, one after the other), then one stream-json process (a turn,
+  `/clear`, a turn): 12 Messages requests at the upstream and no other request; all 12 named the five
+  tools (4 with `contexto_pin` deferred); 4 `ToolSearch` calls; 4 pins issued and 4 tool results without
+  error; 4 stores. Each pin was in its own conversation's store and no other.
+- `/clear` in the stream-json process: a new `system init` on stdout, a new session id in the header, one
+  `contexto mcp --serve` process for the whole run (a process listing every 0.1 s), and the pin issued
+  after `/clear` in the new conversation's store.
+- The service's health counted 4 resolve answers found and 0 unknown: every call resolved at the first
+  try, so the MCP server's retry was not needed. Three runs, the same numbers.
+- With `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, 2.1.322 sends no `HEAD /api/hello`.
+- Each `claude -p` run took about a second against the local stub.
