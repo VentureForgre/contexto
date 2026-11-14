@@ -82,6 +82,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from contexto import __version__
+from contexto.canonical import has_lone_surrogate
 from contexto.cliversions import CLI_NAMES, REPORT_URL, TESTED_VERSIONS, installed_version, is_tested, tested_list
 from contexto.cliversions import _kill_group as kill_group
 from contexto.cliversions import start_failure as cannot_start
@@ -551,7 +552,7 @@ def check_claude_upstream(ctx: Context) -> Check:
         details["ignored"] = list(upstream.ignored)
     try:
         check_upstream(upstream)
-    except LaunchError:  # its message quotes the URL, which is not repeated here
+    except LaunchError:  # its message names the source and the problem, never the URL
         return Check("claude-upstream", FAIL, f"Claude Code upstream from {place} is not a usable http(s) base URL: "
                      "`contexto run claude` refuses to start with it",
                      f"Fix {BASE_URL_KEY} there, or pass --upstream to contexto run", details)
@@ -602,8 +603,8 @@ def check_codex_upstream(ctx: Context) -> Check:
                      untrusted or remedy or f"Pass --codex-upstream to contexto run, or set {UPSTREAM_ENV}", details)
     details.update(origin=url_origin(target), source=source)
     place = codex_upstream_place(source, claude.source, ctx.env)
-    if details["origin"] is None:
-        return Check("codex-upstream", FAIL, f"Codex upstream from {place} is not an http(s) URL: "
+    if details["origin"] is None or has_lone_surrogate(target):  # `contexto run codex` refuses both
+        return Check("codex-upstream", FAIL, f"Codex upstream from {place} is not a usable http(s) URL: "
                      "`contexto run codex` refuses to start with it",
                      f"Fix it there, or pass --codex-upstream to contexto run (or set {UPSTREAM_ENV})", details)
     summary = f"Codex upstream: {details['origin']} (from {place})"

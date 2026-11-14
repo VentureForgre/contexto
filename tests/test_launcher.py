@@ -1376,3 +1376,19 @@ def test_the_watchdog_forgets_the_child_before_the_handlers_are_restored():
     before = signal.getsignal(signal.SIGTERM)
     assert launcher.run_child([sys.executable, "-c", "pass"], watchdog=Watch()) == 0
     assert seen and seen[0] is not before and signal.getsignal(signal.SIGTERM) is before
+
+
+@pytest.mark.parametrize("url", ["https://user:S3CRET-PASS@127.0.0.1:9/path-SECRET-TOKEN/a\ud800",
+                                 "ftp://user:S3CRET-PASS@example.com/path-SECRET-TOKEN",
+                                 "http://user:S3CRET-PASS@[::1/path-SECRET-TOKEN"])
+def test_a_refused_upstream_is_never_echoed(url):
+    """Review B of #294: the refusal names where the URL came from and what is wrong with it, never the
+    URL, which can hold a password or a secret path segment and lands in terminals and CI logs."""
+    from contexto.launcher import LaunchError, check_upstream
+    from contexto.upstream import Upstream
+
+    with pytest.raises(LaunchError) as raised:
+        check_upstream(Upstream(url, "settings:user"))
+    text = str(raised.value)
+    assert text.startswith("invalid upstream (from settings:user): ")
+    assert "S3CRET" not in text and "SECRET-TOKEN" not in text and "user:" not in text

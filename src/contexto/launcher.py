@@ -301,7 +301,8 @@ def check_misplaced_options(cli: str, cli_args: list[str]) -> None:
 def check_upstream(upstream: Upstream) -> None:
     """A malformed upstream URL is a usage error naming where it came from, before any session is opened
     (``http://[::1`` raised ValueError from ``urlsplit`` with a traceback and left an empty session).
-    A URL with a lone surrogate, which a settings file can hold, cannot go into a request either."""
+    A URL with a lone surrogate, which a settings file can hold, cannot go into a request either. The
+    message names the source and the problem, never the URL."""
     try:
         parts = urlsplit(upstream.url)
         _ = parts.port  # parsed on access; raises for a bad one
@@ -312,7 +313,8 @@ def check_upstream(upstream: Upstream) -> None:
     except ValueError as exc:
         ok, problem = False, str(exc)
     if not ok:
-        raise LaunchError(f"invalid upstream {upstream.url!r} (from {upstream.source}): {problem}", EXIT_USAGE)
+        # Never the URL: it can hold a password or a secret path segment, and this lands in logs.
+        raise LaunchError(f"invalid upstream (from {upstream.source}): {problem}", EXIT_USAGE)
 
 
 def check_not_service(upstream: Upstream, home: Path, command: str) -> None:

@@ -430,6 +430,9 @@ def test_a_settings_upstream_with_a_lone_surrogate_fails_without_a_traceback(bot
     line = line_of(out, "Claude Code upstream")
     assert code == 1 and line.startswith("[FAIL]") and "is not a usable http(s) base URL" in line
     assert "~/.claude/settings.json" in line
+    # Review B of #294: Codex derives its upstream from it, and `contexto run codex` refuses it too.
+    codex = line_of(out, "Codex upstream")
+    assert codex.startswith("[FAIL]") and "is not a usable http(s) URL" in codex
 
 
 def test_codex_has_no_upstream_when_claude_code_s_is_anthropic(both, capsys, fast_mcp):
