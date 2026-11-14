@@ -71,20 +71,21 @@ def test_every_request_of_200_turns_stays_under_the_bound(short_run):
 
 
 def test_the_driver_keeps_its_connections_open(short_run):
-    """One connection to the proxy for the session, one each for the first-request and the 104-byte sends,
-    and one per client of the burst. A connection per request left about 850 of this machine's local ports in TIME_WAIT
+    """One connection to the proxy for the session, one each for the first-request sends and for the 104-byte
+    sends with the proxy as shipped and with TCP_NODELAY on its sockets, and one per client of the burst. A connection per request left about 850 of this machine's local ports in TIME_WAIT
     per run, and several runs at once failed with EADDRNOTAVAIL (README.md, "Connections")."""
-    assert short_run["driver_connections"] == short.CLIENTS + 3, short_run["connections"]
+    assert short_run["driver_connections"] == short.CLIENTS + 4, short_run["connections"]
     # The proxy opens a new upstream connection per request (contexto.proxy, by design): every request
     # it forwarded, and the direct sends.
     assert short_run["upstream_connections"] == short_run["requests"] + short.CLIENTS * short.PER_CLIENT \
-        + 4 * short.SMALL_SENDS, short_run["connections"]
+        + 5 * short.SMALL_SENDS, short_run["connections"]
 
 
 def test_what_the_proxy_adds_to_a_request_with_no_history_is_measured(short_run):
     """The session's first request and a 104-byte one, each through the proxy and straight to the fake
     upstream: the audit of 2026-11-12 compared its "about +2 ms" with these (README.md)."""
-    for key in ("first_request_over_direct_ms", "tiny_request_over_direct_ms"):
+    for key in ("first_request_over_direct_ms", "tiny_request_over_direct_ms", "tiny_request_headers_over_direct_ms",
+                "tiny_request_nodelay_over_direct_ms"):
         assert short_run[key] is not None, short.report(short_run)
     assert short_run["tiny_request_bytes"] == len(short.TINY_BODY) < 200
 

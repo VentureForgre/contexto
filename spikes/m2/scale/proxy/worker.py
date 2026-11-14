@@ -314,6 +314,10 @@ def serve(args: argparse.Namespace) -> int:
             if profiler is not None:
                 profiler.dump_stats(cmd["path"])
             reply({"ok": True})
+        elif name == "nagle":  # an experiment of the short run: the proxy's sockets as shipped, or with TCP_NODELAY
+            # ``socketserver.StreamRequestHandler.setup`` reads this for each connection it accepts from now on.
+            proxy_mod._Handler.disable_nagle_algorithm = not cmd["on"]
+            reply({"ok": True, "disable_nagle_algorithm": proxy_mod._Handler.disable_nagle_algorithm})
         elif name == "gc":  # leak probe: collect, then report live objects and current RSS (ps)
             collected = gc.collect()
             reply({"collected": collected, "objects": len(gc.get_objects()), "rss_mb": ps_rss_mb(os.getpid()),

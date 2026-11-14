@@ -15,6 +15,7 @@ import inspect
 import io
 import json
 import re
+import socketserver
 import sys
 from pathlib import Path
 
@@ -178,6 +179,19 @@ def test_the_launcher_and_proxy_take_what_the_harness_passes():
         "rewrite.EpochState lost a field worker.fast_forward writes to ff_*.csv"
     assert set(fidelity.DECISION_FIELDS) <= set(rewrite.RECORD_INT), \
         "the epoch record lost a field fidelity.DECISION_FIELDS compares; update fidelity.py"
+
+
+def test_the_nagle_experiment_reaches_the_proxys_sockets():
+    """``worker.py``'s ``nagle`` command sets ``_Handler.disable_nagle_algorithm``, which only
+    ``socketserver.StreamRequestHandler.setup`` reads. A handler that sets up its sockets itself would
+    make the short run's ``tiny_request_nodelay_over_direct_ms`` measure the package as shipped."""
+    assert issubclass(proxy_mod._Handler, socketserver.StreamRequestHandler), \
+        "contexto.proxy._Handler is no longer a StreamRequestHandler; update worker.py's nagle command"
+    owner = next(c for c in proxy_mod._Handler.__mro__ if "setup" in vars(c))
+    assert owner is socketserver.StreamRequestHandler, \
+        f"{owner.__qualname__} overrides setup; check worker.py's nagle command still reaches the sockets"
+    assert "disable_nagle_algorithm" not in vars(proxy_mod._Handler), \
+        "contexto.proxy._Handler now sets disable_nagle_algorithm; the short run's nagle experiment may be moot"
 
 
 def test_the_timed_engine_is_the_engine_to_the_proxy_and_the_launcher(tmp_path):

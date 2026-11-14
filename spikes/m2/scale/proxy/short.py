@@ -16,7 +16,9 @@ What it measures, and what ``tests/test_scale_proxy_short.py`` holds to ``BUDGET
   Reported over every request of the session (median and p95), and for the session's first request alone,
   sent ``SMALL_SENDS`` times to a new proxy and as often straight to the fake upstream: the difference of
   those two medians is what the proxy adds to a request with no history. The same for ``TINY_BODY``, a
-  104-byte request with no tools.
+  104-byte request with no tools, together with how much of it comes before the response's headers, and
+  the same sends once more with ``TCP_NODELAY`` on the proxy's sockets (an experiment in the worker, not
+  the package's behaviour; README.md, "Connections"). Not budgeted.
 - **Growth with history**: the slope of added time against the size of the history the CLI sent, in
   milliseconds per million tokens, over the tool-loop requests (Theil-Sen: the median of the slopes between
   every pair of requests, so a few slow requests do not move it).
@@ -142,10 +144,12 @@ def burst(worker: run.Worker, upstream: FakeUpstream, body: bytes, clients: int,
             "connections": sum(connections)}
 
 
-def added_ms(port: int, upstream: FakeUpstream, body: bytes, name: str, sends: int) -> tuple[list[float], int]:
+def added_ms(port: int, upstream: FakeUpstream, body: bytes, name: str, sends: int,
+             headers_ms: list[float] | None = None) -> tuple[list[float], int]:
     """``body`` sent ``sends`` times, one after another, on one kept-open connection to ``port``: each
     send's time less the fake upstream's own, in milliseconds, and the connections opened (the fake
-    upstream closes each, so straight to it that is one per send, each opened before the clock starts)."""
+    upstream closes each, so straight to it that is one per send, each opened before the clock starts).
+    ``headers_ms``, when given, gets each send's time to the response's headers, in milliseconds."""
     out = []
     client = run.Client(port, SEND_TIMEOUT_S)
     try:
@@ -155,9 +159,16 @@ def added_ms(port: int, upstream: FakeUpstream, body: bytes, name: str, sends: i
             seen = upstream.take(request_id) or {}
             if result["status"] == 200 and "t_done" in seen:
                 out.append((result["e2e_s"] - (seen["t_done"] - seen["t_recv"])) * 1e3)
+                if headers_ms is not None:
+                    headers_ms.append(result["ttfb_s"] * 1e3)
     finally:
         client.close()
     return out, client.connections
+
+
+def median_over(a: list[float], b: list[float]) -> float | None:
+    """The median of ``a`` less the median of ``b``, in the report's precision; None when either is empty."""
+    return round(statistics.median(a) - statistics.median(b), 3) if a and b else None
 
 
 def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int = TURN_TOKENS, startups: int = STARTUPS, clients: int = CLIENTS,
@@ -168,6 +179,7 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int 
     filled as the run goes (its ``stage`` and what has been measured so far), so a run that raises can
     still report its numbers (``failure_report``)."""
     progress = {} if progress is None else progress
+    run.PATIENCE.reset()  # the wait for a free local port is a total for the run
     args = short_args(reminders, turn_tokens)
     made_home = home is None
     home = Path(tempfile.mkdtemp(prefix="contexto-scale-short-")) if home is None else home
@@ -188,9 +200,13 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int 
             small: list[float] = []
             direct: list[float] = []
             concurrent: dict[str, Any] = {}
-            connections = {"small": 0, "direct": 0, "tiny": 0, "tiny_direct": 0, "burst": 0, "session": 0}
+            connections = {"small": 0, "direct": 0, "tiny": 0, "tiny_direct": 0, "tiny_nodelay": 0, "burst": 0,
+                           "session": 0}
             tiny: list[float] = []
             tiny_direct: list[float] = []
+            tiny_nodelay: list[float] = []
+            tiny_headers: list[float] = []
+            tiny_direct_headers: list[float] = []
             try:
                 for i in range(startups):
                     if probe is not None:
@@ -203,9 +219,15 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int 
                     small, connections["small"] = added_ms(probe.port, upstream, first_body, "small", SMALL_SENDS)
                     direct, connections["direct"] = added_ms(upstream.upstream_port, upstream, first_body, "direct",
                                                              SMALL_SENDS)
-                    tiny, connections["tiny"] = added_ms(probe.port, upstream, TINY_BODY, "tiny", SMALL_SENDS)
+                    tiny, connections["tiny"] = added_ms(probe.port, upstream, TINY_BODY, "tiny", SMALL_SENDS,
+                                                         tiny_headers)
                     tiny_direct, connections["tiny_direct"] = added_ms(upstream.upstream_port, upstream, TINY_BODY,
-                                                                       "tinydirect", SMALL_SENDS)
+                                                                       "tinydirect", SMALL_SENDS, tiny_direct_headers)
+                    # The same sends with TCP_NODELAY on the proxy's sockets, then back to the package as shipped.
+                    probe.call({"cmd": "nagle", "on": False})
+                    tiny_nodelay, connections["tiny_nodelay"] = added_ms(probe.port, upstream, TINY_BODY,
+                                                                         "tinynodelay", SMALL_SENDS)
+                    probe.call({"cmd": "nagle", "on": True})
                     progress.update(first_request_added_ms=round(statistics.median(small), 3) if small else None,
                                     first_request_direct_ms=round(statistics.median(direct), 3) if direct else None)
                     if clients:
@@ -284,8 +306,9 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int 
         if small and direct else None,
         "tiny_request_bytes": len(TINY_BODY),
         "tiny_request_added_ms": round(statistics.median(tiny), 3) if tiny else None,
-        "tiny_request_over_direct_ms": round(statistics.median(tiny) - statistics.median(tiny_direct), 3)
-        if tiny and tiny_direct else None,
+        "tiny_request_over_direct_ms": median_over(tiny, tiny_direct),
+        "tiny_request_headers_over_direct_ms": median_over(tiny_headers, tiny_direct_headers),
+        "tiny_request_nodelay_over_direct_ms": median_over(tiny_nodelay, tiny_direct),
         "startup_ms": round(min(startup_s) * 1e3, 1) if startup_s else None,
         "startup_all_ms": [round(s * 1e3, 1) for s in startup_s],
         "peak_rss_mb": round(peak, 1),
@@ -295,7 +318,7 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int 
         if turn_span > 0 else None,
         "connections": connections,
         "driver_connections": connections["session"] + connections["small"] + connections["tiny"]
-        + connections["burst"],
+        + connections["tiny_nodelay"] + connections["burst"],
         "upstream_connections": connections["upstream_accepted"],
         "samples": samples, "throughput": concurrent, "throughput_rps": concurrent.get("rps"),
         "rows": rows,
@@ -347,7 +370,9 @@ def report(result: dict[str, Any]) -> str:
                  f"request ({result['first_request_bytes']:,} bytes) {result['first_request_added_ms']} ms through "
                  f"the proxy, {result['first_request_direct_ms']} ms straight to the fake upstream, "
                  f"{result['first_request_over_direct_ms']} ms more; a {result['tiny_request_bytes']}-byte request "
-                 f"{result['tiny_request_over_direct_ms']} ms more")
+                 f"{result['tiny_request_over_direct_ms']} ms more, {result.get('tiny_request_headers_over_direct_ms')} "
+                 f"ms of it before the response's headers, and {result.get('tiny_request_nodelay_over_direct_ms')} ms "
+                 f"more with TCP_NODELAY on the proxy's sockets (an experiment, not the package)")
     lines.append(f"  largest added time {result['added_max_ms']} ms; startups {result['startup_all_ms']} ms; "
                  f"burst {json.dumps(result['throughput'])}")
     lines.append(f"  connections opened: {json.dumps(result['connections'])}")
@@ -356,7 +381,8 @@ def report(result: dict[str, Any]) -> str:
 
 
 SPREAD_KEYS = ("added_median_ms", "added_p95_ms", "added_intercept_ms", "first_request_added_ms",
-               "first_request_over_direct_ms", "tiny_request_over_direct_ms", "added_ms_per_mtok", "cpu_median_ms", "cpu_p95_ms", "cpu_intercept_ms",
+               "first_request_over_direct_ms", "tiny_request_over_direct_ms", "tiny_request_headers_over_direct_ms",
+               "tiny_request_nodelay_over_direct_ms", "added_ms_per_mtok", "cpu_median_ms", "cpu_p95_ms", "cpu_intercept_ms",
                "cpu_ms_per_mtok", "startup_ms", "peak_rss_mb", "rss_mb_per_body_mb",
                "objects_per_turn", "throughput_rps", "max_upstream_tokens", "seconds")
 
