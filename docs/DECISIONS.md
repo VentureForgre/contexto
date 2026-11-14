@@ -10,7 +10,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
   to a finished project and asked that STATUS show decisions taken, why, and decisions still open.
   The owner's one limit: nothing is published outside this repository (no PyPI, npm, Homebrew,
   public repos, or public posts). (Superseded in part by D42: the repository itself goes public;
-  the rest of the limit stands.) Intake added two limits of its own: user-level Claude and Codex
+  and by D67: releases go to PyPI as `contexto-proxy`. No npm, Homebrew tap or public post.) Intake added two limits of its own: user-level Claude and Codex
   configuration on the owner's machine is not changed, and heavy spend on the team's Codex seats
   waits for the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
   including the M0 brief's Q5 gate (see D12).
@@ -1006,12 +1006,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
   intake design, 2026-10-15. Versions come from tags, so CI never commits to `main` (which the
   ruleset would reject); artifacts attach to GitHub Releases on this private repo only. No package
   registry publishing (D0). (The private-only wording is superseded by D42: releases stay on this
-  repository's GitHub Releases, which become public with it.)
+  repository's GitHub Releases, which become public with it. The cadence and the "no registry"
+  part are superseded by D67: releases are cut by hand, and can go to PyPI.)
 - **D15. M1 (ledger, checkpoints, recovery) paused when M0 started.** An operator message relaying
   the owner's setup boundary, 2026-10-15. The owner had not chosen M1; an earlier intake occupant drafted it. Its PRs #2, #3,
   #4 stay open and untouched until decision O1.
 - **D42. The repository goes public; GitHub Releases stay the only distribution.** Owner,
-  2026-10-24. The owner decided to make VentureForgre/contexto public. GitHub Releases on this
+  2026-10-24. (The "only distribution" part is superseded by D67 for PyPI.) The owner decided to make VentureForgre/contexto public. GitHub Releases on this
   repository remain the only way Contexto is distributed; nothing goes to a package registry (PyPI,
   npm, Homebrew) yet. This supersedes D0's "no public repos" limit for this repository and the
   private-only wording in D13, D14, D29 and `RELEASING.md`.
@@ -2704,6 +2705,92 @@ the owner's delegation. Open decisions are listed at the end with the options an
   so the next release follows v0.5.24. A backup of each release's notes, assets and tags is kept
   outside the repository. Old commits, pull request diffs and pull request comments still hold the
   hostname (D42).
+
+- **D67. Contexto goes to PyPI as `contexto-proxy`, releases are cut by hand, and there is a
+  one-line install.** Owner request, 2026-11-12; design and calls by Claude, 2026-11-13, each PR
+  with two reviewer agents (#253, #256, #260, #270, @@FOLLOWUP@@, @@DOCSPR@@). The owner asked for a PyPI release
+  under a free name. That supersedes "nothing goes to a package registry" in D0, D14 and D42, for
+  PyPI only: there is still no npm package and no Homebrew tap. Nothing was published and no
+  account was created; what only the owner can do is listed at the end.
+  - **Name.** The distribution is `contexto-proxy`; the command and the import name stay
+    `contexto`. `contexto` on PyPI is an unrelated project (ConTexto 0.2.0), so `pip install
+    contexto` and `uvx contexto` fetch the wrong thing. `pypi.org/pypi/<name>/json` returned 404 on
+    2026-11-12 and 2026-11-13 for `contexto-proxy`, `contexto_proxy` and `contextoproxy`, and for
+    the fallbacks `contexto-cli` and `ctxo`. PyPI's documentation says a name can be refused as
+    "too similar to an existing project" and does not say how that is measured, so only the first
+    upload shows whether the name is accepted. Artifacts are `contexto_proxy-<v>-py3-none-any.whl`
+    and `contexto_proxy-<v>.tar.gz` from the first release after v0.5.24; v0.5.24 and earlier say
+    `Name: contexto` and can never be published.
+  - **Publishing (#260).** Trusted publishing (OIDC), no API token anywhere. The `pypi` job of
+    `release.yml` runs only when the repository variable `PYPI_PUBLISH_ENABLED` is `true` (it does
+    not exist yet, so a release still goes to GitHub only). It downloads the files of the GitHub
+    Release, checks them against `SHA256SUMS`, checks the name and version, requires a build
+    attestation signed by `release.yml` on `refs/heads/main` on a hosted runner, asks PyPI what it
+    has, uploads only what is missing with `uv publish --trusted-publishing always`, and confirms.
+    It runs after the release job, so a PyPI failure cannot undo a GitHub release, and
+    `action=publish` repeats it for an existing tag. No PyPI attestations (PEP 740): uv 0.13.7
+    only uploads ones that already exist, and making them needs a tool fetched at run time.
+  - **The `pypi` environment (a settings change made by Claude).** Reviewer A found that the
+    "only from main" check lives in the workflow file, so a run started from a branch executes
+    that branch's copy; with an unprotected environment any branch could publish once the
+    publisher is registered. On 2026-11-13 Claude created the GitHub environment `pypi` with
+    deployment limited to the branch `main` and administrator bypass off, with no required
+    reviewer. The brief did not ask for a settings change; it was made so that the safe state
+    exists before the owner registers anything. `docs/pypi-publishing.md` has the owner check it
+    first. To undo: Settings > Environments > `pypi`.
+  - **Cadence.** Until v0.5.24 every `feat`, `fix` or `perf` merge cut a release: 25 in 14 days.
+    A PyPI version can never be reused or replaced, so that does not carry over. Since #260
+    (main 20d6a85) `release.yml` has no `push` trigger. A release is a manual run from `main`
+    (`gh workflow run release.yml --ref main -f action=release`), cut by the maintainer or an
+    agent on the maintainer's instruction when `main` holds user-visible changes worth shipping,
+    normally at most one a week, and the same day for a security fix or a release broken for
+    users. The pull request title's type still sets the size of the next bump. The release fails
+    before tagging unless the hand-written `CHANGELOG.md` (#253, seeded from v0.5.0 to v0.5.24)
+    has `## X.Y.Z (YYYY-MM-DD)` for the computed version. Deleting a release to redo it is over:
+    yank on PyPI and release a fix.
+  - **Versions of git installs (#256).** The build backend stays `uv_build` with the placeholder
+    `0.0.0+checkout`: a VCS-version plugin would mean another backend, new build dependencies for
+    every git install, and a different reproducible build. Instead `contexto --version` reads the
+    installer's `direct_url.json` (PEP 610) and prints `contexto 0.0.0+checkout (git v0.6.0,
+    commit 1a2b3c4d)` or `(git commit 1a2b3c4d)`; uv, pip and pipx all record it. No git, no
+    subprocess, no network. Limits, stated in `docs/install.md`: `pip list`, `pipx list` and
+    `uv tool list` still show `0.0.0+checkout`, and v0.5.24 and earlier print no revision.
+  - **Install and upgrade (#270).** `install.sh` finds the latest release by the
+    `/releases/latest` redirect, checks the wheel against the release's `SHA256SUMS`, runs it once
+    before removing an earlier install, and installs with uv or pipx; run again, it upgrades, and
+    it moves an install from the old distribution name. The README names the release version in
+    one line (`uvx --from <release wheel URL> contexto --version`, the short line that works
+    today) instead of nine. Contexto still makes no network call of its own and never checks for
+    a new version.
+  - **CI (#256).** An `install` job installs the built wheel and the sdist into empty
+    environments on every Python and OS of the test matrix and runs `contexto --version`,
+    `--help`, `python -m contexto --version` and `contexto sessions list` offline; a `package`
+    job runs `twine check --strict`, checks every classifier against a pinned
+    `trove-classifiers`, and renders the PyPI description (`docs/pypi-description.md`, absolute
+    links only) with `readme_renderer`. Both are required by `ci`.
+  - **Python floor stays 3.12.** The suite on CPython 3.11.15 (macOS, `requires-python` lowered
+    in a scratch clone): 7 failed, 3,178 passed. Five failures are the 512-level JSON nesting
+    limit (D45): on 3.11 a document inside the limit raises `RecursionError` in a handler thread.
+    Two are `test_launch_check_is_silenced_by_flag_or_env[0-False]` and `[false-False]` in
+    `tests/test_cliversions.py`; their cause was not looked into. Supporting 3.11 would need a
+    lower nesting limit or an iterative parser, which is a contract change.
+  - **WSL** is not claimed: nobody has run it there. `docs/install.md` says "untested".
+  - **Checksums.** `RELEASING.md` said releases "up to v0.5.8" lack `SHA256SUMS` and an
+    attestation; it is v0.5.0 to v0.5.12 (v0.5.13 is the first with both). Corrected in #260.
+  - **Homebrew.** A formula is in `docs/install.md` as an unpublished draft. It was not tested:
+    `brew style` wanted to download gems, and the build would compile `uv_build` from source,
+    which needs Rust. A tap needs a new public repository, which is the owner's to create.
+  - **Not verified, because it needs the owner's PyPI account:** the OIDC exchange with PyPI,
+    GitHub refusing the `pypi` environment to a run from another ref (documented by GitHub, not
+    exercised), and whether PyPI accepts the name.
+  - **Needs the owner.** (1) On pypi.org, Publishing > "Add a new pending publisher", GitHub tab:
+    PyPI Project Name `contexto-proxy`, Owner `VentureForgre`, Repository name `contexto`,
+    Workflow name `release.yml`, Environment name `pypi`. (2) `gh variable set
+    PYPI_PUBLISH_ENABLED --body true --repo VentureForgre/contexto`. (3) Cut the first release
+    soon after: a pending publisher does not reserve the name, so until the first upload anyone
+    can register `contexto-proxy`, and the README already names it. Steps and checks:
+    `docs/pypi-publishing.md`. Optional: a required reviewer on the `pypi` environment, a tag
+    ruleset on `v*`, and the Homebrew tap.
 
 ## Open decisions
 

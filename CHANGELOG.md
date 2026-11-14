@@ -11,7 +11,20 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+
+- The package is now named `contexto-proxy`. The command and the import name are still `contexto`.
+  If you installed 0.5.24 or earlier, uninstall `contexto` before you install the new one, or use
+  `install.sh`, which does it for you: both provide the same `contexto` command. The wheel and
+  sdist are named `contexto_proxy-<version>`.
+- Releases are no longer cut on every fix. They are batched, and each has a section in this file.
+
+### Added
+
+- `install.sh`: one line installs the latest release, after checking the wheel against the
+  release's `SHA256SUMS`, and upgrades it when run again. See the README's Install section.
+- `contexto --version` names the revision of an install from a git URL, for example
+  `contexto 0.0.0+checkout (git v0.6.0, commit 1a2b3c4d)`.
 
 ## 0.5.24 (2026-11-06)
 

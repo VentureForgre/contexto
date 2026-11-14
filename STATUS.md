@@ -1,6 +1,7 @@
 # Contexto status
 
-Updated 2026-11-06 by claude (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
+Updated 2026-11-13 by claude (D67: packaging for PyPI as `contexto-proxy`, releases cut by hand,
+`install.sh`; before that v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
 D48 to D61, live acceptance run #4, and deleting the v0.1.0 to v0.4.0 releases, D62). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
@@ -34,8 +35,9 @@ compaction never fires, and accuracy equals full context.
 - Tested CLI versions (`TESTED_VERSIONS`): Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318;
   codex-cli 0.154.0, 0.163.0 and 0.166.0 (D56). 2.1.318 has the full live acceptance; 2.1.314 and
   0.166.0 the zero-spend routine only.
-- The repository is public (D42) and MIT licensed (D43). GitHub Releases stay the only distribution;
-  there is no package registry release. Tracked files were scrubbed at `HEAD` of the owner's proxy
+- The repository is public (D42) and MIT licensed (D43). Releases are on GitHub; publishing to
+  PyPI as `contexto-proxy` is built and switched off until the owner registers the trusted
+  publisher (D67, next item). Tracked files were scrubbed at `HEAD` of the owner's proxy
   hostname, another private repository's name, statements about the owner's own accounts and plans,
   and the self-hosted runner's machine name; history was not rewritten. On 2026-11-06, with the
   owner's approval, 197 old branches were deleted (QA had found the hostname on 197 of 232 public
@@ -43,6 +45,22 @@ compaction never fires, and accuracy equals full context.
   v0.1.0 to v0.4.0 were deleted (D62), because GitHub's source archives of those 19 releases held the
   hostname; their commits stay on `main`. Old commits, pull request diffs and pull request comments
   still hold it (D42).
+- Install, PyPI and release cadence (D67, 2026-11-13; PRs #253, #256, #260, #270, @@FOLLOWUP@@):
+  - The distribution is `contexto-proxy` (the PyPI project `contexto` is unrelated); the command
+    and import name stay `contexto`. Nothing is on PyPI yet. The `pypi` job of `release.yml`
+    publishes by trusted publishing, with no token, once the owner has registered the pending
+    publisher and set `PYPI_PUBLISH_ENABLED` (`docs/pypi-publishing.md`). The GitHub environment
+    `pypi` exists, limited to `main`, administrator bypass off.
+  - Merging no longer releases. A release is a manual run of `release.yml` from `main`, batched,
+    and needs a `CHANGELOG.md` section for its version (`RELEASING.md`). `main` holds unreleased
+    `feat` commits, so the next release is v0.6.0, the first with `contexto_proxy-` file names.
+  - `install.sh` is the one-line install and upgrade; the README names the release version in
+    one line. `contexto --version` names the revision of a git install.
+  - CI also installs the built wheel and sdist on every Python and OS of the matrix and checks
+    the package for PyPI. Python stays 3.12 or later: on 3.11 the suite fails 7 tests (3,178
+    pass), five of them the JSON nesting limit. WSL is untested and not claimed.
+  - Not verified: the OIDC exchange with PyPI and whether PyPI accepts the name. Both need the
+    owner's account.
 - CI and releases run on GitHub-hosted runners (PR #213): Python 3.12 to 3.15 on Ubuntu, 3.12 and
   3.15 on macOS, and Ruff lint (`uvx ruff@0.17.2 check .`; `ruff format` is not enforced). `ci` is a
   required check in the main ruleset, and workflow runs on fork pull requests need approval for all
@@ -499,7 +517,7 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   term (b 0), so neither a long turn nor an old dump that repeats a key buries the turn that states
   its value; chosen on a measured grid (probes, 13-turn cases, five dump sets).
 - D42: the repository goes public (2026-10-24); GitHub Releases stay the only distribution (no
-  package registry). D0, D13, and D14 are marked superseded in place.
+  package registry; superseded for PyPI by D67). D0, D13, and D14 are marked superseded in place.
 - D43: Contexto is MIT licensed (owner, 2026-10-25). The `LICENSE` file and the license metadata
   ship in the wheel and sdist from v0.5.2 on; v0.5.1 and earlier assets do not hold them.
 - D44: `contexto run claude` allows Contexto's five MCP tools by exact name in its `--settings`,
@@ -611,6 +629,13 @@ Measured candidates deliberately not pursued (each would need a live run or new 
   project file (D52): for now the README says to pin `--upstream` in such a repository.
 
 Needs the owner:
+- PyPI (D67): register the pending publisher on pypi.org (PyPI Project Name `contexto-proxy`,
+  Owner `VentureForgre`, Repository name `contexto`, Workflow name `release.yml`, Environment name
+  `pypi`), set the repository variable `PYPI_PUBLISH_ENABLED` to `true`, and cut v0.6.0 soon
+  after. Until the first upload the name is unregistered, so anyone can take it, and the README
+  and `docs/install.md` already name it. Steps: `docs/pypi-publishing.md`. Optional: a required
+  reviewer on the `pypi` environment, a tag ruleset on `v*`, and a public tap repository for the
+  draft Homebrew formula in `docs/install.md`.
 - Live checks the fix round could not run at zero spend: D51's "keep it open until the user
   withdraws it" wording (added after the live run, not measured live), standing-rule pinning on
   claude-opus-5-5 and on Codex, and the full acceptance on Claude Code 2.1.314 (run #4 covered
@@ -903,7 +928,9 @@ Needs the owner:
 | v0.5.24 | d38e87d | #250 (D61): Codex tool output at the 1.5 seed before usage, older epoch records re-measure their head, bounded JPEG walk and patch pricing, Codex's own overhead range in its start warning, `pdf_uncertain` only when the PDF is the cause |
 
 From v0.5.0 on, each is a tag and a GitHub Release on this repository with the wheel and sdist
-attached; there is no package registry release. The v0.1.0 to v0.4.0 releases and tags were deleted
+attached; none is on PyPI, and none of these can be (their metadata says `Name: contexto`). From
+the next release on, what each release changes is in `CHANGELOG.md`, written by hand before the
+release is cut (D67); this table stops at v0.5.24. The v0.1.0 to v0.4.0 releases and tags were deleted
 on 2026-11-06 (D62); their rows stay as the record of what changed, and their commits are on `main`.
 
 ## Process notes
