@@ -83,7 +83,7 @@ A false hit is a probe for which any page is returned.
 
 ## Through the tool (`contexto_search`) at 6,000 pages
 
-Whether the reply shows every expected page in detail (the tool details 3 pages and lists 50).
+Whether the reply shows every expected page in detail (the tool details 3 pages, and lists 50 more for a strict result and 10 more for an approximate one).
 
 | class | probes | in detail | in detail or listed | not in the reply | differs from top 3 above |
 |---|---:|---:|---:|---:|---:|

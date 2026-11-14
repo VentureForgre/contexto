@@ -13,8 +13,8 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 - Search finds more. When no paged-out turn holds every word of a query, `contexto_search` and
   `contexto search` now give approximate matches and say so: question words are dropped,
-  `refresh_token` finds `refreshToken`, a turn holding most of the words is returned, and one
-  one-letter typo is tolerated. Each match names the words it matched and the ones it did not. A
+  `refresh_token` finds `refreshToken`, a turn holding the rarer words of the query is returned,
+  and one one-letter typo is tolerated. Each match names the words it matched and the ones it did not. A
   query that some turn holds every word of gets the same result as before
   ([docs/search.md](docs/search.md)). `contexto search --json` marks such a result `approximate`
   and gives each hit's `matched` and `missing` words.
