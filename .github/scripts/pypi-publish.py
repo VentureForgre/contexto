@@ -29,6 +29,7 @@ import email.parser
 import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import sys
@@ -361,8 +362,8 @@ def _count(value):
 
 def _seconds(value):
     number = float(value)
-    if not number >= 0:
-        raise argparse.ArgumentTypeError("must be 0 or more")
+    if not (math.isfinite(number) and number >= 0):
+        raise argparse.ArgumentTypeError("must be a finite number, 0 or more")
     return number
 
 
@@ -408,11 +409,17 @@ def main(argv=None, fetch=fetch):
                 print(f"::notice::PyPI already has both files of {what} with the same sha256. Nothing to upload.")
             try:
                 args.output.write_text("".join(f"{release.files[name]}\n" for name in names), encoding="utf-8")
-                if os.environ.get("GITHUB_OUTPUT"):
-                    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-                        output.write(f"upload_count={len(names)}\n")
             except OSError as error:
                 raise Refused(f"Cannot write the plan: {error}. Nothing was uploaded.") from None
+            if os.environ.get("GITHUB_OUTPUT"):
+                try:
+                    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                        output.write(f"upload_count={len(names)}\n")
+                except OSError as error:
+                    raise Refused(
+                        f"The plan is in {args.output}, but upload_count cannot be written to GITHUB_OUTPUT: "
+                        f"{error}. Nothing was uploaded."
+                    ) from None
             return 0
 
         confirm(release, args.project, args.index, fetch, **retry)

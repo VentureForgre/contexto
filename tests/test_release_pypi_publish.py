@@ -854,7 +854,10 @@ def test_a_file_listed_twice_by_the_index_is_an_unreadable_answer(release):
         pypi.confirm(release, PROJECT, INDEX, Index(twice), attempts=2, delay=0, sleep=no_sleep)
 
 
-@pytest.mark.parametrize(("option", "value"), [("--attempts", "0"), ("--attempts", "-1"), ("--delay", "-1")])
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [("--attempts", "0"), ("--attempts", "-1"), ("--delay", "-1"), ("--delay", "nan"), ("--delay", "inf")],
+)
 def test_attempts_and_delay_must_be_usable(dist, tmp_path, option, value, capsys):
     with pytest.raises(SystemExit) as stopped:
         _command("plan", "--dist", str(dist), "--index", INDEX, "--output", str(tmp_path / "u.txt"), option, value)
@@ -877,9 +880,10 @@ def test_oversized_checksums_are_refused(dist):
         pypi.load_release(dist, PROJECT, TAG)
 
 
-def test_a_wheel_with_another_file_name_and_our_metadata_is_refused(dist):
-    (dist / WHEEL).rename(dist / "evil-1.0-py3-none-any.whl")
-    write_sums(dist, [dist / "evil-1.0-py3-none-any.whl", dist / SDIST])
+@pytest.mark.parametrize("name", ["evil-1.0-py3-none-any.whl", "contexto_proxy-9.9.90-py3-none-any.whl"])
+def test_a_wheel_with_another_file_name_and_our_metadata_is_refused(dist, name):
+    (dist / WHEEL).rename(dist / name)
+    write_sums(dist, [dist / name, dist / SDIST])
     with pytest.raises(pypi.Refused, match="do not start with contexto_proxy-9.9.9"):
         pypi.load_release(dist, PROJECT, TAG)
 
@@ -897,3 +901,13 @@ def test_a_checksum_line_with_one_space_is_refused(dist):
     sums.write_text(sums.read_text(encoding="ascii").replace("  ", " ", 1), encoding="ascii")
     with pytest.raises(pypi.Refused, match='line 1 is not "<sha256>  <file name>"'):
         pypi.load_release(dist, PROJECT, TAG)
+
+
+def test_an_unwritable_github_output_says_what_was_not_written(dist, server, tmp_path, monkeypatch, capsys):
+    # The plan file is written; the job's output is a directory, so upload_count cannot be.
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path))
+    output = tmp_path / "upload.txt"
+    assert _command("plan", "--dist", str(dist), "--index", server.url, "--output", str(output)) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "upload_count" in out and "Nothing was uploaded" in out
+    assert "Cannot write the plan" not in out
