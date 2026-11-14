@@ -28,7 +28,13 @@ file's base URL or ``apiKeyHelper`` counts only when Claude Code has recorded th
 
 Limit: organization-managed settings outrank everything here, including the ``--settings`` file
 the launcher passes, so on a machine with managed settings that set a base URL the proxy may be
-bypassed. This module does not read managed settings.
+bypassed. The base URL is not read from managed settings. The cloud-provider guard and the hint
+header decision (D70, below) do read the managed settings file, and only the file: managed settings
+that reach Claude Code another way (a device-management profile, a server) are not seen.
+
+Every settings file is read through one reader (``read_settings_file``): a regular file only, at most
+``SETTINGS_FILE_LIMIT`` bytes, with a UTF-8 byte order mark accepted as Claude Code accepts it. A
+caller that needs several values passes one ``SettingsFiles``, which reads each file once.
 
 The result carries the winning source as a short label for the session log; the URL itself and
 any file path stay out of logs.
@@ -37,10 +43,16 @@ any file path stay out of logs.
 from __future__ import annotations
 
 import json
+import math
 import os
+import stat
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
+
+from contexto.canonical import loads_bounded
 
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 BASE_URL_KEY = "ANTHROPIC_BASE_URL"
@@ -50,6 +62,14 @@ CUSTOM_OAUTH_KEY = "CLAUDE_CODE_CUSTOM_OAUTH_URL"
 PROJECT_KINDS = frozenset({"main-checkout-local", "local", "project"})  # files that come with the repository
 KIND_FILES = {"main-checkout-local": "the main checkout's .claude/settings.local.json",
               "local": ".claude/settings.local.json", "project": ".claude/settings.json"}
+MANAGED_KIND = "managed"
+# Claude Code's file-based managed settings, by ``sys.platform``. Always this path: no variable moves
+# it, since a variable could be inherited from a project's settings ``env`` block through a session
+# and hide the real file from a nested launch. The test suite patches this table in its own process.
+MANAGED_SETTINGS_FILES = {"darwin": "/Library/Application Support/ClaudeCode/managed-settings.json",
+                          "linux": "/etc/claude-code/managed-settings.json"}
+PROVIDER_PREFIX = "CLAUDE_CODE_USE_"  # every cloud-provider switch (CLOUD_PROVIDER_KEYS) starts with it
+SETTINGS_FILE_LIMIT = 4 * 1024 * 1024  # bytes read from one settings file; real ones are a few kilobytes
 
 
 @dataclass(frozen=True)
@@ -212,10 +232,30 @@ JS_WHITESPACE = ("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2
                  "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
 
 
+def env_truthy(value: str | None) -> bool:
+    """Whether Claude Code reads an environment value as on:
+    ``["1", "true", "yes", "on"].includes(String(v).toLowerCase().trim())`` (read from 2.1.314 and
+    2.1.318). Measured on 2.1.322 for ``CLAUDE_CODE_USE_BEDROCK`` (D70; requests went to the Bedrock
+    stub and none to ``ANTHROPIC_BASE_URL``): on for ``1``, ``true``, ``yes``, ``on``, ``TRUE`` and
+    ``" 1 "``; off for ``0``, ``false``, ``no``, ``2``, ``enabled`` and the empty string. The same for
+    ``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` (``true``, ``yes``, ``on``, ``TRUE`` on; ``false``, ``2`` off)."""
+    return (value or "").lower().strip(JS_WHITESPACE) in TRUTHY
+
+
+FALSY = frozenset({"0", "false", "no", "off"})
+
+
+def env_falsy(value: str | None) -> bool:
+    """Whether ``value`` is one of the words that say off outright (``0``, ``false``, ``no``, ``off``; any
+    case, surrounding whitespace ignored), as against a value Claude Code merely does not read as on
+    (the empty string, ``2``)."""
+    return (value or "").lower().strip(JS_WHITESPACE) in FALSY
+
+
 def ignores_persisted_trust(env: Mapping[str, str] | None) -> bool:
-    """Whether ``env`` sets ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` the way Claude Code reads it:
-    ``["1", "true", "yes", "on"].includes(String(v).toLowerCase().trim())`` (2.1.314 and 2.1.318)."""
-    return (env or {}).get(IGNORE_TRUST_KEY, "").lower().strip(JS_WHITESPACE) in TRUTHY
+    """Whether ``env`` sets ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` the way Claude Code reads it
+    (``env_truthy``)."""
+    return env_truthy((env or {}).get(IGNORE_TRUST_KEY, ""))
 
 
 def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None, *,
@@ -265,38 +305,126 @@ def untrusted_note(what: str, kinds: tuple[str, ...], remedy: str, env: Mapping[
             f"or run claude here once and accept the trust dialog")
 
 
-def _settings_string(path: Path, pick: Callable[[dict], object]) -> str | None:
+class SettingsFile(NamedTuple):
+    """One settings file as ``read_settings_file`` found it."""
+
+    data: dict | None  # its JSON object; None when the file is missing or could not be read
+    problem: str | None  # why a file that is there could not be read, as "is ..."; else None
+    # For a file with a ``problem``: whether it might set a cloud-provider switch. False only for a file
+    # that was read whole but is not valid JSON, and whose text neither names ``CLAUDE_CODE_USE_`` nor
+    # holds a NUL byte (a wide encoding hides the name) or a ``\u`` escape that could spell it.
+    may_name_provider: bool = True
+
+
+def read_settings_file(path: Path) -> SettingsFile:
+    """One Claude Code settings file, read with a bound.
+
+    Opened without blocking and checked to be a regular file before a byte is read, so a FIFO or a
+    device at that path is never read; at most ``SETTINGS_FILE_LIMIT`` bytes; decoded as UTF-8 with a
+    byte order mark accepted, as Claude Code accepts one, and UTF-16LE read when it starts with its own
+    byte order mark, as Claude Code reads it (both measured on 2.1.322, D70); parsed with
+    ``contexto.canonical.loads_bounded``.
+
+    ``data`` is the file's JSON object. An empty or blank file, and a document that is not an object,
+    give an empty object: nothing can be set there. A file that does not exist, a directory, and a
+    file this user cannot open give ``SettingsFile(None, None)``: Claude Code runs as the same user
+    and cannot read them either. A file that is there and that Contexto did not read gives
+    ``problem``: it is not a regular file, it is larger than the limit, it cannot be read, or it is
+    not valid JSON for Python (not UTF-8, a syntax error, nested too deep). Such a file is not
+    evidence that a setting is off, since Claude Code may read it differently; the cloud-provider
+    guard refuses on it (``cloud_provider``) unless it was read whole, is not valid JSON, and its text
+    could not name a switch (``may_name_provider``): Claude Code does not load a file with a comment,
+    a trailing comma or another syntax error (measured on 2.1.322, D70), so such a file turns no
+    switch on."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError):  # unreadable or not JSON: as if the file were absent
-        return None
-    value = pick(data) if isinstance(data, dict) else None
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError):  # missing, not permitted, a symlink loop, a name the system rejects
+        return SettingsFile(None, None)
+    try:
+        mode = os.fstat(fd)
+        if stat.S_ISDIR(mode.st_mode):
+            return SettingsFile(None, None)
+        if not stat.S_ISREG(mode.st_mode):
+            return SettingsFile(None, "is not a regular file")
+        chunks, size = [], mode.st_size
+        while size <= SETTINGS_FILE_LIMIT:  # one byte past the limit shows a file that grew since fstat
+            chunk = os.read(fd, min(1 << 20, SETTINGS_FILE_LIMIT + 1 - sum(map(len, chunks))))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size = max(size, sum(map(len, chunks)))
+    except OSError:
+        return SettingsFile(None, "cannot be read")
+    finally:
+        os.close(fd)
+    if size > SETTINGS_FILE_LIMIT:
+        return SettingsFile(None, f"is larger than {SETTINGS_FILE_LIMIT // (1024 * 1024)} MiB")
+    raw = b"".join(chunks)
+    try:
+        # Claude Code 2.1.322 loads UTF-8, with or without a byte order mark, and UTF-16LE that starts
+        # with one (measured, D70); it does not load UTF-16BE, UTF-16LE without the mark, or UTF-32.
+        text = raw[2:].decode("utf-16-le") if raw.startswith(b"\xff\xfe") else raw.decode("utf-8-sig")
+        data = loads_bounded(text) if text.strip() else {}
+    except (ValueError, RecursionError):  # UnicodeDecodeError and JSONTooDeepError are ValueErrors
+        # A NUL byte: a wide encoding, in which the switch's name is not the UTF-8 bytes looked for.
+        return SettingsFile(None, "is not valid JSON",
+                            PROVIDER_PREFIX.encode() in raw or b"\\u" in raw or b"\x00" in raw)
+    return SettingsFile(data if isinstance(data, dict) else {}, None)
+
+
+class SettingsFiles:
+    """The settings files of one launch or command, each read at most once (``read_settings_file``)."""
+
+    def __init__(self) -> None:
+        self._read: dict[Path, SettingsFile] = {}
+
+    def read(self, path: Path) -> SettingsFile:
+        found = self._read.get(path)
+        if found is None:
+            found = self._read[path] = read_settings_file(path)
+        return found
+
+
+def managed_settings_path() -> Path | None:
+    """Claude Code's managed settings file on this platform (``MANAGED_SETTINGS_FILES``); None on a
+    platform with no known location. File-based managed settings only."""
+    known = MANAGED_SETTINGS_FILES.get(sys.platform)
+    return Path(known) if known else None
+
+
+def _settings_string(data: dict, pick: Callable[[dict], object]) -> str | None:
+    value = pick(data)
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def _settings_base_url(path: Path) -> str | None:
+def _settings_base_url(data: dict) -> str | None:
     def pick(data: dict) -> object:
         env = data.get("env")
         return env.get(BASE_URL_KEY) if isinstance(env, dict) else None
-    return _settings_string(path, pick)
+    return _settings_string(data, pick)
 
 
-def claude_setting(read: Callable[[Path], str | None], cwd: Path, home: Path, env: Mapping[str, str] | None = None,
-                   *, trusted_only: bool = False) -> Setting:
-    """The first value ``read`` finds in ``claude_settings_order``. With ``trusted_only``, a project
-    file counts only when ``folder_trusted``. While ``env`` sets ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST``
+def claude_setting(read: Callable[[dict], str | None], cwd: Path, home: Path, env: Mapping[str, str] | None = None,
+                   *, trusted_only: bool = False, files: SettingsFiles | None = None) -> Setting:
+    """The first value ``read`` finds in the JSON object of a file in ``claude_settings_order``; a
+    file that is missing or cannot be read (``read_settings_file``) sets nothing. With
+    ``trusted_only``, a project file counts only when ``folder_trusted``. While ``env`` sets
+    ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST``
     no project file counts for any caller: Claude Code in ``-p`` mode then drops a project file's
     ``env`` and ``apiKeyHelper`` (measured on 2.1.314 and 2.1.318, D52), so the proxy must not
     forward to its base URL. Interactively it shows its dialog and, once accepted, uses the
     project's base URL (measured); skipping there too is the stricter side, and ``--upstream``
-    overrides. The project kinds skipped either way are reported."""
+    overrides. The project kinds skipped either way are reported. ``files`` is the caller's
+    ``SettingsFiles`` when it reads more than one value."""
     ignored: list[str] = []
     trusted: bool | None = None
     no_trust = ignores_persisted_trust(env)
+    files = files or SettingsFiles()
     layout = git_layout(cwd)  # one walk for the order and the trust check (reviewer A's nit, PR #237)
     for kind, path in claude_settings_order(cwd, home, env, layout=layout):
-        value = read(path)
-        if not value:
+        data = files.read(path).data
+        value = read(data) if data is not None else None
+        if value is None:  # the file does not set it; an empty value (``_settings_env``) is still a value
             continue
         if kind in PROJECT_KINDS and (trusted_only or no_trust):
             if trusted is None:
@@ -308,22 +436,229 @@ def claude_setting(read: Callable[[Path], str | None], cwd: Path, home: Path, en
     return Setting(None, None, tuple(ignored))
 
 
+def _js_number(value: int | float) -> str:
+    """JavaScript's ``String()`` of a JSON number. Exact for integers, which is all that matters here
+    (only ``1`` is ever on); other numbers give Python's shortest form."""
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        if value.is_integer() and abs(value) < 2 ** 53:
+            return str(int(value))
+        return repr(value)
+    if abs(value) < 2 ** 53:
+        return str(value)
+    try:
+        return repr(float(value))
+    except OverflowError:  # past the largest double: JavaScript reads the number as Infinity
+        return "Infinity" if value > 0 else "-Infinity"
+
+
+def js_string(value: object) -> str:
+    """JavaScript's ``String(value)`` for a parsed JSON value, which is how Claude Code turns a
+    settings ``env`` entry into an environment value. Measured on 2.1.322 with
+    ``CLAUDE_CODE_USE_BEDROCK`` in a settings file (D70): on for ``true``, ``1``, ``1.0``, ``1e0``,
+    ``["1"]``, ``[1]``, ``[["1"]]``, ``[true]`` and ``" On "``; off for ``false``, ``1.5``, ``[]``,
+    ``["1","1"]`` (the text ``1,1``), ``null``, an object (``[object Object]``) and ``"1.0"``.
+
+    A string is itself, ``true`` and ``false`` their names, a number its shortest form (``1.0`` and
+    ``1e0`` give ``1``), an object ``[object Object]``, and a list its items joined with commas,
+    lists inside it flattened the same way and ``null`` items empty. No recursion."""
+    if not isinstance(value, list):
+        return _js_scalar(value)
+    leaves: list[str] = []
+    pending: list[object] = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, list) and item:
+            pending.extend(reversed(item))
+        else:
+            leaves.append("" if item is None or isinstance(item, list) else _js_scalar(item))
+    return ",".join(leaves)
+
+
+def _js_scalar(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return _js_number(value)
+    return "null" if value is None else "[object Object]"
+
+
+def _settings_env(data: dict, name: str) -> str | None:
+    """``env.<name>`` in a settings file's JSON object as Claude Code applies it to its environment
+    (``js_string``), or None when the file does not set it (no ``env`` object, no such entry, or
+    ``null``). An empty string is a value."""
+    env = data.get("env")
+    value = env.get(name) if isinstance(env, dict) else None
+    return None if value is None else js_string(value)
+
+
+def settings_file_env(files: SettingsFiles, path: Path | None, name: str) -> str | None:
+    """``env.<name>`` of the settings file at ``path`` (``_settings_env``), or None when there is no
+    such file, it could not be read, or it does not set the variable."""
+    data = files.read(path).data if path is not None else None
+    return _settings_env(data, name) if data is not None else None
+
+
+@dataclass(frozen=True)
+class EnvValue:
+    """An environment variable as Claude Code would see it, and where the value comes from."""
+    name: str
+    value: str | None  # None when nothing sets it
+    source: str | None  # "settings:<kind>" (see ``KIND_FILES``; or ``user``, ``managed``), "env", or None
+
+
+def claude_env_value(name: str, *, env: Mapping[str, str] | None = None, cwd: Path | None = None,
+                     home: Path | None = None, files: SettingsFiles | None = None, managed: Path | None = None,
+                     process_env: bool = True) -> EnvValue:
+    """The value Claude Code would run with for the environment variable ``name``, launched from
+    ``cwd`` with the process environment ``env``, as far as Contexto can tell: the managed settings
+    file's ``env`` block (``managed``, by default ``managed_settings_path``), else the first settings
+    file ``env`` block that sets it, in the order and under the trust rule ``contexto run claude`` uses
+    for the base URL (``claude_setting``: a project file counts as ``claude -p`` reads it, with no
+    trust record needed, and no project file counts while ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is
+    set), else the process environment, which ``process_env=False`` leaves out. Measured on 2.1.322
+    (D70) with ``CLAUDE_CODE_USE_BEDROCK`` and ``CLAUDE_CODE_GATEWAY_HINT_HEADERS``: a settings file's
+    value wins over the environment's in both directions, in the user file and in a project file, and
+    a project file's wins over the user file's. That managed settings come first is from Claude Code's
+    documentation, not measured. A ``--settings`` file is not read. This is a prediction, good enough
+    to decide what to forward; the cloud-provider guard does not rely on it (``cloud_provider``)."""
+    env = os.environ if env is None else env
+    files = files or SettingsFiles()
+    managed = managed or managed_settings_path()
+    value = settings_file_env(files, managed, name)
+    if value is not None:
+        return EnvValue(name, value, f"settings:{MANAGED_KIND}")
+    found = claude_setting(lambda data: _settings_env(data, name), cwd or Path.cwd(), home or Path.home(), env,
+                           files=files)
+    if found.value is not None:
+        return EnvValue(name, found.value, f"settings:{found.source}")
+    value = env.get(name) if process_env else None
+    return EnvValue(name, value, "env" if value is not None else None)
+
+
+# D70: with one of these on, Claude Code 2.1.322 sent every request to that provider's own endpoint
+# (ANTHROPIC_BEDROCK_BASE_URL, ANTHROPIC_VERTEX_BASE_URL, ANTHROPIC_FOUNDRY_BASE_URL,
+# ANTHROPIC_BEDROCK_MANTLE_BASE_URL, ANTHROPIC_AWS_BASE_URL) and none to ANTHROPIC_BASE_URL, not even
+# HEAD /api/hello: 0 of the requests of 5 runs with the value 1 and 4 more with true.
+CLOUD_PROVIDER_KEYS = {"CLAUDE_CODE_USE_BEDROCK": "Amazon Bedrock", "CLAUDE_CODE_USE_VERTEX": "Google Vertex AI",
+                       "CLAUDE_CODE_USE_FOUNDRY": "Microsoft Foundry",
+                       "CLAUDE_CODE_USE_MANTLE": "Amazon Bedrock (Mantle)",
+                       "CLAUDE_CODE_USE_ANTHROPIC_AWS": "Claude Platform on AWS"}
+PLACE_NAMES = {"env": "the process environment",
+               "settings:user": "the env block of your Claude Code user settings "
+                                "(~/.claude/settings.json, or settings.json in $CLAUDE_CONFIG_DIR)",
+               f"settings:{MANAGED_KIND}": "the env block of Claude Code's managed settings file "
+                                           "(managed-settings.json)"}
+
+
+@dataclass(frozen=True)
+class CloudProvider:
+    """Why ``cloud_provider`` would not let a launch through."""
+    on: tuple[tuple[str, tuple[str, ...]], ...]  # each switch that is on, with every place it is on
+    unread: tuple[tuple[str, str], ...] = ()  # (place, problem) for each settings file that could not be read
+
+
+def cloud_provider(*, env: Mapping[str, str] | None = None, cwd: Path | None = None, home: Path | None = None,
+                   files: SettingsFiles | None = None, managed: Path | None = None) -> CloudProvider | None:
+    """Whether a Claude Code launched from ``cwd`` may send its requests to a cloud provider, or None
+    (D70). With one of ``CLOUD_PROVIDER_KEYS`` on, Claude Code sends nothing to ``ANTHROPIC_BASE_URL``,
+    so a proxy it was pointed at sees no request and bounds nothing.
+
+    The check fails closed. A switch counts when it is on (``env_truthy``) in the process environment
+    or in the ``env`` block (``js_string``) of any settings file Contexto can find: every file of
+    ``claude_settings_order`` (the main checkout's and the folder's project files, and the user's) and
+    the managed settings file (``managed``, by default ``managed_settings_path``; file-based managed
+    settings only). Precedence between them is not applied and neither is the folder's trust state:
+    Claude Code does not apply every file Contexto can read (measured on 2.1.322: a file holding
+    ``NaN`` or a schema error, any project file under ``--setting-sources user``, a project file's
+    ``env`` in ``-p`` mode while ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is set), so a file that says
+    off cannot be trusted to win, and a project file can only add a refusal. The accepted cost is a
+    refusal Claude Code would not have needed: the environment says on and a file Claude Code does
+    apply says off, or a file it ignores says on.
+
+    A settings file that is there and that Contexto could not read (``read_settings_file``: not a
+    regular file, over the size limit, not valid JSON for Python) is reported in ``unread`` and also
+    refuses the launch. It is not evidence that a switch is off: Claude Code has no such limit and
+    may parse the file differently. A file that does not exist, and one this user cannot open, pass:
+    Claude Code cannot read them either.
+
+    Not covered: managed settings that are not in that file, and ``CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST``
+    (the docs say Claude Code then ignores these switches in settings files; not measured, so a switch
+    found there still counts)."""
+    env = os.environ if env is None else env
+    files = files or SettingsFiles()
+    managed = managed or managed_settings_path()
+    order = [(f"settings:{kind}", path)
+             for kind, path in claude_settings_order(cwd or Path.cwd(), home or Path.home(), env)]
+    if managed is not None:
+        order.append((f"settings:{MANAGED_KIND}", managed))
+    read = [(place, files.read(path)) for place, path in order]
+    on = []
+    for name in CLOUD_PROVIDER_KEYS:
+        places = ["env"] if env_truthy(env.get(name)) else []
+        places += [place for place, found in read
+                   if found.data is not None and env_truthy(_settings_env(found.data, name))]
+        if places:
+            on.append((name, tuple(places)))
+    unread = tuple((place, found.problem) for place, found in read if found.problem and found.may_name_provider)
+    return CloudProvider(tuple(on), unread) if on or unread else None
+
+
+def _place(place: str) -> str:
+    kind = place.removeprefix("settings:")
+    return PLACE_NAMES.get(place) or f"the env block of {KIND_FILES.get(kind, kind)}"
+
+
+def _file(place: str) -> str:
+    return _place(place).removeprefix("the env block of ")
+
+
+def _listed(items: list[str], word: str = "in ") -> str:
+    """``a``, ``a and in b``, ``a, in b and in c``."""
+    if len(items) < 2:
+        return "".join(items)
+    return f", {word}".join(items[:-1]) + f" and {word}" + items[-1]
+
+
+def cloud_provider_note(found: CloudProvider) -> str:
+    """What ``cloud_provider`` found, as sentences without the final full stop: each switch and every
+    place it is on, then each settings file that could not be read. No value and no path of the
+    user's."""
+    parts = []
+    for name, places in found.on:
+        provider = CLOUD_PROVIDER_KEYS.get(name, "a cloud provider")
+        parts.append(f"{name} is set in {_listed([_place(place) for place in places])}. With it on, Claude Code "
+                     f"sends its requests to {provider} and none to ANTHROPIC_BASE_URL")
+    for place, problem in found.unread:
+        parts.append(f"Contexto could not read {_file(place)} (it {problem}), so it cannot tell whether that file "
+                     f"turns on a cloud provider")
+    return ". ".join(parts)
+
+
 def claude_key_helper(cwd: Path, home: Path, env: Mapping[str, str] | None = None, *,
                       trusted_only: bool = True) -> Setting:
     """The ``apiKeyHelper`` Claude Code would use from ``cwd``. Trusted files only by default: the
     helper is a command, and its only caller hands it to Codex, which runs it without asking."""
-    return claude_setting(lambda path: _settings_string(path, lambda data: data.get(KEY_HELPER_KEY)),
+    return claude_setting(lambda data: _settings_string(data, lambda data: data.get(KEY_HELPER_KEY)),
                           cwd, home, env, trusted_only=trusted_only)
 
 
 def resolve_upstream(explicit: str | None = None, *, env: Mapping[str, str] | None = None,
-                     cwd: Path | None = None, home: Path | None = None, trusted_only: bool = False) -> Upstream:
+                     cwd: Path | None = None, home: Path | None = None, trusted_only: bool = False,
+                     files: SettingsFiles | None = None) -> Upstream:
     """The upstream per the module docstring. ``trusted_only`` skips project files in a folder Claude
-    Code has not trusted (``contexto run codex``); ``Upstream.ignored`` names the skipped kinds."""
+    Code has not trusted (``contexto run codex``); ``Upstream.ignored`` names the skipped kinds.
+    ``files`` is the caller's ``SettingsFiles`` when it reads more than the base URL."""
     if explicit:
         return Upstream(explicit, "flag")
     env = os.environ if env is None else env
-    found = claude_setting(_settings_base_url, cwd or Path.cwd(), home or Path.home(), env, trusted_only=trusted_only)
+    found = claude_setting(_settings_base_url, cwd or Path.cwd(), home or Path.home(), env, trusted_only=trusted_only,
+                           files=files)
     if found.value:
         return Upstream(found.value, f"settings:{found.source}", found.ignored)
     value = env.get(BASE_URL_KEY, "").strip()

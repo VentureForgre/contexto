@@ -121,6 +121,7 @@ The index of everything under `docs/` is [docs/README.md](docs/README.md). The g
   commands that inspect and remove sessions.
 - [Rules you give once](docs/standing-rules.md): how a standing rule stays in view after paging.
 - [MCP tools](docs/mcp-tools.md): the tools the model gets, how search ranks, and the recall budget.
+- [Search](docs/search.md): what a query matches, and the approximate matches it falls back to.
 - [FAQ](docs/faq.md): subscriptions, API keys, cost, what is sent where, and continuing a session.
 - [Troubleshooting](docs/troubleshooting.md): the warnings and errors you are most likely to see,
   each with its cause and what to do.

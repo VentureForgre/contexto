@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import http.client
 import json
 import os
 import pstats
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -32,17 +35,35 @@ for p in (ROOT / "spikes" / "m2", ROOT / "src"):
 from scale.proxy import synth  # noqa: E402
 from scale.proxy.upstream import FakeUpstream  # noqa: E402
 
+# A run stops at any of these. The second group (added 2026-11-12) is the proxy refusing or giving up on a
+# request; the third is the engine not taking the synthetic session for Claude Code's, which means
+# ``synth.py`` has fallen behind the signatures in ``contexto.rewrite`` and the run measures a misread
+# session.
 BREAK_EVENTS = ("over_bound", "bound_too_small", "transform_error", "proxy_error", "fallback_failed",
-                "degraded_enter", "store_error", "page_conflict", "observe_usage_error")
+                "degraded_enter", "store_error", "page_conflict", "observe_usage_error",
+                "request_refused", "request_too_deep", "hold_skipped", "page_unreadable", "proxy_stop_incomplete",
+                "session_start_unrecognised", "unclassified_system_message", "cli_version_untested",
+                "mcp_tools_missing", "toolcheck_error", "cli_version_error")
+# Counted per checkpoint (the ``n_<event>`` columns of checkpoints_<label>.csv). Names are only ever
+# appended, so the columns of the 2026-10-17 files keep their places.
 COUNTED_EVENTS = ("rotation", "rotation_noop", "page_out", "window_minimal", "bound_too_small", "over_bound",
                   "carried_over_budget", "carried_paged", "turn_room_low", "estimate_error", "usage_missing",
                   "usage_unattributed", "resync", "transform_error", "proxy_error", "degraded_enter", "store_error",
-                  "fallback_failed", "retained_stale")
+                  "fallback_failed", "retained_stale",
+                  "page_conflict", "observe_usage_error", "request_refused", "request_too_deep", "hold_skipped",
+                  "page_unreadable", "proxy_stop_incomplete", "session_start_unrecognised",
+                  "unclassified_system_message", "cli_version_untested", "mcp_tools_missing", "toolcheck_error",
+                  "cli_version_error", "cli_version", "epoch_not_resumed", "epoch_resumed")
+# How long all the connects of one run may wait, in all, for a free local port: the time macOS keeps a closed
+# connection's port (2 x net.inet.tcp.msl, 15 s). Until 2026-11-14 each connect had 30 s of its own, so a
+# short run on a machine whose ports stayed used up took about 22 minutes to fail.
+CONNECT_PATIENCE_S = 30.0
 REQUEST_FIELDS = ("label", "checkpoint_m", "phase", "round", "turn", "kind", "req_in_turn", "history_tokens",
                   "body_mb", "upstream_bytes", "upstream_tokens", "upstream_messages", "status", "e2e_s", "ttfb_s",
                   "pre_forward_s", "read_body_s", "proxy_transform_s", "engine_s", "observe_s", "index_text_s",
                   "index_text_n", "pages_read_s", "page_out_s", "set_retained_s", "set_epoch_s", "rotated",
-                  "rotation_reason", "events", "proxy_maxrss_mb", "load1")
+                  "rotation_reason", "events", "proxy_maxrss_mb", "load1",
+                  "upstream_s", "added_s", "page_file_reads", "proxy_cpu_s")
 CHECKPOINT_FIELDS = ("label", "checkpoint_m", "turn", "history_tokens", "reached_by", "ff_turns", "ff_seconds",
                      "pages", "pages_mb", "store_mb", "log_mb", "proxy_idle_rss_mb", "proxy_maxrss_mb",
                      "max_upstream_tokens", "ff_turn_peak_max", "ff_turns_over_bound", "uptime", *(f"n_{e}" for e in COUNTED_EVENTS))
@@ -112,24 +133,44 @@ class Worker:
         if engine_pkl.exists():
             cmd += ["--engine-in", str(engine_pkl)]
         self.engine_pkl = engine_pkl
+        self.log_path = getattr(err, "name", None)
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, text=True,
                                      env={**os.environ, "CONTEXTO_HOME": str(home)})
         ready = self._read()
         self.port, self.pid = ready["port"], ready["pid"]
+        self.client = Client(self.port)  # the CLI's connection to the proxy, opened at its first request
 
     def _read(self) -> dict[str, Any]:
         line = self.proc.stdout.readline()
         if not line:
-            raise RuntimeError(f"proxy worker exited (code {self.proc.poll()}); see the worker log")
+            raise RuntimeError(f"proxy worker exited (code {self.proc.poll()}); the end of its log:\n{self._log_tail()}")
         return json.loads(line)
+
+    def _log_tail(self, limit: int = 3000) -> str:
+        """The end of the worker's stderr, so a failure in CI says why (tracebacks name code, not content)."""
+        try:
+            with open(self.log_path, errors="replace") as f:
+                return f.read()[-limit:] or "(empty)"
+        except (OSError, TypeError):
+            return "(no worker log)"
 
     def call(self, cmd: dict[str, Any]) -> dict[str, Any]:
         self.proc.stdin.write(json.dumps(cmd) + "\n")
         self.proc.stdin.flush()
         return self._read()
 
-    def close(self) -> float:
-        out = self.call({"cmd": "exit", "engine_out": str(self.engine_pkl)})
+    def kill(self) -> None:
+        """End the process at once, keeping nothing (a clean stop waits out the proxy's server loop)."""
+        self.client.close()
+        self.proc.kill()
+        self.proc.wait(timeout=120)
+        for pipe in (self.proc.stdin, self.proc.stdout):
+            pipe.close()
+
+    def close(self, save: bool = True) -> float:
+        """Stop the proxy and return its peak RSS in MB; ``save`` pickles the engine for the next phase."""
+        self.client.close()
+        out = self.call({"cmd": "exit", "engine_out": str(self.engine_pkl) if save else None})
         self.proc.wait(timeout=120)
         return out.get("maxrss_mb", 0.0)
 
@@ -180,41 +221,122 @@ class Session:
         self.pending = None
 
 
-def send(port: int, body: bytes, request_id: str, reply: str) -> dict[str, Any]:
-    headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01",
-               "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14",
-               "x-api-key": "sk-ant-scale-harness-not-a-key", "User-Agent": "contexto-scale-harness",
-               "x-scale-id": request_id, "x-scale-reply": reply}
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=900)
-    t0 = time.monotonic()
-    try:
-        conn.request("POST", "/v1/messages", body=body, headers=headers)
-        response = conn.getresponse()
-        t_headers = time.monotonic()
-        data = response.read()
-        t_end = time.monotonic()
+class ConnectPatience:
+    """The wait for a free local port that the connects of one run share (``CONNECT_PATIENCE_S`` in all).
+    A process starts with all of it (``run.py`` is one run per process), and ``short.measure`` calls
+    ``reset`` at the start of each run. The burst's clients take from it at once, so it holds a lock."""
+
+    def __init__(self, seconds: float = CONNECT_PATIENCE_S) -> None:
+        self.seconds = seconds
+        self.left = seconds
+        self.lock = threading.Lock()
+
+    def take(self, pause: float) -> float:
+        """Up to ``pause`` seconds of what is left (0 once it is spent), deducted before the caller sleeps."""
+        with self.lock:
+            pause = max(0.0, min(pause, self.left))
+            self.left -= pause
+            return pause
+
+    def reset(self) -> None:
+        with self.lock:
+            self.left = self.seconds
+
+
+PATIENCE = ConnectPatience()
+
+
+class Client:
+    """One client of a proxy (or of the fake upstream) on one HTTP/1.1 connection kept open between
+    requests, as Claude Code keeps its connection to the proxy open.
+
+    Until 2026-11-13 the driver opened a connection per request. Each short run then left about 850 of
+    this machine's local ports in TIME_WAIT (30 s on macOS) on top of the proxy's own, and a few runs
+    at once failed with EADDRNOTAVAIL (README.md, "Connections"). A connection the server has closed is
+    opened again before the next request's clock starts, so the clock never includes a connect.
+
+    Every connection has ``TCP_NODELAY`` set, so a request's headers and its body (two sends in
+    ``http.client``) never wait for an ACK. ``http.client`` sets it too (in ``HTTPConnection.connect``, on
+    every Python CI runs); the driver sets it itself so its timings do not rest on that."""
+
+    def __init__(self, port: int, timeout: float = 900) -> None:
+        self.port, self.timeout = port, timeout
+        self.conn: http.client.HTTPConnection | None = None
+        self.connections = 0  # connections opened
+
+    def connect(self) -> None:
+        """Open a new connection. EADDRNOTAVAIL (no free local port) is retried with a growing pause, out of
+        the run's ``PATIENCE`` (``CONNECT_PATIENCE_S`` for all its connects together); once that is spent, or
+        on any other error, the error is raised at once."""
+        self.close()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
+        pause = 0.05
+        while True:
+            try:
+                conn.connect()
+                break
+            except OSError as exc:
+                wait = PATIENCE.take(pause) if exc.errno == errno.EADDRNOTAVAIL else 0.0
+                if wait <= 0:
+                    conn.close()
+                    raise
+                time.sleep(wait)
+                pause = min(pause * 2, 2.0)
+        conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.conn = conn
+        self.connections += 1
+
+    def send(self, body: bytes, request_id: str, reply: str, timeout: float | None = None) -> dict[str, Any]:
+        if self.conn is None or self.conn.sock is None:  # http.client drops the socket after "Connection: close"
+            self.connect()  # before the clock starts
+        conn = self.conn
+        conn.sock.settimeout(self.timeout if timeout is None else timeout)
+        headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01",
+                   "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14",
+                   "x-api-key": "sk-ant-scale-harness-not-a-key", **synth.CLI_HEADERS,
+                   "x-scale-id": request_id, "x-scale-reply": reply}
+        t0 = time.monotonic()
+        try:
+            conn.request("POST", "/v1/messages", body=body, headers=headers)
+            response = conn.getresponse()
+            t_headers = time.monotonic()
+            data = response.read()
+            t_end = time.monotonic()
+        except BaseException:
+            self.close()  # a request cut off leaves the connection in an unknown state
+            raise
         status = response.status
-    finally:
-        conn.close()
-    ok = status == 200 and b"message_stop" in data
-    return {"t0": t0, "status": status if ok or status != 200 else -1, "ttfb_s": t_headers - t0, "e2e_s": t_end - t0}
+        ok = status == 200 and b"message_stop" in data
+        return {"t0": t0, "status": status if ok or status != 200 else -1, "ttfb_s": t_headers - t0,
+                "e2e_s": t_end - t0}
+
+    def close(self) -> None:
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
 
 
 def run_turn(session: Session, worker: Worker, upstream: FakeUpstream, rows: list[dict[str, Any]],
-             base: dict[str, Any]) -> None:
-    """Send every request of the next turn (turn start, then one per tool_result) and finish the turn."""
+             base: dict[str, Any], timeout: float = 900) -> None:
+    """Send every request of the next turn (turn start, then one per tool_result) and finish the turn.
+
+    ``upstream_s`` is the time the fake upstream spent on the request and ``added_s`` the rest of the
+    driver's ``e2e_s``: the body's way to the proxy, the proxy's own work, and the relay back."""
     messages = session.next_messages()
     for j, (end, reply) in enumerate(synth.request_points(session.shape, session.turn, messages)):
         body = session.wire.body(messages[:end])
         request_id = f"t{session.turn}r{j}"
-        result = send(worker.port, body, request_id, reply)
+        result = worker.client.send(body, request_id, reply, timeout)
         up = upstream.take(request_id) or {}
+        upstream_s = up["t_done"] - up["t_recv"] if "t_done" in up else None
         rows.append({**base, "turn": session.turn, "kind": "turn_start" if j == 0 else "tool_loop", "req_in_turn": j,
                      "history_tokens": synth.tokens_of(len(body)), "body_mb": round(len(body) / 1e6, 3),
                      "upstream_bytes": up.get("bytes"), "upstream_tokens": up.get("tokens"),
                      "upstream_messages": up.get("messages"), "status": result["status"],
                      "e2e_s": round(result["e2e_s"], 4), "ttfb_s": round(result["ttfb_s"], 4),
                      "pre_forward_s": round(up["t_recv"] - result["t0"], 4) if up else None,
+                     "upstream_s": round(upstream_s, 6) if upstream_s is not None else None,
+                     "added_s": round(result["e2e_s"] - upstream_s, 6) if upstream_s is not None else None,
                      "load1": load_avg(), "_id": request_id})
     session.finish_turn()
 
@@ -237,6 +359,8 @@ def merge_stats(rows: list[dict[str, Any]], records: list[dict[str, Any]], maxrs
                     "page_out_s": round(rec.get("store_page_out", 0), 4),
                     "set_retained_s": round(rec.get("store_set_retained", 0), 4),
                     "set_epoch_s": round(rec.get("store_set_epoch", 0), 4),
+                    "page_file_reads": rec.get("store_page_read_n", 0),
+                    "proxy_cpu_s": round(rec.get("cpu", 0), 6),
                     "rotated": int(bool(rotation)), "rotation_reason": rotation.get("reason", ""),
                     "events": " ".join(names), "proxy_maxrss_mb": round(maxrss, 1)})
 
