@@ -408,8 +408,8 @@ def log_unwritable_message(error: BaseException) -> str:
     code = errno.errorcode.get(getattr(error, "errno", None) or 0, type(error).__name__)
     advice = (f"Free space on the disk that holds {HOME_HINT}." if code in DISK_FULL
               else f"Check the session directory under {HOME_HINT}.")
-    return (f"the session log could not be written ({code}), so `contexto stats` and the summary below miss "
-            f"what happened from here on. {advice}")
+    return (f"the session log could not be written ({code}), so `contexto stats` and the exit summary of "
+            f"`contexto run` miss what happened from here on. {advice}")
 
 
 class _Tally:

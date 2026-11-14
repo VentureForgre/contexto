@@ -91,6 +91,7 @@ from contexto.launcher import (
     Terminated,
     check_cloud_provider,
     check_mcp_values,
+    check_not_service,
     check_upstream,
     cli_not_found,
     mcp_payload,
@@ -555,6 +556,15 @@ def check_claude_upstream(ctx: Context) -> Check:
         return Check("claude-upstream", FAIL, f"Claude Code upstream from {place} is not an http(s) base URL: "
                      "`contexto run claude` refuses to start with it",
                      f"Fix {BASE_URL_KEY} there, or pass --upstream to contexto run", details)
+    try:  # D70: this home's `contexto serve`, which docs/serve.md has clients put in their settings
+        check_not_service(upstream, contexto_home(ctx.env), "contexto run claude")
+    except LaunchError:  # its message never holds the URL, which carries the service's token
+        return Check("claude-upstream", FAIL, f"Claude Code upstream from {place} is this Contexto home's "
+                     "`contexto serve`: `contexto run claude` refuses to start with it",
+                     "Pass --upstream URL to contexto run (for example --upstream https://api.anthropic.com), "
+                     "or use the client through `contexto serve`", details)
+    except (RuntimeError, OSError):  # no usable Contexto home: the store check reports it
+        pass
     summary = f"Claude Code upstream: {details['origin']} (from {place})"
     if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST: a project file's base URL was passed over
         return Check("claude-upstream", WARN, summary,
