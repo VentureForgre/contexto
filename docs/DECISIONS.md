@@ -2715,7 +2715,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     (`docs/README.md`) and a link check (`tests/test_docs_links.py`); the README went from 772 to
     185 lines. (2) PR #259 adds the recording (`docs/assets/demo.svg`, its transcript `demo.txt`),
     the request-size chart (`request-size-light.svg`, `request-size-dark.svg`) and the scripts that
-    make them (`spikes/readme/`). (3) This slice (PR #265) wrote the README (259 lines): the
+    make them (`spikes/readme/`). (3) This slice (PR #265) wrote the README (261 lines): the
     first screen, who it is for and not for, a diagram, the comparison, what the user sees when it works and when it
     fails, privacy, and a short limitations list. It moved the Results table and its cost paragraph
     to `docs/results.md` and the full limitations list to `docs/limitations.md`, word for word, and
