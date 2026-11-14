@@ -3412,6 +3412,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     was measured to send such a URL with the surrogate as U+FFFD (`/a%EF%BF%BD/v1/messages`):
     Contexto would have to guess at that rewrite for the request line and the session's affinity
     key, and a URL that holds one is a mistake in the file, so it stops and names the file.
+    Any other path character that is not ASCII (`é`, or U+FFFD from a UTF-8 file with a bad byte)
+    is percent-encoded as UTF-8, as Claude Code sends it (`/file/caf%EF%BF%BD/v1/messages`, measured);
+    before, every request with such a base URL failed with a 502 (review A of #294).
     How base URL resolution differs from before this slice, apart from the size bound: a UTF-8
     byte order mark, a UTF-16LE file with its mark (malformed ones included) and a UTF-8 file with
     a byte that is not UTF-8 are read, and their base URL is used, as Claude Code uses it

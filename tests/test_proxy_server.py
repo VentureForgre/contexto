@@ -2222,3 +2222,17 @@ def test_a_json_bodys_leading_whitespace_reaches_the_client_at_once(make_proxy, 
         LeadingWhitespace.gate.set()
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.parametrize("suffix, sent", [("/café", "/caf%C3%A9"), ("/caf�", "/caf%EF%BF%BD"),
+                                          ("/a%20b", "/a%20b"), ("/a b", "/a%20b")])
+def test_a_base_path_that_is_not_ascii_is_percent_encoded_as_claude_code_sends_it(make_proxy, upstream, suffix,
+                                                                                   sent):
+    """Review A of #294: a request line is ASCII, so a base URL whose path holds ``é`` or U+FFFD (a
+    settings file read with a bad UTF-8 byte) failed every request with a 502. Claude Code 2.1.322
+    sends such a path percent-encoded as UTF-8 (``/file/caf%EF%BF%BD/v1/messages``); so does the
+    proxy. An escape already in the URL is kept as it is."""
+    proxy, _ = make_proxy(upstream=upstream + suffix)
+    response, _ = call(proxy, "POST", "/v1/messages", json.dumps(REQUEST).encode(), AUTH)
+    assert response.status == 200
+    assert Upstream.received[0][1] == f"/base{sent}/v1/messages"
