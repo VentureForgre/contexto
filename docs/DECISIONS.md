@@ -3704,8 +3704,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
       Each pin was in its own conversation's store and in no other; across `/clear` the one process
       had one MCP server process, and the pin after `/clear` went to the new conversation's store.
       Resolve answered 4 found and 0 unknown, so no retry was needed. Same result on three runs.
-    - **Not confirmed.** No IDE extension, desktop app, Agent SDK program or GitHub Action was run
-      against the service; only `claude -p` was. A claude.ai (OAuth) login was not run. Linux was not
+    - **Not confirmed.** No IDE extension, desktop app, TypeScript Agent SDK program or GitHub Action
+      was run against the service. `claude -p` was, and so was a program on the Python
+      `claude-agent-sdk` 0.2.182 with the Claude Code it bundles (2.1.325), against a fake upstream
+      (`tests/test_serve_recipes.py`). A claude.ai (OAuth) login was not run. Linux was not
       run locally (CI runs the suite there, without `claude`). `claudecode/toolUseId` is reported from
       behaviour on one version and is not documented as stable; if a later version drops it, every
       call fails with the "no tool-use id" error. What Codex sends in `_meta` was not measured; the key
