@@ -10,23 +10,24 @@ moving the oldest turns to disk, word for word, and giving the model tools to se
   a summary. A request can still pass it, for example inside one very long tool loop (the
   requests the CLI sends while the model calls tools, before it answers you) or with an oversized
   prompt ([limitations](#known-limitations)).
-- **Recall no worse than full context on a scripted recall test.** In acceptance run 4, on
-  claude-haiku-5-5, Contexto answered 52 of 54 questions; the same model given the whole history
-  of about 426,000 tokens answered 47. That is one synthetic session and one seed, and the gap is
-  inside noise (p = 0.18). In a separate run on claude-opus-5-5 it was 53 against 54
-  ([results](docs/results.md)).
-- **Fewer input tokens, not always less money.** In acceptance run 3 Contexto sent 46.6% fewer input
-  tokens than a partly modeled plain Claude Code. Haiku 5.5 charges 5 times the rate on a prompt
-  over 100,000 tokens, and at its prices that cost 49.7% less. At flat prices such as Opus 5.5's
-  the same counts cost 66% more when plain Claude Code reads its prompt cache on every request.
-  With the two cache misses the measured plain requests had, Contexto costs less
-  ([results](docs/results.md#tokens-and-cost)).
+- **Recall no worse than full context on a scripted recall test.** In a scripted synthetic
+  session (acceptance run 4) on claude-haiku-5-5, Contexto answered 52 of 54 recall questions. The
+  same model given the whole history of about 426,000 tokens answered 47. That is one session and
+  one seed, and the gap is inside noise (p = 0.18). In a separate run on claude-opus-5-5, Contexto
+  answered 53 of 54 and full context 54 ([results](docs/results.md)).
+- **Fewer input tokens, not always less money.** In an earlier scripted session (acceptance run 3),
+  Contexto sent 46.6% fewer input tokens than plain Claude Code would have; the plain figures are
+  modeled from measured requests. At Haiku 5.5's prices, which are 5 times higher on a prompt over
+  100,000 tokens, Contexto cost 49.7% less. At flat prices such as Opus 5.5's, Contexto would cost
+  66% more if plain Claude Code read its prompt cache on every request, and less with the two cache
+  misses the measured plain requests had ([results](docs/results.md#tokens-and-cost)).
 
 ## Install
 
-Needs Python 3.12 or later and pipx on macOS or Linux, `claude` (Claude Code) or `codex` on `PATH`,
-and an Anthropic API key or a CLIProxyAPI upstream. A claude.ai Pro or Max login is not a supported
-setup, and Contexto does not detect one ([who it is not for](#who-it-is-for)).
+On macOS or Linux, Contexto needs Python 3.12 or later, pipx, `claude` (Claude Code) or `codex` on
+`PATH`, and either an Anthropic API key or a [CLIProxyAPI](docs/cliproxyapi.md) upstream (a
+separate local or hosted proxy in front of the vendor APIs). A claude.ai Pro or Max login is not a supported setup,
+Contexto does not detect one, and the risk to the account is yours ([who it is not for](#who-it-is-for)).
 
 ```sh
 pipx install \
@@ -48,8 +49,8 @@ contexto run --bound 120000 claude --model claude-haiku-5-5
 
 A synthetic session: a stub CLI and a fake upstream on `127.0.0.1`, no model, with one token counted
 per 3.5 bytes. `contexto`, its proxy, store and search are the real code ([transcript](docs/assets/demo.txt)).
-The small bound, `--headroom-floor`, `--no-version-check` and `--upstream` are there only for the
-stand-ins. The request shrinks at a history of about 50,000 tokens because Contexto moves old turns
+The small bound, `--headroom-floor`, `--upstream` (the fake upstream) and `--no-version-check`
+(skip the check of the stub's version) are there only for the stand-ins. The request shrinks at a history of about 50,000 tokens because Contexto moves old turns
 out before the next request could reach the bound.
 
 Contexto options go before `claude`. Everything after `claude` is passed to Claude Code unchanged.
@@ -73,12 +74,12 @@ Your upstream must be the vendor's API with an API key, or a CLIProxyAPI instanc
 - **A claude.ai Pro or Max login.** That is not a supported setup, and Contexto does not detect it.
   `/status` in Claude Code shows which account it uses. If it is a subscription, `contexto run
   claude` sends that subscription's traffic through a third-party local proxy that rewrites
-  requests. The [FAQ](docs/faq.md) describes logging a subscription in to CLIProxyAPI instead; the
-  same question applies there. Whether your plan allows either is for you to check against its
-  terms, and the risk to the account is yours.
-- **Sessions that end before the compaction point, when a large request is fine for you.** Apart
-  from Claude Code compacting a conversation of 200,000 tokens or more after about an hour idle,
-  they do not compact, with or without Contexto
+  requests. The [FAQ](docs/faq.md) describes logging a subscription in to CLIProxyAPI instead.
+  Whether your plan allows either route is for you to check against its terms, and the risk to the
+  account is yours.
+- **Sessions that end before the compaction point, when a large request is fine for you.** They do
+  not compact, with or without Contexto. The exception is Claude Code's default idle compaction: a
+  conversation of 200,000 tokens or more left idle for about an hour on the one-hour prompt cache
   ([comparison](#why-not-compaction-a-1m-window-or-the-memory-tool)).
 - **Work that needs every old detail in view at once.** The model sees a paged-out turn only when
   it runs a search for it.
