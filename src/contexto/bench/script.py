@@ -355,13 +355,18 @@ def decision_reply_ok(script: Script, turn_index: int, reply_text: str) -> bool:
     """Whether ``reply_text``, the assistant's reply to the ``decision`` turn at ``turn_index``, made
     the right decision.
 
-    The reply's last line that holds ``DECISION <label>:`` for the turn's label counts, anywhere in
-    the line and in any case, after markup (``*``, ``_``, backticks) is dropped and any Unicode
-    hyphen or dash is read as ``-``. It is right when the text after the colon names the candidate
-    the rule selects and neither of the other two (each candidate matched as a whole name, case
-    folded). So ``1. **DECISION** DX-1: nickel-1771 (lowest, 110)`` is right, and ``DECISION DX-1:
-    nickel-1771 or onyx-2203`` is not. A reply with no such line for this label is not. Raises
-    ``ValueError`` if that turn is not a decision turn.
+    The reply's last line that holds ``DECISION <label>`` for the turn's label, followed by ``:``,
+    ``=`` or ``-``, counts, anywhere in the line and in any case, after markup (``*``, ``_``,
+    backticks) is dropped and any Unicode hyphen or dash is read as ``-``; ``DECISION: <label>:`` is
+    read the same way. In the text after the separator, anything inside round, square or curly
+    brackets is ignored. The first candidate named in the rest (each candidate matched as a whole
+    name, case folded) is the decision. It is right when it is the candidate the rule selects, no
+    other candidate is named outside brackets, and no negation (``not``, ``no``, ``except``, ...)
+    comes before it. So ``1. **DECISION** DX-1: nickel-1771 (lowest, 110)`` and ``DECISION DX-1 =
+    nickel-1771 (beats onyx-2203 and basalt-1180)`` are right, and ``DECISION DX-1: nickel-1771 or
+    onyx-2203``, ``DECISION DX-1: not nickel-1771`` and ``DECISION DX-1: (nickel-1771)`` are not. A
+    reply with no such line for this label is not. Raises ``ValueError`` if that turn is not a
+    decision turn.
     """
     decision = next((d for d in script.decisions if d.turn == turn_index), None)
     if decision is None:
@@ -369,7 +374,7 @@ def decision_reply_ok(script: Script, turn_index: int, reply_text: str) -> bool:
     probe = next((p for p in script.probes if p.id == decision.probe), None)
     candidates = list(probe.subjects[1:]) if probe is not None else [decision.value]
     label = re.escape(decision.label.casefold())
-    line_rule = re.compile(r"(?<![a-z0-9])decision\s+" + label + r"(?![a-z0-9])\s*:(.*)$")
+    line_rule = re.compile(r"(?<![a-z0-9])decision(?:\s*:\s*|\s+)" + label + r"(?![a-z0-9-])\s*[:=-](.*)$")
     given = None
     for line in reply_text.translate(_HYPHENS).splitlines():
         match = line_rule.search(re.sub(r"[*_`]", "", line).casefold())
@@ -377,12 +382,28 @@ def decision_reply_ok(script: Script, turn_index: int, reply_text: str) -> bool:
             given = match.group(1)
     if given is None:
         return False
+    outside = given
+    while True:  # innermost brackets first, so nested ones go too
+        dropped = _BRACKETED.sub(" ", outside)
+        if dropped == outside:
+            break
+        outside = dropped
+    named = []
+    for candidate in candidates:
+        found = re.search(r"(?<![a-z0-9-])" + re.escape(candidate.casefold()) + r"(?![a-z0-9-])", outside)
+        if found:
+            named.append((found.start(), candidate))
+    if len(named) != 1:
+        return False
+    start, first = named[0]
+    before = re.findall(r"[a-z']+", outside[:start])
+    if any(w in _NEGATIONS or w.endswith("n't") for w in before):
+        return False
+    return first == decision.value or normalize(first) == normalize(decision.value)
 
-    def names(candidate: str) -> bool:
-        return re.search(r"(?<![a-z0-9-])" + re.escape(candidate.casefold()) + r"(?![a-z0-9-])", given) is not None
 
-    named = [c for c in candidates if names(c)]
-    return named == [decision.value] or (len(named) == 1 and normalize(named[0]) == normalize(decision.value))
+_BRACKETED = re.compile(r"\([^()]*\)|\[[^\[\]]*\]|\{[^{}]*\}")
+_NEGATIONS = frozenset(("not", "no", "never", "nor", "neither", "except", "excluding", "without", "other"))
 
 
 # Sizes
