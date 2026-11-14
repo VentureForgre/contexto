@@ -24,9 +24,12 @@ It listens on `127.0.0.1:7837` and prints one line on stderr once it is listenin
 contexto serve: listening on 127.0.0.1:7837 (bound 150,000, upstream flag)
 ```
 
-It serves until it gets SIGINT (Ctrl+C), SIGTERM or SIGHUP. On any of them it stops accepting
-connections, waits up to 2 seconds for requests in flight, closes every session and exits 0. A
-second signal ends that wait. Started under `nohup`, it keeps ignoring SIGHUP, so it outlives its
+It serves until it gets SIGINT (Ctrl+C), SIGTERM or SIGHUP. On any of them it stops routing (a
+request that arrives on a connection already open gets a 503, "contexto serve is stopping", and
+that connection is closed), removes `serve.json`, closes its port, waits up to 2 seconds for the
+requests already in flight, closes every session and exits 0. A second signal ends that wait.
+Because `serve.json` goes before the port, `--status` and the MCP server never send the token to a
+process that binds the port while the service is still finishing. Started under `nohup`, it keeps ignoring SIGHUP, so it outlives its
 terminal.
 
 One service runs per Contexto home. A second `contexto serve` on the same `$CONTEXTO_HOME` is
@@ -187,9 +190,10 @@ To see which store a conversation is in, `contexto sessions list` shows them, an
 At most `--max-sessions` sessions are open at once. When one more is needed, the least recently
 used session is closed; a session idle for `--idle-minutes` is closed too. Closing loses nothing: a
 session's state is on disk, and its next request reopens it. A session with a request in flight is
-never closed. If every open session is busy, a request of one more session waits up to 0.3 seconds
-for one to finish (a client has its whole response a moment before the service has finished with
-it). If none does, the request is forwarded unchanged (so its prompt is not bounded), `serve.log`
+never closed. If every open session is busy, a request of one more session waits for one to finish
+until 0.3 seconds after it arrived (a client has its whole response a moment before the service has
+finished with it); requests of one conversation that arrive together share that wait rather than
+take turns at it. If none finishes, the request is forwarded unchanged (so its prompt is not bounded), `serve.log`
 records `session_cap`, and stderr says to raise `--max-sessions`.
 
 A session store that cannot be opened leaves no new directory behind. The failure is remembered
@@ -242,11 +246,15 @@ Two paths under the token prefix are answered by the service and never forwarded
 
 The service remembers the newest 8,192 tool-use ids. It learns the id of each client tool call
 while it relays the response, before it writes the bytes that carry the call to the client:
-whether the response is a stream it holds, a stream with a `Content-Length` (`hold_skipped` in the
-session log), or a JSON body, and whether or not it carries `usage`. So the id resolves before the
-client can run the call, with one exception: a response the upstream content-encoded although the
-proxy asked for identity is read from a decoded copy, which can trail what the client has decoded.
-The MCP server covers that gap by asking again after a 404, five times within 2 seconds. A response
+whether the response is a stream it holds or a stream with a `Content-Length` (`hold_skipped` in
+the session log), and whether or not it carries `usage`. A JSON body is read only once it has ended,
+so the service holds back what completes it (its last chunk, and any whitespace after that) until
+it has the ids, with a `Content-Length` or chunked alike. So the id resolves before the client can
+run the call, with one exception: a response the upstream content-encoded although the proxy asked
+for identity is read from a decoded copy, which can trail what the client has decoded. The MCP
+server covers that gap by asking again after a 404: six tries in all, the last one started within 2
+seconds of the first. Each try has 2 seconds in total to connect and read the whole answer, so a
+tool call waits at most 4 seconds for the service. A response
 the service cannot read (an encoding it cannot decode, a JSON body over its limit) registers
 nothing, and neither does the response to a request forwarded unrouted; those calls resolve as
 unknown.
@@ -265,7 +273,7 @@ All under `$CONTEXTO_HOME`, all mode 0600:
 |---|---|
 | `serve.token` | The token: one line of ASCII. |
 | `serve.lock` | Empty. The service holds an exclusive lock on it from before it binds its port until it exits, however it exits. "Running" means this lock is held: `--status`, `--print-settings`, `--rotate-token` and the MCP server decide by it, and send nothing when it is free. |
-| `serve.json` | `{"port": N, "pid": N}`, written once the service listens and removed on a clean shutdown. A killed service leaves it behind; it is believed only while the lock is held, and the next service removes it before it binds. It is read only if it is the user's own regular file with no group or other permission bit. |
+| `serve.json` | `{"port": N, "pid": N}`, written once the service listens and removed before it closes its port. A killed service leaves it behind; it is believed only while the lock is held, and the next service removes it before it binds. It is read only if it is the user's own regular file with no group or other permission bit. |
 | `serve.log`, `serve.log.1` | The service log: JSON lines with event names, reasons, counts, request paths without the token, and status codes. Never header values, request or response bodies, the token, or the upstream URL. At 5 MB `serve.log` is renamed to `serve.log.1`, replacing the last one. |
 | `sessions/<id>/` | One session store per conversation, the same files as under `contexto run`. |
 
@@ -284,9 +292,11 @@ are counted on the next line.
 
 A connection that has not passed the token check has 5 seconds in total to send its request head,
 and to send the body of a refused request, which is read and dropped; then the service stops
-reading from it. At most 64 such connections are open at once, and one more is closed at once. A
-connection that passed the check is outside both limits for the rest of its life, so a long
-streamed response is not cut.
+reading from it. At most 64 such connections are open at once. One more takes the place of the
+oldest of them whose request line has not shown the token, which is closed unanswered; a client
+sends its request line as soon as it connects, and the service checks it for the token without
+reading it, so a connection that carries the token is not the one closed. A connection that passed
+the check is outside both limits for the rest of its life, so a long streamed response is not cut.
 
 ## Guards
 
@@ -316,9 +326,16 @@ streamed response is not cut.
   process takes port 7837, a client that still has the URL sends that process the token, its
   requests and its API credentials. Stop clients before you stop the service for long, or rotate
   the token afterwards.
-- Another local user, without the token, can hold up to 64 connections open for 5 seconds each and
-  so delay new connections for up to that long. They cannot read, spend or write through the
-  service.
+- Another local user, without the token, cannot keep clients out by holding connections open: a
+  process that held 64 silent connections and reopened each one the service closed got 40 of 40 of
+  a token holder's health requests answered (median 0.4 ms; macOS arm64, 2026-11-13). Opening
+  connections as fast as it can still costs clients attempts: the system's listen queue (128 on
+  macOS) overflows and resets some new connections before the service sees them, and a client whose
+  process does not send its request line before 64 newer connections arrive can be closed to make
+  room. Measured with a health request every 0.4 s for 16 s: one flooding process (about 6,000
+  connections a second), 40 of 40 answered; two (about 8,000 a second), 30 of 40; six (about 21,000
+  a second), 10 of 40. A client sees a reset connection and can retry. They cannot read, spend or
+  write through the service.
 - A new Claude Code session id is a new Contexto session. `/clear` starts a new session id, so
   what was paged out or pinned before it stays in the earlier store (`contexto search --session
   <id>`, `contexto state --session <id>`), where under `contexto run` the launch's one store keeps
@@ -336,5 +353,4 @@ streamed response is not cut.
 
 ## Recipes
 
-Step-by-step setups for each client (the IDE extensions, the desktop app, the Agent SDK, the
-GitHub Action, CI) are in a separate document.
+Step-by-step setups for each client are added separately.

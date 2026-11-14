@@ -98,8 +98,8 @@ client (started by anything)           mcp server (contexto mcp --serve, started
   `Origin` is present; any other request gets one 403 body, after its body is read and dropped. The
   prefix is then removed: the path forwarded upstream, every log entry and every error is the path
   without the token, and the token is never logged, printed, put on a command line, or put in an
-  error message. A request header whose value holds the token is dropped before forwarding (logged
-  as a count). Measured on Claude Code 2.1.322
+  error message. A request header whose name or value holds the token is dropped before forwarding
+  (logged as a count). Measured on Claude Code 2.1.322
   (`docs/research/D70-serve-probes.md`): it keeps a base URL's path prefix on every request, sends
   `Host: 127.0.0.1:<port>` or `localhost:<port>`, and never `Origin`.
 - Before the token check. Everything sent before a request has passed the checks is that one 403,
@@ -107,8 +107,11 @@ client (started by anything)           mcp server (contexto mcp --serve, started
   `100 Continue`). Every refusal and every failure before the check is logged through one limiter,
   by reason only, at most one line a second with a count of the rest. A connection that has not
   passed the check has 5 s in total for its request head and a refused body, after which its read
-  side is shut; at most 64 such connections are open, and one more is closed at once. A connection
-  that passed is outside both limits.
+  side is shut; at most 64 such connections are open, and one more takes the place of the oldest
+  whose request line has not shown the token (checked with a peek, by the handler before it reads
+  and by the accept thread before it closes one, so a token holder's connection is not the one
+  closed; when all 64 have shown it, the new connection is closed). A connection that passed is
+  outside both limits.
 - Routing. The id is the `X-Claude-Code-Session-Id` header (a plain id, at most 128 characters),
   else `session_id` in `metadata.user_id`. A request with no id, an id that is not a plain id, or a
   header and body that differ (`session_id_mismatch`) is forwarded unchanged through the identity
@@ -134,35 +137,46 @@ client (started by anything)           mcp server (contexto mcp --serve, started
   the least recently used is closed to make room. Closing flushes the recorded ids, runs the
   missing-tools report, logs, and releases the store; the next request reopens the session and the
   engine resumes from its epoch record (rule 16). A session with a request in flight is never
-  closed; when every open session has one, a request of another id waits up to 0.3 s for one to
-  finish and is then forwarded unchanged and logged (`session_cap`). The engine options (`--bound`, `--allow-large-bound`,
+  closed; when every open session has one, a request of another id waits for one to finish until
+  0.3 s after it arrived (in total, however many requests of its id were ahead of it) and is then
+  forwarded unchanged and logged (`session_cap`). The engine options (`--bound`, `--allow-large-bound`,
   `--window-fraction`, `--headroom-floor`, `--observe-thinking`) are validated as for `contexto
   run` and apply to every session.
+- Shutdown (SIGINT, SIGTERM, SIGHUP). Routing stops first: a request that arrives on a connection
+  already open gets a 503 and the connection is closed, and nothing opens or creates a session.
+  `serve.json` is removed, then the port is closed, then the requests already in flight have up to
+  2 s (a second signal ends the wait); every session is closed and the lock released. A store a
+  request made as the shutdown began is removed again: no Claude Code id leads to it yet.
 - Local endpoints, under the token prefix, JSON, bodies at most 64 KiB: `GET /contexto/health`
   gives `{"ok": true, "version", "port", "sessions", "resolve": {"found", "unknown"}}`; `POST
   /contexto/resolve` with `{"tool_use_id"}` gives `{"session": <Contexto session id>}`, 404
   `{"error": "unknown_tool_use"}`, or 400. The shapes, file names and paths are defined once, in
   `contexto.servecontract`. The service keeps the newest 8,192 ids of client tool calls. The
   proxy's `on_tool_calls` hook hands over each id as soon as the proxy has read it off the
-  response and before it writes the bytes that carry it, whether the stream is held, relayed with
-  a `Content-Length` (`hold_skipped`), or a JSON body, with or without `usage`: an id resolves
+  response and before it writes the bytes that carry it, whether the stream is held or relayed
+  with a `Content-Length` (`hold_skipped`), with or without `usage`. A JSON body is read when it has
+  ended, so the proxy holds back what completes it (its last chunk and any whitespace after it), with
+  a `Content-Length` or chunked, and writes that after the ids are handed over: an id resolves
   before the client can act on the call whenever the response is not content-encoded. For a
   response upstream encoded although the proxy asked for identity, the id is read from a decoded
-  side copy that can trail the client's decoder; the MCP server's retry (five tries within 2 s
-  after a 404) covers that. An id two sessions registered is ambiguous and resolves as unknown
+  side copy that can trail the client's decoder; the MCP server's retry (after a 404, six tries in
+  all, the last started within 2 s of the first; each try has 2 s in total, so a call ends within
+  4 s) covers that. An id two sessions registered is ambiguous and resolves as unknown
   (`tool_use_ambiguous`, a count). Claude Code 2.1.322 gives an MCP server the `tool_use` id of
   each call (`_meta["claudecode/toolUseId"]`) and nothing else that names the session.
 - MCP server. `contexto mcp --serve` (exactly one of `--session S` and `--serve`) has no session:
   it lists the five tools with no service running, and for each `tools/call` resolves the call's
   tool-use id through the service, then opens that existing session (never one it creates; the
-  8 most recently used stay open) and runs the tool code of `--session` mode against it. Any step
+  8 most recently used stay open; the store is opened with `create=False`, so a session removed or
+  pruned while it is being opened is refused, not made again) and runs the tool code of `--session`
+  mode against it. Any step
   that fails is a tool error and nothing is read or written; there is no fallback session. It
   writes the store's `tools/list` record at a store's first resolved call.
 - Files under `$CONTEXTO_HOME`, 0600: `serve.token`; `serve.lock` (empty; the service holds an
   exclusive `flock` on it from before it binds until it exits, and "running" means that lock is
-  held); `serve.json` (`{"port", "pid"}`; a record left by a killed service is removed once the
-  lock is taken, the new one written once listening and removed on a clean shutdown; read only as
-  the user's own 0600 regular file and only while the lock is held); `serve.log` (content-free JSON
+  held); `serve.json` (`{"port", "pid"}`; a record left by a killed service is removed as soon as the
+  lock is taken, the new one written once listening and removed before the port is closed; read
+  only as the user's own 0600 regular file and only while the lock is held); `serve.log` (content-free JSON
   lines, renamed once to `serve.log.1` at 5 MB).
 - Guards. A taken port is one line and exit 1. A second service on the same home is refused
   whatever its port, naming the one that runs. `--status`, `--print-settings`, `--rotate-token` and

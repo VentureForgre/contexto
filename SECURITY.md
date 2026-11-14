@@ -39,13 +39,15 @@ In scope:
   library version, and no `100 Continue`. Every refusal and every failure before the check is
   logged by its reason only, through one limit of one line a second with a count of the rest. A
   connection that has not passed the check has 5 seconds in total for its request head and for a
-  refused body, and at most 64 such connections are open; one more is closed at once. The service
-  removes the token before it forwards or logs a request, drops a request header whose value holds
-  the token, and refuses to start if the token file is a symlink, is not a regular file, or has a
-  group or other permission bit set. `contexto serve --rotate-token` replaces the token. One
-  service runs per `$CONTEXTO_HOME`: it holds an exclusive lock on `serve.lock` while it runs, and
-  the commands that talk to it send the token only while that lock is held, to the port of a
-  `serve.json` that is the user's own 0600 file. `serve.log` holds event names, reasons, counts,
+  refused body, and at most 64 such connections are open; one more takes the place of the oldest
+  whose request line has not shown the token. The service removes the token before it forwards or
+  logs a request, drops a request header whose name or value holds the token, and refuses to start
+  if the token file is a symlink, is not a regular file, or has a group or other permission bit
+  set. `contexto serve --rotate-token` replaces the token. One service runs per `$CONTEXTO_HOME`: it
+  holds an exclusive lock on `serve.lock` while it runs, and the commands that talk to it send the
+  token only while that lock is held, to the port of a `serve.json` that is the user's own 0600
+  file. The service writes `serve.json` once its port is listening and removes it before it closes
+  the port. `serve.log` holds event names, reasons, counts,
   request paths without the token, and status codes, never header values, bodies, tool-use ids,
   the token, or the upstream URL. A client-supplied session id selects a store only through the ids
   recorded in the stores and never names a directory. Claude Code session ids are routing keys, not
@@ -57,9 +59,12 @@ In scope:
   listening off loopback are in scope. The token is as private as the files it is copied into: a
   settings file that holds the base URL holds the token, so keep it at mode 0600, and if a
   conversation reads such a file, the token reaches the model provider inside that conversation;
-  rotate it then. Residual: another local user, without the token, can hold connections open and
-  delay new connections for up to 5 seconds; they cannot read, spend or write through the
-  service.
+  rotate it then. Residual: another local user, without the token, who opens connections as fast
+  as it can overflows the system's listen queue, and some of a client's connection attempts are
+  reset: measured on macOS with a health request every 0.4 s, 30 of 40 were answered against two
+  such processes (about 8,000 connections a second) and 10 of 40 against six (about 21,000);
+  holding 64 connections open and reopening each one closed refused none (40 of 40). They cannot
+  read, spend or write through the service.
 - **The session store** under `$CONTEXTO_HOME` (default `~/.contexto`). Every directory Contexto
   creates there is mode 0700 and every file 0600, whatever the umask; an existing
   `$CONTEXTO_HOME` keeps its own mode, and `sessions/` is narrowed to 0700. The temporary

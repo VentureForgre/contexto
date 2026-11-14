@@ -2723,7 +2723,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     settings). The raw first segment is compared in constant time, with no decoding and no path
     normalisation, after `Host` is checked to name `127.0.0.1` or `localhost` and no `Origin` is
     present, and the prefix is removed before anything is forwarded or logged. A request header
-    whose value holds the token is dropped before forwarding.
+    whose name or value holds the token is dropped before forwarding.
   - **Before the token check.** Everything sent before a request passes is one 403, byte for byte:
     `send_error` and `handle_expect_100` are replaced in the service's handler, so a request
     `http.server` cannot parse gets no HTML page echoing its request line and no `Server:
@@ -2731,9 +2731,20 @@ the owner's delegation. Open decisions are listed at the end with the options an
     failure before the check (a versionless request line included) is logged through one limiter,
     by reason, at most a line a second with a count. A connection that has not passed has 5 s in
     total for its head and a refused body (a deadline thread shuts its read side), and at most 64
-    such connections are open; one more is closed at once. A connection that passed is outside both
-    limits, so a long stream is not cut. Residual: another local user without the token can delay
-    new connections for up to 5 s, and cannot read, spend or write.
+    such connections are open. One more takes the place of the oldest whose request line has not
+    shown the token, which is shut; whether it has is read with a peek, by the handler before it
+    reads anything and by the accept thread before it shuts one, so a token holder's connection is
+    never taken for a silent one. The first version closed the new connection at the cap, so a
+    process without the token that held 64 silent connections and reopened each one as it was closed
+    kept every client out (0 of 40 health requests answered in 16 s); with the oldest closed instead
+    it got 40 of 40 answered. A connection that passed is outside both limits, so a long stream is
+    not cut. Residual (measured 2026-11-13, macOS arm64, a health request every 0.4 s for 16 s
+    against `contexto serve` with the flood in other processes): a process that opens connections as
+    fast as it can overflows the listen queue (128 on macOS), so some connection attempts are reset
+    before the service sees them, and a client whose process sends its request line only after 64
+    newer connections arrived can be closed to make room. One such process (about 6,000 connections a
+    second) left 40 of 40 answered, two (about 8,000) 30 of 40, six (about 21,000) 10 of 40; at the
+    first version the same floods left 0 or 1 of 40. It cannot read, spend or write.
   - **Routing.** By Claude Code's session id: the `X-Claude-Code-Session-Id` header (on every POST),
     else `metadata.user_id`'s `session_id` (on `/v1/messages` only). A request with no usable id, or
     whose header and body disagree, is forwarded unchanged and never reaches a store; a
@@ -2758,22 +2769,36 @@ the owner's delegation. Open decisions are listed at the end with the options an
     and a new store there would lose the conversation's pages.
   - **Bounded.** At most `--max-sessions` (64) sessions open, closed after `--idle-minutes` (60)
     idle or to make room, never with a request in flight; a reopened session resumes from its
-    epoch record (rule 16). When every open session is busy, a request of another session waits up
-    to 0.3 s for one to finish, then is forwarded unchanged and logged (`session_cap`): a client has
+    epoch record (rule 16). When every open session is busy, a request of another session waits for
+    one to finish until 0.3 s after it arrived (in total: six first requests of one id at once had
+    waited 0.31 to 1.83 s when each waited its own 0.3 s behind the one before it), then is
+    forwarded unchanged and logged (`session_cap`): a client has
     its whole response a moment before the handler returns its session's lease, and without the
     wait a request in that window went unbounded; queueing longer behind a stranger's request would
     stall a client for as long as that request runs. A store that cannot be opened leaves no new
     directory and is not tried again for 5 s for that id.
+  - **Shutdown.** On SIGINT, SIGTERM or SIGHUP routing stops first: a request that arrives on a
+    connection already open gets a 503 and the connection is closed, and nothing opens or creates a
+    session. Then `serve.json` is removed and the port closed, the requests already in flight get up
+    to 2 s, every session is closed and the lock released. The second version kept routing requests
+    on kept-alive connections during the drain, so under load the drain always ran out, sessions
+    were closed with requests in flight, and a store made then was left without the metadata any
+    conversation could reach it by; such a store is now removed again.
   - **Tool calls.** Claude Code gives an MCP server the model's `tool_use` id with each call
     (`_meta["claudecode/toolUseId"]`, every call in every run) and nothing else that names the
     session; `CLAUDE_CODE_SESSION_ID` in the server's environment is set once at spawn and is
     stale after `/clear`. So the service keeps the newest 8,192 tool-use ids with their sessions
     and answers `POST /contexto/resolve`. The ids are registered through a proxy hook,
     `on_tool_calls`, called with each id as soon as the proxy has read it off the response and
-    before it writes the bytes that carry it: a held stream, a stream with a `Content-Length`
-    (`hold_skipped`) and a JSON body alike, with or without `usage` (tested against a gated upstream
-    in each framing). The first version registered ids in the usage callback, which missed a
-    response without `usage` and ran after the body when the hold was skipped. Where the order
+    before it writes the bytes that carry it: a held stream and a stream with a `Content-Length`
+    (`hold_skipped`) alike, with or without `usage`. A JSON body is read only once it has ended, so
+    the proxy holds back what completes it (its last chunk and any whitespace after it), with a
+    `Content-Length` or chunked, until the ids are handed over. The test is a client that reads the
+    response as a real one does and asks resolve once, the moment it has the whole call, against an
+    upstream slow to end the response; with registration delayed by 0.2 s it fails in all eight
+    framings and without the delay passes. The first version registered ids in the usage callback,
+    which missed a response without `usage` and ran after the body when the hold was skipped; the
+    second wrote a chunked JSON body whole before its ids were read. Where the order
     cannot be promised is a response upstream content-encoded although the proxy asked for
     identity: the id is read from a decoded side copy, which can trail the client's own decoder.
     The MCP server's retry covers that. An id two sessions registered is ambiguous and resolves as
@@ -2789,7 +2814,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **One service per home: a lock, not a pid.** The service holds an exclusive `flock` on
     `$CONTEXTO_HOME/serve.lock` from before it binds until it exits; the kernel drops it however the
     process ends. A second service on the same home is refused whatever its port. A `serve.json`
-    left by a killed service is removed once the lock is taken. `--status`, `--print-settings`,
+    left by a killed service is removed as soon as the lock is taken; the service's own is written
+    once its port listens and removed before it closes the port, so while the lock is held a record
+    names a port only while the service listens on it. The second version closed the port first and
+    removed the record after the 2 s drain, so a process that bound the port then was sent the token
+    by `--status` and by the MCP server. `--status`, `--print-settings`,
     `--rotate-token` and the MCP server decide "running" by the lock, and read `serve.json` only as
     the user's own 0600 regular file: with the lock free nothing is sent, so a stale record naming a
     reused pid and a port another program took gets no request and no token. The first version
@@ -2816,8 +2845,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
     and asks `POST /<token>/contexto/resolve` on `127.0.0.1`; the session in the answer must be a
     valid session id naming an existing session directory that is not a symlink, and the existing
     tool code then runs against that store, so replies, recall budgets and the session log are
-    those of `--session` mode. A 404 is asked again five times within 2 s (see "Tool calls");
-    nothing else is retried.
+    those of `--session` mode. The store is opened with `create=False`, so a session removed after
+    that check, or pruned while the open waits for its lock, is refused rather than made again. After
+    a 404 the call is asked again: six tries in all, the last started within 2 s of the first (see
+    "Tool calls"); nothing else is retried. Each try has 2 s in total to connect and read the whole
+    answer (its socket is shut at that deadline), so a call ends within 4 s however slowly an
+    answer arrives.
   - **It fails closed.** A call whose session cannot be established gets a tool error and no store
     is opened, read or written. There is no fallback to another session, to
     `CLAUDE_CODE_SESSION_ID`, or to the newest session: a pin written to another conversation's
@@ -2893,7 +2926,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     interactive session, `--continue`, background subagents, interactive subagents. A provider
     switch set only in organization-managed settings may not be named in the "unknown id" error.
     Tool calls are answered one at a time, so a call waiting out its retries holds the others of its
-    turn for up to 1.9 s. With 8 stores open the MCP server's search text can reach 8 times the
+    turn for up to 4 s. With 8 stores open the MCP server's search text can reach 8 times the
     per-store budget. A content-encoded upstream response was tested with gzip and sync flushes
     only.
 
