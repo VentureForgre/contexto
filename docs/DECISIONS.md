@@ -2704,6 +2704,89 @@ the owner's delegation. Open decisions are listed at the end with the options an
   so the next release follows v0.5.24. A backup of each release's notes, assets and tags is kept
   outside the repository. Old commits, pull request diffs and pull request comments still hold the
   hostname (D42).
+- **D68. The README is rewritten so a stranger can act on it in 30 seconds.** Claude, 2026-11-12,
+  under D0; docs only, no code and no contract rule changes. An audit of the README on main
+  (7d59e9b) found 772 lines, the headline number (52 of 54) first at line 57, the install command at
+  line 76, the statement that a subscription login is not a supported setup at line 511 (in the
+  FAQ), no latency figure, and no comparison with compaction, a 1M window or Claude Code's memory.
+  The README now opens with what Contexto does, three numbers with their limits, the install
+  command, `contexto run claude` and a recording, and says near the top who it is not for.
+  - **Three slices.** (1) PR #254 moved the reference sections into `docs/*.md` with an index
+    (`docs/README.md`) and a link check (`tests/test_docs_links.py`); the README went from 772 to
+    185 lines. (2) PR #259 adds the recording (`docs/assets/demo.svg`, its transcript `demo.txt`),
+    the request-size chart (`request-size-light.svg`, `request-size-dark.svg`) and the scripts that
+    make them (`spikes/readme/`). (3) This slice (PR #265) wrote the README (263 lines): the
+    first screen, who it is for and not for, a diagram, the comparison, what the user sees when it works and when it
+    fails, privacy, and a short limitations list. It moved the Results table and its cost paragraph
+    to `docs/results.md` and the full limitations list to `docs/limitations.md`, word for word, and
+    added the caveats below to both.
+  - **Claims policy.** A number appears with its limits (one session, one seed, measured or
+    modeled) and cites a record; nothing is shown that the tool did not print.
+    - Recall is presented as "no worse than full context on a scripted recall test", never as
+      better. In run #4 Contexto missed 2 probes and the baseline 7, none in common
+      (`docs/research/M2-acceptance-run4.md`, "Misses (ids only)"). The exact McNemar test on the 9
+      discordant probes gives p = 2 x (C(9,0) + C(9,1) + C(9,2)) / 2^9 = 2 x (1 + 9 + 36) / 512 =
+      0.18. On claude-opus-5-5 the baseline led, 54 against 53.
+    - Fewer input tokens are stated as fact (3,725,391 measured against 6,972,335, 46.6%). Cost is
+      stated as depending on the model and on cache hits. Run #3's cache-class counts
+      (`docs/research/M2-usage-savings-run3.md`, "By cache class": Contexto 88 uncached, 2,677,349
+      cache read, 1,047,954 cache write, 22,693 output; plain 48, 6,533,929, 438,358, 12,836) at
+      Haiku 5.5 base rates with no step cost $0.169 against $0.127 (34% more), and at Opus 5.5 rates
+      ($4 input, $20 output, $0.20 cache read, $5 cache write; `docs/research/M0-cost-model.md`,
+      "Prices and cache rules") $6.23 against $3.76 (66% more). The 49.7% saving exists because
+      Haiku 5.5 charges 5 times the rate over 100,000 tokens. With the baseline arm's two measured
+      cache misses, plain would cost more in both flat rows. The arithmetic is now in the record
+      ("The same token counts at other prices"), so the README cites a record, not its own sum.
+    - Claude Code's behaviour is quoted from its docs as fetched on 2026-11-12 (model-config,
+      context-window, memory, settings-reference). The README says that a session under about
+      967,000 tokens does not compact with or without Contexto, and names the one exception the
+      docs give: a conversation of 200,000 tokens or more left idle for about an hour on the
+      one-hour prompt cache is compacted by default (`idleCompaction`).
+  - **Calls made without the owner.**
+    - The `## Troubleshooting` heading stays in the README, because the program prints "See README,
+      Troubleshooting." (`toolcheck.py`) and "see README, 'contexto run'" (`launcher.py`), and
+      nothing under `src/` changes in a docs slice. The section points to
+      `docs/troubleshooting.md` and `docs/run-reference.md#contexto-run`.
+    - The link check is a pytest in the existing suite, not a new workflow.
+    - The diagram is Mermaid, which GitHub renders in both themes with no image file to keep.
+    - The chart is drawn from run #3's per-request CSV, the only run with a modeled full-history
+      size for every request. Its full-history line is the record's plain-run shape: turns 1 to 18
+      modeled, and for the six probe turns the baseline arm's measured `count_tokens` (435,590 to
+      438,406). The CSV's own probe-turn column, the "same request points" series that peaks at
+      493,902, is not plotted: the record says it overstates plain, because it carries the search
+      tool loops that only Contexto makes. Review of PR #259 found this.
+    - The recording is an animated SVG drawn by `spikes/readme/termsvg.py`, every row made only of
+      `<tspan>` pieces: WebKit (Safari, every iOS browser) stretched bare text beside a `<tspan>` to
+      the row's whole `textLength` and garbled the sizes. Review of PR #259 found this.
+    - The Python badge is static (3.12 to 3.15, from the classifiers and the CI matrix), because the
+      package is not on PyPI. The other two badges are CI on main and the licence.
+    - The README no longer has a `#results` anchor; `docs/faq.md` links `docs/results.md`. The
+      "What it includes" list left the README; each item is in a guide.
+    - The heading "Why not compaction, a 1M window or the memory tool?" keeps the words of the
+      owner's brief; the paragraph under it describes CLAUDE.md, auto memory and the API's memory
+      tool, each from its own docs page.
+    - The README is about 250 lines, not 200. Review asked for the subscription caveat before the
+      install command, one rule for who it is for, a plainer cost line, named runs, a definition of
+      a tool loop and a latency table; each added lines, and none was cut to reach a number.
+    - "Window budget" stays defined in the README although the README uses it once, because
+      `docs/mcp-tools.md` points to that definition.
+    - `docs/limitations.md` has five entries the moved list did not have (tool loops, recall is a
+      search, cost, latency, subscription logins), and the FAQ's cost answer says that cost depends
+      on the model.
+    - The recall bullet keeps the title "no worse than full context on a scripted recall test",
+      the owner's wording. A stranger-read review asked for "close to full context", because the
+      Opus run had full context one question ahead (54 against 53). The headline run had Contexto
+      ahead (52 against 47), and the Opus run is within the test's pass rule (within 2 overall, no
+      category more than 1 below), which the bullet now says.
+  - **Repository About box**, applied with `gh repo edit` on 2026-11-14, before this slice merged,
+    once both reviewers had approved the README it matches; no other repository setting changed.
+    Old values, to restore from: description "Long-running AI sessions and context management",
+    homepage empty, no topics. New description: "Local proxy that keeps each Claude Code and Codex
+    request under a fixed token bound, so the CLI does not reach its compaction point: old turns go
+    to disk word for word and the model searches them back." (Review changed "sessions" to "each
+    request": only each request is bounded.) New topics: `claude-code`, `codex`, `context-window`,
+    `compaction`, `context-management`, `llm-proxy`, `mcp`, `ai-agents`, `developer-tools`,
+    `python`, `anthropic`, `llm`.
 - **D70. `contexto serve`, gateway hint headers, and a cloud-provider guard.** Claude, 2026-11-12,
   under D0; contract change (Stack, Upstream resolution, main selection, the missing-tools and
   session-start checks, the `contexto run claude` checks). This entry is written in slices; the

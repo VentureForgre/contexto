@@ -76,7 +76,8 @@ text. A mistyped `--session` is an error, never a new session.
 - `contexto search WORDS [--session ID] [--limit N]`: the paged-out turns holding every word, best
   match first (at most 10 unless `--limit`), with the same search the MCP `contexto_search` tool
   uses. Each hit shows its page id, turn and opening text, then its matching lines, each with the
-  offset to pass to `contexto recall PAGE_ID --offset N`. It searches paged-out turns only. No match
+  offset to pass to `contexto recall PAGE_ID --offset N`. It searches paged-out turns only. When no
+  turn holds every word it prints approximate matches with a note ([search.md](search.md)). No match
   is a success (exit 0).
 - `contexto recall PAGE_ID [--session ID] [--offset N]`: a paged-out turn as plain text, thinking
   omitted, exactly as the MCP `contexto_recall` tool renders it. Page ids (`pg_` and 16 hex digits,

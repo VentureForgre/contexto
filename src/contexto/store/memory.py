@@ -30,7 +30,7 @@ from contexto.store.ledger import MemoryLedger
 from contexto.store.pages import build_page, current_stub, render_index, same_content, search_entry
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
-from contexto.store.search import rank
+from contexto.store.search import Approximate, SearchEntry, rank, rank_approximate
 
 
 class MemoryStore(LedgerOps):
@@ -180,8 +180,8 @@ class MemoryStore(LedgerOps):
     def page_ids(self) -> list[str]:
         return [p["id"] for p in sorted(self.pages.values(), key=lambda p: (p["turn"], p["id"]), reverse=True)]
 
-    def search(self, query: str) -> list[str]:
-        """As ``SessionStore.search``; each page's searchable text is kept while the page object stays (D34)."""
+    def _search_entries(self) -> list[SearchEntry]:
+        """Each page's searchable text, kept while the page object stays (D34)."""
         texts = self.__dict__.setdefault("_search_texts", {})
         entries = []
         for page in self._pages():
@@ -189,7 +189,15 @@ class MemoryStore(LedgerOps):
             if kept is None or kept[0] is not self.pages.get(page["id"]):
                 kept = texts[page["id"]] = (self.pages.get(page["id"]), search_entry(page))
             entries.append(kept[1])
-        return rank(entries, query)
+        return entries
+
+    def search(self, query: str) -> list[str]:
+        """As ``SessionStore.search``."""
+        return rank(self._search_entries(), query)
+
+    def search_approximate(self, query: str) -> Approximate:
+        """As ``SessionStore.search_approximate`` (D65)."""
+        return rank_approximate(self._search_entries(), query)
 
     def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
         return render_index(self._pages(), budget_tokens,
