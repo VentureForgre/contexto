@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from contexto import serve
+from contexto.hints import GATED_HINT_HEADERS
 from contexto.upstream import Upstream
 from test_serve import child_env, served, session_log, sessions
 
@@ -159,6 +160,8 @@ def test_claude_reaches_upstream_through_serve_and_each_session_id_gets_a_store(
     assert ("POST", "/v1/messages?beta=true") in paths, paths
     for _, path, head, _ in Stub.received:
         assert service.token not in path and not any(service.token in value for value in head.values())
+        # D70: the printed settings turn the hint headers on; the service reads them and sends none on.
+        assert not {name.lower() for name in head} & GATED_HINT_HEADERS, head
     posts = [(head, request) for method, path, head, request in Stub.received
              if method == "POST" and path.split("?")[0] == "/v1/messages"]
     ids = {head.get("X-Claude-Code-Session-Id") for head, _ in posts}
@@ -171,6 +174,7 @@ def test_claude_reaches_upstream_through_serve_and_each_session_id_gets_a_store(
         sent = [request for head, request in posts if head.get("X-Claude-Code-Session-Id") == session_id]
         assert len(logged) == len(sent) >= 1
         assert all(e["path"] == "/v1/messages" and e["status"] == 200 for e in logged)
+        assert any(e["transform_events"][-1].get("request_class") == "main" for e in logged), logged
     # A request with no session id (none here but a HEAD or a GET) is in the service log, never in a store.
     service_requests = [e for e in (json.loads(line) for line in (home / serve.LOG_FILE).read_text().splitlines())
                         if e["event"] == "request"]

@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from contexto import __version__, cli, serve, serveclient, servecontract
+from contexto.hints import GATED_HINT_HEADERS
 from contexto.launcher import build_engine, contexto_tool_rules
 from contexto.proxy import REFUSED_MESSAGE
 from contexto.store import SessionStore
@@ -339,6 +340,51 @@ def test_a_request_without_a_session_id_is_forwarded_unchanged_and_makes_no_sess
     assert (sent_method, sent_path, sent) == (method, "/base" + path, data)
     assert sessions(home) == [] and service.health()["sessions"] == 0
     assert [e["path"] for e in serve_log(home, "request", 1)] == [path.split("?")[0]]
+
+
+# Gateway hint headers (D70): read by the engine, left out of what goes upstream unless asked for.
+
+HINTS = {"x-claude-code-request-class": "main", "x-claude-code-compaction": "manual",
+         "x-claude-code-context-compacted": "manual", "x-claude-code-prompt-id": "6f1d0b52-4b8e-4d6a-9c1e-2f0a7e3b5d10",
+         "x-claude-code-agent-type": "Explore", "x-claude-code-prev-tool-durations": "Bash=742;Read=9"}
+
+
+def hinted(session: str | None) -> dict[str, str]:
+    return {**headers(session), **HINTS}
+
+
+def gated(sent: dict[str, str]) -> set[str]:
+    return {name.lower() for name in sent} & GATED_HINT_HEADERS
+
+
+def test_the_engine_reads_the_hint_headers_and_the_upstream_never_gets_them(make_service, home):
+    service = make_service()
+    response, _ = call(service, "POST", "/v1/messages?beta=true", body(A), hinted(A))
+    assert response.status == 200
+    _, _, sent, _ = StubUpstream.received[0]
+    assert gated(sent) == set() and sent["X-Claude-Code-Session-Id"] == A
+    settle(service)
+    [store] = sessions(home)
+    [logged] = [e for e in session_log(home, store) if e["event"] == "request"]
+    assert logged["transform_events"][-1]["request_class"] == "main"
+    assert serve_log(home, "serve_start")[0]["hint_headers"] == "stripped"
+
+
+def test_a_request_of_no_session_is_forwarded_without_the_hint_headers(make_service, home):
+    service = make_service()
+    response, _ = call(service, "POST", "/v1/messages?beta=true", body(None), hinted(None))
+    assert response.status == 200
+    _, _, sent, _ = StubUpstream.received[0]
+    assert gated(sent) == set() and sessions(home) == []
+
+
+def test_forward_hint_headers_passes_them_upstream(make_service, home):
+    service = make_service(forward_hint_headers=True)
+    for session in (A, None):
+        response, _ = call(service, "POST", "/v1/messages?beta=true", body(session), hinted(session))
+        assert response.status == 200
+    assert [gated(sent) for _, _, sent, _ in StubUpstream.received] == [set(HINTS)] * 2
+    assert serve_log(home, "serve_start")[0]["hint_headers"] == "forwarded"
 
 
 def test_a_header_and_body_that_disagree_are_forwarded_unchanged(make_service, home):
@@ -1002,9 +1048,16 @@ def test_help_lists_the_serve_options(capsys):
     out = capsys.readouterr().out
     assert done.value.code == 0
     for option in ("--port", "--upstream", "--bound", "--max-sessions", "--idle-minutes", "--print-settings",
-                   "--print-mcp-config", "--rotate-token", "--status"):
+                   "--print-mcp-config", "--rotate-token", "--status", "--forward-hint-headers"):
         assert option in out
     assert "--host" not in out
+
+
+def test_the_command_forwards_the_hint_headers_only_when_asked(home, running, upstream):
+    for args, state in (((), "stripped"), (("--forward-hint-headers",), "forwarded")):
+        service = running(*args)
+        assert serve_log(home, "serve_start")[-1]["hint_headers"] == state
+        assert service.stop() == 0
 
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])

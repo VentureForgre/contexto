@@ -138,6 +138,7 @@ from urllib.parse import urlsplit
 
 from contexto import __version__, servecontract
 from contexto.canonical import loads_bounded
+from contexto.hints import FORWARDED, STRIPPED
 from contexto.launcher import (
     CLAUDE_SESSION_HEADER,
     CLI_SESSION_ID,
@@ -443,14 +444,17 @@ class RouteRecorder(SessionRecorder):
 def build_session_proxy(upstream: Upstream, log: Any, transform: Callable[..., Any],
                         observe_usage: Callable[..., Any] | None, *, observe_thinking: bool,
                         affinity_key: str | None,
-                        on_tool_calls: Callable[[tuple[str, ...]], None] | None = None) -> ContextoProxy:
+                        on_tool_calls: Callable[[tuple[str, ...]], None] | None = None,
+                        strip_hint_headers: bool = True) -> ContextoProxy:
     """The one place a session's proxy is built. It is never started: the service's handler uses it as
     its ``owner`` for a request of that session (transform, lock, usage callback, tool-call hook, log,
-    upstream). A ``ContextoProxy`` option that every ``serve`` session should have (such as one that
-    strips the gated hint headers before forwarding) is passed here."""
+    upstream). A ``ContextoProxy`` option that every ``serve`` session should have is passed here:
+    ``strip_hint_headers`` leaves Claude Code's gated hint headers out of what is sent upstream (D70);
+    the engine reads them either way."""
     return ContextoProxy(upstream.url, log, transform, observe_usage=observe_usage,
                          observe_thinking=observe_thinking, upstream_source=upstream.source,
-                         affinity_key=affinity_key, on_tool_calls=on_tool_calls)
+                         affinity_key=affinity_key, on_tool_calls=on_tool_calls,
+                         strip_hint_headers=strip_hint_headers)
 
 
 def body_session(request: Any) -> tuple[str | None, str | None]:
@@ -566,7 +570,7 @@ class ServeService:
                  engine_factory: Callable[..., Any] = build_engine,
                  clock: Callable[[], float] = time.monotonic, reaper: bool = True,
                  cap_wait_s: float = CAP_WAIT_S, unchecked_deadline_s: float = UNCHECKED_DEADLINE_S,
-                 max_unchecked: int = MAX_UNCHECKED_CONNECTIONS) -> None:
+                 max_unchecked: int = MAX_UNCHECKED_CONNECTIONS, forward_hint_headers: bool = False) -> None:
         if not TOKEN_PATTERN.fullmatch(token):
             raise ValueError("not a serve token")
         self.home = Path(home)
@@ -575,6 +579,9 @@ class ServeService:
         self.token_bytes = token.encode("ascii")
         self.config = dict(config) if config else {"bound": DEFAULT_BOUND}
         self.observe_thinking = observe_thinking
+        # D70: the printed settings turn Claude Code's gateway hint headers on for the engine; the six
+        # gated ones are removed before anything is forwarded unless --forward-hint-headers asks for them.
+        self.forward_hint_headers = forward_hint_headers
         self.max_sessions = max_sessions
         self.idle_s = idle_s
         self.stderr = stderr or sys.stderr
@@ -586,7 +593,8 @@ class ServeService:
         self.max_unchecked = max_unchecked
         self.log = ServeLog(self.home, token)
         # Requests that belong to no session: forwarded with the identity transform, logged in serve.log.
-        self.passthrough = ContextoProxy(upstream.url, self.log, upstream_source=upstream.source)
+        self.passthrough = ContextoProxy(upstream.url, self.log, upstream_source=upstream.source,
+                                         strip_hint_headers=not forward_hint_headers)
         self.port = 0
         self._lock = threading.Lock()  # the registry: held to look up or change it, never across I/O
         self._freed = threading.Condition(self._lock)  # notified when a session's last request finishes
@@ -668,7 +676,7 @@ class ServeService:
         self.log.log({"event": "serve_start", "port": self.port, "pid": os.getpid(), "version": __version__,
                       "upstream_source": self.upstream.source, "config": self.config,
                       "observe_thinking": self.observe_thinking, "max_sessions": self.max_sessions,
-                      "idle_s": self.idle_s})
+                      "idle_s": self.idle_s, "hint_headers": FORWARDED if self.forward_hint_headers else STRIPPED})
         return self.port
 
     def _already_running(self) -> str:
@@ -1158,7 +1166,8 @@ class ServeService:
             proxy = build_session_proxy(
                 self.upstream, notices, recorder, observe_usage, observe_thinking=self.observe_thinking,
                 affinity_key=session_affinity_key(store, self.upstream.url),
-                on_tool_calls=lambda tool_call_ids: self.register_tool_calls(tool_call_ids, session_id))
+                on_tool_calls=lambda tool_call_ids: self.register_tool_calls(tool_call_ids, session_id),
+                strip_hint_headers=not self.forward_hint_headers)
             store.log({"event": "serve_open", "cli": "claude", "session": session_id, "created": created,
                        "config": self.config, "engine": engine_name, "upstream_source": self.upstream.source,
                        "observe_thinking": self.observe_thinking,
@@ -1755,7 +1764,8 @@ def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
     try:
         service = ServeService(home, upstream, token, config=engine_config(options),
                                observe_thinking=options.observe_thinking, max_sessions=args.max_sessions,
-                               idle_s=args.idle_minutes * 60, stderr=stderr)
+                               idle_s=args.idle_minutes * 60, stderr=stderr,
+                               forward_hint_headers=args.forward_hint_headers)
     except ValueError as exc:
         raise ServeError(f"invalid upstream (from {upstream.source}): {exc}", EXIT_USAGE) from None
     try:
