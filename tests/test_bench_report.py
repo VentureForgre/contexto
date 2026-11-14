@@ -445,23 +445,46 @@ def test_the_pooled_condition_is_the_significant_flag_of_the_paired_statistics()
     assert "because the pooled comparison is not significant" in refused["text"]
 
 
-def test_the_seed_level_interval_is_printed_with_its_method(tmp_path):
-    results = report.build([crafted(tmp_path / "three", {"plain": 30}, seeds=(1, 2, 3), arms=("contexto", "plain"))])
+def test_the_seed_level_interval_is_printed_with_its_method_and_its_caveat(tmp_path):
+    # Three seeds whose differences vary: 30, 28 and 32 of 72 probes wrong in plain Claude Code.
+    wrong = {"plain": 30, ("plain", 2, 0): 28, ("plain", 3, 0): 32}
+    results = report.build([crafted(tmp_path / "three", wrong, seeds=(1, 2, 3), arms=("contexto", "plain"))])
     level = results["pairs"]["contexto_vs_plain"]["seed_level"]
     assert level["interval_method"] == stats.SEED_INTERVAL_METHOD and "bootstrap_interval" not in level
-    assert level["interval"] == pytest.approx([30 / 72, 30 / 72])  # every seed the same: zero width
+    assert level["interval_note"] is None
+    assert level["interval"] == pytest.approx(list(stats.t_interval([30 / 72, 28 / 72, 32 / 72])))
     text = report.render(results)
     assert ("The interval is the 95% interval for the mean difference over seeds by Student t on the per-seed "
-            "differences, n - 1 degrees of freedom; it is not computed from one seed.") in text
+            "differences, n - 1 degrees of freedom; it is not computed from fewer than 3 seeds or when every seed "
+            "has the same difference, and the table says which.") in text
     assert "| Mean difference | Sign-flip test | 95% interval over seeds |" in text
-    assert "| Contexto against plain Claude Code | 3 | +41.7, +41.7, +41.7 | +41.7 points | p = 0.2500 | +41.7 to " \
-           "+41.7 points |" in text
+    low, high = (f"{100 * x:+.1f}" for x in level["interval"])
+    assert (f"| Contexto against plain Claude Code | 3 | +41.7, +38.9, +44.4 | +41.7 points | p = 0.2500 | {low} to "
+            f"{high} points |") in text
+    assert report.SEED_INTERVAL_CAVEAT in text
+    assert text.index(report.SEED_INTERVAL_CAVEAT) > text.index("| Contexto against plain Claude Code | 3 |")
+    assert ("The interval over seeds assumes roughly symmetric per-seed differences, holds the true difference less "
+            "often than 95% when one arm rarely wins alone (76% to 92% of the time in simulated benchmarks), and does "
+            "not decide the direction of a difference: the pooled test and the sign-flip test do.") \
+        == report.SEED_INTERVAL_CAVEAT
     assert "With two seeds it holds" not in text and "bootstrap" not in text.lower()
-    one = report.build([crafted(tmp_path / "one", {"plain": 30}, seeds=(1,), arms=("contexto", "plain"))])
-    assert one["pairs"]["contexto_vs_plain"]["seed_level"]["interval"] is None
-    assert "| +41.7 points | p = 1.0000 | not computed (one seed) |" in report.render(one)
-    two = report.build([crafted(tmp_path / "two", {"plain": 30}, seeds=(1, 2), arms=("contexto", "plain"))])
-    assert "With two seeds it holds the true difference less often than 95%" in report.render(two)
+    assert "not computed (one seed)" not in text
+
+
+@pytest.mark.parametrize(("seeds", "wrong", "note", "cell"), [
+    ((1,), {"plain": 30}, stats.SEED_INTERVAL_FEWER, "| +41.7 | +41.7 points | p = 1.0000 |"),
+    ((1, 2), {"plain": 30, ("plain", 2, 0): 28}, stats.SEED_INTERVAL_FEWER,
+     "| +41.7, +38.9 | +40.3 points | p = 0.5000 |"),
+    ((1, 2, 3), {"plain": 30}, stats.SEED_INTERVAL_SAME, "| +41.7, +41.7, +41.7 | +41.7 points | p = 0.2500 |"),
+], ids=["one seed", "two seeds", "three equal differences"])
+def test_where_the_seed_level_interval_is_missing_the_report_says_why(tmp_path, seeds, wrong, note, cell):
+    results = report.build([crafted(tmp_path / "run", wrong, seeds=seeds, arms=("contexto", "plain"))])
+    level = results["pairs"]["contexto_vs_plain"]["seed_level"]
+    assert level["interval"] is None and level["interval_note"] == note
+    text = report.render(results)
+    assert f"{cell} none ({note}) |" in text
+    assert report.SEED_INTERVAL_CAVEAT not in text  # no interval printed, so nothing to qualify
+    assert "With two seeds it holds" not in text and "not computed (one seed)" not in text
 
 
 def test_a_seed_with_no_difference_lowers_what_the_seed_level_test_can_reach(tmp_path):

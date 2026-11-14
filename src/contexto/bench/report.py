@@ -60,6 +60,13 @@ LIMITS = (
     "sessions.",
 )
 
+# Printed after the seed-level table whenever it gives an interval (stats.seed_level's coverage
+# figures: 76% to 92% when one arm rarely wins alone, with or without spread between seeds).
+SEED_INTERVAL_CAVEAT = (
+    "The interval over seeds assumes roughly symmetric per-seed differences, holds the true difference less often "
+    "than 95% when one arm rarely wins alone (76% to 92% of the time in simulated benchmarks), and does not decide "
+    "the direction of a difference: the pooled test and the sign-flip test do.")
+
 
 class ReportError(ValueError):
     """Output directories that cannot be reported on: they disagree with each other or with
@@ -833,10 +840,8 @@ def _differences(block: Mapping[str, Any], h: str) -> list[str]:
              + _and([test_words.get(m, m) for m in tests] or [test_words["exact"]])
              + ". The interval is the 95% interval for the mean difference over seeds by "
              + _and(methods or [stats.SEED_INTERVAL_METHOD])
-             + "; it is not computed from one seed.")
-    if any(s["seeds"] == 2 for s in levels):
-        intro += (" With two seeds it holds the true difference less often than 95%: 80% to 91% of the time in the "
-                  "simulated benchmarks described in `contexto.bench.stats`.")
+             + "; it is not computed from fewer than 3 seeds or when every seed has the same difference, and the "
+               "table says which.")
     lines += [f"{h}# Differences with each seed as one observation", "", intro, ""]
     rows = []
     for pair in pairs.values():
@@ -848,10 +853,12 @@ def _differences(block: Mapping[str, Any], h: str) -> list[str]:
         interval = s["interval"]
         rows.append([title, s["seeds"], ", ".join(_points(d, True) for d in s["differences"]),
                      f"{_points(s['mean'], True)} points", f"p {_p(s['sign_flip_p'])}",
-                     "not computed (one seed)" if interval is None else
+                     f"none ({s['interval_note']})" if interval is None else
                      f"{_points(interval[0], True)} to {_points(interval[1], True)} points"])
     lines += _table(["Pair", "Seeds", "Difference per seed (points)", "Mean difference", "Sign-flip test",
                      "95% interval over seeds"], rows)
+    if any(s["interval"] is not None for s in levels):
+        lines += [SEED_INTERVAL_CAVEAT, ""]
     return lines
 
 

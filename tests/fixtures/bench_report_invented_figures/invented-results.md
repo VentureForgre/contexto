@@ -67,13 +67,15 @@ Each cell is the difference in percentage points, then the two discordant counts
 
 ### Differences with each seed as one observation
 
-Probes inside one session are not independent, so each seed is also treated as one observation: its difference in accuracy between the two arms. The p value is an exact sign-flip permutation test, over every pattern of signs. The interval is the 95% interval for the mean difference over seeds by Student t on the per-seed differences, n - 1 degrees of freedom; it is not computed from one seed.
+Probes inside one session are not independent, so each seed is also treated as one observation: its difference in accuracy between the two arms. The p value is an exact sign-flip permutation test, over every pattern of signs. The interval is the 95% interval for the mean difference over seeds by Student t on the per-seed differences, n - 1 degrees of freedom; it is not computed from fewer than 3 seeds or when every seed has the same difference, and the table says which.
 
 | Pair | Seeds | Difference per seed (points) | Mean difference | Sign-flip test | 95% interval over seeds |
 | --- | --- | --- | --- | --- | --- |
 | Contexto against full context | 6 | +8.3, +6.9, +1.4, +0.0, +9.7, +2.8 | +4.9 points | p = 0.0625 | +0.7 to +9.1 points |
 | Contexto against plain Claude Code | 6 | +19.4, +29.2, +23.6, +15.3, +15.3, +26.4 | +21.5 points | p = 0.0312 | +15.4 to +27.6 points |
 | Plain Claude Code against full context | 6 | -11.1, -22.2, -22.2, -15.3, -5.6, -23.6 | -16.7 points | p = 0.0312 | -24.3 to -9.0 points |
+
+The interval over seeds assumes roughly symmetric per-seed differences, holds the true difference less often than 95% when one arm rarely wins alone (76% to 92% of the time in simulated benchmarks), and does not decide the direction of a difference: the pooled test and the sign-flip test do.
 
 ## Run-to-run noise
 
