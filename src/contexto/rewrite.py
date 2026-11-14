@@ -127,6 +127,7 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 from __future__ import annotations
 
 import bisect
+import errno
 import hashlib
 import math
 import os
@@ -1473,6 +1474,9 @@ def store_failure(error: Exception, calls: StoreCalls, state: EpochState) -> dic
     """The content-free ``page_conflict`` or ``store_error`` event for ``error`` (rule 14)."""
     kind = "page_conflict" if isinstance(error, PageConflictError) else "store_error"
     failure = {"event": kind, "epoch": state.epoch, "operation": calls.last, "error": type(error).__name__}
+    code = errno.errorcode.get(getattr(error, "errno", None) or 0)
+    if code:  # D64: ENOSPC or EACCES, so a full disk can be told from a permission problem; a name, not the text
+        failure["errno"] = code
     if state.degraded:
         failure["degraded"] = True
     if kind == "page_conflict" and error.page_id:  # set by both stores (lane B B11, PR #73)
@@ -2350,6 +2354,11 @@ class RewriteEngine:
             checked = [*checked, {"event": "cli_version_error", "error": type(exc).__name__}]
         events[-1:-1] = checked
         events[-1].update(main=main, conversations=len(self.states))  # content-free, for side requests
+        if dialect.name == "anthropic":
+            # D64, content-free: whether this request carried what ``_compacts`` needs to recognise a
+            # compaction (a Claude Code session id and the User-Agent's entrypoint). ``contexto stats``
+            # says "Claude Code did not compact" only for a log in which every request did.
+            events[-1]["cli_session"] = bool(session and session.entrypoint)
         # D70: the hints the request carried, already reduced to their fixed vocabularies.
         events[-1].update({name: value for name, value in hints._asdict().items() if value is not None})
         if main and endpoint != COUNT_TOKENS:

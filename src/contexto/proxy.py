@@ -982,8 +982,25 @@ class ContextoProxy:
         self._thread = threading.Thread(target=self._server.serve_forever, name="contexto-proxy", daemon=True)
         self._thread.start()
         self.log({"event": "proxy_start", "port": self.port, "upstream_source": self.upstream_source,
-                  "observe_thinking": self.observe_thinking})
+                  "observe_thinking": self.observe_thinking, **self._store_pages()})
         return self.port
+
+    def _store_pages(self) -> dict[str, int]:
+        """D64: ``{"pages": n}``, the page files the session's store holds now, for the start and stop
+        lines: ``contexto stats`` takes the pages a run added from the two, because the engine's
+        ``page_out`` counts a turn again each time a launch pages it again. On these lines, not the
+        launcher's ``launch`` and ``exit``, so ``contexto proxy`` and both launchers record it in one
+        place. Empty when the log is not a session store's or the pages cannot be listed. The files are
+        counted by name and never opened, and a failure here never stops the proxy."""
+        try:
+            from contexto.stats import count_pages  # here, so the proxy module loads no reader it may not need
+
+            store = getattr(self.session_log, "store", self.session_log)  # the launcher wraps the store
+            pages_dir = getattr(store, "pages_dir", None)
+            count = count_pages(pages_dir) if pages_dir is not None else None
+        except Exception:
+            count = None
+        return {} if count is None else {"pages": count}
 
     def stop(self) -> None:
         """Stop accepting connections, then wait up to STOP_DRAIN_S for in-flight requests to finish
@@ -1002,7 +1019,7 @@ class ContextoProxy:
                 in_flight = self._in_flight
             if in_flight:
                 self.log({"event": "proxy_stop_incomplete", "in_flight": in_flight})
-            self.log({"event": "proxy_stop"})
+            self.log({"event": "proxy_stop", **self._store_pages()})
 
     def serve_forever(self, port: int = 0) -> None:
         """Block until interrupted, starting the server first if needed."""
