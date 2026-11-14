@@ -661,6 +661,10 @@ def test_text_width_counts_wide_characters_twice():
     # Assigned in Unicode 16 (Python 3.14 and later), unassigned before: wide by the module's own
     # table on every Python version, so the same text gives the same chart.
     ("\U0001fae9", 3), ("\U0001fadc", 3),
+    # #286 Reviewer B nit 2 at 99ee7b07: wide emoji below U+1F000 (Emoji_Presentation), drawn as emoji.
+    ("\u2705", 3), ("\u274c", 3), ("\u2b50", 3), ("\u26a1", 3), ("\u2615", 3), ("\u231a", 3), ("\u2b55", 3),
+    # Wide below U+1F000 but not emoji: angle brackets, trigrams (Unicode 16), digrams, CJK punctuation.
+    ("\u2329", 2), ("\u2630", 2), ("\u268a", 2), ("\u3001", 2), ("\u303d", 2),
     ("a", 1), ("\u00e9", 1), ("\u0416", 1), ("\u2028", 1),
 ])
 def test_text_width_does_not_depend_on_the_pythons_unicode_tables(ch, units):
@@ -691,16 +695,24 @@ def test_a_note_in_wide_characters_is_wrapped_inside_the_chart():
         assert right_edge(element) <= charts.WIDTH - charts.MARGIN + 0.5, shown(element)
 
 
-def test_a_note_in_emoji_is_wrapped_inside_the_chart():
+@pytest.mark.parametrize("emoji", ["\U0001fae9", "\u2705", "\u274c", "\u2b50", "\u26a1", "\u2615"])
+def test_a_note_in_emoji_is_wrapped_inside_the_chart(emoji):
     """#264 Reviewer B nit 1: an emoji is drawn about 16 px wide at 11 px (Apple Color Emoji), more than
     two narrow characters, so a note of 80 of them ran past the right edge. Each line must fit at 16 px
-    per emoji."""
-    note = "\U0001fae9" * 80
+    per emoji. #286 Reviewer B nit 2 at 99ee7b07: also for the emoji below U+1F000, such as U+2705."""
+    note = emoji * 80
     root = parse(charts.request_size_svg(line_results(notes=[note])))
     lines = [e for e in root.iter(f"{SVG}text") if e.get("font-size") == "11" and shown(e) and shown(e) in note]
     assert "".join(shown(e) for e in lines) == note and len(lines) > 1
     for element in lines:
         assert float(element.get("x")) + 16 * len(shown(element)) <= charts.WIDTH - charts.MARGIN + 0.5
+
+
+def test_the_emoji_ranges_are_whole_ranges_of_the_wide_table():
+    """Every range counted as emoji below U+1F000 is one of ``WIDE``'s, so the emoji are a part of the wide
+    characters, fixed in the module like them (no Unicode table of the running Python is read)."""
+    assert charts.EMOJI_BELOW_PICTOGRAPHS <= set(charts.WIDE)
+    assert all(end < charts.PICTOGRAPHS for _, end in charts.EMOJI_BELOW_PICTOGRAPHS)
 
 
 def test_a_series_with_no_points_is_named_in_a_note_not_dropped_silently():
