@@ -10,9 +10,12 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from contexto.bench import script as bench_script
 from contexto.bench.modes import seeds
+
+if TYPE_CHECKING:
+    from contexto.bench.model import Script
 
 FLAG = "--script-only"
 
@@ -28,8 +31,9 @@ def script_path(out: Path, seed: int) -> Path:
     return out / "scripts" / f"seed-{seed}.json"
 
 
-def describe(script: bench_script.Script) -> tuple[list[str], bool]:
+def describe(script: Script) -> tuple[list[str], bool]:
     """The lines ``--script-only`` prints for one script, and whether its self-checks all passed."""
+    from contexto.bench import script as bench_script  # imported here, not at every contexto start
     sizes = bench_script.estimate(script)
     lines = [
         f"seed {script.seed}: protocol {script.protocol}, bound {script.bound:,} tokens",
@@ -55,6 +59,8 @@ def run(args: argparse.Namespace) -> int:
     if args.out is None:
         print("contexto bench: error: --script-only needs --out DIR to write the scripts into", file=sys.stderr)
         return 2
+    from contexto.bench import script as bench_script
+
     status = 0
     for seed in seeds(args):
         try:

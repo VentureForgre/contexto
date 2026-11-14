@@ -7,26 +7,31 @@ one mode runs.
 Modes are discovered from the ``contexto.bench.modes`` package the way ``contexto.cli`` discovers
 commands, so a mode is added by adding a module there and this file does not change. A mode module
 provides ``FLAG`` (its option, or None for the one default mode), ``add_arguments(parser)`` and
-``run(args) -> int``; the rules are in ``contexto.bench.modes``. The options every mode shares are
-defined here, once.
+``run(args) -> int``, and may list the options that belong to it alone in ``OWN_OPTIONS``; the
+rules are in ``contexto.bench.modes``. The options every mode shares are defined here, once.
+
+Before a mode runs, this command refuses (exit 2) an option that belongs to a mode that is not the
+one running, and a ``--turn-kbytes`` so small for the bound that the script would need more than
+``MAX_CONTENT_TURNS`` content turns.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib
+import math
 import pkgutil
 import sys
 from pathlib import Path
 from types import ModuleType
 
 from contexto.bench import modes
-from contexto.bench.model import PROTOCOLS
-from contexto.bench.script import DEFAULT_SEED
+from contexto.bench.model import DEFAULT_SEED, PROTOCOLS
 from contexto.commands._common import EXIT_USAGE
 
 DEFAULT_BOUND = 150_000
 DEFAULT_TURN_KBYTES = 40
+MAX_CONTENT_TURNS = 400  # 2,000-byte turns at the default bound need 332; 1,000-byte turns need 652
 
 
 def _count(text: str) -> int:
@@ -80,17 +85,55 @@ def register(subparsers) -> None:
                         help=f"the token bound of the Contexto arm, which the session is sized against "
                              f"(default {DEFAULT_BOUND})")
     parser.add_argument("--protocol", choices=PROTOCOLS, default="v2",
-                        help="the script protocol: d27 is the 54 probes of the published runs; v2 (the default) "
-                             "adds 18 probes that do not name their subject (paraphrased, concluded by the "
-                             "assistant, and read in a tool loop)")
+                        help="the script protocol: d27 is the 54 probes of the published runs, each naming its "
+                             "subject's key; v2 (the default) adds 18 harder probes: questions that name the "
+                             "service but not the attribute, among several lines for that service, facts the "
+                             "assistant concluded, and facts read in a tool loop")
     parser.add_argument("--turn-kbytes", type=_count, default=DEFAULT_TURN_KBYTES, metavar="KB",
-                        help=f"the size of a content turn, in thousands of bytes (default {DEFAULT_TURN_KBYTES})")
+                        help=f"the size of a content turn, in thousands of bytes (default {DEFAULT_TURN_KBYTES}). "
+                             f"Refused when the script would need more than {MAX_CONTENT_TURNS} content turns to "
+                             "reach 2.5 times the bound: below 2 at the default bound")
     parser.add_argument("--out", type=Path, default=None, metavar="DIR",
                         help="the output directory: scripts, per-probe results and the report")
     found = discover()
     for module in found:
         module.add_arguments(parser.add_argument_group(f"{mode_name(module)} mode"))
-    parser.set_defaults(func=run, _bench_modes=found)
+    # Each mode's own options, as (module, option, dest, default); dest None for an option the mode
+    # lists but did not add. argparse has no public way to look an option up, hence the private table.
+    actions = parser._option_string_actions
+    own = [(module, option, actions[option].dest if option in actions else None,
+            actions[option].default if option in actions else None)
+           for module in found for option in getattr(module, "OWN_OPTIONS", ())]
+    parser.set_defaults(func=run, _bench_modes=found, _bench_own=own)
+
+
+def _turn_problem(args: argparse.Namespace) -> str | None:
+    """Why ``--turn-kbytes`` is too small for ``--bound``, or None."""
+    from contexto.bench import d27  # imported here, not at every contexto start
+
+    def needed(kbytes: int) -> int:
+        return math.ceil(d27.HISTORY_FACTOR * args.bound / (d27.turn_tokens(kbytes * 1_000) + d27.REPLY_TOKENS))
+
+    turns = needed(args.turn_kbytes)
+    if turns <= MAX_CONTENT_TURNS:
+        return None
+    floor = next(k for k in range(args.turn_kbytes, 10 ** 9) if needed(k) <= MAX_CONTENT_TURNS)
+    return (f"--turn-kbytes {args.turn_kbytes} at --bound {args.bound:,} needs about {turns:,} content turns, more "
+            f"than the {MAX_CONTENT_TURNS} a script may have; use --turn-kbytes {floor} or more, or a smaller bound")
+
+
+def _foreign_option(args: argparse.Namespace, running: ModuleType) -> str | None:
+    """The error for an option that belongs to a mode other than ``running`` and was given, or None."""
+    for module, option, dest, default in args._bench_own:
+        if dest is None:
+            return f"mode {mode_name(module)} lists {option} in OWN_OPTIONS but adds no such option"
+        if module is running or getattr(args, dest, default) == default:
+            continue
+        if module.FLAG is None:
+            return (f"{option} belongs to the live run ({mode_name(module)}), which runs only when no mode option "
+                    f"is given; leave it out with {running.FLAG}")
+        return f"{option} belongs to the {mode_name(module)} mode; give {module.FLAG} with it, or leave it out"
+    return None
 
 
 def run(args: argparse.Namespace) -> int:
@@ -101,14 +144,20 @@ def run(args: argparse.Namespace) -> int:
         print(f"contexto bench: error: give one mode, not {' and '.join(m.FLAG for m in chosen)}", file=sys.stderr)
         return EXIT_USAGE
     if chosen:
-        return int(chosen[0].run(args) or 0)
-    default = [m for m in found if m.FLAG is None]
-    if len(default) == 1:
-        return int(default[0].run(args) or 0)
-    if default:
-        print("contexto bench: error: more than one default mode is installed: "
-              f"{', '.join(mode_name(m) for m in default)}", file=sys.stderr)
+        running = chosen[0]
+    else:
+        default = [m for m in found if m.FLAG is None]
+        if len(default) > 1:
+            print("contexto bench: error: more than one default mode is installed: "
+                  f"{', '.join(mode_name(m) for m in default)}", file=sys.stderr)
+            return EXIT_USAGE
+        if not default:
+            print("contexto bench: error: this build has no live run; the modes it has are "
+                  f"{', '.join(m.FLAG for m in flagged) or 'none'}", file=sys.stderr)
+            return EXIT_USAGE
+        running = default[0]
+    problem = _foreign_option(args, running) or _turn_problem(args)
+    if problem:
+        print(f"contexto bench: error: {problem}", file=sys.stderr)
         return EXIT_USAGE
-    print("contexto bench: error: this build has no live run; the modes it has are "
-          f"{', '.join(m.FLAG for m in flagged) or 'none'}", file=sys.stderr)
-    return EXIT_USAGE
+    return int(running.run(args) or 0)

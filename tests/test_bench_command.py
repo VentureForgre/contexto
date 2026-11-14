@@ -76,6 +76,35 @@ def test_bad_common_options_are_usage_errors(argv, capsys):
     assert "usage: contexto bench" in capsys.readouterr().err
 
 
+def test_turn_kbytes_below_the_floor_is_refused(tmp_path, capsys):
+    # At the default bound, 1,000-byte turns would need about 652 content turns (the generator builds 688).
+    assert cli.main(["bench", "--script-only", "--out", str(tmp_path), "--turn-kbytes", "1"]) == 2
+    err = capsys.readouterr().err
+    assert ("contexto bench: error: --turn-kbytes 1 at --bound 150,000 needs about 652 content turns, more "
+            "than the 400 a script may have; use --turn-kbytes 2 or more, or a smaller bound") in err
+    assert not (tmp_path / "scripts").exists()
+    assert cli.main(["bench", "--script-only", "--out", str(tmp_path), "--turn-kbytes", "1", "--bound", "4000"]) == 0
+    with pytest.raises(SystemExit):
+        cli.main(["bench", "--help"])
+    assert "more than 400 content turns" in " ".join(capsys.readouterr().out.split())
+
+
+def test_contexto_does_not_import_the_generator_or_statistics_at_start():
+    code = ("import sys\nfrom contexto import cli\ncli.build_parser()\n"
+            "print(sorted(m for m in sys.modules if m.startswith('contexto.bench.') and m not in "
+            "('contexto.bench.model', 'contexto.bench.modes', 'contexto.bench.modes.script_only')))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "[]"
+
+
+def test_protocol_help_says_the_service_is_named(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["bench", "--help"])
+    flat = " ".join(capsys.readouterr().out.split())
+    assert "do not name their subject" not in flat
+    assert "name the service but not the attribute" in flat
+
+
 # --script-only
 
 
@@ -99,7 +128,7 @@ def test_script_only_writes_one_script_per_seed(tmp_path, capsys):
     for cls in ("paged_only", "multihop", "chain", "obligations", "distractor", "paraphrase", "concluded", "toolloop"):
         assert f"    {cls}: " in text
     assert "    concluded: 6 probes, mean lexical overlap 0.00 words" in text
-    for check in ("restatements", "key_free", "placement", "unplanted"):
+    for check in ("restatements", "key_free", "service_alone", "placement", "unplanted"):
         assert text.count(f"  check {check}: pass") == 2
     assert f"(sha256 {first.digest()})" in text
     assert "FAIL" not in text
@@ -219,6 +248,58 @@ def test_exactly_one_mode_runs(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.err.strip() == "contexto bench: error: give one mode, not --script-only and --t-hello"
     assert captured.out == "" and not (tmp_path / "out").exists()
+
+
+OWN_FLAG_MODE = (
+    "FLAG = '--t-replay'\n"
+    "OWN_OPTIONS = ('--t-dump',)\n"
+    "def add_arguments(parser):\n"
+    "    parser.add_argument(FLAG, action='store_true')\n"
+    "    parser.add_argument('--t-dump', metavar='DIR', default=None)\n"
+    "def run(args):\n"
+    "    print('replay', args.t_dump)\n"
+    "    return 0\n"
+)
+OWN_DEFAULT_MODE = (
+    "from contexto.bench.modes import add_option\n"
+    "FLAG = None\n"
+    "OWN_OPTIONS = ('--t-key-helper',)\n"
+    "def add_arguments(parser):\n"
+    "    add_option(parser, '--t-model', default='m-1')\n"
+    "    parser.add_argument('--t-key-helper', default=None)\n"
+    "def run(args):\n"
+    "    print('live', args.t_key_helper)\n"
+    "    return 0\n"
+)
+
+
+def test_a_modes_own_option_is_refused_without_its_mode(tmp_path, monkeypatch, capsys):
+    _mode(tmp_path, monkeypatch, "t_live", OWN_DEFAULT_MODE)
+    (tmp_path / "t_replay.py").write_text(OWN_FLAG_MODE, encoding="utf-8")
+    # The replay mode's option without --t-replay would otherwise start the live run.
+    assert cli.main(["bench", "--t-dump", "out"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == ("contexto bench: error: --t-dump belongs to the t-replay mode; give "
+                                    "--t-replay with it, or leave it out")
+    assert cli.main(["bench", "--t-replay", "--t-dump", "out"]) == 0
+    assert capsys.readouterr().out == "replay out\n"
+    # The live run's own option with another mode selected.
+    assert cli.main(["bench", "--t-replay", "--t-key-helper", "cmd"]) == 2
+    assert capsys.readouterr().err.strip() == (
+        "contexto bench: error: --t-key-helper belongs to the live run (t-live), which runs only when no mode "
+        "option is given; leave it out with --t-replay")
+    assert cli.main(["bench", "--t-key-helper", "cmd"]) == 0
+    assert capsys.readouterr().out == "live cmd\n"
+    # A shared option (add_option) belongs to no one mode, so it is allowed with either.
+    assert cli.main(["bench", "--t-replay", "--t-model", "m-2"]) == 0
+
+
+def test_a_mode_that_lists_an_option_it_does_not_add_is_refused(tmp_path, monkeypatch, capsys):
+    _mode(tmp_path, monkeypatch, "t_odd", OWN_FLAG_MODE.replace("OWN_OPTIONS = ('--t-dump',)",
+                                                               "OWN_OPTIONS = ('--t-dump', '--t-nope')"))
+    assert cli.main(["bench", "--t-replay"]) == 2
+    assert "mode t-odd lists --t-nope in OWN_OPTIONS but adds no such option" in capsys.readouterr().err
 
 
 def test_two_default_modes_are_refused(tmp_path, monkeypatch, capsys):
