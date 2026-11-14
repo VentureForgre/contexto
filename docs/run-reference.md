@@ -35,7 +35,8 @@ For Claude Code, the launcher:
    one), opens it under `$CONTEXTO_HOME/sessions/<id>/` and starts the proxy on
    `127.0.0.1:<free port>`;
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets
-   `env.ANTHROPIC_BASE_URL` to the proxy and the two hint-header variables below, allows Contexto's
+   `env.ANTHROPIC_BASE_URL` to the proxy and the hint-header variables below (only
+   `CONTEXTO_HINT_HEADERS` when you have turned hint headers off), allows Contexto's
    five MCP tools by name (`permissions.allow`; see [Troubleshooting](troubleshooting.md)), and adds
    Contexto's `statusLine` only when none of your settings files has one and it is not turned off (see
    [Status line](statusline.md)), and an `--mcp-config` file that
