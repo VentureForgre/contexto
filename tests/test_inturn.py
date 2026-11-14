@@ -24,7 +24,7 @@ from contexto.store.catalog import check_page
 from contexto.store.memory import MemoryStore
 from contexto.store.pages import RESULT_PAGE, ROUNDS_PAGE, build_page, index_line, page_id, render_index
 from contexto.store.render import recall_chunk
-from inturn_harness import AGENT, MODEL, Cli, Refused, Upstream, blocks, check_pairing, output, png, tool
+from inturn_harness import AGENT, MODEL, Cli, Refused, Sent, Upstream, blocks, check_pairing, output, png, tool
 from inturn_harness import BYTES_PER_TOKEN as BYTES
 from test_pdf_pages import simple_pdf
 
@@ -1300,3 +1300,49 @@ def test_each_loop_request_logs_the_shape_of_its_thinking_without_content():
     assert cli.sent[-1].thinking == last["kept_before"] + last["kept_between"] + last["kept_after"]
     first_batch = next(s for s in cli.sent if "in_turn_batch" in s.names)
     assert "in_turn_thinking" in first_batch.events[-1]
+
+
+def huge_with_parallel_reads(config: Config, head_bytes: int, older: int, older_bytes: int, huge: int,
+                             parallel: int, parallel_bytes: int) -> tuple[Cli, Sent, int]:
+    """``older`` rounds of one read each, then one round of a result over the bound with ``parallel``
+    reads beside it; returns the conversation, the request that carries that round, and its index."""
+    cli = Cli(memory(), config, head_bytes=head_bytes)
+    cli.prompt("Read the modules, then the dump and three more files at once.")
+    for r in range(older):
+        cli.send([("Read", {"file_path": f"src/older_{r:03d}.py"})])
+        cli.results([output(f"older-{r}", older_bytes)])
+    cli.send([("Read", {"file_path": "dump.log"})]
+             + [("Read", {"file_path": f"src/part_{c}.py"}) for c in range(parallel)])
+    cli.results([output("dump", huge)] + [output(f"part-{c}", parallel_bytes) for c in range(parallel)])
+    at = len(cli.history) - 1
+    return cli, cli.send([("Bash", {"command": "next"})]), at
+
+
+def test_after_a_huge_result_is_stubbed_on_arrival_the_batch_is_sized_from_what_is_left():
+    # Reviewer A at 7575c76f, finding 2: step 0 stubbed the 400 KB result, but steps 1 to 3 were sized
+    # with it still counted, so they did nothing: two of the three 40 KB reads were stubbed unread, the
+    # 43 older reads stayed whole, and the request published 5,657 tokens of room (default config).
+    cli, sent, at = huge_with_parallel_reads(Config(), 40_000, 43, 6_000, 400_000, 3, 40_000)
+    (batch,) = [e for e in sent.events if e["event"] == "in_turn_batch"]
+    assert batch["unseen_results_stubbed"] == 1  # the dump alone: it cannot fit whatever else is paged
+    stubbed = {(i, j) for i, j, _ in cli.state.inturn.stubs}
+    assert (at, 0) in stubbed and not {(at, c) for c in (1, 2, 3)} & stubbed
+    forwarded = sent.messages[-1]["content"]  # the round's results: folds shift the indexes, not this one
+    assert [b["content"] for b in forwarded[1:]] == [b["content"] for b in cli.history[at]["content"][1:]]
+    assert batch["results_stubbed"] > 1 or batch["rounds_folded"]  # older content paged to make the room
+    assert sent.room >= ROOM and sent.real <= BOUND
+    assert not cli.events("in_turn_exhausted") and not cli.events("over_bound")
+
+
+def test_a_huge_unread_result_at_a_small_bound_leaves_the_request_under_it_with_its_room():
+    # Reviewer A at 7575c76f, finding 2, at bound 40,000 (seed 30 of the reviewer's fuzz went over it):
+    # step 0 stubbed the large unread result, and the stale target then stubbed a 2,500-token read
+    # unread and left the room at 2,397, with ten older 6 KB reads and their rounds still in the request.
+    config = Config(bound=40_000, headroom_floor=4_000, min_turn_room=3_000)
+    cli, sent, at = huge_with_parallel_reads(config, 60_000, 10, 6_000, 80_000, 2, 8_000)
+    (batch,) = [e for e in sent.events if e["event"] == "in_turn_batch"]
+    assert batch["unseen_results_stubbed"] == 1 and (batch["results_stubbed"] > 1 or batch["rounds_folded"])
+    forwarded = sent.messages[-1]["content"]
+    assert [b["content"] for b in forwarded[1:]] == [b["content"] for b in cli.history[at]["content"][1:]]
+    assert sent.room >= config.min_turn_room and sent.real <= config.bound
+    assert not cli.events("in_turn_exhausted") and not cli.events("over_bound")

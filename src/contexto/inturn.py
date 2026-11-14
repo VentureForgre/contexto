@@ -1034,14 +1034,18 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     freeable = ((earlier if may_page_turns else 0) + sum(counted(i, sent[i]) for r in rounds for i in r.removed)
                 + sum(c.saving for c in seen if c.i not in in_rounds and (c.i >= start or not may_page_turns)))
     pressure = estimate + margin
-    floor = pressure - freeable
-    halfway = floor + math.ceil(BATCH_FRACTION * max(0, line - floor))
-    # Down to halfway between what cannot be paged and the line, and far enough under the line that the
-    # next rounds do not need another batch; never under what cannot be paged.
     headway = line - HEADWAY_ROOMS * config.min_turn_room
-    target = max(floor, min(halfway, headway))
-    # Stubbing that ends at or under this line is enough; over it, the next step runs.
-    escalate = max(target, headway)
+
+    def sized(cur: int) -> tuple[int, int]:
+        """(target, escalate) for a request at ``cur``. Down to halfway between what cannot be paged and
+        the line, and far enough under the line that the next rounds do not need another batch; never
+        under what cannot be paged. Stubbing that ends at or under ``escalate`` is enough; over it, the
+        next step runs."""
+        floor = cur - freeable
+        halfway = floor + math.ceil(BATCH_FRACTION * max(0, line - floor))
+        target = max(floor, min(halfway, headway))
+        return target, max(target, headway)
+
     over_bound = pressure > config.bound
     base = tokens(rw.transform_messages(messages, state))
     # Step 0: the model reads every result whole at least once unless it cannot fit. A result is stubbed
@@ -1138,6 +1142,11 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     if huge:
         stubbed(huge, True)
         unseen = [c for c in unseen if c not in huge]
+        # Reviewer A at 7575c76f, finding 2: every later step is sized from the request as it stands after
+        # step 0, not with the stubbed results still counted (which kept steps 1 to 3 from running).
+        may_rewrite = cur > config.bound or (freeable >= config.min_turn_room
+                                             and (not after_rewrite or measured(state) > show))
+    target, escalate = sized(cur)
     # Steps 1 to 3 change messages the previous request had: a rewrite of the cached prefix.
     rewriting = may_rewrite and cur > line
     # Step 1: older results, oldest first, down to the target.
