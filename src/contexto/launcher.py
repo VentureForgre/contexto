@@ -1268,7 +1268,8 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         watchdog = Watchdog.start(tmp, store)
         # D64: a statusLine only when it cannot replace one of the user's; the note says which it was.
         status_line, status_note = launch_status_line(session_id, home, Path.cwd(), enabled=options.statusline)
-        settings = write_private_json(tmp, "settings.json", {**settings_payload(proxy.url, hint_headers), **status_line})
+        settings = write_private_json(tmp, "settings.json",
+                                      {**settings_payload(proxy.url, hint_headers), **status_line})
         mcp = write_private_json(tmp, "mcp.json", mcp_payload(session_id, home))
         store.log({"event": "launch", "cli": "claude", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": upstream.source,
