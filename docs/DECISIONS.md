@@ -2773,8 +2773,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
     - `docs/limitations.md` has five entries the moved list did not have (tool loops, recall is a
       search, cost, latency, subscription logins), and the FAQ's cost answer says that cost depends
       on the model.
-  - **Repository About box**, to be applied with `gh repo edit` when this slice merges; no other
-    repository setting changes. Old values, to restore from: description "Long-running AI sessions
+    - The recall bullet keeps the title "no worse than full context on a scripted recall test",
+      the owner's wording. A stranger-read review asked for "close to full context", because the
+      Opus run had full context one question ahead (54 against 53). The headline run had Contexto
+      ahead (52 against 47), and the Opus run is within the test's pass rule (within 2 overall, no
+      category more than 1 below), which the bullet now says.
+  - **Repository About box**, applied with `gh repo edit` on 2026-11-14, before this slice merged,
+    once both reviewers had approved the README it matches; no other repository setting changed. Old values, to restore from: description "Long-running AI sessions
     and context management", homepage empty, no topics. New description: "Local proxy that keeps
     Claude Code and Codex sessions under a fixed token bound so the CLI does not compact them: old
     turns go to disk word for word and the model searches them back." New topics: `claude-code`,

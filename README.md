@@ -14,8 +14,8 @@ moving the oldest turns to disk, word for word, and giving the model tools to se
   session (acceptance run 4) on claude-haiku-5-5, Contexto answered 52 of 54 recall questions. The
   same model given the whole history of about 426,000 tokens answered 47. That is one session and
   one seed, and the gap is inside noise (p = 0.18). In a separate run on claude-opus-5-5, Contexto
-  answered 53 of 54 and full context 54, one question behind and inside the test's pass rule of
-  within 2 ([results](docs/results.md)).
+  answered 53 of 54 and full context 54, one question behind and inside the test's pass rule
+  (within 2 overall, no category more than 1 below) ([results](docs/results.md)).
 - **Fewer input tokens, not always less money.** In an earlier scripted session (acceptance run 3),
   Contexto sent 46.6% fewer input tokens than plain Claude Code would have; the plain figures are
   modeled from measured requests. At Haiku 5.5's prices, which are 5 times higher on a prompt over

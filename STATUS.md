@@ -55,7 +55,8 @@ compaction never fires, and accuracy equals full context.
   in `docs/*.md` (index `docs/README.md`), the Results table in `docs/results.md` and the full
   limitations list in `docs/limitations.md`. `tests/test_docs_links.py` checks every relative link
   and heading anchor in the tracked Markdown files. The README states recall as no worse than full
-  context on a scripted test, and cost as depending on the model and on cache hits.
+  context on a scripted test, and cost as depending on the model and on cache hits. The repository's About box (description and
+  ten topics) matches it since 2026-11-14; the old values are in D68.
 
 ## QA run and fix round (2026-11-05 to 2026-11-06, v0.5.9 to v0.5.24)
 
