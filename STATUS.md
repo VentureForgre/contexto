@@ -91,10 +91,9 @@ Claude Code with its auto-compact window set so that compaction fires near the b
 967,000 tokens and would not compact at all in this session (467,012 estimated tokens); the
 benchmark does not show plain Claude Code at its default compaction threshold. The session is
 generated log text with planted facts, not real coding work. Guide: `docs/bench.md`; decision:
-D66. Why: run
-#4's 52 of 54 against 47 is inside noise (exact McNemar p = 0.18), all runs used one seed, plain
-Claude Code was never run, and nobody outside could rerun the scoring. No model was called to build
-it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
+D66. Why: run #4's 52 of 54 against 47 is inside noise (exact McNemar p = 0.18), all runs used one
+seed, plain Claude Code was never run, and nobody outside could rerun the scoring. No model was
+called to build it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
 
 - Merged into `main`: #255 (script generator, statistics, `--script-only`) as f826c464, #262 (scale
   harness) as c46de5b4, #264 (`--report`, `--chart`, cost at published prices) as 6e4e6b12, #273
@@ -728,6 +727,9 @@ Still open:
 - Not started: a byte budget per search on the pages `contexto_search` reads (D41 follow-up): it
   reads and renders up to 53 pages per search with no cap on their size (18.5 MB of page JSON for
   one multi-word query at 3,000 pages sized like real turns).
+- D70, `contexto serve` (PR #272): the step-by-step client recipes with tests (the Agent SDK,
+  VS Code, headless `claude -p`; the brief's requirement 6) come in a follow-up PR. Until then
+  `docs/serve.md` covers setup through `--print-settings` and `--print-mcp-config` only.
 - Open from D49: a head too large for `min_turn_room` (bound 60,000, a 28,000-token head) leaves the
   minimum-room rotation (A12) nothing to restore, so later turn starts keep their window (about 34,200 real, room 806,
   `turn_room_low` logged once); PR #232 review B's finding 1.

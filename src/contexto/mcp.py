@@ -26,11 +26,13 @@ from __future__ import annotations
 import json
 import math
 import sys
-from collections.abc import Callable, Iterable
-from typing import IO, Any, Protocol
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Mapping
+from typing import IO, TYPE_CHECKING, Any, Protocol
 
-from contexto import __version__
+from contexto import __version__, serveclient
 from contexto.canonical import loads_bounded, utf8
+from contexto.servecontract import MAX_TOOL_USE_ID_CHARS
 from contexto.store import LockFileDamagedError, PageUnreadableError
 from contexto.store.ledger import LedgerCorruptError
 from contexto.store.pages import is_context_page
@@ -47,6 +49,10 @@ from contexto.store.render import (
     render_page,
 )
 from contexto.store.search import FOLDED, SHOWN_IN_DETAIL, TYPO, ApproxHit, Plan, Query, hit_view, text_matches
+from contexto.upstream import CLOUD_PROVIDER_KEYS, cloud_provider, cloud_provider_note
+
+if TYPE_CHECKING:  # annotations only: the module imports nothing beyond the standard library it lists
+    from pathlib import Path
 
 SERVER_NAME = "contexto"
 SERVER_VERSION = __version__  # the package's, as `contexto version` prints it (D64); it was a fixed 0.1.0
@@ -399,6 +405,10 @@ class Server:
         }
 
     def _tools_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._record_listed()
+        return {"tools": TOOLS}
+
+    def _record_listed(self) -> None:
         if not self.listed:
             # The client now has the tools: recorded once per server so the proxy can tell that this
             # launch's CLI received them (contexto.toolcheck; Codex's requests never name them).
@@ -412,7 +422,6 @@ class Server:
                     self._diag(f"set_mcp_listed failed: {type(exc).__name__}")
                 except (OSError, ValueError):  # a closed or broken stderr
                     pass
-        return {"tools": TOOLS}
 
     def _tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
         name = params["name"]
@@ -1021,3 +1030,197 @@ class UnopenedStore:
 def serve_stdio(store: Store) -> int:
     """Run the server on this process's stdin and stdout until end of input."""
     return Server(store, sys.stdout, sys.stderr).serve(sys.stdin)
+
+
+# `contexto mcp --serve` (D70): one server for every conversation of a Claude Code process.
+
+META_TOOL_USE = "claudecode/toolUseId"  # in tools/call params._meta: the model response's tool_use id
+TOOL_USE_ID_MAX = MAX_TOOL_USE_ID_CHARS  # a longer value is not an id, and the service would refuse it
+STORE_CACHE = 8  # session stores kept open, most recently used
+# Each of these makes Claude Code send its model requests to that provider's own base URL and none to
+# ANTHROPIC_BASE_URL (2.1.322, docs/research/D70-serve-probes.md section 4). Defined, and read, once:
+# contexto.upstream.cloud_provider, the check contexto run claude refuses a launch by.
+PROVIDER_SWITCHES = tuple(CLOUD_PROVIDER_KEYS)
+NOT_RUN = "{tool} was not run, and nothing was read or written: "
+NO_TOOL_USE_ID = (NOT_RUN + "this call carries no tool-use id, which `contexto mcp --serve` needs to find the "
+                  "conversation's session. It needs a client that sends _meta[\"claudecode/toolUseId\"] with each "
+                  "tool call (measured on Claude Code 2.1.322). Trying again will not help: go on without this tool.")
+SERVICE_NOT_RUNNING = (NOT_RUN + "the Contexto service is not running or cannot be reached ({reason}), so the "
+                       "session of this call is unknown. The user starts it with `contexto serve`; go on without "
+                       "this tool until then.")
+UNKNOWN_TOOL_USE = (NOT_RUN + "the Contexto service has no record of this tool call, so its session is unknown. The "
+                    "model request that made the call may not have gone through the service: Claude Code's "
+                    "ANTHROPIC_BASE_URL must point at the running `contexto serve`.{switch} Trying again will not "
+                    "help until it does: go on without this tool, and tell the user.")
+SWITCH_SET = " {note}. A Claude Code that runs so bypasses the service."
+TOKEN_REFUSED = (NOT_RUN + "the Contexto service refused this server's token. serve.token in the Contexto home may "
+                 "be left from an earlier run of the service, or another program may hold the service's port. The "
+                 "user restarts `contexto serve`; go on without this tool until then.")
+UNEXPECTED_ANSWER = (NOT_RUN + "the Contexto service gave an answer this server does not understand ({reason}). "
+                     "`contexto serve` and `contexto mcp --serve` may be different versions, or another program may "
+                     "hold the service's port. The user restarts `contexto serve`; go on without this tool until "
+                     "then.")
+SESSION_UNOPENED = (NOT_RUN + "the Contexto service named session {session} for this call, but that session cannot "
+                    "be opened ({reason}). `contexto mcp --serve` never creates a session and never uses another "
+                    "one. Go on without this tool, and tell the user.")
+_RESOLVE_REPLIES = {serveclient.NOT_RUNNING: SERVICE_NOT_RUNNING, serveclient.UNKNOWN_TOOL_USE: UNKNOWN_TOOL_USE,
+                    serveclient.TOKEN_REFUSED: TOKEN_REFUSED, serveclient.UNEXPECTED_ANSWER: UNEXPECTED_ANSWER}
+
+
+class SessionUnavailable(Exception):
+    """The session the service named cannot be served: its id is not a session id, it does not exist, its
+    directory is a symlink, or opening it failed. ``reason`` is a phrase for the tool error."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class Sessions(Protocol):
+    """How ``ServeServer`` reaches session stores (``contexto.commands.mcp.ExistingSessions``)."""
+
+    def check(self, session_id: str) -> None: ...  # SessionUnavailable unless the session can be served
+    def open(self, session_id: str) -> Store: ...  # the same, or LockFileDamagedError (D59)
+
+
+class _NotRun(Exception):
+    """A call whose session is not known: ``reply`` is the tool error's template and ``fields`` what
+    fills it (in one ``format``, so a value holding braces is never read as a field), ``why`` the
+    stderr diagnostic."""
+
+    def __init__(self, reply: str, why: str, **fields: str) -> None:
+        super().__init__(why)
+        self.reply = reply
+        self.why = why
+        self.fields = fields
+
+
+def provider_note(environ: Mapping[str, str], *, cwd: Path, home: Path) -> str | None:
+    """What may make Claude Code bypass the service, as sentences without the final full stop, or None
+    (D70). The check is the one ``contexto run claude`` refuses a launch by
+    (``contexto.upstream.cloud_provider``): a switch on in ``environ`` or in the ``env`` block of any
+    settings file Claude Code would read from ``cwd`` with ``home`` as the user's home, read as Claude
+    Code reads it, and a settings file there that cannot be read. Claude Code passes its whole start
+    environment to a stdio MCP server (2.1.322), and starts it in the project directory, so the server
+    sees what the client would have seen."""
+    found = cloud_provider(env=environ, cwd=cwd, home=home)
+    return cloud_provider_note(found) if found is not None else None
+
+
+class ServeServer(Server):
+    """The server behind ``contexto mcp --serve``: it has no session of its own and finds the session
+    of each ``tools/call`` by asking the Contexto service (``contexto serve``, D70).
+
+    Why: the clients the service serves are not launched by Contexto (the VS Code extension, the Agent
+    SDK, headless ``claude -p``), so their MCP server is registered once in the user's configuration and
+    cannot be started with ``--session S``. Measured on Claude Code 2.1.322 (macOS, zero spend,
+    docs/research/D70-serve-probes.md):
+
+    - ``initialize`` and ``server/discover`` carry no session id.
+    - The server's environment has ``CLAUDE_CODE_SESSION_ID``, set once at spawn. ``/clear`` starts a
+      new session id in the same Claude Code process; the server process survives it and is told
+      nothing, so the variable then names the conversation before the ``/clear``. It is never read here.
+    - Every ``tools/call`` carries ``params._meta["claudecode/toolUseId"]``, exactly the ``tool_use``
+      id of the model response: for main and subagent calls, two calls in one turn, after ``/clear``
+      and after ``--resume``. The service saw that response, so it knows the session.
+
+    ``initialize``, ``server/discover``, ``ping`` and ``tools/list`` are answered with no session and
+    with no service running, as ``Server`` answers them: a CLI that cannot list a server's tools
+    reports nothing to the user, so the tools always list, and the tool list is the same.
+
+    A ``tools/call`` is resolved in three steps, and the existing tool code then runs against that
+    session's store through a per-store ``Server``, so replies, budgets and the session log are those
+    of ``--session`` mode:
+
+    1. the tool-use id from ``_meta`` (a string of 1 to ``TOOL_USE_ID_MAX`` characters);
+    2. ``resolve(id)``, the service's answer (``contexto.serveclient.resolve``);
+    3. ``sessions.check`` and ``sessions.open``: the id must be a valid session id naming an existing
+       session directory that is not a symlink. The server never creates a session (D57).
+
+    It fails closed. When a step fails the call gets a tool error (``isError`` true) that says which
+    step and what the user does about it, and no store is opened, read or written. There is no
+    fallback to another session, to ``CLAUDE_CODE_SESSION_ID`` or to the newest session: a pin written
+    to another conversation's ledger stays in that conversation's pinned state, which is worse than a
+    tool that says it did not run. The messages hold no token, no request path and no file content
+    (``contexto.serveclient.ResolveError``); the same reason goes to stderr, one line per failed call.
+
+    Open stores: the ``STORE_CACHE`` most recently used are kept, each with the search text budget
+    ``sessions`` gives it, so a server whose Claude Code process went through many conversations
+    (``/clear``, subagents share their parent's) holds at most that many. An evicted store is released
+    (its ``live.lock`` hold is dropped, so ``contexto sessions prune`` sees the session as idle again);
+    a kept one is checked again at every call, so a session deleted meanwhile is refused, not recreated.
+    A session whose ``live.lock`` is damaged gets the reply ``--session`` mode gives (D59) and is not
+    kept, so deleting the file repairs it without a restart.
+
+    The ``tools/list`` record (``set_mcp_listed``, which ``contexto.toolcheck`` reads to word its
+    missing-tools warning): ``--session`` mode writes it when it answers ``tools/list``. Here no store
+    is known then, and ``CLAUDE_CODE_SESSION_ID`` would name the wrong one after ``/clear``, so the
+    record is written when a store is opened for its first resolved call. That is later than the
+    listing but never wrong: a client that calls a tool has the tools, and the call is resolved only
+    after the service saw this conversation's response, so the record is newer than the engine the
+    check compares it with. Until a conversation's first call the check finds no record and says the
+    server "did not start or did not answer"; after it, "started ... but its tools are not available".
+    """
+
+    def __init__(self, resolve: Callable[[str], str], sessions: Sessions, stdout: IO[str],
+                 stderr: IO[str] | None = None, *, provider: str | None = None) -> None:
+        super().__init__(None, stdout, stderr)  # type: ignore[arg-type]  # no store until a call is resolved
+        self.resolve = resolve
+        self.sessions = sessions
+        self.provider = provider  # provider_note() of this server's environment and directory
+        self.servers: OrderedDict[str, Server] = OrderedDict()  # by session id, least recently used first
+
+    def _tools_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.listed = True
+        return {"tools": TOOLS}  # recorded per store at its first resolved call (see the class docstring)
+
+    def _tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
+        name = params["name"]
+        try:
+            server = self._session_server(params)
+        except _NotRun as exc:
+            self._diag(f"{name}: no session for this call ({exc.why})")
+            return _tool_error(exc.reply.format(tool=name, **exc.fields))
+        except Exception as exc:  # fails this call only, as a result the model can read
+            self._diag(f"{name}: internal error finding the session: {type(exc).__name__}")
+            return _tool_error(TOOL_FAILED.format(tool=name, error=type(exc).__name__))
+        return server._tools_call(params)
+
+    def _session_server(self, params: dict[str, Any]) -> Server:
+        meta = params.get("_meta")
+        tool_use_id = meta.get(META_TOOL_USE) if isinstance(meta, dict) else None
+        if not isinstance(tool_use_id, str) or not 0 < len(tool_use_id) <= TOOL_USE_ID_MAX:
+            raise _NotRun(NO_TOOL_USE_ID, "no tool-use id")
+        try:
+            session = self.resolve(tool_use_id)
+        except serveclient.ResolveError as exc:
+            raise _NotRun(_RESOLVE_REPLIES[exc.kind], str(exc), reason=exc.reason,
+                          switch=SWITCH_SET.format(note=self.provider) if self.provider else "") from None
+        try:
+            server = self.servers.get(session)
+            if server is not None:
+                self.sessions.check(session)
+                self.servers.move_to_end(session)
+                return server
+            store = self.sessions.open(session)
+        except SessionUnavailable as exc:
+            self._drop(session)
+            raise _NotRun(SESSION_UNOPENED, f"session cannot be opened: {exc.reason}", reason=exc.reason,
+                          session=_clip(repr(session), ECHO_CHARS)) from None
+        except LockFileDamagedError as exc:  # every tool says so, naming the file, as --session mode does
+            return Server(UnopenedStore(session, exc), self.stdout, self.stderr)
+        server = self.servers[session] = Server(store, self.stdout, self.stderr)
+        server._record_listed()
+        while len(self.servers) > STORE_CACHE:
+            self._drop(next(iter(self.servers)))
+        return server
+
+    def _drop(self, session: str) -> None:
+        """Forget ``session``'s open store, if one is kept, and release its hold on the session."""
+        server = self.servers.pop(session, None)
+        release = getattr(server.store, "release", None) if server is not None else None
+        try:
+            if callable(release):
+                release()
+        except Exception as exc:  # a store that will not release is dropped all the same
+            self._diag(f"release failed: {type(exc).__name__}")

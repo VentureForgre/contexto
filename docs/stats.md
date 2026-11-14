@@ -447,6 +447,7 @@ that is in neither.
 | `search_cache_invalid` | `CONTEXTO_SEARCH_CACHE_MB` was not a valid value, so the default was used. |
 | `watchdog_unavailable` | The helper that removes a launch's temporary files if the launcher is killed could not start. |
 | `affinity_salt_unavailable` | The key for the cache-affinity header could not be read, so requests went out without the header and a gateway may route them to different caches. |
+| `tool_calls_hook_error` | Under `contexto serve`, the tool calls in a response could not be registered, so a Contexto tool call from that response may not find its session. |
 | `project_unavailable` | Project memory could not read the project's earlier sessions, so nothing was carried ([project memory](project-memory.md)). |
 | `project_session_skipped` | An earlier session of the project could not be read (damaged, too large or unreadable), so its records were not carried. |
 | `start_text_unavailable` | The records carried from earlier sessions could not be read for a request; the text already sent was kept. |
@@ -516,7 +517,13 @@ The log's ordinary records are not faults either, and most have a number of thei
 `launch`, `exit`, `proxy_start`, `proxy_stop`, `mcp_call`, `count_tokens`, `rotation`, `page_out`,
 `carried_paged`, `carried_reclassified`, `over_bound`, `main_changed`, `degraded_leave`,
 `epoch_resumed`, `sizing_restored`, `side_room_closed`, `mcp_tools_found`,
-`cli_version`, `cli_version_check`.
+`cli_version`, `cli_version_check`, and `serve_open` and `serve_close`, which `contexto serve` writes
+where a launch writes `proxy_start` and `proxy_stop`.
+
+`contexto serve` writes its other events to `serve.log` in `$CONTEXTO_HOME`, not to a session's log,
+so `contexto stats` never reads them: `serve_start`, `serve_stop`, `serve_error`, `session_open`,
+`session_open_failed`, `session_close`, `session_discarded`, `reap_error`, `stopping_refused`,
+`token_header_dropped`, `tool_use_ambiguous` and `unrouted` ([docs/serve.md](serve.md)).
 
 ## What the numbers cannot show
 

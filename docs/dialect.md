@@ -743,8 +743,12 @@ D53).
   a compressed request body (rule 15). The launcher must keep the client on plain HTTP with
   compression off. Codex: yes (`supports_websockets = false` and
   `enable_request_compression = false` in `api_key_config` and `chatgpt_overrides`).
-- [ ] **A launcher.** `contexto run <cli>` is the only path that wires the engine in:
-  `src/contexto/commands/run.py` lists the CLIs in `choices` and dispatches, and the launcher shares
+- [ ] **A launcher.** `contexto run <cli>` is the path that wires the engine in for a client
+  Contexto starts. `contexto serve` (`src/contexto/serve.py`, [serve.md](serve.md)) also runs the
+  engine, as a standing service for clients started by something else, but it serves Claude Code
+  only: it routes by Claude Code's session ids and resolves tool calls by
+  `_meta["claudecode/toolUseId"]`. A new client still needs its Dialect and either a launcher or a
+  route of its own in `serve`. The launcher path: `src/contexto/commands/run.py` lists the CLIs in `choices` and dispatches, and the launcher shares
   `options_from_args`, `check_options`, `open_session`, `engine_config`, `start_proxy`,
   `check_cli_version`, `start_warning`, `run_child` and `report_missing_tools` from
   `src/contexto/launcher.py`. `start_proxy` builds the `RewriteEngine`, passes its `observe_usage` to
@@ -761,7 +765,8 @@ D53).
   the interpreter Contexto runs on (`sys.executable`) as `<python> -P -m contexto mcp --session=<id>`,
   with `CONTEXTO_HOME` set (`paths.mcp_env`). `-P` keeps the project directory, where the client
   starts its servers, off `sys.path`, so a project's own `contexto` package cannot run in its place.
-  Pass the session as one argument, `--session=<id>`, as `mcp_payload` does. Every value written into
+  Pass the session as one argument, `--session=<id>`, as `mcp_payload` does. The other mode,
+  `contexto mcp --serve`, serves the clients of `contexto serve` and, like it, Claude Code only. Every value written into
   the client's config must be quoted for that config's format, and refused when the client would
   expand it (Claude Code expands `${`: `check_mcp_values`, D55). Where the client runs unattended it
   must be allowed to call the tools without a prompt, and no more than that: Contexto's own tools by
