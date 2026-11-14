@@ -12,7 +12,7 @@ Written by `contexto bench` from the records in the output directory: `manifest.
 - Started 2026-11-12T10:00:00Z, finished 2026-11-12T12:00:00Z.
 - Sessions (one arm on one seed, run once): 24 recorded, 24 complete, 0 stopped, 0 not run.
 - The tables below use repeat 0 of each seed, so the repeated seed is counted once. The other repeats are used only for run-to-run noise.
-- The manifest gives no count of request records for any session, so a `requests.jsonl` cut short at the end of a session cannot be detected.
+- The manifest gives no count of request records for any session, so a lost request record, or a `requests.jsonl` cut short, cannot be detected.
 
 ## Accuracy by arm
 

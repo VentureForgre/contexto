@@ -26,8 +26,8 @@ A request number ``n`` is unique within one attempt of a unit, but numbers may b
 meter takes a number for a request before forwarding it and writes a record only for a request that
 got a response, so a request the upstream never answered leaves a gap with nothing lost. A record
 that was lost shows in the unit's counts instead. Where the manifest gives no count for an attempt,
-nothing in the directory can show that its records were cut short at its end; ``Run.unchecked``
-names those attempts and the report says so.
+nothing in the directory can show that one of its records was lost, wherever it stood, or that the
+file was cut short; ``Run.unchecked`` names those attempts and the report says so.
 
 What the live run (``contexto.bench.runner``) adds and this module reads:
 
@@ -528,8 +528,8 @@ class Run:
     """One live output directory, read and checked: its manifest and its two record files.
 
     ``unchecked`` names, in manifest order, each unit that has attempts whose request records the
-    manifest does not count, with those attempts: a ``requests.jsonl`` cut short at the end of one
-    of them cannot be detected. A unit that was not run is never named."""
+    manifest does not count, with those attempts: a request record lost from one of them, or a
+    ``requests.jsonl`` cut short, cannot be detected. A unit that was not run is never named."""
 
     path: Path
     manifest: dict[str, Any]

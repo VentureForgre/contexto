@@ -247,10 +247,11 @@ def test_without_a_count_the_report_says_a_cut_file_cannot_be_detected(tmp_path)
     assert len(run.unchecked) == 6
     assert run.unchecked[0] == (("contexto", 1, 0), (0, 1))
     results = report.write(out)
-    assert results["unchecked"][0] == {"model": MODEL, "arm": "contexto", "seed": 1, "repeat": 0, "attempts": [0, 1]}
+    assert results["unchecked"][0] == {"model": MODEL, "arm": "contexto", "seed": 1, "repeat": 0, "attempts": [0, 1],
+                                       "last_attempt": 1}
     text = (out / "results.md").read_text(encoding="utf-8")
-    assert ("- The manifest gives no count of request records for any session, so a `requests.jsonl` cut short at "
-            "the end of a session cannot be detected.") in text
+    assert ("- The manifest gives no count of request records for any session, so a lost request record, or a "
+            "`requests.jsonl` cut short, cannot be detected.") in text
     # One session without a count is named.
     out = gap_run(tmp_path / "one")
     data = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
@@ -259,8 +260,42 @@ def test_without_a_count_the_report_says_a_cut_file_cannot_be_detected(tmp_path)
     (out / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
     text = report.render(report.build([out]))
     assert ("- The manifest gives no count of request records for 1 session (full context, seed 3, repeat 0), so a "
-            "`requests.jsonl` cut short at the end of it cannot be detected. Every other session's count was "
-            "checked.") in text
+            "request record lost from it, or a `requests.jsonl` cut short at the end of it, cannot be detected. "
+            "Every other count was checked.") in text
+
+
+def _uncount(out, keep):
+    """Remove the request counts of every attempt of ``out``'s manifest but those ``keep`` names
+    (arm, seed, attempt)."""
+    data = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    for unit in data["units"]:
+        for entry in unit["attempts"]:
+            if (unit["arm"], unit["seed"], entry["attempt"]) not in keep:
+                del entry["requests"]
+                if entry["attempt"] == unit["attempt"]:
+                    del unit["requests"]
+    (out / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_a_retried_session_without_a_count_for_attempt_0_only_names_the_attempt(tmp_path):
+    """#264 nits: a session whose attempt 1 was checked and whose attempt 0 has no count is named with
+    its attempt, not as if the whole session were unchecked."""
+    out = gap_run(tmp_path / "run")
+    every = {(arm, seed, 0) for arm in ("contexto", "full") for seed in (1, 2, 3)}
+    _uncount(out, keep=every - {("contexto", 1, 0)} | {("contexto", 1, 1)})
+    text = report.render(report.build([out]))
+    assert ("- The manifest gives no count of request records for 1 session (Contexto, seed 1, repeat 0, attempt 0), "
+            "so a request record lost from it") in text
+
+
+def test_the_any_session_form_needs_every_attempt_without_a_count(tmp_path):
+    """Every session has an attempt without a count, but attempt 1 of Contexto's seed-1 session was
+    counted: the sentence names the sessions instead of saying "any session"."""
+    out = gap_run(tmp_path / "run")
+    _uncount(out, keep={("contexto", 1, 1)})
+    text = report.render(report.build([out]))
+    assert "for any session" not in text
+    assert "no count of request records for 6 sessions (Contexto, seed 1, repeat 0, attempt 0; " in text
 
 
 def test_the_units_counts_are_checked_against_the_attempt_they_belong_to(tmp_path):

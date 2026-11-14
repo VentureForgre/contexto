@@ -33,7 +33,8 @@ What is counted:
   record whose fragment named no unit is in the total over every request only.
 
 - A session whose manifest entry gives no count of its request records (``records.Run.unchecked``)
-  is named under "What was run": a ``requests.jsonl`` cut short at its end cannot be detected.
+  is named under "What was run": only a count shows a lost request record, so without one a record
+  lost anywhere in the session, or a ``requests.jsonl`` cut short, cannot be detected.
 
 Words. The manifest calls one arm on one seed, run once, a unit; ``results.md`` calls it a session
 throughout. A manifest ``label`` is printed in the title of ``results.md``, under "What this run
@@ -840,7 +841,8 @@ def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any]
         "arms": None, "pairs": None, "noise": None, "plain_compaction": None, "all_requests": None,
         "by_model": None, "charts": [], "charts_skipped": [],
         "unchecked": [{"model": run.manifest["model"], "arm": key[0], "seed": key[1], "repeat": key[2],
-                       "attempts": list(attempts)} for run in runs for key, attempts in run.unchecked],
+                       "attempts": list(attempts), "last_attempt": _last_attempt(run, key)}
+                      for run in runs for key, attempts in run.unchecked],
     }
     if one:
         results.update(blocks[first.model])
@@ -944,28 +946,35 @@ def _what_was_run(results: Mapping[str, Any]) -> list[str]:
 UNCHECKED_SHOWN = 8  # sessions named one by one; more are counted
 
 
+def _last_attempt(run: records.Run, key: Key) -> int:
+    return next(records.attempt(u) for u in run.manifest["units"] if records.unit_key(u) == key)
+
+
 def _unchecked_words(results: Mapping[str, Any]) -> list[str]:
-    """The sentence about sessions whose request records the manifest does not count, if any."""
+    """The sentence about sessions whose request records the manifest does not count, if any. Only
+    the counts show a lost record (``records.read_run``), so without one a record lost anywhere in
+    the attempt goes unnoticed, as does a file cut short."""
     unchecked = results.get("unchecked") or []
     if not unchecked:
         return []
-    ran = sum(1 for u in results["manifest"]["units"] if u["status"] != "not_run")
-    if len(unchecked) >= ran:
-        return ["- The manifest gives no count of request records for any session, so a `requests.jsonl` cut short "
-                "at the end of a session cannot be detected."]
+    attempts = sum(records.attempt(u) + 1 for u in results["manifest"]["units"] if u["status"] != "not_run")
+    if sum(len(u["attempts"]) for u in unchecked) >= attempts:
+        return ["- The manifest gives no count of request records for any session, so a lost request record, or a "
+                "`requests.jsonl` cut short, cannot be detected."]
     several = len({u["model"] for u in unchecked}) > 1 or results["manifest"].get("model") is None
     names = []
     for u in unchecked[:UNCHECKED_SHOWN]:
         words = f"{_inline(u['arm'])}, seed {u['seed']}, repeat {u['repeat']}"
-        if u["attempts"] != [0]:
+        if u.get("last_attempt", 0) > 0:  # a session run more than once: say which of its attempts
             words += f", attempt{'s' if len(u['attempts']) > 1 else ''} {_and([str(a) for a in u['attempts']])}"
         names.append(f"{u['model']}, {words}" if several else words)
     if len(unchecked) > UNCHECKED_SHOWN:
         names.append(f"and {len(unchecked) - UNCHECKED_SHOWN} more")
     one = len(unchecked) == 1
     return [f"- The manifest gives no count of request records for {_plural(len(unchecked), 'session')} "
-            f"({'; '.join(names)}), so a `requests.jsonl` cut short at the end of {'it' if one else 'one of them'} "
-            "cannot be detected. Every other session's count was checked."]
+            f"({'; '.join(names)}), so a request record lost from {'it' if one else 'them'}, or a `requests.jsonl` "
+            f"cut short at the end of {'it' if one else 'one of them'}, cannot be detected. Every other count was "
+            "checked."]
 
 
 def _accuracy(block: Mapping[str, Any], h: str) -> list[str]:
