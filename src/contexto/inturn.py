@@ -74,9 +74,9 @@ from dataclasses import replace
 from typing import Any, NamedTuple
 
 from contexto.canonical import canonical_bytes, canonical_json, utf8
-from contexto.pdfpages import PDF_MAX_PAGES, count_pages
+from contexto.pdfpages import PDF_MAX_PAGES, count_pages  # noqa: F401 (PDF_MAX_PAGES: still importable from here)
 from contexto.store.render import OWN_TOOL_PREFIX, own_call_ids
-from contexto.tokens import PDF_PAGE_TOKENS, TokenEstimator, uncertain_documents
+from contexto.tokens import UNCERTAIN_DOCUMENT_TOKENS, TokenEstimator, measured_documents
 
 STUB_MIN_BYTES = 2_048  # a result is stubbed only when its content is at least this many bytes
 STUB_MIN_RATIO = 2  # and at least this many times its stub
@@ -963,10 +963,6 @@ def _tightness(request: dict, messages: list[dict], sent: list[dict], state: Any
     return head, trigger(config) - (head + fixed + prompt) < HEADWAY_ROOMS * config.min_turn_room
 
 
-# What D60 counts a PDF at when its pages are not certain: the API's maximum, so it is never estimated low.
-UNCERTAIN_DOCUMENT_TOKENS = PDF_MAX_PAGES * PDF_PAGE_TOKENS
-
-
 class _Candidate(NamedTuple):
     i: int
     j: int
@@ -1049,12 +1045,20 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     last_assistant = max(i for i in range(start, n) if rw.is_assistant(messages[i]))
     sent = view(messages, state, dialect)
 
+    costs = dict(state.document_costs)
+
+    def unmeasured(items: list[dict]) -> int:
+        """How many PDFs in ``items`` have pages that are not certain and no cost measured by usage."""
+        return measured_documents([m for m in items if m is not FOLDED], costs)[1]
+
     def tokens(items: list[dict]) -> int:
-        """Certain estimates only (Reviewer A at 7575c76f, finding 1): a PDF whose pages are not certain
-        counts as nothing here, so it never makes a result look over the bound on its own and paging it
-        never counts as freeing anything. Usage measures it once it is sent."""
+        """Known estimates only. A PDF whose pages are not certain counts at the cost usage measured for it
+        (Reviewer A at 15293e9c, finding 1), so stubbing it frees that cost. Before usage has measured it,
+        it counts as nothing here (Reviewer A at 7575c76f, finding 1), so it never makes a result look over
+        the bound on its own and paging it never counts as freeing anything."""
         kept = [m for m in items if m is not FOLDED]
-        return rw.estimate_items(estimator, kept) - UNCERTAIN_DOCUMENT_TOKENS * uncertain_documents(kept)
+        over, unknown = measured_documents(kept, costs)
+        return rw.estimate_items(estimator, kept) - over - UNCERTAIN_DOCUMENT_TOKENS * unknown
 
     def counted(i: int, item: dict) -> int:
         """A sent item's tokens for a decision: a fresh tool result with its margin."""
@@ -1072,7 +1076,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             result = hooks.result(messages[i], j)
             if (i, j) in done or result is None or not hooks.stubbable(result):
                 continue
-            certain = not uncertain_documents([result])
+            certain = not unmeasured([result])  # every PDF in it counted or measured
             if not certain and i >= last_assistant:
                 continue  # unread and its cost unknown: sent once, as without in-turn paging
             call = hooks.call(messages, i, call_id)
@@ -1088,7 +1092,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             stubbed_item = hooks.with_stubs(sent[i], {j: text})
             plain = tokens([sent[i]]) - tokens([stubbed_item])
             saving = counted(i, sent[i]) - counted(i, stubbed_item)
-            if not certain:  # seen: stubbed like any result, counted as freeing only what is certain
+            if not certain:  # seen, usage missing: stubbed like any result, counted as freeing what is known
                 plain, saving = max(plain, 0), max(saving, 0)
             if plain > 0 or not certain:
                 (seen if i < last_assistant else unseen).append(
@@ -1103,11 +1107,11 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     earlier = tokens(rw.window_items(sent[:start], state.k)) if start > state.k else 0
     freeable = ((earlier if may_page_turns else 0) + sum(counted(i, sent[i]) for r in rounds for i in r.removed)
                 + sum(c.saving for c in seen if c.i not in in_rounds and (c.i >= start or not may_page_turns)))
-    # The estimate holds a fresh uncertain PDF at D60's count until usage measures it: the batch leaves
-    # that count out, so it pages nothing for it (over the bound by usage is the logged over_bound).
+    # The estimate holds an uncertain PDF at D60's count until usage measures it: the batch leaves that
+    # count out, so it pages nothing for it (over the bound by usage is the logged over_bound).
     fresh = (sent[previous_n:] if state.last_input_tokens is not None
              else rw.transform_messages(messages, state))
-    unknown = UNCERTAIN_DOCUMENT_TOKENS * uncertain_documents([m for m in fresh if m is not FOLDED])
+    unknown = UNCERTAIN_DOCUMENT_TOKENS * unmeasured(fresh)
     pressure = estimate + margin - unknown
     headway = line - HEADWAY_ROOMS * config.min_turn_room
 

@@ -1480,3 +1480,107 @@ def test_sessions_show_lists_parallel_results_of_one_message_in_their_calls_orde
     check_page({**results[0], "block": 3})
     with pytest.raises(TypeError):
         check_page({**results[0], "block": -1})
+
+
+class CostedPdfs(Upstream):
+    """An upstream that counts each PDF whose pages the estimator cannot count at ``cost`` tokens."""
+
+    def __init__(self, cost: int) -> None:
+        super().__init__()
+        self.cost = cost
+
+    def tokens(self, request: dict) -> int:
+        over = PDF_MAX_PAGES * PDF_PAGE_TOKENS - self.cost
+        return super().tokens(request) - over * uncertain_documents(request["messages"])
+
+
+SCAN_55K = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                          "data": base64.b64encode(b"%PDF-1.7\n" + b"x" * 55_000).decode()}}
+
+
+def read_pdfs_then(config: Config, reads: int, pdf=True, cost: int = 24_500) -> Cli:
+    """Reviewer A at 15293e9c, finding 1: ``reads`` reads of a 55 KB PDF whose pages are not certain (the
+    upstream counts it at ``cost``), or with ``pdf=False`` the same reads returning text of about that
+    cost (12,000 tokens: a text read of 24,500 would be over a 60,000 bound on its own once counted at the
+    fresh results' dense ratio), then one small round."""
+    cost = cost if pdf else 12_000
+    cli = Cli(memory(), config)
+    cli.upstream = CostedPdfs(cost)
+    cli.prompt("Read the scan, then work.")
+    for r in range(reads):
+        cli.send([("Read", {"file_path": "scan.pdf"})])
+        cli.results([[SCAN_55K] if pdf else output(f"scan-{r}", int(cost * BYTES))])
+    cli.send([("Bash", {"command": "ls"})])
+    cli.results([output("small", 600)])
+    return cli
+
+
+def assert_real_bound_held(cli: Cli, bound: int) -> None:
+    """The bound by the upstream's count. A request that carries a PDF usage has not measured is over
+    it by estimate (D60 counts the API's maximum), the logged ``over_bound`` of v0.5.24."""
+    assert max(s.real for s in cli.sent) <= bound
+    assert not cli.events("in_turn_exhausted")
+    assert not [e for e in cli.usage_events if e["event"] == "over_bound"]
+
+
+def assert_estimates_track(cli: Cli, within: float = 0.05) -> None:
+    """Every request after a batch is estimated within ``within`` of the upstream's count."""
+    for s in cli.sent:
+        if any(e["event"] == "in_turn_batch" for e in s.events):
+            assert abs(s.estimate - s.real) <= within * s.real, (s.estimate, s.real)
+
+
+@pytest.mark.parametrize("config,reads,fresh", [(SMALL, 2, 15_000), (Config(), 5, 60_000)],
+                         ids=["bound-60000", "defaults"])
+@pytest.mark.parametrize("pdf", [True, False], ids=["pdf", "text"])
+def test_a_read_uncertain_pdf_is_measured_and_a_fresh_result_is_read_whole(config, reads, fresh, pdf):
+    # Reviewer A at 15293e9c, finding 1 (a): once read, an uncertain PDF counted as freeing nothing, so a
+    # batch stubbed a fresh 15 KB result the model never saw and sent 7,301 tokens of 60,000 (estimated
+    # 56,473); at the defaults a 60 KB result, 7,370 of 150,000 (estimated 130,279). Its cost is now
+    # measured from the usage of the first request that carried it. The text control behaves the same.
+    cli = read_pdfs_then(config, reads, pdf)
+    cli.send([("Bash", {"command": "cat big.log"})])
+    cli.results([output("fresh", fresh)])
+    sent = cli.send([("Bash", {"command": "next"})])
+    assert "needle-fresh-midpoint" in json.dumps(sent.messages[-1]["content"])  # forwarded whole
+    assert not [e for e in batches(cli) if e["unseen_results_stubbed"]]
+    assert_real_bound_held(cli, config.bound)
+    assert_estimates_track(cli)
+    if pdf:
+        costs = dict(cli.state.document_costs)
+        assert len(costs) == 1 and abs(next(iter(costs.values())) - 24_500) <= 200
+
+
+@pytest.mark.parametrize("pdf", [True, False], ids=["pdf", "text"])
+def test_a_request_riding_up_to_the_bound_over_read_pdfs_runs_a_batch_at_the_line(pdf):
+    # Reviewer A at 15293e9c, finding 1 (b): with two read PDFs, 3 KB rounds went out at 57,249 and 58,329
+    # tokens of 60,000 with no batch and no event, since stubbing a read PDF counted as freeing nothing.
+    cli = read_pdfs_then(SMALL, 2, pdf)
+    cli.loop(8, lambda r: output(f"l-{r}", 3_000))
+    assert batches(cli)
+    assert_room_held(cli, SMALL.min_turn_room)
+    assert max(s.real for s in cli.sent[2:]) <= inturn.trigger(SMALL)
+    assert_estimates_track(cli)
+
+
+def test_a_large_uncertain_pdf_once_measured_is_stubbed_without_folding_the_loop():
+    # Reviewer B at 15293e9c, L3: ten 20 KB rounds, then an uncertain PDF the upstream counts at 120,000.
+    # Its request is over the bound by usage (the logged over_bound, as at v0.5.24). The next batch stubbed
+    # 12 results and folded 11 rounds down to 20,696 tokens, estimated 140,945, since the PDF's stub was
+    # credited as freeing nothing.
+    cli = Cli(memory())
+    cli.upstream = CostedPdfs(120_000)
+    cli.prompt("go")
+    for r in range(10):
+        cli.send([("Read", {"file_path": f"a{r}"})])
+        cli.results([output(f"a{r}", RESULT)])
+    cli.send([("Read", {"file_path": "scan.pdf"})])
+    cli.results([[SCAN_55K]])
+    pdf_at = len(cli.history) - 1
+    cli.send([("Read", {"file_path": "b0"})])  # carries the PDF: usage measures it
+    cli.results([output("b0", RESULT)])
+    sent = cli.send([("Read", {"file_path": "b1"})])
+    (batch,) = [e for e in sent.events if e["event"] == "in_turn_batch"]
+    assert batch["rounds_folded"] == 0 and not batch["unseen_results_stubbed"]
+    assert pdf_at in {i for i, _, _ in cli.state.inturn.stubs}
+    assert abs(sent.estimate - sent.real) <= 0.05 * sent.real

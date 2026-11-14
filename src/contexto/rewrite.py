@@ -172,14 +172,17 @@ from contexto.store.render import is_own_block, is_own_item, own_call_ids, rende
 from contexto.tokens import (
     PDF_PAGE_TOKENS,
     TEXT_BYTES_PER_TOKEN,
+    UNCERTAIN_DOCUMENT_TOKENS,
     MediaCost,
     TokenEstimator,
     estimate_tokens,
+    measured_documents,
     media_cost,
     media_keys,
     pdf_allowance,
     prime_media,
     split_media,
+    uncertain_document_keys,
     uncertain_documents,
 )
 from contexto.toolcheck import ToolCheck
@@ -328,6 +331,14 @@ class EpochState:
     # inturn.FRESH_BYTES_PER_TOKEN); the request-time room counts it, so a room is never published from an
     # estimate a dense result has not yet corrected. Per-request, never recorded.
     room_margin: int = 0
+    # D63: (content key, tokens) for each PDF whose pages are not certain once usage has measured it: the
+    # real input of the first request that carried it less the estimate of everything else in that request,
+    # never under 0. The estimate counts it at that cost from then on, and stubbing it frees that cost. Per
+    # engine, never recorded: after a restart the next usage measures it again.
+    document_costs: tuple[tuple[Any, int], ...] = ()
+    # D63: (the keys of the unmeasured uncertain PDFs the newest request carried, the estimate of everything
+    # else in that request). Per-request, never recorded.
+    pending_documents: tuple[tuple, int] | None = None
     # D69 (rule 19): the records carried from the project's earlier sessions, read once when the main
     # conversation's state is created and sent while k == 0; past that the preamble's pinned text holds them.
     start_text: str = ""
@@ -1239,12 +1250,37 @@ def headroom(state: EpochState, config: Config) -> int:
 
 def estimate_upstream(request: dict, messages: list[dict], previous_n: int, state: EpochState,
                       estimator: TokenEstimator) -> int:
-    """Rule 3: last real input plus the messages added since, else an estimate of the whole request."""
+    """Rule 3: last real input plus the messages added since, else an estimate of the whole request. A PDF
+    whose pages are not certain counts at its measured cost once usage has measured it (D63)."""
+    costs = dict(state.document_costs)
     if state.last_input_tokens is not None and previous_n <= len(messages):
         added = inturn.view(messages, state, _dialect())[previous_n:]  # as sent (rule 5)
-        return state.last_input_tokens + estimate_items(estimator, added)
+        return state.last_input_tokens + estimate_items(estimator, added) - measured_documents(added, costs)[0]
     head = estimator.estimate(canonical_json(_dialect().head_estimate_source(request)))
-    return head + estimate_items(estimator, transform_messages(messages, state))
+    items = transform_messages(messages, state)
+    return head + estimate_items(estimator, items) - measured_documents(items, costs)[0]
+
+
+def pending_documents(sent_items: list[dict], sent_estimate: int, state: EpochState) -> tuple[tuple, int] | None:
+    """D63: the uncertain PDFs this request carries that usage has not measured, and the estimate of
+    everything else in it (each counted at ``UNCERTAIN_DOCUMENT_TOKENS`` in ``sent_estimate``), for
+    ``observe_usage`` to measure them by."""
+    costs = dict(state.document_costs)
+    keys = tuple(key for key in uncertain_document_keys(sent_items) if key not in costs)
+    return (keys, sent_estimate - UNCERTAIN_DOCUMENT_TOKENS * len(keys)) if keys else None
+
+
+def measured_costs(state: EpochState, real: int) -> tuple[tuple[Any, int], ...]:
+    """D63: ``document_costs`` with the PDFs of the request ``real`` measures: the real input less the
+    estimate of everything else in it, never under 0, shared evenly when it carried several."""
+    if state.pending_documents is None:
+        return state.document_costs
+    keys, others = state.pending_documents
+    each = max(0, real - others) // len(keys)
+    costs = dict(state.document_costs)
+    for key in keys:
+        costs.setdefault(key, each)
+    return tuple(costs.items())
 
 
 def window_items(messages: list[dict], start: int = 0) -> list[dict]:
@@ -1704,7 +1740,8 @@ def forward_original(request: dict, messages: list[dict], state: EpochState, rea
     return request, replace(state, degraded=True, last_sent_bytes=sent, last_sent_media=media,
                             last_sent_media_keys=media_keys(split_media(messages)[1]), last_sent_appends=False,
                             last_sent_anchor=(0, ""),
-                            last_estimate=None, last_input_tokens=None, pending_usage=usage_identity(messages)), events
+                            last_estimate=None, last_input_tokens=None, pending_usage=usage_identity(messages),
+                            pending_documents=None), events
 
 
 def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str, state: EpochState, store: Store,
@@ -1802,7 +1839,8 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
                     last_sent_media_keys=media_keys(split_media(sent_items)[1]),
                     last_sent_appends=appends_to(state.last_measured, scope, hashes), last_sent_scope=scope,
                     last_sent_anchor=(len(hashes), anchor_hash(hashes)),
-                    pending_usage=usage_identity(messages))
+                    pending_usage=usage_identity(messages),
+                    pending_documents=pending_documents(sent_items, sent_estimate, state))
     uncertain = uncertain_documents(messages[previous_n:]) if n > previous_n else 0
     if uncertain:
         # D60: a PDF whose pages are not certain counts as the API's maximum; say so when it arrives.
@@ -3262,7 +3300,8 @@ class RewriteEngine:
                     self.estimator.observe(text_bytes, text_tokens)
             measured = (Measured(state.last_sent_scope, *state.last_sent_anchor, text_bytes, real, keys)
                         if state.last_sent_anchor[0] else None)
-            state = replace(state, last_input_tokens=real, pending_usage=None, last_measured=measured)
+            state = replace(state, last_input_tokens=real, pending_usage=None, last_measured=measured,
+                            document_costs=measured_costs(state, real), pending_documents=None)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried
                 # messages, which also covers a resumed first request with a long history). The messages
