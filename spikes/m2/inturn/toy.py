@@ -46,10 +46,13 @@ LYING_ROOM = 100_000
 INFLATED = 999_999
 OLDER = ("silent_older", "drop_older_stubs", "drop_older_rounds", "noted_older_rounds", "trim_older_prompts",
          "split_older_prompts", "drop_older_turns", "fake_omission", "fake_omission_split",
-         "fake_omission_trim")  # Claude Code only
+         "fake_omission_trim", "fake_omission_trimall", "fake_omission_doc", "omit_turns", "omit_turns_n0",
+         "omit_turns_n99")  # Claude Code only
 ROUNDS_GONE = ("drop_older_rounds", "noted_older_rounds", "trim_older_prompts", "split_older_prompts", "fake_omission",
-               "fake_omission_split", "fake_omission_trim")
-FAKE_OMISSION = ("fake_omission", "fake_omission_split", "fake_omission_trim")
+               "fake_omission_split", "fake_omission_trim", "fake_omission_trimall", "fake_omission_doc")
+FAKE_OMISSION = ("fake_omission", "fake_omission_split", "fake_omission_trim", "fake_omission_trimall",
+                 "fake_omission_doc")
+OMIT_TURNS = {"omit_turns": 1, "omit_turns_n0": 0, "omit_turns_n99": 99}  # the N its omission line claims
 DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "no_room", "room_one",
            "no_stub_text", "show_once", "lying_room", "in_place", "inflate", *OLDER)
 # What each defect does (the reviewers' wrong engines among them):
@@ -80,7 +83,12 @@ DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "n
 # - fake_omission: drop_older_rounds, with the index's "(1 older pages omitted; use contexto_search ...)"
 #   line added where the page id would go, though the turns' prompts are still in view (reviewer A at
 #   9fe691ef); fake_omission_split, fake_omission_trim: the same with each earlier prompt split into two
-#   blocks or trimmed by one character (reviewer B at 18d2e783: a changed prompt is not a turn that left).
+#   blocks or trimmed by one character (reviewer B at 18d2e783: a changed prompt is not a turn that left);
+#   fake_omission_trimall: prompt and every earlier answer trimmed by one character; fake_omission_doc: the
+#   prompt moved into a plain-text document block (reviewer A at 3097dbe9);
+# - omit_turns, omit_turns_n0, omit_turns_n99: drop_older_turns with an omission line claiming 1, 0 or 99
+#   older pages. With 1 it is the open case the note states (the whole turn left, the count borne out by
+#   the store, the results stored), and it passes; 0 and 99 fail.
 # The last four strip thinking where they rewrite: in each earlier turn, from the first item they change to
 # the next prompt.
 
@@ -242,7 +250,7 @@ class ToyPager:
         forwarded, size = self.view(claude, state, items, head)
         before = size
         # The defects that take earlier turns out of view leave the batch the running turn's results only.
-        start = self.prompt_index(items) if self.defect in ("silent_older", "drop_older_turns", *ROUNDS_GONE) else 0
+        start = self.prompt_index(items) if self.defect in ("silent_older", "drop_older_turns", *ROUNDS_GONE, *OMIT_TURNS) else 0
         one = self.defect == "inflate" and state.batched and not self.inflated and size <= high
         if size > high or self.defect == "rewrite_always" or one:
             first = None
@@ -296,6 +304,11 @@ class ToyPager:
             (self.older_pages[p],) = self.store.page_out([items[:p]], len(self.older_pages))
         if self.defect == "drop_older_turns":
             return forwarded[p:]
+        if self.defect in OMIT_TURNS:
+            line = {"type": "text", "text": f"({OMIT_TURNS[self.defect]} older pages omitted; use contexto_search to find them)"}
+            head = forwarded[p]
+            content = head["content"] if isinstance(head.get("content"), list) else [{"type": "text", "text": head["content"]}]
+            return [self.older_form(head, [*content, line]), *forwarded[p + 1:]]
         out: list[dict] = []
         first = None
         for i, (item, form) in enumerate(zip(items, forwarded)):
@@ -304,7 +317,8 @@ class ToyPager:
                 continue
             if self.is_prompt(True, item):  # each turn was rewritten at its own turn start: its responses after that
                 first = None
-                if self.defect in ("trim_older_prompts", "split_older_prompts", "fake_omission_split", "fake_omission_trim"):
+                if self.defect in ("trim_older_prompts", "split_older_prompts", "fake_omission_split", "fake_omission_trim",
+                                   "fake_omission_trimall", "fake_omission_doc"):
                     form = self.changed_prompt(form)
             blocks = item.get("content") if isinstance(item.get("content"), list) else []
             if self.defect in ROUNDS_GONE:
@@ -319,6 +333,10 @@ class ToyPager:
                 if changed != form["content"]:
                     form = self.older_form(form, changed)
                     first = i if first is None else first
+            if self.defect == "fake_omission_trimall" and form.get("role") == "assistant" \
+                    and isinstance(form.get("content"), list):
+                form = self.older_form(form, [{**b, "text": b["text"][:-1]} if b.get("type") == "text" and b.get("text")
+                                              else b for b in form["content"]])
             if first is not None and form.get("role") == "assistant" and isinstance(form.get("content"), list):
                 kept = [b for b in form["content"] if b.get("type") not in THINKING_TYPES]
                 if len(kept) < len(form["content"]):
@@ -341,7 +359,11 @@ class ToyPager:
         text = content if isinstance(content, str) else next(
             (b["text"] for b in content or [] if isinstance(b, dict) and b.get("type") == "text"), "")
         half = len(text) // 2
-        blocks = ([{"type": "text", "text": text[:-1]}] if self.defect in ("trim_older_prompts", "fake_omission_trim")
+        if self.defect == "fake_omission_doc":
+            return self.older_form(form, [{"type": "document", "source": {"type": "text", "media_type": "text/plain",
+                                                                           "data": text}}])
+        blocks = ([{"type": "text", "text": text[:-1]}]
+                  if self.defect in ("trim_older_prompts", "fake_omission_trim", "fake_omission_trimall")
                   else [{"type": "text", "text": text[:half]}, {"type": "text", "text": text[half:]}])
         return self.older_form(form, blocks)
 

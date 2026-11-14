@@ -511,14 +511,17 @@ min_turn_room`, 113,000 at the defaults.
      text the model reads names where it went: a page id in a text part of a message (not a tool
      result, not another request field) reaches it, or that text carries the index's "older pages
      omitted; use contexto_search" line, with N at least 1 and at most the number of store pages the
-     text does not name, the whole turn left (neither its prompt nor any of its answers is in the text
-     of any one message, its text parts joined as they are), and the
+     text does not name, the whole turn left (no 40-character run of its prompt or of any of its
+     answers, whitespace removed, is anywhere in that text, plain-text documents included), and the
      result is stored byte for byte in some page. An index past its budget lists only the newest pages,
      so a correct long session needs the second way (v0.5.24 with a 40-token index fails 6 requests
      without it). A missing prompt alone is not evidence that a turn was paged: an engine that trims,
      splits or drops earlier prompts without naming the page fails, and so does one that adds the
-     omission line while the prompts stay in view, whole, split or trimmed (`fake_omission`,
-     `fake_omission_split`, `fake_omission_trim`). What remains open: an engine that
+     omission line while the turn stays in view in any form: whole, split, trimmed, prompt and answers
+     both trimmed, or moved into a document block (`fake_omission`, `fake_omission_split`,
+     `fake_omission_trim`, `fake_omission_trimall`, `fake_omission_doc`), and one whose omission line
+     claims 0 or more pages than the store holds unnamed (`omit_turns_n0`, `omit_turns_n99`). The open
+     case is tested as passing (`omit_turns`). What remains open: an engine that
      drops an earlier turn whole, prompt included, and writes an omission line the store bears out
      passes rule 3 for that turn; that is what a turn-start rotation past the index budget does, and
      the results stay stored and searchable. `system` (Codex `instructions`) is not read for page ids:

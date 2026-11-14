@@ -386,17 +386,41 @@ def _digest(item: dict) -> str:
 
 
 def _read_texts(item: Any) -> list[str]:
-    """The text the model reads of a forwarded message or item as prose: a string content and its
-    ``text`` and ``input_text`` parts. Tool results and outputs are left out, so a page id inside some
-    tool's output (or a request field the model never reads) names nothing."""
+    """The text the model reads of a forwarded message or item as prose: a string content, its ``text``,
+    ``input_text`` and ``output_text`` parts, and the text of a plain-text ``document`` block. Tool results
+    and outputs are left out, so a page id inside some tool's output (or a request field the model never
+    reads) names nothing."""
     if not isinstance(item, dict):
         return []
     content = item.get("content")
     if isinstance(content, str):
         return [content]
-    return [block["text"] for block in content if isinstance(content, list) and isinstance(block, dict)
-            and block.get("type") in ("text", "input_text", "output_text") and isinstance(block.get("text"), str)] \
-        if isinstance(content, list) else []
+    found = []
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in ("text", "input_text", "output_text") and isinstance(block.get("text"), str):
+            found.append(block["text"])
+        elif block.get("type") == "document" and isinstance(block.get("source"), dict) \
+                and isinstance(block["source"].get("data"), str) and block["source"].get("type") == "text":
+            found.append(block["source"]["data"])
+    return found
+
+
+WINDOW = 40  # characters: a turn is still in view when any window this long of its prompt or answers is
+
+
+def _in_view(texts: tuple[str, ...], haystack: str) -> bool:
+    """Whether any ``WINDOW``-character run of ``texts`` (whitespace removed, windows every half window)
+    is in ``haystack`` (whitespace removed). A text shorter than the window counts whole."""
+    for text in texts:
+        t = re.sub(r"\s+", "", text)
+        if not t:
+            continue
+        step = max(1, WINDOW // 2)
+        if any(t[i:i + WINDOW] in haystack for i in range(0, max(1, len(t) - WINDOW + 1), step)):
+            return True
+    return False
 
 
 def _estimate(events: list[dict]) -> tuple[int | None, int | None]:
@@ -535,8 +559,8 @@ class _Play:
         how many are not accounted for. Only a result of an earlier turn whose call is gone from the
         request as well can be, and only when the text the model reads names where it went: a page id
         in the request's own text (a text part of a message, not a tool result and not another request
-        field) reaches it; or the whole turn left (neither its prompt nor any of its answers is in the text
-        of any one message, that message's text parts joined as they are), that text
+        field) reaches it; or the whole turn left (no 40-character run of its prompt or of any of its
+        answers, whitespace removed, is anywhere in that text), that text
         carries the index's "(N older pages omitted; use contexto_search" line with N at least 1 and at
         most the number of store pages it does not name, and the result is stored byte for byte in some
         page. An index past its budget lists only the newest pages, so a correct long session needs the
@@ -556,10 +580,10 @@ class _Play:
         named = set(PAGE_ID.findall(texts))
         unlisted = sum(1 for name in self.page_names if name[:-5] not in named)
         omitted = any(1 <= int(n) <= unlisted for n in OMITTED.findall(texts))
-        messages = ["".join(_read_texts(item)) for item in forwarded.get(self.field) or []]
+        haystack = re.sub(r"\s+", "", texts)
 
-        def left(turn: int) -> bool:  # neither the turn's prompt nor any of its answers is in any one message
-            return not any(text in m for text in (actor.prompts[turn], *actor.answers.get(turn, ())) for m in messages)
+        def left(turn: int) -> bool:  # no 40-character run of the turn's prompt or answers is anywhere in view
+            return not _in_view((actor.prompts[turn], *actor.answers.get(turn, ())), haystack)
 
         accounted = sum(1 for call_id in gone if call_id in reached or (
             omitted and left(actor.call_turn[call_id]) and actor.results[call_id] in self.paged.get(call_id, ())))

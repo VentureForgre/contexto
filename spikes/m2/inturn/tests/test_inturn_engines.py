@@ -122,7 +122,8 @@ NARROW = (112_500, 87_500)  # reviewer B
 HIGHER = (110_000, 70_000)  # a batch leaves the request over the pressure line, so a second one is held to the in-a-row rule
 OLDER = [("silent_older", 51), ("drop_older_stubs", 31), ("drop_older_rounds", 51), ("trim_older_prompts", 51),
          ("split_older_prompts", 51), ("drop_older_turns", 51), ("fake_omission", 51), ("fake_omission_split", 51),
-         ("fake_omission_trim", 51)]  # requests failed, quick build
+         ("fake_omission_trim", 51), ("fake_omission_trimall", 51), ("fake_omission_doc", 51), ("omit_turns_n0", 51),
+         ("omit_turns_n99", 51)]  # requests failed, quick build
 
 
 @pytest.mark.parametrize(("defect", "rules"), WRONG)
@@ -776,7 +777,12 @@ def test_only_the_text_the_model_reads_names_a_page():
 def test_an_index_past_its_budget_accounts_for_the_whole_turns_it_omits():
     """Reviewer A's M at 9fe691ef. v0.5.24 with an index of 40 tokens lists only its newest page and writes
     "(N older pages omitted; ...)"; the whole earlier turns it paged are accounted for by that line."""
-    run = harness.run(scripts.build("multiturn", quick=True), "claude", index_budget=40)
+    for dialect in ("claude", "codex"):
+        _past_budget(dialect)
+
+
+def _past_budget(dialect: str) -> None:
+    run = harness.run(scripts.build("multiturn", quick=True), dialect, index_budget=40)
     assert run.sent and run.metrics()["requests_with_an_unnamed_result"] == 0
     # (storage itself reports only that v0.5.24 has no stubs hook: the baseline's hook is empty by design)
     assert targets.unmet_by_rule(run)["storage"] == ["stubs.find_stubs is not filled in, so no stub was checked"]
@@ -786,3 +792,12 @@ def test_the_omission_line_needs_a_count_the_store_bears_out_and_the_whole_turn_
     from inturn.harness import OMITTED
     assert OMITTED.findall("(0 older pages omitted; use contexto_search to find them)") == ["0"]
     assert OMITTED.findall("see 3 older pages omitted; use contexto_search") == []  # not the index's form
+
+
+def test_the_open_case_an_omission_line_the_store_bears_out_after_a_whole_turn_left_passes():
+    """Stated as open in the note: an engine that drops whole earlier turns and writes an omission line
+    with a count the store bears out passes rule 3 for them, as a turn-start rotation past the index budget
+    does; the results stay stored. The same engine claiming 0 or 99 older pages fails (above)."""
+    run = toy_run("multiturn", "claude", "omit_turns")
+    assert targets.unmet_by_rule(run) == {}
+    assert run.metrics()["requests_with_a_lost_result"] == 0
