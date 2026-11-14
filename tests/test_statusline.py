@@ -464,6 +464,15 @@ def test_a_session_reopened_for_another_conversation_does_not_serve_the_old_one(
     write_log(tmp_path, "aaaa11", [*launch(0), request(1, tokens=11_000),
                                    {"event": "note", "text": "proxy_start", "ts": "2027-01-15T09:00:00Z"}])
     assert statusline.run_started(tmp_path, "aaaa11") == 1_800_000_000.0
+    # A session `contexto serve` opened after the launch is the service's now: it shows nothing, rather than
+    # the last launch's bound under the service's requests (Reviewer B, PR #276 round 4).
+    write_log(tmp_path, "aaaa11", [*launch(0), request(1, tokens=11_000),
+                                   {"event": "serve_open", "cli": "claude", "session": "aaaa11", "ts": ts(5)}])
+    assert statusline.run_started(tmp_path, "aaaa11") is None
+    assert statusline.serving_session(tmp_path, CLAUDE_ID) is None
+    write_log(tmp_path, "aaaa11", [{"event": "serve_open", "cli": "claude", "session": "aaaa11", "ts": ts(-9)},
+                                   *launch(0), request(1, tokens=11_000)])  # a launch after the service: shown
+    assert statusline.run_started(tmp_path, "aaaa11") == 1_800_000_000.0
     # A log with no proxy start, or none that can be read, serves nothing.
     write_log(tmp_path, "aaaa11", [request(1, tokens=11_000)])
     assert statusline.serving_session(tmp_path, CLAUDE_ID) is None

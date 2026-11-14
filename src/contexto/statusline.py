@@ -415,30 +415,40 @@ def session_live(home: Path, session_id: str) -> bool:
     return False
 
 
+def _last_event(data: bytes, name: str) -> tuple[int, dict[str, Any]] | None:
+    """(offset, event) of the newest line of ``data`` whose event is ``name``, found by searching the bytes
+    from the end, so a long run's request lines are not split and parsed; None when there is none."""
+    end = len(data)
+    while (at := data.rfind(name.encode(), 0, end)) >= 0:
+        start = data.rfind(b"\n", 0, at) + 1
+        stop = data.find(b"\n", at)
+        event = _event(data[start:stop if stop >= 0 else len(data)])
+        end = start
+        if event is not None and event.get("event") == name:
+            return start, event
+    return None
+
+
 def run_started(home: Path, session_id: str) -> float | None:
     """When the latest run of ``session_id`` started: its newest ``proxy_start`` line's time, in full (the
-    log writes UTC with microseconds). The line is found by searching the bytes from the end, so a long
-    run's request lines are not split and parsed. None when the log cannot be read or has no such line."""
+    log writes UTC with microseconds). None when the log cannot be read, has no such line, or was opened
+    by ``contexto serve`` after it (a ``serve_open`` line): the status line covers a session only while a
+    ``contexto run`` launch serves it, and a session the service serves would show the last launch's
+    bound, not the service's (PR #276's review)."""
     from datetime import UTC, datetime
 
     try:
         data = read_regular(session_dir(home, session_id) / "log.jsonl")
     except OSError:
         return None
-    end = len(data)
-    while (at := data.rfind(b"proxy_start", 0, end)) >= 0:
-        start = data.rfind(b"\n", 0, at) + 1
-        stop = data.find(b"\n", at)
-        event = _event(data[start:stop if stop >= 0 else len(data)])
-        end = start
-        if event is None or event.get("event") != "proxy_start":
-            continue
-        try:
-            when = datetime.fromisoformat(str(event.get("ts", "")))
-        except ValueError:
-            return None
-        return (when if when.tzinfo else when.replace(tzinfo=UTC)).timestamp()
-    return None
+    started, served = _last_event(data, "proxy_start"), _last_event(data, "serve_open")
+    if started is None or (served is not None and served[0] > started[0]):
+        return None
+    try:
+        when = datetime.fromisoformat(str(started[1].get("ts", "")))
+    except ValueError:
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=UTC)).timestamp()
 
 
 def serves_in_this_run(home: Path, session_id: str, seen_at: float) -> bool:

@@ -144,6 +144,10 @@ order:
    one it served before. If two open launches serve
    the same Claude Code session, either could be the one asking, so nothing is printed.
 
+A session that [`contexto serve`](serve.md) has opened since its last `contexto run` launch prints
+nothing in steps 2 and 3: the status line covers `contexto run` launches only, and for a session the
+service serves it would show the last launch's bound, not the service's `--bound`.
+
 There is no fourth step. If none of the three names a session, nothing is printed. In a plain
 `claude` session that Contexto is not serving, that is the right answer: a line with another
 session's numbers would be wrong. A session named by `--session` or `$CONTEXTO_SESSION` that does not
