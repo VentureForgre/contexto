@@ -22,6 +22,10 @@ delete sessions.
   4xx errors) and lists the paged-out turns. Over-bound turns should stay at 0. The upstream 4xx
   count says how many were on model requests: Claude Code's keyless `HEAD /api/hello` probe gets a
   401 at every launch, and that one is expected.
+- **At exit**, `contexto run` prints a short summary of the run: the largest prompt against the
+  bound, the pages it added, recall and search calls, the share of input read from cache, and
+  whether Claude Code compacted. `contexto stats ID` prints the same numbers for any session, and
+  more ([Stats](stats.md)).
 - **From inside the session**, `contexto state` and `contexto search WORDS` read the running
   session: `contexto run` sets `CONTEXTO_SESSION` for the CLI and its shell commands.
 - **If something is wrong**, Contexto prints a `warning:` line, for example when the model has no

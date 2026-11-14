@@ -44,7 +44,8 @@ For Claude Code, the launcher:
    one argument, so a prompt right after `claude` (`contexto run claude "fix the tests"`) stays a
    prompt.
 5. after Claude Code exits, prints any warnings raised while it ran (printing them mid-run would land
-   in Claude Code's input box), then the command that resumes the conversation through Contexto.
+   in Claude Code's input box), a short summary of the run ([stats.md](stats.md); `--quiet` drops
+   it), then the command that resumes the conversation through Contexto.
 
 `contexto run claude --version` (or `-v`, `--help`, `-h` alone) runs Claude Code without a session or
 proxy. SIGTERM, SIGHUP and SIGQUIT are forwarded to Claude Code; SIGUSR1, SIGUSR2 and SIGALRM end it

@@ -293,7 +293,9 @@ the proxy.
   the wrong type. Contexto checks the `env` block's type only, so a file with another wrong-typed
   setting (for example `permissions` as a string) is read by doctor and `contexto run` though Claude
   Code ignores it: an upstream or key helper set there is reported, and used, when Claude Code would
-  not use it, and a switch set there refuses the launch.
+  not use it, and a switch set there refuses the launch. With only an `apiKeyHelper` there, doctor
+  says `Ready` and Claude Code then says "Not logged in". Claude Code names such a file when it
+  starts ("These settings files did not load"), which tells you which file to fix.
 
 ## JSON
 
