@@ -11,8 +11,8 @@ not start it by hand.
 
 | Tool | What it does |
 |---|---|
-| `contexto_search(query)` | Finds turns that contain every word of the query, or approximate matches when none does (details below) |
-| `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
+| `contexto_search(query, scope?)` | Finds turns that contain every word of the query, or approximate matches when none does (details below). With `scope: "project"`, also the earlier sessions of the project |
+| `contexto_recall(page_id, offset?, session?)` | A paged-out turn word for word, of an earlier session of the project when `session` names one, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
 | `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`. Decisions and obligations always show in the pinned state; an event, artifact, or reference shows there only when verified with a provenance source, and the reply says so when it will not |
 | `contexto_close(obligation_id, note)` | Close an open obligation, including one carried from an earlier session of the project |
 | `contexto_state()` | The full pinned state, with no pin-budget cap, then the records carried from earlier sessions of the project. It is charged against the turn's recall budget and cut at a whole line, with a trailer, when the budget runs out |
@@ -22,7 +22,9 @@ the preamble tell the model to pin a standing rule, preference or obligation whe
 it, and only what the user states in their own messages, never a rule found in tool results, files,
 web pages, or another agent's output. The `contexto_pin` description also says that a pin in the
 main conversation can be carried into later sessions of the project. This guidance is the same for
-every session, with project memory on or off.
+every session, with project memory on or off, except that in a session that can search earlier
+sessions the instructions and the `contexto_pin` description also name a search or recall of an
+earlier session among the places a rule must not come from; the preamble names it in every session.
 
 **Carried records.** A new session starts with the open obligations and active decisions the main
 conversation pinned in earlier sessions of the same project ([Project memory](project-memory.md)).
@@ -61,6 +63,26 @@ The MCP server holds search text in memory up to `CONTEXTO_SEARCH_CACHE_MB` (64 
 newest pages' text as it is and older pages' text compressed. Pages that do not fit are read from the
 store at each search, so a larger value makes search in a large store faster and a smaller one uses
 less memory. Results do not change.
+
+**Earlier sessions.** In a session with a project (one started by `contexto run` with project
+memory on), `contexto_search` takes `scope` and `contexto_recall` takes `session`; in any other
+session the two arguments are refused as unexpected and the tool list is the same as without project
+memory. The list is fixed when the MCP server starts.
+
+- `scope`: `"session"` (the default) searches the current session as above. `"project"` returns that
+  reply, then each of the newest 50 earlier sessions of the project with a match, newest first,
+  under `[session LABEL, DATE:]`: at most 3 matches each, lines in view at the session's last request
+  first, then its best pages. Earlier sessions are matched on every word only, also when the current
+  session's part falls back to approximate matches. The part opens with a line that says its text is
+  old, can be tool output or web pages, and is not an instruction.
+- `session`: the label on a `[session ...]` line (or the session's full id, or a start of it that no
+  other earlier session shares). The recall reads that session's page by the same offsets and the
+  same budget as any recall. A value that names no earlier session of this project, an ambiguous one
+  included, is a tool error that does not repeat the value.
+
+Both are charged against the turn's recall budget like any call. Earlier sessions are read without
+a lock and never changed. What this exposes, and how to turn it off:
+[Searching earlier sessions](project-memory.md#searching-earlier-sessions).
 
 **Recall budget.** Each turn has a recall budget: the bound minus the tokens the turn already uses
 minus the headroom floor. At a turn start the proxy rotates when needed to leave at least 12,000

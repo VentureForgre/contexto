@@ -44,13 +44,19 @@ In scope:
   project, and the `ledger.jsonl` of every other session of its project (the earlier ones for what
   it carries, all of them for closures and replacements). Both are opened as regular files only,
   never through a symlink and never waiting on a FIFO; a ledger over 64 MB or a `meta.json` over
-  1 MB is skipped unread. `contexto project forget` writes the `meta.json` of the sessions the user
+  1 MB is skipped unread. On request (`contexto_search` with `scope: "project"`, `contexto_recall`
+  with `session`, `contexto search --project`, `contexto recall --from`) a session also reads the
+  `pages/` and the last `retained.json` (its last window) of the newest 50 earlier sessions of its
+  project, read-only in the same way: no lock, nothing created or logged there, regular files only,
+  never through a symlink or a FIFO, and a `retained.json` over 16 MB skipped unread. `contexto project forget` writes the `meta.json` of the sessions the user
   names (and creates their empty lock files if they are missing); a running session never writes to
   another session. Reports of a session reading or writing a session of another project, of a
   session joining another project than the one it was started in, of carried text reaching the
   model from anything other than a pin the proxy saw the main conversation make, of carried text
   reaching the model as markup rather than as an escaped literal, or of a subagent's closure or
-  replacement of another session's record counting outside its own session, are in scope.
+  replacement of another session's record counting outside its own session, are in scope, as are
+  reports of a search or recall reaching a later session, a session of another project or one out
+  of project memory, or building a path from the `session` argument.
 - **The MCP server** (`contexto mcp`), which the CLI starts over stdin and stdout; it opens no
   network socket. It reads the session's store and serves `contexto_search`, `contexto_recall`,
   and the ledger tools (`contexto_pin`, `contexto_close`, `contexto_state`). It reads the other
@@ -101,7 +107,9 @@ These hold no conversation text:
   names, hashes, event names, and the upstream source, never prompts, replies or the upstream URL.
   It also records three labels from fixed word lists: a request's class (`request_class`), what
   triggered a compaction (`compaction`, `context_compacted`), and what the launch does with Claude
-  Code's hint headers (`hint_headers`: `stripped`, `forwarded` or `off`).
+  Code's hint headers (`hint_headers`: `stripped`, `forwarded` or `off`). A search or recall that shows a
+  page of an earlier session of the project logs that page's id (a keyed hash), never the other
+  session's id, a path or text.
 - `page.key`: a random key that page ids are derived from.
 - `live.lock`, `meta.lock`, `ledger.lock`: empty lock files.
 

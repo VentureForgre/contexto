@@ -83,13 +83,15 @@ text. A mistyped `--session` is an error, never a new session.
   uses. Each hit shows its page id, turn and opening text, then its matching lines, each with the
   offset to pass to `contexto recall PAGE_ID --offset N`. It searches paged-out turns only. When no
   turn holds every word it prints approximate matches with a note ([search.md](search.md)). No match
-  is a success (exit 0).
+  is a success (exit 0). `--project` also searches the earlier sessions of the session's project
+  ([Searching earlier sessions](project-memory.md#searching-earlier-sessions)).
 - `contexto recall PAGE_ID [--session ID] [--offset N]`: a paged-out turn as plain text, thinking
   omitted, exactly as the MCP `contexto_recall` tool renders it. Page ids (`pg_` and 16 hex digits,
   for example `pg_1cb04faa431985c5`) come from `contexto sessions show` or `contexto search`. Each chunk is at most
   32,000 characters and about a quarter of the session's window budget, or 12,000 characters until
   the proxy has recorded the window. When more remains, stderr says
-  `[N more characters: rerun with --offset M; <how the chunk size was chosen>]`.
+  `[N more characters: rerun with --offset M; <how the chunk size was chosen>]`. `--from LABEL`
+  reads the page from an earlier session of the session's project.
 - `contexto state [--session ID] [--raw]`: the decisions, open obligations, and verified facts the
   model pinned, uncapped, then the records the session carries from earlier sessions of its
   project (or "No pinned records." when there are none of either), then how many turns are paged

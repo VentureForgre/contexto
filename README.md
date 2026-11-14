@@ -42,7 +42,8 @@ What it includes:
 - Resuming a Claude Code conversation (`--resume`, `--continue`) through the Contexto session that
   served it, so its pages and pins carry over.
 - Project memory: a new session starts with the open obligations and decisions pinned in earlier
-  sessions of the same project ([Project memory](docs/project-memory.md)).
+  sessions of the same project, and the model can search those sessions' pages on request
+  ([Project memory](docs/project-memory.md)).
 - A per-session `X-Session-Affinity` header for proxies that spread requests over several accounts,
   so a session's prompt cache stays on one ([Troubleshooting](docs/troubleshooting.md)).
 - A warning when Claude Code or Codex is a version Contexto was not tested with. New CLI versions
