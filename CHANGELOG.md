@@ -57,25 +57,28 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 - Records pinned before this release are never carried, so project memory starts empty.
 - `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
   described in the command's `--help`; an error is still one line on stderr with the usual exit
-  code. `contexto state --json` includes the store faults `contexto stats --json` shows.
+  code. `contexto state --json` includes the latest run's store faults, as
+  `contexto stats --last-run --json` gives them, and whether the session has a log to read them
+  from (`log.missing`).
 - `contexto version` and `contexto -V` print the same line as `--version`. `contexto sessions`
   with no command lists the sessions.
 - On a fresh install, `state`, `search`, `recall` and `sessions` say to run `contexto run claude`
-  first.
+  first. When `$CONTEXTO_HOME/sessions` is a file or a broken symlink they name it instead, and
+  `contexto sessions list` exits 1 there (it printed an empty list).
+- `contexto mcp --session` with the start of a session id names the sessions it starts; `mcp`,
+  like `run`, `proxy` and `sessions prune`, needs the full id.
 - When `claude` or `codex` is not on `PATH`, the error gives the vendor's install command. Every
   `contexto run claude` launch error now starts with `contexto:`, as `run codex` errors did.
 - The Codex "no key helper" error gives a whole command that works with an OpenAI key in
   `OPENAI_API_KEY`:
-
   ```sh
   contexto run --codex-upstream https://api.openai.com/v1 \
     --codex-key-helper 'printenv OPENAI_API_KEY' codex
   ```
-
 - The MCP server reports the package version in `serverInfo` (it said `0.1.0`).
 - `contexto run codex` with a session id that starts with `-` no longer starts Codex without
-  Contexto's tools: the MCP server now gets the id as one `--session=<id>` argument, as Claude Code's
-  already did.
+  Contexto's tools: the MCP server now gets the id as one `--session=<id>` argument, as Claude
+  Code's already did.
 - `contexto run claude` and `contexto run codex` print a short summary on stderr when the CLI
   exits: the largest prompt against the bound, the pages this run added and the pages the session
   has on disk, the recall and search calls, the share of input read from cache, and whether Claude
@@ -112,13 +115,13 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   It makes no network request, runs no key helper and prints no key. Details:
   [docs/doctor.md](docs/doctor.md).
 - `contexto run claude` now refuses to launch (exit 2) when a cloud-provider switch is on, in the
-  environment or in a Claude Code settings file: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
-  `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS` or
-  `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` (D70, D64). With one on, Claude Code sends its requests to
-  that provider and none through the proxy, so the session would not be kept under the bound;
-  0.5.24 launched anyway. It also refuses while a settings file that may turn one on cannot be read.
-  The message says which switch and where; to keep using the provider, run `claude` without
-  Contexto.
+  environment or in a Claude Code settings file: `CLAUDE_CODE_USE_BEDROCK`,
+  `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`,
+  `CLAUDE_CODE_USE_ANTHROPIC_AWS` or `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` (D70, D64). With one
+  on, Claude Code sends its requests to that provider and none through the proxy, so the session
+  would not be kept under the bound; 0.5.24 launched anyway. It also refuses while a settings file
+  that may turn one on cannot be read. The message says what it found and where; to keep using the
+  provider, run `claude` without Contexto.
 - A Claude Code settings file that starts with a UTF-8 byte order mark is read. Claude Code reads
   such a file, and Contexto treated it as absent, so `contexto run` missed an
   `ANTHROPIC_BASE_URL` or `apiKeyHelper` set there and used another upstream than Claude Code's own.
