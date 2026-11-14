@@ -42,7 +42,7 @@ Options:
 |---|---|
 | `--port N` | Port on `127.0.0.1` (default 7837; 0 picks a free one). There is no `--host`. |
 | `--upstream URL` | Where requests are forwarded. See [Upstream](#upstream). |
-| `--bound N`, `--allow-large-bound`, `--window-fraction F`, `--headroom-floor N`, `--observe-thinking` | The engine options of `contexto run`, with the same meaning and the same checks. They apply to every session. |
+| `--bound N`, `--allow-large-bound`, `--window-fraction F`, `--headroom-floor N`, `--observe-thinking`, `--no-in-turn-paging` | The engine options of `contexto run`, with the same meaning and the same checks. They apply to every session. `CONTEXTO_IN_TURN_PAGING=0` turns in-turn paging off as `--no-in-turn-paging` does ([in-turn paging](in-turn-paging.md)). |
 | `--max-sessions N` | Sessions open at once (default 64). |
 | `--idle-minutes M` | Close a session idle this long (default 60). Its next request reopens it. |
 | `--forward-hint-headers` | Pass Claude Code's gateway hint headers on to the upstream. By default they are removed. See [Gateway hint headers](#gateway-hint-headers). |

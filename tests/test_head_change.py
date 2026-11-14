@@ -6,6 +6,8 @@ QA 2026-11-05 (verify-headchange, live-realworld F1): the head-change branch kep
 whatever its size, so a turn started with recall room -4,243 live, and at bound 8,000 a request of 17,172
 estimated tokens went out with no pre-send event."""
 
+import dataclasses
+
 import pytest
 
 from contexto.canonical import canonical_bytes
@@ -16,6 +18,9 @@ from test_rewrite import FILL, assistant, history, request, tool_result, tool_us
 
 FAILURES = {"bound_too_small", "over_bound"}
 SMALL = Config(bound=8_000, headroom_floor=1_000, min_turn_room=1_000, pin_budget=200, index_budget=200)
+# D63: a tool loop reaches its turn's end over the bound only with in-turn paging off. The reproductions of
+# a turn start after such a loop (the minimal window, a head change sized by it) use this.
+UNPAGED = dataclasses.replace(SMALL, in_turn_paging=False)
 ROOM = Config(bound=30_000, headroom_floor=2_000, min_turn_room=6_000, pin_budget=200, index_budget=200)
 # The live run's settings: bound 60,000, the default floor and minimum room, a head near 20,000 tokens.
 LIVE = Config(bound=60_000)
@@ -95,14 +100,14 @@ def room(config, events):
 # The QA reproductions ------------------------------------------------------------------------------
 
 def test_control_without_head_change_rotates_to_the_minimal_window():
-    _, _, ev = turn_start_after_loop(SMALL, 12, no_change)
+    _, _, ev = turn_start_after_loop(UNPAGED, 12, no_change)
     assert "window_minimal" in {e["event"] for e in ev} and sent_estimate(ev) <= SMALL.bound
 
 
 @pytest.mark.parametrize("change", KINDS)
 def test_head_change_at_a_small_bound_takes_the_minimal_window(change):
     # Before D49: the newest complete turn (the 12-read loop) was kept, 17,172 estimated tokens at 8,000.
-    _, st, ev = turn_start_after_loop(SMALL, 12, change)
+    _, st, ev = turn_start_after_loop(UNPAGED, 12, change)
     names = [e["event"] for e in ev]
     assert "window_minimal" in names, names
     assert next(e for e in ev if e["event"] == "rotation")["reason"] == "head_change"
@@ -523,7 +528,7 @@ def test_a_rotated_request_under_the_bound_is_not_flagged():
 def test_a_side_conversation_head_change_sizes_only_its_own_window():
     # A subagent or other side request is its own conversation (its own first message and epoch): its
     # head change sizes its own window and leaves main's epoch and head alone.
-    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=SMALL)
+    engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=UNPAGED)
     main = history(2) + [user("main task")]
     engine(base(main), {}, MESSAGES)
     side = [user("side task " + FILL)]

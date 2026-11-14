@@ -909,8 +909,9 @@ def test_real_pdfs_fit_the_step_budget():
 def _session(tmp_path, raw: bytes, cost: int, *, bound: int = 150_000, pasted: bool = True) -> list[tuple]:
     """Text at 3.0 bytes a token, the PDF at ``cost`` tokens; the PDF pasted (or read) at the fourth request,
     then Reads until a request crosses the bound. Returns (estimate, real, over_bound flagged, carries the
-    PDF) for every request."""
-    eng = RewriteEngine(SessionStore(tmp_path, "pdf"), config=Config(bound=bound))
+    PDF) for every request. In-turn paging is off (D63): these sessions test the estimate of a tool loop
+    that reaches the bound, which only an unpaged loop does."""
+    eng = RewriteEngine(SessionStore(tmp_path, "pdf"), config=Config(bound=bound, in_turn_paging=False))
     rng = random.Random(9)
     block = doc(raw)
     msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "read the report"}]}]
@@ -957,10 +958,10 @@ def test_a_compact_pdf_near_the_bound_is_flagged_before_the_send(tmp_path, paste
     """The 7-page PDFlib file (real 11,081 at 1,583 a page) arrives when the conversation is under 9,000
     tokens from the bound, so the request crosses it. On main its bytes priced it at 230: read in a tool
     loop the request went out over the bound unflagged, and pasted at a turn start nothing was paged for it.
-    Now a Read is flagged before the send (rule 5's tool-loop exception), and a paste pages enough at the turn
-    start for the request to fit."""
+    Now a Read is flagged before the send (a tool loop with in-turn paging off, D63, so that it reaches the
+    bound), and a paste pages enough at the turn start for the request to fit."""
     raw = (FIXTURES / "pdflib-indirect-length-7.pdf").read_bytes()
-    eng = RewriteEngine(SessionStore(tmp_path, "pdf"), config=Config(bound=150_000))
+    eng = RewriteEngine(SessionStore(tmp_path, "pdf"), config=Config(bound=150_000, in_turn_paging=False))
     rng = random.Random(3)
     msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "start"}]}]
     real = 0

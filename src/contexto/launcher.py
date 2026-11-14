@@ -184,8 +184,10 @@ WATCHDOG_EXITED = b"exited\n"  # the child was reaped: its pid may be reused
 # after the CLI's name). The codex options are not listed: they only apply before 'codex'.
 RUN_OPTIONS = {"--bound": True, "--allow-large-bound": False, "--window-fraction": True, "--headroom-floor": True,
                "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False,
-               "--quiet": False, "--no-statusline": False, "--no-project-memory": False}
+               "--quiet": False, "--no-statusline": False, "--no-project-memory": False, "--no-in-turn-paging": False}
 ENV_VALUE_SHOWN = 40  # characters of an unrecognised variable's value quoted on stderr
+# D63: set to 0, false, off or no to turn in-turn paging off, like --no-in-turn-paging.
+IN_TURN_PAGING_ENV = "CONTEXTO_IN_TURN_PAGING"
 # Claude Code's long options whose value is the next argument even when it starts with "-": every main-command
 # option declared with a required ``<value>`` in the 2.1.314 and 2.1.318 binaries, shown in ``--help`` or
 # hidden (variadic ones take at least that one). ``claude_options`` skips that value.
@@ -257,6 +259,7 @@ class LaunchOptions:
     quiet: bool = False  # D64: no summary at exit; warnings are still printed
     statusline: bool = True  # D64: add Contexto's status line when the user has none (contexto.statusline)
     project_memory: bool = True  # False: --no-project-memory (D69)
+    in_turn_paging: bool = True  # D63: page inside a running turn (rule 5)
 
 
 def check_user_args(claude_args: list[str]) -> None:
@@ -445,7 +448,16 @@ def engine_config(options: LaunchOptions) -> dict[str, int | float]:
         config["window_fraction"] = options.window_fraction
     if options.headroom_floor is not None:
         config["headroom_floor"] = options.headroom_floor
+    if not options.in_turn_paging:
+        config["in_turn_paging"] = False
     return config
+
+
+def in_turn_paging(flag_off: bool, env: dict[str, str] | None = None) -> bool:
+    """D63: in-turn paging is on unless ``--no-in-turn-paging`` is given or ``CONTEXTO_IN_TURN_PAGING``
+    is 0, false, off or no."""
+    env = os.environ if env is None else env
+    return not flag_off and env.get(IN_TURN_PAGING_ENV, "").strip().lower() not in ("0", "false", "off", "no")
 
 
 def assumed_overhead(env: dict[str, str] | None = None) -> int:
@@ -892,6 +904,8 @@ def resume_command(options: LaunchOptions, session_id: str, cli_session: str) ->
         args.append("--no-version-check")
     if not options.project_memory:
         args.append("--no-project-memory")
+    if not options.in_turn_paging:
+        args.append("--no-in-turn-paging")
     return shlex.join([*args, "claude", "--resume", cli_session])
 
 
@@ -1254,7 +1268,8 @@ def options_from_args(args: Any) -> LaunchOptions:
         version_check=not getattr(args, "no_version_check", False),
         quiet=bool(getattr(args, "quiet", False)) or quiet_from_env(),
         statusline=not getattr(args, "no_statusline", False),
-        project_memory=not getattr(args, "no_project_memory", False))
+        project_memory=not getattr(args, "no_project_memory", False),
+        in_turn_paging=in_turn_paging(getattr(args, "no_in_turn_paging", False)))
 
 
 def check_options(options: LaunchOptions) -> None:

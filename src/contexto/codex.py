@@ -108,6 +108,8 @@ class ResponsesDialect(Dialect):
     name = "responses"
     field = "input"
     media_floor = False  # D48: OpenAI prices images by tiles (85 tokens at low detail), under Claude's floor
+    # D63: no in-turn paging for Codex yet. The Responses primitives go here (see contexto.inturn.MessagesInTurn).
+    in_turn = None
 
     def is_context_block(self, block: Any) -> bool:
         return False  # Codex sends context as separate messages, not inside the prompt message
