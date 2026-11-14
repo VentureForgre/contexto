@@ -75,6 +75,19 @@ again, even after it is deleted, so every release is permanent.
    finishes, check the release page (`gh release view vX.Y.Z --repo VentureForgre/contexto`) and,
    if PyPI publishing is on, <https://pypi.org/project/contexto-proxy/>.
 
+5. **Update the documents that name the latest release.** After the release exists, open a `docs:`
+   pull request that updates every command, link and example in the README's Install section and
+   in `docs/install.md` that names the previous release: versions, URLs, file names and any
+   `sha256`, including a draft Homebrew formula and the sentence above it, if the page has one. At
+   the first release after v0.5.24 the file names change from `contexto-<v>...` to
+   `contexto_proxy-<v>...`. Then check with the previous version, for example:
+
+   ```sh
+   git grep -n -F '0.5.24' -- README.md docs/install.md
+   ```
+
+   It must print only lines that state history, such as "up to 0.5.24".
+
 ## The changelog
 
 `CHANGELOG.md` is written by hand, newest version first, with an optional `## Unreleased` section
@@ -253,7 +266,10 @@ distribution, and the `pypi` job refuses them.
 normalized copy, and has no setting to leave it out. The build hook repacks the sdist without it.
 uv writes every member and the gzip header with mtime 0, and the repack keeps that, so two builds of
 one tree with one uv version give the same bytes. The uv version matters: the wheel's
-`.dist-info/WHEEL` names the uv that built it (`Generator: uv 0.13.7`), so CI pins uv.
+`.dist-info/WHEEL` names the uv that built it (`Generator: uv 0.13.7`), so CI pins uv. The repack
+writes the sdist with gzip level 9, written out because Python 3.15 changed the default to 6, and
+both the `release` and the `reattach` job put the same uv-managed Python 3.12 first on `PATH` for
+the build.
 
 ### Verifying a release
 
@@ -272,7 +288,9 @@ NEW_VERSION=<v> bash .github/scripts/release-build.sh   # needs uv, the version 
 cat dist/SHA256SUMS
 ```
 
-For v0.5.24 and earlier the files are named `contexto-<v>-py3-none-any.whl` and `contexto-<v>.tar.gz`.
+For v0.5.24 and earlier the files are named `contexto-<v>-py3-none-any.whl` and `contexto-<v>.tar.gz`,
+and the rebuilt sdist matches only with a `python3` below 3.15 (their build script uses Python's
+default gzip level, which 3.15 changed).
 
 The files on PyPI are the files of the GitHub Release, byte for byte, so the attestation check also
 passes on a wheel or sdist downloaded from PyPI.
@@ -299,7 +317,8 @@ it, so a failure here leaves the GitHub release as it is.
 
 What it does, in order:
 
-1. Checks that the tag is an existing `vX.Y.Z` tag on `main` (`.github/scripts/reattach-verify.sh`).
+1. Checks that the tag is an existing `vX.Y.Z` tag on `main`'s first-parent chain
+   (`.github/scripts/reattach-verify.sh`).
 2. Downloads the wheel, the sdist and `SHA256SUMS` from the tag's GitHub Release
    (`gh release download`). It does not build anything.
 3. Verifies them (`.github/scripts/pypi-publish.py verify`, then `sha256sum --check --strict`):
@@ -375,12 +394,12 @@ Why it is built this way:
 | `.github/scripts/release-request.sh` | First job of every run: checks the action, the tag and the ref (every action from `main` only). It catches a mistaken run; it is not a control |
 | `.github/scripts/changelog-check.py` | Release guard: `CHANGELOG.md` must have the section `## X.Y.Z (YYYY-MM-DD)` for the computed version, and no `<!-- version list -->` line |
 | `.github/scripts/release-build.sh` | PSR `build_command`: stamp, build, drop `pyproject.toml.orig` from the sdist, verify artifact versions, write `SHA256SUMS`; skip cleanly without `pyproject.toml` |
-| `.github/scripts/reattach-verify.sh` | Guard for `reattach` and `pypi`: the tag must be an existing `vX.Y.Z` tag on `main` |
+| `.github/scripts/reattach-verify.sh` | Guard for `reattach` and `pypi`: the tag must be an existing `vX.Y.Z` tag on `main`'s first-parent chain |
 | `.github/scripts/pypi-publish.py` | The `pypi` job's checks: verify the downloaded files, decide what may be uploaded, confirm the upload. It never uploads |
 | `.github/scripts/ensure-gh.sh` | `release` and `reattach`: use `gh` if the runner has it (hosted runners do), else install a pinned, checksum-verified `gh` |
 | Variable `RELEASES_ENABLED` | Releases on or off |
 | Variable `PYPI_PUBLISH_ENABLED` | PyPI publishing on or off |
-| Environment `pypi` | The GitHub environment of the `pypi` job, named in the trusted publisher on PyPI. It exists since 2026-11-13 and is limited to the branch `main` (D67); that rule is what stops a run from another ref from publishing. No required reviewer; the owner may add one |
+| Environment `pypi` | The GitHub environment of the `pypi` job, named in the trusted publisher on PyPI. It exists since 2026-11-13 and is limited to the branch `main` (D67); that rule is what stops a run from another ref from publishing. Administrators cannot bypass it. No required reviewer; the owner may add one |
 
 CI runs `ruff check`, then `uv run --with pytest pytest` and `uv build` on each Python and OS in its
 test matrix. Release's call runs the same jobs. The pytest run collects spike tests under `spikes/`
@@ -417,7 +436,8 @@ psr() { uvx --from python-semantic-release==10.7.0 semantic-release -c .github/s
 psr version --print-last-released-tag    # empty when there is no release yet
 psr version --print-tag                  # the tag the next release would get
 psr --noop version --no-commit --tag --push --vcs-release --no-changelog   # show every step and the notes
-python3 .github/scripts/changelog-check.py "$(psr version --print-tag)"     # the changelog guard
+python3 .github/scripts/changelog-check.py "$(psr version --print-tag)" \
+  --last-released "$(psr version --print-last-released-tag)"                # the changelog guard
 ```
 
 The function works in bash and zsh. (A `PSR="uvx ..."` variable does not: zsh does not split
@@ -428,9 +448,10 @@ clone to act as `origin`, push the commits under test to its `main`, and run
 `psr version --no-commit --tag --push --no-vcs-release --no-changelog` there.
 
 To rehearse the `pypi` job's checks, build in a scratch copy and point the script at the files.
-`verify` reads only the files. `plan` and `confirm` only read from the index: `plan` asks once, and
-up to three times if the answer is not 200 or 404; `confirm` asks until both files are listed, up
-to twenty times.
+`verify` reads only the files. `plan` and `confirm` only read from the index. `plan` asks again,
+up to three times in all and 5 seconds apart, while the answer is neither a 404 nor a 200 with a
+readable file list; it stops at the first 404 or file list. `confirm` asks until both files are
+listed, up to twenty times, 6 seconds apart.
 
 ```sh
 NEW_VERSION=9.9.9 bash .github/scripts/release-build.sh
@@ -449,10 +470,11 @@ by hand without `--dry-run`: publishing is the workflow's job.
   existing tag, such as `v0.5.24`
   (`gh workflow run release.yml --ref main -f action=reattach -f tag=v0.5.24`). Like every action
   it is run from `main`. The `reattach` job checks out `main` with full history.
-  It refuses anything except an existing `vX.Y.Z` tag whose commit is on `main`
-  (`.github/scripts/reattach-verify.sh`, `git merge-base --is-ancestor`), failing before it creates
-  anything. If the release is missing, it first checks that the notes can be generated, then creates
-  the release and posts that tag's Conventional Commit notes
+  It refuses anything except an existing `vX.Y.Z` tag whose commit is on `main`'s first-parent
+  chain, the commits `main` itself has pointed at (`.github/scripts/reattach-verify.sh`), failing
+  before it creates anything. A commit that reached `main` inside a merge commit is refused. If the
+  release is missing, it first checks that the notes can be generated, then creates the release and
+  posts that tag's Conventional Commit notes
   (`semantic-release changelog --post-to-release-tag`, which needs a branch checkout, not a detached
   tag). Finally it checks out the tag, rebuilds at the tag's version, attests the rebuilt sdist and
   wheel, and uploads them with `SHA256SUMS` (written by the workflow when the tag's build script
@@ -461,15 +483,20 @@ by hand without `--dry-run`: publishing is the workflow's job.
   jobs", does nothing here, because it sees the tag and treats that version as released.
   A reattach never publishes to PyPI. If PyPI publishing is on, run `action=publish` for the tag
   afterwards.
-- **What a reattach changes.** The rebuild uses the pinned uv and the tag's own build script.
-  From v0.5.13 on it gives the same bytes as the first build, as long as the uv pin has not moved.
+- **What a reattach changes.** The rebuild uses the pinned uv, the pinned Python and the tag's own
+  build script. From v0.5.13 on it gives the same bytes as the first build, as long as the uv pin
+  or the Python that runs the build has not moved. The build script now writes the sdist with gzip
+  level 9, which protects tags cut from now on. Tags up to v0.5.24 run their own
+  script, which uses Python's default level: a reattach of one of them whose `python3` is 3.15 or
+  later changes the sdist's bytes (rebuilt v0.5.24: `d367cc88...` under 3.12, `e8618343...` under
+  3.15). The pinned 3.12 keeps that from happening, as long as the pin stays below 3.15.
   For v0.5.9 to v0.5.12 it also gives the same wheel and sdist (the sdist still holds
   `pyproject.toml.orig`), and adds the `SHA256SUMS` and the attestation they never had. For v0.5.8
   and earlier the sdist is the same, but the wheel differs from the one first published in one line
   of its `WHEEL` file (uv 0.13.7 instead of 0.13.5), so its checksum changes.
-- **Do not reattach a release that is on PyPI after the uv pin has moved.** The rebuilt wheel would
-  differ from the file on PyPI, which cannot be replaced, and the GitHub asset would no longer be
-  the PyPI file.
+- **Do not reattach a release that is on PyPI after the uv pin or the Python that runs the build
+  has moved.** The rebuilt wheel or sdist would differ from the file on PyPI, which cannot be
+  replaced, and the GitHub asset would no longer be the PyPI file.
 - **The release is on GitHub and not on PyPI.** Three ways to get there: the PyPI upload failed;
   the release was cut while PyPI publishing was off; or the `release` job failed after the tag was
   pushed, so the `pypi` job never ran, and the release was completed with `action=reattach`. Fix
@@ -491,5 +518,6 @@ by hand without `--dry-run`: publishing is the workflow's job.
   file name again, even after the file, the release or the whole project is deleted. A deleted
   version number is lost; the fix is always a new version.
 - **Do not create release tags by hand.** Versions come only from the workflow. Nothing technical
-  enforces this: a `vX.Y.Z` tag pushed by hand onto a commit of `main` could be reattached and then
-  published, and that version could never be taken back from PyPI.
+  enforces this: a `vX.Y.Z` tag pushed by hand onto a commit of `main`'s first-parent chain could be
+  reattached and then published, and the tagged commit's own tree and build script are what gets
+  built. That version could never be taken back from PyPI.
