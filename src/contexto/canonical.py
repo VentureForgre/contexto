@@ -68,7 +68,8 @@ def loads_bounded(data: str | bytes | bytearray, *, parse_int: Callable[[str], A
     ``parse_int`` and ``parse_constant`` go to ``json.loads`` (``contexto.upstream.read_settings_file``
     reads a settings file as Claude Code reads it)."""
     try:
-        value = json.loads(data, parse_int=parse_int, parse_constant=parse_constant)
+        hooks = {name: hook for name, hook in (("parse_int", parse_int), ("parse_constant", parse_constant)) if hook}
+        value = json.loads(data, **hooks)  # no hook given: json.loads exactly as every other caller has it
     except RecursionError:
         raise JSONTooDeepError(f"nested deeper than {MAX_JSON_DEPTH} levels") from None
     if nesting_exceeds(value):
