@@ -510,3 +510,60 @@ def test_a_zero_width_run_interleaved_with_blanks_is_still_escapes():
     for blank in ("\u034f", "\u3164", "\u2800"):
         hidden = blank.join("\u200b" if bit == "1" else "\u2060" for bit in "01101000")
         assert not any(c in "\u200b\u2060" for c in safe_text("dates" + blank + hidden))
+
+
+ZERO_WIDTH_BLANKS = ["\u034f", "\u115f", "\u1160", "\u17b4", "\u17b5", *map(chr, range(0x180B, 0x1810))]
+
+
+@pytest.mark.parametrize("pair", [("\u034f", "\u17b4"), ("\u180b", "\u180c"), ("\u115f", "\u1160"),
+                                  ("\u17b5", "\u180f"), ("\u034f", "\u200b")])
+def test_a_run_of_zero_width_blanks_is_shown_as_escapes(pair):
+    """Review A round 7, finding 3: characters drawn as nothing that Python counts as printable (U+034F,
+    U+115F, U+1160, U+17B4, U+17B5, U+180B to U+180F) are zero-width characters for the run rule, so a run
+    made only of them, which spells text in its pattern, is escapes."""
+    hidden = "".join(pair[int(bit)] for bit in "0110100001101001")
+    shown = safe_text("Use ISO." + hidden)
+    assert shown.isascii() and shown.startswith("Use ISO.\\u")
+
+
+@pytest.mark.parametrize("blank", ZERO_WIDTH_BLANKS)
+def test_one_zero_width_blank_prints_and_one_next_to_a_zero_width_character_is_an_escape(blank):
+    assert safe_text(f"a{blank}b") == f"a{blank}b"
+    for text in (f"a{blank}\u200cb", f"a\u200d{blank}b"):
+        assert safe_text(text).isascii(), text
+
+
+@pytest.mark.parametrize("space", [" ", "\u00a0", "\u2002", "\u2004", "\u205f", "\u3000"])
+def test_a_space_between_zero_width_characters_does_not_hide_them(space):
+    """Review B round 7, N19 (pocN): a space next to a zero-width character counts as a neighbour for the
+    run rule, so zero-width characters (or zero-width blanks) placed one per gap between spaces are escapes."""
+    for marks in (("\u200b", "\u2060"), ("\u034f", "\u17b4")):
+        hidden = space.join(marks[int(bit)] for bit in "01101000") + space
+        shown = safe_text("Use ISO dates." + space + hidden)
+        assert not any(c in marks for c in shown), (space, marks)
+    word_gaps = space.join(f"{c}\u200b" for c in "Use ISO dates")
+    assert "\u200b" in safe_text(word_gaps.replace("\u200b" + space, "\u200b"))  # between letters: one prints
+    assert "\u200b" + space not in safe_text(word_gaps)  # before a space: an escape
+
+
+@pytest.mark.parametrize("text", [
+    "\u2800\u2800\u28ff\u28ff\u2800\u2800\u28ff",  # braille art with blank cells
+    "\u2813\u2811\u2807\u2807\u2815 \u283a\u2815\u2817\u2807\u2819",  # braille text
+    "\u3164 \u3164\u3164 \u3164",  # spaced Hangul fillers
+    "\uffa0\uffa0 \uffa0",  # halfwidth Hangul fillers
+    "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8",  # Hangul
+    "\u1100\u1160",  # an old Hangul syllable with one jungseong filler
+    "\u1820\u180b",  # a Mongolian letter with one free variation selector
+    "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 \u0628\u0631\u0648\u0645",  # Persian, one ZWNJ, a space
+    "\u0915\u094d\u200d\u0937 \u0930\u094d\u200d\u092f",  # Devanagari ZWJ conjuncts
+    "\U0001f468\u200d\u2764\ufe0f\u200d\U0001f468 \U0001f468\u200d\u2764\u200d\U0001f468",  # emoji, FE0F and not
+    "\U0001f3f3\ufe0f\u200d\U0001f308 \U0001f469\u200d\U0001f4bb",  # a flag sequence and a profession emoji
+])
+def test_real_text_with_joiners_blanks_and_spaces_prints_as_it_is(text):
+    assert safe_text(text) == text
+
+
+def test_a_blank_cell_prints_on_its_own_and_is_an_escape_next_to_a_zero_width_character():
+    for cell in ("\u2800", "\u3164", "\uffa0"):
+        assert safe_text(f"a{cell}{cell} {cell}b") == f"a{cell}{cell} {cell}b"
+        assert safe_text(f"a{cell}\u200bb").isascii() and safe_text(f"a\u034f{cell}b").isascii()

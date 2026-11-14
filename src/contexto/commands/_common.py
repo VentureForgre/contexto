@@ -47,12 +47,20 @@ _IDEOGRAPHIC_SELECTORS = frozenset(range(0xE0100, 0xE01F0))
 _EMOJI_BASES = frozenset({0x203C, 0x2049, 0x2139, 0x3030, 0x303D})
 # Symbols drawn as blank, after which a selector would sit unseen (review B round 5, N14).
 _BLANK_SYMBOLS = frozenset({0x2800, 0xFFFC})
-# Zero-width characters: one prints (a ZWNJ in Persian, a ZWJ in an emoji sequence); two or more in a row
-# carry text in their pattern, so a run is shown as escapes (N14).
-_ZERO_WIDTH = frozenset({0x180E, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF})
-# Characters drawn as nothing or as a blank cell, which count with the zero-width ones for that rule, so a
-# run cannot be hidden by placing one of them between each pair (review A round 6, finding 4).
-_BLANKS = frozenset({0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0, *range(0x180B, 0x1810)})
+# Zero-width characters: one prints (a ZWNJ in Persian, a ZWJ in an emoji sequence, a Mongolian variation
+# selector); two or more in a row carry text in their pattern, so a run is shown as escapes (N14). Counted
+# with the format characters are those drawn as nothing that Python calls printable (U+034F, the Hangul
+# fillers U+115F and U+1160, the Khmer U+17B4 and U+17B5, U+180B to U+180F), so a run made only of them is
+# escapes too (review A round 7, finding 3). A space next to one makes it part of a run, so a space between
+# each pair hides nothing (review B round 7, N19); real text never puts a joiner next to a space.
+_ZERO_WIDTH = frozenset({0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF,
+                         0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, *range(0x180B, 0x1810)})
+# Characters drawn as a blank cell (the blank braille pattern, the Hangul fillers U+3164 and U+FFA0). On
+# their own they print, as in braille art and spaced Hangul; next to a zero-width character both are
+# escapes, so a run cannot be hidden by placing one of them between each pair (review A round 6, finding 4).
+_BLANK_CELLS = frozenset({0x2800, 0x3164, 0xFFA0})
+# Printable characters that safe_text's fast path cannot pass unchecked.
+_CHECKED = _SELECTORS | _IDEOGRAPHIC_SELECTORS | _INVISIBLE | _ZERO_WIDTH
 
 
 def _ideograph(c: str) -> bool:
@@ -72,12 +80,17 @@ def _selector_shown(n: int, before: str, after: str) -> bool:
     return unicodedata.category(before) in ("So", "Sm") or _ideograph(before) or ord(before) in _EMOJI_BASES
 
 
+def _in_run(n: int, before: str, after: str) -> bool:
+    """Whether the character ``n``, between ``before`` and ``after``, is part of a zero-width run."""
+    if n in _ZERO_WIDTH:
+        return any(c and (ord(c) in _ZERO_WIDTH or ord(c) in _BLANK_CELLS or unicodedata.category(c) == "Zs")
+                   for c in (before, after))
+    return n in _BLANK_CELLS and any(c and ord(c) in _ZERO_WIDTH for c in (before, after))
+
+
 def _shown(c: str, before: str, after: str) -> bool:
     n = ord(c)
-    if n in _INVISIBLE:
-        return False
-    if n in _ZERO_WIDTH and ((before and ord(before) in _ZERO_WIDTH | _BLANKS)
-                             or (after and ord(after) in _ZERO_WIDTH | _BLANKS)):
+    if n in _INVISIBLE or _in_run(n, before, after):
         return False
     if n in _SELECTORS or n in _IDEOGRAPHIC_SELECTORS:
         return _selector_shown(n, before, after)
@@ -88,12 +101,12 @@ def safe_text(text: str) -> str:
     """``text`` for one line of a terminal: every character that does not print and could move the
     cursor, end the line, reorder or hide text (a control character, a line or paragraph separator, a
     direction control, a tag or annotation character, a lone surrogate, a private-use or unassigned
-    code point, an invisible operator, or a variation selector anywhere but right after a character it
-    varies) as its backslash escape, and everything else as it is: backslashes, and the joiners, a
-    variation selector after an emoji, a symbol or an ideograph or in a keycap, other format characters and
-    spaces that text in many scripts and emoji need."""
-    if text.isprintable() and not any(ord(c) in _SELECTORS or ord(c) in _IDEOGRAPHIC_SELECTORS
-                                      or ord(c) in _INVISIBLE for c in text):
+    code point, an invisible operator, a variation selector anywhere but right after a character it
+    varies, a zero-width character next to another, a blank cell or a space, and a blank cell next to a
+    zero-width character) as its backslash escape, and everything else as it is: backslashes, and the
+    joiners, a variation selector after an emoji, a symbol or an ideograph or in a keycap, other format
+    characters and spaces that text in many scripts and emoji need."""
+    if text.isprintable() and not any(ord(c) in _CHECKED for c in text):
         return text
 
     def escape(c: str) -> str:
