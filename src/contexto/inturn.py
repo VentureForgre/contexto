@@ -984,7 +984,8 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
                 by_turn.setdefault(_turn_of(messages, current, dialect, c.i), []).append(c)
         ids: dict[tuple[int, int], str] = {}
         for turn, group in by_turn.items():
-            written = store.page_parts([hooks.result_page(c.call, c.result) for c in group], turn, RESULT_PAGE)
+            written = store.page_parts([hooks.result_page(c.call, c.result) for c in group], turn, RESULT_PAGE,
+                                       [c.i for c in group])
             ids.update({(c.i, c.j): page_id for c, page_id in zip(group, written)})
         new = [(c.i, c.j, ids.get((c.i, c.j), "")) for c in chosen]
         edits = current.inturn
@@ -1054,7 +1055,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             kept = state.inturn._replace(stubs=tuple(s for s in state.inturn.stubs if s[2]))
             stored = view(messages, replace(state, inturn=kept), dialect)
             page_id = store.page_parts([[stored[i] for i in removed]], _turn_of(messages, state, dialect, start),
-                                       ROUNDS_PAGE)[0]
+                                       ROUNDS_PAGE, [removed[0]])[0]
             edits = state.inturn
             state = replace(state, inturn=edits._replace(
                 folds=(*edits.folds, (start, _spans(removed), page_id)),
@@ -1117,7 +1118,7 @@ def _listed(messages: list[dict], state: Any, store: Any, start: int, hooks: Any
         return state
     unfolded = view(messages, replace(state, inturn=edits._replace(folds=(), lists=())), dialect)
     page_id = store.page_parts([folds_page(hooks, unfolded, group[:-1])], _turn_of(messages, state, dialect, start),
-                               FOLDS_PAGE)[0]
+                               FOLDS_PAGE, [start])[0]
     lists = tuple(x for x in edits.lists if x[0] != start) + ((start, len(group) - 1, page_id),)
     return replace(state, inturn=edits._replace(lists=tuple(sorted(lists))))
 

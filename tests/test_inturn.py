@@ -22,7 +22,7 @@ from contexto.rewrite import ANTHROPIC, COUNT_TOKENS, MESSAGES, Config, EpochSta
 from contexto.store import SessionStore, check_epoch
 from contexto.store.catalog import check_page
 from contexto.store.memory import MemoryStore
-from contexto.store.pages import RESULT_PAGE, ROUNDS_PAGE, build_page, page_id, render_index
+from contexto.store.pages import RESULT_PAGE, ROUNDS_PAGE, build_page, index_line, page_id, render_index
 from contexto.store.render import recall_chunk
 from inturn_harness import AGENT, MODEL, Cli, Refused, Upstream, blocks, check_pairing, output, png, tool
 from inturn_harness import BYTES_PER_TOKEN as BYTES
@@ -699,10 +699,10 @@ def test_memory_store_writes_the_same_in_turn_pages(tmp_path):
 class BrokenParts(MemoryStore):
     broken = True
 
-    def page_parts(self, parts, turn, kind):
+    def page_parts(self, parts, turn, kind, seqs=None):
         if self.broken:
             raise OSError("synthetic: disk full")
-        return super().page_parts(parts, turn, kind)
+        return super().page_parts(parts, turn, kind, seqs)
 
 
 def test_a_store_failure_in_a_batch_degrades_and_sends_the_request_unpaged():
@@ -988,11 +988,11 @@ def test_only_as_many_unread_results_are_stubbed_as_needed():
 class FailsOnce(MemoryStore):
     failures = 1
 
-    def page_parts(self, parts, turn, kind):
+    def page_parts(self, parts, turn, kind, seqs=None):
         if self.failures:
             self.failures -= 1
             raise OSError("synthetic: a transient write error")
-        return super().page_parts(parts, turn, kind)
+        return super().page_parts(parts, turn, kind, seqs)
 
 
 def test_one_transient_store_error_does_not_leave_a_subagent_unbounded():
@@ -1170,3 +1170,44 @@ def test_at_a_small_bound_each_result_is_still_read_once():
     assert low["reason"] == "in_turn_small_bound"
     # The headroom floor stays whole: the room for the reply is what such a bound gives up last.
     assert max(s.estimate for s in cli.sent) <= config.bound - config.headroom_floor
+
+
+def test_search_does_not_steer_the_model_to_an_older_copy_in_view():
+    # Reviewer B, finding 2: a 1.5 KB read of config.py stays in view (too small to stub); the file is
+    # edited and read again at 20 KB, and a batch pages that read. Search used to say the conversation in
+    # view is newer than any hit, which steered the model to the stale copy.
+    cli = Cli(memory(), SMALL, head_bytes=8_000)
+    cli.prompt("Tune the timeout.")
+    cli.send([("Read", {"file_path": "config.py"})])
+    cli.results(["retry_timeout_seconds = 10\n" + "# filler\n" * 150])
+    cli.send([("Edit", {"file_path": "config.py", "old_string": "10", "new_string": "30"})])
+    cli.results(["ok"])
+    cli.send([("Read", {"file_path": "config.py"})])
+    cli.results(["retry_timeout_seconds = 30\n" + "# filler line of the config file\n" * 600])
+    for r in range(30):
+        cli.send([("Read", {"file_path": f"m{r}.py"})])
+        cli.results([output(f"m-{r}", RESULT)])
+    assert (6, 0) in {(i, j) for i, j, _ in cli.state.inturn.stubs}  # the newer read is paged
+    reply = tool(cli.store, "contexto_search", {"query": "retry_timeout_seconds"})
+    assert "[this turn, paged result]" in reply and "retry_timeout_seconds = 30" in reply
+    assert "newer than any" not in reply and "can be newer than an earlier copy in view" in reply
+
+
+def test_sessions_show_lists_result_pages_by_their_call_and_in_order():
+    # Reviewer B, finding 6: a result page listed as "pg_... turn 0:  [tools: Read] [files: ...]", pages of
+    # one turn in the order of their random ids, and stub words among a page's identifiers.
+    cli = Cli(memory(), SMALL, head_bytes=8_000)
+    cli.prompt("Run the checks.")
+    for r in range(14):
+        cli.send([("Bash", {"command": f"make check-{r:02d}"})])
+        cli.results([output(f"check-{r}", RESULT)])
+    store = cli.store
+    pages = [store.get_page(p) for p in store.page_ids()]
+    results = [p for p in pages if p.get("kind") == RESULT_PAGE]
+    assert len(results) >= 3
+    assert [p["seq"] for p in results] == sorted((p["seq"] for p in results), reverse=True)  # newest first
+    line = index_line(results[-1], salient=True)
+    assert "[paged tool result] Bash command: make check-00" in line and ":  [" not in line
+    for word in ("file_path", "was", "page"):
+        assert f" {word}," not in line and f"[ids: {word}" not in line
+    assert "seq" not in inturn.MESSAGES.result_page(None, {"type": "tool_result", "tool_use_id": "t", "content": ""})[0]

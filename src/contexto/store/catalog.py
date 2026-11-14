@@ -410,8 +410,9 @@ class PageCatalog:
 def _view(page: dict[str, Any]) -> dict[str, Any]:
     """The fields the index and page ids read, of a page ``check_page`` passed."""
     view = {"id": page["id"], "turn": page["turn"], "stub": page["stub"]}
-    if "kind" in page:  # D63: an in-turn page; the index leaves result pages out
-        view["kind"] = page["kind"]
+    for name in ("kind", "seq", "locator"):  # D63: an in-turn page; the index leaves result pages out
+        if name in page:
+            view[name] = page[name]
     return view
 
 
@@ -450,6 +451,10 @@ def check_page(page: Any, page_id: str | None = None) -> dict[str, Any]:
         raise TypeError("page messages is not a list")
     if "kind" in page and not isinstance(page["kind"], str):  # D63: optional; absent means a whole turn
         raise TypeError("page kind is not a string")
+    if "seq" in page and (not isinstance(page["seq"], int) or isinstance(page["seq"], bool) or page["seq"] < 0):
+        raise TypeError("page seq is not a natural number")  # D63: optional, an in-turn page's position
+    if "locator" in page and not isinstance(page["locator"], str):
+        raise TypeError("page locator is not a string")
     stub = page["stub"]
     if not isinstance(stub, dict):
         raise TypeError("page stub is not an object")

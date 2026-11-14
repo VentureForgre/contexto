@@ -67,7 +67,7 @@ from contexto.private import (
 )
 from contexto.store.catalog import PageCatalog, load_page
 from contexto.store.ledger import Ledger, LedgerCorruptError
-from contexto.store.pages import build_page, render_index, same_content
+from contexto.store.pages import build_page, page_order, render_index, same_content
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 from contexto.store.search import rank
@@ -920,12 +920,14 @@ class SessionStore(LedgerOps):
         """
         return self._write_pages(build_page(self._key, turn, first_turn + offset) for offset, turn in enumerate(turns))
 
-    def page_parts(self, parts: list[list[dict]], turn: int, kind: str) -> list[str]:
+    def page_parts(self, parts: list[list[dict]], turn: int, kind: str,
+                   seqs: list[int] | None = None) -> list[str]:
         """Write one in-turn page per part (D63): each holds its messages exactly, the turn number
         ``turn`` (the same for all: the turn they are part of) and ``kind`` (``result``: a tool call and
         its result; ``rounds``: tool rounds folded out of a running turn). Ids, immutability and
         conflicts are ``page_out``'s; ``kind`` is not part of the id."""
-        return self._write_pages(build_page(self._key, part, turn, kind) for part in parts)
+        return self._write_pages(build_page(self._key, part, turn, kind, None if seqs is None else seqs[n])
+                                 for n, part in enumerate(parts))
 
     def _write_pages(self, pages: Iterable[dict[str, Any]]) -> list[str]:
         ids = []
@@ -1014,12 +1016,12 @@ class SessionStore(LedgerOps):
 
     def page_ids(self) -> list[str]:
         """Every page id in this store, newest turn first."""
-        return [e.id for e in sorted(self._catalog.entries(), key=lambda e: (e.turn, e.id), reverse=True)]
+        return [e.id for e in sorted(self._catalog.entries(), key=lambda e: page_order(e.view), reverse=True)]
 
     def page_list(self) -> list[dict[str, Any]]:
         """``{id, turn, line}`` for every page, newest turn first; ``line`` is its index line without the
         identifiers (``contexto sessions show``, D57)."""
-        entries = sorted(self._catalog.entries(), key=lambda e: (e.turn, e.id), reverse=True)
+        entries = sorted(self._catalog.entries(), key=lambda e: page_order(e.view), reverse=True)
         return [{"id": e.id, "turn": e.turn, "line": self._catalog.line(e, False)} for e in entries]
 
     def search(self, query: str) -> list[str]:

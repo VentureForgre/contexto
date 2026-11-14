@@ -27,7 +27,7 @@ from contexto.store import (
     redact,
 )
 from contexto.store.ledger import MemoryLedger
-from contexto.store.pages import build_page, current_stub, render_index, same_content, search_entry
+from contexto.store.pages import build_page, current_stub, page_order, render_index, same_content, search_entry
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 from contexto.store.search import rank
@@ -146,9 +146,11 @@ class MemoryStore(LedgerOps):
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]:
         return self._write_pages(build_page(self._key, turn, first_turn + offset) for offset, turn in enumerate(turns))
 
-    def page_parts(self, parts: list[list[dict]], turn: int, kind: str) -> list[str]:
+    def page_parts(self, parts: list[list[dict]], turn: int, kind: str,
+                   seqs: list[int] | None = None) -> list[str]:
         """As ``SessionStore.page_parts`` (D63)."""
-        return self._write_pages(build_page(self._key, part, turn, kind) for part in parts)
+        return self._write_pages(build_page(self._key, part, turn, kind, None if seqs is None else seqs[n])
+                                 for n, part in enumerate(parts))
 
     def _write_pages(self, pages: Iterable[dict[str, Any]]) -> list[str]:
         ids = []
@@ -184,7 +186,7 @@ class MemoryStore(LedgerOps):
         return [current_stub(p) for p in self.pages.values()]
 
     def page_ids(self) -> list[str]:
-        return [p["id"] for p in sorted(self.pages.values(), key=lambda p: (p["turn"], p["id"]), reverse=True)]
+        return [p["id"] for p in sorted(self.pages.values(), key=page_order, reverse=True)]
 
     def search(self, query: str) -> list[str]:
         """As ``SessionStore.search``; each page's searchable text is kept while the page object stays (D34)."""
