@@ -270,6 +270,20 @@ DAMAGE = [
     ("probes", lambda p: [{**p[0], "overlap": 1.5}, *p[1:]], "overlap"),
     ("probes", lambda p: [{**p[0], "kind": "list"}, *p[1:]], "probes: 'q_p_01' has kind 'list'"),
     ("probes", lambda p: [{**p[0], "cls": "riddle"}, *p[1:]], "probes: 'q_p_01' has class 'riddle'"),
+    # Reviewer B's nit 2 at 74bdf083:
+    ("files", lambda f: {"bench-files/a\x00b.txt": "x", **f}, "files: 'bench-files/a\\x00b.txt' holds a control"),
+    ("files", lambda f: {"bench-files/a\nb.txt": "x", **f}, "files: 'bench-files/a\\nb.txt' holds a control"),
+    ("files", lambda f: {"bench-files/a\tb.txt": "x", **f}, "files: 'bench-files/a\\tb.txt' holds a control"),
+    ("files", lambda f: {"bench-files/a\x1fb.txt": "x", **f}, "files: 'bench-files/a\\x1fb.txt' holds a control"),
+    ("reads", lambda r: ["bench-files/a\nb.txt", *r], "reads: 'bench-files/a\\nb.txt' holds a control"),
+    ("files", lambda f: {"bench-files/log-01.txt/x": "x", **f},
+     "files: 'bench-files/log-01.txt/x' is below the file 'bench-files/log-01.txt'"),
+    ("decisions", lambda d: [{**d[0], "label": "DX-0000", "reply": f"DECISION DX-0000: {d[0]['value']}"}, *d[1:]],
+     "decisions: the label of the decision for turn"),
+    ("decisions", lambda d: [{**d[0], "label": "", "reply": f"DECISION : {d[0]['value']}"}, *d[1:]],
+     "decisions: the label of the decision for turn"),
+    ("probes", lambda p: [{**p[0], "answer": "`\"`."}, *p[1:]], "probes: 'q_p_01' has an answer that is empty"),
+    ("probes", lambda p: [{**p[0], "answer": ""}, *p[1:]], "probes: 'q_p_01' has an answer that is empty"),
 ]
 
 
@@ -281,6 +295,18 @@ def test_from_json_refuses_a_damaged_script_and_names_the_field(v2, field, edit,
     kinds[0] = "chat"
     with pytest.raises(ValueError, match="kinds: unknown turn kind 'chat'"):
         Script.from_dict({**v2.to_dict(), "kinds": kinds})
+
+
+@pytest.mark.parametrize("found", [True, 1.0, "1", None, 2])
+def test_from_json_refuses_a_format_that_is_not_the_integer_1(v2, found):
+    with pytest.raises(ValueError, match=re.escape(f"not a benchmark script of format 1 (found {found!r})")):
+        Script.from_dict({**v2.to_dict(), "format": found})
+
+
+def test_from_json_refuses_json_nested_too_deeply_as_damage():
+    for text in ("[" * 200_000 + "]" * 200_000, '{"a":' * 200_000 + "1" + "}" * 200_000):
+        with pytest.raises(ValueError, match="not JSON: nested too deeply"):
+            Script.from_json(text)
 
 
 def test_from_json_accepts_both_protocols_undamaged():
@@ -587,12 +613,21 @@ RIGHT_REPLIES = (
     "DECISION {label}: {value} (it has the lowest number, 110)", "DECISION {label}: {value} = 110",
     "DECISION {label}: <{value}>", "decision {label}: {value}", "DECISION {label_lower}: {value}",
     "1. DECISION {label}: {value}", "DECISION {label_nbh}: {value}",
+    # Reviewer B's forms rejected at 74bdf083: the losers named in brackets, and other separators.
+    "DECISION {label}: {value} (beats {other} and {other2})", "DECISION: {label}: {value}",
+    "DECISION {label} - {value}", "DECISION {label} = {value}", "DECISION {label} \u2013 {value}",
+    "DECISION {label}: {value} [{other} and {other2} lost]", "DECISION {label}: {value} ({other} (high) lost)",
 )
 WRONG_REPLIES = (
     "DECISION {label}: {other}", "DECISION {label}: {value} or {other}", "DECISION {label}: {other2}",
     "DECISION DX-0000: {value}", "DECISION {label}0: {value}", "OK", "", "{value}",
     "DECISION {label}: {value}\nDECISION {label}: {other}", "DECISION {label}: none of them",
     "DECISION {label}: {value_prefix}", "DECISION {label}: {value}9", "DECISION {label}:",
+    # Reviewer B's forms accepted at 74bdf083: a negated candidate is not a decision for it.
+    "DECISION {label}: not {value}", "DECISION {label}: anything except {value}",
+    "DECISION {label}: {other} (not {value})", "DECISION {label}: ({value}) {other}",
+    "DECISION {label}: no, {value} is wrong", "DECISION {label}: {other} = 110 [{value}]",
+    "DECISION {label}-0: {value}",
 )
 
 
@@ -680,11 +715,15 @@ def test_words_tokenisation():
 def test_generator_words_are_the_filler_and_fixed_turn_words():
     texts = [d27.LOG_HEAD, d27.LOG_TAIL, d27.INSTRUCTIONS, *d27.PROBE_HEADER, script.TOOLLOOP_HEAD,
              script.DECISION_HEAD, *(script.DECISION_RULE.format(rule=r) for r in ("lowest", "highest")),
-             *script.DECISION_ASK, d27.filler_text(random.Random(0), 200, "s00")]
+             script.DECISION_ASK[0], script.DECISION_ASK[1].format(label="DX-1"),  # a turn holds a label, not "{label}"
+             d27.filler_text(random.Random(0), 200, "s00")]
     found = {w for t in texts for w in re.findall(r"[a-z]+", t.casefold()) if len(w) >= 3}
     names = {w for name in d27.Pools(random.Random(0)).services for w in name.split("-")} | set(d27.WORDS)
     assert GENERATOR_WORDS == found - names
     assert "search" in found & names  # the one collision: a service root and a word of the tool-loop head
+    assert "label" not in GENERATOR_WORDS  # no turn holds the placeholder's word
+    # Subject words other than service names stay: "shard" is on every filler line.
+    assert {"shard", "log", "name"} <= GENERATOR_WORDS
 
 
 def test_lexical_overlap_counts_distinct_shared_words():
