@@ -3592,9 +3592,21 @@ the owner's delegation. Open decisions are listed at the end with the options an
   less than two `min_turn_room` between the head plus the prompt and `T` (bound 60,000 with a
   20,000-token head; a 92,000-token head at 150,000), a batch holds requests under `bound -
   headroom_floor - min_turn_room / 4` instead of the line, and a new result is shown once if the
-  request with it fits under `bound - 2 * (min_turn_room / 4)` (54,000 at bound 60,000: the output
-  allowance and as much again for the estimate's error, which reached 8.6% in the reviewer's sweep),
-  by the session's ratio, whether or not the head is measured. The headroom floor and the recall
+  request with it fits under `bound - 2 * (min_turn_room / 4)` (54,000 at bound 60,000) by the
+  session's ratio, whether or not the head is measured, and also, with each new result counted at
+  the tool-output seed of 1.5 bytes a token, under `bound - min_turn_room / 4` (57,000); a result
+  that fails either test is stubbed on arrival. The second test is what holds the bound there: the
+  request stays under it for results no denser than 1.5 bytes a token, with the output allowance to
+  spare, and a denser one can take it over (at 1.2 bytes a token by the reviewer's fake upstream,
+  50 KB results over a 20,000 head reached 64,184 of 60,000, the `over_bound` logged from usage).
+  The 6,000 of the first test is the output allowance and a margin for the estimate's error at the
+  session's ratio (8.6% in the reviewer's sweep); it does not hold the bound for dense output.
+  Before (Reviewer B at 26cba5ad, L1) only the session's ratio was tested, so the request held only
+  for results no denser than the over-bound test's 1.8 bytes a token, with no slack: at 1.5 bytes a
+  token a 60 KB result over a 20,000 head reached 61,718 of 60,000 (estimated 39,670), and a 100 KB
+  one over a 92,000 head 161,318 of 150,000. Both are now stubbed on arrival, the largest requests
+  22,883 and 94,884, while a 45 KB result is still read once at 51,571 (`tests/test_inturn.py`, two
+  cases). The headroom floor and the recall
   room are given up on that request: its room may be 0, logged once per turn as `turn_room_low`
   with `reason: "in_turn_small_bound"`, and `contexto_recall` is refused there. The result is
   stubbed at a later batch once seen. Before (Reviewer B, finding 3) bound 60,000 with a
@@ -3602,8 +3614,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   `bound - headroom_floor - min_turn_room / 4`, a 26,000 head at 60,000 still stubbed 60 of 60, a
   28,000 head 120 of 120, a 48,000 head at 80,000 60 of 60, and a 20,000 head with usage never
   arriving 120 of 120, though each request with the result whole was 35,000 to 42,000. Now 0 in
-  each, the largest requests 40,479, 42,914, 62,479 and 28,675 by the fake upstream, none over the
-  bound (`tests/test_inturn.py`, four cases). What the engine adds that
+  each, the largest requests 40,258, 42,914, 62,258 and 39,950 by the fake upstream (the last with
+  usage never arriving, its estimate up to 59,918), none over the bound (`tests/test_inturn.py`, four
+  cases). What the engine adds that
   no batch can page counts with the head here: D69's carried records while `k = 0`, the preamble
   after the first rotation. Before (merging D69): a bound too small for the carried records was not
   seen as tight, so with records carried it logged no `turn_room_low` where the same session whose
@@ -3629,10 +3642,23 @@ the owner's delegation. Open decisions are listed at the end with the options an
   then shows the request over the bound, that is the `over_bound` logged from usage, as today. Once
   usage has measured the first request that carried it, the PDF has a measured cost, the engine's
   own way: that request's real input less the estimate of everything else in it, never under 0,
-  shared evenly over the unmeasured PDFs it carried (keyed by content, so a second read of the same
-  file is measured already). From then on the estimate counts it at that cost (rule 3's estimate and
-  every count inside a batch), and stubbing it frees that cost. The costs are per engine and never
-  recorded: after a restart the next usage measures the PDF again. Before (Reviewer A at 15293e9c,
+  shared over the unmeasured PDFs it carried in proportion to their size as sent: the length of the
+  base64 data, or for a PDF by URL or file id, which has none, the length of its block's JSON (so in
+  a request with an inline PDF its share is small, and it may be counted low). It is keyed by
+  content, that size and a SHA-256 digest of the same bytes, so a second read of the same file is
+  measured already. From then on the estimate counts it at that cost (rule 3's estimate and every
+  count inside a batch), and stubbing it frees that cost. The costs are kept in the epoch record
+  (below), which is written also from the usage that measures one, so a restart keeps them; a cost a
+  restarted engine still lacks (a record from before the field, or a write that failed) is measured
+  again, the PDF handled as on its first sending. Before (Reviewer A at 26cba5ad, finding 1) the
+  share was even: a 10,000-token and a 122,000-token PDF read in one round were each measured at
+  66,018, and the large one read alone 60 rounds later at bound 200,000 went out at 203,685 against
+  an estimate of 147,838, over the bound only by usage. Now the reviewer's case measures 10,168 and
+  121,889 (121,877 alone) and the re-read is paged by estimate, 0 over; the test's measures 10,008
+  and 122,015 (`tests/test_inturn.py`). And (finding 2, fuzz seed 118) a restart lost the costs, so
+  the request after it counted the read PDF at D60's maximum, freed nothing for it, and went out at
+  66,160 of 60,000; the reviewer's 40 PDF sessions now have no request over the bound without a
+  fresh PDF. Before (Reviewer A at 15293e9c,
   finding 1, and Reviewer B, L3) a read uncertain PDF counted as freeing nothing: with two reads of
   a 55 KB PDF (24,500 tokens each by the reviewer's fake upstream) a batch stubbed a fresh 15 KB
   result unread and sent 7,301 tokens of 60,000 with an estimate of 56,473 (at the defaults five
@@ -3663,8 +3689,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
   the cost ceiling). Now 38 rewrite, none back to back, the largest request 120,142 by the fake
   upstream; at bound 60,000 with a 20,000 head, 60 rewrites, none back to back (119 and 118
   before). The price is the room: with no usage it is published from an estimate nothing
-  corrects, and was under `min_turn_room` on 107 of 151 requests in the first case. Usage delivered
-  late counts as none, since the engine drops stale usage (rule 3).
+  corrects, and was under `min_turn_room` on 107 of 151 requests in the first case (55 of 151 with
+  a 28,000 head). A loop request whose published room falls under `min_turn_room` while the previous
+  request's usage is missing logs `turn_room_low` with `reason: "usage_missing"`, once per turn (the
+  small bound's `in_turn_small_bound` shares that once); before (Reviewer B at 26cba5ad, L3) nothing
+  logged it. Usage delivered late counts as none, since the engine drops stale usage (rule 3).
   (e) Depth. Under the harness's breakpoint cache (an entry at each `cache_control`; Claude Code
   marks both `system` blocks and the newest message), a rewrite re-reads only the head and re-sends
   the rest, so a batch costs about the request's size after it less the head. Swept on the replay
@@ -3779,8 +3808,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
   ignore them.
   The index lists turn and rounds pages, not result or folds pages; search and recall reach all.
   In-turn pages do not advance `turns_paged`. The epoch record gains the optional `in_turn` field
-  (positions and page ids; `lists` and `room_low` optional) and its configuration gains `in_turn_paging`. Old stores and records
-  work unchanged: a record without the setting resumes under either value. Checked by reading a
+  (positions and page ids; `lists` and `room_low` optional), the optional `document_costs` field
+  (the measured costs of PDFs whose pages are not certain, `[size, digest, tokens]` each with a
+  32-hex-digit digest, the newest 64 kept; present only once usage has measured one), and its
+  configuration gains `in_turn_paging`. Old stores and records work unchanged: a record without the
+  setting resumes under either value, and one without `document_costs` resumes with none. Checked by reading a
   store this branch wrote (1 turn page, 24 result pages, 1 rounds page, a record with `in_turn`)
   with the v0.5.24 code: it lists, searches and recalls every page as an ordinary page, its index
   lists the 24 result pages too, and it reads the record as no record (`epoch_not_resumed`,

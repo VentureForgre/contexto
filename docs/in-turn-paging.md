@@ -42,7 +42,9 @@ prompt. When less than 24,000 tokens (two minimum turn rooms) are left between t
 your prompt and `bound - headroom floor - minimum turn room` (113,000 by default), Contexto holds
 requests under the bound less the headroom floor and 3,000 instead (32,000 at a bound of 60,000). A
 new result is still read once whenever the request with it fits under the bound less 6,000 (54,000
-at a bound of 60,000), and it is paged at a later batch. On such a request the headroom floor and the
+at a bound of 60,000), and also fits under the bound less 3,000 (57,000) with the result counted at
+1.5 bytes per token; it is paged at a later batch. A result that fails either test is stubbed before
+the model reads it. On such a request the headroom floor and the
 room for `contexto_recall` are given up, so recall can be refused there; the session log says so
 once per turn (`turn_room_low` with `reason: "in_turn_small_bound"`). With a 28,000-token system
 prompt at a bound of 60,000, each 20 KB read is read whole and the largest request is about 43,000.
@@ -83,8 +85,10 @@ size: it is sent whole once, as without in-turn paging (the session log records
 then shows that request over the bound, the log records `over_bound`. Once the API has reported that
 request's size, Contexto takes the PDF's cost from it (the request's real size less its estimate of
 everything else) and counts the PDF at that cost from then on, also for a second read of the same
-file, so a later batch can stub it and knows what that frees. After a proxy restart the next
-response measures it again. Tool search results (`tool_reference`) are never stubbed.
+file, so a later batch can stub it and knows what that frees. When one request carries several
+such PDFs, the cost is shared among them by their size as sent (a PDF by URL or file id counts by the
+size of its reference, so its share can be low). The costs are kept with the session's state, so a
+proxy restart keeps them; one a restart still lost is measured again, as on the PDF's first sending. Tool search results (`tool_reference`) are never stubbed.
 
 The wording is the same in every conversation. A subagent given only some tools, or a session where
 tool search has deferred Contexto's tools, may not have `contexto_recall`; the stub then tells the
@@ -203,6 +207,8 @@ that enforces preserved thinking may refuse. Switch it off between turns when yo
   blocks were kept before the first edit, stripped, and kept after it. Counts only.
 - `turn_room_low` with `reason: "in_turn_small_bound"`: once per turn, when a small bound leaves the
   recall room under 12,000.
+- `turn_room_low` with `reason: "usage_missing"`: once per turn, when the API's usage for the
+  previous request is missing and the room published for recall falls under 12,000.
 
 ## Limits
 
@@ -226,7 +232,11 @@ that enforces preserved thinking may refuse. Switch it off between turns when yo
   12,000 tokens, and batches come more often: with a 92,000-token system prompt at a bound of
   150,000, a loop of 20 KB reads rewrites the cached prefix about every three rounds.
 - A result that has just arrived is counted at 1.8 bytes per token until the API has reported its
-  real size, so that a dense one never takes the request over the bound. For sparse text (plain
+  real size, so that a dense one does not take the request over the bound. With a small bound or a
+  large system prompt (see "When it runs") the result is read once if it fits at 1.5 bytes per token
+  with 3,000 to spare, so the request stays under the bound for output no denser than that; denser
+  output (1.2 bytes per token, for example) can take it over, and the log records `over_bound`. For
+  sparse text (plain
   prose, most source code) that is about twice its real size, so results that arrive together and
   add up to more than about 160 KB can be paged before the model reads them although they would
   have fit. Measured: two parallel reads of 100 KB of prose, 81,854 tokens by the API's count at a
@@ -235,7 +245,8 @@ that enforces preserved thinking may refuse. Switch it off between turns when yo
   way.
 - If the API never reports usage (a proxy or gateway that strips it), new results stay counted at 1.8
   bytes per token, so the request's estimate stays high. Contexto then rewrites the prefix again only
-  when a request would be over the bound, so the room published for recall is often under 12,000.
+  when a request would be over the bound, so the room published for recall is often under 12,000
+  (the log records `turn_room_low` with `reason: "usage_missing"`).
 - Do not downgrade to v0.5.24 or turn in-turn paging off in the middle of a tool loop that has been
   paged. The older release sends the loop's raw history, whose thinking was produced under stubs it
   does not send, and an account that enforces preserved thinking refuses it with a 400 ("bound to a
