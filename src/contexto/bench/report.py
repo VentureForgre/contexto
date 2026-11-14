@@ -25,6 +25,7 @@ The "What this run shows" text is produced by fixed rules (``_verdict``), not wr
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import math
@@ -1111,7 +1112,7 @@ def _refuse(code: int, problem: str, path: Path) -> OSError:
     return OSError(code, problem, str(path))
 
 
-def _place(out_dir: Path, files: Mapping[str, bytes]) -> None:
+def _place(out_dir: Path, files: Mapping[str, bytes], restore: bool = False) -> None:
     """Put ``files`` (relative path to content) into ``out_dir``: all of them or none.
 
     Every file is first written into a staging directory inside ``out_dir`` (the same file
@@ -1120,8 +1121,10 @@ def _place(out_dir: Path, files: Mapping[str, bytes]) -> None:
     made read-only. Then the files are moved into place in the order given. A move replaces the
     name, so a symbolic link there is replaced and not followed. If a move still fails, the files
     after it keep their previous content; the caller puts ``results.json`` last, so a directory
-    never holds a new ``results.json`` beside an older report. The staging directory is removed
-    whatever happens.
+    never holds a new ``results.json`` beside an older report. With ``restore`` the files moved
+    before the failure are put back too: a copy of each file there before (a link is copied as a
+    link) is kept in the staging directory and moved back, and a file that was not there is
+    removed. The staging directory is removed whatever happens.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     for name in files:
@@ -1136,13 +1139,29 @@ def _place(out_dir: Path, files: Mapping[str, bytes]) -> None:
         if target.exists() and not os.access(target, os.W_OK):
             raise _refuse(errno.EACCES, "the file is read-only", target)
     staging = Path(tempfile.mkdtemp(prefix=".contexto-bench-", dir=out_dir))
+    new, old = staging / "new", staging / "old"
+    placed: list[str] = []
     try:
         for name, content in files.items():
-            (staging / name).parent.mkdir(parents=True, exist_ok=True)
-            (staging / name).write_bytes(content)
+            (new / name).parent.mkdir(parents=True, exist_ok=True)
+            (new / name).write_bytes(content)
+        if restore:
+            for name in files:
+                if (out_dir / name).is_symlink() or (out_dir / name).exists():
+                    (old / name).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(out_dir / name, old / name, follow_symlinks=False)
         for name in files:
             (out_dir / name).parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staging / name, out_dir / name)
+            os.replace(new / name, out_dir / name)
+            placed.append(name)
+    except BaseException:
+        for name in reversed(placed if restore else []):
+            with contextlib.suppress(OSError):  # the first error is the one to report
+                if (old / name).is_symlink() or (old / name).exists():
+                    os.replace(old / name, out_dir / name)
+                else:
+                    (out_dir / name).unlink()
+        raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 

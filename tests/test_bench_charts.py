@@ -7,7 +7,9 @@ request-size plot is 700 wide from x = 76 and 300 high, the accuracy plot 536 wi
 from __future__ import annotations
 
 import json
+import os
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import pytest
 
@@ -299,6 +301,62 @@ def test_chart_mode_writes_into_out_when_given(tmp_path, capsys):
     assert cli.main(["bench", "--chart", str(out / "results.json"), "--out", str(target)]) == 0
     assert sorted(p.name for p in (target / "charts").iterdir()) == ["accuracy.svg", "request-size.svg"]
     assert not (out / "charts").exists()
+
+
+def _fail_after_the_first_chart(monkeypatch, stage):
+    """Make the second chart fail: while it is written (``write``) or while it is put in place
+    (``move``), after the first chart has been."""
+    if stage == "write":
+        real_write = Path.write_bytes
+
+        def write_bytes(self, data):
+            if self.name == "request-size.svg":
+                raise OSError(28, "No space left on device", str(self))
+            return real_write(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", write_bytes)
+        return
+    real_replace = os.replace
+    moved = []
+
+    def replace(source, target):
+        if Path(target).name == "request-size.svg" and "accuracy.svg" in moved:
+            raise OSError(28, "No space left on device", str(target))
+        moved.append(Path(target).name)
+        return real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+
+@pytest.mark.parametrize("stage", ["write", "move"])
+def test_chart_mode_writes_both_charts_or_neither_beside_the_results_file(tmp_path, monkeypatch, capsys, stage):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,))
+    report.write(out)
+    before = {name: f"old {name}".encode() for name in ("accuracy.svg", "request-size.svg")}
+    for name, data in before.items():
+        (out / "charts" / name).write_bytes(data)
+    _fail_after_the_first_chart(monkeypatch, stage)
+    assert cli.main(["bench", "--chart", str(out / "results.json")]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith(f"contexto bench: error: cannot write the charts into {out / 'charts'}: ")
+    assert "No space left on device" in captured.err and len(captured.err.splitlines()) == 1
+    assert sorted(p.name for p in (out / "charts").iterdir()) == ["accuracy.svg", "request-size.svg"]  # no staging
+    assert {name: (out / "charts" / name).read_bytes() for name in before} == before
+
+
+@pytest.mark.parametrize("stage", ["write", "move"])
+def test_chart_mode_writes_both_charts_or_neither_into_a_new_directory(tmp_path, monkeypatch, capsys, stage):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,))
+    report.write(out, charts=False)
+    target = tmp_path / "site"
+    _fail_after_the_first_chart(monkeypatch, stage)
+    assert cli.main(["bench", "--chart", str(out / "results.json"), "--out", str(target)]) == 1
+    assert "cannot write the charts into" in capsys.readouterr().err
+    assert not (target / "charts").exists()  # not even an empty directory is left
+    monkeypatch.undo()
+    assert cli.main(["bench", "--chart", str(out / "results.json"), "--out", str(target)]) == 0
+    assert sorted(p.name for p in (target / "charts").iterdir()) == ["accuracy.svg", "request-size.svg"]
 
 
 def test_chart_mode_on_a_replay_file_says_there_is_no_accuracy_chart(tmp_path, capsys):

@@ -34,6 +34,7 @@ last tick of each axis (``axis_top``). In the accuracy chart an accuracy ``p`` i
 
 from __future__ import annotations
 
+import contextlib
 import math
 import re
 import textwrap
@@ -526,15 +527,24 @@ def skipped(results: Mapping[str, Any]) -> list[tuple[str, str]]:
 def write(results: Mapping[str, Any] | None, charts_dir: Path | str, drawn: Drawn | None = None) -> list[Path]:
     """Write every chart the results allow into ``charts_dir`` and return the paths. A chart the
     file cannot give (``skipped``) is left out; with nothing to draw it raises ``ChartError``.
-    ``drawn`` is the first value of an earlier ``render(results)``, to write without drawing again."""
+    ``drawn`` is the first value of an earlier ``render(results)``, to write without drawing again.
+
+    All of the charts are written or none, as the report's files are: what cannot be written is an
+    ``OSError``, the charts that were there before keep their content, and a ``charts_dir`` this
+    call made is removed again."""
+    from contexto.bench import report  # report imports this module
+
     if drawn is None:
         drawn, left_out = render(results or {})
         if not drawn:
             raise ChartError("; ".join(reason for _, reason in left_out) or "the results file has nothing to draw")
     charts_dir = Path(charts_dir)
-    charts_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
-    for name, _, svg in drawn:
-        (charts_dir / name).write_text(svg, encoding="utf-8")
-        paths.append(charts_dir / name)
-    return paths
+    made = [d for d in (charts_dir, *charts_dir.parents) if not d.exists()]
+    try:
+        report._place(charts_dir, {name: svg.encode("utf-8") for name, _, svg in drawn}, restore=True)
+    except BaseException:
+        for directory in made:  # deepest first; one that is not empty now stays
+            with contextlib.suppress(OSError):
+                directory.rmdir()
+        raise
+    return [charts_dir / name for name, _, _ in drawn]
