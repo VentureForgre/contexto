@@ -1,7 +1,8 @@
 """The short scale run, once per test session, and its numbers at the end of the pytest output.
 
 The run's measurements are printed whether its tests pass or fail, so a CI log always holds the numbers the
-budgets in ``short.BUDGETS`` were compared against on that runner.
+budgets in ``short.BUDGETS`` were compared against on that runner. When the run itself raises (the fixture
+errors), the step it failed in and what it had measured by then are printed instead.
 """
 
 from __future__ import annotations
@@ -28,7 +29,12 @@ REPORTS: list[str] = []
 
 @pytest.fixture(scope="session")
 def short_run(tmp_path_factory):
-    measured = short.measure(home=tmp_path_factory.mktemp("scale-short"))
+    progress: dict = {}
+    try:
+        measured = short.measure(home=tmp_path_factory.mktemp("scale-short"), progress=progress)
+    except BaseException as exc:  # the fixture errors: still print the step and what was measured by then
+        REPORTS.append(short.failure_report(exc, progress))
+        raise
     REPORTS.append(short.report(measured))
     out = os.environ.get(OUT_ENV)
     if out:

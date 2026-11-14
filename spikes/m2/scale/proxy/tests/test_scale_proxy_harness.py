@@ -223,6 +223,32 @@ def test_the_fake_upstream_closes_each_connection_first():
     assert upstream.connections == 1
 
 
+def test_a_short_run_that_fails_reports_what_it_measured(monkeypatch, tmp_path):
+    """conftest.py prints this when the fixture errors, so a CI log holds the numbers measured up to the
+    failure, and the step it failed in."""
+    from scale.proxy import short
+
+    def broken_burst(*args, **kwargs):
+        raise RuntimeError("burst broke")
+
+    monkeypatch.setattr(short, "burst", broken_burst)
+    progress: dict = {}
+    with pytest.raises(RuntimeError, match="burst broke"):
+        short.measure(2, startups=1, clients=1, per_client=1, home=tmp_path, progress=progress)
+    assert progress["stage"] == "burst" and len(progress["startup_all_ms"]) == 1
+    assert progress["first_request_added_ms"] > 0 and progress["first_request_direct_ms"] > 0
+    text = short.failure_report(RuntimeError("burst broke"), progress)
+    assert "burst broke" in text and "stage burst" in text and "first_request_added_ms" in text
+
+
+def test_the_short_run_takes_a_turn_size():
+    from scale.proxy import short
+
+    assert short.short_args().turn_tokens == short.TURN_TOKENS == 3_000
+    assert short.short_args(turn_tokens=26_000).turn_tokens == 26_000
+    assert short.main(["--turn-tokens", "26000", "--spread", "/dev/null"]) == 0
+
+
 def test_summary_statistics():
     assert summarize.p95([1.0, 2.0, 3.0, 4.0, 100.0]) == 100.0
     assert summarize.p95(list(map(float, range(101)))) == 95.0

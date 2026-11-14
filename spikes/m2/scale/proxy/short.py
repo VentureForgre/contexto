@@ -91,9 +91,9 @@ def theil_sen(points: list[tuple[float, float]]) -> tuple[float, float]:
     return slope, statistics.median(y - slope * x for x, y in points)
 
 
-def short_args(reminders: str = REMINDERS) -> argparse.Namespace:
+def short_args(reminders: str = REMINDERS, turn_tokens: int = TURN_TOKENS) -> argparse.Namespace:
     return run.build_parser().parse_args(["--label", "short", "--head-tokens", str(HEAD_TOKENS), "--turn-tokens",
-                                          str(TURN_TOKENS), "--bound", str(BOUND), "--reminders", reminders])
+                                          str(turn_tokens), "--bound", str(BOUND), "--reminders", reminders])
 
 
 def start(args: argparse.Namespace, home: Path, upstream: FakeUpstream, err) -> tuple[run.Worker, float]:
@@ -159,11 +159,15 @@ def added_ms(port: int, upstream: FakeUpstream, body: bytes, name: str, sends: i
     return out, client.connections
 
 
-def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = STARTUPS, clients: int = CLIENTS,
-            per_client: int = PER_CLIENT, burst_body: str = "first", home: Path | None = None) -> dict[str, Any]:
+def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int = TURN_TOKENS, startups: int = STARTUPS, clients: int = CLIENTS,
+            per_client: int = PER_CLIENT, burst_body: str = "first", home: Path | None = None,
+            progress: dict[str, Any] | None = None) -> dict[str, Any]:
     """One short run. Returns the measurements (see the module docstring); ``rows`` holds one dict per
-    request of the session, with the columns of ``run.REQUEST_FIELDS``."""
-    args = short_args(reminders)
+    request of the session, with the columns of ``run.REQUEST_FIELDS``. ``progress``, when given, is
+    filled as the run goes (its ``stage`` and what has been measured so far), so a run that raises can
+    still report its numbers (``failure_report``)."""
+    progress = {} if progress is None else progress
+    args = short_args(reminders, turn_tokens)
     made_home = home is None
     home = Path(tempfile.mkdtemp(prefix="contexto-scale-short-")) if home is None else home
     upstream = FakeUpstream()
@@ -173,6 +177,7 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
     rows: list[dict[str, Any]] = []
     samples: list[dict[str, Any]] = []
     startup_s: list[float] = []
+    progress.update(stage="startup", load1=[load_before])
     try:
         with open(home / "worker.log", "w") as err:
             session = run.Session(args)
@@ -189,18 +194,25 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
                         probe.kill()
                     probe, seconds = start(args, home / f"startup-{i}", upstream, err)
                     startup_s.append(seconds)
+                    progress["startup_all_ms"] = [round(s * 1e3, 1) for s in startup_s]
                 if probe is not None:
+                    progress["stage"] = "first_request"
                     small, connections["small"] = added_ms(probe.port, upstream, first_body, "small", SMALL_SENDS)
                     direct, connections["direct"] = added_ms(upstream.upstream_port, upstream, first_body, "direct",
                                                              SMALL_SENDS)
+                    progress.update(first_request_added_ms=round(statistics.median(small), 3) if small else None,
+                                    first_request_direct_ms=round(statistics.median(direct), 3) if direct else None)
                     if clients:
+                        progress["stage"] = "burst"
                         concurrent = burst(probe, upstream, TINY_BODY if burst_body == "tiny" else first_body,
                                            clients, per_client)
                         concurrent["body"] = burst_body
                         connections["burst"] = concurrent["connections"]
+                        progress["throughput"] = concurrent
             finally:
                 if probe is not None:
                     probe.kill()
+            progress["stage"] = "session"
             worker, _ = start(args, home / "run", upstream, err)
             peak = 0.0
             try:
@@ -211,13 +223,18 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
                     stats = worker.call({"cmd": "stats"})
                     run.merge_stats(turn_rows, stats["records"], stats["maxrss_mb"])
                     rows.extend(turn_rows)
+                    progress.update(turns_done=t + 1, requests=len(rows), last_added_ms=round(
+                        turn_rows[-1]["added_s"] * 1e3, 3) if turn_rows[-1].get("added_s") is not None else None,
+                        statuses_not_200=sum(1 for r in rows if r["status"] != 200))
                     if (t + 1) % SAMPLE_EVERY == 0 or t + 1 == turns:
                         seen = worker.call({"cmd": "gc"})
                         samples.append({"turn": t + 1, "body_mb": turn_rows[-1]["body_mb"], "rss_mb": seen["rss_mb"],
                                         "maxrss_mb": round(seen["maxrss_mb"], 1), "objects": seen["objects"]})
+                        progress["samples"] = samples
             finally:
                 connections["session"] = worker.client.connections
                 peak = worker.close(save=False)
+        progress["stage"] = "summary"
         session_dir = home / "run" / "sessions" / "scale"
         counts, max_logged = run.log_events(session_dir / "log.jsonl")
         pages = len(list((session_dir / "pages").glob("pg_*.json")))
@@ -239,6 +256,7 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
     turn_span = (last_sample.get("turn") or 0) - (first_sample.get("turn") or 0)
     return {
         "python": platform.python_version(), "platform": sys.platform, "turns": turns, "reminders": reminders,
+        "turn_tokens": args.turn_tokens, "head_tokens": args.head_tokens,
         "requests": len(rows), "seconds": round(time.monotonic() - began, 1),
         "load1": [load_before, run.load_avg()], "cpus": os.cpu_count(),
         "history_tokens": rows[-1]["history_tokens"] if rows else 0, "body_mb": rows[-1]["body_mb"] if rows else 0,
@@ -289,9 +307,17 @@ def over_budget(result: dict[str, Any], budgets: dict[str, float] = BUDGETS) -> 
     return out
 
 
+def failure_report(error: BaseException, progress: dict[str, Any]) -> str:
+    """A run that raised: the step it was in, the error, and what it had measured by then."""
+    progress = {**progress, "load1": [*progress.get("load1", []), run.load_avg()]}
+    return (f"short scale run FAILED at stage {progress.get('stage')}: {type(error).__name__}: {error}\n"
+            f"  measured so far: {json.dumps(progress)}")
+
+
 def report(result: dict[str, Any]) -> str:
     """The run as lines of text: the bound, then each budgeted quantity with its budget and the factor."""
-    lines = [f"short scale run: {result['turns']} turns, {result['requests']} requests, "
+    lines = [f"short scale run: {result['turns']} turns of about {result['turn_tokens']:,} tokens, "
+             f"{result['requests']} requests, "
              f"{result['history_tokens']:,} tokens of history ({result['body_mb']} MB body) in {result['seconds']} s; "
              f"Python {result['python']} on {result['platform']}, {result['cpus']} CPUs, 1-minute load "
              f"{result['load1'][0]} before and {result['load1'][1]} after",
@@ -340,6 +366,9 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--turns", type=int, default=TURNS)
     parser.add_argument("--reminders", choices=("first", "mixed"), default=REMINDERS)
+    parser.add_argument("--turn-tokens", type=int, default=TURN_TOKENS,
+                        help="average tokens per turn (the record's full runs used 26,000); growth per million "
+                        "tokens depends on it, because part of the per-request cost is per message")
     parser.add_argument("--repeat", type=int, default=1, help="runs; with more than one, the spread is printed")
     parser.add_argument("--clients", type=int, default=CLIENTS, help="concurrent clients of the throughput burst")
     parser.add_argument("--burst", choices=("first", "tiny"), default="first",
@@ -355,7 +384,8 @@ def main(argv: list[str]) -> int:
     results = []
     failed = False
     for _ in range(args.repeat):
-        result = measure(args.turns, reminders=args.reminders, clients=args.clients, burst_body=args.burst)
+        result = measure(args.turns, reminders=args.reminders, turn_tokens=args.turn_tokens, clients=args.clients,
+                         burst_body=args.burst)
         results.append(result)
         print(report(result), flush=True)
         problems = [*result["broken"], *over_budget(result)]
