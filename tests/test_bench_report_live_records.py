@@ -461,3 +461,116 @@ def test_a_mean_difference_of_exactly_zero_prints_without_a_sign_of_minus(tmp_pa
     text = report.render(results)
     assert "-0.0" not in text
     assert "+0.0 points" in text
+
+
+# Requests with no record: no response from the upstream, or a record a killed run tore
+
+
+def no_record_run(out, counted: bool = True):
+    """``gap_run`` with the counts the live run writes for its gaps: request 1 of full context, seed 3,
+    got no response after it was sent (166,692 tokens reserved, as in the live review's run), and so
+    did request 2 of attempt 0 of Contexto's seed-1 session (50,000). A killed run tore one record of
+    full context, seed 1 (its fragment held the unit and the reservation, 20,836), and one whose
+    fragment named no unit (7,000, the largest reservation in the file). A torn probe line counts
+    nothing. ``counted=False`` gives the second request fragment no ``counted_tokens``, as a run from
+    before the live runner counted them wrote it."""
+    out = gap_run(out)
+    data = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    for unit in data["units"]:
+        for entry in [unit, *unit["attempts"]]:
+            entry.update({"requests_unanswered": 0, "unanswered_tokens": 0})
+        if (unit["arm"], unit["seed"]) == ("full", 3):
+            for entry in (unit, unit["attempts"][0]):
+                entry.update({"requests_unanswered": 1, "unanswered_tokens": 166_692})
+        if (unit["arm"], unit["seed"]) == ("contexto", 1):
+            unit["attempts"][0].update({"requests_unanswered": 1, "unanswered_tokens": 50_000})
+    torn = {"file": "requests.jsonl", "bytes": 134, "found": "2026-11-14T00:00:00Z", "action": "moved"}
+    data["torn_lines"] = [
+        {**torn, "moved_to": "requests.jsonl.torn-1", "counted_tokens": 20_836, "counted_from": "reservation",
+         "arm": "full", "seed": 1, "repeat": 0, "attempt": 0},
+        {**torn, "moved_to": "requests.jsonl.torn-2",
+         **({"counted_tokens": 7_000, "counted_from": "largest_in_file"} if counted else {})},
+        {**torn, "file": "probes.jsonl", "moved_to": "probes.jsonl.torn-1"},
+        {**torn, "action": "newline_added"},
+    ]
+    (out / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+    return out
+
+
+def test_requests_with_no_record_are_in_the_upper_cost_bound_and_named(tmp_path):
+    out = no_record_run(tmp_path / "run")
+    results = report.build([out])
+    full, contexto, total = results["arms"]["full"], results["arms"]["contexto"], results["all_requests"]
+    assert full["no_record"] == {"unanswered": 1, "torn": 1, "reserved_tokens": 166_692 + 20_836,
+                                 "without_reservation": 0}
+    assert contexto["no_record"] == {"unanswered": 1, "torn": 0, "reserved_tokens": 50_000, "without_reservation": 0}
+    assert total["no_record"] == {"unanswered": 2, "torn": 2, "reserved_tokens": 166_692 + 20_836 + 50_000 + 7_000,
+                                  "without_reservation": 0}
+    for model in prices.models(TABLE):
+        def kept(tokens: int, model: str = model) -> float:
+            return prices.reservation_cost(tokens, model, TABLE)
+
+        assert full["cost_upper"][model] == pytest.approx(full["cost"][model] + kept(187_528))
+        assert contexto["cost_upper"][model] == pytest.approx(contexto["cost"][model] + kept(50_000))
+        # Contexto's gap was in the attempt that did not complete: in its retries, not in its completed cost.
+        assert contexto["retries"]["cost_upper"][model] == pytest.approx(contexto["retries"]["cost"][model]
+                                                                         + kept(50_000))
+        assert contexto["cost_completed_upper_per_unit"][model] == pytest.approx(
+            contexto["cost_completed_per_unit"][model])
+        assert total["cost_upper"][model] == pytest.approx(total["cost"][model] + kept(244_528))
+    text = report.render(results)
+    tokens = text.split("## Tokens and requests")[1].split("## Cost at published prices")[0]
+    assert ("2 requests got no response from the upstream (the connection failed or closed before a status line), "
+            "and a killed run cut short 2 request records, so they have no record in the table above. The live run "
+            "kept their reservations as spent") in tokens
+    cost = text.split("## Cost at published prices")[1]
+    low, high = full["cost_per_unit"][MODEL], full["cost_upper_per_unit"][MODEL]
+    assert f"{report._usd(low)} to {report._usd(high)}" in cost
+    assert ("- Full context: 1 request got no response from the upstream and 1 request record was cut short by a "
+            "killed run, so they have no record. The live run counted their reservations, 187,528 tokens, as spent, "
+            "because the provider may have billed them; the higher figure adds those tokens at the model's highest "
+            "price per token.") in cost
+    assert (f"2 more requests got no response and 2 more request records were cut short; their reservations bring "
+            f"the cost to at most {report._usd(total['cost_upper'][MODEL])}.") in cost
+
+
+def test_a_torn_record_counted_by_no_run_leaves_only_a_lower_bound(tmp_path):
+    results = report.build([no_record_run(tmp_path / "run", counted=False)])
+    total = results["all_requests"]
+    assert total["no_record"]["without_reservation"] == 1 and total["cost_upper"] is None
+    assert results["arms"]["full"]["cost_upper"] is not None  # the arm's own were counted
+    cost = report.render(results).split("## Cost at published prices")[1]
+    assert "nothing bounds the cost of 1 of them" in cost
+
+
+@pytest.mark.parametrize(("where", "value"), [("unit", -1), ("attempt", "1"), ("torn", {"counted_tokens": -5}),
+                                              ("torn", {"file": 3})])
+def test_the_counts_of_requests_with_no_record_are_checked(tmp_path, where, value):
+    out = no_record_run(tmp_path / "run")
+    data = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    if where == "unit":
+        data["units"][0]["unanswered_tokens"] = value
+    elif where == "attempt":
+        data["units"][0]["attempts"][0]["requests_unanswered"] = value
+    else:
+        data["torn_lines"][0].update(value)
+    (out / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(records.RecordError):
+        records.read_run(out)
+
+
+def test_an_unreadable_request_and_requests_with_no_record_share_one_upper_bound(tmp_path):
+    out = no_record_run(tmp_path / "run")
+    path = out / "requests.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows[0] = unreadable(rows[0], 9_000)
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    results = report.build([out])
+    total = results["all_requests"]
+    for model in prices.models(TABLE):
+        assert total["cost_upper"][model] == pytest.approx(
+            total["cost"][model] + prices.reservation_cost(9_000 + 244_528, model, TABLE))
+    cost = report.render(results).split("## Cost at published prices")[1]
+    assert ("1 more request could not have its usage read and 2 more requests got no response and 2 more request "
+            f"records were cut short; their reservations bring the cost to at most "
+            f"{report._usd(total['cost_upper'][MODEL])}.") in cost
