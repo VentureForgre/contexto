@@ -76,11 +76,17 @@ again, even after it is deleted, so every release is permanent.
    if PyPI publishing is on, <https://pypi.org/project/contexto-proxy/>.
 
 5. **Update the documents that name the latest release.** After the release exists, open a `docs:`
-   pull request that updates the places that name the latest release by hand, those of them that
-   are on `main`: the one versioned line in the README's Install section (the
-   `uvx --from <release wheel URL>` line), the version example in `docs/install.md`, and the URL and
-   `sha256` of the draft Homebrew formula there. At the first release after v0.5.24 the file names
-   in those places also change, from `contexto-<v>...` to `contexto_proxy-<v>...`.
+   pull request that updates every command, link and example in the README's Install section and
+   in `docs/install.md` that names the previous release: versions, URLs, file names and any
+   `sha256`, including a draft Homebrew formula and the sentence above it, if the page has one. At
+   the first release after v0.5.24 the file names change from `contexto-<v>...` to
+   `contexto_proxy-<v>...`. Then check with the previous version, for example:
+
+   ```sh
+   git grep -n -F '0.5.24' -- README.md docs/install.md
+   ```
+
+   It must print only lines that state history, such as "up to 0.5.24".
 
 ## The changelog
 
@@ -466,8 +472,9 @@ by hand without `--dry-run`: publishing is the workflow's job.
   it is run from `main`. The `reattach` job checks out `main` with full history.
   It refuses anything except an existing `vX.Y.Z` tag whose commit is on `main`'s first-parent
   chain, the commits `main` itself has pointed at (`.github/scripts/reattach-verify.sh`), failing
-  before it creates anything. A commit that reached `main` inside a merge commit is refused. If the release is missing, it first checks that the notes can be generated, then creates
-  the release and posts that tag's Conventional Commit notes
+  before it creates anything. A commit that reached `main` inside a merge commit is refused. If the
+  release is missing, it first checks that the notes can be generated, then creates the release and
+  posts that tag's Conventional Commit notes
   (`semantic-release changelog --post-to-release-tag`, which needs a branch checkout, not a detached
   tag). Finally it checks out the tag, rebuilds at the tag's version, attests the rebuilt sdist and
   wheel, and uploads them with `SHA256SUMS` (written by the workflow when the tag's build script
