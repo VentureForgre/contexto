@@ -32,7 +32,7 @@ import fcntl
 import hashlib
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -168,12 +168,13 @@ def _draft_fields(draft: dict) -> dict:
     return fields
 
 
-def _chain(fields: dict, prev: str, existing: list[Record], precondition=None) -> Record:
+def _chain(fields: dict, prev: str, existing: list[Record], precondition=None,
+           known: Sequence[Record] = ()) -> Record:
     if precondition is not None:
         precondition(existing)  # runs on the records as they are under the lock
     record = Record.from_dict({**fields, "id": compute_id(fields), "prev": prev})
     check_new_sources(record)
-    Ledger._check_references(record, existing)
+    Ledger._check_references(record, existing, known)
     return record
 
 
@@ -248,12 +249,16 @@ class Ledger:
             lines = self._lines()
         return [message for _, message in _problems(lines)]
 
-    def append(self, draft: dict, precondition=None) -> Record:
+    def append(self, draft: dict, precondition=None, known: Sequence[Record] = ()) -> Record:
         """Validate a draft, chain it, and durably append it as one line.
 
         ``precondition(existing_records)``, if given, runs inside the exclusive lock on the records as
         they stand, so a check such as "the obligation is still open" cannot race another writer.
         It raises to refuse the append.
+
+        ``known`` are records of other ledgers the draft may name (D69: the records a session carries
+        from the earlier sessions of its project): a closure may target one and ``supersedes`` may list
+        one. They are only looked up; nothing of them is written here or anywhere else.
         """
         fields = _draft_fields(draft)
         with self._locked(exclusive=True):
@@ -264,7 +269,7 @@ class Ledger:
                     f"ledger does not verify; run repair or inspect manually: {problems[0][1]}"
                 )
             prev = _sha256(lines[-1].raw) if lines else GENESIS_PREV
-            record = _chain(fields, prev, [line.record for line in lines], precondition)
+            record = _chain(fields, prev, [line.record for line in lines], precondition, known)
 
             created = not self.path.exists()
             fd = open_private(self.path, os.O_WRONLY | os.O_APPEND)
@@ -278,17 +283,17 @@ class Ledger:
         return record
 
     @staticmethod
-    def _check_references(record: Record, existing: list[Record]) -> None:
-        by_id = {r.id: r for r in existing}
-        if record.id in by_id:
+    def _check_references(record: Record, existing: list[Record], known: Sequence[Record] = ()) -> None:
+        if any(r.id == record.id for r in existing):
             raise LedgerError(f"record id already exists: {record.id}")
+        by_id = {r.id: r for r in (*known, *existing)}  # this ledger's own record wins a shared id
         if record.kind == "closure":
             target = by_id.get(record.target)
             if target is None:
                 raise LedgerError(f"closure target does not exist: {record.target}")
             if target.kind != "obligation":
                 raise LedgerError(f"closure target is a {target.kind}, not an obligation: {record.target}")
-            if any(record.target in r.supersedes for r in existing):
+            if any(record.target in r.supersedes for r in (*known, *existing)):
                 raise LedgerError(f"closure target is a superseded obligation: {record.target}")
         missing = [rid for rid in record.supersedes if rid not in by_id]
         if missing:
@@ -361,8 +366,8 @@ class MemoryLedger:
     def verify(self) -> list[str]:
         return []
 
-    def append(self, draft: dict, precondition=None) -> Record:
-        record = _chain(_draft_fields(draft), self.head(), self._records, precondition)
+    def append(self, draft: dict, precondition=None, known: Sequence[Record] = ()) -> Record:
+        record = _chain(_draft_fields(draft), self.head(), self._records, precondition, known)
         self._lines.append(canonical_bytes(record.to_dict()))
         self._records.append(record)
         return record

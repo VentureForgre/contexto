@@ -40,9 +40,9 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 # when either changes without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
-CONTEXTO_TOOL_BYTES = 3_070  # D65
+CONTEXTO_TOOL_BYTES = 3_285  # D65 3,070; D69 adds whose words are pinned and that pins can be carried
 CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE = 426  # main c8f0b08 (unchanged until D51)
-CONTEXTO_INSTRUCTIONS_BYTES = 747  # D65
+CONTEXTO_INSTRUCTIONS_BYTES = 878  # D65 747; D69 adds whose words are pinned
 HEAD = (HEAD_MEASURED
         + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
         + math.ceil((CONTEXTO_INSTRUCTIONS_BYTES - CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN))
@@ -50,7 +50,8 @@ HEAD = (HEAD_MEASURED
 
 def fixed_preamble_tokens() -> int:
     """The pinned text's fixed opening lines (``contexto.store.recall.DEFAULT_LINES``) by the engine's
-    estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it."""
+    estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it,
+    409 with D69's clause on whose words are pinned."""
     from contexto.store.recall import DEFAULT_LINES
     from contexto.tokens import estimate_tokens
 
