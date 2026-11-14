@@ -34,7 +34,6 @@ last tick of each axis (``axis_top``). In the accuracy chart an accuracy ``p`` i
 
 from __future__ import annotations
 
-import contextlib
 import math
 import re
 import textwrap
@@ -539,12 +538,5 @@ def write(results: Mapping[str, Any] | None, charts_dir: Path | str, drawn: Draw
         if not drawn:
             raise ChartError("; ".join(reason for _, reason in left_out) or "the results file has nothing to draw")
     charts_dir = Path(charts_dir)
-    made = [d for d in (charts_dir, *charts_dir.parents) if not d.exists()]
-    try:
-        report._place(charts_dir, {name: svg.encode("utf-8") for name, _, svg in drawn}, restore=True)
-    except BaseException:
-        for directory in made:  # deepest first; one that is not empty now stays
-            with contextlib.suppress(OSError):
-                directory.rmdir()
-        raise
+    report._place(charts_dir, {name: svg.encode("utf-8") for name, _, svg in drawn})
     return [charts_dir / name for name, _, _ in drawn]

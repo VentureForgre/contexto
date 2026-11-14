@@ -19,12 +19,16 @@ What is counted:
   every attempt, because every attempt was billed; its probes, its compactions and its line on the
   request-size chart are those of the attempt the manifest names (the one that completed). Each
   arm says how many of its sessions were retried and what the attempts that did not complete
-  used.
+  used, in tokens and in dollars, and what a session cost without them. Where no session was
+  retried and every usage was read (a stub run, for one), that table is one line.
 - A request whose usage could not be read (``usage_unreadable``) is not a measurement: it is left
   out of the token totals, the largest request and the chart, and counted on its own. The cost is
   then a range: the requests that were read, and that plus each unreadable request's reservation
   (``reserved_tokens``) priced at the model's highest per-token price
   (``prices.reservation_cost``). Without a reservation the cost is only a lower bound, and says so.
+
+- A session whose manifest entry gives no count of its request records (``records.Run.unchecked``)
+  is named under "What was run": a ``requests.jsonl`` cut short at its end cannot be detected.
 
 Words. The manifest calls one arm on one seed, run once, a unit; ``results.md`` calls it a session
 throughout. A manifest ``label`` is printed in the title of ``results.md``, under "What this run
@@ -257,18 +261,24 @@ def _final(group: _Group, key: Key) -> list[dict[str, Any]]:
     return [r for r in group.requests.get(key, []) if records.attempt(r) == at]
 
 
-def _retries(group: _Group, keys: Sequence[Key]) -> dict[str, int]:
+def _earlier(group: _Group, key: Key) -> list[dict[str, Any]]:
+    """The requests of a unit's attempts before the one its manifest entry names."""
+    at = records.attempt(group.units[key])
+    return [r for r in group.requests.get(key, []) if records.attempt(r) != at]
+
+
+def _retries(group: _Group, keys: Sequence[Key], table: Mapping[str, Any]) -> dict[str, Any]:
     """Of ``keys``, the sessions that took more than one attempt, how many attempts did not
-    complete, and their requests and measured tokens (input and output)."""
-    earlier = []
-    attempts = 0
-    for key in keys:
-        at = records.attempt(group.units[key])
-        attempts += at
-        earlier += [r for r in group.requests.get(key, []) if records.attempt(r) != at]
-    tokens = _tokens(earlier)
-    return {"sessions": sum(1 for key in keys if records.attempt(group.units[key]) > 0), "attempts": attempts,
-            "requests": len(earlier), "tokens": tokens["input"] + tokens["output"]}
+    complete, their requests, measured tokens (input and output) and how many of their requests
+    have unreadable usage, and their cost at every model as ``_costs`` gives it."""
+    earlier = {key: _earlier(group, key) for key in keys}
+    rows = [r for of_key in earlier.values() for r in of_key]
+    tokens = _tokens(rows)
+    cost, upper = _costs_of(group, earlier, table)
+    return {"sessions": sum(1 for key in keys if records.attempt(group.units[key]) > 0),
+            "attempts": sum(records.attempt(group.units[key]) for key in keys),
+            "requests": len(rows), "tokens": tokens["input"] + tokens["output"],
+            "unreadable": len(rows) - tokens["requests"], "cost": cost, "cost_upper": upper}
 
 
 def _price_order(model: str, table: Mapping[str, Any]) -> list[str]:
@@ -283,14 +293,20 @@ def _price_order(model: str, table: Mapping[str, Any]) -> list[str]:
 
 def _costs(group: _Group, keys: Iterable[Key],
            table: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, float] | None]:
+    """The cost of every request of ``keys``: see ``_costs_of``."""
+    return _costs_of(group, {key: group.requests.get(key, []) for key in keys}, table)
+
+
+def _costs_of(group: _Group, rows: Mapping[Key, Sequence[Mapping[str, Any]]],
+              table: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, float] | None]:
     """The cost of the requests whose usage was read, at every model of the table, and the upper
     bound that adds each unreadable request's reservation at the model's highest price. The upper
-    bound is None when an unreadable request carries no reservation: then nothing bounds it."""
-    keys = list(keys)
-    lower = {model: math.fsum(price_tables.cost(_read(group.requests.get(key, [])), model, group.ttl[key], table)
-                              for key in keys)
+    bound is None when an unreadable request carries no reservation: then nothing bounds it.
+    ``rows`` holds the requests of each unit to price, at that unit's cache lifetime."""
+    lower = {model: math.fsum(price_tables.cost(_read(of_key), model, group.ttl[key], table)
+                              for key, of_key in rows.items())
              for model in _price_order(group.model, table)}
-    unread = _unreadable(r for key in keys for r in group.requests.get(key, []))
+    unread = _unreadable(r for of_key in rows.values() for r in of_key)
     if unread["without_reservation"]:
         return lower, None
     return lower, {model: usd + price_tables.reservation_cost(unread["reserved_tokens"], model, table)
@@ -322,6 +338,7 @@ def _arm(group: _Group, arm: str, bound: int, table: Mapping[str, Any]) -> dict[
     sizes = [_input(r) for r in _read(requests)]
     compactions = [group.units[key]["compactions"] for key in keys]
     cost, upper = _costs(group, keys, table)
+    completed, completed_upper = _costs_of(group, {key: _final(group, key) for key in keys}, table)
     block = _proportion(rows)
     block = {"units": len(keys), "seeds": [key[1] for key in keys], **block}
     block.update({
@@ -330,7 +347,7 @@ def _arm(group: _Group, arm: str, bound: int, table: Mapping[str, Any]) -> dict[
         "by_class": {cls: _proportion(of_class) for cls, of_class in _by_class(rows).items()},
         "tokens": _tokens(requests),
         "unreadable": _unreadable(requests),
-        "retries": _retries(group, keys),
+        "retries": _retries(group, keys, table),
         "max_input": max(sizes, default=0),
         "over_bound": sum(1 for size in sizes if size > bound),
         "http_errors": sum(1 for r in requests if not 200 <= r["status"] < 300),
@@ -341,6 +358,11 @@ def _arm(group: _Group, arm: str, bound: int, table: Mapping[str, Any]) -> dict[
         "cost_upper": upper,
         "cost_upper_per_unit": None if upper is None else (
             {model: usd / len(keys) for model, usd in upper.items()} if keys else {}),
+        # Per session without the attempts that did not complete: the figure to compare across arms
+        # when the budget stopped one arm's session and not another's.
+        "cost_completed_per_unit": {model: usd / len(keys) for model, usd in completed.items()} if keys else {},
+        "cost_completed_upper_per_unit": None if completed_upper is None else (
+            {model: usd / len(keys) for model, usd in completed_upper.items()} if keys else {}),
         "concluded": _concluded(group, arm, keys),
         "not_complete": [{"seed": key[1], "repeat": key[2], "status": unit["status"], "reason": unit["reason"]}
                          for key, unit in group.units.items() if key[0] == arm and unit["status"] != "complete"],
@@ -627,7 +649,9 @@ def _model_block(group: _Group, bound: int, table: Mapping[str, Any]) -> dict[st
     return {"arms": arms, "pairs": pairs, "noise": noise, "request_series": _series(group),
             "plain_compaction": _plain_compaction(group, bound),
             "all_requests": {"units": len(group.requests), "tokens": _tokens(every),
-                             "unreadable": _unreadable(every), "cost": cost, "cost_upper": upper}}
+                             "unreadable": _unreadable(every), "cost": cost, "cost_upper": upper,
+                             "retried_sessions": sum(1 for unit in group.units.values()
+                                                     if records.attempt(unit) > 0)}}
 
 
 def _manifest(runs: Sequence[records.Run]) -> dict[str, Any]:
@@ -736,6 +760,8 @@ def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any]
                    "table": table},
         "arms": None, "pairs": None, "noise": None, "plain_compaction": None, "all_requests": None,
         "by_model": None, "charts": [], "charts_skipped": [],
+        "unchecked": [{"model": run.manifest["model"], "arm": key[0], "seed": key[1], "repeat": key[2],
+                       "attempts": list(attempts)} for run in runs for key, attempts in run.unchecked],
     }
     if one:
         results.update(blocks[first.model])
@@ -825,6 +851,7 @@ def _what_was_run(results: Mapping[str, Any]) -> list[str]:
         lines.append(f"- These results merge {merged['directories']} output directories.")
         for name, values in merged["differs"].items():
             lines.append(f"- The directories differ in `{name}`: {', '.join(json.dumps(v) for v in values)}.")
+    lines += _unchecked_words(results)
     lines.append("")
     incomplete = [u for u in units if u["status"] != "complete"]
     if incomplete:
@@ -833,6 +860,33 @@ def _what_was_run(results: Mapping[str, Any]) -> list[str]:
                         [[label(u["arm"]), u["seed"], u["repeat"], u["status"].replace("_", " "),
                           u["reason"] or "none given"] for u in incomplete])
     return lines
+
+
+UNCHECKED_SHOWN = 8  # sessions named one by one; more are counted
+
+
+def _unchecked_words(results: Mapping[str, Any]) -> list[str]:
+    """The sentence about sessions whose request records the manifest does not count, if any."""
+    unchecked = results.get("unchecked") or []
+    if not unchecked:
+        return []
+    ran = sum(1 for u in results["manifest"]["units"] if u["status"] != "not_run")
+    if len(unchecked) >= ran:
+        return ["- The manifest gives no count of request records for any session, so a `requests.jsonl` cut short "
+                "at the end of a session cannot be detected."]
+    several = len({u["model"] for u in unchecked}) > 1 or results["manifest"].get("model") is None
+    names = []
+    for u in unchecked[:UNCHECKED_SHOWN]:
+        words = f"{_inline(u['arm'])}, seed {u['seed']}, repeat {u['repeat']}"
+        if u["attempts"] != [0]:
+            words += f", attempt{'s' if len(u['attempts']) > 1 else ''} {_and([str(a) for a in u['attempts']])}"
+        names.append(f"{u['model']}, {words}" if several else words)
+    if len(unchecked) > UNCHECKED_SHOWN:
+        names.append(f"and {len(unchecked) - UNCHECKED_SHOWN} more")
+    one = len(unchecked) == 1
+    return [f"- The manifest gives no count of request records for {_plural(len(unchecked), 'session')} "
+            f"({'; '.join(names)}), so a `requests.jsonl` cut short at the end of {'it' if one else 'one of them'} "
+            "cannot be detected. Every other session's count was checked."]
 
 
 def _accuracy(block: Mapping[str, Any], h: str) -> list[str]:
@@ -1020,6 +1074,7 @@ def _reserved_cell(unread: Mapping[str, int]) -> str:
 
 
 def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str) -> list[str]:
+    arms = block["arms"]
     bases = sorted({basis for a in block["arms"].values() for basis in a["bases"]})
     unread = sum(a["unreadable"]["requests"] for a in block["arms"].values())
     if bases == ["measured"]:
@@ -1042,6 +1097,9 @@ def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str
                       f"{a['tokens']['output']:,}", f"{a['max_input']:,}", a["over_bound"],
                       "not applicable" if a["compactions"] is None else a["compactions"], a["http_errors"]]
                      for arm, a in block["arms"].items()])
+    if not any(a["retries"]["sessions"] or a["unreadable"]["requests"] for a in arms.values()):
+        return [*lines, "No session was run more than once, and the usage of every request was read.", ""]
+    priced = next((m for a in arms.values() for m in a["retries"]["cost"]), None)
     lines += ["Sessions run more than once, and requests whose usage could not be read. A session stopped by the "
               "budget or by an error is run again by the same command; where a session was retried, every attempt "
               "of a session is counted, because every attempt was billed: the table above and the cost below "
@@ -1052,11 +1110,21 @@ def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str
               "benchmark sends, plus its `max_tokens`. That reservation is taken as the most the request can have "
               "used, and the cost below uses it as a bound.", ""]
     lines += _table(["Arm", "Sessions", "Sessions retried", "Attempts that did not complete", "Their requests",
-                     "Their tokens", "Requests whose usage could not be read", "Their reservation (tokens)"],
+                     "Their tokens", f"Their cost at {priced} prices", "Requests whose usage could not be read",
+                     "Their reservation (tokens)"],
                     [[label(arm), a["units"], a["retries"]["sessions"], a["retries"]["attempts"],
-                      f"{a['retries']['requests']:,}", f"{a['retries']['tokens']:,}", a["unreadable"]["requests"],
-                      _reserved_cell(a["unreadable"])] for arm, a in block["arms"].items()])
+                      f"{a['retries']['requests']:,}", f"{a['retries']['tokens']:,}",
+                      _usd_span(a["retries"]["cost"][priced],
+                                None if a["retries"]["cost_upper"] is None else a["retries"]["cost_upper"][priced]),
+                      a["unreadable"]["requests"], _reserved_cell(a["unreadable"])] for arm, a in arms.items()])
     return lines
+
+
+def _usd_span(low: float, high: float | None) -> str:
+    """One figure, a range up to an upper bound, or a lower bound when there is no upper one."""
+    if high is None:
+        return f"{_usd(low)} or more"
+    return _usd(low) if _usd(high) == _usd(low) else f"{_usd(low)} to {_usd(high)}"
 
 
 def _rate(lifetimes: Sequence[str]) -> str:
@@ -1148,9 +1216,15 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, 
                          "between the two.")
     retried = {arm: a["retries"] for arm, a in arms.items() if a["retries"]["sessions"]}
     for arm, r in retried.items():
+        a = arms[arm]
+        first = next(iter(r["cost"]))
+        spent = _usd_span(r["cost"][first], None if r["cost_upper"] is None else r["cost_upper"][first])
+        upper = a["cost_completed_upper_per_unit"]
+        without = _usd_span(a["cost_completed_per_unit"][first], None if upper is None else upper[first])
         lines.append(f"- {label(arm)}: {_plural(r['sessions'], 'session')} {'was' if r['sessions'] == 1 else 'were'} "
                      f"retried; the cost includes the {_plural(r['attempts'], 'attempt')} that did not complete "
-                     f"({_plural(r['requests'], 'request')}), because they were billed.")
+                     f"({_plural(r['requests'], 'request')}, {spent} at the prices of {first}), because they were "
+                     f"billed. Without them the cost per session is {without} at those prices.")
     other = sum(a["other_model_requests"] for a in arms.values())
     if other:
         lines.append(f"- {_plural(other, 'request')} went to a model other than the run's own (a CLI sends some "
@@ -1159,7 +1233,9 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, 
     total = block["all_requests"]
     if total["cost"]:
         first = next(iter(total["cost"]))
-        every = (f"- Every request recorded, repeats, unfinished sessions and retried attempts included: "
+        included = ("repeats, unfinished sessions and retried attempts" if total.get("retried_sessions") else
+                    "repeats and unfinished sessions")
+        every = (f"- Every request recorded, {included} included: "
                  f"{total['tokens']['requests']:,} requests, {total['tokens']['input']:,} input and "
                  f"{total['tokens']['output']:,} output tokens, {_usd(total['cost'][first])} at the prices of "
                  f"{first}.")
@@ -1269,58 +1345,78 @@ def _refuse(code: int, problem: str, path: Path) -> OSError:
     return OSError(code, problem, str(path))
 
 
-def _place(out_dir: Path, files: Mapping[str, bytes], restore: bool = False) -> None:
+def _place(out_dir: Path, files: Mapping[str, bytes]) -> None:
     """Put ``files`` (relative path to content) into ``out_dir``: all of them or none.
 
     Every file is first written into a staging directory inside ``out_dir`` (the same file
     system, so each move is one rename), and what would stop a move is looked for before the first
     one: a file where a directory has to be, a directory where a file has to be, a file the user
-    made read-only. Then the files are moved into place in the order given. A move replaces the
+    made read-only. A copy of each file already there (a link is copied as a link) is kept in the
+    staging directory. Then the files are moved into place in the order given. A move replaces the
     name, so a symbolic link there is replaced and not followed. If a move still fails, the files
-    after it keep their previous content; the caller puts ``results.json`` last, so a directory
-    never holds a new ``results.json`` beside an older report. With ``restore`` the files moved
-    before the failure are put back too: a copy of each file there before (a link is copied as a
-    link) is kept in the staging directory and moved back, and a file that was not there is
-    removed. The staging directory is removed whatever happens.
+    moved before it are put back from those copies, a file that was not there before is removed,
+    and so is every directory this call made (``out_dir`` itself included); the files after it
+    were never touched. The caller puts ``results.json`` last, so even if putting a file back fails
+    too, a directory never holds a new ``results.json`` beside an older report. The staging
+    directory is removed whatever happens, and the first error is the one raised.
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
+    made = [d for d in (out_dir, *out_dir.parents) if not d.exists()]  # the directories this call makes
     for name in files:
-        target = out_dir / name
-        for parent in target.relative_to(out_dir).parents:
-            if (out_dir / parent).exists() and not (out_dir / parent).is_dir():
-                raise _refuse(errno.ENOTDIR, "a file is where this directory has to be", out_dir / parent)
-        if target.is_symlink():
-            continue
-        if target.is_dir():
-            raise _refuse(errno.EISDIR, "a directory is where this file has to be", target)
-        if target.exists() and not os.access(target, os.W_OK):
-            raise _refuse(errno.EACCES, "the file is read-only", target)
-    staging = Path(tempfile.mkdtemp(prefix=".contexto-bench-", dir=out_dir))
+        for relative in Path(name).parents:
+            directory = out_dir / relative
+            if relative != Path(".") and not directory.exists() and directory not in made:
+                made.append(directory)
+    failed = True
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            target = out_dir / name
+            for parent in target.relative_to(out_dir).parents:
+                if (out_dir / parent).exists() and not (out_dir / parent).is_dir():
+                    raise _refuse(errno.ENOTDIR, "a file is where this directory has to be", out_dir / parent)
+            if target.is_symlink():
+                continue
+            if target.is_dir():
+                raise _refuse(errno.EISDIR, "a directory is where this file has to be", target)
+            if target.exists() and not os.access(target, os.W_OK):
+                raise _refuse(errno.EACCES, "the file is read-only", target)
+        staging = Path(tempfile.mkdtemp(prefix=".contexto-bench-", dir=out_dir))
+        try:
+            _move_all(out_dir, staging, files)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        failed = False
+    finally:
+        if failed:
+            for directory in sorted(made, key=lambda d: len(d.parts), reverse=True):  # deepest first
+                with contextlib.suppress(OSError):  # one that is not empty now stays
+                    directory.rmdir()
+
+
+def _move_all(out_dir: Path, staging: Path, files: Mapping[str, bytes]) -> None:
+    """``_place``'s moves, with the copies to put back if one fails."""
     new, old = staging / "new", staging / "old"
     placed: list[str] = []
     try:
         for name, content in files.items():
             (new / name).parent.mkdir(parents=True, exist_ok=True)
             (new / name).write_bytes(content)
-        if restore:
-            for name in files:
-                if (out_dir / name).is_symlink() or (out_dir / name).exists():
-                    (old / name).parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(out_dir / name, old / name, follow_symlinks=False)
+        for name in files:
+            if (out_dir / name).is_symlink() or (out_dir / name).exists():
+                (old / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(out_dir / name, old / name, follow_symlinks=False)
         for name in files:
             (out_dir / name).parent.mkdir(parents=True, exist_ok=True)
             os.replace(new / name, out_dir / name)
             placed.append(name)
     except BaseException:
-        for name in reversed(placed if restore else []):
+        for name in reversed(placed):
             with contextlib.suppress(OSError):  # the first error is the one to report
                 if (old / name).is_symlink() or (old / name).exists():
                     os.replace(old / name, out_dir / name)
                 else:
                     (out_dir / name).unlink()
         raise
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
 
 
 def write(out_dir: Path | str, sources: Iterable[Path | str] | None = None,
@@ -1333,8 +1429,8 @@ def write(out_dir: Path | str, sources: Iterable[Path | str] | None = None,
     All of the files are written or none. The results are built, the report is rendered and every
     chart is drawn in memory first, so a directory that cannot be reported on is an error before
     anything is touched (``RecordError``, ``ReportError``, ``PriceError``). Then ``_place`` moves
-    the finished files into place, ``results.json`` last; what it cannot write is an ``OSError``
-    and the previous files stay. ``results["charts"]`` lists the charts written and
+    the finished files into place, ``results.json`` last; what it cannot write is an ``OSError``,
+    and every file there before is as it was, even when a move failed partway. ``results["charts"]`` lists the charts written and
     ``results["charts_skipped"]`` those the results cannot give, each with the reason.
     """
     out_dir = Path(out_dir)

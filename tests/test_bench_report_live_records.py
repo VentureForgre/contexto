@@ -16,7 +16,7 @@ import json
 import pytest
 
 from contexto.bench import prices, records, report
-from test_bench_records import MODEL, probe_rows, request_rows, small_script, write_run
+from test_bench_records import MODEL, SMALL_BOUND, probe_rows, request_rows, small_script, write_run
 
 TABLE = prices.load()
 
@@ -27,6 +27,27 @@ def live_requests(s, arm: str, attempt: int, repeat: int = 0, count: int | None 
     rows = request_rows(s, arm, repeat)[0]
     rows = rows if count is None else rows[:count]
     return [{**row, "n": n, "attempt": attempt} for n, row in enumerate(rows)]
+
+
+# The keys of a record of contexto.bench.meter (origin/claude/bench-live), in the order it writes them.
+METER_KEYS = ("arm", "seed", "repeat", "model", "n", "turn", "main", "history_tokens", "uncached", "cache_write",
+              "cache_read", "output", "status", "compaction", "basis", "attempt")
+
+
+def meter_requests(s, arm: str, attempt: int, unreachable: tuple[int, ...] = (), repeat: int = 0) -> list[dict]:
+    """The records the meter writes for one attempt when the requests numbered ``unreachable`` got
+    no response. The meter takes ``n`` for a request before forwarding it and writes a record only
+    for one that got a response, so those numbers are missing; Claude Code sends the request again
+    and its record takes the next number."""
+    out, n = [], 0
+    for row in request_rows(s, arm, repeat)[0]:
+        while n in unreachable:
+            n += 1
+        record = {**row, "n": n, "attempt": attempt}
+        assert set(record) == set(METER_KEYS)
+        out.append({key: record[key] for key in METER_KEYS})
+        n += 1
+    return out
 
 
 def unreadable(row: dict, reserved: int | None) -> dict:
@@ -107,14 +128,33 @@ def test_every_attempt_counts_in_tokens_and_cost_and_the_retries_are_reported(tm
     assert block["tokens"]["requests"] == len(every)
     assert block["tokens"]["input"] == sum(r["uncached"] + r["cache_write"] + r["cache_read"] for r in every)
     assert block["cost"][MODEL] == pytest.approx(prices.cost(every, MODEL, "5m", TABLE))
-    assert block["retries"] == {"sessions": 1, "attempts": 1, "requests": 3, "tokens": _tokens(stopped)}
-    assert results["arms"]["full"]["retries"] == {"sessions": 0, "attempts": 0, "requests": 0, "tokens": 0}
+    retries = {k: v for k, v in block["retries"].items() if k not in ("cost", "cost_upper")}
+    assert retries == {"sessions": 1, "attempts": 1, "requests": 3, "tokens": _tokens(stopped), "unreadable": 0}
+    for model in prices.models(TABLE):
+        assert block["retries"]["cost"][model] == pytest.approx(prices.cost(stopped, model, "5m", TABLE))
+        completed = [r for r in every if not (r["seed"] == 1 and r["attempt"] == 0)]
+        assert block["cost_completed_per_unit"][model] == pytest.approx(
+            prices.cost(completed, model, "5m", TABLE) / 3)
+    assert block["retries"]["cost_upper"] == block["retries"]["cost"]
+    full = results["arms"]["full"]
+    assert {k: v for k, v in full["retries"].items() if k not in ("cost", "cost_upper")} == {
+        "sessions": 0, "attempts": 0, "requests": 0, "tokens": 0, "unreadable": 0}
+    assert set(full["retries"]["cost"].values()) == {0}
+    assert full["cost_completed_per_unit"] == full["cost_per_unit"]
     # Accuracy is the completed attempt's probes, once per session.
     assert (block["units"], block["probes"]) == (3, 3 * 72)
     text = report.render(results)
     section = text.split("## Tokens and requests")[1].split("## Cost at published prices")[0]
-    assert f"| Contexto | 3 | 1 | 1 | 3 | {_tokens(stopped):,} | 0 | 0 |" in section
+    usd = report._usd(block["retries"]["cost"][MODEL])
+    assert f"| Contexto | 3 | 1 | 1 | 3 | {_tokens(stopped):,} | {usd} | 0 | 0 |" in section
+    assert f"| Full context | 3 | 0 | 0 | 0 | 0 | {report._usd(0)} | 0 | 0 |" in section
+    assert f"Their cost at {MODEL} prices" in section
     assert "every attempt of a session is counted, because every attempt was billed" in section
+    cost = text.split("## Cost at published prices")[1]
+    assert (f"- Contexto: 1 session was retried; the cost includes the 1 attempt that did not complete (3 requests, "
+            f"{usd} at the prices of {MODEL}), because they were billed. Without them the cost per session is "
+            f"{report._usd(block['cost_completed_per_unit'][MODEL])} at those prices.") in cost
+    assert "retried attempts included" in cost
 
 
 def test_the_request_series_is_drawn_from_the_attempt_that_completed(tmp_path):
@@ -138,14 +178,89 @@ def test_a_request_number_repeated_within_one_attempt_is_still_an_error(tmp_path
         records.read_run(out)
 
 
-def test_a_gap_within_one_attempt_is_an_error(tmp_path):
+def test_a_record_lost_from_an_earlier_attempt_shows_in_that_attempts_count(tmp_path):
     out = retried_run(tmp_path / "run")
     path = out / "requests.jsonl"
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     rows = [r for r in rows if (r["arm"], r["seed"], r["attempt"], r["n"]) != ("contexto", 1, 0, 1)]
     path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-    with pytest.raises(records.RecordError, match="contexto, seed 1, repeat 0, attempt 0 has no request 1"):
+    with pytest.raises(records.RecordError, match="contexto, seed 1, repeat 0, attempt 0 has 2 request records and "
+                                                  "manifest.json says 3"):
         records.read_run(out)
+
+
+def gap_run(out, counts: bool = True, lose: int | None = None):
+    """Seeds 1 to 3, arms contexto and full, in the meter's shape. The full-context session of seed
+    3 had request 1 go unanswered (the upstream reset the connection), so its numbers are 0, 2, 3,
+    ...; attempt 0 of Contexto's seed-1 session (stopped by the budget) lost request 2 the same way.
+    ``counts=False`` leaves out every count the runner writes; ``lose`` drops the record numbered so
+    from the full-context session after its count was taken."""
+    units, probes, requests = [], [], []
+    for seed in (1, 2, 3):
+        s = small_script(seed)
+        for arm in ("contexto", "full"):
+            if (arm, seed) == ("contexto", 1):
+                first = meter_requests(s, arm, 0, unreachable=(2,))[:3]
+                second = meter_requests(s, arm, 1)
+                entry = live_unit(arm, seed, [("stopped", "budget", first), ("complete", None, second)])
+                rows = first + second
+            else:
+                rows = meter_requests(s, arm, 0, unreachable=(1,) if (arm, seed) == ("full", 3) else ())
+                entry = live_unit(arm, seed, [("complete", None, rows)])
+                if lose is not None and (arm, seed) == ("full", 3):
+                    rows = [r for r in rows if r["n"] != lose]
+            if not counts:
+                del entry["requests"]
+                for a in entry["attempts"]:
+                    del a["requests"]
+            units.append(entry)
+            requests += rows
+            probes += probe_rows(s, arm, 0, set())
+    return write_run(out, units, probes, requests, arms=["contexto", "full"])
+
+
+def test_a_request_that_got_no_response_leaves_a_gap_in_n_and_the_run_is_still_reported(tmp_path):
+    out = gap_run(tmp_path / "run")
+    run = records.read_run(out)
+    numbers = [r["n"] for r in run.requests if (r["arm"], r["seed"]) == ("full", 3)]
+    assert numbers[:4] == [0, 2, 3, 4] and len(numbers) == len(small_script(3).turns)
+    assert [r["n"] for r in run.requests if (r["arm"], r["seed"], r["attempt"]) == ("contexto", 1, 0)] == [0, 1, 3]
+    assert run.unchecked == ()  # every attempt carries its count
+    results = report.write(out)
+    assert results["unchecked"] == []
+    every = [r for r in run.requests if r["arm"] == "full"]
+    assert results["arms"]["full"]["tokens"]["requests"] == len(every)
+    assert "cannot be detected" not in (out / "results.md").read_text(encoding="utf-8")
+
+
+def test_with_a_count_a_record_lost_beside_a_gap_is_still_an_error(tmp_path):
+    turns = len(small_script(3).turns)
+    out = gap_run(tmp_path / "run", lose=turns)  # the last record of the session
+    with pytest.raises(records.RecordError, match=f"the unit full, seed 3, repeat 0 has {turns - 1} request records "
+                                                  f"and manifest.json says {turns}: the file was cut short"):
+        records.read_run(out)
+
+
+def test_without_a_count_the_report_says_a_cut_file_cannot_be_detected(tmp_path):
+    out = gap_run(tmp_path / "run", counts=False, lose=len(small_script(3).turns))
+    run = records.read_run(out)  # nothing shows the lost record
+    assert len(run.unchecked) == 6
+    assert run.unchecked[0] == (("contexto", 1, 0), (0, 1))
+    results = report.write(out)
+    assert results["unchecked"][0] == {"model": MODEL, "arm": "contexto", "seed": 1, "repeat": 0, "attempts": [0, 1]}
+    text = (out / "results.md").read_text(encoding="utf-8")
+    assert ("- The manifest gives no count of request records for any session, so a `requests.jsonl` cut short at "
+            "the end of a session cannot be detected.") in text
+    # One session without a count is named.
+    out = gap_run(tmp_path / "one")
+    data = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    entry = next(u for u in data["units"] if (u["arm"], u["seed"]) == ("full", 3))
+    del entry["requests"], entry["attempts"][0]["requests"]
+    (out / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+    text = report.render(report.build([out]))
+    assert ("- The manifest gives no count of request records for 1 session (full context, seed 3, repeat 0), so a "
+            "`requests.jsonl` cut short at the end of it cannot be detected. Every other session's count was "
+            "checked.") in text
 
 
 def test_the_units_counts_are_checked_against_the_attempt_they_belong_to(tmp_path):
@@ -182,6 +297,8 @@ def test_a_unit_left_running_says_the_run_was_interrupted_and_how_to_resume(tmp_
                                               if (p["arm"], p["seed"]) != ("full", 3)), encoding="utf-8")
     with pytest.raises(records.RecordError) as caught:
         records.read_run(out)
+    assert "the session full, seed 3, repeat 0, attempt 0 is 'running'" in str(caught.value)
+    assert caught.value.field == f"units[{data['units'].index(entry)}].status"
     assert "was interrupted while this session ran" in str(caught.value)
     assert "the same command with the same --out resumes it" in str(caught.value)
 
@@ -241,11 +358,49 @@ def test_a_request_with_unreadable_usage_is_counted_apart_and_bounds_the_cost(tm
     tokens = text.split("## Tokens and requests")[1].split("## Cost at published prices")[0]
     assert "The counts are measured: the upstream reported them." not in tokens
     assert "1 request whose usage could not be read" in tokens
-    assert "| Contexto | 3 | 0 | 0 | 0 | 0 | 1 | 160,000 |" in tokens
+    assert f"| Contexto | 3 | 0 | 0 | 0 | 0 | {report._usd(0)} | 1 | 160,000 |" in tokens
     cost = text.split("## Cost at published prices")[1]
     low, high = block["cost_per_unit"][MODEL], block["cost_upper_per_unit"][MODEL]
     assert f"{report._usd(low)} to {report._usd(high)}" in cost
     assert "upper bound" in cost
+
+
+def test_an_unreadable_records_partial_read_counts_toward_its_reservation_and_nothing_else(tmp_path):
+    # The partial read is larger than any read request of the arm, over the bound and larger than the
+    # reservation, and its basis differs from the others'. Each figure must leave it out, except the
+    # reservation, which is the larger of the two (as the live run's guard counts it).
+    units, probes, requests = [], [], []
+    for seed in (1, 2, 3):
+        s = small_script(seed)
+        rows = live_requests(s, "contexto", 0)
+        if seed == 2:
+            rows[3] = {**rows[3], "uncached": SMALL_BOUND + 1_000, "cache_write": 0, "cache_read": 0, "output": 100,
+                       "basis": "estimated", "usage_unreadable": True, "reserved_tokens": 1_000}
+        units.append(live_unit("contexto", seed, [("complete", None, rows)]))
+        requests += rows
+        probes += probe_rows(s, "contexto", 0, set())
+    out = write_run(tmp_path / "run", units, probes, requests, arms=["contexto"])
+    block = report.build([out])["arms"]["contexto"]
+    read = [r for r in requests if not r.get("usage_unreadable")]
+    sizes = [r["uncached"] + r["cache_write"] + r["cache_read"] for r in read]
+    assert block["max_input"] == max(sizes) < SMALL_BOUND
+    assert block["over_bound"] == 0
+    assert block["unreadable"] == {"requests": 1, "reserved_tokens": SMALL_BOUND + 1_100, "without_reservation": 0}
+    assert block["bases"] == ["measured"]
+
+
+def test_the_retry_and_unreadable_table_is_printed_only_when_it_has_something_to_show(tmp_path):
+    from test_bench_records import make_run
+
+    plain = report.render(report.build([make_run(tmp_path / "stub", repeats=1, seeds=(11,))]))
+    tokens = plain.split("## Tokens and requests")[1].split("## Cost at published prices")[0]
+    assert "Sessions run more than once" not in tokens and "Sessions retried" not in tokens
+    assert "reserved tokens" not in plain and "retried attempts" not in plain
+    assert ("No session was run more than once, and the usage of every request was read." in tokens)
+    for out in (retried_run(tmp_path / "retried"), unreadable_run(tmp_path / "unreadable")):
+        tokens = report.render(report.build([out])).split("## Tokens and requests")[1]
+        assert "Sessions run more than once, and requests whose usage could not be read." in tokens
+        assert "No session was run more than once" not in tokens
 
 
 def test_without_the_reservation_the_cost_is_called_a_lower_bound(tmp_path):

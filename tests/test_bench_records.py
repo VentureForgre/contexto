@@ -573,6 +573,34 @@ def test_a_unit_may_carry_its_record_counts_and_its_cache_lifetime(tmp_path):
             records.read_manifest(path)
 
 
+@pytest.mark.parametrize("value", ["x", "2h", "", 5])
+def test_the_manifests_cache_lifetime_is_5m_1h_or_null(tmp_path, value):
+    path = tmp_path / "manifest.json"
+    for good in ("5m", "1h", None):
+        path.write_text(json.dumps(manifest([unit("contexto", 1)], cache_ttl=good)), encoding="utf-8")
+        assert records.read_manifest(path)["cache_ttl"] == good
+    path.write_text(json.dumps(manifest([unit("contexto", 1)], cache_ttl=value)), encoding="utf-8")
+    with pytest.raises(records.RecordError, match=r"manifest.json: field 'cache_ttl': expected one of '5m', '1h'"):
+        records.read_manifest(path)
+
+
+def test_an_integer_too_large_for_any_count_is_an_error_even_in_a_field_no_reader_checks(tmp_path):
+    big = 10 ** 18 + 1
+    with pytest.raises(ValueError, match=r"field 'extra': a whole number larger than 10\^18"):
+        records.strict(json.dumps({"extra": big}))
+    assert records.strict(json.dumps({"extra": 10 ** 18, "negative": -(10 ** 18)})) == {
+        "extra": 10 ** 18, "negative": -(10 ** 18)}
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest([unit("contexto", 1)], extra={"deep": [1, big]})), encoding="utf-8")
+    with pytest.raises(records.RecordError, match=r"field 'extra.deep\[1\]': a whole number larger than 10\^18"):
+        records.read_manifest(path)
+    results = tmp_path / "results.json"
+    results.write_text(json.dumps({"format": 1, "kind": "replay", "bound": 100, "request_series": {},
+                                   "manifest": {"bound": -big}}), encoding="utf-8")
+    with pytest.raises(records.RecordError, match=r"field 'manifest.bound': a whole number larger than 10\^18"):
+        records.read_results(results)
+
+
 # read_run: records that were cut, dropped or written twice
 
 
@@ -592,13 +620,38 @@ def test_read_run_refuses_a_request_recorded_twice(tmp_path):
     assert exc.value.line == len(small_script(1).turns) + 1
 
 
-def test_read_run_refuses_a_gap_in_the_requests_of_a_unit(tmp_path):
+def test_a_gap_in_n_is_not_an_error_and_a_lost_record_shows_in_the_count(tmp_path):
+    # The live meter takes n for a request before it is forwarded and writes no record for one that
+    # got no response, so n can skip a number with nothing lost. The count is what shows a loss.
+    turns = len(small_script(1).turns)
     out = _one_unit(tmp_path, lambda probes, requests: requests.pop(5))
-    with pytest.raises(records.RecordError, match="requests.jsonl: the unit contexto, seed 1, repeat 0, attempt 0 "
-                                                  "has no request 5"):
+    run = records.read_run(out)
+    assert len(run.requests) == turns - 1
+    assert run.unchecked == ((("contexto", 1, 0), (0,)),)  # no count: a cut file cannot be detected here
+    out = _one_unit(tmp_path, lambda probes, requests: requests.pop(5), requests=turns - 1)
+    assert records.read_run(out).unchecked == ()
+    out = _one_unit(tmp_path, lambda probes, requests: requests.pop(5), requests=turns)
+    with pytest.raises(records.RecordError, match=f"requests.jsonl: the unit contexto, seed 1, repeat 0 has "
+                                                  f"{turns - 1} request records and manifest.json says {turns}"):
         records.read_run(out)
     out = _one_unit(tmp_path, lambda probes, requests: requests.reverse())  # the order in the file is free
-    assert len(records.read_run(out).requests) == len(small_script(1).turns)
+    assert len(records.read_run(out).requests) == turns
+
+
+def test_the_sessions_whose_records_have_no_count_are_named_attempt_by_attempt(tmp_path):
+    s = small_script(1)
+    rows = request_rows(s, "contexto", 0)[0]
+    earlier = [{**r, "attempt": 0} for r in rows[:2]]
+    final = [{**r, "attempt": 1} for r in rows]
+    counted = unit("contexto", 1, attempt=1, requests=len(final),
+                   attempts=[{"attempt": 0, "status": "stopped"}, {"attempt": 1, "status": "complete"}])
+    stopped = unit("full", 1, status="stopped", reason="budget")
+    not_run = unit("plain", 1, status="not_run")
+    out = write_run(tmp_path / "run", [counted, stopped, not_run], probe_rows(s, "contexto", 0, set()),
+                    earlier + final)
+    # Attempt 1 is counted by the unit's requests; attempt 0 by nothing. A stopped unit with no count is
+    # named too, since a cut could have removed all its records; a unit not run has none to lose.
+    assert records.read_run(out).unchecked == ((("contexto", 1, 0), (0,)), (("full", 1, 0), (0,)))
 
 
 @pytest.mark.parametrize("keep", [0, 1])

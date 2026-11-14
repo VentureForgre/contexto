@@ -870,16 +870,10 @@ def test_a_session_may_record_its_own_cache_lifetime(tmp_path):
             "full context.") in report.render(results)
 
 
-def test_a_cache_lifetime_the_table_has_no_price_for_is_an_error_only_when_something_is_priced(tmp_path):
+def test_a_cache_lifetime_other_than_5m_or_1h_is_refused_naming_the_manifest_and_the_field(tmp_path):
     out = make_run(tmp_path / "run", repeats=1, seeds=(11,), cache_ttl="2h")
-    with pytest.raises(prices.PriceError, match="no cache-write price for a cache lifetime of '2h'"):
+    with pytest.raises(records.RecordError, match=r"manifest.json: field 'cache_ttl': expected one of '5m', '1h'"):
         report.build([out])
-    # Nothing ran, so nothing is priced: the report is still made and names the lifetime as recorded.
-    nothing = make_run(tmp_path / "nothing", repeats=1, seeds=(11,), cache_ttl="2h",
-                       not_run=[(arm, 11) for arm in ARMS])
-    results = report.build([nothing])
-    assert results["prices"]["lifetimes"][0]["by_arm"] == {"contexto": ["2h"], "full": ["2h"], "plain": ["2h"]}
-    assert "Cache writes are priced at the 2h rate for every arm" in report.render(results)
 
 
 def test_the_limit_about_one_version_is_not_printed_when_the_merged_directories_differ_in_version(tmp_path):
@@ -1104,23 +1098,60 @@ def test_a_failure_while_the_files_are_put_in_place_leaves_results_json_as_it_wa
     real = os.replace
 
     def replace(source, target):
-        moved.append(Path(target).relative_to(out).as_posix())
-        if Path(target).name == "results.md":
-            raise OSError(28, "No space left on device", str(target))
+        if Path(source).relative_to(out).parts[1] == "new":  # a move forward, not one putting a file back
+            moved.append(Path(target).relative_to(out).as_posix())
+            if Path(target).name == "results.md":
+                raise OSError(28, "No space left on device", str(target))
         return real(source, target)
 
     monkeypatch.setattr(os, "replace", replace)
     with pytest.raises(OSError, match="No space left"):
         report.write(out)
     assert moved[-1] == "results.md" and "results.json" not in moved
-    assert (out / "results.json").read_bytes() == before["results.json"]
-    assert (out / "results.md").read_bytes() == before["results.md"]
+    assert unchanged(out, before)
     assert not [p for p in out.iterdir() if p.name.startswith(".")]  # the staging directory is gone
     monkeypatch.setattr(os, "replace", real)
     moved.clear()
     monkeypatch.setattr(os, "replace", lambda source, target: moved.append(Path(target).name) or real(source, target))
     report.write(out)
     assert moved[-1] == "results.json" and len(moved) == 4
+
+
+def _fail_forward_move(monkeypatch, out: Path, which: int) -> list[str]:
+    """Make the ``which``-th move of a new file into ``out`` fail (1-based). Moves back from the
+    staging directory's copy of the old files (``restore``) are not counted and are let through."""
+    real, forward = os.replace, []
+
+    def replace(source, target):
+        if Path(source).relative_to(out).parts[1] == "new":  # <out>/<staging>/new/<name>
+            forward.append(Path(target).relative_to(out).as_posix())
+            if len(forward) == which:
+                raise OSError(5, "Input/output error", str(target))
+        return real(source, target)
+
+    monkeypatch.setattr(os, "replace", replace)
+    return forward
+
+
+@pytest.mark.parametrize("which", [1, 2, 3, 4])
+def test_a_move_that_fails_partway_leaves_every_file_of_the_earlier_report(tmp_path, monkeypatch, which):
+    out, before = reported(tmp_path)
+    forward = _fail_forward_move(monkeypatch, out, which)
+    with pytest.raises(OSError, match="Input/output error"):
+        report.write(out)
+    assert forward == ["charts/accuracy.svg", "charts/request-size.svg", "results.md", "results.json"][:which]
+    assert unchanged(out, before)  # the charts and results.md moved before the failure were put back
+    assert not [p for p in out.iterdir() if p.name.startswith(".")]
+
+
+@pytest.mark.parametrize("which", [1, 2, 3, 4])
+def test_a_move_that_fails_partway_leaves_no_new_file_where_there_was_no_report(tmp_path, monkeypatch, which):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11,))
+    records_before = sorted(p.name for p in out.iterdir())
+    _fail_forward_move(monkeypatch, out, which)
+    with pytest.raises(OSError, match="Input/output error"):
+        report.write(out)
+    assert sorted(p.name for p in out.iterdir()) == records_before  # no chart, no charts/, no results.md
 
 
 @pytest.mark.skipif(os.name == "nt", reason="needs a symbolic link")

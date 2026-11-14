@@ -11,14 +11,23 @@ Three rules:
   JSONL file) and the field, so a truncated or hand-edited file cannot shrink a result unnoticed.
 - A field this module does not know is accepted and kept, so a later version can add fields.
 - The JSON is read strictly (``loads``): a key repeated in one object, ``NaN``, ``Infinity``, a
-  number too large for a float and a string that is not valid Unicode are errors wherever they
-  are, because each of them is read differently, or not at all, by another JSON reader.
+  number too large for a float, a whole number beyond 10^18 either side of 0 (``INTEGER_LIMIT``)
+  and a string that is not valid Unicode are errors wherever they are, because each of them is
+  read differently, or not at all, by another JSON reader (JavaScript's rounds a whole number
+  beyond 2^53, and one of 309 digits or more becomes ``Infinity``).
 
 Fields the schema document does not list and this module reads when they are present: the
 manifest's ``label`` (a short line the report prints at the top of ``results.md`` and in every
 chart's title, for example to say that a stub answered), and on a unit ``probes`` and ``requests``
 (how many records the unit wrote, so that a file cut at the end of a unit is noticed) and
 ``cache_ttl`` (the unit's own cache lifetime where it differs from the manifest's).
+
+A request number ``n`` is unique within one attempt of a unit, but numbers may be missing: the live
+meter takes a number for a request before forwarding it and writes a record only for a request that
+got a response, so a request the upstream never answered leaves a gap with nothing lost. A record
+that was lost shows in the unit's counts instead. Where the manifest gives no count for an attempt,
+nothing in the directory can show that its records were cut short at its end; ``Run.unchecked``
+names those attempts and the report says so.
 
 What the live run (``contexto.bench.runner``) adds and this module reads:
 
@@ -31,13 +40,21 @@ What the live run (``contexto.bench.runner``) adds and this module reads:
   ``reserved_tokens`` is what its spend guard reserved for the request (the request's bytes at
   1.5 bytes per token plus its ``max_tokens``), an upper bound on what it can have cost.
 - A unit's ``status`` is ``running`` only while a run is in progress or after it was killed; such
-  a directory is refused with what to do (the same command resumes the run and records the unit).
+  a directory is refused, naming the session, with what to do (the same command resumes the run
+  and records the unit).
+
+The manifest ``label`` must be one line of printable characters. "Printable" is decided by the
+Unicode category, and a code point the running Python's Unicode tables do not have yet is allowed,
+so the same label is read alike on Python 3.12 to 3.15. The one difference left: a code point that
+a later Unicode version assigns as a control, format or separator character is accepted by a
+Python whose tables predate it.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +68,10 @@ RUNNING = "running"  # the live run's status for a unit in progress
 BASES = ("measured", "estimated", "modelled")
 CACHE_TTLS = ("5m", "1h")
 LARGEST = 10 ** 12  # no count of tokens, probes or requests is larger; a longer number is a damaged file
+INTEGER_LIMIT = 10 ** 18  # no whole number anywhere in these files is larger, in either direction
+# Unicode categories a label may not hold: controls, format characters, surrogates, private use,
+# and separators other than the space. Unassigned code points (Cn) are allowed: see the module text.
+_NOT_PRINTABLE = frozenset(("Cc", "Cf", "Cs", "Co", "Zl", "Zp", "Zs"))
 LABEL_MAX = 200
 
 
@@ -137,7 +158,7 @@ def _label(value: Any, field: str) -> None:
         raise _Bad(field, f"expected a string or null, got {_show(value)}")
     if len(value) > LABEL_MAX:
         raise _Bad(field, f"expected {LABEL_MAX} characters or fewer, got {len(value)}")
-    if not value.isprintable():
+    if any(ch != " " and unicodedata.category(ch) in _NOT_PRINTABLE for ch in value):
         raise _Bad(field, f"expected one line of printable characters, got {_show(value)}")
 
 
@@ -206,11 +227,8 @@ def _format(value: Any, field: str) -> None:
 
 
 def _status(value: Any, field: str) -> None:
-    if value == RUNNING:
-        raise _Bad(field, "the session is 'running': the run that wrote this directory was interrupted while this "
-                          "session ran, or it is still running. When no run is using the directory, the same command "
-                          "with the same --out resumes it and records the session; then report again")
-    _choice(*STATUSES)(value, field)
+    # ``running`` is let through here and refused by ``_check_manifest``, which can name the session.
+    _choice(*STATUSES, RUNNING)(value, field)
 
 
 _ATTEMPT = _object({"attempt": _integer(0)}, optional={"status": _string(nullable=True),
@@ -236,10 +254,21 @@ _MANIFEST: dict[str, Check] = {
     "repeats": _integer(1), "arms": _list_of(_string()), "upstream": _choice(*UPSTREAMS),
     "plain_compaction": _object({"variable": _string(), "value": _integer(0), "intended_trigger": _integer(1),
                                  "forced": _boolean, "note": _string()}, nullable=True),
-    "cache_ttl": _string(nullable=True), "started": _string(), "finished": _string(nullable=True),
+    "cache_ttl": _or_null(_choice(*CACHE_TTLS)), "started": _string(), "finished": _string(nullable=True),
     "units": _list_of(_object(_UNIT, optional=_UNIT_OPTIONAL)),
 }
 _MANIFEST_OPTIONAL: dict[str, Check] = {"label": _label}
+
+
+def _check_manifest(data: dict[str, Any]) -> None:
+    _fields(data, _MANIFEST, optional=_MANIFEST_OPTIONAL)
+    for i, unit in enumerate(data["units"]):
+        if unit["status"] == RUNNING:
+            raise _Bad(f"units[{i}].status",
+                       f"the session {_unit_words(unit_key(unit), attempt(unit))} is 'running': the run that wrote "
+                       "this directory was interrupted while this session ran, or it is still running. When no run "
+                       "is using the directory, the same command with the same --out resumes it and records the "
+                       "session; then report again")
 
 _PROBE: dict[str, Check] = {
     "arm": _string(), "seed": _integer(0), "repeat": _integer(0), "model": _string(), "id": _string(),
@@ -346,12 +375,17 @@ def _no_repeats(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _sound(value: Any) -> None:
     """Refuse what the strict reading does not allow, anywhere inside ``value``: a number that is
-    not finite and a string that cannot be written as UTF-8. Raises ``_Bad`` with the path of the
-    value as its field. It walks with a list of its own, not by recursion, so depth cannot stop it."""
+    not finite, a whole number beyond ``INTEGER_LIMIT`` and a string that cannot be written as
+    UTF-8. Raises ``_Bad`` with the path of the value as its field. It walks with a list of its
+    own, not by recursion, so depth cannot stop it."""
     todo: list[tuple[str, Any]] = [("", value)]
     while todo:
         field, item = todo.pop()
-        if isinstance(item, float):
+        if _is_int(item):
+            if abs(item) > INTEGER_LIMIT:
+                raise _Bad(field, f"a whole number larger than 10^18 in size, {_show(item)}; no field holds one, "
+                                  "and other JSON readers round it or read it as Infinity")
+        elif isinstance(item, float):
             if not math.isfinite(item):
                 raise _Bad(field, "not a finite number (NaN, Infinity or a number too large for a float); JSON "
                                   "has no such value")
@@ -382,7 +416,8 @@ def loads(text: str) -> Any:
 def strict(text: str) -> Any:
     """Read JSON text strictly and whole, for a caller with its own error type. Everything this
     module refuses is a ``ValueError`` that says what and where: a key that appears twice, nesting
-    too deep to read, a number that is not finite, a string that is not valid Unicode, and text
+    too deep to read, a number that is not finite, a whole number beyond 10^18 either side of 0, a
+    string that is not valid Unicode, and text
     that is not JSON at all (``json.JSONDecodeError``, itself a ``ValueError``)."""
     try:
         value = loads(text)
@@ -438,7 +473,7 @@ def _jsonl(path: Path, check: Callable[[dict[str, Any]], None]) -> list[dict[str
 def read_manifest(path: Path | str) -> dict[str, Any]:
     """Read and check ``manifest.json``, of a live run or of a replay."""
     path = Path(path)
-    return _parse(path, _text(path), lambda data: _fields(data, _MANIFEST, optional=_MANIFEST_OPTIONAL))
+    return _parse(path, _text(path), _check_manifest)
 
 
 def read_results(path: Path | str) -> dict[str, Any]:
@@ -477,12 +512,17 @@ def read_reach(path: Path | str) -> list[dict[str, Any]]:
 
 @dataclass(frozen=True)
 class Run:
-    """One live output directory, read and checked: its manifest and its two record files."""
+    """One live output directory, read and checked: its manifest and its two record files.
+
+    ``unchecked`` names, in manifest order, each unit that has attempts whose request records the
+    manifest does not count, with those attempts: a ``requests.jsonl`` cut short at the end of one
+    of them cannot be detected. A unit that was not run is never named."""
 
     path: Path
     manifest: dict[str, Any]
     probes: list[dict[str, Any]]
     requests: list[dict[str, Any]]
+    unchecked: tuple[tuple[tuple[str, int, int], tuple[int, ...]], ...] = ()
 
 
 def unit_key(record: dict[str, Any]) -> tuple[str, int, int]:
@@ -515,12 +555,14 @@ def read_run(out_dir: Path | str) -> Run:
     replay directory is refused: its results are written by ``contexto bench --replay``, not
     recomputed from records.
 
-    Against a ``requests.jsonl`` that lost records: no request number ``n`` is used twice in one
-    attempt of a unit, the numbers of each attempt run from 0 with no gap (in any order in the
-    file), no record belongs to an attempt later than the one the unit names as its last, and a
-    ``complete`` unit has one request record or more in its last attempt. A file cut at the end of
-    a unit leaves no gap, so a unit that carries its counts (``probes``, ``requests``, and
-    ``requests`` in each entry of ``attempts``) is also checked against them.
+    Against a ``requests.jsonl`` that lost records or holds some twice: no request number ``n`` is
+    used twice in one attempt of a unit (the order in the file is free, because the meter writes a
+    record when its response ends and requests can end out of order), no record belongs to an
+    attempt later than the one the unit names as its last, and a ``complete`` unit has one request
+    record or more in its last attempt. A number may be missing, because a request that got no
+    response has none (see the module text). A unit that carries its counts (``probes``,
+    ``requests``, and ``requests`` in each entry of ``attempts``) is checked against them, which is
+    what shows a lost record or a file cut short; the attempts without a count are in ``unchecked``.
     """
     out_dir = Path(out_dir)
     manifest_path = out_dir / "manifest.json"
@@ -571,14 +613,9 @@ def read_run(out_dir: Path | str) -> Run:
     answered: dict[tuple[str, int, int], int] = {key: 0 for key in status}
     for key, _ in seen:
         answered[key] += 1
+    unchecked: list[tuple[tuple[str, int, int], tuple[int, ...]]] = []
     for unit in manifest["units"]:
         key = unit_key(unit)
-        for at, found in sorted(numbers[key].items()):
-            lost = next((n for n in range(len(found)) if n not in found), None)
-            if lost is not None:
-                raise RecordError(requests_path, f"the unit {_unit_words(key, at)} has no request {lost}: each "
-                                                 "attempt's requests are numbered from 0 with no gap, so a record "
-                                                 "was lost")
         found = numbers[key].get(last[key], set())
         if unit["status"] == "complete" and not found:
             raise RecordError(requests_path, f"the unit {_unit_words(key)} is complete in manifest.json but has "
@@ -594,4 +631,11 @@ def read_run(out_dir: Path | str) -> Run:
                 raise RecordError(requests_path, f"the unit {_unit_words(key, entry['attempt'])} has {have} request "
                                                  f"records and manifest.json says {entry['requests']}: the file was "
                                                  "cut short or added to")
-    return Run(out_dir, manifest, probes, requests)
+        if unit["status"] != "not_run":
+            counted = {entry["attempt"] for entry in unit.get("attempts") or [] if entry.get("requests") is not None}
+            if unit.get("requests") is not None:
+                counted.add(last[key])
+            missing = tuple(at for at in range(last[key] + 1) if at not in counted)
+            if missing:
+                unchecked.append((key, missing))
+    return Run(out_dir, manifest, probes, requests, tuple(unchecked))
