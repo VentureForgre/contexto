@@ -555,7 +555,8 @@ The quantities with a budget, as `short.py` defines them:
   The clock starts after the TCP connection is open. That change came after the first CI run and
   the two loops of the flake check, whose times include the connect, as `e2e_s` does in the
   2026-10-17 files. Since 2026-11-13 the driver also keeps its connection open between requests
-  (see "Connections").
+  (see "Connections"). On Linux that adds a wait of about 41 ms to every request, which is the
+  proxy's, not the harness's (see "The 40 ms wait on Linux"); on macOS there is none.
 - **Growth with history** is the slope of added time against the history the CLI sent, over the
   434 tool-loop requests, as the median of the slopes between every pair of them (Theil-Sen).
 - **Startup** is from starting the proxy process to its `ready` line: the interpreter, the imports,
@@ -606,10 +607,16 @@ to catch more: a required check that fails on a slow runner would be worse.
 
 - **A linear slowdown** is caught only when it is large. Here, the handler spinning until its CPU
   time for a request was 2, 4, 8, 12 and 16 times what it was passed every budget (16 times:
-  median 170 ms against 200, growth 265 against 300). From the CI values the threshold is about
-  8.5 to 12 times on the median and 9 to 13 times on growth on an Ubuntu runner, about 15 times on
-  this machine, and near 4 times only on the slow macOS runner. So the test catches a slowdown
-  from about 10 times on a typical CI runner.
+  median 170 ms against 200, growth 265 against 300). From the CI values of 2026-11-12 the
+  threshold was about 8.5 to 12 times on the median and 9 to 13 times on growth on an Ubuntu
+  runner, about 15 times on this machine, and near 4 times only on the slow macOS runner. Since
+  the driver keeps its connections open, every request on an Ubuntu runner also carries the
+  proxy's 41 ms wait (see "The 40 ms wait on Linux"). In CI run 43552340153 (2026-11-14) the
+  median there was 61.8 to 65.7 ms, 3.0 to 3.2 times under the budget, of which about 20 to 24
+  ms is the rest of the proxy's work. [Inference] A slowdown of that part is now caught on the
+  median from about 6.5 to 8 times, since the wait does not grow with it. Growth, a slope, does
+  not include the wait: 28.2 to 37.4 ms per million tokens there, 8.0 to 10.7 times under the
+  budget. So the test catches a slowdown from about 7 to 10 times on a typical CI runner.
 - **A quadratic pass over history** is caught when a step costs about 200 ns: the session ends at
   1,269 messages, 1.6 million pairs per request, and a dict `.get` comparison done 8 times per pair
   gave growth 402 ms per million tokens (budget 300). A cheap pass is not caught: a pair loop with
@@ -622,7 +629,7 @@ to catch more: a required check that fails on a slow runner would be worse.
 - **A slow start** is caught from 3 seconds: a 3-second sleep in `start_proxy` failed (3,119 ms),
   a 2.5-second one passed.
 
-Not caught, then: a slowdown of less than about 10 times on a typical runner (a doubling, or a
+Not caught, then: a slowdown of less than about 7 times on a typical runner (a doubling, or a
 regression of 50 percent, passes with room to spare), a cheap quadratic pass, a small leak outside
 Python objects, and anything that only shows after more than 200 turns (0.9M tokens of history).
 
@@ -697,19 +704,30 @@ upstream connections to a run.
 What changed, in the harness only:
 
 - The driver keeps one HTTP/1.1 connection per client open between requests (`run.Client`), as
-  Claude Code does: one for the session, one each for the first-request and 104-byte sends, one
-  per client of the burst. A connection is opened before the request's clock starts, and a connect
-  that fails with EADDRNOTAVAIL is retried with a growing pause for up to 30 seconds.
+  Claude Code does: one for the session, one each for the first-request and 104-byte sends (two
+  for the 104-byte sends since 2026-11-14; see "The 40 ms wait on Linux" below), one per client of
+  the burst. A connection is opened before the request's clock starts, and a connect that fails
+  with EADDRNOTAVAIL is retried with a growing pause. The wait is 30 seconds in all for the run
+  (`run.PATIENCE`); until 2026-11-14 each connect had 30 seconds of its own, so a run on a machine
+  whose ports stayed used up took about 22 minutes to fail.
 - The fake upstream answers with `Connection: close` and closes first, so the TIME_WAIT of each of
   the proxy's upstream connections is on the upstream's listening port and holds no local port. The
   proxy reads each reply to its last chunk before either side closes, so what it does is unchanged.
-- The proxy itself was not changed: it opens a new upstream connection per request by design
-  (`contexto/proxy.py`: "a new connection per request: nothing is pooled or reused"). A short run
-  makes 914 of them (634 for the session, 200 for the burst, 40 for the first-request and 104-byte
-  sends), and the full run one per request it forwards. At the rate of a real session, a few
-  requests a minute to a remote host, that holds a few dozen ports; it matters only to a harness
-  that sends hundreds of requests a second on one machine.
-- `test_the_driver_keeps_its_connections_open` checks the counts on every run (103 driver
+- The proxy itself was not changed. **Finding:** it opens a new upstream connection per request by
+  design (`contexto/proxy.py`: "a new connection per request: nothing is pooled or reused"). A
+  short run makes 934 of them (634 for the session, 200 for the burst, 100 for the first-request
+  and 104-byte sends; 914 before the second set of 104-byte sends), and the full run one per
+  request it forwards. At the rate of a real session, a few requests a minute, the ports this holds
+  are negligible. The cost that matters is elsewhere: `ContextoProxy.connection()` builds a new
+  `_UpstreamHTTPS` with `ssl.create_default_context()` for every request, so each request to a
+  real HTTPS upstream also pays a TCP connect, a TLS handshake (at least two round trips to the
+  host) and the building of a context with the CA store loaded (2 to 3 ms on this machine: over
+  20 calls, Reviewer A measured 2.4 ms minimum and 2.7 ms median, and I measured 2.1 and 2.2 ms on
+  2026-11-14 at a load of about 5). Claude Code without Contexto keeps its
+  upstream connection open. The fake upstream is plain HTTP on 127.0.0.1, so the harness cannot
+  measure these costs, and none of its added-time figures include them. What they cost a session
+  was not measured.
+- `test_the_driver_keeps_its_connections_open` checks the counts on every run (104 driver
   connections, and one upstream connection per forwarded request and direct send).
 
 After the change, twelve copies at once and then twelve more as soon as they ended, done twice
@@ -725,6 +743,63 @@ held about 1,700 local ports for 30 seconds while its short test ran, so four to
 reaching it within half a minute of each other, on top of the 1,400 to 6,000 sockets other loopback
 tests hold, could take all 16,384, and any process connecting in that window fails. It was not the
 only load on the ports, and no `test_launcher.py` failure was reproduced here.
+
+#### The 40 ms wait on Linux (2026-11-14)
+
+Reviewer B found that, once the driver kept its connections open, every request on GitHub's Ubuntu
+runners took about 41 ms more, whatever its size. macOS showed no such wait. **Finding: the wait is
+the proxy's.** It comes from how the proxy writes its responses, and a client that keeps its
+connection open to the proxy on Linux, as Claude Code does, meets it on every request.
+
+[Inference, from the code and the measurements below] The proxy's handler (`contexto.proxy._Handler`,
+a `BaseHTTPRequestHandler`) leaves Nagle's algorithm on, as `socketserver` does by default
+(`disable_nagle_algorithm = False`). It writes a response's headers and then each chunk in separate
+`send` calls. Nagle holds the first chunk until the client has acknowledged the headers. On a
+connection that has carried a request and a response before, Linux delays that acknowledgement by
+its minimum of 40 ms, hoping to send it with data. A new connection acknowledges at once, which is
+why the driver's connection per request until 2026-11-13, and the direct sends to the fake
+upstream (which closes each connection), did not show the wait.
+
+Reviewer B suggested that the driver's request writes were the cause (`http.client` sends a
+request's headers and body in two calls). They are not: `http.client.HTTPConnection.connect` has
+set `TCP_NODELAY` on every Python CI runs (3.12 to 3.15). The driver now sets it as well
+(`run.Client.connect`), so its timings do not depend on that. As expected, this changed nothing.
+
+To measure it, the short run sends the 104-byte request 20 more times after `worker.py`'s `nagle`
+command has set `_Handler.disable_nagle_algorithm` in the proxy process: the package with
+`TCP_NODELAY` on its accepted sockets, as an experiment in the harness only. It also reports how
+much of the request's added time comes before the response's headers. Neither is budgeted. In CI
+run 43552340153 at 8e0dc259, on the four Ubuntu legs (Python 3.12 to 3.15, 4 CPUs, loads 0.5 to
+0.9), in milliseconds over a direct send:
+
+| | Ubuntu, the package as shipped | Ubuntu, `TCP_NODELAY` on the proxy's sockets | This machine (macOS), 10 runs |
+|---|---|---|---|
+| 104-byte request | 41.3 to 41.5 | 0.79 to 1.47 | 0.47 to 0.59 as shipped, 0.46 to 0.58 with it |
+| of which before the response's headers | 0.90 to 0.98 | | 0.27 to 0.33 |
+| First request (50,838 bytes) | 44.8 to 45.2 | not measured | 2.39 to 2.85 |
+
+So about 40.5 ms of each request's added time on Ubuntu comes after the proxy has sent the
+response's headers, and it goes when the proxy's sockets have `TCP_NODELAY`. The fix belongs in the
+package (for example `disable_nagle_algorithm = True` on `_Handler`, or one write for the headers
+and the first chunk), which this PR does not change; it is recorded here for a separate issue.
+What it costs a real session was not measured: a real upstream's replies stream over seconds, and
+the wait is per response, not per chunk, in these measurements.
+
+What the Ubuntu legs measure, before and after (Reviewer B's figures for the first two columns):
+
+| | e14f6630 (run 43365787007), a connection per request | bd7b8dd8 (43548374232), kept open | 8e0dc259 (43552340153), kept open, driver `TCP_NODELAY` |
+|---|---|---|---|
+| Added time per request, median | 16.5 to 23.6 ms | 54.3 to 65.6 ms | 61.8 to 65.7 ms |
+| p95 | | 64.0 to 81.3 ms | 78.3 to 99.0 ms |
+| Growth per million tokens | | 19.3 to 37.3 ms | 28.2 to 37.4 ms |
+| First request over a direct send | 4.4 to 5.4 ms | 43.4 to 45.1 ms | 44.8 to 45.2 ms |
+| 104-byte request over a direct send | not measured | 40.6 to 41.6 ms | 41.3 to 41.5 ms |
+| Duration of the short run | 14.6 to 23.7 s | 38.8 to 47.2 s | 45.9 to 48.4 s |
+
+The budgets were not changed. The median's margin on Ubuntu is 3.0 to 3.2 times, against 8.5 to
+12 times before the driver kept its connections open; growth's is 8.0 to 10.7 times. The harness
+could turn Nagle off in the proxy for the whole run to measure the proxy's work alone, but then the
+required check would no longer measure the package as it ships, so it does not.
 
 ### Against the audit's four numbers
 
@@ -874,12 +949,18 @@ What each change accounts for:
 
 - **The synth change** (third column against the second: same package, the request content of
   this PR against October's) moves F up and W down by 70 tokens, the 70 tokens the head grew by,
-  and the largest requests by 71. It changes three rotation decisions in fast-forward (`bound`
-  371 against 370, `min_turn_room` 161 against 163), and none in the number of rotations the
-  session log records.
+  and the largest requests by 71. It changes 12 of the 1,097 fast-forward rotation decisions the
+  two runs share: two rotations change reason (turns 90 and 426, `min_turn_room` to `bound`), one
+  is added (a `min_turn_room` at turn 338), and a run of five `bound` rotations at turns 296 to 304
+  becomes four, each one turn later. The counts by reason (`bound` 371 against 370,
+  `min_turn_room` 161 against 163) are also not over the same turns: turns 382 and 383 were
+  fast-forwarded in the October-synth run (with a `min_turn_room` rotation at 383) and measured
+  over HTTP in the other (1,099 against 1,097 fast-forward rows, 140 against 150 request rows).
+  The session log counts 559 rotations in both at 30M, but 186 against 187 at the 10M checkpoint.
 - **The package and the repaired harness** (second column against the first: the same October
-  request content) move F up and W down by 151 tokens, add 2 rotations (557 to 559) and 3
-  `min_turn_room` rotations in fast-forward, and lower the largest fast-forwarded last request by
+  request content) move F up and W down by 151 tokens, add 2 rotations (557 to 559), change 44 of
+  the 1,097 fast-forward rotation decisions the two runs share (3 more `min_turn_room` rotations
+  net), and lower the largest fast-forwarded last request by
   236 tokens. These include what the harness now does as the proxy does (D40's `tool_calls`, the
   Claude Code headers, 420 output tokens for a reply with no tool call) as well as three weeks of
   package changes; this run does not separate those. In the second column the engine also did not

@@ -27,8 +27,11 @@ laptop (load 7 to 10), and from the CI runs' values:
 
 - A linear slowdown is caught only when it is large. On the laptop, 2, 4, 8, 12 and 16 times the proxy's
   CPU work per request all passed (16 times: median 170 ms against 200). From the Ubuntu runners' values
-  the threshold there is about 8.5 to 12 times on the median and 9 to 13 times on growth; only the slow
-  macOS runner (median 50.9 ms) is near 4 times.
+  of 2026-11-12 the threshold there was about 8.5 to 12 times on the median and 9 to 13 times on growth;
+  only the slow macOS runner (median 50.9 ms) was near 4 times. Since the driver keeps its connections
+  open, every request on Linux also waits about 41 ms in the proxy's response writes (Nagle against
+  delayed ACK; README.md, "The 40 ms wait on Linux"): on 2026-11-14 the Ubuntu median was 61.8 to 65.7 ms
+  (3.0 to 3.2 times under the budget) and growth 28.2 to 37.4 ms per million tokens (8.0 to 10.7 times).
 - A quadratic pass over the 1,269 messages of the last request is caught when a step costs about 200 ns
   (growth 402 ms per million tokens against 300). A cheap one passes: a pair loop at 5 ns a step, a dict
   ``.get`` comparison at 26 ns (growth 65) and a list membership test all passed. The full run at 30M
@@ -38,7 +41,7 @@ laptop (load 7 to 10), and from the CI runs' values:
   is not made of Python objects passes.
 - A start of 3 seconds or more fails (3,119 ms); a 2.5-second sleep in ``start_proxy`` passed.
 
-Not caught: a slowdown of less than about 10 times on a typical runner, a cheap quadratic pass, a small
+Not caught: a slowdown of less than about 7 times on a typical runner, a cheap quadratic pass, a small
 leak outside Python objects, and anything the 200-turn session (0.9M tokens) is too short to show.
 Throughput is only a floor: it spread from 15 to 226 requests a second across these runs, and the 100
 clients share one Python process with the fake upstream, so it says little about the proxy alone.
